@@ -988,6 +988,31 @@ async function resolveChargeEligibility(successorId, conn = db) {
   });
 }
 
+// Codex #4971 pre-push P1 — the ONE "dispute-suspended successor" rule. A
+// renewal successor that was PAID and then disputed is demoted back to
+// payment_pending with the dispute marker (suspendActiveTermsForDisputedInvoice)
+// and its invoice reopened unpaid — so it reads exactly like an unpaid,
+// overdue renewal. The dispute owns it until it resolves (won: re-paid ->
+// active, the marker cleared by the recovery; lost: cancelled). No renewal
+// action — the charge, a pay link, a withdrawal's void, a grace lapse's void
+// and station retrieval — may act on it: every under-gate successor re-read
+// defers (rotates, no bell) on this, and the scans exclude it through the
+// SQL twin. The marker on a row in any OTHER status is not a suspension (on
+// a live row it is the won / re-paid recovery, see
+// successorPaymentBacksRenewal), so the rule is the pair, never the marker
+// alone. Column-tolerant in SQL (to_jsonb): narrow schemas read "not
+// suspended", as coveredTermsAsOf's grace predicate does.
+function successorDisputeSuspended(term) {
+  return term?.status === PAYMENT_PENDING_STATUS && Boolean(term.dispute_suspended_at);
+}
+
+function whereSuccessorNotDisputeSuspended(builder, alias) {
+  return builder.whereRaw(
+    `NOT (${alias}.status = ? AND (to_jsonb(${alias}) ->> 'dispute_suspended_at') IS NOT NULL)`,
+    [PAYMENT_PENDING_STATUS],
+  );
+}
+
 // The ONE definition of "may this successor still be acted on" — shared by
 // resolveChargeEligibility (locked, right before the fence) and
 // checkStillEligibleForRenewalAction (unlocked, before any customer-facing
@@ -1009,7 +1034,7 @@ async function successorActionBlocker(conn, successorId, { lock = false } = {}) 
   if (fresh.status !== PAYMENT_PENDING_STATUS) return { reason: `successor_status_${fresh.status}` };
   if (fresh.renewal_charge_attempted_at) return { reason: 'already_attempted' };
   // Paid, then disputed back to payment_pending: the dispute owns it.
-  if (fresh.dispute_suspended_at) return { reason: 'successor_dispute_suspended' };
+  if (successorDisputeSuspended(fresh)) return { reason: 'successor_dispute_suspended' };
 
   if (fresh.renewed_from_term_id) {
     const parent = await read(conn('annual_prepay_terms').where({ id: fresh.renewed_from_term_id })).first();
@@ -1154,7 +1179,9 @@ async function withdrawRenewalSuccessor(successor, label, conn = db) {
 // fresh successor row).
 async function withdrawalRefusalUnderGate(successor, conn) {
   const fresh = await conn('annual_prepay_terms').where({ id: successor.id }).first();
-  if (fresh?.status !== PAYMENT_PENDING_STATUS) return null;
+  // Codex #4971 pre-push P1: a dispute-suspended successor is the dispute's
+  // — never voided or cancelled here (deferred, rotated, no bell).
+  if (fresh?.status !== PAYMENT_PENDING_STATUS || successorDisputeSuspended(fresh)) return null;
   const refusal = await successorRecoveryRefusal(fresh, conn);
   return refusal?.retire ? { ...refusal, successor: fresh } : null;
 }
@@ -1739,9 +1766,13 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
 // re-judged by the charge's claim under the invoice row lock. null = charge.
 async function chargeRefusalUnderGate(successor, conn) {
   const fresh = await conn('annual_prepay_terms').where({ id: successor.id }).first();
-  if (fresh?.status !== PAYMENT_PENDING_STATUS || fresh.dispute_suspended_at) {
-    return { eligible: false, reason: `successor_status_${fresh?.dispute_suspended_at ? 'dispute_suspended' : fresh?.status || 'missing'}`, durable: true };
+  if (fresh?.status !== PAYMENT_PENDING_STATUS) {
+    return { eligible: false, reason: `successor_status_${fresh?.status || 'missing'}`, durable: true };
   }
+  // Codex #4971 pre-push P1: disputed after the pre-check — the dispute owns
+  // it. Not a durable refusal (that would route to the withdrawal): nothing
+  // is charged, withdrawn or belled.
+  if (successorDisputeSuspended(fresh)) return { eligible: false, reason: 'successor_dispute_suspended', disputeOwned: true };
   // Codex #4971 r7 P1: this claim was retired by leg 7b's recovery (or its
   // outcome was already recorded) — the fallback owns it; never submit.
   if (fresh.renewal_charge_claim_retired_at
@@ -1766,6 +1797,7 @@ async function handleRefusalAtSubmission(successor, refusal, conn) {
   // Recovery (leg 7b) retired this claim while it waited for the gate: the
   // fallback owns the renewal — nothing to bell, withdraw or send here.
   if (refusal.superseded) return { status: 'claim_retired', reason: refusal.reason };
+  if (refusal.disputeOwned) return { status: 'deferred', reason: refusal.reason };
   const reason = `the parent was decided elsewhere immediately before the charge attempt (${refusal.reason})`;
   if (refusal.durable) {
     const retired = await withdrawRenewalSuccessor(successor, reason, conn);
@@ -2096,8 +2128,14 @@ async function withPayLinkClearance(successor, conn, context, send) {
 // null when the pay link may go out; otherwise 'handled' / 'deferred' (see
 // withPayLinkClearance).
 async function payLinkRefusal(successor, conn, context) {
-  const stillPending = await conn('annual_prepay_terms').where({ id: successor.id, status: PAYMENT_PENDING_STATUS }).first('id');
+  const stillPending = await conn('annual_prepay_terms').where({ id: successor.id, status: PAYMENT_PENDING_STATUS }).first();
   if (!stillPending) return 'handled';
+  // Codex #4971 pre-push P1: never a pay link for a disputed renewal — the
+  // dispute owns it; rotated (no bell) until it resolves either way.
+  if (successorDisputeSuspended(stillPending)) {
+    await stampSweepDeferred(successor, conn);
+    return 'deferred';
+  }
   return refuseRecoveryDelivery(successor, conn, context);
 }
 
@@ -2472,6 +2510,15 @@ async function resolveLapseVoidEligibility(term, conn = db) {
       if (fresh.status !== PAYMENT_PENDING_STATUS) {
         return { outcome: 'retired', reason: `the successor is already ${fresh.status}, not payment_pending` };
       }
+      // Codex #4971 pre-push P1: paid, then disputed back to payment_pending
+      // after this lapse was selected (or while a started lapse waited) — its
+      // reopened invoice reads overdue, but the dispute owns it. Deferred:
+      // no void, no retrieval, no parent decision, no manual review, no
+      // bell; rotated until the dispute resolves (won: active, retired here;
+      // lost: cancelled, retired here) or the marker clears.
+      if (successorDisputeSuspended(fresh)) {
+        return { outcome: 'deferred', kind: 'successor_dispute_suspended', reason: `the successor's renewal payment is under dispute (since ${new Date(fresh.dispute_suspended_at).toISOString()}) — the dispute owns it` };
+      }
       // Codex round-7 P1 (2nd audit round): 'processing' is in
       // isInvoiceCollectibleStatus's OWN uncollectible list (you can't
       // ATTEMPT to collect an ACH debit that's already mid-clearing) —
@@ -2771,7 +2818,7 @@ async function voidLapsedInvoice(term, conn) {
   }
 }
 
-const LAPSE_HOLD_BELL_KIND = { parent_decided_elsewhere: 'lapse_parent_decided_elsewhere', parent_suspended: null };
+const LAPSE_HOLD_BELL_KIND = { parent_decided_elsewhere: 'lapse_parent_decided_elsewhere', parent_suspended: null, successor_dispute_suspended: null };
 
 async function processGraceLapseSequence(term, conn) {
   const eligibility = await resolveLapseVoidEligibility(term, conn);
@@ -2845,13 +2892,17 @@ async function decideParentLapse(term, conn) {
 // as started-but-not-completed for the next tick.
 async function reconcileMissedLapseEffects({ conn = db, limit = 200, counts }) {
   try {
-    const candidates = await conn('annual_prepay_terms as t')
+    const scan = conn('annual_prepay_terms as t')
       .whereNotNull('t.renewal_lapse_started_at')
       .whereNull('t.renewal_lapse_completed_at')
       // Chokepoint D (item 4): a manual-review hold is staff's now, never
       // re-run here; a self-clearing deferral rotates behind rows this
       // pass has not retried yet — see holdLapse.
-      .whereRaw("coalesce(t.renewal_lapse_outcome, '') <> 'manual_review'")
+      .whereRaw("coalesce(t.renewal_lapse_outcome, '') <> 'manual_review'");
+    // Codex #4971 pre-push P1: a started lapse whose successor was since
+    // disputed back to payment_pending waits for the dispute (the locked
+    // re-check defers it too); it resumes once the dispute resolves.
+    const candidates = await whereSuccessorNotDisputeSuspended(scan, 't')
       .orderByRaw('t.renewal_sweep_deferred_at asc nulls first')
       .orderBy('t.renewal_lapse_started_at', 'asc')
       .select('t.*')
@@ -2966,6 +3017,9 @@ async function bellAndVerifyDeliveryForNeverReachedStripe(successor, conn) {
 async function retireAbandonedChargeClaim(successor, conn) {
   const claim = await conn('annual_prepay_terms').where({ id: successor.id }).first();
   if (claim?.status !== PAYMENT_PENDING_STATUS || !claim.renewal_charge_attempted_at) return false;
+  // Codex #4971 pre-push P1: a disputed renewal is never recovered (no bell,
+  // no pay link); the 7b scan excludes it, this closes the gap after it.
+  if (successorDisputeSuspended(claim)) return false;
   if (claim.renewal_charge_claim_retired_at) return true;
   if (claim.renewal_charge_failure_kind && claim.renewal_charge_failure_kind !== CHARGE_OUTCOME_PENDING) return false;
   const submitted = await whereAttemptSubmitted(
@@ -3329,6 +3383,10 @@ async function resolvePendingChargeOutcome(successor, conn) {
 
 async function pendingChargeOutcomeVerdict(successor, conn) {
   if (successor.status !== PAYMENT_PENDING_STATUS) return { kind: null };
+  // Codex #4971 pre-push P1: a disputed renewal's reopened invoice is not a
+  // declined or ambiguous charge — the dispute owns it; rotated until it
+  // resolves (then not payment_pending: the marker clears above).
+  if (successorDisputeSuspended(successor)) return { kind: 'in_motion' };
   const invoice = await conn('invoices').where({ id: successor.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS);
   if (invoice && (await invoiceSettledNotRevoked(conn, invoice))) return { kind: null };
   if (classifyRenewalInvoice(invoice).processing) return { kind: 'in_motion' };
@@ -3419,6 +3477,10 @@ module.exports = {
     classifyRenewalInvoice,
     invoiceSettledNotRevoked,
     INVOICE_EVIDENCE_COLUMNS,
+    resolvePendingChargeOutcome,
+    handleRefusalAtSubmission,
+    successorDisputeSuspended,
+    whereSuccessorNotDisputeSuspended,
     successorShapeBacksRenewal,
     successorPaymentBacksRenewal,
     whereSuccessorPaymentBacksRenewal,

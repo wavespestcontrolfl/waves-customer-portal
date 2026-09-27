@@ -36,6 +36,13 @@ jest.mock('../services/invoice', () => ({
   sendViaSMSAndEmail: (...args) => mockSendViaSMSAndEmail(...args),
   voidInvoice: (...args) => mockVoidInvoice(...args),
 }));
+// The grace lapse's station-retrieval raise (its own suites cover the task
+// itself): "no rented stations" — nothing to verify, the lapse may complete.
+const mockRaiseRetrieval = jest.fn(async () => ({ raised: false, reason: 'no_rented_stations' }));
+jest.mock('../services/cancellation-processor', () => ({
+  raiseTermiteRetrievalTask: (...args) => mockRaiseRetrieval(...args),
+  termRetrievalDedupeKey: (termId, episodeKey) => `termite_station_retrieval:term:${termId}:${episodeKey}`,
+}));
 // The homeowner pay-link payer re-check (self-pay here).
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: null })) }));
 // The grace lapse's own reconciliation re-check — refused here, so a
@@ -906,6 +913,150 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       await db('annual_prepay_terms').where({ id: successor.id }).update({ dispute_suspended_at: new Date(Date.now() - 86400000) });
       await Renewals._private.stampParentRenewedForSuccessor(successor, 'test', db);
       expect(await parentRow(parent.id)).toEqual({ status: 'renewed', renewal_decision: 'renew' });
+    });
+  });
+
+  // Codex #4971 pre-push P1: a renewal successor paid and then disputed back
+  // to payment_pending (the marker set, its invoice reopened overdue) reads
+  // like an overdue, presented renewal. The grace lapse must never void that
+  // disputed invoice or order station retrieval: the locked re-check defers
+  // it (rotated, no bell, no manual review), the recovery scan skips it, and
+  // once the dispute resolves the lapse proceeds as before.
+  describe('pre-push P1: a dispute-suspended successor is never lapsed', () => {
+    let Renewals4;
+    let originalLock;
+    beforeEach(() => {
+      Renewals4 = require('../services/annual-prepay-renewals');
+      originalLock = Renewals4.withParentDecisionLock;
+      Renewals4.withParentDecisionLock = (_termId, fn) => fn();
+      jest.spyOn(Renewals4, 'otherLiveTermiteCoverage').mockResolvedValue(null);
+      require('../services/stripe').assertNoInvoiceChargeReconciliationPending.mockImplementation(async () => undefined);
+      mockVoidInvoice.mockImplementation(async (invoiceId) => {
+        await db('invoices').where({ id: invoiceId }).update({ status: 'void' });
+        await db('annual_prepay_terms').where({ prepay_invoice_id: invoiceId }).update({ status: 'cancelled' });
+        return {};
+      });
+    });
+    afterEach(() => {
+      Renewals4.withParentDecisionLock = originalLock;
+      jest.restoreAllMocks(); // the spies (otherLiveTermiteCoverage, recordDecision)
+      require('../services/stripe').assertNoInvoiceChargeReconciliationPending.mockImplementation(async () => { throw new Error('reconciliation pending (test)'); });
+      mockVoidInvoice.mockReset();
+    });
+
+    // An overdue, presented renewal past its grace window.
+    async function overdueRenewal() {
+      const parent = await insertParent();
+      const invoice = await insertInvoice({ status: 'overdue', sms_sent_at: new Date(Date.now() - 20 * 86400000) });
+      const successor = await insertSuccessor(parent, invoice);
+      return { parent, invoice, successor };
+    }
+    const graceCounts = () => ({ graceScanned: 0, graceLapsed: 0, graceReconciliationDeferred: 0, graceRetiredSettled: 0 });
+    const lapseCounts = () => ({ lapseEffectsScanned: 0, lapseEffectsReconciled: 0, graceReconciliationDeferred: 0, graceRetiredSettled: 0 });
+    const row = (id) => db('annual_prepay_terms').where({ id }).first();
+    const expectUntouched = async ({ parent, invoice, successor }) => {
+      expect(mockVoidInvoice).not.toHaveBeenCalled();
+      expect(mockRaiseRetrieval).not.toHaveBeenCalled();
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
+      expect((await db('invoices').where({ id: invoice.id }).first()).status).toBe('overdue');
+      const s = await row(successor.id);
+      expect(s).toMatchObject({ status: 'payment_pending', renewal_lapse_outcome: null, renewal_lapse_completed_at: null });
+      expect(await row(parent.id)).toMatchObject({ status: 'active', renewal_decision: null });
+      return s;
+    };
+
+    test('disputed between the lapse scan and the gate: no void, no retrieval, no bell — rotated', async () => {
+      const fx = await overdueRenewal();
+      Renewals4.withParentDecisionLock = async (_termId, fn) => {
+        // The payment landed and was disputed while the lapse waited for the gate.
+        await db('annual_prepay_terms').where({ id: fx.successor.id }).update({ dispute_suspended_at: new Date() });
+        return fn();
+      };
+
+      const counts = graceCounts();
+      await Charge._private.processGraceLapses({ conn: db, limit: 50, counts });
+
+      expect(counts.graceScanned).toBe(1);
+      expect(counts.graceLapsed).toBe(0);
+      const s = await expectUntouched(fx);
+      expect(s.renewal_sweep_deferred_at).toBeInstanceOf(Date);
+    });
+
+    test('a resumed lapse whose successor was disputed: the recovery scan skips it, the locked re-check defers it; once the dispute resolves it lapses', async () => {
+      const fx = await overdueRenewal();
+      // A lapse started on an earlier tick (deferred), then the renewal was
+      // paid and disputed back to payment_pending.
+      await db('annual_prepay_terms').where({ id: fx.successor.id })
+        .update({ renewal_lapse_started_at: new Date(Date.now() - 86400000), dispute_suspended_at: new Date() });
+
+      const counts = lapseCounts();
+      await Charge._private.reconcileMissedLapseEffects({ conn: db, limit: 50, counts });
+      expect(counts.lapseEffectsScanned).toBe(0);
+      // Called directly (a row selected before the dispute landed): deferred.
+      await expect(Charge._private.processGraceLapseForTerm(await row(fx.successor.id), db)).resolves.toBe('deferred');
+      await expectUntouched(fx);
+
+      // The dispute resolves: the marker clears, the invoice is as it was
+      // (still unpaid, overdue) — the lapse now proceeds.
+      await db('annual_prepay_terms').where({ id: fx.successor.id }).update({ dispute_suspended_at: null });
+      // recordDecision's full writer reads the module-level db this suite
+      // mocks; its own suites cover it — the parent's 'cancel' is recorded
+      // with the same guarded write here.
+      const decide = jest.spyOn(Renewals4, 'recordDecision').mockImplementation(async ({ termId, action }) => {
+        const [decided] = await db('annual_prepay_terms').where({ id: termId }).whereNull('renewal_decision')
+          .update({ renewal_decision: action, renewal_decision_at: new Date() }).returning('*');
+        return decided || null;
+      });
+      const after = lapseCounts();
+      await Charge._private.reconcileMissedLapseEffects({ conn: db, limit: 50, counts: after });
+
+      expect(after.lapseEffectsScanned).toBe(1);
+      expect(after.lapseEffectsReconciled).toBe(1);
+      expect(mockVoidInvoice).toHaveBeenCalledWith(fx.invoice.id, { requireUnsettled: true });
+      expect(mockRaiseRetrieval).toHaveBeenCalledTimes(1);
+      expect(await row(fx.successor.id)).toMatchObject({ status: 'cancelled', renewal_lapse_outcome: 'lapsed' });
+      expect(await row(fx.parent.id)).toMatchObject({ renewal_decision: 'cancel' });
+      expect(decide).toHaveBeenCalledWith(expect.objectContaining({ termId: fx.parent.id, action: 'cancel' }));
+    });
+
+    // The same rule on every other successor action that can void, send a
+    // pay link or record a charge outcome — each re-reads the successor and
+    // defers on a dispute suspension (successorDisputeSuspended).
+    test('every other successor action defers on a dispute-suspended successor: withdrawal, pay link, charge in-gate, 7b, 7d', async () => {
+      // A refunded parent (so the withdrawal WOULD fire) and a sent renewal,
+      // then paid-and-disputed: payment_pending + marker, invoice reopened.
+      const parentInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(), stripe_payment_intent_id: `pi_${randomUUID()}` });
+      const parent = await insertParent({ prepay_invoice_id: parentInvoice.id });
+      await db('payments').insert({ status: 'refunded', refund_status: 'full', stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id });
+      const invoice = await insertInvoice({ status: 'overdue', sent_at: new Date() });
+      const successor = await insertSuccessor(parent, invoice, {
+        term_start: daysFromToday(-5), created_at: new Date(), dispute_suspended_at: new Date(),
+        renewal_charge_attempted_at: new Date(Date.now() - 3 * 3600000), renewal_charge_failure_kind: 'outcome_pending',
+      });
+      await db('stripe_invoice_charge_attempts').insert({ invoice_id: invoice.id, status: 'succeeded', submitted_at: new Date(Date.now() - 3 * 3600000) });
+      const fresh = () => row(successor.id);
+
+      // Withdrawal (4b, and the charge's durable-refusal route): no void.
+      await expect(Charge._private.withdrawRenewalSuccessor(await fresh(), 'test', db)).resolves.toBe('deferred');
+      // Pay link (7b / 7c delivery, and the first send): withheld, nothing sent.
+      await expect(Charge._private.deliverRenewalInvoice(await fresh(), db)).resolves.toMatchObject({ ok: false, withheld: true, outcome: 'deferred' });
+      // The charge's in-gate re-check: refused as dispute-owned — never the
+      // durable refusal that would route to a withdrawal; nothing belled.
+      const refusal = await Charge._private.chargeRefusalUnderGate(await fresh(), db);
+      expect(refusal).toMatchObject({ eligible: false, reason: 'successor_dispute_suspended', disputeOwned: true });
+      await expect(Charge._private.handleRefusalAtSubmission(await fresh(), refusal, db)).resolves.toEqual({ status: 'deferred', reason: 'successor_dispute_suspended' });
+      // 7b: an abandoned claim on a disputed renewal is never retired / recovered.
+      await expect(Charge._private.retireAbandonedChargeClaim(await fresh(), db)).resolves.toBe(false);
+      // 7d: the reopened invoice is not a declined / ambiguous charge.
+      await expect(Charge._private.resolvePendingChargeOutcome(await fresh(), db)).resolves.toBe(false);
+
+      expect(mockVoidInvoice).not.toHaveBeenCalled();
+      expect(mockSendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
+      expect(await fresh()).toMatchObject({
+        status: 'payment_pending', renewal_charge_failure_kind: 'outcome_pending', renewal_charge_claim_retired_at: null,
+      });
+      expect((await db('invoices').where({ id: invoice.id }).first()).status).toBe('overdue');
     });
   });
 
