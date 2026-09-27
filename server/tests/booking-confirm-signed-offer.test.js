@@ -665,6 +665,34 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     } finally { geocodeSpy.mockRestore(); }
   });
 
+  test.each([
+    ['changed longitude with capacity off', { latitude: null, longitude: LNG }, { latitude: null, longitude: LNG - 0.02 }, TECH_ID, 'false'],
+    ['changed latitude without a technician', { latitude: LAT, longitude: null }, { latitude: LAT + 0.02, longitude: null }, null, 'true'],
+    ['cleared complete pin with capacity off', { latitude: LAT, longitude: LNG }, { latitude: null, longitude: null }, TECH_ID, 'false'],
+  ])('re-service refuses an invalidated pin before any conflict probe: %s', async (_label, before, after, technicianId, gate) => {
+    const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+    const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
+    process.env.GATE_SCHEDULING_CAPACITY = gate;
+    process.env.GATE_BOOK_CAPACITY_COMMIT = gate;
+    loadedCustomer = { ...CUST, ...before };
+    fencedCustomer = { ...loadedCustomer, ...after };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: LAT, lng: LNG });
+    const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+    try {
+      await expect(createSelfBooking(callbackPayload({ technician_id: technicianId }))).resolves.toMatchObject({
+        ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY',
+      });
+      expect(conflictSpy).not.toHaveBeenCalled();
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally {
+      geocodeSpy.mockRestore(); conflictSpy.mockRestore();
+      if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+      if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+      else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
+    }
+  });
+
   test('an assessment callback with its own expected location is not independently re-geocoded', async () => {
     loadedCustomer = { ...CUST, latitude: null, longitude: null };
     fencedCustomer = { ...loadedCustomer };
@@ -753,7 +781,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     } finally { geocodeSpy.mockRestore(); }
   });
 
-  test('a staff review hold recorded during geocoding prevents a new visit pin', async () => {
+  test.each(['public', 're-service'])('a staff review hold recorded during geocoding prevents a new %s visit pin', async (surface) => {
     loadedCustomer = { ...CUST, latitude: null, longitude: null };
     fencedCustomer = { ...loadedCustomer };
     const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: LAT, lng: LNG });
@@ -761,7 +789,8 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       .mockResolvedValueOnce(null).mockResolvedValue({ location: null, reason: 'address_review_required' });
     try {
       const sig = mintSlotOfferField(offerPayload());
-      await expect(createSelfBooking(confirmPayload(sig))).resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+      const payload = surface === 'public' ? confirmPayload(sig) : callbackPayload();
+      await expect(createSelfBooking(payload)).resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
       expect(capturedScheduledInsert).toBeUndefined();
     } finally { geocodeSpy.mockRestore(); reviewSpy.mockRestore(); }
   });

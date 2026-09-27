@@ -3232,7 +3232,11 @@ async function createSelfBooking(payload = {}) {
         // offer; an exact correction inside the same cell is safe because the
         // resolved exact pin below drives every commit-time route check and
         // the customer row is FOR SHARE-fenced through the visit insert.
-        if (!callbackVisit && bookingOfferLocationKey(bookingLat, bookingLng) !== offerLocationKey) {
+        // Re-service callbacks have no signed location key. They still must
+        // refuse an invalidated/held fallback, including when capacity is off
+        // or no technician is bound; a null pin cannot reach the visit insert.
+        if ((shouldResolveMissingBookingLocation && !freshPin)
+          || (!callbackVisit && bookingOfferLocationKey(bookingLat, bookingLng) !== offerLocationKey)) {
           throw Object.assign(new Error('Your address just changed — please pick a time again.'), {
             statusCode: 409,
             isOperational: true,
