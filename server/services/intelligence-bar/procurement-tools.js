@@ -1277,8 +1277,13 @@ function isClosedVocabResidual(rawText, spans = []) {
 const FOLLOW_UP_QUALIFIER_RE = new RegExp(`%|\\b(?:percent|pct|per\\s+cent)\\b|(?:\\b|\\d)(?:${FORMULATION_CODE_ALT})\\b`, 'i');
 function isBareFollowUp(text) {
   // At least one word: a reply of only punctuation ("?", "...") says nothing
-  // and never borrows a product from an earlier turn.
-  return residualWords(text, []).length > 0 && isClosedVocabResidual(text) && !FOLLOW_UP_QUALIFIER_RE.test(text);
+  // and never borrows a product from an earlier turn. An N-P-K analysis is
+  // an identity qualifier like a percent or a formulation code: "0-0-20"
+  // after "K-Flow 0-0-25" corrects the product, so it never borrows it — and
+  // as a turn the look-back meets, it stops the look-back instead of being
+  // skipped (2026-09-27 pre-push audit). A cued date isn't an analysis.
+  return residualWords(text, []).length > 0 && isClosedVocabResidual(text)
+    && !FOLLOW_UP_QUALIFIER_RE.test(text) && analysesIn(text).length === 0;
 }
 
 // Which ACTIVE catalog products does operator text name? A product is named

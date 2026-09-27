@@ -1458,6 +1458,35 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         expect(result).toMatchObject({ productId: TAURUS.id });
       });
 
+      // 2026-09-27 pre-push audit: an analysis-only reply read as a bare
+      // follow-up and borrowed the earlier product with the other grade.
+      test.each([
+        ['the current reply is the correction', '0-0-20', ['We received two bottles of K-Flow 0-0-25']],
+        ['an intervening correction stops the look-back', 'two bottles', ['0-0-20', 'We received two bottles of K-Flow 0-0-25']],
+      ])('an analysis never borrows an earlier product (%s)', async (_label, prompt, earlierTurns) => {
+        setGroundingDb({ products: [K_FLOW, ALPINE], aliases: K_FLOW_ALIASES });
+        IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+        IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(earlierTurns);
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt,
+          preview: { product: { id: K_FLOW.id, name: K_FLOW.name }, movement_type: 'restock' },
+          actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 5,
+        });
+        expect(result).toMatchObject({ code: 'target_clarification_required' });
+      });
+
+      test('a bare follow-up after the named product still borrows it (control)', async () => {
+        setGroundingDb({ products: [K_FLOW, ALPINE], aliases: K_FLOW_ALIASES });
+        IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+        IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We received two bottles of K-Flow 0-0-25']);
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt: 'two more',
+          preview: { product: { id: K_FLOW.id, name: K_FLOW.name }, movement_type: 'restock' },
+          actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 5,
+        });
+        expect(result).toEqual({ productId: K_FLOW.id });
+      });
+
       test('plain "K-Flow" with no analysis at all still grounds', async () => {
         setGroundingDb({ products: [K_FLOW, ALPINE], aliases: K_FLOW_ALIASES });
         const result = await resolveInventoryWriteTarget({
