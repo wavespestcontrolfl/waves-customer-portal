@@ -210,6 +210,14 @@ describe('planRescheduleFromCall', () => {
       .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'other-program'] });
   });
 
+  // The unresolved-catalog guard covers the single-program path too: an
+  // orphaned in-span visit may be the one the named service really means.
+  test('an unresolved in-span visit keeps even a single matched program in review', () => {
+    const orphan = visit({ id: 'orphan', service_id: 'retired-program', catalog_service_name: null, scheduled_date: '2026-09-25' });
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [visit(), orphan] }).reason)
+      .toBe('service_needs_review');
+  });
+
   // A repoint leaves service_type stale, so the label alone can name the
   // requested program while the row now belongs to a different one (r8 P1).
   test('a stale service label cannot stand in for the catalog identity', () => {

@@ -312,6 +312,10 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     // Every visit the call's service evidence could refer to: the grounding
     // below checks the moved visit against ALL of their upcoming dates.
     let sourcePool = matchingServices;
+    // An in-span visit at the property whose catalog identity no longer
+    // resolves may be the caller's actual target, whatever the name matched:
+    // it keeps every path in review.
+    if (inSpanOf(atProperty).some((row) => !(row.service_id ? row.catalog_service_name : row.service_type))) return skip('service_needs_review');
     if (programIds.size !== 1) {
       // Fallback ONLY where the call's own service evidence cannot pick a
       // program: no service named at all (a program of V2's own category at
@@ -322,7 +326,6 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
       // identity no longer resolves, checked before any narrowing since it
       // may be the caller's target.
       if (namedServices.size && !programIds.size) return skip('service_needs_review');
-      if (inSpanOf(atProperty).some((row) => !(row.service_id ? row.catalog_service_name : row.service_type))) return skip('service_needs_review');
       let pool = matchingServices;
       if (!namedServices.size) {
         // V2's category only stands in for a name when V2 itself is sure of
