@@ -29,7 +29,6 @@ const {
   sanitizeContactEmail,
   fillExistingCustomerLastName,
   fillExistingCustomerEmail,
-  hasEmail: contactGapHasEmail,
   cleanedNameTokens: contactGapNameTokens,
 } = require('../services/estimate-contact-gaps');
 
