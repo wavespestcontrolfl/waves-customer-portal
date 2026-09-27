@@ -79,6 +79,10 @@
       "id": "ants",
       "label": "Ants",
       "generic": "an ant",
+      "aliases": [
+        "sugar ant",
+        "sugar ants"
+      ],
       "category": "insect",
       "next_photo": {
         "ask": "Use zoom from a safe distance for a whole-trail or whole-mound photo showing the ants' size and movement. Do not approach, disturb, handle, or place objects beside the ants.",
@@ -368,6 +372,12 @@
       "id": "other-insects",
       "label": "Other insects",
       "generic": "an insect",
+      "aliases": [
+        "praying mantis",
+        "praying mantises",
+        "mantid",
+        "mantids"
+      ],
       "category": "insect",
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the whole insect and any markings already visible. Do not approach, disturb, or handle it.",
@@ -423,6 +433,10 @@
       "id": "wild-mammals",
       "label": "Wild mammals",
       "generic": "a wild animal",
+      "aliases": [
+        "tree squirrel",
+        "tree squirrels"
+      ],
       "category": "wildlife",
       "next_photo": {
         "ask": "Use zoom from a safe distance for the animal and any digging or damage already visible. Never approach, handle, or disturb the animal or its shelter.",
@@ -444,7 +458,7 @@
       "generic": "a lizard",
       "category": "wildlife",
       "next_photo": {
-        "ask": "A close-up of the head and throat from a few feet away, plus the whole body for size.",
+        "ask": "Use camera zoom from a safe distance to show the whole lizard and any head, throat, and tail markings already visible. Do not approach, corner, touch, or handle it.",
         "why": "Throat color (dewlap) and overall size separate native anoles from the larger invasive lizards."
       },
       "generic_guidance": {
@@ -723,6 +737,10 @@
       "group": "mosquitoes",
       "label": "Container Mosquitoes",
       "generic": "a container-breeding mosquito",
+      "aliases": [
+        "container mosquito",
+        "container mosquitoes"
+      ],
       "scientific": "Aedes",
       "rank": "genus",
       "next_photo": {
@@ -838,6 +856,10 @@
       "group": "spiders",
       "label": "Orb-weavers",
       "generic": "an orb-weaver spider",
+      "aliases": [
+        "banana spider",
+        "banana spiders"
+      ],
       "scientific": "Araneidae",
       "rank": "family",
       "next_photo": {
@@ -1076,6 +1098,14 @@
       "group": "caterpillars-moths",
       "label": "Garden Caterpillars",
       "generic": "a caterpillar on your plants",
+      "aliases": [
+        "armyworm",
+        "armyworms",
+        "army worm",
+        "army worms",
+        "hornworm",
+        "hornworms"
+      ],
       "scientific": "several families",
       "rank": "group",
       "next_photo": {

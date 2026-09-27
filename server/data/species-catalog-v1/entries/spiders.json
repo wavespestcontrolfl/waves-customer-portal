@@ -223,9 +223,7 @@
   },
   {
     "kind": "organism",
-    "aka": [
-      "Banana Spider"
-    ],
+    "aka": [],
     "stages": [
       "juvenile",
       "adult"
@@ -246,8 +244,7 @@
     "common_name": "Golden Silk Orb-weaver",
     "aliases": [
       "golden silk orbweaver",
-      "golden silk spider",
-      "banana spider"
+      "golden silk spider"
     ],
     "scientific_name": "Trichonephila clavipes",
     "rank": "species",

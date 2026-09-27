@@ -718,6 +718,50 @@ describe('resolveName regressions', () => {
     expect(catalog.resolveName('insect').node).toMatchObject({ level: 'category', id: 'insect' });
   });
 
+  test.each([
+    ['praying mantis', 'group', 'other-insects'],
+    ['praying mantises', 'group', 'other-insects'],
+    ['mantid', 'group', 'other-insects'],
+    ['mantids', 'group', 'other-insects'],
+    ['tree squirrel', 'group', 'wild-mammals'],
+    ['tree squirrels', 'group', 'wild-mammals'],
+    ['container mosquito', 'subgroup', 'aedes'],
+    ['container mosquitoes', 'subgroup', 'aedes'],
+  ])('the broad name %s resolves above species level', (name, level, id) => {
+    expect(catalog.resolveName(name)).toMatchObject({ via: 'node', node: { level, id } });
+  });
+
+  test.each([
+    ['Carolina Mantis', 'carolina-mantis'],
+    ['Stagmomantis carolina', 'carolina-mantis'],
+    ['Eastern Gray Squirrel', 'eastern-gray-squirrel'],
+    ['gray squirrel', 'eastern-gray-squirrel'],
+    ['Sciurus carolinensis', 'eastern-gray-squirrel'],
+    ['Yellow Fever Mosquito', 'aedes-mosquito'],
+    ['Aedes aegypti', 'aedes-mosquito'],
+  ])('the qualified name %s retains its species identity', (name, slug) => {
+    expect(catalog.resolveName(name)).toMatchObject({ node: { level: 'entry', slug } });
+  });
+
+  test.each([
+    ['sugar ant', 'group', 'ants'],
+    ['armyworm', 'subgroup', 'garden-caterpillars'],
+    ['army worms', 'subgroup', 'garden-caterpillars'],
+    ['hornworm', 'subgroup', 'garden-caterpillars'],
+    ['banana spider', 'subgroup', 'orb-weavers'],
+  ])('the broad-alias audit keeps %s at the neutral %s node', (name, level, id) => {
+    expect(catalog.resolveName(name)).toMatchObject({ via: 'node', node: { level, id } });
+  });
+
+  test.each([
+    ['ghost ant', 'ghost-ant'],
+    ['fall armyworm', 'fall-armyworm'],
+    ['tomato hornworm', 'tomato-hornworm'],
+    ['golden silk orb-weaver', 'golden-silk-orbweaver'],
+  ])('the qualified audit control %s stays species-specific', (name, slug) => {
+    expect(catalog.resolveName(name)).toMatchObject({ node: { level: 'entry', slug } });
+  });
+
   test('a specific name inside a sentence still beats the group name inside it', () => {
     // Now that drywood-termite-frass (the "pellets" sign entry) exists, its
     // own longer alias ("drywood termite pellets") is the more specific
@@ -995,6 +1039,27 @@ describe('loader API surface', () => {
     expect(built.answer).toMatchObject({ level: 'group', node_id: node.id });
     expect(built.nextPhoto.ask).toMatch(/zoom from a safe distance/i);
     expect(built.nextPhoto.ask).not.toMatch(/next to a coin|close-up|a few feet away/i);
+  });
+
+  test('a mixed large and small lizard fallback keeps the customer at a safe distance', () => {
+    const { buildAnswer, mapToV1, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
+    const candidates = [
+      ['green-iguana', 0.35],
+      ['brown-anole', 0.30],
+    ].map(([slug, confidence]) => ({
+      ...resolveCandidate({ slug, confidence }), checked: true, verified: true,
+    }));
+    const built = buildAnswer({ candidates, qualityUsable: true, currentMonth: 6 });
+    expect(built).toMatchObject({
+      answer: { level: 'group', node_id: 'lizards' }, entry: null,
+      nextPhoto: { ask: expect.stringMatching(/zoom from a safe distance/i) },
+    });
+    expect(built.nextPhoto.ask).toMatch(/do not approach, corner, touch, or handle/i);
+    expect(built.nextPhoto.ask).not.toMatch(/close-up|a few feet|several feet|next to a coin/i);
+    expect(mapToV1(built).report_contract).toMatchObject({
+      service: { line: 'none', key: null, label: 'Wildlife Referral', inspection_required: false },
+      safety: { venomous: false },
+    });
   });
 
   test('nextPhoto falls back to the first look-alike photo for an entry, with its rationale (Codex r3 P1)', () => {

@@ -199,6 +199,30 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     });
   });
 
+  test('a mixed iguana and anole result uses safe lizard guidance and a neutral wildlife contract', () => {
+    const built = buildAnswer({
+      candidates: [
+        { ...candidate('green-iguana', { approved: false }), confidence: 0.35 },
+        { ...candidate('brown-anole', { approved: false }), confidence: 0.30 },
+      ],
+      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
+      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+    });
+    expect(built).toMatchObject({
+      answer: { level: 'group', node_id: 'lizards' }, entry: null,
+      nextPhoto: { ask: expect.stringMatching(/zoom from a safe distance/i) },
+    });
+    expect(built.nextPhoto.ask).toMatch(/do not approach, corner, touch, or handle/i);
+    expect(built.nextPhoto.ask).not.toMatch(/close-up|a few feet|several feet|next to a coin/i);
+    expect(mapToV1(built)).toMatchObject({
+      species_slug: null, service_line: 'none', urgency: 'low',
+      report_contract: {
+        service: { line: 'none', key: null, label: 'Wildlife Referral', inspection_required: false },
+        safety: { venomous: false },
+      },
+    });
+  });
+
   test('mixed Centruroides species keep only their shared scorpion guidance', () => {
     const built = buildAnswer({
       candidates: [

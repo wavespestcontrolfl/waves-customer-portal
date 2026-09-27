@@ -1,9 +1,7 @@
 [
   {
     "kind": "organism",
-    "aka": [
-      "Container Mosquito"
-    ],
+    "aka": [],
     "stages": [
       "larva",
       "adult"
@@ -24,7 +22,6 @@
     "common_name": "Yellow Fever Mosquito",
     "aliases": [
       "yellow fever mosquito",
-      "container mosquito",
       "aedes aegypti"
     ],
     "scientific_name": "Aedes aegypti",

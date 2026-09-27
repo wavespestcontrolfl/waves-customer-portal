@@ -1571,6 +1571,45 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
     });
   });
 
+  test('gate on: mixed iguana and anole keep safe lizard guidance through POST, storage, and GET', async () => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultForCandidates([
+      ['green-iguana', 0.35], ['brown-anole', 0.30],
+    ]);
+    expect(engineResult).toMatchObject({
+      v2: {
+        answer: { level: 'group', node_id: 'lizards' }, entry: null,
+        next_photo: { ask: expect.stringMatching(/zoom from a safe distance/i) },
+      },
+      v1: {
+        species_slug: null, service_line: 'none', urgency: 'low',
+        report_contract: {
+          service: { line: 'none', key: null, label: 'Wildlife Referral', inspection_required: false },
+        },
+      },
+    });
+    expect(engineResult.v2.next_photo.ask).toMatch(/do not approach, corner, touch, or handle/i);
+    expect(engineResult.v2.next_photo.ask).not.toMatch(/close-up|a few feet|several feet|next to a coin/i);
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.v2).toMatchObject({
+        answer: { node_id: 'lizards' }, entry: null,
+        next_photo: { ask: expect.stringMatching(/zoom from a safe distance/i) },
+      });
+      const stored = JSON.parse(TABLES.pest_identifications[0].report_contract);
+      expect(stored).toMatchObject({
+        service: { line: 'none', key: null, label: 'Wildlife Referral', inspection_required: false },
+        v2: { answer: { node_id: 'lizards' }, next_photo: body.v2.next_photo },
+      });
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.v2).toMatchObject({
+        answer: { node_id: 'lizards' }, entry: null, next_photo: body.v2.next_photo,
+      });
+    });
+  });
+
   test('gate on: a real draft tussock climb keeps the tree-and-shrub contract through POST, storage, and GET', async () => {
     mockGateState.photoIdV2 = true;
     const engineResult = realCatalogV2ResultFor('tussock-moth-caterpillar');
