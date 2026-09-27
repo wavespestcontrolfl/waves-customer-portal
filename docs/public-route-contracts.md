@@ -416,7 +416,34 @@ renders the report's IDENTITY facts from the completion-time snapshot on
 carries one: `customerName`, `serviceAddress` / `propertyAddress` /
 `cityState` and the `mapCenter` those resolved to, `technicianName`, the
 `serviceDisplayName` title, and each application's approved product facts
-(EPA number, precaution / re-entry / summary copy, approval). Records
+(EPA number, precaution / re-entry / summary copy, approval). The payload
+also carries `applicatorFdacsId` (F.S. 482.2265(1)(b) — the applying
+technician's FDACS identification card number, `technicians.fl_applicator_license`):
+`null` when blank on file, when `technicians.license_expiry` had already
+passed as of the service date (a missing expiry is active), or when the
+frozen `technicianName` above disagrees with the technician currently
+joined (report-identity-snapshot.js withholds the id rather than print it
+beside a name it may not match). The project report's GET
+`/api/reports/project/:token/data` carries the same field, judged against
+the report's own `projectDate` (the WDO last-filing date when one exists),
+PLUS `applicatorName` (the resolved technician's name) and `poisonControl`
+(boolean). Both `applicatorFdacsId` and `applicatorName` on the project
+payload resolve from the technician who actually PERFORMED the linked
+service — the project's own `service_record_id` → `scheduled_service_id` →
+its `created_by_tech_id` only when genuinely unlinked
+(`resolveProjectApplicatorTechnician`, report-data.js) — never simply the
+project's creator, which the separate `technicianName` field still reflects
+unchanged. `poisonControl` is the canonical typed-application verdict
+(`activity-indicators.js`'s `projectPoisonControl`) over the project's raw
+`findings` + `followup_findings`, OR'd, plus `rodent_bait_station` visits
+(always true — the stations hold rodenticide though servicing one records no
+typed application); never true for WDO/certificate/inspection-only project
+types. The admin detail endpoint `GET /api/admin/projects/:id` mirrors both
+fields on the returned `project` object as `applicator_fdacs_id` /
+`applicator_name` / `poison_control` (same shared resolver, judged against
+`project_date || created_at`), so the staff customer-report preview can never
+show a different applicator or Poison Control verdict than the sent report.
+Records
 completed before the snapshot shipped carry none and keep the live
 customers / scheduled_services / technicians / products_catalog joins; a
 snapshot leg that could not be frozen (missing customer or technician row)
@@ -1022,11 +1049,20 @@ like the dark surface — only analyze/claim are gated.)
 `/api/public/pest-forecast` (+ `/pest-forecast/locations`) (read-only,
 no auth, no DB writes, no PII — returns a deterministic Florida
 pest-pressure model keyed only on a curated city slug / FL ZIP plus
-public NWS + FAWN weather; no request body. Intentionally CORS-open
+public NWS weather and NOAA MRMS radar rainfall (via the Iowa
+Environmental Mesonet); no request body. Intentionally CORS-open
 (`Access-Control-Allow-Origin: *`) so the free embeddable forecast
 widget can run on third-party domains; inherits the global `/api/` IP
-rate limit, served from a 3h per-location server cache and public CDN
-`Cache-Control`. Note: unlike the token-gated read routes, this surface
+rate limit. Caching: the per-location server cache and the forecast
+response's `Cache-Control: public, max-age=<≤3600>, s-maxage=<≤10800>`
+share one freshness instant — 3h after the forecast's weather was
+fetched, 15 minutes while a SWFL city's radar rain for yesterday is not
+available yet (IEM backfills late), and never past the next ET midnight
+(the rain signal is yesterday's measured total). Both HTTP lifetimes are
+the seconds left until that instant, measured when the response is sent,
+so a result computed before ET midnight and sent after it carries
+`max-age=0, s-maxage=0`; `/locations` stays `public, max-age=86400`.
+Note: unlike the token-gated read routes, this surface
 is deliberately cacheable and indexable — it exposes only modeled,
 non-sensitive forecast data, so `no-store`/`noindex` privacy headers do
 NOT apply here).
@@ -1340,8 +1376,21 @@ when both LLM providers miss) read English AND Spanish — the prompt answers
 Spanish visitors in Spanish. Each turn has a wall-clock budget across both
 providers (`ASK_WAVES_TURN_BUDGET_MS`, default 22000) after which the
 deterministic fallback is returned; the conversation log never delays the
-reply. NOT CORS-open — credentialed allowlist origins
-only (hub site)).
+reply. Any reply — from either provider, on any intent — that carries
+safety wording, an EPA-approval claim, or a fixed re-entry/drying time
+(duration or clock time) is replaced wholesale with a reviewed "follow the
+product label" answer, in English or Spanish matching the reply's own language
+(a reply with emergency direction keeps the 911 / veterinary script instead;
+a non-emergency reply that carries both a claim and price talk gets the
+reviewed price redirect, which is also claim-free). The safety/emergency check
+reads the model's original reply before the price scrub, so a price mention
+never erases emergency direction.
+The check is the intake-local topic chokepoint in `ask-waves-intake.js`
+(`intakeSafetyClaimSupplement`), run on typography-folded text; the shared
+`reentrySafetyClaimFinding` is deliberately NOT called on this per-turn path
+(its worst case blocks the event loop, #4905). Safety wording is judged by
+topic, not grammatical subject, so it over-blocks by design. NOT CORS-open — credentialed allowlist
+origins only (hub site)).
 `/api/public/experiments` (`GET /status` + `POST /exposure`) (client-side
 GrowthBook experimentation surface — no auth, anonymous visitors are the
 unit. **POST /exposure is gated behind GATE_GROWTHBOOK** (404 when off) with
@@ -1446,16 +1495,27 @@ ranges — no auth, no token, public `Cache-Control`, no side effects, no PII.
 Ranges are computed from the live pricing engine (DB-authoritative
 pricing_config) so the published numbers cannot drift from admin-edited
 pricing; owner ruling 2026-08-06 approved publishing ranges for all
-residential services. Consumed by the Astro build for the agent-readable
-/pricing.md surface and directly by AI agents (both surfaces read this
-same computed payload — neither carries its own copy of the sweep).
-Exact per-property pricing stays on POST /api/public/quote/calculate.
+residential services. Owner ruling 2026-09-27 narrowed what each range
+means: every row is now a TYPICAL residential job at LIST price (standard
+scheduling, before WaveGuard bundle discounts, recurring-customer perks,
+and advertised waivers), not an envelope of every possible quote — a
+larger or more complex property, a heavier infestation, a bigger scope, or
+emergency/after-hours service can quote above the published high, and the
+payload's `disclaimer` says so. "Typical" is sized from the estimator's own
+property lookups: the middle 80% (10th-90th percentile) of the residential
+homes in `property_lookups` for house, lot, and turf size, with the
+landscaping, pool-cage, and water-proximity mix those homes show. Consumed by the Astro build for the
+agent-readable /pricing.md surface and directly by AI agents (both
+surfaces read this same computed payload — neither carries its own copy
+of the sweep). Exact per-property pricing stays on POST
+/api/public/quote/calculate.
 The `tree_shrub_care` row contracted with the Light tier's retirement
 (2026-09-24): the sweep is now `standard`/`enhanced` only (`light` dropped
 from the tier sweep the same way the lawn row above dropped its retired
-6x column), so the published low end is Standard-derived (`low` ≈ $28,
-was lower under Light's cheaper 4x rate) and `notes` now reads "6 or 9
-applications per year by tier" instead of the old 4/6/9 wording).
+6x column), and `notes` reads "6 or 9 applications per year by tier"
+instead of the old 4/6/9 wording; since the 2026-09-27 typical-job
+narrowing above, the published low is Standard's list-price floor on a
+typical lot (`low` ≈ $36), not a bundle-discounted value.
 `/api/public/credentials` (+ `/api/public/credentials/:slug`) (read-only
 canonical FDACS / license / insurance numbers — no auth, no token, public
 `Cache-Control`. Consumed by the Astro content build; intentionally public
