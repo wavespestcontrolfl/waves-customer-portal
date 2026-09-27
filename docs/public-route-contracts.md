@@ -2083,6 +2083,21 @@ re-check under `GATE_BOOK_CAPACITY_COMMIT` (see the `GATE_SCHEDULING_CAPACITY`
 paragraph above) — a tech-bound re-service slot that a later booking made
 infeasible refuses with `SLOT_TAKEN` and this route's existing refresh (fresh
 availability in the 409 body) instead of committing an infeasible route.
+For a customer missing a complete stored latitude/longitude pair, the route
+also reads the canonical address-bound staff review under `GATE_GEOCODE_REVIEW`.
+A matching permanent `address_review_required` result blocks online scheduling;
+the full stored address, including line 2, must match that review. Once a
+bookable lane is selected (or implicit), GET keeps its eligibility payload but
+returns `availability: null` and `location_review_required: true` instead of
+offering times. Search and confirm return HTTP 409
+`{ error, code: 'LOCATION_REVIEW_REQUIRED' }` before building availability or
+committing. A complete stored pair, a stale/nonblocking review, or the review
+gate being off retains the existing pre-check behavior. If the booking
+transaction later returns `LOCATION_CHANGED_RETRY` (including an address or
+review change after the pre-check), confirm maps it to that same 409 recovery
+without refreshed slots. The page clears its selected slot and availability,
+hides time search, and asks the customer to text or call Waves to confirm the
+service address. Ordinary `SLOT_TAKEN`/`DAY_FULL` races still refresh times.
 find-slots mirrors the
 reschedule search: model-backed parseWhen clamped on BOTH ends to the
 booking window, READ-ONLY, no raw query logging. Generic 404 for

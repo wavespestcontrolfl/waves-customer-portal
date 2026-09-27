@@ -391,19 +391,17 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const { parseWhen, summarizeWindow } = require('../services/scheduling/parse-when');
     const when = await parseWhen(query, searchParseOpts(config));
 
-    let availability = null;
-    try {
-      availability = await buildAvailabilityForCustomer(customer, {
-        rangeFrom: when.dateFrom,
-        rangeTo: when.dateTo,
-        config,
-        duration: browseDuration,
-        lanes: browseLanes,
-        timeOfDay: when.timeOfDay,
-      });
-    } catch (err) {
+    const availability = await buildAvailabilityForCustomer(customer, {
+      rangeFrom: when.dateFrom,
+      rangeTo: when.dateTo,
+      config,
+      duration: browseDuration,
+      lanes: browseLanes,
+      timeOfDay: when.timeOfDay,
+    }).catch((err) => {
       logger.error(`[reservice-public] find-slots availability failed for customer ${customer.id}: ${err.message}`);
-    }
+      return null;
+    });
     if (!availability) {
       return res.status(503).json({ error: 'Slot search is unavailable right now. Please pick from the times below.' });
     }
