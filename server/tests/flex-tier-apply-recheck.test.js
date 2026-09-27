@@ -16,7 +16,9 @@ jest.mock('../services/auto-dispatch/preferences', () => ({
   })),
 }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ findValidCandidateSlots: jest.fn() }));
-jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })) }));
+jest.mock('../services/auto-dispatch/apply', () => ({
+  applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })), previewGroupMove: jest.fn(async () => null),
+}));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
 // A realistic composer (mirrors appointment-reminders.js's own
 // composeScheduledApptTime) so flexTier.ownScheduleFrozen's hours-until
@@ -118,6 +120,28 @@ test('clean freeze state both times ⇒ the flex-tier move applies through the S
   expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
   const changed = decisions('changed')[0];
   expect(changed.constraints.route_tiers).toMatchObject({ mode: 'flex', radius_days: 5 });
+});
+
+test('a grouped move the member guard would refuse is neither recommended nor planned (Codex #4995 r4 P2)', async () => {
+  apply.previewGroupMove.mockResolvedValue({ code: 'GROUP_MEMBER_GUARD', description: 'Grouped visit would be refused at apply — sibling inside 73 hours' });
+  reminderResults = [[]];
+  const dry = await runAutoDispatch({ mode: 'dry_run', flexTierEnabled: true });
+  expect(dry.recommended).toBe(0);
+  expect(decisions('no_change').map((d) => d.reason_code)).toContain('GROUP_MEMBER_GUARD');
+  expect(apply.previewGroupMove).toHaveBeenCalledWith(expect.objectContaining({ id: 's1' }), CAND, expect.objectContaining({ guardMode: 'flex' }));
+
+  audit.logDecision.mockClear();
+  reminderResults = [[]];
+  const res = await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+  expect(res.changed).toBe(0);
+  expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+  apply.previewGroupMove.mockResolvedValue(null);
+});
+
+test('route tiers never run the flex group preview (gate-off behavior unchanged)', async () => {
+  reminderResults = [[], []];
+  await runAutoDispatch({ mode: 'apply', routeTiersEnabled: true });
+  expect(apply.previewGroupMove).not.toHaveBeenCalled();
 });
 
 test('flexTierEnabled takes precedence when routeTiersEnabled is also on', async () => {

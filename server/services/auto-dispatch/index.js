@@ -19,7 +19,9 @@ const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibil
 const { getCustomerSchedulingPreferences } = require('./preferences');
 const { findValidCandidateSlots, SCORE_CAP } = require('./candidate-slots');
 const { scoreAppointmentPlacement } = require('./scoring');
-const { applyAutoDispatchMove, revalidatePlacement, unitMoveSize } = require('./apply');
+const {
+  applyAutoDispatchMove, revalidatePlacement, unitMoveSize, previewGroupMove,
+} = require('./apply');
 const { toDateStr, shiftDateStr } = require('./dates');
 const { stampedAddressDiverges } = require('../stamped-address');
 const { ensureCustomerGeocoded } = require('../geocoder');
@@ -678,6 +680,16 @@ async function runAutoDispatch(opts = {}) {
 
         if (evalResult.kind === 'no_change') {
           await audit.logDecision(runId, { action: 'no_change', service, reason_code: evalResult.reason_code, reason_description: evalResult.reason_description, ...evalResult.audit });
+          continue;
+        }
+
+        // FLEX-TIER (Codex #4995 r4 P2): a grouped move is only as legal as
+        // its siblings — preview the apply-time member guard now, so neither
+        // a dry-run recommendation nor a planned move carries one apply
+        // would refuse.
+        const groupRefusal = guardMode === 'flex' ? await previewGroupMove(service, evalResult.best, { ...config, prefs, lockBoundary }) : null;
+        if (groupRefusal) {
+          await audit.logDecision(runId, { action: 'no_change', service, reason_code: groupRefusal.code, reason_description: groupRefusal.description, ...evalResult.audit });
           continue;
         }
 

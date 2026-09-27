@@ -794,8 +794,50 @@ async function unitMoveSize(service, best = null) {
   }
 }
 
+/**
+ * Pass-1 preview of the grouped-member guard for the flexible tier (Codex
+ * #4995 r4 P2). makeMemberGuard otherwise first runs in apply mode, inside
+ * the unit mover — so a dry-run night could recommend a grouped move that
+ * apply refuses (a sibling inside its own 73 h, or outside its own anchored
+ * window), and the owner reviews exactly that dry run before switching to
+ * apply. This runs the SAME guard against the visit's open members and their
+ * predicted destination starts (visit-groups predictMemberWindows — the unit
+ * mover's own planning, from the same member fields it reads), reading only.
+ * Returns null when the move would pass or the visit is not grouped, else
+ * { code, description }: a refusal, an unplannable unit or an unreadable
+ * group all suppress the recommendation (fail closed).
+ */
+async function previewGroupMove(service, best, config, conn = db) {
+  if (!service.visit_id) return null;
+  try {
+    const { predictMemberWindows } = require('../visit-groups');
+    const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
+    const members = await conn('scheduled_services').where({ visit_id: service.visit_id })
+      .whereNotIn('status', TERMINAL_ROW_STATUSES)
+      .select('id', 'status', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+    if (members.length < 2) return null;
+    const visit = await conn('service_visits').where({ id: service.visit_id }).first('window_start');
+    const predicted = predictMemberWindows({
+      members, primaryId: service.id, visitWindowStart: visit ? visit.window_start : null,
+      requestedStart: best.start_time, requestedEnd: best.end_time, newDateStr: best.date,
+    });
+    if (!predicted.ok) {
+      return { code: 'GROUP_MEMBER_GUARD', description: `Grouped visit cannot move as a unit to this slot (${predicted.code})` };
+    }
+    // Each member's start as the unit mover derives it (its target, else its own window).
+    const targets = predicted.targets.map((t, i) => ({
+      id: members[i].id, isPrimary: t.isPrimary, startHHMM: norm(t.start) || norm(members[i].window_start),
+    }));
+    const techChanged = !!best.technician_id && String(best.technician_id) !== String(service.technician_id || '');
+    await makeMemberGuard({ service, best, config, techChanged })({ trx: conn, members, targets });
+    return null;
+  } catch (err) {
+    return { code: 'GROUP_MEMBER_GUARD', description: `Grouped visit would be refused at apply — ${err.message}` };
+  }
+}
+
 module.exports = {
-  applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize, makeMemberGuard, makeMoveGuard,
+  applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize, makeMemberGuard, makeMoveGuard, previewGroupMove,
   // Exported for direct unit tests of the flex-tier apply-time guards (Codex
   // pre-push P1) — otherwise only reachable through the full member/move
   // guard closures.

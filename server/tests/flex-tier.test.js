@@ -397,17 +397,21 @@ describe('destinationFrozen — the DESTINATION instant must clear 73h too (Code
     expect(destinationFrozen({ id: 's1' }, '2026-10-20', null, NOW)).toBe(true);
   });
 
-  test('a combined-allocation stamp for the destination date freezes on its earlier shared arrival', () => {
+  test('a combined-allocation member landing back in its booked slot freezes on the shared arrival; a stale stamp does not (Codex #4995 r4 P2)', () => {
+    // s1 is allocation index 2 under a 15:00 arrival: its booked slot is
+    // 17:00 (74h out), but the customer was promised 15:00 (72h out).
     const stamped = {
       id: 's1',
-      reservation_service_mix: { allocatedServiceIds: ['s0', 's1'], scheduledDate: '2026-10-08', arrivalWindowStart: '15:00' },
+      reservation_service_mix: { allocatedServiceIds: ['s0', 'sx', 's1'], scheduledDate: '2026-10-08', arrivalWindowStart: '15:00' },
     };
-    // 17:00 alone is 74h out, but the stamp's 15:00 arrival (72h) is what
-    // reservation_arrival_start would hand back for that date.
     expect(destinationFrozen(stamped, '2026-10-08', '17:00', NOW)).toBe(true);
+    // Any other start on that date is outside the booked slot, so
+    // reservation_arrival_start ignores the stamp — 18:00 (75h) is legal.
+    expect(destinationFrozen(stamped, '2026-10-08', '18:00', NOW)).toBe(false);
     // Another date: the stamp does not apply.
     expect(destinationFrozen(stamped, '2026-10-12', '08:00', NOW)).toBe(false);
-    // A malformed stamp arrival is ignored, as reservation_arrival_start ignores it.
+    // A row the stamp does not allocate, or a malformed arrival, is ignored too.
+    expect(destinationFrozen({ ...stamped, id: 's9' }, '2026-10-08', '17:00', NOW)).toBe(false);
     const malformed = { ...stamped, reservation_service_mix: { ...stamped.reservation_service_mix, arrivalWindowStart: '3pm' } };
     expect(destinationFrozen(malformed, '2026-10-08', '17:00', NOW)).toBe(false);
   });

@@ -266,24 +266,38 @@ function insideFreeze(date, start, now) {
 const STAMP_ARRIVAL = /^([01][0-9]|2[0-3]):00$/;
 
 /**
+ * The arrival reservation_arrival_start would report for this row once it
+ * lands on `date` at `start` — the same rule as that SQL function
+ * (migrations/20260906000020_reservation_arrival.js): a combined-allocation
+ * stamp's shared arrival applies only on the stamp's own date, and only while
+ * the row sits in its booked slot (arrival + allocation index × 60 minutes,
+ * wrapping at midnight as `time + interval` does); anything else — including
+ * a stale stamp on a row moved out of its slot — is the row's own start.
+ */
+function destinationArrival(service, date, start) {
+  const stamp = service && service.reservation_service_mix;
+  const ids = stamp && Array.isArray(stamp.allocatedServiceIds) ? stamp.allocatedServiceIds.map(String) : [];
+  const index = ids.indexOf(String(service && service.id));
+  const arrival = index > -1 && stamp.scheduledDate === date ? String(stamp.arrivalWindowStart || '') : '';
+  if (!start || !STAMP_ARRIVAL.test(arrival)) return start;
+  const slotHour = (Number(arrival.slice(0, 2)) + index) % 24;
+  return String(start).slice(0, 5) === `${String(slotHour).padStart(2, '0')}:00` ? arrival : start;
+}
+
+/**
  * The DESTINATION's own 73h check (Codex #4995 P1). The date window keeps a
  * visit's current date reachable for a same-day re-time, and a re-time to an
  * EARLIER hour can land inside the freeze while the current time sits
  * outside it (Thu 17:00, 74h out → Thu 09:00, 66h out) — after which the
  * 72-hour reminder may already have gone out with the old time. So the
  * instant the placement gives the customer must clear the freeze as well:
- * `date` + the placement's `start` (ET), and — when the row carries a
- * combined-allocation stamp for that very date — the stamp's shared arrival
- * too, since reservation_arrival_start hands that earlier arrival back to a
- * member landing in its booked slot (checking both never under-freezes).
- * Fails closed on an uncomposable instant (no start).
+ * `date` + the arrival that placement would carry (destinationArrival — the
+ * placement's own `start`, or a combined visit's shared arrival when the row
+ * lands back in its booked slot), in ET. Fails closed on an uncomposable
+ * instant (no start).
  */
 function destinationFrozen(service, date, start, now = new Date()) {
-  if (insideFreeze(date, start, now)) return true;
-  const stamp = service && service.reservation_service_mix;
-  const arrival = stamp && Array.isArray(stamp.allocatedServiceIds) && stamp.scheduledDate === date
-    ? String(stamp.arrivalWindowStart || '') : '';
-  return STAMP_ARRIVAL.test(arrival) && insideFreeze(date, arrival, now);
+  return insideFreeze(date, destinationArrival(service, date, start), now);
 }
 
 /**

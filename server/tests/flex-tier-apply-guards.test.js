@@ -32,7 +32,7 @@ jest.mock('../services/appointment-reminders', () => ({
 
 const routeTiers = require('../services/auto-dispatch/route-tiers');
 const {
-  makeMoveGuard, makeMemberGuard, checkFlexOwnBounds, checkFlexSiblingBounds,
+  makeMoveGuard, makeMemberGuard, checkFlexOwnBounds, checkFlexSiblingBounds, previewGroupMove,
 } = require('../services/auto-dispatch/apply');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
@@ -438,5 +438,85 @@ describe('destination freeze — the DESTINATION instant must clear 73h, not jus
       .resolves.toBeUndefined();
     await expect(checkFlexSiblingBounds(trx, [sibRow], [sibRow], best, '2026-10-05', refuseFactory(), []))
       .rejects.toMatchObject({ id: 's2', why: expect.stringContaining('at its destination') });
+  });
+});
+
+describe('previewGroupMove — pass 1 runs the grouped-member guard, so a dry run never recommends what apply refuses (Codex #4995 r4 P2)', () => {
+  // Mon 2026-10-05 15:00 ET (19:00Z).
+  beforeEach(() => {
+    jest.useFakeTimers({ now: new Date('2026-10-05T19:00:00Z'), doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  // A pool stub answering the preview's member + visit reads and the member
+  // guard's own reads (sibling rows, plan alerts, the series and clash reads,
+  // anchor evidence, the series fence).
+  function groupConn({ date }) {
+    const members = [
+      { id: 's1', status: 'confirmed', scheduled_date: date, window_start: '17:00', window_end: '18:00', estimated_duration_minutes: 60 },
+      { id: 's2', status: 'confirmed', scheduled_date: date, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 },
+    ];
+    const siblingRow = {
+      id: 's2', status: 'confirmed', scheduled_date: date, window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1',
+      technician_id: null, lat: 27.4, lng: -82.5, customer_active: true,
+    };
+    const conn = jest.fn((table) => {
+      if (table === 'service_visits') return { where: () => ({ first: async () => ({ window_start: '17:00' }) }) };
+      if (table === 'scheduled_services as ss') return { leftJoin: () => ({ whereIn: () => ({ select: async () => [siblingRow] }) }) };
+      if (table === 'recurring_plan_alerts') return { where: () => ({ where: () => ({ where: () => ({ whereNull: () => ({ first: async () => null }) }) }) }) };
+      if (table === 'reschedule_log' || table === 'auto_dispatch_audit_logs') {
+        const chain = { whereIn: () => chain, where: () => chain, orderBy: () => chain, select: async () => [] };
+        return chain;
+      }
+      if (table !== 'scheduled_services') throw new Error(`unexpected table ${table}`);
+      let series = false;
+      const q = {
+        where: (arg) => { if (typeof arg === 'function') series = true; return q; },
+        whereNotIn: () => q,
+        forShare: () => q,
+        noWait: () => q,
+        select: async () => (series ? [{ id: 's2', recurring_parent_id: 'p1', scheduled_date: date }] : members),
+        first: async () => null, // no same-series clash
+      };
+      return q;
+    });
+    return withSeriesFence(conn);
+  }
+  const service = { id: 's1', visit_id: 'v1', status: 'confirmed', technician_id: null };
+
+  test('a grouped move whose earlier sibling is inside its own 73 hours is not recommended', async () => {
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
+    // Both at Thu 10-08: the tapped 17:00 stop is 74h out, its 09:00 sibling 66h.
+    const refusal = await previewGroupMove(
+      { ...service, scheduled_date: '2026-10-08', window_start: '17:00' },
+      { date: '2026-10-13', start_time: '17:00', end_time: '18:00', technician_id: null },
+      { guardMode: 'flex' },
+      groupConn({ date: '2026-10-08' }),
+    );
+    expect(refusal).toEqual({ code: 'GROUP_MEMBER_GUARD', description: expect.stringContaining('73 hours') });
+  });
+
+  test('a grouped move every sibling can legally make passes the whole member guard', async () => {
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
+    const conn = groupConn({ date: '2026-10-12' });
+    await expect(previewGroupMove(
+      { ...service, scheduled_date: '2026-10-12', window_start: '17:00' },
+      { date: '2026-10-13', start_time: '17:00', end_time: '18:00', technician_id: null },
+      { guardMode: 'flex' },
+      conn,
+    )).resolves.toBeNull();
+    expect(conn.raw).toHaveBeenCalled(); // reached the sibling's series fence and window
+  });
+
+  test('an ungrouped visit, or a visit with one open member, needs no preview', async () => {
+    const conn = jest.fn(() => { throw new Error('must not query'); });
+    await expect(previewGroupMove({ id: 's1', visit_id: null }, { date: '2026-10-13' }, { guardMode: 'flex' }, conn)).resolves.toBeNull();
+    const single = jest.fn(() => {
+      const q = { where: () => q, whereNotIn: () => q, select: async () => [{ id: 's1' }] };
+      return q;
+    });
+    await expect(previewGroupMove(service, { date: '2026-10-13' }, { guardMode: 'flex' }, single)).resolves.toBeNull();
   });
 });
