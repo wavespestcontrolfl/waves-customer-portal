@@ -91,8 +91,8 @@ async function lockedContext(trx, customerId, proposedAddress = null) {
   return { customer, primary, visitReference, storedReview };
 }
 
-function assertRevision(customer, storedReview, expected) {
-  if (reviewStore.reviewRevision(customer, storedReview) !== expected) {
+function assertRevision(customer, primary, storedReview, expected) {
+  if (reviewStore.reviewRevision(customer, storedReview, primary) !== expected) {
     throw actionError('Customer location data changed. Reload and review the latest values.', 409, 'review_changed');
   }
 }
@@ -206,7 +206,7 @@ async function revokePin({ trx, customerId, input, actorId, customer, primary, s
 
 async function requestRetry({ trx, customerId, input, actorId, customer, primary, storedReview }) {
   if (hasUsablePin(customer) || hasUsablePin(primary)) {
-    throw actionError('Revoke the current pin before retrying the lookup.', 409, 'pin_present');
+    throw actionError('Resolve the current primary location pin before retrying the lookup.', 409, 'pin_present');
   }
   await reviewStore.saveReview(trx, customer, {
     status: 'pending', reason: 'retry_requested', source: storedReview?.source || null,
@@ -241,7 +241,7 @@ async function resolveCustomerGeocodeReview(customerId, input, actorId, conn = d
       trx, customerId, proposedAddress,
     );
     if (!reviewStore.reviewEnabled()) throw actionError('Geocode review is disabled.', 404, 'review_disabled');
-    assertRevision(customer, storedReview, input.revision);
+    assertRevision(customer, primary, storedReview, input.revision);
     const visitContext = needsVisitFence
       ? await lockVisitContext(trx, customerId, prelocked, {
         includeProtected, customer: visitReference, primary, verifyPin: input.action === 'verify_pin',
