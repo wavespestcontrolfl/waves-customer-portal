@@ -1063,7 +1063,7 @@ async function sendCustomerMessageCore(input) {
       return { sent: false, blocked: true, ...preferenceChangeHold(), auditLogId: audit.id };
     }
     if (sendInput.metadata?.appOnly === true || sendInput.metadata?.billingDeliveryLeg === 'push') {
-      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id, ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}) };
+      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id, ...(providerOutcome.eventVisibleAt ? { eventVisibleAt: providerOutcome.eventVisibleAt } : {}), ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (providerOutcome.error === 'preference_changed'
       && ['appointment_reminder_72h', 'appointment_reminder_24h'].includes(sendInput.purpose)) {

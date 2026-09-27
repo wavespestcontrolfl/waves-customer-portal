@@ -36,6 +36,8 @@ async function logAutopay(customerId, eventType, opts = {}) {
       payment_method_id: opts.paymentMethodId ?? null,
       payment_id: opts.paymentId ?? null,
       details: opts.details ? JSON.stringify(opts.details) : null,
+      // An earlier visible App event repairs progress at its original time.
+      ...(opts.createdAt ? { created_at: opts.createdAt } : {}),
     };
     await (opts.db || db)('autopay_log').insert(row);
   } catch (err) {

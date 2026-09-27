@@ -1,3 +1,4 @@
+const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
 const db = require('../models/db');
 const logger = require('./logger');
 const { logAutopay, eventExistsRecently } = require('./autopay-log');
@@ -43,6 +44,7 @@ async function sendPreChargeLegs({ customer, target, legs, sendInput, amountCent
   const chargeDate = etDateString(target);
   const eventKey = `autopay-pre-charge:${customer.id}:${chargeDate}`;
   let delivered = 0;
+  let settled = 0;
   let code = null;
   for (const channel of legs) {
     let result;
@@ -68,18 +70,20 @@ async function sendPreChargeLegs({ customer, target, legs, sendInput, amountCent
       result = err.providerOutcome || { sent: false, deliveryOutcome: 'uncertain', code: err.message };
     }
     if (result.code === 'lane_changed') return { laneChanged: true, reason: result.reason };
-    if (result.deliveryOutcome === 'accepted') {
+    const delivery = billingLegDeliveryState(channel, result);
+    if (delivery) {
       await logAutopay(customer.id, 'pre_charge_reminder_sent', {
-        amountCents,
+        ...(delivery === 'deduped' && result.eventVisibleAt ? { createdAt: result.eventVisibleAt } : { amountCents }),
         details: { charge_date: chargeDate, channel },
       });
-      delivered++;
+      settled++;
+      if (delivery === 'delivered') delivered++;
     } else {
       code = result.code || result.reason || 'unknown';
       logger.warn(`[autopay-notifications] pre-charge ${channel} leg not delivered for ${customer.id}: ${code}`);
     }
   }
-  return { delivered, code };
+  return { delivered, settled, code };
 }
 
 async function sendPreChargeReminders() {
@@ -210,8 +214,9 @@ async function sendPreChargeReminders() {
           logger.info(`[autopay-notifications] pre-charge skipped for ${c.id}: ${outcome.reason}`);
           skipped++; continue;
         }
-        if (!outcome.delivered) throw new Error(`autopay reminder blocked: ${outcome.code || 'unknown'}`);
-        sent++; continue;
+        if (!outcome.settled) throw new Error(`autopay reminder blocked: ${outcome.code || 'unknown'}`);
+        if (outcome.delivered) sent++; else skipped++;
+        continue;
       }
       const sendResult = await sendCustomerMessage({ to: c.phone, channel: 'sms', ...sendInput });
       if (sendResult.code === 'lane_changed') {
@@ -223,10 +228,10 @@ async function sendPreChargeReminders() {
       }
 
       await logAutopay(c.id, 'pre_charge_reminder_sent', {
-        amountCents,
+        ...(sendResult.deduped && sendResult.eventVisibleAt ? { createdAt: sendResult.eventVisibleAt } : { amountCents }),
         details: { charge_date: etDateString(target) },
       });
-      sent++;
+      if (sendResult.deduped) skipped++; else sent++;
     } catch (err) {
       logger.error(`[autopay-notifications] reminder failed for ${c.id}: ${err.message}`);
     }
@@ -429,10 +434,11 @@ async function sendCardExpiryWarnings() {
 
       await logAutopay(r.customer_id, eventType, {
         paymentMethodId: r.payment_method_id,
+        ...(sendResult.deduped && sendResult.eventVisibleAt ? { createdAt: sendResult.eventVisibleAt } : {}),
         details: { exp_month: r.exp_month, exp_year: r.exp_year, brand: r.brand, last4: r.last4, reminder_stage: reminderStage },
       });
       await emailPromise;
-      sent++;
+      if (sendResult.deduped) skipped++; else sent++;
     } catch (err) {
       logger.error(`[autopay-notifications] expiry warning failed for ${r.customer_id}: ${err.message}`);
     }

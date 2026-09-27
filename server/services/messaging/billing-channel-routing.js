@@ -97,6 +97,7 @@ const REPLAY_HOLD_CODES = Object.freeze([
 ]);
 
 function isReplayHold(result) {
+  if (result.bellPersisted === true || result.reason === 'app_event_already_visible') return false;
   return result.deferred === true && REPLAY_HOLD_CODES.includes(result.code);
 }
 
@@ -121,7 +122,18 @@ function preferenceChangeHold(overrides = {}) {
   };
 }
 
+// This is event settlement, not evidence that retry copy reached a device.
+// Only the guarded push path can supply either bell witness.
+function billingLegDeliveryState(channel, result = {}) {
+  if (channel === 'push' && result.deliveryOutcome === 'not_sent'
+    && result.reason === 'app_event_already_visible') return 'deduped';
+  if (result.deliveryOutcome === 'accepted') return result.deduped ? 'deduped' : 'delivered';
+  if (channel === 'email' && result.ok === true && result.deliveryOutcome === undefined) return 'delivered';
+  return channel === 'push' && result.bellPersisted === true ? 'delivered' : null;
+}
+
 function needsRetry(result) {
+  if (result?.bellPersisted === true || result?.reason === 'app_event_already_visible') return false;
   return result?.retryable || result?.deliveryOutcome === 'uncertain';
 }
 
@@ -181,7 +193,15 @@ async function sendBillingLeg({ input, channel, channels, channelResults, catego
 // the caller retries it; otherwise the latest acceptance, then any retry.
 function billingDispatchOutcome(channelResults) {
   const results = Object.values(channelResults);
-  const accepted = [...results].reverse().find((result) => result.sent && result.deliveryOutcome === 'accepted');
+  const settled = Object.entries(channelResults).reverse().map(([channel, result]) => {
+    const state = billingLegDeliveryState(channel, result);
+    if (!state) return null;
+    // The aggregate reports settlement of the event. The leg retains its
+    // actual native outcome and never gains a provider id or current bell.
+    return { ...result, sent: true, blocked: false, deliveryOutcome: 'accepted',
+      retryable: false, deferred: false, ...(state === 'deduped' ? { deduped: true } : {}) };
+  }).filter(Boolean);
+  const accepted = settled.find((result) => !result.deduped) || settled[0];
   const retry = results.find(needsRetry);
   const textRetry = needsRetry(channelResults.sms) && channelResults.sms;
   const textAccepted = channelResults.sms?.sent && channelResults.sms.deliveryOutcome === 'accepted';
@@ -230,5 +250,5 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
 
 module.exports = {
   BILLING_MESSAGE_CATEGORIES, billingDeliveryCategory, isBillingDeliveryCandidate, usesBillingDeliveryPreferences,
-  billingNotificationEventKey, dispatchBillingChannels, REPLAY_HOLD_CODES, isReplayHold, preferenceChangeHold,
+  billingNotificationEventKey, dispatchBillingChannels, REPLAY_HOLD_CODES, isReplayHold, preferenceChangeHold, billingLegDeliveryState,
 };

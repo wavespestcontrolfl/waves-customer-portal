@@ -3,6 +3,7 @@
 let mockPg;
 jest.mock('../models/db', () => {
   const database = (...args) => mockPg(...args);
+  database.raw = (...args) => mockPg.raw(...args);
   database.transaction = (...args) => mockPg.transaction(...args);
   return database;
 });
@@ -39,7 +40,16 @@ postgres('billing App quote guard under the scheduler connection limit', () => {
     });
     await mockPg.schema.createTable('notifications', (table) => {
       table.increments('id'); table.uuid('recipient_id'); table.jsonb('metadata');
+      table.timestamp('created_at').defaultTo(mockPg.fn.now());
       for (const key of ['recipient_type', 'category', 'title', 'body', 'icon', 'link']) table.text(key);
+    });
+    await mockPg.schema.createTable('collections_contact_ledger', (table) => {
+      table.uuid('id').primary(); table.jsonb('metadata'); table.timestamp('occurred_at');
+    });
+    await mockPg.schema.createTable('autopay_log', (table) => {
+      table.increments('id'); table.uuid('customer_id'); table.text('event_type');
+      table.integer('amount_cents'); table.uuid('payment_method_id'); table.uuid('payment_id');
+      table.jsonb('details'); table.timestamp('created_at').defaultTo(mockPg.fn.now());
     });
     await mockPg('invoices').insert({ id: invoiceId, customer_id: customerId, due_cents: 4900 });
   }, 30000);
@@ -76,5 +86,52 @@ postgres('billing App quote guard under the scheduler connection limit', () => {
         expect(PushService.sendToCustomer).not.toHaveBeenCalled();
       }
     } finally { await scheduler.rollback(); }
+  }, 15000);
+
+  test('a committed bell with a lost acknowledgement cannot authorize a changed native quote', async () => {
+    await mockPg('invoices').where({ id: invoiceId }).update({ due_cents: 4900 });
+    const database = require('../models/db');
+    const transaction = database.transaction;
+    const transactionSpy = jest.spyOn(database, 'transaction').mockImplementationOnce(async (...args) => {
+      await transaction(...args);
+      throw new Error('commit acknowledgement lost');
+    });
+    const options = { dedupeKey: `billing-quote:${invoiceId}`, awaitPush: true };
+    try {
+      const first = await NotificationService.notifyCustomer(customerId, 'billing', 'Balance due', 'Balance: $49.00', {
+        ...options, pushOptions: { shouldContinue: windowGuardFrom(async ({ database }) => {
+          const row = await database('invoices').where({ id: invoiceId }).forUpdate().first();
+          return { ok: row.due_cents === 4900 };
+        }) },
+      });
+      expect(first).toBeNull();
+      expect(await mockPg('notifications')).toHaveLength(1);
+      const visibleAt = new Date(Date.now() - 86400000);
+      await mockPg('notifications').update({ created_at: visibleAt });
+      // Payment after the bell commit is after that copy's delivery.
+      await mockPg('invoices').where({ id: invoiceId }).update({ due_cents: 2500 });
+      const retried = await NotificationService.notifyCustomer(customerId, 'billing', 'Balance due', 'Balance: $25.00', options);
+      expect(retried.created_at).toEqual((await mockPg('notifications').first()).created_at);
+      expect(retried).toMatchObject({ body: 'Balance: $49.00', deduped: true,
+        push: { queued: false, accepted: 0, reason: 'dedupe_payload_changed' } });
+      expect(await mockPg('notifications')).toHaveLength(1);
+      expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+      // Progress repair must retain the original visible-event time, even
+      // when the retry happens later with a different quote.
+      await require('../services/autopay-log').logAutopay(customerId, 'pre_charge_reminder_sent', {
+        createdAt: retried.created_at, details: { channel: 'push', delivery_repaired: true },
+      });
+      const progress = await mockPg('autopay_log').first();
+      expect(progress.created_at).toEqual(visibleAt);
+      expect(progress.amount_cents).toBeNull();
+      const ledgerId = randomUUID();
+      await mockPg('collections_contact_ledger').insert({ id: ledgerId, metadata: {}, occurred_at: new Date() });
+      expect(await require('../services/collections/contact-ledger').markDelivered({ id: ledgerId }, {
+        occurredAt: retried.created_at,
+      })).toBe(true);
+      const ledger = await mockPg('collections_contact_ledger').where({ id: ledgerId }).first();
+      expect(ledger.metadata.delivered).toBe(true);
+      expect(ledger.occurred_at).toEqual(visibleAt);
+    } finally { transactionSpy.mockRestore(); }
   }, 15000);
 });

@@ -42,7 +42,8 @@ async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundle
   }
   await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
     status: 'sent',
-    created_at: completedAt,
+    // An event dedupe retires the queue; it is not a fresh contact.
+    created_at: result.deduped === true ? (result.eventVisibleAt || meta.queued_at || msg.created_at) : completedAt,
     updated_at: completedAt,
     metadata: db.raw(metadataSql, bindings),
   });

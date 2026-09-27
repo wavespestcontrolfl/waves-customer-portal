@@ -1,3 +1,4 @@
+const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
 'use strict';
 
 const crypto = require('node:crypto');
@@ -113,12 +114,12 @@ async function sendLeg(send, channel, entry) {
 // as delivered), or null while it stays pending. An uncertain outcome keeps
 // the reservation held; only a definite non-send becomes retryable.
 async function recordLegOutcome(entry, channel, result, results) {
-  const accepted = result?.deliveryOutcome === 'accepted'
-    || (channel === 'email' && result?.ok === true && result.deliveryOutcome === undefined)
-    // A bell committed by this attempt remains visible if native push fails.
-    || (channel === 'push' && result?.bellPersisted === true);
-  if (accepted) {
-    if (await ContactLedger.markDelivered(entry)) return 'delivered';
+  const delivered = billingLegDeliveryState(channel, result || {});
+  if (delivered) {
+    const stamped = result.eventVisibleAt
+      ? await ContactLedger.markDelivered(entry, { occurredAt: result.eventVisibleAt })
+      : await ContactLedger.markDelivered(entry);
+    if (stamped) return delivered;
     results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_ACCEPTANCE_UNSTAMPED' };
     return null;
   }
@@ -207,9 +208,9 @@ async function sendReminderChannels({
     const result = await sendLeg(send, channel, entry);
     results[channel] = result;
     const state = await recordLegOutcome(entry, channel, result, results);
-    if (state === 'delivered') {
+    if (state === 'delivered' || state === 'deduped') {
       delivered.add(channel);
-      if (!result.deduped) deliveredNow.push(channel);
+      if (state === 'delivered' && !result.deduped) deliveredNow.push(channel);
     } else if (state === 'resolved') resolved.add(channel);
   }
   const complete = await settleEpisode(channels, { delivered, resolved, waived }, episodeRowIds);

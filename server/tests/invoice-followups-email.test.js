@@ -15,6 +15,7 @@ jest.mock('../services/billing-channel-email-authority', () => ({
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
   markSendFailed: jest.fn(async () => true),
+  markDelivered: jest.fn(async () => true),
 }));
 
 jest.mock('../services/logger', () => ({
@@ -627,7 +628,9 @@ describe('invoice follow-up email sidecar', () => {
     await expect(InvoiceFollowUps.resumeSequence('inv-1')).resolves.toBeUndefined();
   });
 
-  test.each([false, true])('advances a no-phone sequence through selected App (%s) or legacy email', async (appSelected) => {
+  test.each([false, true, 'prior', 'bell'])('advances a no-phone sequence through selected App (%s) or legacy email', async (appSelected) => {
+    if (appSelected === 'prior') sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible' });
+    if (appSelected === 'bell') sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', bellPersisted: true });
     const prefs = { email_enabled: true, ...(appSelected ? { invoice_channels: ['push'] } : {}) };
     const emailInteraction = chain();
     const finalInteraction = chain();
@@ -664,6 +667,11 @@ describe('invoice follow-up email sidecar', () => {
       step_index: 1,
       status: 'active',
     }));
+    if (appSelected === 'prior') {
+      expect(require('../services/collections/contact-ledger').markDelivered).toHaveBeenCalled();
+      expect(finalInteraction.insert).not.toHaveBeenCalled();
+      expect(require('../services/collections/contact-ledger').markSendFailed).not.toHaveBeenCalled();
+    }
   });
 
   test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT'])('%s with a failed enqueue holds the current follow-up step for retry', async (code) => {

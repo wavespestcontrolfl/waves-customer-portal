@@ -436,3 +436,18 @@ test('a provider error after the reservation was set still holds the full 72h un
   expect(row.metadata.review_ask_reservation).toBe(true);
   expect(row.scheduled_for.getTime()).toBe(Date.now() + 72 * 3600000);
 });
+
+test('retiring an earlier billing event keeps the original queue time and mints no provider proof', async () => {
+  const queuedAt = new Date(Date.now() - 86400000);
+  const visibleAt = new Date(queuedAt.getTime() + 1000);
+  row.created_at = queuedAt;
+  row.message_body = 'Billing event';
+  row.metadata = { entry_point: 'durable-test', queued_at: queuedAt.toISOString() };
+  const send = jest.fn(async () => ({ sent: true, deduped: true, deliveryOutcome: 'accepted', reason: 'app_event_already_visible', eventVisibleAt: visibleAt }));
+  const result = await dispatchScheduledSms(row, row.metadata, send, 'billing');
+  expect(result.deduped).toBe(true);
+  const final = updates.find(({ patch }) => patch.status === 'sent').patch;
+  expect(new Date(final.created_at)).toEqual(visibleAt);
+  expect(final.metadata.bindings).toEqual([null]);
+  expect(row.status).toBe('sent');
+});

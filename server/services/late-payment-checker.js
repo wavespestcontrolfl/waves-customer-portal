@@ -1,3 +1,4 @@
+const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
 /**
  * Late Payment Checker
  *
@@ -160,7 +161,7 @@ function pendingDeliveryChannel(row) {
   return activityMetadata(row).channel || 'sms';
 }
 
-async function dispatchReservedText(ContactLedger, ledger, dispatch) {
+async function dispatchReservedText(ContactLedger, ledger, dispatch, channel = 'sms') {
   const claim = typeof ContactLedger.claimAttempt === 'function'
     ? await ContactLedger.claimAttempt(ledger)
     : { allowed: true };
@@ -171,22 +172,23 @@ async function dispatchReservedText(ContactLedger, ledger, dispatch) {
   catch (err) {
     // A throw that carries the provider's own outcome keeps it; anything
     // else is an unconfirmed attempt.
-    result = err.providerOutcome || {};
-    if (!['accepted', 'not_sent'].includes(result.deliveryOutcome)) {
-      return { sent: false, deferred: true, deliveryOutcome: 'uncertain', code: 'TEXT_OUTCOME_UNCONFIRMED' };
-    }
-    result = { ...result, sent: result.deliveryOutcome === 'accepted', retryable: result.deliveryOutcome === 'not_sent' };
+    result = err.providerOutcome || { deliveryOutcome: 'uncertain' };
+    // Classify the same way as a returned outcome, including a bell that
+    // committed before a later audit/provider failure.
+    result = { ...result, retryable: true };
   }
   // A legacy blocked result with no outcome is a definite non-send.
   const outcome = result?.deliveryOutcome ?? (result?.blocked === true ? 'not_sent' : 'unconfirmed');
-  if (!['accepted', 'not_sent'].includes(outcome)) {
-    return { sent: false, deferred: true, code: 'TEXT_OUTCOME_UNCONFIRMED' };
+  const delivery = billingLegDeliveryState(channel, result || {});
+  if (!delivery && !['accepted', 'not_sent'].includes(outcome)) {
+    return { sent: false, deferred: true, deliveryOutcome: 'uncertain', code: 'TEXT_OUTCOME_UNCONFIRMED' };
   }
-  const accepted = outcome === 'accepted';
+  const accepted = !!delivery;
   const stamped = accepted
-    ? (typeof ContactLedger.markDelivered === 'function' ? await ContactLedger.markDelivered(ledger) : true)
+    ? (typeof ContactLedger.markDelivered === 'function'
+      ? await ContactLedger.markDelivered(ledger, ...(result.eventVisibleAt ? [{ occurredAt: result.eventVisibleAt }] : [])) : true)
     : await ContactLedger.markSendFailed(ledger, { code: result.code || 'blocked' });
-  return stamped ? { ...result, sent: accepted } : { sent: false, deferred: true, code: 'TEXT_OUTCOME_STAMP_FAILED' };
+  return stamped ? { ...result, sent: accepted, ...(delivery === 'deduped' ? { deduped: true } : {}) } : { sent: false, deferred: true, code: 'TEXT_OUTCOME_STAMP_FAILED' };
 }
 
 function selectedNonEmailChannels(explicitChannels) {
@@ -240,7 +242,7 @@ async function dispatchSelectedNonEmail({ ContactLedger, customer, invoice, body
       },
       hasEmailLeg: true,
       ...(preDispatchCheck ? { preDispatchCheck } : {}),
-    }));
+    }), channel);
   }
   return { results, ledgers, sentChannels: deliveredChannelLabel(results),
     willRetry: Object.values(results).some((result) => !result.sent && isTransientSmsResult(result)) };
@@ -444,10 +446,12 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
         && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal')));
     const pendingEmail = !!delivery.sentChannels && explicitEmailSelected && !emailDurablyDenied
       && !emailDelivered && !terminalEmailResolved;
+    const repaired = !emailDelivered && delivery.results.push?.reason === 'app_event_already_visible' && Object.values(delivery.results).every((result) => result.deduped === true);
     const activityInsert = db('activity_log').insert({
+      ...(repaired ? { created_at: delivery.results.push.eventVisibleAt } : {}),
       customer_id: customer.id,
       action: 'microdeposit_verification_reminder',
-      description: `Micro-deposit verification re-nudge (${tierDays}-day): ${inv.title || 'invoice'} ${invoiceRef}`,
+      description: repaired ? `Original ${tierDays}-day App event settled` : `Micro-deposit verification re-nudge (${tierDays}-day): ${inv.title || 'invoice'} ${invoiceRef}`,
       metadata: JSON.stringify({
         dedupeKey, invoiceId: inv.id, tierDays, daysOverdue: daysSince,
         ...(pendingEmail ? {
@@ -459,7 +463,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
     });
     if (pendingEmail) await activityInsert;
     else await activityInsert.catch(() => {});
-    return 'sent';
+    return repaired ? 'deduped' : 'sent';
   } catch (e) {
     logger.error(`[late-payment] micro-deposit re-nudge failed for invoice ${inv.id}: ${e.message}`);
     return 'skip';
@@ -834,8 +838,9 @@ const LatePaymentService = {
         const pendingEmail = !!delivery.sentChannels && explicitEmailSelected && !emailDurablyDenied
           && !emailDelivered && !terminalEmailResolved;
 
+        const repaired = !emailDelivered && delivery.results.push?.reason === 'app_event_already_visible' && Object.values(delivery.results).every((result) => result.deduped === true);
         if (delivery.sentChannels) {
-          notified++;
+          if (repaired) skipped++; else notified++;
           logger.info(`[late-payment] Reminder sent for customer ${customer.id} — ${daysSince} days overdue`);
         } else if (emailDelivered) {
           emailedFallback++;
@@ -854,11 +859,12 @@ const LatePaymentService = {
         }
 
         const activityInsert = db('activity_log').insert({
+          ...(repaired ? { created_at: delivery.results.push.eventVisibleAt } : {}),
           customer_id: customer.id,
           action: 'late_payment_reminder',
-          description: `${tierDays}-day late payment reminder: ${invoiceTitle} ($${totalAmount.toFixed(2)})`,
+          description: repaired ? `Original ${tierDays}-day App event settled` : `${tierDays}-day late payment reminder: ${invoiceTitle} ($${totalAmount.toFixed(2)})`,
           metadata: JSON.stringify({
-            invoiceKey, invoiceId: inv.id, amount: totalAmount, daysOverdue: daysSince,
+            invoiceKey, invoiceId: inv.id, ...(repaired ? { delivery_repaired: true } : { amount: totalAmount, daysOverdue: daysSince }),
             tierDays,
             channel: delivery.sentChannels ? `${delivery.sentChannels}${emailDelivered ? '+email' : ''}` : 'email_only',
             ...(pendingEmail ? {

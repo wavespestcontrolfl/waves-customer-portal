@@ -297,6 +297,34 @@ describe('late-payment checker email sidecar', () => {
     expect(activityInsert.insert).not.toHaveBeenCalled();
   });
 
+  test.each([
+    [{ sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: new Date('2026-05-20T14:00:00Z') }, true, false],
+    [{ sent: false, deliveryOutcome: 'uncertain', deferred: true, retryable: true, bellPersisted: true }, false, false],
+    [{ sent: false, deliveryOutcome: 'uncertain', bellPersisted: true }, false, true],
+  ])('settles visible App delivery while preserving earlier event history: %j', async (appResult, repaired, throws) => {
+    const occurredAt = new Date('2026-05-20T14:00:00Z');
+    const invoice = { id: 'inv-1', customer_id: 'cust-1', token: 'token-1', invoice_number: 'WPC-2026-1042',
+      status: 'sent', title: 'Quarterly Pest Control', total: '129.00', due_date: '2026-05-10',
+      service_date: '2026-05-01', created_at: '2026-05-01T12:00:00Z' };
+    if (throws) sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit acknowledgement lost'), { providerOutcome: appResult }));
+    else sendCustomerMessage.mockResolvedValueOnce(appResult);
+    ContactLedger.recordContact.mockResolvedValueOnce({ id: 'push-14', metadata: {}, occurred_at: occurredAt });
+    const activityInsert = chain();
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), ...Array(4).fill(null).map(() => chain({ first: { payer_id: null, scheduled_send_error: null } }))],
+      activity_log: [chain({ first: null }), chain({ result: [] }), activityInsert],
+      customers: [chain({ first: { id: 'cust-1', first_name: 'Taylor', phone: null } })],
+      notification_prefs: [chain({ first: { billing_channels: ['push'] } })],
+    });
+    const result = await LatePaymentChecker.checkAndNotify();
+    expect(result).toMatchObject({ notified: repaired ? 0 : 1, skipped: repaired ? 1 : 0 });
+    if (repaired) expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'push-14' }), { occurredAt });
+    else expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'push-14' }));
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(activityInsert.insert).toHaveBeenCalled();
+    if (repaired) expect(activityInsert.insert.mock.calls[0][0]).toMatchObject({ created_at: occurredAt, description: 'Original 14-day App event settled' });
+  });
+
   test('keeps a selected retryable Text leg alive after the selected Email succeeds', async () => {
     const invoice = {
       id: 'inv-1',

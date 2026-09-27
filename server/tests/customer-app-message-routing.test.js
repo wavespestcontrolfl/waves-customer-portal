@@ -494,6 +494,15 @@ test('request delivery forwards the queued status and transition identity to the
 });
 
 describe('explicit billing channel combinations', () => {
+  test('an already visible App event keeps its settlement evidence without a Text fallback', async () => {
+    prefs.billing_channels = ['push'];
+    const visibleAt = new Date(Date.now() - 86400000);
+    Twilio.sendSMS.mockResolvedValue({ success: false, appUnavailable: true, error: 'app_event_already_visible', eventVisibleAt: visibleAt });
+    expect(await sendCustomerMessage({ ...input, purpose: 'billing', metadata: {
+      billingDeliveryCategory: 'billing', billingDeliveryLeg: 'push', notificationEventKey: 'billing:event-1', appOnly: true,
+    } })).toMatchObject({ sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt });
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+  });
   const combinations = [
     ['email'], ['sms'], ['push'], ['email', 'sms'],
     ['email', 'push'], ['sms', 'push'], ['email', 'sms', 'push'],

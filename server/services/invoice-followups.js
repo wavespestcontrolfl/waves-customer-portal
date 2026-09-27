@@ -1,3 +1,4 @@
+const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
 /**
  * Per-Invoice Follow-up Sequence Engine
  *
@@ -1115,7 +1116,6 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         ? await ContactLedger.claimAttempt(ledger) : { allowed: true };
       if (claim.delivered) {
         smsSent = true;
-        if (channel === 'push') appSent = true; else actualSmsSent = true;
         continue;
       }
       if (!claim.allowed) { holdStep(); continue; }
@@ -1139,11 +1139,12 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       } catch (err) {
         result = err.providerOutcome || { deliveryOutcome: 'uncertain', deferred: true };
       }
-      if (result?.deliveryOutcome === 'accepted') {
+      const delivery = billingLegDeliveryState(channel, result || {});
+      if (delivery) {
         smsSent = true;
-        if (channel === 'push') appSent = true; else actualSmsSent = true;
+        if (channel === 'push') appSent ||= delivery === 'delivered'; else actualSmsSent ||= delivery === 'delivered';
         if (typeof ContactLedger.markDelivered === 'function'
-          && !await ContactLedger.markDelivered(ledger)) holdStep();
+          && !await ContactLedger.markDelivered(ledger, ...(result.eventVisibleAt ? [{ occurredAt: result.eventVisibleAt }] : []))) holdStep();
       } else if (result?.deliveryOutcome === 'not_sent'
         || (result?.deliveryOutcome == null && result?.blocked === true)) {
         if (!await ContactLedger.markSendFailed(ledger, { code: result.code || 'not_sent' })) holdStep();
@@ -1372,6 +1373,9 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
 
   // (Contact-ledger rows were written BEFORE each leg's delivery attempt —
   // record-then-send, codex 2026-08-14 — so there is nothing to record here.)
+
+  // A repaired original event advances its step without a new outbound touch.
+  if (selectedChannels !== null && !actualSmsSent && !appSent && !emailResult.ok) return;
 
   // Log to customer_interactions for the 360 view
   try {
