@@ -83,6 +83,9 @@ const DISPATCH_BATCH = 50;
 // cheaper than a retry/defer scheme, and costs nothing against the 2-hour
 // minimum delay this lane already imposes.
 const STAGING_GRACE_MINUTES = 15;
+// How long past its send time a staged call may stay mid-reprocess before
+// the send gives up (see dispatchClaimedCall's readiness fence).
+const NOT_READY_GIVE_UP_MS = 24 * 60 * 60 * 1000;
 
 // A call that ends without at least this much talk time is a hang-up, a
 // voicemail greeting, or a dropped call before the ask — never a "no visit
@@ -543,6 +546,18 @@ async function dispatchIneligibleReason(ctx) {
   return null;
 }
 
+// The ownership fence at send time: 'wait' while the processor holds or is
+// rewriting the row, a skip reason once it gave up or ended non-valid, null
+// when the row is ready to judge.
+function sendReadiness(call, entry, now) {
+  if (call.processing_token || call.v2_extraction_status == null) {
+    const dueAt = entry.send_at ? new Date(entry.send_at) : null;
+    const overdue = dueAt && !Number.isNaN(dueAt.getTime()) && now.getTime() - dueAt.getTime() > NOT_READY_GIVE_UP_MS;
+    return overdue ? 'call_not_ready_timeout' : 'wait';
+  }
+  return call.v2_extraction_status === 'valid' ? null : `extraction_${call.v2_extraction_status}`;
+}
+
 /**
  * Send-time re-check + dispatch for ONE already-claimed call. Re-derives
  * every "never" condition from fresh rows — nothing here trusts the
@@ -555,6 +570,21 @@ async function dispatchClaimedCall(conn, call, now) {
     await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at });
     return { sent: false, skipped: reason };
   };
+  // The processor's own ownership fence, re-checked at send time (codex
+  // pre-push P1): staging only judged a row that was valid and quiet. A
+  // reprocess since then holds processing_token and resets
+  // v2_extraction_status to null while it rewrites the extraction and the
+  // lead linkage. That's a reason to WAIT, not to judge half-written state.
+  // Checked before the linkage re-check below, which a mid-reprocess row
+  // would fail spuriously. A reprocess that ends non-valid is a skip, and a
+  // row still not ready a day past its send time gives up with a reason
+  // instead of being re-claimed forever.
+  const readiness = sendReadiness(call, entry, now);
+  if (readiness === 'wait') {
+    await recordDecision(conn, call, { status: 'pending', lead_id: leadId, send_at: entry.send_at }, { logActivity: false });
+    return { sent: false, skipped: 'call_not_ready', deferred: true };
+  }
+  if (readiness) return skip(readiness);
   if (!leadId) return skip('no_lead_linkage');
   // The call processor can rewrite call_log.metadata.lead_id later (an
   // attribution correction, a merge into a different lead) while leaving

@@ -490,6 +490,7 @@ describe('claimForDispatch', () => {
 describe('dispatchClaimedCall', () => {
   const NOW = new Date('2026-09-26T18:00:00Z'); // 2:00 PM ET — inside the window
   const CALL = { id: 'call-1', created_at: new Date('2026-09-26T15:30:00Z'), duration_seconds: 90,
+    v2_extraction_status: 'valid', processing_token: null,
     metadata: { lead_id: 'lead-1', call_booking_link_text: { status: 'claimed', lead_id: 'lead-1', send_at: NOW.toISOString() } },
     ai_extraction_enriched: {
       meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
@@ -654,6 +655,37 @@ describe('dispatchClaimedCall', () => {
     const conn = makeDb({ consultationCodes: ['abcd'], smsWithLink: null });
     const result = await dispatchClaimedCall(conn, CALL, NOW);
     expect(result.sent).toBe(true);
+  });
+
+  test('a call mid-reprocess (processing_token held) waits instead of judging half-written state', async () => {
+    const conn = makeDb();
+    const result = await dispatchClaimedCall(conn, { ...CALL, processing_token: 'tok-1' }, NOW);
+    expect(result).toMatchObject({ sent: false, skipped: 'call_not_ready', deferred: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an extraction reset by a reprocess (status null) waits too', async () => {
+    const conn = makeDb();
+    const result = await dispatchClaimedCall(conn, { ...CALL, v2_extraction_status: null }, NOW);
+    expect(result).toMatchObject({ skipped: 'call_not_ready', deferred: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a reprocess that ended non-valid is a skip, never a send on the stale extraction', async () => {
+    const conn = makeDb();
+    const result = await dispatchClaimedCall(conn, { ...CALL, v2_extraction_status: 'parse_failed' }, NOW);
+    expect(result.skipped).toBe('extraction_parse_failed');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a row still not ready a day past its send time gives up with a reason', async () => {
+    const conn = makeDb();
+    const staleEntry = { status: 'claimed', lead_id: 'lead-1', send_at: new Date(NOW.getTime() - 25 * 60 * 60 * 1000).toISOString() };
+    const stuck = { ...CALL, processing_token: 'tok-1', metadata: { ...CALL.metadata, call_booking_link_text: staleEntry } };
+    const result = await dispatchClaimedCall(conn, stuck, NOW);
+    expect(result.skipped).toBe('call_not_ready_timeout');
+    expect(result.deferred).toBeUndefined();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('outside the 8am-8pm ET window is deferred to the next window open, never lost', async () => {
