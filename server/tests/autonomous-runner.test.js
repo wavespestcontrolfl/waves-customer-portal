@@ -3715,7 +3715,7 @@ describe('approveAndPublishNamedCompetitor — superseded in-flight approval', (
     expect(wheres).toContainEqual({ table: 'opportunity_queue', args: ['claimed_at', approvalClaimedAt] });
   });
 
-  test('crash recovery binds the terminal approval run to the superseded row current claim', async () => {
+  test('crash recovery preserves an uncertain superseded publication for interrupted-publish reconciliation', async () => {
     jest.resetModules();
     const approvalClaimedAt = new Date('2026-09-27T01:30:00Z');
     const outsideWheres = [];
@@ -3748,12 +3748,12 @@ describe('approveAndPublishNamedCompetitor — superseded in-flight approval', (
       signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
     }], 'crash recovery');
 
-    expect(result).toEqual({ ids: ['opp-cite'], runs: 1, opps: 1 });
+    expect(result).toEqual({ ids: [], runs: 0, opps: 0 });
     expect(outsideWheres).toContainEqual({ table: 'autonomous_runs', args: ['queue_claim_id', 'claim-current'] });
-    expect(updates).toEqual(expect.arrayContaining([
-      expect.objectContaining({ table: 'opportunity_queue', patch: expect.objectContaining({ status: 'skipped' }) }),
-      expect.objectContaining({ table: 'autonomous_runs', patch: expect.objectContaining({ outcome: 'skipped_gate_fail' }) }),
-    ]));
+    // The caller's ordinary stuck-publish path now parks both records at
+    // named_competitor_publish_interrupted. No terminal write here may hide
+    // an external PR/live side effect whose URL was not persisted.
+    expect(updates).toEqual([]);
   });
 
   test('crash recovery restores a persisted current-claim PR park for supersession retirement', async () => {

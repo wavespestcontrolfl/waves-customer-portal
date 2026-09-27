@@ -3207,8 +3207,9 @@ class AutonomousRunner {
     });
   }
 
-  async _retireSupersededStuckApprovals(stuckOpps, note) {
+  async _retireSupersededStuckApprovals(stuckOpps, _note) {
     const superseded = (stuckOpps || []).filter((row) => row.bucket === 'citability_backfill' && pageEditSuperseded(row));
+    const ids = [];
     let runs = 0;
     let opps = 0;
     for (const row of superseded) {
@@ -3217,9 +3218,13 @@ class AutonomousRunner {
       query = row.claim_id == null ? query.whereNull('queue_claim_id') : query.where('queue_claim_id', row.claim_id);
       const run = await query.first('id', 'reviewer_notes');
       if (run) {
-        await this._retireSupersededApprovalClaim(row.id, run, row.claimed_at, note);
-        runs += 1;
-        opps += 1;
+        // Outcome is still publishing_named_competitor, so the crash may
+        // have happened after an external PR/live write but before its URL
+        // was persisted. The generic interrupted-publication path below
+        // parks both records for GitHub/live reconciliation; terminalizing
+        // here would erase the only visible obligation to find that side
+        // effect and retire it.
+        continue;
       } else {
         // The publish may have persisted its PR-bearing terminal run before
         // both opportunity park writes failed. That is durable current-claim
@@ -3243,7 +3248,10 @@ class AutonomousRunner {
               status: 'pending_review', skip_reason: pendingPr.skip_reason,
               updated_at: new Date(),
             });
-          opps += Number(restored) > 0 ? 1 : 0;
+          if (Number(restored) > 0) {
+            ids.push(row.id);
+            opps += 1;
+          }
           continue;
         }
         const retired = await db('opportunity_queue')
@@ -3254,10 +3262,13 @@ class AutonomousRunner {
             status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit',
             completed_at: new Date(), updated_at: new Date(),
           });
-        opps += Number(retired) > 0 ? 1 : 0;
+        if (Number(retired) > 0) {
+          ids.push(row.id);
+          opps += 1;
+        }
       }
     }
-    return { ids: superseded.map((row) => row.id), runs, opps };
+    return { ids, runs, opps };
   }
 
   async approveAndPublishNamedCompetitor(opportunityId, { runId = null, approvedBy = 'operator', expectedDraftSha = null } = {}) {
