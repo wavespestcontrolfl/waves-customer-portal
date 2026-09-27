@@ -95,10 +95,13 @@ function excludeReviewedAddresses(query, alias = 'customers') {
 const SERVICE_FIELDS = ['service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip'];
 function serviceReviewDecision(service, review) {
   if (!review) return null;
+  const linkedPrimary = review.primary_address_matches_review === true
+    && service.property_id != null && review.primary_property_id != null
+    && String(service.property_id) === String(review.primary_property_id);
   const snapshot = SERVICE_FIELDS.map(field => service[field] || null);
   const reference = Object.fromEntries(SERVICE_FIELDS.map((field, index) => [field, review.address_snapshot[index]]));
   const exact = JSON.stringify(snapshot) === JSON.stringify(review.address_snapshot.map(value => value || null));
-  if (!exact) {
+  if (!linkedPrimary && !exact) {
     // Complete localities are required before treating alternative spellings
     // as the same property. An incomplete primary must not claim a secondary
     // address that happens to share its street name.
@@ -113,16 +116,38 @@ function serviceReviewDecision(service, review) {
   return null;
 }
 
+async function serviceReviewContexts(customerIds, conn = db) {
+  const ids = [...new Set((customerIds || []).filter(Boolean))];
+  if (!ids.length) return new Map();
+  const reviews = await conn('customer_geocode_reviews').whereIn('customer_id', ids);
+  if (!reviews.length) return new Map();
+  const primaries = await conn('customer_properties')
+    .whereIn('customer_id', reviews.map(review => review.customer_id))
+    .where({ active: true, is_primary: true })
+    .select('customer_id', 'id', ...ADDRESS_FIELDS);
+  const primaryByCustomer = new Map(primaries.map(row => [String(row.customer_id), row]));
+  return new Map(reviews.map(review => {
+    const primary = primaryByCustomer.get(String(review.customer_id));
+    const currentPrimarySnapshot = primary && addressSnapshot(primary);
+    return [review.customer_id, {
+      ...review,
+      primary_property_id: primary?.id || null,
+      primary_address_matches_review: !!primary && Array.isArray(review.address_snapshot)
+        && JSON.stringify(currentPrimarySnapshot.map(value => value || null))
+          === JSON.stringify(review.address_snapshot.map(value => value || null)),
+    }];
+  }));
+}
+
 async function reviewedServiceLocation(service, conn = db) {
   if (!reviewEnabled()) return null;
-  const review = await conn('customer_geocode_reviews').where({ customer_id: service.customer_id }).first();
-  return serviceReviewDecision(service, review);
+  const contexts = await serviceReviewContexts([service.customer_id], conn);
+  return serviceReviewDecision(service, contexts.get(service.customer_id));
 }
 
 async function filterServiceReviewBlocks(rows, conn = db) {
   if (!reviewEnabled() || !rows.length) return rows;
-  const reviews = await conn('customer_geocode_reviews').whereIn('customer_id', [...new Set(rows.map(row => row.customer_id))]);
-  const byCustomer = new Map(reviews.map(review => [review.customer_id, review]));
+  const byCustomer = await serviceReviewContexts(rows.map(row => row.customer_id), conn);
   return rows.filter(row => {
     const decision = serviceReviewDecision(row, byCustomer.get(row.customer_id));
     return !decision || decision.location;
@@ -162,4 +187,4 @@ async function attemptReviewedGeocode(customerId, conn = db, { onCoordinatesComm
 
 module.exports = { reviewEnabled, addressSnapshot, reviewRevision, saveReview, getReviewDetail, listReviewQueue,
   attemptReviewedGeocode, excludeReviewedAddresses, effectiveReview, blocksAutomaticGeocode,
-  filterServiceReviewBlocks, reviewedServiceLocation, serviceReviewDecision };
+  filterServiceReviewBlocks, reviewedServiceLocation, serviceReviewDecision, serviceReviewContexts };

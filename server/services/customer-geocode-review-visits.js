@@ -294,26 +294,17 @@ async function clearLocationMirrors(trx, customer, primary, latitude, longitude,
 }
 
 async function clearVisitLocations(trx, customer, primary, matchingVisits) {
-  const primaryLinkedIds = matchingVisits.filter(row => primaryLinked(row, primary)).map(row => row.id);
-  const pinMatchedIds = matchingVisits.filter(row => !primaryLinked(row, primary)).map(row => row.id);
+  const ids = matchingVisits.map(row => row.id);
   const scope = query => query.where({ customer_id: customer.id })
     .whereIn('status', ['pending', 'confirmed'])
     .where('scheduled_date', '>=', etDateString());
-  let count = pinMatchedIds.length ? await scope(trx('scheduled_services').whereIn('id', pinMatchedIds))
-    .update({ lat: null, lng: null, zone: null, route_order: null, updated_at: new Date() }) : 0;
-  if (!primaryLinkedIds.length) return count;
-  count += await scope(trx('scheduled_services').whereIn('id', primaryLinkedIds)).update({
-    ...primaryAddressPatch(primary),
+  return ids.length ? scope(trx('scheduled_services').whereIn('id', ids)).update({
     lat: null,
     lng: null,
     zone: null,
     route_order: null,
-    pre_service_brief: null,
-    pre_service_brief_type: null,
-    pre_service_brief_generated_at: null,
     updated_at: new Date(),
-  });
-  return count;
+  }) : 0;
 }
 
 async function clearRecurringLocations(trx, customer, primary, parents, hasRejectedPin, latitude, longitude) {
