@@ -299,15 +299,21 @@ function lineKey(line) {
   return [line.vendor, line.orderNumber || 'unknown', line.shipmentKey, line.lineNo].join('|');
 }
 
-// A line the live lane recorded that the replay doesn't rebuild from its own
-// email (see tableOnlyLines) owns its identity outright: the table holds exactly one row per
-// line, so a later Delivered email for that same line was never recorded
-// live, whichever email sorts first.
-function dedupe(lines) {
-  const seen = new Set(lines.filter((line) => line.recordedStatus).map(lineKey));
+// One line per identity. The live table holds exactly one row per line and
+// its first writer owns it, so for a line the live lane recorded (`owners`:
+// line key -> the recorded row's email_id, null when that email was deleted)
+// only the owner survives — rebuilt from the owner's own email, else the
+// recorded row itself (tableOnlyLines) — whichever copy sorts first. A line
+// never recorded keeps its first copy in queue order.
+function recordedOwners(rows) {
+  return new Map(rows.map((row) => [rowKey(row), row.email_id]));
+}
+
+function dedupe(lines, owners = new Map()) {
+  const seen = new Set();
   return lines.filter((line) => {
-    if (line.recordedStatus) return true;
     const key = lineKey(line);
+    if (owners.has(key) && !line.recordedStatus && line.email.id !== owners.get(key)) return false;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -527,7 +533,7 @@ async function main() {
     // In the live queue's order (see recordedTimes): hand-offs and proposed
     // catalog changes apply to what comes after, and --limit caps the same
     // lines the live agent would reach first.
-    const lines = dedupe(inQueueOrder([...amazon, ...siteOneRead.lines, ...tableOnly], recordedTimes(tableRows)));
+    const lines = dedupe(inQueueOrder([...amazon, ...siteOneRead.lines, ...tableOnly], recordedTimes(tableRows)), recordedOwners(tableRows));
     console.log(`Since ${since.toISOString()}: ${amazon.length} Amazon and ${siteOneRead.lines.length} SiteOne line(s) rebuilt from their emails, `
       + `${tableOnly.filter((line) => line.report).length} recorded line(s) with no email to rebuild from `
       + '(undelivered-shipment holds, deleted emails), before dedupe.');
@@ -562,5 +568,5 @@ if (require.main === module) {
 }
 
 module.exports = {
-  assertReadOnly, parseSince, parseLimit, lineKey, dedupe, inQueueOrder, tableOnlyLines, emptyProposals, recordProposal, catalogWithProposals, replayLine,
+  assertReadOnly, parseSince, parseLimit, lineKey, dedupe, recordedOwners, inQueueOrder, tableOnlyLines, emptyProposals, recordProposal, catalogWithProposals, replayLine,
 };

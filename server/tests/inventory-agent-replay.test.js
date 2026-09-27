@@ -10,7 +10,7 @@
  * script does anything else) is for.
  */
 const {
-  assertReadOnly, parseSince, parseLimit, lineKey, dedupe, inQueueOrder, tableOnlyLines, emptyProposals, recordProposal, catalogWithProposals, replayLine,
+  assertReadOnly, parseSince, parseLimit, lineKey, dedupe, recordedOwners, inQueueOrder, tableOnlyLines, emptyProposals, recordProposal, catalogWithProposals, replayLine,
 } = require('../../ops/agents/inventory-agent-replay');
 const { classifyItem } = require('../services/purchase-receipts/receipt-processor');
 
@@ -197,7 +197,21 @@ describe('dedupe', () => {
     const hold = { ...key, email: { id: holdId, received_at: '2026-09-01T00:00:00Z' }, recordedStatus: 'no_delivery_email' };
     const delivered = { ...key, email: { id: deliveredId, received_at: '2026-09-01T00:00:00Z' } };
     const ordered = inQueueOrder([delivered, hold], new Map([[lineKey(key), { vendor: 'amazon', shipmentKey: 'S1', at: Date.parse('2026-09-01T00:00:00Z') }]]));
-    expect(dedupe(ordered)).toEqual([hold]);
+    expect(dedupe(ordered, new Map([[lineKey(key), holdId]]))).toEqual([hold]);
+  });
+
+  // 2026-09-27 pre-push P1: two emails rebuild one recorded line; the copy
+  // the live lane recorded survives even when it arrived later.
+  test('the recorded owner email survives an earlier-arriving copy of the same line', () => {
+    const early = { ...key, email: { id: 'copy', received_at: '2026-09-01T00:00:00Z' }, item: { title: 'early' } };
+    const owner = { ...key, email: { id: 'owner', received_at: '2026-09-01T02:00:00Z' }, item: { title: 'owner' } };
+    const owners = recordedOwners([{ vendor: 'amazon', order_number: 'o', shipment_key: 'S1', line_no: 1, email_id: 'owner' }]);
+    expect(dedupe([early, owner], owners)).toEqual([owner]);
+  });
+
+  test('a line never recorded keeps its first copy', () => {
+    const first = { ...key, email: { id: 'a' } };
+    expect(dedupe([first, { ...key, email: { id: 'b' } }])).toEqual([first]);
   });
 });
 
@@ -226,7 +240,7 @@ describe('tableOnlyLines', () => {
     const [recorded] = tableOnlyLines([old], from([[old, ['later']]]), since);
     expect(recorded).toMatchObject({ recordedStatus: 'no_items', report: null });
     const later = { vendor: 'amazon', orderNumber: 'o', shipmentKey: 'S', lineNo: 1, email: { id: 'later', received_at: '2026-09-05T00:00:00Z' } };
-    expect(dedupe([later, recorded])).toEqual([recorded]);
+    expect(dedupe([later, recorded], new Map([[keyOf(old), 'old']]))).toEqual([recorded]);
   });
 
   // 2026-09-27 pre-push P1: a surviving duplicate email rebuilding the same
@@ -235,7 +249,7 @@ describe('tableOnlyLines', () => {
     const orphan = row({ email_id: null, status: 'agent_pending' });
     const [recorded] = tableOnlyLines([orphan], from([[orphan, ['dup']]]), since);
     const duplicate = { vendor: 'amazon', orderNumber: 'o', shipmentKey: 'S', lineNo: 1, email: { id: 'dup', received_at: orphan.created_at } };
-    expect(dedupe([duplicate, recorded])).toEqual([recorded]);
+    expect(dedupe([duplicate, recorded], new Map([[keyOf(orphan), null]]))).toEqual([recorded]);
   });
 
   test('a deleted-email row in the window is reported; a pre-window row only feeds the rules', () => {
