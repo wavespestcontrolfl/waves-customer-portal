@@ -112,6 +112,12 @@ const BOOKED_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_
 // docstring (Codex #5019 r20/r21).
 const LOOKBACK_MS = 30 * 60 * 1000;
 
+// A generous ceiling on how long a genuine call can run — wide enough that
+// no real call is ever excluded by the coarse pre-filter below (Codex
+// #5019 r9 P2). Not itself a window: the precise, end-based condition is
+// what actually decides eligibility.
+const MAX_CALL_DURATION_MS = 4 * 60 * 60 * 1000;
+
 // A `.catch()` sentinel distinguishable from every genuine obligationRenewedAt
 // result (null = never renewed, or a real Date) — never a value that value
 // could itself equal.
@@ -269,12 +275,20 @@ async function findPromiseToRing(call, now) {
     if (!Number.isFinite(createdBoundaryMs)) continue;
     const boundaryMs = renewedAt && renewedAt.getTime() > createdBoundaryMs ? renewedAt.getTime() : createdBoundaryMs;
     if (boundaryMs >= call.created_at.getTime()) continue;
-    withRenewal.push({ ...r, __renewedAt: renewedAt });
+    withRenewal.push({ ...r, __renewedAt: renewedAt, __obligationAtMs: boundaryMs });
   }
   if (!withRenewal.length) return null;
 
-  // The promise the caller has waited longest for.
-  withRenewal.sort((a, b) => new Date(a.call_started_at) - new Date(b.call_started_at));
+  // The promise the caller has waited longest for — by its own EFFECTIVE
+  // obligation time (Codex #5019 r9 P2: the SAME boundaryMs just computed
+  // per candidate above — a human commitment's own created_at, a renewal
+  // instant, or otherwise the originating call's time), never
+  // call_started_at alone. A human-typed commitment logged well after its
+  // linked (possibly much older) call is only "owed" from when it was
+  // actually made, and a renewed callback is only "owed" from the renewal
+  // — sorting on the call's own timestamp instead could describe the
+  // WRONG promise as the one the caller has waited longest for.
+  withRenewal.sort((a, b) => a.__obligationAtMs - b.__obligationAtMs);
   const promise = withRenewal[0];
   return { promise, renewedAt: promise.__renewedAt, ...describePromise(promise) };
 }
@@ -363,6 +377,18 @@ async function ringForCall(call, now = new Date()) {
         // the send the same way findPromiseToRing already treats it.
         const refreshed = await commitments.refreshFulfillment(db, promise.call_log_id);
         if (refreshed.failed > 0) return false;
+        // Re-check renewal precedence too (Codex #5019 r9 P2): staff can
+        // reopen/restate the SAME promise in the gap between
+        // findPromiseToRing's own snapshot and here, exactly like they can
+        // fulfill or dismiss it — findPromiseToRing's own precedence rule
+        // (a callback cannot be "about" a renewal that postdates it) must
+        // hold at dispatch time too, not just at selection time, or a
+        // renewal landing in this exact gap would let a stale obligation
+        // ring anyway. A lookup failure blocks the same way an unverified
+        // fulfillment refresh does — never a false ring on unverifiable
+        // renewal state; the next tick simply re-evaluates from scratch.
+        const renewedNow = await commitments.obligationRenewedAt(db, promise);
+        if (renewedNow && renewedNow.getTime() >= call.created_at.getTime()) return false;
         const stillLive = await commitments.stillOpenIds(db, [promise.id], { now: new Date() });
         if (!stillLive.has(promise.id)) return false;
         const followedNow = await followedUpIds(db, [promise]);
@@ -480,7 +506,23 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
       // the promise. The 30-minute window is unchanged — this is an
       // additional filter, not a replacement for it.
       .whereIn('status', TERMINAL_STATUSES)
-      .where('created_at', '>', since)
+      // The window is on when the call ENDED, not when it started (Codex
+      // #5019 r9 P2): paired with the terminal-status filter above, a call
+      // that ran close to (or beyond) the 30-minute lookback itself would
+      // otherwise cross the created_at cutoff and never be evaluated at
+      // all, even though it just ended. `created_at` alone stays as a
+      // COARSE, index-friendly pre-filter with a generous extra margin for
+      // the longest a real call could plausibly run — it never itself
+      // excludes a genuine call, only keeps this query sargable; the
+      // precise end-based condition right below it is what actually
+      // decides eligibility. End time mirrors call-commitments.js's own
+      // callEndedAt (bridged_at + duration when bridged, else created_at +
+      // duration) — simplified to COALESCE(bridged_at, created_at) since
+      // this query is already direction:'inbound'-only, so callEndedAt's
+      // own non-inbound branch (created_at, no duration added) never
+      // applies here.
+      .where('created_at', '>', new Date(since.getTime() - MAX_CALL_DURATION_MS))
+      .whereRaw("COALESCE(bridged_at, created_at) + make_interval(secs => COALESCE(duration_seconds, 0)) > ?", [since])
       // Eligibility, not the window, is what keeps a dark-period call from
       // ringing (see module docstring) — a call the /voice webhook did not
       // stamp promise_chaser_eligible: true at arrival is never considered,

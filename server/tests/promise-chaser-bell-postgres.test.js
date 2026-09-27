@@ -242,7 +242,11 @@ const OUR_NUMBER = '+19415550100';
     test('a call created before the 30-minute sweep window is ignored regardless of its stamp; one just inside it rings', async () => {
       const earlier = callRow(240);
       const commitment = commitmentRow(earlier.id);
-      const tooOld = callRow(31);
+      // 33 minutes ago, not 31: with the window now on call COMPLETION
+      // (Codex #5019 r9 P2), callRow's own default 90s duration nudges the
+      // effective end time forward — 31 minutes ago would actually still
+      // END inside the 30-minute window. 33 minutes stays safely outside.
+      const tooOld = callRow(33);
       await mockConn('call_log').insert([earlier, tooOld]);
       await mockConn('call_commitments').insert(commitment);
       expect(await sweepPromiseChasers()).toBe(0);
@@ -251,6 +255,63 @@ const OUR_NUMBER = '+19415550100';
       const justInside = callRow(29);
       await mockConn('call_log').insert(justInside);
       expect(await sweepPromiseChasers()).toBe(1);
+    });
+
+    test('the window is on when the call ENDED, not when it started — a long call that just ended rings; one that ended 31 minutes ago does not (Codex #5019 r9 P2)', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      // Started 35 minutes ago — already outside a start-only window — but
+      // a 35-minute call, so it just NOW ended. The terminal-status filter
+      // (r8) means /voice's own eligibility stamp alone can no longer
+      // exclude a call still in progress, so it's the completion-based
+      // window's own job to admit this one.
+      const justEnded = callRow(35, { duration_seconds: 35 * 60 });
+      await mockConn('call_log').insert([earlier, justEnded]);
+      await mockConn('call_commitments').insert(commitment);
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+    });
+
+    test('a call that ended 31 minutes ago (however long it ran) is excluded', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      // Started 41 minutes ago, ran 10 minutes — ended 31 minutes ago.
+      const endedTooLongAgo = callRow(41, { duration_seconds: 10 * 60 });
+      await mockConn('call_log').insert([earlier, endedTooLongAgo]);
+      await mockConn('call_commitments').insert(commitment);
+      expect(await sweepPromiseChasers()).toBe(0);
+      expect(triggerNotification).not.toHaveBeenCalled();
+    });
+
+    test('candidate promises are ordered by their EFFECTIVE obligation time, not call_started_at alone (Codex #5019 r9 P2)', async () => {
+      // The human commitment's own LINKED CALL started 5 hours ago — by
+      // call_started_at alone this looks like the longest-waiting promise
+      // — but a human-typed commitment's real obligation only begins when
+      // it was actually LOGGED (r5/r8's own boundary), just 5 minutes ago.
+      const humanCall = callRow(300);
+      const loggedRecently = new Date(now - 5 * 60000);
+      const humanCommitment = commitmentRow(humanCall.id, {
+        source: 'human', kind: 'send_estimate', description: 'Send the quote',
+        created_at: loggedRecently, updated_at: loggedRecently,
+      });
+      // The AI commitment's own linked call started only 4 hours ago —
+      // LESS old by call_started_at — but its (unrenewed) obligation IS
+      // that call time, genuinely the longer real wait once the human
+      // promise's own recent logging is accounted for.
+      const aiCall = callRow(240);
+      const aiCommitment = commitmentRow(aiCall.id); // default source 'ai'
+      const back = callRow(0);
+      await mockConn('call_log').insert([humanCall, aiCall, back]);
+      await mockConn('call_commitments').insert([humanCommitment, aiCommitment]);
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      const [, payload] = triggerNotification.mock.calls[0];
+      // The AI promise's own obligation (4h ago) is the genuinely LONGER
+      // real wait, even though the human commitment's own linked call
+      // started earlier — call_started_at-only sorting would have picked
+      // the human one instead.
+      expect(payload.commitmentId).toBe(aiCommitment.id);
+      expect(payload.when).toBe(`${formatETDate(aiCall.created_at)} ${formatETTime(aiCall.created_at)}`);
     });
 
     test('a dark-period call (the gate was off at arrival, so /voice never stamped it) inside the window never rings after re-enable', async () => {
@@ -682,6 +743,37 @@ const OUR_NUMBER = '+19415550100';
         return { bellWritten: false, push: { sent: 0, skipped: 'superseded_before_push' } };
       });
       expect(await sweepPromiseChasers()).toBe(0);
+    });
+
+    test('a promise reopened between selection and dispatch is blocked at the live recheck too — no ring, no delivery fact (Codex #5019 r9 P2)', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id, { human_state: 'confirmed' });
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      triggerNotification.mockImplementationOnce(async (triggerKey, payload, opts) => {
+        // Staff reopen the SAME promise in the gap between findPromiseToRing's
+        // own snapshot (already run, with no renewal present) and this
+        // dispatch-time recheck — the same precedence rule findPromiseToRing
+        // itself enforces (a callback cannot be "about" a renewal that
+        // postdates it) must hold here too, on a FRESH read, or a renewal
+        // landing in exactly this gap would ring on a now-stale obligation.
+        const renewedAt = new Date(now + 1000);
+        await mockConn('audit_log').insert({
+          id: randomUUID(), actor_type: 'admin', action: 'callback_reopen',
+          resource_type: 'call_commitment', resource_id: commitment.id,
+          metadata: JSON.stringify({ renewed_at: renewedAt.toISOString() }), created_at: renewedAt,
+        });
+        const stillWanted = await opts.shouldContinue();
+        expect(stillWanted).toBe(false);
+        return { bellWritten: false, push: { sent: 0, skipped: 'superseded_before_push' } };
+      });
+
+      expect(await sweepPromiseChasers()).toBe(0);
+      const dedupeKey = `promise_chaser:${commitment.id}:0:${etDateString(new Date(now))}`;
+      const row = await mockConn('promise_chaser_deliveries').where({ dedupe_key: dedupeKey }).first('dedupe_key');
+      expect(row).toBeFalsy(); // retryable, not settled — the next tick re-evaluates from scratch
     });
   });
 
