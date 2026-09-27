@@ -453,14 +453,17 @@ class ContentBriefBuilder {
     });
 
     // Related-post link targets for a NEW supporting-blog brief only (see
-    // related-posts.js) — a failed lookup must not fail brief composition,
-    // it just means this brief carries no related-link allowance.
+    // related-posts.js). Composition may continue after an infrastructure
+    // error, but the brief must retain that failure so the publish gate can
+    // distinguish it from a confirmed zero-candidate topic and fail closed.
+    let relatedPostsStatus = 'complete';
     const relatedPosts = await this._loadRelatedPosts(opp, decision).catch((err) => {
       logger.warn(`[brief-builder] related posts lookup failed: ${err.message}`);
+      relatedPostsStatus = 'lookup_failed';
       return [];
     });
 
-    const brief = this._composeBrief({ opportunity: opp, signals, decision, existingBriefVersions, factsPack, relatedPosts });
+    const brief = this._composeBrief({ opportunity: opp, signals, decision, existingBriefVersions, factsPack, relatedPosts, relatedPostsStatus });
     if (persist) brief.id = await this._persist(brief);
     return brief;
   }
@@ -677,7 +680,7 @@ class ContentBriefBuilder {
     });
   }
 
-  _composeBrief({ opportunity, signals, decision, existingBriefVersions, factsPack = null, relatedPosts = [] }) {
+  _composeBrief({ opportunity, signals, decision, existingBriefVersions, factsPack = null, relatedPosts = [], relatedPostsStatus = 'complete' }) {
     const pageType = decision.page_type;
 
     // Overlay answer-engine extractability requirements for aeo_gap briefs.
@@ -955,7 +958,11 @@ class ContentBriefBuilder {
         // round-trips through get_content_brief AND the stored-draft
         // revalidation path (_loadReviewedBrief), so the gate allowance
         // survives a re-check exactly like it did the first time.
-        return (decision.action_type === 'new_supporting_blog' && Array.isArray(relatedPosts) && relatedPosts.length)
+        if (decision.action_type !== 'new_supporting_blog') return withRetry;
+        if (relatedPostsStatus === 'lookup_failed') {
+          return { ...withRetry, related_posts_status: 'lookup_failed' };
+        }
+        return (Array.isArray(relatedPosts) && relatedPosts.length)
           ? { ...withRetry, related_posts: relatedPosts }
           : withRetry;
       })(),

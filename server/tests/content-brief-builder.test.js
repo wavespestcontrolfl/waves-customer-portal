@@ -489,6 +489,16 @@ describe('_composeBrief related_posts (owner audit 2026-09-26)', () => {
   test('an empty related_posts list adds no key (brief shape unchanged for topics with no candidates)', () => {
     const brief = new ContentBriefBuilder()._composeBrief(baseArgs({ relatedPosts: [] }));
     expect(brief.voice_constraints.related_posts).toBeUndefined();
+    expect(brief.voice_constraints.related_posts_status).toBeUndefined();
+  });
+
+  test('a failed related-post lookup is persisted separately from a confirmed empty result', () => {
+    const brief = new ContentBriefBuilder()._composeBrief(baseArgs({
+      relatedPosts: [],
+      relatedPostsStatus: 'lookup_failed',
+    }));
+    expect(brief.voice_constraints.related_posts).toBeUndefined();
+    expect(brief.voice_constraints.related_posts_status).toBe('lookup_failed');
   });
 
   test('non-supporting-blog page types never carry related_posts even if passed', () => {
@@ -507,6 +517,7 @@ describe('_composeBrief related_posts (owner audit 2026-09-26)', () => {
       relatedPosts,
     }));
     expect(brief.voice_constraints.related_posts).toBeUndefined();
+    expect(brief.voice_constraints.related_posts_status).toBeUndefined();
   });
 
   test('related_posts coexists with an operator_brief / retry_directives already on voice_constraints', () => {
@@ -521,6 +532,44 @@ describe('_composeBrief related_posts (owner audit 2026-09-26)', () => {
 });
 
 describe('_loadRelatedPosts gating', () => {
+  test('compose preserves a lookup failure sentinel instead of treating it as a confirmed empty corpus', async () => {
+    const queue = require('../services/content/opportunity-queue');
+    const router = require('../services/content/decision-router');
+    const opportunity = {
+      id: 'opp-lookup-failure',
+      page_url: null,
+      query: 'termite swarmers',
+      service: 'termite',
+      city: 'Bradenton',
+      bucket: 'customer_need',
+      signal_metadata: {},
+    };
+    const decision = {
+      page_type: 'supporting-blog',
+      action_type: 'new_supporting_blog',
+      final_score: 80,
+      score_breakdown: {},
+      human_review_required: false,
+      human_review_reason: null,
+      router_notes: null,
+    };
+    const getById = jest.spyOn(queue, 'getById').mockResolvedValue(opportunity);
+    const route = jest.spyOn(router, 'route').mockReturnValue(decision);
+    try {
+      const builder = new ContentBriefBuilder();
+      builder._gatherSignals = jest.fn().mockResolvedValue({ customer_signal: null, serp_profile: null, conversion_feedback: null });
+      builder._countExistingBriefs = jest.fn().mockResolvedValue(0);
+      builder._loadFactsPack = jest.fn().mockResolvedValue(null);
+      builder._loadRelatedPosts = jest.fn().mockRejectedValue(new Error('candidate query unavailable'));
+      const brief = await builder.compose(opportunity.id, { persist: false });
+      expect(brief.voice_constraints.related_posts).toBeUndefined();
+      expect(brief.voice_constraints.related_posts_status).toBe('lookup_failed');
+    } finally {
+      getById.mockRestore();
+      route.mockRestore();
+    }
+  });
+
   test('skips the DB lookup entirely for a non-supporting-blog decision', async () => {
     const builder = new ContentBriefBuilder();
     const out = await builder._loadRelatedPosts({ id: 'opp-1' }, { page_type: 'city-service', action_type: 'create_or_refresh_city_service_page' });
