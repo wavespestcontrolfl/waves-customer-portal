@@ -1963,6 +1963,65 @@ describe('POST /:token commit', () => {
       expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.latitude).toBe(27.51);
     });
 
+    test.each([
+      ['primary-only', null, null],
+      ['divergent mirror', 27.1, -82.2],
+    ])('a linked customer with a %s pin synchronizes its mirror before booking', async (_label, latitude, longitude) => {
+      gateState.reviewLive = true;
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = {
+        id: 'cust-1', phone: '9415550101', address_line1: '5 Palm Ave', address_line2: '',
+        city: 'Bradenton', state: 'FL', zip: '34209', latitude, longitude,
+      };
+      firstResults.customer_properties = {
+        id: 'property-1', customer_id: 'cust-1', active: true, is_primary: true,
+        address_line1: '5 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209',
+        latitude: 27.51, longitude: -82.52,
+      };
+      listResults.scheduled_services = [];
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+
+      expect(res.statusCode).toBe(200);
+      expect(updateCalls).toContainEqual(expect.objectContaining({
+        table: 'customers', payload: expect.objectContaining({ latitude: 27.51, longitude: -82.52 }),
+      }));
+      expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toMatchObject({
+        id: 'cust-1', latitude: 27.51, longitude: -82.52,
+      });
+    });
+
+    test('a linked saved-address geocode cannot restore a pin after an outside-area decision wins the customer lock', async () => {
+      gateState.reviewLive = true;
+      firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+      firstResults.customers = {
+        id: 'cust-1', phone: '9415550101', address_line1: '5 Palm Ave', address_line2: '',
+        city: 'Bradenton', state: 'FL', zip: '34209', latitude: null, longitude: null,
+      };
+      listResults.scheduled_services = [];
+      mockGeocode.mockImplementationOnce(async () => {
+        firstResults.customer_geocode_reviews = {
+          customer_id: 'cust-1', status: 'outside_area', reason: 'staff_confirmed_outside_area',
+          address_snapshot: ['5 Palm Ave', null, 'Bradenton', 'FL', '34209'],
+          latitude: null, longitude: null,
+        };
+        return { location: { lat: 27.51, lng: -82.52 } };
+      });
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), { date: FUTURE_DATE, time: '09:00' });
+
+      expect(res.statusCode).toBe(422);
+      expect(res.body).toEqual({ error: 'address_unresolved' });
+      expect(updateCalls.some((call) => call.table === 'customers' && call.payload.latitude != null)).toBe(false);
+      expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+    });
+
     // Codex #4737 r5 P1: a retry with a CORRECTED address books there, even
     // though the failed first attempt already persisted its own address.
     test('an explicitly supplied address wins over stored coordinates (a corrected retry)', async () => {

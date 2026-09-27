@@ -106,7 +106,7 @@ postgres('geocode review enrichment serialization in PostgreSQL', () => {
     const decision = mockConnection.transaction(async (trx) => {
       const customer = await trx('customers').where({ id: customerId }).forUpdate().first();
       await trx('customer_properties').where({ id: propertyId }).forUpdate().first();
-      await review.saveReview(trx, customer, {
+      await review.saveReview(trx, { ...customer, address_line2: null }, {
         status: 'outside_area', reason: 'staff_confirmed_outside_area', reviewed_by: randomUUID(),
       });
       await trx('customer_properties').where({ id: propertyId }).update({ latitude: null, longitude: null });
@@ -159,7 +159,7 @@ postgres('geocode review enrichment serialization in PostgreSQL', () => {
     const decision = mockConnection.transaction(async (trx) => {
       const customer = await trx('customers').where({ id: customerId }).forUpdate().first();
       await trx('customer_properties').where({ id: propertyId }).forUpdate().first();
-      await review.saveReview(trx, customer, {
+      await review.saveReview(trx, { ...customer, address_line2: null }, {
         status: 'outside_area', reason: 'staff_confirmed_outside_area', reviewed_by: randomUUID(),
       });
       await trx('customer_properties').where({ id: propertyId }).update({ latitude: null, longitude: null });

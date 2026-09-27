@@ -143,7 +143,7 @@ function excludeCustomerAutomaticGeocodeForId(query, customerId) {
       .where(function () {
         this.where('r.status', 'verified').orWhere(function () {
           this.whereIn('r.status', ['needs_details', 'needs_pin', 'outside_area'])
-            .whereRaw('r.address_snapshot = jsonb_build_array(blocked_customer.address_line1, blocked_customer.address_line2, blocked_customer.city, blocked_customer.state, blocked_customer.zip)');
+            .whereRaw(`${NORMALIZED_REVIEW_ADDRESS_SQL} = jsonb_build_array(COALESCE(NULLIF(blocked_customer.address_line1, ''), ''), COALESCE(NULLIF(blocked_customer.address_line2, ''), ''), COALESCE(NULLIF(blocked_customer.city, ''), ''), COALESCE(NULLIF(blocked_customer.state, ''), ''), COALESCE(NULLIF(blocked_customer.zip, ''), ''))`);
         });
       });
   });
