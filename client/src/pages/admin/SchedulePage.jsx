@@ -13731,9 +13731,11 @@ export function CompletionPanel({
       && product.propertyAreaDefault.serviceId === service.id && !product.lawnPlanDefaults;
     const next = selectedProducts.map(product => {
       if (!follows(product)) return product;
-      const area = product.propertyAreaDefault.propertyId === currentPropertyAreas.propertyId ? propertyTreatedArea : "";
-      if (String(product.areaValue) === String(area)) return product;
-      return { ...product, areaValue: area,
+      const pending = product.propertyAreaDefault.pending;
+      const area = pending || product.propertyAreaDefault.propertyId === currentPropertyAreas.propertyId ? propertyTreatedArea : "";
+      if (!pending && String(product.areaValue) === String(area)) return product;
+      return { ...product, areaValue: area, areaUnit: 'sqft', propertyServiceAreaField: true,
+        propertyAreaDefault: pending ? { serviceId: service.id, propertyId: currentPropertyAreas.propertyId } : product.propertyAreaDefault,
         totalAmount: product.totalAmountManual || isPerGallonUnit(product.rateUnit)
           ? product.totalAmount : lawnDerivedTotal(product, area) };
     });
@@ -16226,8 +16228,8 @@ export function CompletionPanel({
         applicationArea: "",
         areaValue: prefillArea,
         propertyServiceAreaField: !!currentPropertyAreas && productUsesServiceArea,
-        propertyAreaDefault: currentPropertyAreas && productUsesServiceArea && areaRequirement?.unit === "sqft"
-          ? { serviceId: service.id, propertyId: currentPropertyAreas.propertyId } : null,
+        propertyAreaDefault: productUsesServiceArea && requiredApplicationArea(applicationMethod, serviceTypeForArea, false, true)?.unit === "sqft"
+          ? { serviceId: service.id, propertyId: currentPropertyAreas?.propertyId ?? null, pending: !currentPropertyAreas } : null,
         areaUnit: areaRequirement?.unit || "",
         // Prefill the targets from the manufacturer label (products_catalog
         // target_pests) so the tech starts from what the product is labeled to

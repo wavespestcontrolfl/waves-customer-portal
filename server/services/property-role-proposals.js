@@ -1096,6 +1096,14 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       const loc = resolveLocation(newPrimary.city || '');
       if (loc?.id) mirror.nearest_location_id = loc.id;
       await trx('customers').where({ id: customerId }).update(mirror);
+      const { propertyServiceAreasEnabled, reviewedAreas } = require('./property-service-areas');
+      if (propertyServiceAreasEnabled()) {
+        // A promoted property's own reviewed lawn becomes the primary turf
+        // mirror. An unknown lawn must clear the former home's measurement.
+        const lawnSqft = reviewedAreas(newPrimary).lawn?.sqft ?? null;
+        await trx('customer_turf_profiles').insert({ customer_id: customerId, lawn_sqft: lawnSqft })
+          .onConflict('customer_id').merge({ lawn_sqft: lawnSqft, updated_at: trx.fn.now() });
+      }
       // A verified pin can protect an unchanged address from a coordinate
       // overwrite. Re-read the customer point so a same-address primary flip
       // keeps the property mirror aligned with that protection.

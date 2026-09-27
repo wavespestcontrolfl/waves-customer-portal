@@ -1,6 +1,14 @@
 const areas = require('../services/property-service-areas');
 const { addressKey } = require('../services/customer-properties');
 
+test('lookup estimates round fractional square feet for review without relaxing saved input validation', () => {
+  expect(areas.lookupSuggestions({ estimatedBedAreaSf: 1200.5, estimatedTurfSf: 4999.4, turfSource: 'vision' })).toMatchObject({
+    beds: { sqft: 1201, source: 'imagery', reviewedAt: null }, lawn: { sqft: 4999, source: 'imagery', reviewedAt: null },
+  });
+  expect(areas.lookupSuggestions({ estimatedBedAreaSf: -0.1 })).toEqual({});
+  expect(() => areas.validateAreaChanges({ beds: { sqft: 1200.5, source: 'field' } })).toThrow();
+});
+
 test.each([null, [], {}, { other: { sqft: 100, source: 'field' } },
   { beds: { sqft: '100', source: 'field' } }, { beds: { sqft: -1, source: 'field' } },
   { beds: { sqft: 0.5, source: 'field' } }, { beds: { sqft: 1000001, source: 'field' } },

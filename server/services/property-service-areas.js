@@ -76,7 +76,10 @@ async function loadAreaProperty(scope, req, knex = db, { lock = false } = {}) {
 }
 
 function lookupSuggestions(enriched = {}) {
-  const candidate = (value, source) => areaNumber(value) !== null ? { sqft: value, source, reviewedAt: null, reviewedBy: null } : null;
+  const candidate = (value, source) => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1000000) return null;
+    return { sqft: Math.round(value), source, reviewedAt: null, reviewedBy: null };
+  };
   const result = {};
   // These are the lookup's area reads, never the pricing engine's density,
   // lot-category proxy, or 2,000-sq-ft default. Review is required to save.

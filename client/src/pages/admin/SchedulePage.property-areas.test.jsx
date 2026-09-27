@@ -2,7 +2,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { CompletionPanel } from './SchedulePage';
 import { refetchFlags } from '../../hooks/useFeatureFlag';
 const products = [
@@ -50,6 +50,20 @@ it('derives a granular bed amount and retains a manual quantity after partial co
   expect(screen.getByPlaceholderText('Total')).toHaveValue(2);
   expect(screen.getByText('1,200 sq ft')).toBeInTheDocument();
   expect(fetch.mock.calls.some(([url, opts]) => url.includes('property-areas') && opts?.method === 'PUT')).toBe(false);
+});
+
+it.each([false, true])('attaches an area arriving after product selection and preserves a manual total (%s)', async manual => {
+  const original = fetch.getMockImplementation();
+  let release;
+  fetch.mockImplementation((url, ...rest) => url.includes('property-areas')
+    ? new Promise(resolve => { release = resolve; }) : original(url, ...rest));
+  mount();
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: 'Snapshot 2.5TG' } });
+  fireEvent.click(screen.getByText('Snapshot 2.5TG'));
+  if (manual) fireEvent.change(screen.getByPlaceholderText('Total'), { target: { value: '7' } });
+  await act(async () => release(new Response(JSON.stringify(measurements), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+  await waitFor(() => expect(screen.getByPlaceholderText('Sq ft')).toHaveValue(1200));
+  expect(screen.getByPlaceholderText('Total')).toHaveValue(manual ? 7 : 2.76);
 });
 it('does not reinterpret palm fertilizer as bed area', async () => {
   mount(); await add('LESCO 8-0-12 Palm');
