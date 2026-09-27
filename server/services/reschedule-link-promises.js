@@ -1857,10 +1857,11 @@ async function acquireSendLock(connection, customerId, held) {
 // was written for (local codex audit P1). An unpooled connection's own
 // error/end/close events are the authority instead — and listening for 'error'
 // also keeps a dead raw connection from taking the process down with it.
+// Codex #4971 r15 P1: lifted into raw-connection-slots.js so the
+// parent-decision lock session (annual-prepay-renewals.js) shares this exact
+// mechanism instead of a second copy.
 function trackInterlockLoss(connection, held) {
-  if (typeof connection?.on !== 'function') return;
-  const lost = () => { held.lost = true; };
-  for (const event of ['error', 'end', 'close']) connection.on(event, lost);
+  require('./raw-connection-slots').trackConnectionLoss(connection, held);
 }
 
 // The interlock runs OUTSIDE the pool, so it has to be bounded in both time

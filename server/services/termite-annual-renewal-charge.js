@@ -398,6 +398,11 @@ async function stampRenewalExceptionBelled(term, kind, conn = db) {
 const PAID_INVOICE_STATUSES = ['paid', 'prepaid'];
 const INVOICE_EVIDENCE_COLUMNS = [
   'status', 'paid_at', 'sent_at', 'sms_sent_at', 'email_sent_at', 'stripe_payment_intent_id', 'stripe_charge_id',
+  // Codex #4971 r15 P1: a NET-terms statement child carries no Stripe ids of
+  // its own (the statement is charged, never the invoice) — durability of a
+  // reopened one is read off the STATEMENT's own payments row instead (see
+  // statementRevocationForInvoice), keyed by this column.
+  'payer_statement_id',
 ];
 
 function classifyRenewalInvoice(invoice) {
@@ -429,6 +434,37 @@ async function invoiceLedgerRevocation(conn, invoice) {
     .first('id', 'status', 'refund_status');
   if (!revoked) return null;
   return revoked.status === 'disputed' && revoked.refund_status !== 'full' ? 'disputed' : 'refunded';
+}
+
+// Codex #4971 r15 P1: a NET-terms statement child invoice is never itself
+// charged — the STATEMENT is (invoice.stripe_payment_intent_id/
+// stripe_charge_id are null on it) — so a chargeback/refund cascade
+// (routes/stripe-webhook.js reverseStatementCascadeForDispute) reopens the
+// child as draft with paid_at cleared and leaves no row invoiceLedgerRevocation
+// can find keyed to the INVOICE's own (absent) Stripe ids. The durable
+// signal instead lives on the STATEMENT's own payments row (statement_id,
+// the same row the cascade itself updates/inserts). Same vocabulary as
+// invoiceLedgerRevocation: 'refunded' = durable, 'disputed' = transient
+// (an OPEN dispute can still be won), null = no statement-level revocation
+// found (the invoice may simply be legitimately unpaid/not yet billed).
+// A dispute the webhook has already CLOSED lost (payments.status stays
+// 'disputed' forever per its own comment — 'failed' would risk a late
+// succeeded resurrecting it — with metadata.dispute_final:'lost' the one
+// durable marker) is money gone for good — durable, same as a refund.
+async function statementRevocationForInvoice(conn, invoice) {
+  if (!invoice?.payer_statement_id) return null;
+  const revoked = await conn('payments')
+    .where('statement_id', invoice.payer_statement_id)
+    .whereRaw(`(status in ('refunded', 'disputed') or refund_status = 'full')`)
+    .orderBy('updated_at', 'desc')
+    .first('id', 'status', 'refund_status', 'metadata');
+  if (!revoked) return null;
+  if (revoked.status !== 'disputed' || revoked.refund_status === 'full') return 'refunded';
+  let meta = {};
+  try {
+    meta = revoked.metadata ? (typeof revoked.metadata === 'string' ? JSON.parse(revoked.metadata) : revoked.metadata) : {};
+  } catch { meta = {}; }
+  return meta.dispute_final === 'lost' ? 'refunded' : 'disputed';
 }
 
 // A payments row (aliased) that revokes its invoice's payment — the SQL twin
@@ -575,6 +611,17 @@ async function resolveParentEligibility(trx, parent) {
   const revocation = payable ? await invoiceLedgerRevocation(trx, invoice) : null;
   if (payable && !revocation) return { eligible: true };
   if (revocation === 'disputed') return { eligible: false, reason: 'parent_payment_disputed', durable: false };
+  // Codex #4971 r15 P1: a statement-cascade reversal (reverseStatementCascadeForDispute)
+  // reopens this invoice DIRECTLY as draft/paid_at-null — no ledger row keyed
+  // to the invoice's own (absent, for a statement child) Stripe ids exists,
+  // so `payable` above is already false and invoiceLedgerRevocation was
+  // never even asked. Check the STATEMENT's own durable signal before
+  // falling back to inferring durability from draft alone.
+  if (!payable && invoice.payer_statement_id) {
+    const statementRevocation = await statementRevocationForInvoice(trx, invoice);
+    if (statementRevocation === 'disputed') return { eligible: false, reason: 'parent_payment_disputed', durable: false };
+    if (statementRevocation === 'refunded') return { eligible: false, reason: 'parent_invoice_unpaid_or_refunded', durable: true };
+  }
   return { eligible: false, reason: 'parent_invoice_unpaid_or_refunded', durable: evidence.cancelled || evidence.paidEvidence };
 }
 
@@ -1232,6 +1279,50 @@ function withRenewalGate(successor, fn) {
   return require('./annual-prepay-renewals').withParentDecisionLock(successor.renewed_from_term_id, fn, { alsoTermIds: [successor.id] });
 }
 
+// Codex #4971 r15 P1: call immediately before every provider boundary a
+// held renewal gate is meant to serialize against (a Stripe charge
+// submission, an SMS/email pay-link send) — see
+// assertParentDecisionLockAlive's own doc in annual-prepay-renewals.js. A
+// typeof guard, not a require-shape assumption: production always exports
+// this; a test's own narrow mock of annual-prepay-renewals that predates
+// this assertion simply has nothing to assert against, so it stays a no-op
+// there rather than failing that test on an unrelated shape mismatch.
+function assertRenewalLockAlive() {
+  const mod = require('./annual-prepay-renewals');
+  if (typeof mod.assertParentDecisionLockAlive === 'function') mod.assertParentDecisionLockAlive();
+}
+
+// Codex #4971 r15 P1: EVERY code path that soft-deletes or archives a
+// customer (routes/auth.js self-service DELETE /account, admin-customers.js
+// archive) must wait on this SAME gate before its deleted_at write may
+// commit. Without it, deleted_at can commit AFTER a pay-link send's own
+// in-gate eligibility read (payLinkVerdict, at the top of
+// withPayLinkClearance) but BEFORE that same send's provider handoff — both
+// of which run inside withRenewalGate, but nothing stops an unrelated writer
+// from ignoring an advisory lock it never takes. Held here, the deletion
+// literally cannot commit until any in-flight renewal action (send, charge,
+// withdrawal) for this customer's terms has released the gate — and once
+// held for deletion, no such action can start until the deletion itself
+// releases it. Takes every live (payment_pending) successor's own gate, in
+// id order (never more than one open per customer in practice — sorted
+// defensively so a customer with more than one can't cross-deadlock two
+// concurrent deletion attempts). No live successor → fn() runs directly,
+// no lock taken.
+async function withCustomerDeletionGate(customerId, fn) {
+  if (!customerId) return fn();
+  const successors = await db('annual_prepay_terms')
+    .where({ customer_id: customerId, status: PAYMENT_PENDING_STATUS })
+    .whereNotNull('renewed_from_term_id')
+    .select('id', 'renewed_from_term_id');
+  if (!successors?.length) return fn();
+  // Sorted in JS, not the query (a plain array sort — no ORDER BY needed
+  // for a handful of rows, and it keeps this callable against a query
+  // builder stub that supports where/whereNotNull/select but not orderBy).
+  const sorted = [...successors].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  const chain = sorted.reduceRight((inner, successor) => () => withRenewalGate(successor, inner), fn);
+  return chain();
+}
+
 async function withdrawSuccessorUnderGate(original, label, conn) {
   const refusal = await withdrawalRefusalUnderGate(original, conn);
   if (!refusal) {
@@ -1778,6 +1869,12 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
       const outcome = await withRenewalGate(successor, async () => {
         const refusal = await chargeRefusalUnderGate(successor, conn);
         if (refusal) return { blocked: true, ...refusal };
+        // Codex #4971 r15 P1: the gate's own session can die at any point
+        // while this async tree runs (a dropped raw connection releases its
+        // advisory locks at Postgres's end immediately) — assert it is
+        // still alive immediately before the actual Stripe call, not just
+        // at the top of this closure.
+        assertRenewalLockAlive();
         return { blocked: false, result: await submitCharge() };
       });
       if (outcome.blocked) return handleRefusalAtSubmission(successor, outcome, conn);
@@ -1896,6 +1993,16 @@ async function handleChargeFailure(successor, err, conn = db) {
   if (err?.code === 'CUSTOMER_DELETED') {
     return (await withdrawRenewalSuccessor(successor, 'the customer deleted their account before the renewal charge', conn)) !== 'deferred';
   }
+  // Codex #4971 r15 P1: the parent-decision lock session died before Stripe
+  // was ever reached (assertParentDecisionLockAlive, right before
+  // submitCharge()) — never attempted, not a decline. Leave the claim fence
+  // exactly as a mid-submission crash would (claimed_at set, no submission
+  // evidence, not stamped handled) so leg 7b's own recovery lease picks it
+  // up and re-judges it fresh, the same as it already does for a crash.
+  if (err?.code === 'PARENT_DECISION_LOCK_LOST') {
+    logger.warn(`[termite-annual-renewal] renewal charge for term ${successor.id} deferred — the parent-decision lock session was lost before Stripe was reached; leg 7b will recover the claimed attempt`);
+    return false;
+  }
   const { classifyChargeError } = require('./termite-annual-signature-charge')._private;
   const classification = classifyChargeError(err);
   logger.error(`[termite-annual-renewal] renewal charge failed for term ${successor.id}: ${classification.status} (${classification.reason})`);
@@ -1953,20 +2060,67 @@ async function followThroughChargeOutcome(successor, kind, reason, conn, { first
     delivered = Boolean(delivery?.ok) || delivery?.code === 'payer_billed';
   }
   const belled = await ringRenewalBell(successor, bellKind, reason);
-  if (first && kind === 'declined' && bellKind === 'declined') {
-    // Best-effort customer notice — never blocks the bell/pay-link
-    // fallback above, which are the load-bearing parts of this path.
-    await sendRenewalChargeFailedNotice(successor, conn).catch((noticeErr) => {
+  // Codex #4971 r15 P2: the customer decline notice is its OWN persisted
+  // follow-through obligation, not a fire-once side effect of `first`.
+  // sendCustomerMessage can return a non-throwing { blocked: true,
+  // deferred: true } during quiet hours (and withPayLinkClearance can
+  // itself withhold with a 'deferred' reason on a dispute-suspended pay
+  // link) — this used to be swallowed, `done` was computed from the bell
+  // and pay-link delivery alone, and recovery re-runs with first=false, so
+  // the notice was NEVER retried once the first attempt landed inside a
+  // quiet window. Retry on every tick until it is durably stamped sent, and
+  // fold that into `done` so a deferred notice keeps the row eligible for
+  // leg 7c instead of being marked handled with the customer never told.
+  const noticeOwed = kind === 'declined' && bellKind === 'declined';
+  let noticeSettled = true;
+  if (noticeOwed && !successor.renewal_charge_failed_notice_sent_at) {
+    const noticeOutcome = await sendRenewalChargeFailedNotice(successor, conn).catch((noticeErr) => {
       logger.warn(`[termite-annual-renewal] charge-failed customer notice failed for term ${successor.id}: ${noticeErr.message}`);
+      return null;
     });
+    noticeSettled = await recordChargeFailedNoticeOutcome(successor, noticeOutcome, conn);
   }
-  const done = Boolean(belled) && delivered;
+  const done = Boolean(belled) && delivered && noticeSettled;
   if (done) {
     await markChargeFollowThroughHandled(successor, conn);
   } else {
     await stampSweepDeferred(successor, conn);
   }
   return done;
+}
+
+// Whether the notice attempt just run means nothing more should be
+// retried: true once ACCEPTED (sendCustomerMessage's own "definitely sent"
+// shape) and durably stamped, or once withheld/failed for a reason retrying
+// changes nothing (no phone on file, no pay url, a missing template,
+// payer_billed, or withPayLinkClearance's 'handled' — the renewal no longer
+// owes a notice at all). False — must retry later — for a genuine defer
+// (quiet hours, or withPayLinkClearance's 'deferred' on a dispute-suspended
+// pay link), an explicit `retryable` flag, or no outcome at all (the
+// attempt threw before producing one — never silently counted as settled).
+function chargeFailedNoticeMustRetry(outcome) {
+  if (!outcome) return true;
+  if (outcome.deferred === true) return true;
+  if (outcome.reason === 'deferred') return true;
+  if (outcome.retryable === true) return true;
+  return false;
+}
+
+async function recordChargeFailedNoticeOutcome(successor, outcome, conn) {
+  // sendCustomerMessage always names its outcome (#4338 — same normalization
+  // scheduled-sms-delivery.js's own dispatch() applies); a legacy/simplified
+  // `sent: true` with no deliveryOutcome at all is still an accepted
+  // handoff. An EXPLICIT deliveryOutcome of 'not_sent' (the owner-phone kill
+  // switch's `sent: true` suppression) is deliberately NOT accepted.
+  const deliveryOutcome = outcome?.deliveryOutcome || (outcome?.sent === true ? 'accepted' : undefined);
+  const accepted = deliveryOutcome === 'accepted';
+  if (accepted) {
+    await conn('annual_prepay_terms').where({ id: successor.id })
+      .whereNull('renewal_charge_failed_notice_sent_at')
+      .update({ renewal_charge_failed_notice_sent_at: new Date() });
+    return true;
+  }
+  return !chargeFailedNoticeMustRetry(outcome);
 }
 
 // The pay-link chokepoint withheld the link: true once this leg is done
@@ -2308,6 +2462,11 @@ async function deliverRenewalInvoice(successor, conn = db, context = 'the renewa
 async function sendRenewalInvoice(successor) {
   try {
     const InvoiceService = require('./invoice');
+    // Codex #4971 r15 P1: this send runs under withRenewalGate — assert the
+    // lock session is still alive immediately before the provider handoff,
+    // not just when the gate was first taken (a dropped connection releases
+    // its advisory locks the instant it happens, wherever fn() is by then).
+    assertRenewalLockAlive();
     // Codex #4971 pre-push P1: firstDeliveryOnly — invoice.js's ATOMIC
     // first-delivery guard. The stamps were read just above, but a staff or
     // scheduled send can complete in between; the claim flip itself
@@ -2412,6 +2571,10 @@ async function sendChargeFailedText(successor, customer, invoice) {
     pay_url: payUrl,
   }, { workflow: 'termite_annual_renewal_charge_failed', entity_type: 'annual_prepay_term', entity_id: successor.id });
   if (!body) return { sent: false, reason: 'missing_template' };
+  // Codex #4971 r15 P1: same assertion as the pay-link send — this notice
+  // runs under withRenewalGate (withPayLinkClearance -> withRenewalGate)
+  // too, and must never reach the provider once the lock session is lost.
+  assertRenewalLockAlive();
   const { sendCustomerMessage } = require('./messaging/send-customer-message');
   return sendCustomerMessage({
     to: customer.phone,
@@ -3717,6 +3880,7 @@ module.exports = {
   runTermiteAnnualRenewalSweep,
   withRenewalSendClearance,
   withRenewalGate,
+  withCustomerDeletionGate,
   termiteAnnualRenewalChargeLive,
   renewalMoneyInMotionForParent,
   renewalMoneyInMotionForTerm,
@@ -3738,6 +3902,8 @@ module.exports = {
     parentInvoicePaidAndNotFullyRefunded,
     classifyRenewalInvoice,
     invoiceSettledNotRevoked,
+    invoiceLedgerRevocation,
+    statementRevocationForInvoice,
     INVOICE_EVIDENCE_COLUMNS,
     resolvePendingChargeOutcome,
     handleRefusalAtSubmission,
@@ -3765,6 +3931,8 @@ module.exports = {
     renewalMoneyInMotion,
     deliverRenewalInvoice,
     sendRenewalChargeFailedNotice,
+    recordChargeFailedNoticeOutcome,
+    chargeFailedNoticeMustRetry,
     bellNoWitnessTerms,
     bellUnanchoredOriginalTerms,
     bellStaleOverdueTerms,

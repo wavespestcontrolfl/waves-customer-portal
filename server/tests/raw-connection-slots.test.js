@@ -7,7 +7,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { rawConnectionSlots } = require('../services/raw-connection-slots');
+const { rawConnectionSlots, trackConnectionLoss } = require('../services/raw-connection-slots');
+const { EventEmitter } = require('events');
 
 describe('rawConnectionSlots', () => {
   beforeEach(() => {
@@ -63,5 +64,28 @@ describe('rawConnectionSlots', () => {
     expect(await slots.acquire()).toBeNull();
     expect(slots.openCount()).toBe(0);
     expect(logger.warn).toHaveBeenCalledWith('[test] lock session connection unavailable (ECONNREFUSED)');
+  });
+});
+
+// Codex #4971 r15 P1: extracted from reschedule-link-promises.js's send
+// interlock (trackInterlockLoss) so the parent-decision lock session
+// (annual-prepay-renewals.js) shares this exact mechanism instead of a
+// second copy — every raw-connection session-lock user's own error/end/close
+// is the one authority for "is this session still held".
+describe('trackConnectionLoss', () => {
+  test.each(['error', 'end', 'close'])('marks held.lost on a %s event', (event) => {
+    const connection = new EventEmitter();
+    const held = { lost: false };
+    trackConnectionLoss(connection, held);
+    expect(held.lost).toBe(false);
+    connection.emit(event, new Error('boom'));
+    expect(held.lost).toBe(true);
+  });
+
+  test('does nothing for a connection with no .on (never throws)', () => {
+    const held = { lost: false };
+    expect(() => trackConnectionLoss({}, held)).not.toThrow();
+    expect(() => trackConnectionLoss(null, held)).not.toThrow();
+    expect(held.lost).toBe(false);
   });
 });

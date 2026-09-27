@@ -67,4 +67,22 @@ function rawConnectionSlots({ max, connectMs, logPrefix }) {
   return { acquire, release, openCount: () => open };
 }
 
-module.exports = { rawConnectionSlots };
+// A dedicated raw connection's own error/end/close events are the one
+// authority for "is this session still held" — lifted from
+// reschedule-link-promises.js's send interlock (codex #4293) so every
+// session-lock user shares one mechanism (Codex #4971 r15 P1: the
+// parent-decision lock session adopted this too). Postgres releases every
+// advisory lock a session held the instant its connection drops; nothing
+// else observes that on its own — an AsyncLocalStorage context (or any
+// other in-memory "I'm holding this" flag) keeps believing the lock is held
+// long after the session that actually took it is gone. `held` is the
+// caller's own { lost: boolean } — mutated in place, never replaced, so a
+// caller that already threads it through nested closures keeps working
+// unchanged.
+function trackConnectionLoss(connection, held) {
+  if (typeof connection?.on !== 'function') return;
+  const lost = () => { held.lost = true; };
+  for (const event of ['error', 'end', 'close']) connection.on(event, lost);
+}
+
+module.exports = { rawConnectionSlots, trackConnectionLoss };

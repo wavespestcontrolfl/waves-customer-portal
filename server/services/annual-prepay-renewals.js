@@ -8859,7 +8859,23 @@ const PARENT_DECISION_LOCK_TIMEOUT_MS = 5000;
 // lock connection, so every writer takes any pair in the one global order,
 // and nested gates on either key are skipped as held.
 const heldParentDecisionLockStore = new AsyncLocalStorage();
-const heldDecisionKeys = () => heldParentDecisionLockStore.getStore() || new Set();
+const heldDecisionKeys = () => heldParentDecisionLockStore.getStore()?.keys || new Set();
+
+// Codex #4971 r15 P1: the lock SESSION's own liveness, threaded through the
+// same store as the keys it holds. The dedicated raw connection backing
+// withParentDecisionLock can emit error/end/close mid-flight — Postgres
+// releases every advisory lock the session held the instant that happens,
+// but this store's keys alone don't know it, so pooled work inside fn()
+// (a Stripe charge submission, a Stripe refund, an SMS/email pay-link send)
+// would otherwise sail through believing the gate still serializes it.
+// assertParentDecisionLockAlive() is the read; callers run it immediately
+// before each such provider boundary — never only once at entry, since the
+// loss can land at any point while fn() is running. A no-op outside any
+// held gate (nothing to assert).
+function assertParentDecisionLockAlive() {
+  const assertAlive = heldParentDecisionLockStore.getStore()?.assertAlive;
+  if (assertAlive) assertAlive();
+}
 
 // Extracted from recordDecision (Codex round-7 P2 self-review, AGENTS.md
 // L412-418): the transaction-scoped lock acquisition is a genuinely
@@ -9148,9 +9164,24 @@ async function withParentDecisionLock(termId, fn, { timeoutMs = PARENT_DECISION_
       throw new Error(`could not acquire the parent-decision lock for term ${keys[0]} — no lock session is available right now (the session cap is full or the database did not answer in time); retry shortly`);
     }
     await takeSessionDecisionLocks(lockConn, keys, locked, boundedTimeoutMs);
+    // Codex #4971 r15 P1: the session's own error/end/close is the one
+    // authority for "is this lock still held" — the same mechanism
+    // reschedule-link-promises.js's send interlock uses (raw-connection-
+    // slots.js's trackConnectionLoss), so both session-lock users share one
+    // implementation.
+    const lockHeld = { lost: false };
+    require('./raw-connection-slots').trackConnectionLoss(lockConn, lockHeld);
+    const assertAlive = () => {
+      if (lockHeld.lost) {
+        throw Object.assign(
+          new Error(`the parent-decision lock session for term ${keys[0]} was lost before this action reached its provider — never attempted`),
+          { code: 'PARENT_DECISION_LOCK_LOST', deliveryNeverAttempted: true },
+        );
+      }
+    };
     // Mark these terms as session-lock-held for the lifetime of fn()'s own
     // async tree — see heldParentDecisionLockStore's doc above.
-    return await heldParentDecisionLockStore.run(new Set([...held, ...keys]), () => fn());
+    return await heldParentDecisionLockStore.run({ keys: new Set([...held, ...keys]), assertAlive }, () => fn());
   } finally {
     if (lockConn) await releaseSessionDecisionLocks(lockConn, locked);
   }
@@ -10215,6 +10246,7 @@ module.exports = {
   // takes — exported so termite-annual-renewal-charge.js's charge path
   // can hold the SAME lock across its own Stripe submission.
   withParentDecisionLock,
+  assertParentDecisionLockAlive,
   // Chokepoint B (Codex #4971 round-3 P1 / pre-push lock order): the FIRST
   // lock of a writer's own transaction, keyed on the termite terms tied to
   // what it touches — callers outside this module (voidInvoice and the

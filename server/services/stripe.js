@@ -3345,6 +3345,17 @@ const StripeService = {
           // balance) — see the gross-up block above.
           refundParams.amount = grossCents;
         }
+        // Codex #4971 r15 P1: when this refund carries a termite term
+        // (refund() above ran it inside withTermiteGateForCharge), assert
+        // the gate's lock session is still alive immediately before the
+        // Stripe call — a no-op outside any held gate. A typeof guard, not
+        // a require-shape assumption: a test's own narrow mock of
+        // annual-prepay-renewals that predates this assertion simply has
+        // nothing to assert against.
+        {
+          const parentLock = require('./annual-prepay-renewals').assertParentDecisionLockAlive;
+          if (typeof parentLock === 'function') parentLock();
+        }
         refund = await stripe.refunds.create(refundParams, { idempotencyKey });
       }
     } catch (err) {

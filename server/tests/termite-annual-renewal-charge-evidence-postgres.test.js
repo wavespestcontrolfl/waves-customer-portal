@@ -25,9 +25,20 @@
 const knexLib = require('knex');
 const { randomUUID } = require('crypto');
 
-// annualPrepayTableExists() reads the module-level db; nothing else here
-// touches it (every query under test runs on the scratch `db` passed in).
-jest.mock('../models/db', () => ({ schema: { hasTable: jest.fn().mockResolvedValue(true) } }));
+// annualPrepayTableExists() reads the module-level db; every OTHER query
+// under test runs on the scratch `db` passed in as `conn`. Codex #4971 r15
+// P2: composeAndSendChargeFailedNotice's own customer lookup is one
+// exception — it reads the module-level db directly, not `conn` — and now
+// that the customer notice retries on every followThroughChargeOutcome
+// call (not just the first), leg 7c's tests below reach it. A plain
+// resolved-to-null customer lookup is enough: no phone on file settles the
+// notice as permanently not-owed ('no_phone'), which is all these charge-
+// outcome-sweep tests need from it.
+jest.mock('../models/db', () => {
+  const stub = jest.fn(() => ({ where: () => ({ first: async () => null }) }));
+  stub.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+  return stub;
+});
 const mockNotifyAdmin = jest.fn(async () => ({ id: 'bell-1' }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) => mockNotifyAdmin(...args) }));
 const mockSendViaSMSAndEmail = jest.fn(async () => ({ ok: true }));
@@ -94,6 +105,9 @@ async function createScratchDb() {
     renewal_charge_claim_retired_at timestamptz,
     renewal_lapse_parent_cancelled_at timestamptz,
     dispute_suspended_at timestamptz,
+    -- Codex #4971 r15 P2: the charge-failed customer notice's own durable
+    -- delivery stamp.
+    renewal_charge_failed_notice_sent_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
   )`);
@@ -106,7 +120,12 @@ async function createScratchDb() {
     email_sent_at timestamptz,
     stripe_payment_intent_id text,
     stripe_charge_id text,
-    payer_id uuid
+    payer_id uuid,
+    -- Codex #4971 r15 P1: a NET-terms statement child invoice — never
+    -- itself charged, so its durable revocation signal lives on the
+    -- STATEMENT's own payments row (statement_id), not this invoice's own
+    -- (absent) Stripe ids.
+    payer_statement_id uuid
   )`);
   await db.raw(`CREATE TABLE payments (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -114,6 +133,8 @@ async function createScratchDb() {
     refund_status text,
     stripe_payment_intent_id text,
     stripe_charge_id text,
+    statement_id uuid,
+    metadata jsonb,
     updated_at timestamptz
   )`);
   // The account-deletion read (successorRecoveryRefusal, Codex #4971 r10):
@@ -1171,6 +1192,74 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       const { parent, successor } = await disputedParentRenewal();
       await db('invoices').where({ id: successor.prepay_invoice_id }).update({ status: 'paid', paid_at: new Date() });
       await expect(Charge._private.paidAfterParentChanged(db, await db('annual_prepay_terms').where({ id: successor.id }).first(), parent)).resolves.toBe(true);
+    });
+  });
+
+  // Codex #4971 r15 P1: a NET-terms statement's chargeback/refund cascade
+  // (routes/stripe-webhook.js reverseStatementCascadeForDispute) reopens the
+  // parent's own prepay invoice DIRECTLY as draft/paid_at-null — no ledger
+  // row keyed to the invoice's own (absent, for a statement child) Stripe
+  // ids exists, so the durable signal must be read off the STATEMENT's own
+  // payments row (statement_id) instead of inferred from draft alone.
+  describe('r15: a statement cascade reversal on the parent\'s own invoice', () => {
+    const statementId = randomUUID();
+
+    async function statementParentRenewal() {
+      // The shape reverseStatementCascadeForDispute leaves BEHIND: the
+      // invoice reopened to draft/paid_at-null (it never carried its own
+      // Stripe ids — the STATEMENT was charged, not the invoice).
+      const parentInvoice = await insertInvoice({ status: 'draft', paid_at: null, payer_statement_id: statementId });
+      const parent = await insertParent({ prepay_invoice_id: parentInvoice.id });
+      const invoice = await insertInvoice({ status: 'draft' });
+      const successor = await insertSuccessor(parent, invoice, { created_at: new Date() });
+      return { parent, parentInvoice, successor };
+    }
+
+    test('a FINAL full statement refund is a DURABLE revocation — the successor is withdrawn, not left owed', async () => {
+      const { successor } = await statementParentRenewal();
+      await db('payments').insert({ status: 'refunded', refund_status: 'full', statement_id: statementId, updated_at: new Date() });
+      await expect(Charge._private.chargeRefusalUnderGate(successor, db)).resolves.toEqual({
+        eligible: false, reason: 'parent_invoice_unpaid_or_refunded', durable: true,
+      });
+    });
+
+    test('a CLOSED-LOST statement dispute is a DURABLE revocation — money is gone for good', async () => {
+      const { successor } = await statementParentRenewal();
+      await db('payments').insert({
+        status: 'disputed', statement_id: statementId, updated_at: new Date(),
+        metadata: JSON.stringify({ statement_id: statementId, dispute_id: 'dp_1', dispute_final: 'lost' }),
+      });
+      await expect(Charge._private.chargeRefusalUnderGate(successor, db)).resolves.toEqual({
+        eligible: false, reason: 'parent_invoice_unpaid_or_refunded', durable: true,
+      });
+    });
+
+    test('an OPEN (unresolved) statement dispute stays TRANSIENT — never withdraws the successor', async () => {
+      const { successor } = await statementParentRenewal();
+      await db('payments').insert({
+        status: 'disputed', statement_id: statementId, updated_at: new Date(),
+        metadata: JSON.stringify({ statement_id: statementId, dispute_id: 'dp_2' }),
+      });
+      await expect(Charge._private.chargeRefusalUnderGate(successor, db)).resolves.toEqual({
+        eligible: false, reason: 'parent_payment_disputed', durable: false,
+      });
+    });
+
+    test('a WON statement dispute (row restored to paid, no lingering revoked row): the charge proceeds', async () => {
+      const { parentInvoice, successor } = await statementParentRenewal();
+      await db('invoices').where({ id: parentInvoice.id }).update({ status: 'paid', paid_at: new Date() });
+      await db('payments').insert({
+        status: 'paid', statement_id: statementId, updated_at: new Date(),
+        metadata: JSON.stringify({ statement_id: statementId, dispute_id: 'dp_3', dispute_final: 'won' }),
+      });
+      await expect(Charge._private.chargeRefusalUnderGate(successor, db)).resolves.toBeNull();
+    });
+
+    test('no statement-level payments row at all: an ordinary reopened/unpaid parent stays transient, exactly as before', async () => {
+      const { successor } = await statementParentRenewal();
+      await expect(Charge._private.chargeRefusalUnderGate(successor, db)).resolves.toEqual({
+        eligible: false, reason: 'parent_invoice_unpaid_or_refunded', durable: false,
+      });
     });
   });
 

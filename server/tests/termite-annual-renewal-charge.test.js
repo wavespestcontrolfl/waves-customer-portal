@@ -96,10 +96,139 @@ describe('termite annual renewal charge', () => {
         // lock is annual-prepay-renewals.js's own concern (tested there);
         // this suite only needs the callback to actually run.
         withParentDecisionLock: jest.fn((termId, fn) => fn()),
+        // Codex #4971 r15 P1: the gate's own liveness assertion — a no-op
+        // here (the mock above never tracks a real session), same as
+        // withParentDecisionLock. The lost-session behavior itself is
+        // covered by annual-prepay-renewals.js's and this file's own
+        // dedicated tests below.
+        assertParentDecisionLockAlive: jest.fn(),
       };
       return actual;
     });
   }
+
+  // Codex #4971 r15 P1 — finding 1: account deletion is fenced through the
+  // same renewal gate a live pay-link send holds, so deleted_at can never
+  // commit between that send's own eligibility check and its provider
+  // handoff. auth.js's DELETE /account and admin-customers.js's archive
+  // route both wrap their write in this ONE shared helper (see their own
+  // test suites — cancelled-portal-read-access.test.js and
+  // admin-customers-archive-relink.test.js — for the wiring itself); this
+  // proves the helper's own gating logic in isolation.
+  describe('withCustomerDeletionGate', () => {
+    test('no customerId at all — fn runs directly, no query, no gate', async () => {
+      mockCommon();
+      const dbSpy = jest.fn();
+      jest.doMock('../models/db', () => dbSpy);
+      const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
+      const fn = jest.fn(async () => 'deleted');
+      await expect(withCustomerDeletionGate(null, fn)).resolves.toBe('deleted');
+      expect(fn).toHaveBeenCalledTimes(1);
+      expect(dbSpy).not.toHaveBeenCalled();
+    });
+
+    test('no live (payment_pending) successor for this customer — fn runs directly, no gate taken', async () => {
+      mockCommon();
+      const withParentDecisionLock = jest.fn((termId, fn) => fn());
+      jest.doMock('../services/annual-prepay-renewals', () => ({
+        ...jest.requireActual('../services/annual-prepay-renewals'),
+        withParentDecisionLock,
+      }));
+      jest.doMock('../models/db', () => jest.fn((table) => {
+        if (table === 'annual_prepay_terms') {
+          return { where: jest.fn(() => ({ whereNotNull: jest.fn(() => ({ select: jest.fn(async () => []) })) })) };
+        }
+        throw new Error(`unexpected table ${table}`);
+      }));
+      const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
+      const fn = jest.fn(async () => 'deleted');
+      await expect(withCustomerDeletionGate('cust-1', fn)).resolves.toBe('deleted');
+      expect(fn).toHaveBeenCalledTimes(1);
+      expect(withParentDecisionLock).not.toHaveBeenCalled();
+    });
+
+    test('a live successor takes its OWN renewal gate (parent + successor keys) before fn runs — and never commits until the gate releases', async () => {
+      mockCommon();
+      const order = [];
+      const withParentDecisionLock = jest.fn(async (termId, innerFn, opts) => {
+        expect(termId).toBe('parent-1');
+        expect(opts).toEqual({ alsoTermIds: ['succ-1'] });
+        order.push('gate-acquired');
+        const result = await innerFn();
+        order.push('gate-released');
+        return result;
+      });
+      jest.doMock('../services/annual-prepay-renewals', () => ({
+        ...jest.requireActual('../services/annual-prepay-renewals'),
+        withParentDecisionLock,
+      }));
+      jest.doMock('../models/db', () => jest.fn((table) => {
+        if (table === 'annual_prepay_terms') {
+          return {
+            where: jest.fn(() => ({
+              whereNotNull: jest.fn(() => ({ select: jest.fn(async () => [{ id: 'succ-1', renewed_from_term_id: 'parent-1' }]) })),
+            })),
+          };
+        }
+        throw new Error(`unexpected table ${table}`);
+      }));
+      const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
+      const result = await withCustomerDeletionGate('cust-1', async () => { order.push('deletion-commits'); return 'deleted'; });
+      expect(result).toBe('deleted');
+      expect(withParentDecisionLock).toHaveBeenCalledTimes(1);
+      // The deletion write runs ONLY inside the gate's callback — never
+      // before it is acquired, never after it releases.
+      expect(order).toEqual(['gate-acquired', 'deletion-commits', 'gate-released']);
+    });
+  });
+
+  // Codex #4971 r15 P2 — finding 4: the charge-failed customer notice's own
+  // retry/settle classification (followThroughChargeOutcome's
+  // recordChargeFailedNoticeOutcome reads this to decide whether `done` may
+  // stamp renewal_charge_failure_handled_at). See the leg-7c Postgres-free
+  // unit test above ("the customer notice is never re-sent") and the real-
+  // Postgres evidence suite for the end-to-end retry-until-durably-sent
+  // behavior; this pins the classification itself.
+  describe('chargeFailedNoticeMustRetry', () => {
+    test('an accepted send needs no retry', () => {
+      mockCommon();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      expect(_private.chargeFailedNoticeMustRetry({ sent: true, deliveryOutcome: 'accepted' })).toBe(false);
+    });
+
+    test('a quiet-hours defer (sendCustomerMessage\'s own { deferred: true }) must retry', () => {
+      mockCommon();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      expect(_private.chargeFailedNoticeMustRetry({ sent: false, blocked: true, deferred: true, code: 'QUIET_HOURS_HOLD' })).toBe(true);
+    });
+
+    test('withPayLinkClearance\'s own \'deferred\' withholding (a dispute-suspended pay link) must retry', () => {
+      mockCommon();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      expect(_private.chargeFailedNoticeMustRetry({ sent: false, reason: 'deferred' })).toBe(true);
+    });
+
+    test('withPayLinkClearance\'s \'handled\' withholding (no longer owed) settles — never retried', () => {
+      mockCommon();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      expect(_private.chargeFailedNoticeMustRetry({ sent: false, reason: 'handled' })).toBe(false);
+    });
+
+    test('a permanent local refusal (no phone / no pay url / missing template / payer-billed) settles — never retried', () => {
+      mockCommon();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      for (const reason of ['no_phone', 'no_pay_url', 'missing_template', 'payer_billed']) {
+        expect(_private.chargeFailedNoticeMustRetry({ sent: false, reason })).toBe(false);
+      }
+    });
+
+    test('no outcome at all (the attempt threw) must retry — never silently counted as settled', () => {
+      mockCommon();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      expect(_private.chargeFailedNoticeMustRetry(null)).toBe(true);
+      expect(_private.chargeFailedNoticeMustRetry(undefined)).toBe(true);
+    });
+  });
 
   // ---- date helpers -------------------------------------------------------
 
@@ -863,6 +992,9 @@ describe('termite annual renewal charge', () => {
     // stamps leg 7b's handled marker, so 7b never re-handles the attempt as
     // a crash.
     const handledStampUpdate = jest.fn().mockResolvedValue(1);
+    // Codex #4971 r15 P2: the charge-failed customer notice's own durable
+    // "sent" stamp (recordChargeFailedNoticeOutcome).
+    const noticeStampUpdate = jest.fn().mockResolvedValue(1);
     // The FIRST read of the successor's own invoice on the outer conn is
     // checkStillEligibleForRenewalAction's "is it still open" check
     // (before ANY customer-facing action) — it must see the SAME
@@ -896,6 +1028,10 @@ describe('termite annual renewal charge', () => {
             update: deferredUpdate,
             whereNull: jest.fn((col) => {
               if (col === 'renewal_charge_never_reached_stripe_belled_at') return { update: handledStampUpdate };
+              // Codex #4971 r15 P2: the charge-failed customer notice's own
+              // durable delivery stamp (recordChargeFailedNoticeOutcome) —
+              // untracked here; no test in this block asserts on it.
+              if (col === 'renewal_charge_failed_notice_sent_at') return { update: noticeStampUpdate };
               expect(col).toBe('renewal_charge_skipped_at');
               return { update: skipStampUpdate };
             }),
@@ -906,7 +1042,7 @@ describe('termite annual renewal charge', () => {
       throw new Error(`unexpected table ${table} on outer conn`);
     });
     conn.transaction = jest.fn(async (cb) => cb(trx));
-    return { conn, trx, claimUpdate, skipStampUpdate, handledStampUpdate, deferredUpdate };
+    return { conn, trx, claimUpdate, skipStampUpdate, handledStampUpdate, noticeStampUpdate, deferredUpdate };
   }
 
   function mockSignatureChargePrivate({ classifyChargeErrorImpl, classifyVerifiedChargeImpl } = {}) {
@@ -4040,6 +4176,11 @@ describe('termite annual renewal charge', () => {
           return {
             where: jest.fn((filter) => ({
               update: jest.fn(async (payload) => { updates.push(payload); return 1; }),
+              // recordChargeFailedNoticeOutcome's own durable stamp (Codex
+              // #4971 r15 P2).
+              whereNull: jest.fn(() => ({
+                update: jest.fn(async (payload) => { updates.push(payload); return 1; }),
+              })),
               // The withdrawal re-reads the successor under the gate (Codex
               // #4971 r6 P1); the post-void status read and the parent read
               // answer as before.
@@ -4087,9 +4228,20 @@ describe('termite annual renewal charge', () => {
       expect(first.updates.some((u) => u.renewal_charge_failure_handled_at instanceof Date)).toBe(false);
       await Promise.resolve();
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      // Codex #4971 r15 P2: the notice's own durable "sent" stamp — set on
+      // the FIRST run since it was accepted there, so a later retry (below)
+      // must see it and skip re-sending.
+      expect(first.updates.some((u) => u.renewal_charge_failed_notice_sent_at instanceof Date)).toBe(true);
 
-      // Leg 7c, a later tick.
-      const owed = { ...successor, renewal_charge_failure_kind: 'declined', renewal_charge_failure_reason: declineErr.message };
+      // Leg 7c, a later tick — a fresh DB read carries the notice's own
+      // durable stamp forward (the first run's own conn/updates array is a
+      // separate mock instance; this models what a real re-read returns).
+      const owed = {
+        ...successor,
+        renewal_charge_failure_kind: 'declined',
+        renewal_charge_failure_reason: declineErr.message,
+        renewal_charge_failed_notice_sent_at: new Date(),
+      };
       const retry = followThroughConn({ rows: [owed] });
       const counts = { reconcileFollowThroughScanned: 0 };
       await _private.reconcileChargeFollowThrough({ conn: retry.conn, limit: 50, counts });

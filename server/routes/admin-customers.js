@@ -4713,9 +4713,18 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
     // customer's current email, and those rows must move too (each to the
     // twin of its OWN email).
     const { relinkSubscribersFromArchivedCustomer } = require('../services/newsletter-subscribers');
+    // Codex #4971 r15 P1: the same gate the self-service DELETE /account
+    // route takes (withCustomerDeletionGate) — churnGuardForRow below
+    // already refuses an active/payment_pending prepay term, but a live
+    // termite renewal send holds this SAME gate through its ENTIRE
+    // provider handoff, so wrapping the whole archive transaction in it
+    // closes the remaining crash-adjacent window (a successor minted, or a
+    // send already past its own reads, in the instant between that guard's
+    // check and this transaction's commit).
+    const { withCustomerDeletionGate } = require('../services/termite-annual-renewal-charge');
     let relink;
     try {
-      relink = await db.transaction(async (trx) => {
+      relink = await withCustomerDeletionGate(req.params.id, () => db.transaction(async (trx) => {
         await trx('customers').where({ id: req.params.id }).forUpdate().first();
         const churnDecision = await LifecycleGuard.churnGuardForRow(trx, req.params.id, { archive: true });
         if (churnDecision.blocked) {
@@ -4743,7 +4752,7 @@ router.delete('/:id', requireAdmin, async (req, res, next) => {
           newsletterRelinked: result.relinked,
         }, true, trx);
         return result;
-      });
+      }));
     } catch (e) {
       if (e && e.churnBlocked) return res.status(409).json(e.payload);
       throw e;

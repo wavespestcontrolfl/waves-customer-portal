@@ -191,6 +191,51 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
     expect(await advisoryLockCount(termId)).toBe(0);
   });
 
+  // Codex #4971 r15 P1: the dedicated raw connection's own error/end/close
+  // is the one authority for "is this lock session still held" — Postgres
+  // releases every advisory lock the session held the instant its
+  // connection drops, but the ALS store's keys alone don't know it.
+  // assertParentDecisionLockAlive() is what the gated flow checks
+  // immediately before each provider boundary. Proved here against a REAL
+  // connection loss (the backend actually terminated from a separate
+  // session), not a simulated flag — trackConnectionLoss's own unit test
+  // (raw-connection-slots.test.js) covers the plain event-listener
+  // mechanics; this proves the wiring end to end.
+  test('assertParentDecisionLockAlive: alive right after the gate is taken, throws once the session connection is actually killed', async () => {
+    const termId = 'lock-session-loss-1';
+    const { assertParentDecisionLockAlive } = require('../services/annual-prepay-renewals');
+    let sawAliveMidHold = false;
+    let thrown = null;
+    await withParentDecisionLock(termId, async () => {
+      expect(() => assertParentDecisionLockAlive()).not.toThrow();
+      sawAliveMidHold = true;
+      const pidRow = await holder.raw(
+        "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted AND classid = hashtext(?) AND objid = hashtext(?::text)",
+        ['annual-prepay-parent-decision', String(termId)],
+      );
+      const pid = pidRow.rows[0]?.pid;
+      expect(pid).toBeTruthy();
+      // Kill the exact backend holding OUR lock session — a real socket
+      // close, not a mock.
+      await holder.raw('SELECT pg_terminate_backend(?)', [pid]);
+      for (let waited = 0; waited < 3000 && !thrown; waited += 25) {
+        try {
+          assertParentDecisionLockAlive();
+        } catch (err) {
+          thrown = err;
+        }
+        if (!thrown) await sleep(25);
+      }
+    });
+    expect(sawAliveMidHold).toBe(true);
+    expect(thrown).toBeTruthy();
+    expect(thrown.code).toBe('PARENT_DECISION_LOCK_LOST');
+    expect(thrown.deliveryNeverAttempted).toBe(true);
+    // Outside the gate (fn() has returned) the store is gone — a no-op,
+    // never a stale throw leaking into whatever runs next.
+    expect(() => assertParentDecisionLockAlive()).not.toThrow();
+  });
+
   test('(b) the unlock runs on the SAME session that took the lock — pg_locks clears the instant fn() resolves', async () => {
     const termId = 'lock-same-session-1';
     let sawHeld = false;
