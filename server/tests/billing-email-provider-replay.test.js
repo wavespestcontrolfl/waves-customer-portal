@@ -74,6 +74,8 @@ test('runs eligibility and provider dispatch on the held authority database', as
     expect(options.input).toMatchObject({ customerId: 'cust-1', invoiceId: 'inv-1',
       metadata: { billingDeliveryCategory: 'invoice', notificationEventKey: context.notificationEventKey } });
     expect(options.recipientEmail).toBe('casey@example.com');
+    // The retried row's own template decides the suppression recheck.
+    expect(options.templateKey).toBe('billing.notice');
     expect(await options.preSendCheck({ database: heldDatabase })).toEqual({ ok: true });
     options.state.handoffStarted = true;
     await options.dispatch(heldDatabase);
