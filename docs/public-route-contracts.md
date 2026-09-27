@@ -1410,16 +1410,24 @@ ranges — no auth, no token, public `Cache-Control`, no side effects, no PII.
 Ranges are computed from the live pricing engine (DB-authoritative
 pricing_config) so the published numbers cannot drift from admin-edited
 pricing; owner ruling 2026-08-06 approved publishing ranges for all
-residential services. Consumed by the Astro build for the agent-readable
-/pricing.md surface and directly by AI agents (both surfaces read this
-same computed payload — neither carries its own copy of the sweep).
-Exact per-property pricing stays on POST /api/public/quote/calculate.
+residential services. Owner ruling 2026-09-27 narrowed what each range
+means: every row is now a TYPICAL residential job at LIST price (standard
+scheduling, before WaveGuard bundle discounts, recurring-customer perks,
+and advertised waivers), not an envelope of every possible quote — a
+larger or more complex property, a heavier infestation, a bigger scope, or
+emergency/after-hours service can quote above the published high, and the
+payload's `disclaimer` says so. Consumed by the Astro build for the
+agent-readable /pricing.md surface and directly by AI agents (both
+surfaces read this same computed payload — neither carries its own copy
+of the sweep). Exact per-property pricing stays on POST
+/api/public/quote/calculate.
 The `tree_shrub_care` row contracted with the Light tier's retirement
 (2026-09-24): the sweep is now `standard`/`enhanced` only (`light` dropped
 from the tier sweep the same way the lawn row above dropped its retired
-6x column), so the published low end is Standard-derived (`low` ≈ $28,
-was lower under Light's cheaper 4x rate) and `notes` now reads "6 or 9
-applications per year by tier" instead of the old 4/6/9 wording).
+6x column), and `notes` reads "6 or 9 applications per year by tier"
+instead of the old 4/6/9 wording; since the 2026-09-27 typical-job
+narrowing above, the published low is Standard's list-price floor on a
+typical lot (`low` ≈ $40), not a bundle-discounted value.
 `/api/public/credentials` (+ `/api/public/credentials/:slug`) (read-only
 canonical FDACS / license / insurance numbers — no auth, no token, public
 `Cache-Control`. Consumed by the Astro content build; intentionally public
