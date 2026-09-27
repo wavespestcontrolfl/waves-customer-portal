@@ -67,13 +67,6 @@ describe('stripTrailingSignature', () => {
     // A bare full signature block is a sign-off even as the whole text.
     ['Adam, Waves Pest Control', ''],
     ['Adam from Waves', ''],
-    // A name cannot answer a question that does not ask for a person, company
-    // or name, so a signer on its own line under one signs the text (most
-    // suggested replies end on a question like these).
-    ['Would you like to schedule?\nAdam', 'Would you like to schedule?'],
-    ['Happy to help. When works best for you?\nWaves Pest Control', 'Happy to help. When works best for you?'],
-    ['What day works best for you?\nAdam B.', 'What day works best for you?'],
-    ['Any questions?\nAdam', 'Any questions?'],
   ])('strips the trailing sign-off from %j', (input, expected) => {
     expect(stripTrailingSignature(input)).toBe(expected);
   });
@@ -182,11 +175,14 @@ describe('stripTrailingSignature — anySigner', () => {
     ['Options:\n- Lawn Care\n\n— Adam, Waves Pest Control', 'Options:\n- Lawn Care'],
     ['Options:\n- Lawn Care\n\n— Sarah', 'Options:\n- Lawn Care'],
     ['Options:\n- Lawn Care\n— Adam, Waves Pest Control', 'Options:\n- Lawn Care'],
-    // #4975 follow-up: a Waves signer answers only a who-question, so under
-    // any other question the dashed name signs the text.
+    // #4975 follow-up (owner ruling on #5083): a dashed Waves name after any
+    // question is a sign-off, as it is for every other caller.
     ['When works best for you?\n— Adam', 'When works best for you?'],
     ['What day works best for you?\n- Adam', 'What day works best for you?'],
     ['Which works better, Tuesday or Wednesday?\n— Waves Pest Control', 'Which works better, Tuesday or Wednesday?'],
+    ['Who will be coming?\n— Adam', 'Who will be coming?'],
+    ['Which representative is coming?\n— Adam', 'Which representative is coming?'],
+    ['Which company is this?\n— Waves Team', 'Which company is this?'],
   ])('%j → %j', (text, expected) => {
     expect(any(text)).toBe(expected);
   });
@@ -218,20 +214,17 @@ describe('stripTrailingSignature — anySigner', () => {
     'Who will be coming?\n— Sarah',
     'Your technician is:\n— Adam',
     'Options:\n- Lawn Care\n- Pest Control',
-    // #4975 follow-up: a dashed answer to a question asking for a name, a
-    // Waves signer included; a dashed answer to an information question. An
-    // unknown name there has an answer's shape too, so it stays.
-    'Who will be coming?\n— Adam',
-    'Which technician is coming?\n— Adam',
-    'What is your name?\n— Adam',
+    // #4975 follow-up: a dashed answer to an information question stays. An
+    // unknown name there has an answer's shape too, so it stays as well.
     'Which service?\n— Lawn Care',
     'Where are you located?\n— Lakewood Ranch',
     'When works for you?\n— Sarah',
-    // Codex r1 on #5083: a three-word call to action is not a name, and a
-    // name never runs onto the next line.
+    // Codex r1 + r2 on #5083: a three-word call to action is not a name, and
+    // a signature never runs onto the next line.
     'Thanks!\nCall Us Today',
     'Talk soon!\nSchedule Online Today',
     'Options:\n- Lawn Care\nTuesday',
+    'Options:\n- Lawn Care,\nTuesday',
   ])('%j is not a sign-off and is kept', (text) => {
     expect(any(text)).toBe(text);
   });
