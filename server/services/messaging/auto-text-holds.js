@@ -4,9 +4,13 @@
  * Owner rulings 2026-09-27 for the automated texts a missed call or a
  * voicemail sets off (voicemail-lead-sms.js today; the missed-call
  * text-back next): none of them goes to someone who
- *   quote_on_file             — already has a quote or estimate (an online
- *                               quote-wizard lead carrying an estimate, or
- *                               an estimate that was sent to their number)
+ *   quote_on_file             — already has a quote or estimate: an online
+ *                               quote-wizard lead carrying one (they saw
+ *                               their price in the wizard), a lead whose
+ *                               linked estimate reached them, or an estimate
+ *                               that reached their number — never a draft
+ *                               (an estimator-engine call draft included)
+ *                               that was not sent
  *   lead_assigned             — has an open lead a staff member is working
  *   asked_not_to_be_contacted — asked not to be contacted on an earlier call
  *   not_a_prospect            — an earlier call showed a salesperson, vendor,
@@ -25,9 +29,11 @@ const { applyOpenLeadPredicate } = require('../lead-statuses');
 const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
 
 const RECENT_CONVERSATION_MS = 7 * 24 * 60 * 60 * 1000;
-// Estimate statuses that mean the quote reached them (sent_at covers any
-// other status an estimate moved to after it went out).
-const QUOTED_ESTIMATE_STATUSES = ['sent', 'viewed', 'accepted', 'declined', 'expired'];
+// An estimate reached them when it carries delivery evidence (sent_at or
+// viewed_at — estimate-extension.js's own rule: an 'expired' or
+// 'send_failed' row without either never went out) or sits in a status only
+// a delivered estimate reaches.
+const QUOTED_ESTIMATE_STATUSES = ['sent', 'viewed', 'accepted', 'declined'];
 // V2 call natures that are not a prospect (utils/extraction-compat.js's
 // spam-class set plus a job applicant), and the legacy extraction's own
 // spam / wrong-number labels for calls processed before V2.
@@ -80,12 +86,16 @@ async function autoTextHoldReason(phone, {
   const digits = phoneDigits(phone);
   if (!digits) return null;
 
-  const quoteLead = await dbi('leads').whereNull('deleted_at').whereNotNull('estimate_id')
-    .whereRaw(...matches('phone', digits)).first('id');
+  const quoteLead = await dbi('leads as l').join('estimates as e', 'e.id', 'l.estimate_id')
+    .whereNull('l.deleted_at')
+    .whereRaw(...matches('l.phone', digits))
+    .where((q) => q.where('l.lead_type', 'quote_wizard')
+      .orWhereNotNull('e.sent_at').orWhereNotNull('e.viewed_at').orWhereIn('e.status', QUOTED_ESTIMATE_STATUSES))
+    .first('l.id');
   if (quoteLead) return 'quote_on_file';
   const quotedEstimate = await dbi('estimates')
     .whereRaw(...matches('customer_phone', digits))
-    .where((q) => q.whereNotNull('sent_at').orWhereIn('status', QUOTED_ESTIMATE_STATUSES))
+    .where((q) => q.whereNotNull('sent_at').orWhereNotNull('viewed_at').orWhereIn('status', QUOTED_ESTIMATE_STATUSES))
     .first('id');
   if (quotedEstimate) return 'quote_on_file';
 

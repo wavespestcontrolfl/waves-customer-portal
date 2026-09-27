@@ -40,6 +40,7 @@ jest.setTimeout(30000);
 
   const hold = (opts = {}) => autoTextHoldReason(PHONE, { callAt: CALL_AT, ...opts });
   const lead = (extra) => database('leads').insert({ id: randomUUID(), phone: '(941) 555-0100', status: 'new', ...extra });
+  const estimate = async (extra) => { const id = randomUUID(); await database('estimates').insert({ id, status: 'draft', ...extra }); return id; };
   const priorCall = (extra) => database('call_log').insert({
     id: randomUUID(), direction: 'inbound', from_phone: PHONE, to_phone: '+19412975749',
     created_at: new Date(CALL_AT.getTime() - 24 * 60 * 60 * 1000), ...extra,
@@ -55,8 +56,13 @@ jest.setTimeout(30000);
   });
 
   describe('quote_on_file', () => {
-    test('an online quote-wizard lead carrying an estimate (any phone format)', async () => {
-      await lead({ estimate_id: randomUUID() });
+    test('an online quote-wizard lead carrying an estimate — they saw their price, sent or not (any phone format)', async () => {
+      await lead({ lead_type: 'quote_wizard', estimate_id: await estimate({}) });
+      expect(await hold()).toBe('quote_on_file');
+    });
+
+    test('a call lead whose linked estimate was sent to them', async () => {
+      await lead({ lead_type: 'inbound_call', estimate_id: await estimate({ status: 'expired', sent_at: new Date() }) });
       expect(await hold()).toBe('quote_on_file');
     });
 
@@ -65,9 +71,24 @@ jest.setTimeout(30000);
       expect(await hold()).toBe('quote_on_file');
     });
 
-    test('never: a staff draft that never went out, or a deleted quote lead', async () => {
-      await database('estimates').insert({ id: randomUUID(), customer_phone: PHONE, status: 'draft' });
-      await lead({ estimate_id: randomUUID(), deleted_at: new Date() });
+    test('an expired estimate that was viewed before it lapsed', async () => {
+      await database('estimates').insert({ id: randomUUID(), customer_phone: PHONE, status: 'expired', viewed_at: new Date() });
+      expect(await hold()).toBe('quote_on_file');
+    });
+
+    test('never: a staff draft that never went out, one that expired or failed unsent, or a deleted quote lead', async () => {
+      await database('estimates').insert([
+        { id: randomUUID(), customer_phone: PHONE, status: 'draft' },
+        { id: randomUUID(), customer_phone: PHONE, status: 'expired' },
+        { id: randomUUID(), customer_phone: PHONE, status: 'send_failed' },
+      ]);
+      await lead({ lead_type: 'quote_wizard', estimate_id: await estimate({}), deleted_at: new Date() });
+      expect(await hold()).toBeNull();
+    });
+
+    test('never: a call lead linked to an estimator draft that was never sent (or has since expired unsent)', async () => {
+      await lead({ lead_type: 'inbound_call', estimate_id: await estimate({ status: 'draft' }) });
+      await lead({ lead_type: 'voicemail', estimate_id: await estimate({ status: 'expired' }) });
       expect(await hold()).toBeNull();
     });
   });
