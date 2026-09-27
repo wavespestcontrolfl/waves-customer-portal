@@ -173,6 +173,11 @@ const CREDENTIAL_CASES = {
     'Type 8842 oz after opening the side gate',
     'Input 2468 ft when we access the garage',
     'Press 8842 ml, then unlock the rear door',
+    'Use 2468 ml, and then open the gate',
+    'Using 8842 oz before unlocking the side door',
+    'Provide 2468 ft when accessing the garage',
+    'Give 8842 grams after opening the rear gate',
+    'Say 2468 ml, then enter the garage',
   ],
 };
 
@@ -260,6 +265,9 @@ const LEGITIMATE_CASES = {
     'Enter 100 ml in the application log before treating around the rear door',
     'Input 100 ml in the service record, then treated the hinge near the side gate',
     'Type 100 ml into the service note after applying product near the garage door',
+    'Use 100 ml, and then treat the hinge near the rear gate',
+    'Provide 100 ml before treating around the side door',
+    'Say 100 ml, then record the application near the garage door',
   ],
 };
 
