@@ -984,9 +984,19 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (!booking) return { failed: true, modelResult: { error: 'No customer matches that id — nothing was proposed.' } };
       if (booking.error) return { failed: true, modelResult: { error: booking.error } };
       // Server pins, set unconditionally so a model-supplied value can never
-      // stand in for them.
+      // stand in for them. The discount identity/terms (Codex r2 on #5093,
+      // P1) ride alongside the net price and service id: the card shows the
+      // GROSS list price and the discount's name/percent, so a drift in
+      // EITHER at commit — a different discount row, a re-typed percent, or
+      // a preset swapped for one that happens to net the same dollars —
+      // must refuse the same way a net-price mismatch already does, not
+      // silently commit a visit the card never actually showed.
       params._booking_price = booking.price;
       params._booking_service_id = booking.serviceId;
+      params._booking_list_price = booking.listPrice;
+      params._booking_discount_id = booking.discountId;
+      params._booking_discount_type = booking.discountType;
+      params._booking_discount_amount = booking.discountAmount;
       preview = {
         ...preview,
         pinned_price: {

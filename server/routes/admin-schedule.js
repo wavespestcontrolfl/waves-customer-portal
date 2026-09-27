@@ -2323,9 +2323,15 @@ function calculateDiscountDollars(row, baseAmount, clientAmount) {
   return { amount: Math.round(amount * 100) / 100, dollars };
 }
 
-async function loadInvoiceDiscount(discountId) {
+// conn defaults to the module db so every existing caller (invoice create,
+// discount presets, the restack replay) is unaffected; a locked recheck
+// (the IB create_appointment executor's trx re-derivation, ADMIN-BUG-R12)
+// passes its trx so this read joins the same locked snapshot as the
+// customer row it re-priced against, instead of racing a commit that
+// deactivated or changed the discount between the trx opening and here.
+async function loadInvoiceDiscount(discountId, conn = db) {
   if (!discountId) return null;
-  const discount = await db('discounts')
+  const discount = await conn('discounts')
     .where({ id: discountId, is_active: true, show_in_invoices: true })
     .first();
   if (!discount) throw httpError(400, 'Selected discount is not available for invoices');
@@ -2459,16 +2465,21 @@ function addonStackGroupConflictRows(normalizedAddons, groupMetaById) {
     .filter(Boolean);
 }
 
-async function resolveLineDiscount(input, baseAmount, customer, serviceContext = {}) {
+// conn: same locked-recheck pass-through as loadInvoiceDiscount above — a
+// caller re-deriving pricing on a trx (IB create_appointment's commit-time
+// recheck) must have BOTH the discount row and its eligibility read joined
+// to that same trx, or the recheck can pass against a snapshot the write
+// already invalidated (Codex r2 on #5093, P2).
+async function resolveLineDiscount(input, baseAmount, customer, serviceContext = {}, conn = db) {
   const discountId = input?.discountId || input?.id || null;
   if (!discountId) return null;
-  const row = await loadInvoiceDiscount(discountId);
+  const row = await loadInvoiceDiscount(discountId, conn);
   const failures = await DiscountEngine.manualEligibilityFailures(row, customer, {
     subtotal: baseAmount,
     serviceKey: serviceContext.serviceKey || null,
     serviceCategory: serviceContext.serviceCategory || null,
     recurringMembershipBooking: !!serviceContext.recurringMembershipBooking,
-  });
+  }, conn);
   if (failures.length) {
     throw httpError(400, `${row.name} is not eligible: ${failures.join(', ')}`);
   }
@@ -2499,9 +2510,16 @@ async function resolveLineDiscount(input, baseAmount, customer, serviceContext =
 // amount (edits there must keep working); recurring-plan members keep the
 // engine's canonical one-time perk in both cases — membership derived via the
 // file's one predicate (hasMembership) so tier sentinels stay in one place.
+// recurringOverride: the caller's own live-recurring-coverage evidence
+// (Codex r2 on #5093, P1) ORs into the membership check — a tierless
+// customer with live recurring coverage (the "or recurring customers" half
+// of the owner's 2026-09-27 rule) gets the same member ladder rate a
+// tiered/dues member does, not the flat nonmember price. The caller is
+// responsible for only ever setting this from evidence that already passed
+// the active-customer guard (activeCustomerHasLiveRecurringCoverage).
 // Returns null when the caller's own catalog fallback should apply as-is.
-function mosquitoOneTimeDefaultPrice(customer, catalogBasePrice = null) {
-  const isRecurringCustomer = hasMembership(customer || {});
+function mosquitoOneTimeDefaultPrice(customer, catalogBasePrice = null, { recurringOverride = false } = {}) {
+  const isRecurringCustomer = !!recurringOverride || hasMembership(customer || {});
   const lotSqFt = Number(customer?.lot_sqft);
   if (Number.isFinite(lotSqFt) && lotSqFt > 0) {
     try {
@@ -2600,7 +2618,7 @@ function bookingCreatesWaveGuardCoverage({ isRecurring, isCallback, serviceType,
   return uniqueServiceFamilies(detectWaveGuardPlanKeys(row)).length > 0;
 }
 
-async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false }) {
+async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false, conn = db }) {
   if (discountType && !discountId) {
     throw httpError(400, 'discountId is required for appointment-level discounts');
   }
@@ -2609,10 +2627,14 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   // 2026-07-28) instead of the flat catalog price. An explicitly typed price
   // still wins; catalog base_price remains the fallback when the customer has
   // no lot size on file. Applied per line (primary here, add-on lines below)
-  // so a grouped booking never silently bills mosquito at $0.
+  // so a grouped booking never silently bills mosquito at $0. recurringMembershipBooking
+  // ORs into the ladder's own hasMembership check (Codex r2 on #5093, P1): a
+  // tierless customer whose live recurring coverage is the ONLY reason this
+  // call carries the flag (IB's mosquito one-off path) must get the member
+  // ladder rate too — not just a WaveGuard-plan sale in progress.
   let mosquitoLadderDefault = null;
   if (serviceRecord?.service_key === 'mosquito_one_time' && primaryLinePrice == null) {
-    mosquitoLadderDefault = mosquitoOneTimeDefaultPrice(customer, serviceRecord?.base_price);
+    mosquitoLadderDefault = mosquitoOneTimeDefaultPrice(customer, serviceRecord?.base_price, { recurringOverride: recurringMembershipBooking });
   }
   const primaryBaseFallback = mosquitoLadderDefault != null
     ? mosquitoLadderDefault
@@ -2622,7 +2644,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     serviceKey: serviceRecord?.service_key,
     serviceCategory: serviceRecord?.category,
     recurringMembershipBooking,
-  });
+  }, conn);
   const primaryNet = primaryBase == null
     ? null
     : Math.max(0, Math.round((primaryBase - (primaryDiscount?.discountDollars || 0)) * 100) / 100);
@@ -2636,13 +2658,13 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   for (const addon of Array.isArray(serviceAddons) ? serviceAddons : []) {
     let base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
     const addonService = addon.serviceId
-      ? await db('services').where({ id: addon.serviceId }).first('service_key', 'category', 'base_price')
+      ? await conn('services').where({ id: addon.serviceId }).first('service_key', 'category', 'base_price')
       : null;
     // Blank-priced one-time mosquito add-on lines get the same lot-ladder
     // default as the primary (catalog base_price as the no-lot-data
     // fallback) — a grouped booking must never silently bill mosquito at $0.
     if (base == null && addonService?.service_key === 'mosquito_one_time') {
-      const ladder = mosquitoOneTimeDefaultPrice(customer, addonService.base_price);
+      const ladder = mosquitoOneTimeDefaultPrice(customer, addonService.base_price, { recurringOverride: recurringMembershipBooking });
       const fallback = ladder != null ? ladder : (addonService.base_price != null ? Number(addonService.base_price) : null);
       if (fallback != null) base = parseMoneyInput(fallback, `price for ${addon.name || addon.serviceName || 'add-on'}`);
     }
@@ -2650,7 +2672,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       serviceKey: addonService?.service_key,
       serviceCategory: addonService?.category,
       recurringMembershipBooking,
-    });
+    }, conn);
     const net = base == null
       ? null
       : Math.max(0, Math.round((base - (lineDiscount?.discountDollars || 0)) * 100) / 100);
@@ -2692,7 +2714,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   let resolvedAppointmentDiscount = null;
   if (hasAnyPrice) {
     const subtotal = (primaryNet || 0) + addonLines.reduce((sum, line) => sum + (line.price || 0), 0);
-    appointmentDiscount = await loadInvoiceDiscount(discountId);
+    appointmentDiscount = await loadInvoiceDiscount(discountId, conn);
     let appointmentDiscountBase = subtotal;
     // Hoisted so the canonical-restack block below (after the appointment
     // discount's own dollars are resolved) can read which lines this
@@ -2726,7 +2748,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
         serviceKey: eligibilityContext.serviceKey || null,
         serviceCategory: eligibilityContext.serviceCategory || null,
         recurringMembershipBooking: !!recurringMembershipBooking,
-      });
+      }, conn);
       if (failures.length) {
         throw httpError(400, `${appointmentDiscount.name} is not eligible: ${failures.join(', ')}`);
       }
@@ -24814,6 +24836,15 @@ module.exports.recurringWithoutBillableAmount = recurringWithoutBillableAmount;
 // create_appointment proposal and executor, so an IB booking carries exactly
 // the price a Schedule-screen booking would (owner 2026-09-27).
 module.exports.buildAppointmentPricing = buildAppointmentPricing;
+// The percent-discount exclusion predicate (termite bond, rodent bait,
+// bed bug, Bora-Care, pre-slab, ...) — consumed lazily by the IB
+// create_appointment member-discount auto-apply (tools.js) so its automatic
+// line discount honors the SAME catalog exclusion the Schedule screen's own
+// appointment-level discount already enforces (Codex r2 on #5093, P1): an
+// operator-picked discount is scoped by this file's own appointmentDiscount
+// block above, but an automatically-applied one had no equivalent gate.
+module.exports.lineExcludedFromPercentDiscount = lineExcludedFromPercentDiscount;
+module.exports.isPercentDiscountType = isPercentDiscountType;
 // Completion reruns the visit-scoped trade-name screen with the SAME typed
 // product-field classification generation used (codex r49 #3420).
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;

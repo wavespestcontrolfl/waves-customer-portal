@@ -219,6 +219,19 @@ test('create_appointment with a time texts the booking confirmation, as on the S
   expect(c.notifies_customer).toBe(true);
 });
 
+// Codex r2 on #5093 (P1): only the SMS leg holds for the 8AM-8PM send window
+// (appointment-reminders.js reminderSendWindowHold — 'email' is never held,
+// and 'both' sends its email leg right away and defers only the text). The
+// card must say so — not that the WHOLE confirmation waits until 8 AM,
+// which is false for an email-only or email+text customer.
+test('the after-8PM hold is disclosed as a TEXT-only hold — an email confirmation still goes right away', () => {
+  const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1', time_window: '9:00 AM' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
+  const labels = c.effects.map((e) => e.label);
+  const confirmationLabel = labels.find((l) => l.startsWith('Customer gets a booking confirmation'));
+  expect(confirmationLabel).toMatch(/a text after 8 PM waits until 8 AM, but an email goes right away/);
+  expect(confirmationLabel).not.toMatch(/after 8 PM it waits for 8 AM/);
+});
+
 test('dynamic legacy jobs disclose launch, spend, variable writes, and internal comms explicitly', () => {
   const price = buildContract({ toolName: 'run_price_lookup', params: { product: 'Termidor' }, displayParams: { product: 'Termidor' } });
   expect(price.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/paid web-search/));

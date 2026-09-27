@@ -2452,6 +2452,19 @@ async function hasLiveRecurringCoverage(customerId, conn = db) {
   return !!row;
 }
 
+// Live recurring coverage counts toward the "or recurring customers" member
+// floor only for an ACTIVE customer (Codex r2 on #5093, P1) — a churned
+// account (active === false) can carry a stale future recurring row no one
+// closed out, and that row must not grant a member discount. Mirrors
+// isActivePlanCustomer / loadActiveRecurringServiceRows's own active===false
+// fail-closed guard (waveguard-existing-services.js:70-77, 151-155). Every
+// caller of the recurring-coverage evidence (the member line discount AND
+// the mosquito ladder default) goes through this, not the raw row query.
+async function activeCustomerHasLiveRecurringCoverage(customer, conn = db) {
+  if (!customer?.id || customer.active === false) return false;
+  return hasLiveRecurringCoverage(customer.id, conn);
+}
+
 // The WaveGuard member discount a member's one-off catalog visit carries
 // (owner 2026-09-27: "members or recurring customers get 15% off"): the
 // first member row the discount engine finds eligible — for a member by
@@ -2468,9 +2481,22 @@ async function memberOneOffDiscount({ customer, catalogRow, listPrice, conn = db
     .select('*');
   if (!Array.isArray(rows) || !rows.length) return null;
   const DiscountEngine = require('../discount-engine');
+  // The same catalog exclusion the Schedule screen's own appointment-level
+  // discount already enforces (admin-schedule.js lineExcludedFromPercentDiscount,
+  // POLICY.md 155-163) — Codex r2 on #5093, P1: the generic waveguard_member
+  // row carries no service filter, so without this guard an excluded service
+  // (bed bug, Bora-Care, pre-slab, termite bond, rodent bait, ...) would get
+  // 15% off through this AUTOMATIC application, which no operator picked and
+  // no service-scoped filter caught. A row is skipped only when it is BOTH a
+  // percentage type AND the booked service is excluded — the WDO free perk
+  // (waveguard_member_wdo, also `percentage`) survives because wdo_inspection
+  // itself is not an excluded family.
+  const { lineExcludedFromPercentDiscount, isPercentDiscountType } = require('../../routes/admin-schedule');
+  const serviceExcluded = lineExcludedFromPercentDiscount(catalogRow.service_key || null);
   const context = { subtotal: listPrice, serviceKey: catalogRow.service_key || null, serviceCategory: catalogRow.category || null };
   const firstEligible = async (recurringMembershipBooking) => {
     for (const row of rows) {
+      if (serviceExcluded && isPercentDiscountType(row.discount_type)) continue;
       const failures = await DiscountEngine.manualEligibilityFailures(row, customer, { ...context, recurringMembershipBooking }, conn);
       if (!failures.length) return row;
     }
@@ -2478,7 +2504,7 @@ async function memberOneOffDiscount({ customer, catalogRow, listPrice, conn = db
   };
   const byMembership = await firstEligible(false);
   if (byMembership) return { row: byMembership, recurringCustomer: false };
-  if (!(await hasLiveRecurringCoverage(customer.id, conn))) return null;
+  if (!(await activeCustomerHasLiveRecurringCoverage(customer, conn))) return null;
   const byRecurring = await firstEligible(true);
   return byRecurring ? { row: byRecurring, recurringCustomer: true } : null;
 }
@@ -2571,6 +2597,18 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   const memberDiscount = !stated && Number(catalogDefault) > 0
     ? await memberOneOffDiscount({ customer, catalogRow, listPrice: Number(catalogDefault), conn })
     : null;
+  // The mosquito ladder's OWN "or recurring customers" floor (Codex r2 on
+  // #5093, P1): mosquitoOneTimeDefaultPrice (admin-schedule.js) only ORs in
+  // whatever recurringMembershipBooking carries — a tierless customer whose
+  // ONLY qualifying evidence is live recurring coverage never reaches
+  // memberOneOffDiscount above (mosquito's catalogDefault is `undefined`,
+  // so `Number(catalogDefault) > 0` is false), so without this the ladder
+  // silently prices them at the flat nonmember rate. hasMembership is
+  // checked first so the extra query only runs when it's actually needed.
+  const { hasMembership } = require('../project-completion');
+  const mosquitoRecurringOverride = !stated && catalogRow.service_key === 'mosquito_one_time' && !hasMembership(customer)
+    ? await activeCustomerHasLiveRecurringCoverage(customer, conn)
+    : false;
   const pricing = await buildAppointmentPricing({
     serviceRecord: catalogRow,
     serviceType,
@@ -2578,9 +2616,16 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
     primaryLinePrice: stated ? statedPrice : catalogDefault,
     ...(memberDiscount ? { primaryLineDiscount: { discountId: memberDiscount.row.id } } : {}),
     // The builder re-checks the discount's eligibility; a recurring
-    // customer's Bronze floor rides the same recurring-coverage flag.
-    recurringMembershipBooking: !!memberDiscount?.recurringCustomer,
+    // customer's Bronze floor rides the same recurring-coverage flag — ORed
+    // with the mosquito ladder's own override above so a tierless recurring
+    // customer's one-time mosquito line prices at the member rate too.
+    recurringMembershipBooking: !!memberDiscount?.recurringCustomer || mosquitoRecurringOverride,
     customer,
+    // The locked recheck (create_appointment's commit-time re-derivation)
+    // must read the discount row and its eligibility on the SAME trx as the
+    // locked customer row, not a racing global-db read (Codex r2 on #5093,
+    // P2) — conn defaults to db, so the unlocked preflight pass is unchanged.
+    conn,
   });
   // $0 is a real price only when a member discount made the visit free (the
   // catalog's free WDO for members); a $0 list price is no price at all.
@@ -2605,6 +2650,32 @@ async function bookingDiscountStamps(trx, pricing) {
 function sameBookingPrice(a, b) {
   if (a == null || b == null) return a == null && b == null;
   return Math.round(Number(a) * 100) === Math.round(Number(b) * 100);
+}
+
+// The discount identity + terms a booking's pricing carries, in the same
+// shape the proposal pins (Codex r2 on #5093, P1): the card shows the GROSS
+// list price and the discount's name/percent, but the executor previously
+// compared only the NET _booking_price and the service id — a discount
+// that changed (a different row, a re-typed percent, a deactivated preset
+// swapped for another that nets the same dollars) could commit a visit the
+// card never actually showed. null when the booking carries no discount.
+function bookingDiscountFingerprint(booking) {
+  const discount = booking?.pricing?.primaryDiscount || null;
+  return {
+    listPrice: discount ? Number(booking.pricing.primaryBase) : null,
+    discountId: discount?.discountId ?? null,
+    discountType: discount?.discountType ?? null,
+    discountAmount: discount ? Number(discount.discountAmount) : null,
+  };
+}
+
+// True when two fingerprints (or a fingerprint and the proposal's pinned
+// fields) name the SAME discount at the SAME terms on the SAME gross price.
+function sameBookingDiscount(a, b) {
+  return sameBookingPrice(a.listPrice, b.listPrice)
+    && String(a.discountId || '') === String(b.discountId || '')
+    && String(a.discountType || '') === String(b.discountType || '')
+    && sameBookingPrice(a.discountAmount, b.discountAmount);
 }
 
 const BOOKING_PRICE_CHANGED_ERROR = 'This visit\'s price or catalog service changed since the card was shown — nothing was booked. Ask again for a fresh confirmation card.';
@@ -2666,6 +2737,14 @@ async function ibBookingProposal(customerId, serviceType, statedPrice) {
     listPrice: discount ? Number(booking.pricing.primaryBase) : null,
     discountName: discount?.discountName || null,
     discountPercent: discount && discount.discountType === 'percentage' ? Number(discount.discountAmount) : null,
+    // The discount's own identity/terms (Codex r2 on #5093, P1) — carried
+    // so the route can pin them alongside _booking_price/_booking_service_id
+    // and the executor can refuse a commit whose discount drifted from what
+    // this exact card showed (a different row, a re-typed percent, or a
+    // preset swapped for one that happens to net the same dollars).
+    discountId: discount?.discountId || null,
+    discountType: discount?.discountType || null,
+    discountAmount: discount ? Number(discount.discountAmount) : null,
   };
 }
 
@@ -2727,8 +2806,18 @@ async function createAppointment(input, actionContext = {}) {
   const approvedPrice = input._booking_price === undefined ? null : input._booking_price;
   const approvedServiceId = input._booking_service_id === undefined
     ? (booking.catalogRow?.id || null) : input._booking_service_id;
+  // The discount identity/terms the card pinned (Codex r2 on #5093, P1) — a
+  // call with no pins (never proposed through a card) approved no discount,
+  // so it matches only a booking that also carries none.
+  const approvedDiscount = {
+    listPrice: input._booking_list_price === undefined ? null : input._booking_list_price,
+    discountId: input._booking_discount_id === undefined ? null : input._booking_discount_id,
+    discountType: input._booking_discount_type === undefined ? null : input._booking_discount_type,
+    discountAmount: input._booking_discount_amount === undefined ? null : input._booking_discount_amount,
+  };
   if (!sameBookingPrice(approvedPrice, booking.price)
-    || String(approvedServiceId || '') !== String(booking.catalogRow?.id || '')) {
+    || String(approvedServiceId || '') !== String(booking.catalogRow?.id || '')
+    || !sameBookingDiscount(approvedDiscount, bookingDiscountFingerprint(booking))) {
     return { error: BOOKING_PRICE_CHANGED_ERROR, preview_changed: true };
   }
   // Refused before any lock or write when the visit could never bill
@@ -2828,7 +2917,8 @@ async function createAppointment(input, actionContext = {}) {
       customer: lockedCustomer, serviceType: service_type, statedPrice: input.price, conn: trx,
     });
     if (lockedBooking.error || !sameBookingPrice(lockedBooking.price, booking.price)
-      || String(lockedBooking.catalogRow?.id || '') !== String(booking.catalogRow?.id || '')) {
+      || String(lockedBooking.catalogRow?.id || '') !== String(booking.catalogRow?.id || '')
+      || !sameBookingDiscount(bookingDiscountFingerprint(lockedBooking), bookingDiscountFingerprint(booking))) {
       const err = new Error('booking_price_changed');
       err.bookingPriceChanged = true;
       throw err;

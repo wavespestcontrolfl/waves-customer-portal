@@ -46,7 +46,7 @@ const logger = require('../services/logger');
 const { clearTechCurrentJob } = require('../services/tech-status');
 const AppointmentReminders = require('../services/appointment-reminders');
 const datetimeEt = require('../utils/datetime-et');
-const { executeTool } = require('../services/intelligence-bar/tools');
+const { executeTool, ibBookingProposal } = require('../services/intelligence-bar/tools');
 
 // Real ET "today" — the date a same-day move targets.
 const TODAY_ET = jest.requireActual('../utils/datetime-et').etDateString();
@@ -708,7 +708,10 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
 
     test('15% off the catalog price, stamped as the line discount the Schedule create writes', async () => {
       const insertChain = wireMember({ rows: [ONE_TIME_PEST], listed: [GENERIC], picked: GENERIC });
-      const result = await book({ _booking_price: 212.5, _booking_service_id: 'svc-otp' });
+      const result = await book({
+        _booking_price: 212.5, _booking_service_id: 'svc-otp',
+        _booking_list_price: 250, _booking_discount_id: 'disc-member', _booking_discount_type: 'percentage', _booking_discount_amount: 15,
+      });
       expect(result).toMatchObject({ success: true, price: 212.5 });
       expect(insertChain.insert.mock.calls[0][0]).toMatchObject({
         estimated_price: 212.5,
@@ -725,10 +728,47 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       expect(memberListing.whereIn).toHaveBeenCalledWith('discount_key', ['waveguard_member_wdo', 'waveguard_member']);
     });
 
+    test('a discount that was never pinned is refused even when the net price still matches (Codex r2 on #5093, P1)', async () => {
+      // The card's pins previously carried ONLY the net _booking_price and
+      // _booking_service_id — no discount identity at all. A booking whose
+      // net price happens to still match (the discount actually applies,
+      // 15% off $250 = $212.50) must still refuse: the operator never
+      // approved a discount they were never shown, and a re-typed percent
+      // or a swapped preset that happens to net the same dollars must
+      // refuse the same way, which this same missing-pin shape stands in for.
+      wireDb({
+        customers: [chain({ first: jest.fn().mockResolvedValue(MEMBER) })],
+        services: [catalog([ONE_TIME_PEST])],
+        discounts: [listing([GENERIC]), chain({ first: jest.fn().mockResolvedValue(GENERIC) })],
+      });
+      const result = await book({ _booking_price: 212.5, _booking_service_id: 'svc-otp' });
+      expect(result).toMatchObject({ preview_changed: true });
+      expect(result.error).toMatch(/price or catalog service changed since the card was shown/);
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+
+    test('a discount pin that names a different row than what now resolves is refused (Codex r2 on #5093, P1)', async () => {
+      wireDb({
+        customers: [chain({ first: jest.fn().mockResolvedValue(MEMBER) })],
+        services: [catalog([ONE_TIME_PEST])],
+        discounts: [listing([GENERIC]), chain({ first: jest.fn().mockResolvedValue(GENERIC) })],
+      });
+      const result = await book({
+        _booking_price: 212.5, _booking_service_id: 'svc-otp',
+        _booking_list_price: 250, _booking_discount_id: 'disc-a-different-row', _booking_discount_type: 'percentage', _booking_discount_amount: 15,
+      });
+      expect(result).toMatchObject({ preview_changed: true });
+      expect(result.error).toMatch(/price or catalog service changed since the card was shown/);
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+
     test('the catalog\'s own member row wins by priority: a WDO inspection is free for members — a real $0, nothing invoiced', async () => {
       const wdo = { ...ONE_TIME_PEST, id: 'svc-wdo', name: 'WDO Inspection Service', service_key: 'wdo_inspection', base_price: '250.00', category: 'termite' };
       const insertChain = wireMember({ rows: [wdo], listed: [WDO_FREE, GENERIC], picked: WDO_FREE });
-      const result = await book({ service_type: 'WDO Inspection Service', _booking_price: 0, _booking_service_id: 'svc-wdo' });
+      const result = await book({
+        service_type: 'WDO Inspection Service', _booking_price: 0, _booking_service_id: 'svc-wdo',
+        _booking_list_price: 250, _booking_discount_id: 'disc-wdo', _booking_discount_type: 'percentage', _booking_discount_amount: 100,
+      });
       expect(result.success).toBe(true);
       expect(insertChain.insert.mock.calls[0][0]).toMatchObject({
         estimated_price: 0, primary_line_price: 250, create_invoice_on_complete: false, line_discount_id: 'disc-wdo', line_discount_dollars: 250,
@@ -750,21 +790,55 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
         // check, the stamp helper's column read, then the insert
         scheduled_services: [live(), chain(), live(), chain({ columnInfo: jest.fn().mockResolvedValue(LINE_DISCOUNT_COLS) }), insertChain],
       });
-      const result = await book({ _booking_price: 212.5, _booking_service_id: 'svc-otp' });
+      const result = await book({
+        _booking_price: 212.5, _booking_service_id: 'svc-otp',
+        _booking_list_price: 250, _booking_discount_id: 'disc-member', _booking_discount_type: 'percentage', _booking_discount_amount: 15,
+      });
       expect(result).toMatchObject({ success: true, price: 212.5 });
       expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 212.5, line_discount_id: 'disc-member' });
     });
 
     test('a member outside the dues lane booking one extra visit of a plan service gets the member discount — the visit is a one-off', async () => {
+      // pest_general_quarterly (NOT foam_recurring — that key is percent-
+      // discount EXCLUDED, Codex r2 on #5093 finding 6; this test is about
+      // the one-off/dues-lane distinction, not the exclusion policy).
+      const plan = {
+        id: 'svc-plan', name: 'Recurring Pest Control Service', short_name: null, service_key: 'pest_general_quarterly',
+        price_range_min: '146.00', base_price: '164.00', category: 'pest', billing_type: 'recurring',
+      };
+      const perAppMember = { ...PER_VISIT, billing_mode: 'per_application', per_application_fee: 95, waveguard_tier: 'Gold', active: true };
+      const insertChain = wireMember({ rows: [plan], listed: [GENERIC], picked: GENERIC, customer: perAppMember });
+      const result = await book({
+        service_type: plan.name, _booking_price: 124.1, _booking_service_id: 'svc-plan',
+        _booking_list_price: 146, _booking_discount_id: 'disc-member', _booking_discount_type: 'percentage', _booking_discount_amount: 15,
+      });
+      expect(result.success).toBe(true);
+      expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 124.1, primary_line_price: 146, line_discount_id: 'disc-member' });
+    });
+
+    // The exclusion above must not swallow a legitimately excluded service's
+    // OWN booking when no member discount was ever in play — foam_recurring
+    // still books at its plain catalog price for a member, just with no
+    // automatic 15%.
+    test('foam_recurring (percent-discount excluded) books at the plain catalog price for a member — no automatic discount', async () => {
       const foam = {
         id: 'svc-foam', name: 'Recurring Termite Foam Service', short_name: null, service_key: 'foam_recurring',
         price_range_min: '146.00', base_price: '164.00', category: 'termite', billing_type: 'recurring',
       };
       const perAppMember = { ...PER_VISIT, billing_mode: 'per_application', per_application_fee: 95, waveguard_tier: 'Gold', active: true };
-      const insertChain = wireMember({ rows: [foam], listed: [GENERIC], picked: GENERIC, customer: perAppMember });
-      const result = await book({ service_type: foam.name, _booking_price: 124.1, _booking_service_id: 'svc-foam' });
+      const insertChain = chain();
+      insertChain.returning.mockImplementation(async () => [{ id: 'appt-1', ...insertChain.insert.mock.calls[0][0] }]);
+      wireDb({
+        customers: [chain({ first: jest.fn().mockResolvedValue(perAppMember) }), chain({ first: jest.fn().mockResolvedValue(perAppMember) })],
+        services: [catalog([foam]), catalog([foam])],
+        discounts: [listing([GENERIC]), listing([GENERIC])],
+        scheduled_services: [chain(), chain(), chain(), insertChain],
+      });
+      const result = await book({ service_type: foam.name, _booking_price: 146, _booking_service_id: 'svc-foam' });
       expect(result.success).toBe(true);
-      expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 124.1, primary_line_price: 146, line_discount_id: 'disc-member' });
+      const payload = insertChain.insert.mock.calls[0][0];
+      expect(payload).toMatchObject({ estimated_price: 146, primary_line_price: 146 });
+      expect(payload).not.toHaveProperty('line_discount_id');
     });
 
     test('a stated price is the operator\'s own number: no member discount is looked up or applied', async () => {
@@ -793,6 +867,75 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       expect(payload).toMatchObject({ estimated_price: 250 });
       expect(payload).not.toHaveProperty('line_discount_id');
     });
+
+    // The two guards below are exercised through ibBookingProposal directly
+    // (the proposal-time twin executeTool's create_appointment calls to
+    // build the card) — same ibBookingPricing/memberOneOffDiscount code
+    // path, without the transaction/insert plumbing that isn't relevant to
+    // either guard.
+    test('a churned customer (active: false) with a stale future recurring row does NOT get the member discount (Codex r2 on #5093, P1)', async () => {
+      const churned = {
+        ...PER_VISIT, billing_mode: 'per_application', per_application_fee: 95, waveguard_tier: null, monthly_rate: 0, active: false,
+      };
+      wireDb({
+        customers: [chain({ first: jest.fn().mockResolvedValue(churned) })],
+        services: [catalog([ONE_TIME_PEST])],
+        discounts: [listing([GENERIC])],
+        // A LIVE future recurring row IS present — the active guard must
+        // short-circuit BEFORE this table is ever read, or the old bug (no
+        // active check on the recurring-coverage evidence) wrongly
+        // qualifies a churned account off its stale row.
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ id: 'rec-visit' }) })],
+      });
+      const result = await ibBookingProposal('cust-1', ONE_TIME_PEST.name, undefined);
+      expect(result).toMatchObject({ price: 250, discountId: null });
+    });
+
+    test('an excluded service (bed bug) never gets the automatic 15% — the generic member row carries no service filter (Codex r2 on #5093, P1)', async () => {
+      const BED_BUG = {
+        id: 'svc-bb', name: 'Bed Bug Treatment Service', short_name: null, service_key: 'bed_bug', base_price: '200.00', category: 'pest',
+      };
+      wireDb({
+        customers: [chain({ first: jest.fn().mockResolvedValue(MEMBER) })],
+        services: [catalog([BED_BUG])],
+        discounts: [listing([GENERIC])],
+        // The exclusion skip means neither pass finds an eligible row, so
+        // the recurring-coverage fallback still runs once — wired with no
+        // live row (irrelevant either way: the exclusion applies before
+        // eligibility is checked, on both the membership and recurring pass).
+        scheduled_services: [chain()],
+      });
+      const result = await ibBookingProposal('cust-1', 'Bed Bug Treatment Service', undefined);
+      expect(result).toMatchObject({ price: 200, discountId: null });
+    });
+  });
+
+  // The mosquito ladder's OWN "or recurring customers" floor (Codex r2 on
+  // #5093, P1) — a tierless customer whose ONLY qualifying evidence is live
+  // recurring coverage never reaches memberOneOffDiscount above (mosquito's
+  // catalogDefault is `undefined`, so it never becomes a line discount), so
+  // this wiring is separate from the describe block above.
+  test('a tierless customer with live recurring coverage books the one-time mosquito line at the member ladder rate, not the flat nonmember rate', async () => {
+    const MOSQUITO = {
+      id: 'svc-mq', name: 'One-Time Mosquito Control Service', short_name: null,
+      service_key: 'mosquito_one_time', base_price: '156.00', category: 'mosquito',
+    };
+    const recurringOnly = {
+      id: 'cust-1', first_name: 'Ada', last_name: 'L', billing_mode: 'per_application', per_application_fee: 95,
+      waveguard_tier: null, monthly_rate: 0, active: true, lot_sqft: 12000,
+    };
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue(recurringOnly) })],
+      services: [chain({ select: jest.fn().mockResolvedValue([MOSQUITO]) })],
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ id: 'rec-visit' }) })],
+    });
+    const { priceOneTimeMosquito } = require('../services/pricing-engine');
+    const memberExpected = priceOneTimeMosquito({ lotSqFt: 12000 }, { isRecurringCustomer: true }).price;
+    const nonMemberExpected = priceOneTimeMosquito({ lotSqFt: 12000 }, { isRecurringCustomer: false }).price;
+    expect(memberExpected).toBeLessThan(nonMemberExpected);
+
+    const result = await ibBookingProposal('cust-1', MOSQUITO.name, undefined);
+    expect(result.price).toBe(memberExpected);
   });
 
   test('the one-time mosquito default comes from the Schedule screen\'s lot ladder, not the flat catalog price', async () => {
@@ -806,7 +949,17 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
     })).finalPrice;
     expect(expected).toBeGreaterThan(0);
     expect(expected).not.toBe(156);
-    const insertChain = wirePriced({ customer, rows: [mosquito] });
+    // A non-member mosquito booking now ALSO checks live recurring coverage
+    // (Codex r2 on #5093, P1 — the ladder's own "or recurring customers"
+    // floor), on both the preflight and the locked pass; wired with no live
+    // row so this stays the plain non-member ladder price under test.
+    const insertChain = chain();
+    insertChain.returning.mockImplementation(async () => [{ id: 'appt-1', ...insertChain.insert.mock.calls[0][0] }]);
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue(customer) }), chain({ first: jest.fn().mockResolvedValue(customer) })],
+      services: [catalog([mosquito]), catalog([mosquito])],
+      scheduled_services: [chain(), chain(), chain(), insertChain],
+    });
     const result = await book({ service_type: mosquito.name, _booking_price: expected, _booking_service_id: 'svc-mq' });
     expect(result.success).toBe(true);
     expect(insertChain.insert.mock.calls[0][0].estimated_price).toBe(expected);

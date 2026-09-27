@@ -1046,6 +1046,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
     mockIbBookingProposal.mockResolvedValueOnce({
       price: 212.5, source: 'catalog', serviceId: 'svc-otp', serviceName: 'One-Time Pest Control Service',
       listPrice: 250, discountName: 'WaveGuard Member Discount', discountPercent: 15,
+      discountId: 'disc-member', discountType: 'percentage', discountAmount: 15,
     });
     scriptModelTurns([
       [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'One-Time Pest Control Service', time_window: '9:00 AM' } }],
@@ -1056,7 +1057,16 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       const { body } = await postQuery(baseUrl, { prompt: 'book a one-time pest visit at 9', context: 'schedule' });
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params._booking_price).toBe(212.5);
+      // The discount's own identity/terms are pinned alongside the net
+      // price (Codex r2 on #5093, P1) — the executor compares these at
+      // commit, refusing on drift the same way it already does for price.
+      expect(stored.params._booking_list_price).toBe(250);
+      expect(stored.params._booking_discount_id).toBe('disc-member');
+      expect(stored.params._booking_discount_type).toBe('percentage');
+      expect(stored.params._booking_discount_amount).toBe(15);
       expect(body.pendingActions[0].params.price).toBe('$212.50 (catalog price $250.00 less 15% WaveGuard Member Discount) — invoiced when the visit is completed');
+      // The pins are execution guards, never disclosures.
+      expect(Object.keys(body.pendingActions[0].params).filter((k) => k.startsWith('_'))).toEqual([]);
       // A timed booking texts its confirmation — the contract says so.
       const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
       expect(labels).toContainEqual(expect.stringMatching(/^Customer gets a booking confirmation, as on the Schedule screen: by text, email or both/));

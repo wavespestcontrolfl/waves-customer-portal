@@ -760,7 +760,13 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
     if (bookingConfirmationText) {
-      contactLabel = 'Customer gets a booking confirmation, as on the Schedule screen: by text, email or both per their notice settings (email is the fallback when a text cannot go out), to their appointment contacts as they stand when it sends; after 8 PM it waits for 8 AM';
+      // Codex r2 on #5093 (P1): only the SMS leg holds for the 8 AM-8 PM
+      // send window (appointment-reminders.js reminderSendWindowHold — 'email'
+      // is never held, and the 'both' channel sends its email leg right away
+      // and defers only the text). The old wording said the WHOLE
+      // confirmation waited until 8 AM, which is false for an email-only or
+      // email+text customer.
+      contactLabel = 'Customer gets a booking confirmation, as on the Schedule screen: by text, email or both per their notice settings (email is the fallback when a text cannot go out), to their appointment contacts as they stand when it sends; a text after 8 PM waits until 8 AM, but an email goes right away';
     }
     // Derived from the PINNED recipient set for batch moves (GH r21 P2):
     // a stop pinned with no SMS recipient cannot be texted — the card
