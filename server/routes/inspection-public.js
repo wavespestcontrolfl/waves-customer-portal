@@ -1403,7 +1403,10 @@ async function reuseMatchedProfile(trx, freshLead, matched, resolved) {
   if (eligibility.state !== 'ok') return { eligibility };
   const review = require('../services/customer-geocode-review');
   const reviewed = await review.reviewedCustomerLocation(matched, trx);
-  if (reviewed.latitude != null && reviewed.longitude != null) {
+  const rawMatchesReviewed = matched.latitude != null && matched.longitude != null
+    && Number(matched.latitude) === Number(reviewed.latitude)
+    && Number(matched.longitude) === Number(reviewed.longitude);
+  if (reviewed.latitude != null && reviewed.longitude != null && rawMatchesReviewed) {
     return { customer: reviewed, location: { lat: parseFloat(reviewed.latitude), lng: parseFloat(reviewed.longitude) } };
   }
   if (reviewed.geocode_review_blocked) return { locationFailure: 'address_unresolved' };
@@ -1426,7 +1429,7 @@ async function reuseMatchedProfile(trx, freshLead, matched, resolved) {
       // concurrent address edit or geocode decision must win rather than
       // receiving the provider result computed before this transaction.
       const fresh = await fencedTrx('customers').where({ id: matched.id }).whereNull('deleted_at')
-        .first('id', 'account_id', ...STORED_ADDRESS_FIELDS);
+        .first('id', 'account_id', ...STORED_ADDRESS_FIELDS, 'latitude', 'longitude');
       const unchanged = fresh
         && String(fresh.account_id || '') === String(matched.account_id || '')
         && STORED_ADDRESS_FIELDS.every((f) => (fresh[f] ?? null) === (matched[f] ?? null));
@@ -1434,9 +1437,16 @@ async function reuseMatchedProfile(trx, freshLead, matched, resolved) {
       const freshReviewed = await review.reviewedCustomerLocation(fresh, fencedTrx);
       if (freshReviewed.geocode_review_blocked) return { locationFailure: 'address_unresolved' };
       if (freshReviewed.latitude != null && freshReviewed.longitude != null) {
+        const coordinates = {
+          latitude: Number(freshReviewed.latitude),
+          longitude: Number(freshReviewed.longitude),
+        };
+        if (Number(fresh.latitude) !== coordinates.latitude || Number(fresh.longitude) !== coordinates.longitude) {
+          await fencedTrx('customers').where({ id: matched.id }).update({ ...coordinates, updated_at: new Date() });
+        }
         return {
-          customer: freshReviewed,
-          location: { lat: parseFloat(freshReviewed.latitude), lng: parseFloat(freshReviewed.longitude) },
+          customer: { ...matched, ...freshReviewed, ...coordinates },
+          location: { lat: coordinates.latitude, lng: coordinates.longitude },
         };
       }
       const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };

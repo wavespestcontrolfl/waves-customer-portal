@@ -22,9 +22,10 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
 
-const gateState = { live: true };
+const gateState = { live: true, reviewLive: false };
 jest.mock('../config/feature-gates', () => ({
   leadInspectionLinkLive: jest.fn(() => gateState.live),
+  gateEnvValue: jest.fn(name => name === 'GATE_GEOCODE_REVIEW' && gateState.reviewLive),
 }));
 
 const mockGeocode = jest.fn(async () => ({ location: { lat: 27.4, lng: -82.5 } }));
@@ -225,6 +226,7 @@ afterEach(() => {
   updateCalls.length = 0;
   insertCalls.length = 0;
   gateState.live = true;
+  gateState.reviewLive = false;
   mockGeocode.mockClear();
   mockGeocode.mockImplementation(async () => ({ location: { lat: 27.4, lng: -82.5 } }));
   mockCounty.mockClear();
@@ -2502,6 +2504,36 @@ describe('POST /:token commit', () => {
         const coordWrite = updateCalls.find((c) => c.table === 'customers' && c.payload.latitude != null);
         expect(coordWrite).toBeTruthy();
         expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer.latitude).toBe(coordWrite.payload.latitude);
+      });
+
+      test.each([
+        ['primary-only', null, null],
+        ['divergent mirror', 27.1, -82.2],
+      ])('a %s reviewed location synchronizes the customer mirror before booking', async (_label, latitude, longitude) => {
+        gateState.reviewLive = true;
+        firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+        mockOneSlot();
+        const existingCustomer = existingCustomerAt('123 Palm Ave', { latitude, longitude });
+        seedPhoneHousehold(existingCustomer);
+        listResults.scheduled_services = [];
+        firstResults.customer_properties = {
+          id: 'property-9', customer_id: existingCustomer.id, active: true, is_primary: true,
+          address_line1: existingCustomer.address_line1, address_line2: null,
+          city: existingCustomer.city, state: existingCustomer.state, zip: existingCustomer.zip,
+          latitude: 27.4, longitude: -82.5,
+        };
+
+        const token = mintLeadConsultationToken(LEAD_ID);
+        const res = await callPost(token, { date: FUTURE_DATE, time: '09:00', address: MATCH_ADDRESS });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.body.success).toBe(true);
+        expect(updateCalls).toContainEqual(expect.objectContaining({
+          table: 'customers', payload: expect.objectContaining({ latitude: 27.4, longitude: -82.5 }),
+        }));
+        expect(mockCreateSelfBooking.mock.calls[0][0].authedCustomer).toMatchObject({
+          id: existingCustomer.id, latitude: 27.4, longitude: -82.5,
+        });
       });
 
       test('coords mismatch on the matched row → re-validates the slot against ITS stored location and fails closed (SLOT_TAKEN), never books', async () => {
