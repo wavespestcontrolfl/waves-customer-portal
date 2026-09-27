@@ -531,6 +531,38 @@ const OUR_NUMBER = '+19415550100';
       triggerNotification.mockResolvedValue({ bellWritten: true, push: { sent: 1 } });
       expect(await sweepPromiseChasers()).toBe(1);
     });
+
+    test("a TRANSIENT failure inside the live recheck itself never settles the fact, even though notification-triggers.js's own shouldContinue rejection reports it as `suppressed` (Codex #5019 r7 P1)", async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      // Mirrors notification-triggers.js's REAL behavior when shouldContinue
+      // (stillEligible, wired into the bell write, unlike missed-call-bell.js
+      // / repeat-caller-bell.js which only wire it into beforePush) rejects:
+      // NotificationService.create returns `suppressed: true, reason:
+      // 'pre_send_check_blocked'` regardless of WHY stillEligible said no —
+      // a genuine supersession and a transient DB blip inside it look
+      // identical from here.
+      const commitments = require('../services/call-commitments');
+      triggerNotification.mockImplementationOnce(async (triggerKey, payload, opts) => {
+        const spy = jest.spyOn(commitments, 'refreshFulfillment').mockRejectedValueOnce(new Error('synthetic fulfillment outage'));
+        const stillWanted = await opts.shouldContinue();
+        spy.mockRestore();
+        expect(stillWanted).toBe(false);
+        return { bellWritten: false, push: { sent: 0, skipped: 'superseded_before_push' }, suppressed: true };
+      });
+      expect(await sweepPromiseChasers()).toBe(0); // never counted as rung
+      const dedupeKey = `promise_chaser:${commitment.id}:0:${etDateString(new Date(now))}`;
+      const row = await mockConn('promise_chaser_deliveries').where({ dedupe_key: dedupeKey }).first('dedupe_key');
+      expect(row).toBeFalsy(); // no terminal fact written — this is retryable, not a real opt-out
+
+      // Next tick, the transient outage has cleared — the SAME promise
+      // still genuinely rings.
+      expect(await sweepPromiseChasers()).toBe(1);
+    });
   });
 
   test('gate off is a hard no-op — no dispatch', async () => {

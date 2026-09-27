@@ -331,25 +331,39 @@ async function ringForCall(call, now = new Date()) {
   // (never throws) — an unverifiable recheck blocks the send outright; a
   // later tick, still inside the sweep's own window, simply re-evaluates
   // from scratch.
+  // Set the instant this re-check itself blocks the send — whether because
+  // the promise was genuinely superseded in the race window, or because a
+  // lookup inside it threw (Codex #5019 r7 P1: notification-triggers.js's
+  // own shouldContinue rejection surfaces as `stats.suppressed` — the SAME
+  // flag deliberate preference/policy suppression uses — so without this,
+  // a merely TRANSIENT failure here (a DB blip mid-refresh) got the same
+  // permanent "settle the delivery fact, never retry" treatment as a real
+  // opt-out, silencing an actually-still-open promise for the rest of the
+  // ET day). Read below, right before deciding whether to settle.
+  let stillEligibleBlocked = false;
   const stillEligible = async () => {
-    try {
-      // Re-run the SAME fulfillment refresh findPromiseToRing's own
-      // snapshot did — direct fulfillment (an estimate actually sent, a
-      // visit actually booked) can land in the gap between that snapshot
-      // and here just as easily as the kept-evidence checks below can
-      // change; without this, an estimate sent in the race window still
-      // rang "still owe them a quote" (Codex #5019 r16 P2). An unverified
-      // refresh (thrown, or its own per-commitment `failed` count) blocks
-      // the send the same way findPromiseToRing already treats it.
-      const refreshed = await commitments.refreshFulfillment(db, promise.call_log_id);
-      if (refreshed.failed > 0) return false;
-      const stillLive = await commitments.stillOpenIds(db, [promise.id], { now: new Date() });
-      if (!stillLive.has(promise.id)) return false;
-      const followedNow = await followedUpIds(db, [promise]);
-      return !followedNow.has(promise.id);
-    } catch {
-      return false;
-    }
+    const ok = await (async () => {
+      try {
+        // Re-run the SAME fulfillment refresh findPromiseToRing's own
+        // snapshot did — direct fulfillment (an estimate actually sent, a
+        // visit actually booked) can land in the gap between that snapshot
+        // and here just as easily as the kept-evidence checks below can
+        // change; without this, an estimate sent in the race window still
+        // rang "still owe them a quote" (Codex #5019 r16 P2). An unverified
+        // refresh (thrown, or its own per-commitment `failed` count) blocks
+        // the send the same way findPromiseToRing already treats it.
+        const refreshed = await commitments.refreshFulfillment(db, promise.call_log_id);
+        if (refreshed.failed > 0) return false;
+        const stillLive = await commitments.stillOpenIds(db, [promise.id], { now: new Date() });
+        if (!stillLive.has(promise.id)) return false;
+        const followedNow = await followedUpIds(db, [promise]);
+        return !followedNow.has(promise.id);
+      } catch {
+        return false;
+      }
+    })();
+    if (!ok) stillEligibleBlocked = true;
+    return ok;
   };
 
   const { triggerNotification } = require('./notification-triggers');
@@ -374,8 +388,23 @@ async function ringForCall(call, now = new Date()) {
   // throws, so a swallowed insert failure or a failed preferences lookup
   // (retryable, not suppressed) simply reads as neither here; the next
   // tick tries again.
+  //
+  // EXCEPT when stillEligible itself is what blocked the send
+  // (`stillEligibleBlocked`, Codex #5019 r7 P1): unlike missed-call-bell.js
+  // / repeat-caller-bell.js, this bell wires stillEligible into BOTH
+  // shouldContinue (the bell write) and beforePush (the push) — and
+  // notification-triggers.js's own shouldContinue rejection surfaces as
+  // the SAME `stats.suppressed` flag deliberate preference suppression
+  // uses. stillEligible fails closed on ANY thrown lookup error, so a
+  // merely transient failure there must never get the permanent
+  // "settle, never retry" treatment a genuine opt-out earns — it reads as
+  // neither delivered nor suppressed here, exactly like it did before
+  // suppression settling existed, and the next tick re-evaluates from
+  // scratch. A genuinely superseded promise (fulfilled in the race
+  // window) is harmless to leave unsettled too: the next tick's own
+  // findPromiseToRing already excludes it once it is truly gone.
   const delivered = Boolean(stats && (stats.bellWritten || Number(stats.push?.sent || 0) > 0
-    || stats.suppressed || stats.policySilenced));
+    || (!stillEligibleBlocked && (stats.suppressed || stats.policySilenced))));
   if (delivered) {
     // Recorded AFTER dispatch, never before: the sweep is already
     // serialized (runExclusive, scheduler.js), so there is no concurrent
