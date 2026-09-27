@@ -4915,6 +4915,11 @@ async function loadProjectCompletionContextByServiceId(services) {
       // default-true, and the tech could not clear the $75 promise from
       // the actual completion UI. Mirrors /admin/dispatch/:date.
       inspectionCreditAvailable: require('../config/feature-gates').isEnabled('inspectionCredit'),
+      // GATE_RESERVICE_FAST_COMPLETE (PR C) — TechHomePage reads this per
+      // service to decide whether a pest re-service opens the one-screen
+      // Fast Complete sheet instead of ServiceRecapModal. Same "ride the
+      // schedule payload, no new endpoint" pattern as inspectionCreditAvailable above.
+      reserviceFastCompleteEnabled: require('../config/feature-gates').isEnabled('reserviceFastComplete'),
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
@@ -5921,6 +5926,8 @@ router.get('/', async (req, res, next) => {
         // Dispatch V2 completes from this payload — the closeout promise
         // checkbox renders only on true (Codex #3178 r21 P1).
         inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
+        // GATE_RESERVICE_FAST_COMPLETE (PR C) — see loadProjectCompletionContextByServiceId.
+        reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -6499,6 +6506,8 @@ router.get('/week', async (req, res, next) => {
           completionProfile: projectCompletionContext.completionProfile || null,
           // Same field as the day view above — both feed the V2 closeout.
           inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
+          // Same field as the day view above (PR C).
+          reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,

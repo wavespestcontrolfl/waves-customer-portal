@@ -50,6 +50,7 @@ import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
 import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/CreateProjectModal';
 import ServiceRecapModal from '../../components/ServiceRecapModal';
+import FastCompleteSheet from '../../components/tech/FastCompleteSheet';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import TechRecapCapture from './TechRecapCapture';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
@@ -90,6 +91,18 @@ const API = import.meta.env.VITE_API_URL || '';
 // services-table backed signal (the schedule API attaches it).
 function isPestControlService(service) {
   return service?.completionProfile?.category === 'pest_control';
+}
+
+// Fast Complete (PR C, GATE_RESERVICE_FAST_COMPLETE): a pest re-service
+// (free between-visit callback, completionProfile.serviceKey ===
+// 'pest_re_service') opens the one-screen FastCompleteSheet instead of the
+// full ServiceRecapModal when the gate is on. `reserviceFastCompleteEnabled`
+// rides the schedule payload per service (mirrors inspectionCreditAvailable
+// — server/routes/admin-schedule.js) so the gate needs no client redeploy.
+// Gate off, or any other service, is byte-identical to today's routing.
+function isReserviceFastCompleteEligible(service) {
+  return service?.reserviceFastCompleteEnabled === true
+    && service?.completionProfile?.serviceKey === 'pest_re_service';
 }
 
 // Typed specialty jobs (profile cut over to the service-report flow with a
@@ -250,6 +263,7 @@ export default function TechHomePage({ section = 'today' }) {
   const [leadTarget, setLeadTarget] = useState(null);
   const [outcomeTarget, setOutcomeTarget] = useState(null);
   const [recapService, setRecapService] = useState(null);
+  const [fastCompleteService, setFastCompleteService] = useState(null);
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
@@ -611,6 +625,14 @@ export default function TechHomePage({ section = 'today' }) {
           && !['sent', 'closed'].includes(service.linkedProject?.status))
       ))
     : myServices;
+  // Shared by every entry point that would otherwise call setRecapService
+  // directly: a pest re-service under the gate opens the one-screen Fast
+  // Complete sheet instead of the full recap modal. Everything else routes
+  // exactly as before.
+  const openPestCompletion = useCallback((service) => {
+    if (isReserviceFastCompleteEligible(service)) setFastCompleteService(service);
+    else setRecapService(service);
+  }, []);
   const handleProjectQuickAction = useCallback(() => {
     if (projectServices.length === 1) {
       const only = projectServices[0];
@@ -619,14 +641,14 @@ export default function TechHomePage({ section = 'today' }) {
       if (usesDispatchCompletion(only)) {
         openTypedCompletion(only);
       } else if (isPestControlService(only)) {
-        setRecapService(only);
+        openPestCompletion(only);
       } else {
         openProjectOrContinue(only);
       }
       return;
     }
     setShowProjectPicker(true);
-  }, [projectServices, openProjectOrContinue]);
+  }, [projectServices, openProjectOrContinue, openPestCompletion]);
 
   const openFieldVisit = (stop) => {
     if (navigationBusy) return;
@@ -639,7 +661,7 @@ export default function TechHomePage({ section = 'today' }) {
   const openServiceReport = (service) => {
     if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
     if (usesDispatchCompletion(service)) openTypedCompletion(service);
-    else if (isPestControlService(service)) setRecapService(service);
+    else if (isPestControlService(service)) openPestCompletion(service);
     else openProjectOrContinue(service);
   };
   const fieldTools = [
@@ -1068,7 +1090,7 @@ export default function TechHomePage({ section = 'today' }) {
           onSelect={(service) => {
             setShowProjectPicker(false);
             if (usesDispatchCompletion(service)) openTypedCompletion(service);
-            else if (isPestControlService(service)) setRecapService(service);
+            else if (isPestControlService(service)) openPestCompletion(service);
             else openProjectOrContinue(service);
           }}
         />
@@ -1085,6 +1107,27 @@ export default function TechHomePage({ section = 'today' }) {
           request={techRequest}
           onClose={() => setRecapService(null)}
           onCompleted={() => { setRecapService(null); fetchSchedule(); }}
+        />
+      )}
+
+      {fastCompleteService && (
+        <FastCompleteSheet
+          key={fastCompleteService.id}
+          service={{
+            id: fastCompleteService.id,
+            customerName: fastCompleteService.customer_name || fastCompleteService.customerName,
+            serviceType: fastCompleteService.service_type || fastCompleteService.serviceType,
+            address: shortAddress(fastCompleteService.address) || fastCompleteService.address || '',
+            timeLabel: serviceWindowLabel(fastCompleteService) || '',
+          }}
+          request={techRequest}
+          onClose={() => setFastCompleteService(null)}
+          onCompleted={() => { setFastCompleteService(null); fetchSchedule(); }}
+          onFullForm={() => {
+            const raw = fastCompleteService;
+            setFastCompleteService(null);
+            setRecapService(raw);
+          }}
         />
       )}
 

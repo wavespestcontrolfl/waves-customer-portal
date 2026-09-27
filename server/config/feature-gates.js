@@ -2961,6 +2961,17 @@ const gates = {
   // explicit offset, read by gateEnvTimestamp) set, independently of this
   // gate, or the lane does nothing (see sweep.js).
   purchaseReceiptRestock: gateEnvValue('GATE_PURCHASE_RECEIPT_RESTOCK'),
+  // Fast Complete for pest re-services (PR C): the tech portal opens a
+  // one-screen completion sheet for pest_re_service (free callback) visits
+  // instead of the full ServiceRecapModal. Read once at load and mirrored
+  // onto the schedule payload as `reserviceFastCompleteEnabled` per service
+  // (server/routes/admin-schedule.js, same pattern as `inspectionCredit`
+  // below) — so TechHomePage learns the gate state from the job payload it
+  // already fetches, no new endpoint. **Ships DARK: off unless exactly
+  // `true`.** Off = the tech portal routes pest re-services to
+  // ServiceRecapModal exactly as before. Kill switch: unset
+  // GATE_RESERVICE_FAST_COMPLETE.
+  reserviceFastComplete: process.env.GATE_RESERVICE_FAST_COMPLETE === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
