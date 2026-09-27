@@ -86,7 +86,8 @@ function parseLimit(raw) {
 }
 
 const server = (relative) => path.join(__dirname, '..', '..', 'server', relative);
-const { classifyItem, lineDisposition, shipmentHandedOff } = require(server('services/purchase-receipts/receipt-processor'));
+const { classifyItem, lineDisposition, handedOffBy } = require(server('services/purchase-receipts/receipt-processor'));
+const { loadMatchCatalog } = require(server('services/purchase-receipts/product-matcher'));
 const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require(server('services/purchase-receipts/amazon-delivery-parser'));
 const siteOne = require(server('services/purchase-receipts/siteone-invoices'));
 const { amazonEmailLines, siteOneInvoiceLines, authenticated } = require(server('services/purchase-receipts/sweep'));
@@ -219,12 +220,14 @@ async function siteOneLines(since) {
 // came: each is held for a person as 'no_delivery_email' and hands its
 // shipment to a person for good, so none ever reaches the agent. Read from
 // what the live lane actually recorded rather than re-deriving its timing
-// rules; listed so the replay's population is complete.
+// rules, and placed in the timeline at the moment it was recorded, so a
+// later email for that shipment is handed off exactly as it was live.
 async function undeliveredLines(conn, since) {
   const rows = await conn('purchase_receipt_lines').where({ status: 'no_delivery_email' }).where('created_at', '>=', since)
-    .select('vendor', 'order_number', 'shipment_key', 'line_no', 'raw_title', 'quantity');
+    .select('vendor', 'order_number', 'shipment_key', 'line_no', 'raw_title', 'quantity', 'email_id', 'created_at');
   return rows.map((row) => ({
     vendor: row.vendor, orderNumber: row.order_number, shipmentKey: row.shipment_key, lineNo: row.line_no,
+    email: { id: row.email_id, received_at: row.created_at },
     item: { title: row.raw_title, quantity: Number(row.quantity) }, recordedStatus: 'no_delivery_email',
   }));
 }
@@ -258,15 +261,52 @@ function decisionSummary(decision) {
   return `PROPOSES LOGGING ${decision.amount} ${decision.unit}${created}${containerNote}`;
 }
 
-// A proposal the live agent would carry out by changing the catalog — a new
-// product, a container size, or the alias it saves for an unmatched title.
-// Once the live agent has done that for one line, a later line with the same
-// title is resolved by the receipt rules, not the model, so the replay must
-// not reuse the proposal for it.
-function changesCatalog(outcome) {
+// The catalog changes the live agent makes when it carries out a proposal
+// (inventory-agent.js applyDecision): a new product (with its container
+// size), a container size on a product that had none, and — for a title the
+// rules couldn't match — an alias of that exact title to the chosen product.
+// The replay never writes them; it keeps them here, in order, and matches
+// every later line against the catalog plus these, so a later title (the
+// same or differently worded) the live rules would then resolve is resolved
+// here too, with no model call.
+function emptyProposals() {
+  return { products: [], containerSizes: new Map(), aliases: [] };
+}
+
+function recordProposal(proposals, { outcome, found, title }) {
   const decision = outcome.decision;
-  if (!decision || decision.status !== 'logged') return false;
-  return decision.kind === 'new_product' || Boolean(decision.setContainerSize) || outcome.reClassified?.status === 'unmatched';
+  if (!decision || decision.status !== 'logged') return;
+  let productId;
+  if (decision.kind === 'new_product') {
+    productId = `proposed-product-${proposals.products.length + 1}`;
+    proposals.products.push({
+      id: productId, name: decision.newProduct.name, category: decision.newProduct.category,
+      container_size: decision.newProduct.containerSize || null, active: true,
+    });
+  } else if (decision.kind === 'existing' && decision.product) {
+    productId = decision.product.id;
+    if (decision.setContainerSize) proposals.containerSizes.set(productId, decision.setContainerSize);
+  } else {
+    return;
+  }
+  if (!found.productId) proposals.aliases.push({ productId, aliasName: title });
+}
+
+// A loadMatchCatalog snapshot with the proposals so far layered on.
+function catalogWithProposals({ aliasRows, products }, proposals) {
+  const sized = (row) => (proposals.containerSizes.has(row.id) ? { ...row, container_size: proposals.containerSizes.get(row.id) } : row);
+  const allProducts = [...products.map(sized), ...proposals.products];
+  const byId = new Map(allProducts.map((row) => [row.id, row]));
+  const proposedAliases = proposals.aliases.filter((a) => byId.has(a.productId)).map((a) => ({ ...byId.get(a.productId), alias_name: a.aliasName }));
+  return { aliasRows: [...aliasRows.map(sized), ...proposedAliases], products: allProducts };
+}
+
+// The agent's own catalog view (loadActiveCatalog) with the proposed
+// products and aliases added, so its duplicate-name checks see them.
+function agentCatalogWithProposals({ activeProducts, activeProductAliases }, proposals) {
+  const aliases = { ...activeProductAliases };
+  for (const alias of proposals.aliases) aliases[alias.productId] = [...(aliases[alias.productId] || []), alias.aliasName];
+  return { activeProducts: [...activeProducts, ...proposals.products.map(({ id, name }) => ({ id, name }))], activeProductAliases: aliases };
 }
 
 // decideForTitle answers one of three ways: the model couldn't be reached,
@@ -286,50 +326,71 @@ function settledRow(state, line, status, text = '') {
 }
 
 // The agent's answer for one line it would take: a reused one when the same
-// question was already asked (or the receipt rules' line when that earlier
-// proposal changes the catalog), '--limit reached' past the cap, or a real
-// decideForTitle call against the catalog as it stands right now.
-async function agentProposal(conn, line, state) {
+// question was already asked, '--limit reached' past the cap, or a real
+// decideForTitle call. (A title an earlier proposal's catalog change covers
+// never gets here: replayLine already matched it against those changes.)
+async function agentProposal(conn, line, found, state) {
   const siteOneFields = line.vendor === 'siteone' ? await siteOneLineFields(conn, { email_id: line.email.id, line_no: line.lineNo }) : null;
   const question = JSON.stringify([line.vendor, line.item.title, line.item.quantity, siteOneFields]);
   const earlier = state.decided.get(question);
-  if (earlier) {
-    return earlier.changesCatalog
-      ? "the receipt rules would take it, once the earlier line's catalog change is made (no model call)"
-      : `${earlier.text} (same as an earlier line)`;
-  }
+  if (earlier) return `${earlier} (same as an earlier line)`;
   if (state.llmCalls >= state.limit) return '(skipped — --limit reached)';
   // Categories load once, as the live runner loads them once per run; the
   // active catalog reloads before every decision, as the live runner
   // reloads it per line — staff can add a product or alias while this
   // replay waits on the model.
   if (!state.allowedCategories) state.allowedCategories = await loadAllowedCategories(conn);
-  const catalog = await loadActiveCatalog(conn);
+  const catalog = agentCatalogWithProposals(await loadActiveCatalog(conn), state.proposals);
   state.llmCalls += 1;
   const outcome = await decideForTitle(conn, dispatchWithFallback, {
     rawTitle: line.item.title, quantity: line.item.quantity, vendor: line.vendor, siteOneFields,
   }, { allowedCategories: state.allowedCategories, ...catalog });
   const text = outcomeSummary(outcome);
   // A failed call is never reused: the next identical line asks again.
-  if (outcome.llmFailed) state.llmFailures += 1;
-  else state.decided.set(question, { text, changesCatalog: changesCatalog(outcome) });
+  if (outcome.llmFailed) {
+    state.llmFailures += 1;
+    return text;
+  }
+  recordProposal(state.proposals, { outcome, found, title: line.item.title });
+  state.decided.set(question, text);
   return text;
 }
 
-// One line's row: the live lane's own checks first (receipt-processor.js
-// processReceiptLine records nothing for a line with no shipment key, or on
-// a shipment a later email handed to a person), then its disposition, then
-// — for a line it hands to the agent — the agent's proposal.
+// The shipment hand-off rule (receipt-processor.js handedOffBy) applied to
+// the lines this replay has recorded so far — never to today's table, which
+// already holds this very line and everything after it.
+function shipmentId(line) {
+  return `${line.vendor}|${line.shipmentKey}`;
+}
+
+function recordLine(state, line, status) {
+  const rows = state.recorded.get(shipmentId(line)) || [];
+  rows.push({ status, email_id: line.email.id });
+  state.recorded.set(shipmentId(line), rows);
+}
+
+// One line's row, in time order: the live lane's own checks first
+// (receipt-processor.js processReceiptLine records nothing for a line with
+// no shipment key, or on a shipment already handed to a person), then its
+// disposition against the catalog plus the changes proposed so far, then —
+// for a line it hands to the agent — the agent's proposal.
 async function replayLine(conn, line, state) {
+  if (line.recordedStatus) {
+    recordLine(state, line, line.recordedStatus);
+    return settledRow(state, line, line.recordedStatus);
+  }
   if (!line.shipmentKey) return settledRow(state, line, 'no_shipment_key');
-  if (await shipmentHandedOff(conn, line.vendor, line.shipmentKey, line.email.id)) return settledRow(state, line, 'handed_to_person');
-  const found = line.forcedStatus ? { status: line.forcedStatus, productId: null, product: null } : await classifyItem(line.item, conn);
+  if (handedOffBy(state.recorded.get(shipmentId(line)) || [], line.email.id)) return settledRow(state, line, 'handed_to_person');
+  const found = line.forcedStatus
+    ? { status: line.forcedStatus, productId: null, product: null }
+    : await classifyItem(line.item, conn, catalogWithProposals(await loadMatchCatalog(conn), state.proposals));
   const disposition = lineDisposition(found, line, { agentOn: true });
+  recordLine(state, line, disposition.status);
   if (disposition.status !== 'agent_pending') {
     return settledRow(state, line, disposition.status, disposition.product ? `matched: ${disposition.product.name}` : '');
   }
   state.handedToAgent += 1;
-  return { line, status: `agent (${found.status})`, text: await agentProposal(conn, line, state) };
+  return { line, status: `agent (${found.status})`, text: await agentProposal(conn, line, found, state) };
 }
 
 function printReport(rows, state, siteOneFailures) {
@@ -345,6 +406,8 @@ function printReport(rows, state, siteOneFailures) {
   console.log(`${state.handedToAgent} line(s) the agent would take; ${state.llmCalls} real LLM decision(s) (--limit=${state.limit}).`);
   console.log('Proposals are what the agent would PROPOSE; the live apply step can still hold one under its own checks '
     + '(a nearby manual restock or count, the catalog changing underneath, an application unit already in use).');
+  console.log('Later lines are matched against the catalog plus the changes earlier proposals would make; the model itself '
+    + 'is shown the saved catalog, with proposed products counted only in its duplicate-name check.');
   // An incomplete replay never passes for a complete one: each gap is
   // listed and the run exits 1.
   if (state.llmFailures) {
@@ -367,20 +430,21 @@ async function main() {
   const conn = readOnlyConn();
   try {
     const [amazon, siteOneRead, undelivered] = await Promise.all([amazonLines(conn, since), siteOneLines(since), undeliveredLines(conn, since)]);
-    // Oldest first, as the live agent works its queue: --limit then caps the
-    // same lines the live agent would reach first.
-    const lines = dedupe([...amazon, ...siteOneRead.lines].sort(byReceivedAt));
+    // Oldest first, as the live lane recorded them and the live agent works
+    // its queue: hand-offs and proposed catalog changes apply to what comes
+    // after, and --limit caps the same lines the live agent would reach first.
+    const lines = dedupe([...amazon, ...siteOneRead.lines, ...undelivered].sort(byReceivedAt));
     console.log(`${lines.length} distinct purchase line(s) since ${since.toISOString()} `
-      + `(${amazon.length} Amazon, ${siteOneRead.lines.length} SiteOne before dedupe), `
-      + `plus ${undelivered.length} undelivered-shipment line(s) the live lane held for a person.`);
+      + `(${amazon.length} Amazon, ${siteOneRead.lines.length} SiteOne, `
+      + `${undelivered.length} undelivered-shipment line(s) the live lane held for a person, before dedupe).`);
 
     // One paid call per distinct question: `decided` maps each asked
     // question (title, quantity, vendor, invoice evidence) to its answer.
     const state = {
-      limit, tally: undelivered.length ? { no_delivery_email: undelivered.length } : {},
-      handedToAgent: 0, llmCalls: 0, llmFailures: 0, allowedCategories: null, decided: new Map(),
+      limit, tally: {}, handedToAgent: 0, llmCalls: 0, llmFailures: 0, allowedCategories: null,
+      decided: new Map(), recorded: new Map(), proposals: emptyProposals(),
     };
-    const rows = undelivered.map((line) => ({ line, status: line.recordedStatus, text: '' }));
+    const rows = [];
     for (const line of lines) rows.push(await replayLine(conn, line, state));
     printReport(rows, state, siteOneRead.failures);
   } finally {
@@ -400,4 +464,6 @@ if (require.main === module) {
   });
 }
 
-module.exports = { assertReadOnly, parseSince, parseLimit, lineKey, changesCatalog };
+module.exports = {
+  assertReadOnly, parseSince, parseLimit, lineKey, emptyProposals, recordProposal, catalogWithProposals, replayLine,
+};

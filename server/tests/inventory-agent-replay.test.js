@@ -9,7 +9,10 @@
  * (this same function, run against the real shared db module before the
  * script does anything else) is for.
  */
-const { assertReadOnly, parseSince, parseLimit, lineKey, changesCatalog } = require('../../ops/agents/inventory-agent-replay');
+const {
+  assertReadOnly, parseSince, parseLimit, lineKey, emptyProposals, recordProposal, catalogWithProposals, replayLine,
+} = require('../../ops/agents/inventory-agent-replay');
+const { classifyItem } = require('../services/purchase-receipts/receipt-processor');
 
 function mockDb(behavior) {
   return { raw: jest.fn(behavior) };
@@ -80,22 +83,82 @@ describe('parseSince', () => {
   });
 });
 
-// Codex round 4: once the live agent changes the catalog for one line (a new
-// product, a container size, the alias for an unmatched title), a later line
-// with the same title goes through the receipt rules instead.
-describe('changesCatalog', () => {
-  const logged = (decision) => ({ status: 'logged', ...decision });
+// Codex round 5: the live agent changes the catalog as it carries out a
+// proposal, so a later line — the same title or a differently worded one —
+// may then resolve by the receipt rules with no model call. The replay
+// matches every later line against the catalog plus its earlier proposals.
+describe('catalogWithProposals', () => {
+  const base = () => ({
+    products: [{ id: 'p-taurus', name: 'Taurus SC', container_size: null, active: true }],
+    aliasRows: [],
+  });
+  const logged = (decision) => ({ decision: { status: 'logged', ...decision } });
+  const classify = (title, proposals) => classifyItem({ title, quantity: 1 }, null, catalogWithProposals(base(), proposals));
 
-  test('a new product, a container size, or an unmatched title (its alias) changes the catalog', () => {
-    expect(changesCatalog({ decision: logged({ kind: 'new_product' }) })).toBe(true);
-    expect(changesCatalog({ decision: logged({ kind: 'existing', setContainerSize: '78 oz' }), reClassified: { status: 'needs_size' } })).toBe(true);
-    expect(changesCatalog({ decision: logged({ kind: 'existing', setContainerSize: null }), reClassified: { status: 'unmatched' } })).toBe(true);
+  test('a proposed new product resolves a differently worded later title by the rules', async () => {
+    const proposals = emptyProposals();
+    expect((await classify('Syngenta Alpine WSG Insecticide 500 g', proposals)).status).toBe('unmatched');
+    recordProposal(proposals, {
+      outcome: logged({ kind: 'new_product', newProduct: { name: 'Alpine WSG', category: 'insecticide', containerSize: '500 g' } }),
+      found: { status: 'unmatched', productId: null },
+      title: 'Alpine WSG Insecticide 500 g',
+    });
+    const later = await classify('Syngenta Alpine WSG Insecticide 500 g', proposals);
+    expect(later).toMatchObject({ status: 'logged', receivedQty: 500, receivedUnit: 'g' });
   });
 
-  test('a plain restock of an already-matched product, a hold, or a failed call does not', () => {
-    expect(changesCatalog({ decision: logged({ kind: 'existing', setContainerSize: null }), reClassified: { status: 'size_mismatch' } })).toBe(false);
-    expect(changesCatalog({ decision: { kind: 'unsure', status: 'agent_unsure' }, reClassified: { status: 'unmatched' } })).toBe(false);
-    expect(changesCatalog({ llmFailed: true })).toBe(false);
+  test('a proposed container size sizes the product for every later title', async () => {
+    const proposals = emptyProposals();
+    expect((await classify('Taurus SC Termiticide 78 oz', proposals)).status).toBe('needs_size');
+    recordProposal(proposals, {
+      outcome: logged({ kind: 'existing', product: { id: 'p-taurus', name: 'Taurus SC' }, setContainerSize: '78 fl oz' }),
+      found: { status: 'needs_size', productId: 'p-taurus' },
+      title: 'Taurus SC Termiticide 78 oz',
+    });
+    expect((await classify('Control Solutions Taurus SC 78 oz', proposals)).status).toBe('logged');
+    // A matched title gets no alias — only an unmatched one does, as live.
+    expect(proposals.aliases).toEqual([]);
+  });
+
+  test('an unmatched title chosen as an existing product becomes its alias', async () => {
+    const proposals = emptyProposals();
+    recordProposal(proposals, {
+      outcome: logged({ kind: 'existing', product: { id: 'p-taurus', name: 'Taurus SC' }, setContainerSize: '78 fl oz' }),
+      found: { status: 'unmatched', productId: null },
+      title: 'Fipronil Termiticide 78 oz',
+    });
+    expect(await classify('Fipronil Termiticide 78 oz', proposals)).toMatchObject({ status: 'logged', productId: 'p-taurus' });
+  });
+
+  test('a hold, an unsure answer or a failed call changes nothing', async () => {
+    const proposals = emptyProposals();
+    recordProposal(proposals, { outcome: { decision: { kind: 'unsure', status: 'agent_unsure' } }, found: { productId: null }, title: 'x' });
+    recordProposal(proposals, { outcome: { llmFailed: true }, found: { productId: null }, title: 'x' });
+    expect(proposals).toEqual(emptyProposals());
+  });
+});
+
+// Codex round 5: the hand-off rule applies to the lines the replay has
+// recorded so far, in order — never to today's table, which already holds
+// the replayed line itself (a placeholder would otherwise hand itself off).
+describe('replayLine hand-offs', () => {
+  const state = () => ({ tally: {}, recorded: new Map(), proposals: emptyProposals() });
+  const line = (emailId, extra = {}) => ({
+    vendor: 'amazon', orderNumber: '111', shipmentKey: 'S1', lineNo: 1, email: { id: emailId }, item: { title: 'x', quantity: 1 }, ...extra,
+  });
+
+  test('a placeholder is reported as itself, then hands off the rest of its shipment', async () => {
+    const s = state();
+    expect((await replayLine(null, line('e1', { forcedStatus: 'no_items' }), s)).status).toBe('no_items');
+    expect((await replayLine(null, line('e2', { forcedStatus: 'no_items' }), s)).status).toBe('handed_to_person');
+    expect(s.tally).toEqual({ no_items: 1, handed_to_person: 1 });
+  });
+
+  test('an undelivered-shipment hold hands off a later email for that shipment only', async () => {
+    const s = state();
+    await replayLine(null, line(null, { recordedStatus: 'no_delivery_email' }), s);
+    expect((await replayLine(null, line('e2', { forcedStatus: 'no_items' }), s)).status).toBe('handed_to_person');
+    expect((await replayLine(null, line('e3', { shipmentKey: 'S2', forcedStatus: 'no_items' }), s)).status).toBe('no_items');
   });
 });
 

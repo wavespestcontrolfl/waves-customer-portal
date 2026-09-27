@@ -66,7 +66,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
-const { matchTitleToProduct } = require('./product-matcher');
+const { matchTitleToProduct, matchTitleInCatalog } = require('./product-matcher');
 const { parsePackSize } = require('../product-costing');
 const { convertInventoryQuantity } = require('../inventory-units');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
@@ -203,8 +203,11 @@ function amountPerItem(title, container, aliasMatch) {
 }
 
 // Pure classification (match + sizing, no writes). Exported for unit tests.
-async function classifyItem(item, conn = db) {
-  const match = await matchTitleToProduct(item.title, conn);
+// `catalog` (optional, a loadMatchCatalog snapshot): match against it
+// instead of reading the database — the read-only replay passes the catalog
+// plus the changes it has proposed so far.
+async function classifyItem(item, conn = db, catalog = null) {
+  const match = catalog ? matchTitleInCatalog(item.title, catalog) : await matchTitleToProduct(item.title, conn);
   if (!match.matched) return { status: 'unmatched', productId: null };
   const { product } = match;
   const container = parsePackSize(product.container_size);
@@ -234,7 +237,15 @@ function lockShipment(trx, vendor, shipmentKey) {
 async function shipmentHandedOff(trx, vendor, shipmentKey, emailId) {
   const handOffs = await trx('purchase_receipt_lines').where({ vendor, shipment_key: shipmentKey })
     .whereIn('status', HANDED_OFF_STATUSES).select('status', 'email_id');
-  return handOffs.some((row) => PLACEHOLDER_HAND_OFFS.includes(row.status) || row.email_id !== emailId);
+  return handedOffBy(handOffs, emailId);
+}
+
+// The rule itself, over a shipment's recorded { status, email_id } rows —
+// shared with the read-only replay, which applies it to the lines it has
+// recorded so far rather than to today's table.
+function handedOffBy(rows, emailId) {
+  return rows.some((row) => HANDED_OFF_STATUSES.includes(row.status)
+    && (PLACEHOLDER_HAND_OFFS.includes(row.status) || row.email_id !== emailId));
 }
 
 // Classify, and for a line that would move stock, lock its product row and
@@ -390,7 +401,7 @@ async function logQueuedLine(trx, { line, email }) {
 }
 
 module.exports = {
-  classifyItem, processReceiptLine, lineDisposition, logQueuedLine, lockShipment, shipmentHandedOff, SOURCES, UNKNOWN_ORDER,
+  classifyItem, processReceiptLine, lineDisposition, logQueuedLine, lockShipment, shipmentHandedOff, handedOffBy, SOURCES, UNKNOWN_ORDER,
   findPossibleDuplicateMovement,
   // Title-size-claim and pack-marker parsing primitives, reused (not
   // duplicated) by inventory-agent.js's deterministic reading validation —
