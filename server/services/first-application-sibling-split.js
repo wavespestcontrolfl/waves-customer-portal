@@ -187,6 +187,25 @@ async function reconcileFirstApplicationSplitOnDateChange(trx, scheduledServiceI
     return { action: 'declined', reason: 'deposit_credit_present', invoiceId: invoice.id };
   }
 
+  // Same saved-card charge-reconciliation fence InvoiceService.update's own
+  // amount-editing path checks before ANY retotal: a claimed/ambiguous
+  // stripe_invoice_charge_attempts row can commit durably BEFORE the
+  // invoice carries a payments row or a PaymentIntent — in that window the
+  // draft/no-paid_at/no-PI guards above see nothing, but the off-session
+  // charge may still settle for the FULL combined total. Reducing the
+  // invoice now would let that settlement bind collected money to a total
+  // this split already shrank, while the sibling is ALSO billed separately
+  // for its carved-out share — double-billing (Codex pre-push P0).
+  const unresolvedChargeAttempt = await trx('stripe_invoice_charge_attempts')
+    .where({ invoice_id: invoice.id })
+    .whereNull('resolved_at')
+    .whereIn('status', ['claimed', 'ambiguous'])
+    .first('id');
+  if (unresolvedChargeAttempt) {
+    logger.warn(`[first-application-sibling-split] estimate ${moved.source_estimate_id}: declining resplit — invoice ${invoice.id} has an unresolved saved-card charge attempt`);
+    return { action: 'declined', reason: 'unresolved_charge_attempt_present', invoiceId: invoice.id };
+  }
+
   const lineItems = parseLineItems(invoice.line_items);
   if (!lineItems) return { action: 'skipped', reason: 'unreadable_line_items', invoiceId: invoice.id };
 

@@ -240,6 +240,35 @@ suite('first-application-sibling-split — same-trip resplit on date change', ()
     expect(Number(state.invoice.total)).toBe(133.6);
   }));
 
+  test('an unresolved saved-card charge attempt on the invoice declines the resplit — Stripe may still settle the FULL combined total', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('stripe_invoice_charge_attempts').insert({
+      invoice_id: ids.invoiceId, stripe_payment_method_id: 'pm_fixture_test',
+      idempotency_key: randomUUID(), status: 'claimed',
+    });
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const result = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('declined');
+    expect(result.reason).toBe('unresolved_charge_attempt_present');
+    const state = await readState(trx, ids);
+    // No money moved — the invoice keeps its full combined total and the
+    // sibling stays unpriced/covered until the charge resolves.
+    expect(state.lawn.estimated_price).toBeNull();
+    expect(Number(state.pest.estimated_price)).toBe(153.6);
+    expect(Number(state.invoice.total)).toBe(153.6);
+  }));
+
+  test('a RESOLVED saved-card charge attempt does not block the resplit', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('stripe_invoice_charge_attempts').insert({
+      invoice_id: ids.invoiceId, stripe_payment_method_id: 'pm_fixture_test',
+      idempotency_key: randomUUID(), status: 'failed', resolved_at: new Date(),
+    });
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const result = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('split');
+  }));
+
   test('a one-time setup-fee line on the invoice declines the resplit', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     const withFee = [
