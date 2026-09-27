@@ -959,66 +959,98 @@ function isCandidateToken(token) {
 
 const UUID_RE_THREAD = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// The codebase treats "10% SC" and "20% SC" as different products — a TOKEN
-// or ALIAS match (never a full catalog-name match, which already carries its
-// own qualifiers verbatim) must not ignore a concentration or formulation
-// qualifier the operator actually said. Closed set; single letters (F, G, L)
-// are too ambiguous in free text to trust. "AS" (aqueous suspension) is
-// deliberately left out too — it's an ordinary English word ("Taurus AS to
-// add...", a real production prompt), and a code this collision-prone is not
-// worth the false positives. Sorted longest-first so "WDG"/"WSG" are never
-// shadowed by the shorter "WG" alternative.
+// The codebase treats "10% SC" and "20% SC" as different products — ANY
+// match (full catalog name, alias, or distinctive token) must not ignore a
+// concentration or formulation qualifier that sits immediately BEFORE or
+// AFTER the matched span in the operator's RAW text (a qualifier INSIDE the
+// span is already accounted for — matching the name/alias string at all
+// proves it's consistent). This is the ONE place that check happens —
+// qualifierConflict, called from every match branch in productsNamedIn.
+//
+// Closed formulation-code set; single letters (F, G, L) are too ambiguous in
+// free text to trust. "AS" (aqueous suspension) is deliberately left out —
+// it's an ordinary English word ("Taurus AS to add...", a real production
+// prompt) and a code this collision-prone is not worth the false positives.
+// "FL" is left out for the same reason: "fl oz" (fluid ounces) is the most
+// common unit phrase in these prompts, and "fl" sitting right next to a
+// match would otherwise misread as the FL code every time. Sorted
+// longest-first so "WDG"/"WSG" are never shadowed by the shorter "WG".
 const FORMULATION_CODES = ['SC', 'SE', 'EC', 'EW', 'CS', 'ME', 'WG', 'WDG', 'WSG', 'WP', 'WSP',
-  'SG', 'SL', 'SP', 'DF', 'DG', 'GR', 'TC', 'RTU', 'FL']
+  'SG', 'SL', 'SP', 'DF', 'DG', 'GR', 'TC', 'RTU']
   .sort((a, b) => b.length - a.length);
 const FORMULATION_CODE_ALT = FORMULATION_CODES.join('|');
 // A qualifier immediately follows a match when only whitespace, commas,
-// hyphens or periods sit between them. A bare number with no '%' is never a
-// concentration ("Taurus 78 ounces").
-const QUALIFIER_STEP_RE = new RegExp(`^[\\s,\\-.]*(?:(\\d+(?:\\.\\d+)?)\\s*%|(${FORMULATION_CODE_ALT})\\b)`, 'i');
+// hyphens or periods sit between them (checked in both directions — see
+// qualifiersFollowing/qualifiersPreceding). A bare number with no '%' is
+// never a concentration ("Taurus 78 ounces").
+const QUALIFIER_AFTER_RE = new RegExp(`^[\\s,\\-.]*(?:(\\d+(?:\\.\\d+)?)\\s*%|(${FORMULATION_CODE_ALT})\\b)`, 'i');
+const QUALIFIER_BEFORE_RE = new RegExp(`(?:(\\d+(?:\\.\\d+)?)\\s*%|(${FORMULATION_CODE_ALT})\\b)[\\s,\\-.]*$`, 'i');
 
 function escapeRegExpLiteral(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Where, in the RAW operator text, does this whole-word phrase (a single
-// token, or an alias's own words) first occur? Punctuation/whitespace may
-// separate the phrase's own words, mirroring containsWholeWords' tolerance.
-// Returns the index right after the match, or -1 if it doesn't occur.
-function findPhraseEndInRawText(rawText, words) {
+// Where, in the RAW operator text, does this whole-word phrase (the full
+// catalog name's words, an alias's own words, or a single distinctive token)
+// first occur? Punctuation/whitespace may separate the phrase's own words,
+// mirroring containsWholeWords' tolerance. Returns { start, end }, or null if
+// it doesn't occur.
+function findPhraseSpanInRawText(rawText, words) {
   const pattern = words.map(escapeRegExpLiteral).join('[^a-zA-Z0-9]+');
   const match = new RegExp(`\\b${pattern}\\b`, 'i').exec(rawText);
-  return match ? match.index + match[0].length : -1;
+  return match ? { start: match.index, end: match.index + match[0].length } : null;
 }
 
-// The concentration(s) and formulation code(s) that immediately trail a
-// match, reading forward from `fromIndex` in the RAW text (raw so '%'
-// survives — normalizeForMatch would drop it).
+// The concentration(s)/formulation code(s) immediately trailing `fromIndex`,
+// reading forward. Raw text, so '%' survives (normalizeForMatch drops it).
 function qualifiersFollowing(rawText, fromIndex) {
   let rest = rawText.slice(fromIndex);
   const concentrations = [];
   const formulations = [];
-  let step = QUALIFIER_STEP_RE.exec(rest);
+  let step = QUALIFIER_AFTER_RE.exec(rest);
   while (step) {
     if (step[1] !== undefined) concentrations.push(Number(step[1]));
     else formulations.push(step[2].toUpperCase());
     rest = rest.slice(step[0].length);
-    step = QUALIFIER_STEP_RE.exec(rest);
+    step = QUALIFIER_AFTER_RE.exec(rest);
   }
   return { concentrations, formulations };
 }
 
-// Does a TOKEN/ALIAS match of `words` conflict with `productNameRaw`? No
-// qualifier captured at all ⇒ never a conflict (e.g. "Taurus" alone, or
-// "Taurus 78 ounces" — a bare number is not a concentration). Any qualifier
-// captured must ALL appear in the product's own catalog name — a formulation
-// code as a normalized whole token, a concentration as an exact numeric match
-// against the percent numbers in the name's raw text — or it's a conflict.
+// The concentration(s)/formulation code(s) immediately preceding `toIndex`,
+// reading backward (each found qualifier must reach all the way to `toIndex`
+// through only separator characters — mirrors qualifiersFollowing).
+function qualifiersPreceding(rawText, toIndex) {
+  let rest = rawText.slice(0, toIndex);
+  const concentrations = [];
+  const formulations = [];
+  let step = QUALIFIER_BEFORE_RE.exec(rest);
+  while (step) {
+    if (step[1] !== undefined) concentrations.push(Number(step[1]));
+    else formulations.push(step[2].toUpperCase());
+    rest = rest.slice(0, step.index);
+    step = QUALIFIER_BEFORE_RE.exec(rest);
+  }
+  return { concentrations, formulations };
+}
+
+// Does a match of `words` (any match type — full name, alias, or a single
+// distinctive token) conflict with `productNameRaw`, given qualifiers found
+// immediately before or after the matched span in the RAW text? No qualifier
+// captured at all ⇒ never a conflict (e.g. "Taurus" alone, or "Taurus 78
+// ounces" — a bare number is not a concentration). Any qualifier captured
+// must ALL appear in the product's own catalog name — a formulation code as
+// a normalized whole token, a concentration as an exact numeric match against
+// the percent numbers in the name's raw text — or it's a conflict. The ONE
+// chokepoint for this check; every productsNamedIn match branch calls it.
 function qualifierConflict(rawText, words, productNameRaw) {
   const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
-  const endIndex = findPhraseEndInRawText(rawText, words);
-  if (endIndex === -1) return false;
-  const { concentrations, formulations } = qualifiersFollowing(rawText, endIndex);
+  const span = findPhraseSpanInRawText(rawText, words);
+  if (!span) return false;
+  const before = qualifiersPreceding(rawText, span.start);
+  const after = qualifiersFollowing(rawText, span.end);
+  const concentrations = [...before.concentrations, ...after.concentrations];
+  const formulations = [...before.formulations, ...after.formulations];
   if (!concentrations.length && !formulations.length) return false;
   const nameTokens = new Set(normalizeForMatch(productNameRaw).split(' '));
   const nameConcentrations = [...productNameRaw.matchAll(/(\d+(?:\.\d+)?)\s*%/g)].map((m) => Number(m[1]));
@@ -1063,13 +1095,14 @@ function isBareFollowUp(text) {
 // words (never a substring of a longer word). Returns { named, conflict }:
 // `named` is a Set of product ids (0 = nothing named, 1 = grounded, 2+ =
 // ambiguous — the caller refuses rather than guessing); `conflict` is true
-// when an ALIAS or TOKEN match was disqualified by a concentration/
-// formulation qualifier that doesn't match that product's own catalog name
-// (e.g. "Taurus 20% SC" naming only a "Taurus 10% SC" catalog row) — a
+// when a match (of ANY type — full name, alias, or token) was disqualified
+// by a concentration/formulation qualifier sitting immediately before or
+// after the matched span that doesn't match that product's own catalog name
+// (e.g. "Taurus SC 20%" or "20% Taurus SC" naming only a plain "Taurus SC"
+// catalog row, or "Taurus 20% SC" naming only a "Taurus 10% SC" row) — a
 // conflict never grounds, on this text or any other (see
-// resolveByOperatorGrounding). A full-name match never needs this check: the
-// whole name (qualifiers included) already had to appear verbatim in
-// sequence to match at all.
+// resolveByOperatorGrounding). See qualifierConflict for the one check every
+// match type routes through.
 async function productsNamedIn(textNorm, rawText) {
   const named = new Set();
   let conflict = false;
@@ -1093,21 +1126,26 @@ async function productsNamedIn(textNorm, rawText) {
 
   for (const p of products) {
     const nameNorm = normalizeForMatch(p.name);
-    if (containsWholeWords(textNorm, nameNorm)) { named.add(p.id); continue; }
-    const aliasMatch = aliasRows.find((a) => a.product_id === p.id
-      && containsWholeWords(textNorm, normalizeForMatch(a.alias_name)));
-    if (aliasMatch) {
-      const words = normalizeForMatch(aliasMatch.alias_name).split(' ');
-      if (qualifierConflict(rawText, words, p.name)) { conflict = true; continue; }
-      named.add(p.id);
-      continue;
+    // Every match type routes through the same qualifierConflict chokepoint
+    // — a full-name match is NOT exempt: "Taurus SC 20%" matches the full
+    // name "Taurus SC", but the trailing "20%" still has to agree with the
+    // catalog row (see qualifierConflict's own doc for why a qualifier
+    // INSIDE the matched span needs no separate check).
+    let words = null;
+    if (containsWholeWords(textNorm, nameNorm)) words = nameNorm.split(' ');
+    else {
+      const aliasMatch = aliasRows.find((a) => a.product_id === p.id
+        && containsWholeWords(textNorm, normalizeForMatch(a.alias_name)));
+      if (aliasMatch) words = normalizeForMatch(aliasMatch.alias_name).split(' ');
+      else {
+        const tokenMatch = nameNorm.split(' ').find((token) => isCandidateToken(token)
+          && tokenOwners.get(token)?.size === 1 && containsWholeWords(textNorm, token));
+        if (tokenMatch) words = [tokenMatch];
+      }
     }
-    const tokenMatch = nameNorm.split(' ').find((token) => isCandidateToken(token)
-      && tokenOwners.get(token)?.size === 1 && containsWholeWords(textNorm, token));
-    if (tokenMatch) {
-      if (qualifierConflict(rawText, [tokenMatch], p.name)) { conflict = true; continue; }
-      named.add(p.id);
-    }
+    if (!words) continue;
+    if (qualifierConflict(rawText, words, p.name)) { conflict = true; continue; }
+    named.add(p.id);
   }
   return { named, conflict };
 }

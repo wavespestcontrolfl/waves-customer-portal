@@ -761,5 +761,63 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       });
       expect(result).toMatchObject({ code: 'target_clarification_required' });
     });
+
+    // A FULL-NAME match is not exempt from the qualifier check — only a
+    // qualifier INSIDE the matched span is already accounted for. A
+    // qualifier sitting immediately before/after "Taurus SC" itself (before
+    // or after the whole matched phrase) still has to agree with the
+    // catalog row, checked through the same chokepoint as alias/token
+    // matches (qualifierConflict, called uniformly in productsNamedIn).
+    describe('qualifier conflicts adjacent to a FULL-NAME match', () => {
+      test('"Taurus SC 20%" (qualifier trailing the full-name match) refuses (the audit\'s case)', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock',
+          prompt: 'We bought Taurus SC 20%, add 12 oz',
+          preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+        });
+        expect(result).toMatchObject({ code: 'target_clarification_required' });
+      });
+
+      test('"20% Taurus SC" (qualifier leading the full-name match) also refuses', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock',
+          prompt: '20% Taurus SC',
+          preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+        });
+        expect(result).toMatchObject({ code: 'target_clarification_required' });
+      });
+
+      test('"Taurus SC, add 12 fl oz" grounds — "fl oz" must never read as the FL code', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock',
+          prompt: 'Taurus SC, add 12 fl oz',
+          preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+        });
+        expect(result).toEqual({ productId: TAURUS.id });
+      });
+
+      test('"Taurus SC 78 ounces" grounds — a bare number is never a concentration', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock',
+          prompt: 'Taurus SC 78 ounces',
+          preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+        });
+        expect(result).toEqual({ productId: TAURUS.id });
+      });
+    });
+
+    test('a BEFORE-window conflict on a TOKEN match ("SE Taurus") also refuses', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock',
+        prompt: 'SE Taurus',
+        preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+      });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
+    });
   });
 });
