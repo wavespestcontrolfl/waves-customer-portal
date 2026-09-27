@@ -2079,7 +2079,10 @@ describe('POST /:token commit', () => {
       expect(mockCreateSelfBooking).not.toHaveBeenCalled();
     });
 
-    test('an incomplete supplied copy cannot bypass an outside-area review as a sibling property', async () => {
+    test.each([
+      ['missing ZIP', '5 Palm Ave, Bradenton, FL'],
+      ['postal-city alias with the same ZIP', '5 Palm Ave, Palma Sola, FL 34209'],
+    ])('a supplied copy with %s cannot bypass an outside-area review as a sibling property', async (_case, address) => {
       gateState.reviewLive = true;
       firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
       firstResults.customers = {
@@ -2099,7 +2102,7 @@ describe('POST /:token commit', () => {
       });
 
       const res = await callPost(mintLeadConsultationToken(LEAD_ID), {
-        date: FUTURE_DATE, time: '09:00', address: '5 Palm Ave, Bradenton, FL',
+        date: FUTURE_DATE, time: '09:00', address,
       });
 
       expect(res.statusCode).toBe(422);

@@ -1157,12 +1157,19 @@ function profileAffirmativelyDiffers(row, address) {
   const { streetKey, normalizeZip, unitKey, streetEmbeddedUnitKey } = require('../services/customer-properties');
   const unitOf = (line1, line2) => unitKey(line2 || '') || streetEmbeddedUnitKey(line1);
   const text = value => String(value || '').trim().toLowerCase();
-  return [
+  const premiseDiffers = [
     [streetKey(row.address_line1), streetKey(address?.line1)],
     [unitOf(row.address_line1, row.address_line2), unitOf(address?.line1, address?.line2)],
-    [normalizeZip(row.zip), normalizeZip(address?.zip)],
-    [text(row.city), text(address?.city)],
+  ].some(([stored, supplied]) => stored && supplied && stored !== supplied);
+  if (premiseDiffers) return true;
+  const zip = normalizeZip(row.zip);
+  const suppliedZip = normalizeZip(address?.zip);
+  // The ordinary profile matcher treats matching ZIPs as the same property,
+  // regardless of postal-city aliases. The quarantine boundary must agree.
+  if (zip && suppliedZip) return zip !== suppliedZip;
+  return [
     [text(row.state), text(address?.state)],
+    [text(row.city), text(address?.city)],
   ].some(([stored, supplied]) => stored && supplied && stored !== supplied);
 }
 
