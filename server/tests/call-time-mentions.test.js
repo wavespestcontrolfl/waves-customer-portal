@@ -28,8 +28,8 @@ describe('parseDayMentions', () => {
     expect(datesIn('The constructor is here today.')).toEqual([['2026-09-26']]);
   });
 
-  test('a weekday or "next <weekday>" names this week\'s and next week\'s date', () => {
-    expect(datesIn('Why not next Saturday, or Friday?')).toEqual([['2026-10-03', '2026-10-10'], ['2026-10-02', '2026-10-09']]);
+  test('a weekday or "next <weekday>" names this week\'s and next week\'s date; the call\'s own weekday can be today, "next" never', () => {
+    expect(datesIn('Why not next Saturday, or Friday, or Saturday?')).toEqual([['2026-10-03', '2026-10-10'], ['2026-10-02', '2026-10-09'], ['2026-09-26', '2026-10-03']]);
   });
 
   test('"the 8th" names this month\'s or next month\'s; with its month it is a month and day', () => {

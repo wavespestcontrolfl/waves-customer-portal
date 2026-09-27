@@ -113,6 +113,16 @@ const REFUSAL_MARKERS = [
 // it"). Every agreement on the 1,089-call replay closed with one. A bare
 // acknowledgment ("okay", "sounds good") can answer anything ("I need to ask
 // my husband" — "Okay") and never affirms on its own.
+// A caller accepting a slot the agent put to them ("Yes", "That works",
+// "That would be so much better").
+const ACCEPT_MARKERS = [
+  'yes', 'yeah', 'yep', 'yup', 'sure', 'okay', 'ok', 'alright', 'all right', 'perfect', 'great', 'fine', 'good', 'works',
+  'better', 'absolutely', 'definitely', 'of course', 'please', 'awesome', 'excellent', 'wonderful', 'love',
+];
+function accepts(ns) {
+  return ACCEPT_MARKERS.some((m) => padded(ns).includes(padded(m)));
+}
+
 const COMMITMENT_MARKERS = [
   'i ll do that', 'i will do that', 'we ll do that', 'we will do that', 'i ll do it', 'we ll do it', 'let s do that', 'let s do it',
   'you re all set', 'you are all set',
@@ -330,9 +340,20 @@ function callerRepliesToSlot(turns, refs, slot, runStart, anchorIdx) {
     while (prev >= 0 && !talksAboutTime(prev)) prev -= 1;
     if (turns[idx].agent || prev < 0 || !onlySlot(prev)) continue;
     const counters = mentionsIn(idx).length > 0 && !mentionsIn(idx).some((m) => namesSlot(m, slot));
-    replies.push(counters ? turns[idx].ns : read(idx));
+    const text = counters ? turns[idx].ns : read(idx);
+    // A reply to the agent putting the slot to the caller must accept it; one
+    // that does not ("I have another appointment then") turns it down.
+    const proposal = turns[prev].agent && sentenceSpans(turns[prev].raw).some((sentence) => sentence.question);
+    replies.push(proposal && !accepts(text) ? `no ${text}` : text);
   }
   return replies;
+}
+
+// The caller's answer after turn `afterIdx`, if it accepts the slot the agent
+// put to them; else -1.
+function acceptingAnswer(turns, afterIdx) {
+  const idx = turns.findIndex((t, i) => i > afterIdx && !t.agent);
+  return idx >= 0 && accepts(turns[idx].ns) ? idx : -1;
 }
 
 // After the slot's final mention the caller answers or closes the call: any
@@ -469,12 +490,12 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
   // that does not affirm does not settle it: either way the slot was not
   // agreed.
   const agentTurnFrom = (from) => turns.findIndex((t, i) => i >= from && t.agent);
-  const nextTurn = (after, agent) => (after < 0 ? -1 : turns.findIndex((t, i) => i > after && t.agent === agent));
+  const agentTurnAfter = (after) => (after < 0 ? -1 : turns.findIndex((t, i) => i > after && t.agent));
   let affirmIdx = agentTurnFrom(anchorIdx);
   // The agent putting the slot to the caller needs the caller's answer before
   // the next agent turn can commit ("Would Thursday at two work for you?" —
   // "You are all set" answers nothing).
-  if (affirmIdx === anchorIdx && asksCaller(affirmIdx)) affirmIdx = nextTurn(nextTurn(anchorIdx, false), true);
+  if (affirmIdx === anchorIdx && asksCaller(affirmIdx)) affirmIdx = agentTurnAfter(acceptingAnswer(turns, anchorIdx));
   if (affirmIdx === -1 || asksCaller(affirmIdx) || !commitsToSlot(turns[affirmIdx])) return failAt('no_affirming_agent_turn');
 
   // A negation on the slot's own words, after it in the turn completing it,

@@ -107,7 +107,7 @@ const DAY_FORMS = [
   (toks, i, started) => Object.hasOwn(RELATIVE_DAYS, toks[i])
     && { dates: [dayAfterCall(started, RELATIVE_DAYS[toks[i]])], kind: toks[i], len: 1 },
   (toks, i, started) => toks[i] === 'next' && WEEKDAY_NAMES.includes(toks[i + 1])
-    && { dates: weekdayDates(toks[i + 1], started), kind: 'next_weekday', len: 2, weekday: WEEKDAY_NAMES.indexOf(toks[i + 1]) },
+    && { dates: weekdayDates(toks[i + 1], started, true), kind: 'next_weekday', len: 2, weekday: WEEKDAY_NAMES.indexOf(toks[i + 1]) },
   (toks, i, started) => WEEKDAY_NAMES.includes(toks[i])
     && { dates: weekdayDates(toks[i], started), kind: 'weekday', len: 1, weekday: WEEKDAY_NAMES.indexOf(toks[i]) },
   // "October 8", "October 8th"
@@ -127,10 +127,11 @@ const DAY_FORMS = [
     && { dates: dayOfMonthDates(Number(ORDINAL_DAY.exec(toks[i + 1])[1]), started), kind: 'day_of_month', len: 2 },
 ];
 
-// A weekday said on the call: this week's and next week's, never the call's
-// own day.
-function weekdayDates(name, started) {
-  const off = ((WEEKDAY_NAMES.indexOf(name) - etParts(started).dayOfWeek + 7) % 7) || 7;
+// A weekday said on the call: this week's and next week's.
+function weekdayDates(name, started, next = false) {
+  // The call's own weekday can be today ("Thursday at two" on a Thursday);
+  // "next Thursday" never is.
+  const off = ((WEEKDAY_NAMES.indexOf(name) - etParts(started).dayOfWeek + 7) % 7) || (next ? 7 : 0);
   return [dayAfterCall(started, off), dayAfterCall(started, off + 7)];
 }
 
@@ -175,8 +176,14 @@ const RELATIVE_HOUR_LEADS = new Set(['before', 'by', 'after', 'until', 'till', '
 const TRAILING_BOUNDS = [['or', 'later'], ['or', 'earlier'], ['or', 'so'], ['or', 'after'], ['or', 'before'], ['at', 'the', 'latest'], ['at', 'the', 'earliest']];
 // "Two o'clock" normalizes to "two o clock" or "two oclock".
 const OCLOCK = new Set(['o', 'oclock']);
-// A number running into a unit of time is a length, not a clock time.
-const DURATION_UNITS = new Set(['hour', 'hours', 'hr', 'hrs', 'minute', 'minutes', 'min', 'mins']);
+// A number running into a unit of time is a length, and one running into a
+// counted thing a quantity ("at two properties"), not a clock time.
+const DURATION_UNITS = new Set([
+  'hour', 'hours', 'hr', 'hrs', 'minute', 'minutes', 'min', 'mins', 'day', 'days', 'week', 'weeks', 'month', 'months', 'year', 'years',
+  'property', 'properties', 'house', 'houses', 'home', 'homes', 'location', 'locations', 'unit', 'units', 'building', 'buildings',
+  'option', 'options', 'people', 'dogs', 'cats', 'kids', 'children', 'room', 'rooms', 'bedrooms', 'bathrooms', 'spots', 'places',
+  'addresses', 'lots', 'acres', 'visits', 'services', 'treatments', 'trees', 'palms', 'times',
+]);
 const DURATION_FILLER = new Set(['and', 'a', 'half', 'or', 'to', 'through', 'quarter']);
 // Said right after an hour, part of it: "2 pm", "2 00 pm", "two o clock".
 const CLOCK_TAIL = new Set(['am', 'pm', 'o', 'clock', 'oclock', '00']);

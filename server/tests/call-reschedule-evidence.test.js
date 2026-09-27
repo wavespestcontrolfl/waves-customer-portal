@@ -198,7 +198,7 @@ describe('rescheduleAgreementEvidence', () => {
     expect(evidence('Caller: Can we do Thursday at two?\nAgent: We will see you then. Oh, but not Thursday.')).toMatchObject({ ok: false, reason: 'slot_refused' });
     expect(evidence('Caller: Can we do Thursday at two?\nAgent: Okay, we will see you then. Oh, I don\'t have that.')).toMatchObject({ ok: false, reason: 'slot_refused' });
     expect(evidence('Caller: Can we do Thursday at two?\nAgent: We will see you, there are no Thursday openings.')).toMatchObject({ ok: false, reason: 'slot_refused' });
-    expect(evidence('Agent: Would Thursday at two work?\nCaller: No.\nAgent: Okay, we will see you then.')).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: No.\nAgent: Okay, we will see you then.')).toMatchObject({ ok: false, reason: 'no_affirming_agent_turn' });
     expect(evidence('Caller: I can\'t do Thursday at two.\nAgent: Okay, we will see you then.')).toMatchObject({ ok: false, reason: 'slot_refused' });
     expect(evidence('Caller: Can we do Thursday?\nAgent: We will see you Thursday at two, is that not good?').ok).toBe(false);
   });
@@ -290,7 +290,7 @@ describe('rescheduleAgreementEvidence', () => {
     // Before the commitment too, from either side: an unmarked hour is a
     // correction no mention reads.
     expect(evidence('Agent: Would Thursday at two work?\nCaller: Make that three.\nAgent: I will put you down.'))
-      .toMatchObject({ ok: false, reason: 'slot_refused' });
+      .toMatchObject({ ok: false, reason: 'no_affirming_agent_turn' });
     expect(evidence('Caller: Can we do Thursday at two?\nAgent: Make that three. We will see you then.'))
       .toMatchObject({ ok: false, reason: 'slot_refused' });
     // Conservative by design: the caller repeating the slot after the
@@ -385,6 +385,20 @@ describe('rescheduleAgreementEvidence', () => {
     for (const hold of ['Actually, hold off on moving it.', 'Please leave it unchanged.']) {
       expect(evidence(`Caller: Can we do Thursday at two?\nAgent: We will see you then.\nCaller: ${hold}`).ok).toBe(false);
     }
+  });
+
+  // Codex #5071 round 3.
+  test('a reply to the agent\'s proposal must accept it', () => {
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: I have another appointment then.\nAgent: We will see you Thursday at two.').ok).toBe(false);
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: That would be so much better.\nAgent: We will see you Thursday at two.').ok).toBe(true);
+  });
+
+  test('a number counting something is not a clock time, and the call\'s own weekday can be today', () => {
+    expect(evidence(['Caller: Can we move it to Thursday?', 'Agent: We will see you Thursday.', 'Caller: I need service at two properties.',
+      'Agent: We will do that.'].join('\n')).ok).toBe(false);
+    // Thursday Sep 24, 10 AM ET: "Thursday at two" is today at 2 PM.
+    expect(rescheduleAgreementEvidence({ transcript: 'Caller: Can we move it to Thursday at two?\nAgent: We will see you Thursday at two.',
+      confirmedStartAt: '2026-09-24T14:00:00-04:00', callStartedAt: '2026-09-24T14:00:00Z' }).ok).toBe(true);
   });
 
   test('"I am" is not a time, and a courtesy "if" does not condition the commitment', () => {
