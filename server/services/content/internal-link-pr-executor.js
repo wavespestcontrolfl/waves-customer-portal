@@ -38,7 +38,10 @@ const {
 
 const TABLE = 'content_internal_link_tasks';
 const EXECUTOR_VERSION = 'internal-link-dry-run-v1';
-const PR_EXECUTOR_VERSION = 'internal-link-pr-executor-v1';
+// v2 = every link in the PR passed the LLM reader check and the
+// anchor_not_target_specific rule. runAutoMerge merges ONLY v2 PRs; a PR
+// opened by an older executor stays for a human.
+const PR_EXECUTOR_VERSION = 'internal-link-pr-executor-v2';
 const DEFAULT_LIMIT = 10;
 // A pr_reserved row normally flips to pr_open/failed within seconds; one
 // untouched for 2h with no PR URL is a crash orphan (see
@@ -323,6 +326,9 @@ class InternalLinkPrExecutor {
     if (!pr || String(pr.state).toLowerCase() !== 'open') {
       // Merged/closed PRs are settled by runPostMergeVerification.
       return { status: 'pr_not_open', pr_number: prNumber };
+    }
+    if (prTasks.some((t) => t.executor_version !== PR_EXECUTOR_VERSION)) {
+      return { status: 'hold', reason: 'pre_judge_pr', pr_number: prNumber };
     }
     const headSha = String(pr.head?.sha || '').toLowerCase();
     const pushed = prTasks.map((t) => String(t.pr_commit_sha || '').toLowerCase());

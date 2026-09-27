@@ -1236,7 +1236,7 @@ describe('internal-link PR auto-merge', () => {
   beforeEach(() => {
     for (const k of keys) { saved[k] = process.env[k]; delete process.env[k]; }
     process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
-    openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, source_file: 'src/content/blog/a.md', target_url: '/termite-inspection/' }]);
+    openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-v2', source_file: 'src/content/blog/a.md', target_url: '/termite-inspection/' }]);
     GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', title: 'SEO links', created_at: new Date(Date.now() - 3 * 3600e3).toISOString(), head: { sha: HEAD, ref: 'content/internal-link-x' }, base: { ref: 'main' } });
     GitHubClient.listPrFiles = jest.fn(async () => [{ filename: 'src/content/blog/a.md' }]);
     GitHubClient.getFile.mockImplementation(async (_path, ref) => ({ content: ref === HEAD ? headBody : baseBody }));
@@ -1264,6 +1264,12 @@ describe('internal-link PR auto-merge', () => {
       sha: HEAD, expectBaseSha: 'e'.repeat(40), expectBaseRef: 'main', verifyPaths: ['src/content/blog/a.md'],
     }));
     expect(instance._markTaskMerged).toHaveBeenCalledWith('t1', expect.objectContaining({ commitSha: 'b'.repeat(40) }));
+  });
+
+  test('never auto-merges a PR opened before the reader check existed', async () => {
+    openTasks([{ id: 't0', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-v1', source_file: 'src/content/blog/a.md', target_url: '/termite-inspection/' }]);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'pre_judge_pr' });
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
   });
 
   test('holds when main moves between the check and the merge', async () => {
