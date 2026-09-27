@@ -46,7 +46,7 @@ test.each([false, true])('scheduled replay uses trusted row identities and regis
     sendCustomerMessage,
     dispatchScheduledSms,
     SCHEDULED_SMS_MAX_ATTEMPTS: 3,
-    require: () => ({ ...noInvoiceHandoffs, deferredSmsHandoff: () => undefined, dispatchDeferredReplay }),
+    require: () => ({ ...noInvoiceHandoffs, deferredSmsHandoff: () => undefined, deferredProviderPreSendCheck: () => undefined, dispatchDeferredReplay }),
   });
   expect(dispatchScheduledSms).toHaveBeenCalledWith(expect.objectContaining({ id: 'queue-row' }),
     expect.objectContaining({ entry_point: 'fixture' }), expect.any(Function), 'appointment', 3);
@@ -64,6 +64,28 @@ test.each([false, true])('scheduled replay uses trusted row identities and regis
   }
 });
 
+test('a replay carries its entry\'s provider-boundary predicate into the send (the voicemail quote link\'s holds)', async () => {
+  const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+  const start = source.indexOf('const sendReplay = () => {');
+  const end = source.indexOf('if (smsResult.scheduledHold) continue;', start);
+  const sendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+  const boundaryCheck = jest.fn();
+  const deferredProviderPreSendCheck = jest.fn(() => boundaryCheck);
+  await require('vm').runInNewContext(`(async () => { ${source.slice(start, end)} return smsResult; })()`, {
+    msg: { id: 'queue-row', customer_id: null, to_phone: '+19415550101', message_body: 'Quote link', message_type: 'voicemail_quote_link' },
+    claimMeta: { entry_point: 'voicemail_lead_sms_deferred', lead_id: 'lead-1', voicemail_phone: '+19415550101' },
+    toPhone: '+19415550101', purpose: 'missed_call_followup', replayConsentBasis: undefined,
+    sendCustomerMessage,
+    dispatchScheduledSms: jest.fn(async (_msg, _meta, send) => send()),
+    SCHEDULED_SMS_MAX_ATTEMPTS: 3,
+    require: () => ({ ...noInvoiceHandoffs, deferredSmsHandoff: () => undefined, deferredProviderPreSendCheck, dispatchDeferredReplay: (_e, _m, fallback) => fallback() }),
+  });
+  expect(deferredProviderPreSendCheck).toHaveBeenCalledWith('voicemail_lead_sms_deferred', expect.objectContaining({
+    lead_id: 'lead-1', voicemail_phone: '+19415550101', to_phone: '+19415550101',
+  }));
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ providerPreSendCheck: boundaryCheck, entryPoint: 'scheduled_sms_cron' }));
+});
+
 test('a deferred billing notice replays with its delivery category and Email-sidecar marker', async () => {
   const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
   const start = source.indexOf('const sendReplay = () => {');
@@ -78,7 +100,7 @@ test('a deferred billing notice replays with its delivery category and Email-sid
     dispatchScheduledSms: jest.fn(async (_msg, _meta, send) => send()),
     SCHEDULED_SMS_MAX_ATTEMPTS: 3,
     Array,
-    require: () => ({ ...noInvoiceHandoffs, deferredSmsHandoff: () => undefined, dispatchDeferredReplay: (_e, _m, fallback) => fallback() }),
+    require: () => ({ ...noInvoiceHandoffs, deferredSmsHandoff: () => undefined, deferredProviderPreSendCheck: () => undefined, dispatchDeferredReplay: (_e, _m, fallback) => fallback() }),
   });
   expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
     hasEmailLeg: true, invoiceId: 'inv-1',
@@ -106,7 +128,7 @@ test('a queued invoice notice replays with the registry\'s invoice handoffs, bou
     dispatchScheduledSms: jest.fn(async (_msg, _meta, send) => send()),
     SCHEDULED_SMS_MAX_ATTEMPTS: 3,
     require: () => ({ deferredSmsHandoff: () => undefined, deferredProviderHandoff, deferredBillingEmailPreSendCheck,
-      dispatchDeferredReplay: (_e, _m, fallback) => fallback() }),
+      deferredProviderPreSendCheck: () => undefined, dispatchDeferredReplay: (_e, _m, fallback) => fallback() }),
   });
   const rowMeta = expect.objectContaining({ invoice_id: 'inv-1', customer_id: 'cust-1', to_phone: '+19415550101' });
   expect(deferredProviderHandoff).toHaveBeenCalledWith('invoice_send_deferred', rowMeta);
@@ -139,7 +161,7 @@ test('scheduled completion sends the body after the review guard strips its bund
     claimMeta: { entry_point: 'dispatch_completion_deferred', bundled_review_request_id: 'review-1' },
     toPhone: 'fixture-phone', purpose: 'service_complete', replayConsentBasis: undefined,
     sendCustomerMessage, dispatchScheduledSms, SCHEDULED_SMS_MAX_ATTEMPTS: 3,
-    require: () => ({ ...noInvoiceHandoffs, deferredSmsHandoff: () => undefined, dispatchDeferredReplay }),
+    require: () => ({ ...noInvoiceHandoffs, deferredSmsHandoff: () => undefined, deferredProviderPreSendCheck: () => undefined, dispatchDeferredReplay }),
   });
   expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
     body: completion,
