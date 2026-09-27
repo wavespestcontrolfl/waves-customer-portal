@@ -287,7 +287,9 @@ function textBesideMentions(turn, idx, refs, from = 0) {
 // at two, yes; I have an appointment at four"); one naming only other times
 // is read whole, and that time is a counter-proposal ("How about three?").
 // A reply to talk of another time ("You don't want to do 8?" — "No") is not
-// a reply to the slot. The caller's own turn first naming it counts too
+// a reply to the slot. The reply completing the slot counts ("That won't
+// work. Thursday at two is when I have another appointment."), and so does
+// the caller's own turn first naming it
 // ("I cannot make it Thursday at two"), less a leading "no" that answers
 // what came before the slot was on the table ("Friday?" — "No, Thursday at
 // two").
@@ -298,7 +300,7 @@ function callerRepliesToSlot(turns, refs, slot, runStart, anchorIdx) {
     && !talksOtherTime(textBesideMentions(turns[idx], idx, refs), slot.hour24);
   const replies = !turns[runStart].agent && runStart < anchorIdx
     ? [textBesideMentions(turns[runStart], runStart, refs).replace(/^(?:no|nope|nah)\b/, '')] : [];
-  for (let idx = runStart + 1; idx < anchorIdx; idx += 1) {
+  for (let idx = runStart + 1; idx <= anchorIdx; idx += 1) {
     let prev = idx - 1;
     while (prev >= 0 && !talksAboutTime(prev)) prev -= 1;
     if (turns[idx].agent || prev < 0 || !onlySlot(prev)) continue;

@@ -326,6 +326,8 @@ describe('rescheduleAgreementEvidence', () => {
     expect(evidence('Caller: If my husband agrees, Thursday at two.\nAgent: I will put you down.').ok).toBe(false);
     expect(evidence('Caller: Can we do Thursday at two?\nAgent: I will put you down.\nCaller: Only if my husband agrees.').ok).toBe(false);
     expect(evidence('Caller: If you could come Thursday at two, that would be great.\nAgent: I will put you down.').ok).toBe(true);
+    // The reply completing the slot can refuse it too.
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: That won\'t work. Thursday at two is when I have another appointment.\nAgent: I will put you down.').ok).toBe(false);
     // An objection to the day stands before the hour is named.
     expect(evidence('Agent: Would Thursday work?\nCaller: No, I cannot make it.\nAgent: Okay, we will see you Thursday at two.').ok).toBe(false);
     expect(evidence('Agent: Would Thursday work?\nCaller: Yes.\nAgent: Okay, we will see you Thursday at two.').ok).toBe(true);
