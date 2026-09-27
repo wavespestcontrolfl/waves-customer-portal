@@ -316,3 +316,30 @@ it('retains Wasp service but clears all previous nest scope on the next estimate
   expect(screen.getByLabelText('Access height')).toHaveValue('GROUND');
   expect(screen.getByLabelText('Confined space')).toHaveValue('NO');
 });
+
+describe('tree & shrub large palms', () => {
+  async function treeShrubWithLookup() {
+    renderEditor();
+    selectService('Tree & Shrub');
+    lookUp();
+    await waitFor(() => expect(screen.getByLabelText('Palms on property')).toHaveValue(12));
+  }
+
+  it('sends the large palms with the palm count and keeps them in the saved inputs', async () => {
+    await treeShrubWithLookup();
+    change('Palms on property', '6');
+    change('Large palms (canopy over ~15 ft)', '2');
+    const saved = await generateAndSave();
+    expect(lastBody('/calculate-estimate').profile).toMatchObject({ palmCount: 6, largePalmCount: 2 });
+    expect(saved.estimateData.inputs).toMatchObject({ palmCount: '6', largePalmCount: '2' });
+  });
+
+  it('refuses more large palms than palms before any pricing request', async () => {
+    await treeShrubWithLookup();
+    change('Palms on property', '2');
+    change('Large palms (canopy over ~15 ft)', '3');
+    fireEvent.click(screen.getByRole('button', { name: 'Generate Estimate', exact: true }));
+    await waitFor(() => expect(window.alert).toHaveBeenCalledWith('Large palms must be a whole number no greater than the palm count.'));
+    expect(callsTo('/calculate-estimate')).toHaveLength(0);
+  });
+});

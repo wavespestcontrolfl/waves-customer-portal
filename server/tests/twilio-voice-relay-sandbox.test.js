@@ -259,7 +259,7 @@ describe('POST /relay-sandbox', () => {
       expect(alertTwilioFailure.mock.calls.map((c) => c[0].errorMessage)).toEqual([]); // the handler must not have thrown
       expect(insert).toHaveBeenCalledWith(expect.objectContaining({ twilio_call_sid: 'CA-sb-status', source: VOICE_RELAY_SANDBOX_SOURCE, status: 'completed' }));
       expect(insert.mock.calls[0][0].customer_id).toBeUndefined();
-      expect(JSON.parse(insert.mock.calls[0][0].metadata)).toEqual({ relay_sandbox: true, source: 'status_callback' });
+      expect(JSON.parse(insert.mock.calls[0][0].metadata)).toEqual({ relay_sandbox: true, source: 'status_callback', inserted_on_status: 'completed' });
       expect(recordTouchpoint).not.toHaveBeenCalled();
       jest.runAllTimers();
       await Promise.resolve();

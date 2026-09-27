@@ -9,6 +9,7 @@ const DEFAULT_HOME_SQFT = 2000;
 const DEFAULT_LOT_SQFT = 8000;
 
 const { generateEstimate } = require('./pricing-engine');
+const { withTrustedCatalogPricing } = require('./pricing-engine/trusted-catalog-pricing');
 const {
   unitScopeGuardrailsEnabled,
   hasPrimaryStreetNumber,
@@ -346,6 +347,7 @@ function rodentEligibilityFreeze(item = {}) {
 }
 
 function compactLineItem(item = {}) {
+  const isRodentTrapping = String(item?.service || '').toLowerCase() === 'rodent_trapping';
   return {
     service: item.service,
     name: item.name || item.label || item.displayName,
@@ -406,6 +408,18 @@ function compactLineItem(item = {}) {
     perApplicationBilled: item.perApplicationBilled === true ? true : undefined,
     stations: Number(item.stations) > 0 ? Number(item.stations) : undefined,
     pricingBasis: item.pricingBasis ?? undefined,
+    // A generated lead draft is persisted directly and its engine input is
+    // nested under automation, so the public replay path cannot reconstruct
+    // trapping scope from that input. Keep the finite allowance on the saved
+    // trapping row itself; older rows without these fields intentionally retain
+    // the legacy open-ended copy. Scope these fields to trapping so every other
+    // one-time row keeps its existing wire shape.
+    ...(isRodentTrapping ? {
+      includedFollowUps: item.includedFollowUps,
+      includedCallbacks: item.includedCallbacks,
+      unlimitedCallbacks: item.unlimitedCallbacks,
+      additionalCheckPrice: item.additionalCheckPrice,
+    } : {}),
     // The rodent row's LIVE eligibility posture at generation (codex #3591
     // r23 P1): a draft generated with tier_qualifier off / the % exclusion
     // on must keep reading that way when viewed or accepted later, never be
@@ -441,7 +455,7 @@ function mapServiceKeyToEstimateServices(serviceKey, { instant = null } = {}) {
   return { services, supported: true, unsupportedReason: null, review: [] };
 }
 
-function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, body = {}, readiness = {} } = {}) {
+async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, body = {}, readiness = {} } = {}) {
   const serviceInterest = firstNonEmpty(readiness.serviceInterest, intake.serviceInterest, customer.service_interest);
   const serviceKey = readiness.serviceKey || null;
   // A key that was submitted but never verified (catalog read failed, or not
@@ -475,10 +489,19 @@ function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, body = {}
 
   const engineInput = buildLeadEngineInput({ intake, customer, body, services: mapped.services });
   automation.review.push(...engineInput.review);
+  // Persist the reproducible business inputs only. catalogPricing remains a
+  // transient server-owned overlay and is frozen into the generated line's
+  // pricing witnesses below, never into a replayable client-visible input.
   automation.engineInput = engineInput.input;
 
   try {
-    const estimate = generateEstimate(engineInput.input);
+    // This draft is a pricing authority of its own: it is saved immediately,
+    // and its engine input lives below automation.draftEstimateAutomation rather
+    // than on the public replay path. Read catalog pricing at this boundary so
+    // another process's admin edit cannot leave a newly saved trapping draft on
+    // this process's 60-second singleton value.
+    const trustedInput = await withTrustedCatalogPricing(engineInput.input);
+    const estimate = generateEstimate(trustedInput);
     const manualQuoteLines = (estimate?.lineItems || []).filter(lineRequiresReview);
     const quoteRequired = manualQuoteLines.length > 0;
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);

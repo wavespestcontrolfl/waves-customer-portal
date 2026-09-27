@@ -1412,11 +1412,41 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityNamedSources({ body: 'Use an EPA-registered product. We follow FDACS licensing.' }).ok).toBe(false);
   });
 
+  test('named_sources: a generic head noun never counts, whatever adjectives precede it (Codex P2)', () => {
+    for (const source of ['Leading Experts', 'Trusted Industry Research', 'Renowned Florida Entomologists', 'Recent Studies', 'the University']) {
+      expect(checkCitabilityNamedSources({ body: `According to ${source}, ants are common.` }).ok).toBe(false);
+    }
+    // A phrase that names its institution still counts.
+    expect(checkCitabilityNamedSources({ body: 'According to Department of Agriculture Researchers, ticks spread.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to the National Pest Management Association, bed bugs spread.' }).ok).toBe(true);
+  });
+
+  test('named_sources: our own company never counts behind an article or "our" (Codex P2)', () => {
+    for (const source of ['The Waves Pest Control', 'THE WAVES PEST CONTROL', 'Our Technicians']) {
+      expect(checkCitabilityNamedSources({ body: `According to ${source}, ants are common.` }).ok).toBe(false);
+    }
+  });
+
+  test('named_sources: rate labels and Title-Case headings are not attribution', () => {
+    expect(checkCitabilityNamedSources({ body: '**Cost per Visit:** it depends on the home.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'Priced per Service Visit, not per hour.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: '## Termite Treatment Cost per Linear Foot\nWood is at risk.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: '## Research by Region\nWood is at risk.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'Per the Florida Forest Service, pine beetles spread in drought.' }).ok).toBe(true);
+  });
+
   test('concrete_specifics counts numbers with units, ignores dollars, years, and bare counts', () => {
     expect(countConcreteSpecifics('Mow St. Augustine at 3.5–4 inches and water 1/2 inch per week; wait 10-14 days between applications.')).toBe(3);
     expect(countConcreteSpecifics('It costs $120 and we were founded in 2024; here are 3 ways.')).toBe(0);
     // '%' is not a word char, so a trailing \b after it never matched (fallback auditor P2, 2026-09-25).
     expect(countConcreteSpecifics('Chinch bug damage covered 20% of the lawn and 35 % of the swale.')).toBe(2);
+  });
+
+  test('concrete_specifics counts calendar windows — the prompt\'s own example (Codex P2)', () => {
+    expect(countConcreteSpecifics('Mosquito season runs June 1 – Sept 30.')).toBe(1);
+    expect(countConcreteSpecifics('Treat March through October; swarms peak May 10–25.')).toBe(2);
+    expect(countConcreteSpecifics('You may want to wait. Marco went to Juneau.')).toBe(0);
+    expect(checkCitabilityConcreteSpecifics({ body: 'Mosquitoes peak June 1 – Sept 30, so wait a few weeks after rain.' }).ok).toBe(true);
   });
 
   test('concrete_specifics is not a quota: one supported number passes, a vague stand-in with none fails', () => {
@@ -1567,6 +1597,7 @@ describe('citability checks read rendered Markdown only (Codex r8 P2)', () => {
     expect(checkCitabilityComparison({ title, body: '```mdx\n<ComparisonTable columns={[]} rows={[]} />\n```' }).ok).toBe(false);
     expect(checkCitabilityComparison({ title, body: '{/* <ComparisonTable columns={[]} rows={[]} /> */}' }).ok).toBe(false);
     expect(checkCitabilityComparison({ title, body: '<!-- <ComparisonTable columns={[]} rows={[]} /> -->' }).ok).toBe(false);
+    expect(checkCitabilityComparison({ title, body: 'Compare both. <!-- <ComparisonTable columns={[]} rows={[]} /> -->' }).ok).toBe(false);
     expect(checkCitabilityComparison({ title, body: '<ComparisonTable columns={[]} rows={[]} />' }).ok).toBe(true);
   });
   test('fenced how-to headings/bullets and commented attributions do not count', () => {

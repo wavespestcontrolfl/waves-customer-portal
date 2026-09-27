@@ -789,10 +789,22 @@ async function updateService(id, data, { audit } = {}) {
 // without waiting for the 10-minute refresh. Fire-and-forget: the write is
 // already committed, so the admin response never waits on (or fails from)
 // a display-cache query (codex P1).
-function refreshAfterCatalogWrite(row) {
+//
+// The additional trap-check catalog price also feeds customer estimate copy.
+// Wait for that one bridge refresh before acknowledging the admin write so a
+// quote created immediately afterward cannot snapshot the previous price.
+async function refreshAfterCatalogWrite(row) {
   refreshCatalogNames().catch((err) => {
     logger.error(`[service-library] catalog-name cache refresh failed: ${err.message}`);
   });
+  if (row?.service_key === 'rodent_trap_check_additional') {
+    const bridge = require('./pricing-engine/db-bridge');
+    bridge.invalidatePricingConfigCache();
+    const synced = await bridge.syncConstantsFromDB(db);
+    if (!synced) {
+      logger.error('[service-library] rodent extra-check pricing bridge refresh failed');
+    }
+  }
   return row;
 }
 
@@ -828,7 +840,7 @@ async function deactivateService(id, { audit } = {}) {
     const [row] = await trx('services').where({ id }).update({ is_active: false, is_archived: true, updated_at: new Date() }).returning('*');
     if (row) await writeCatalogAudit('archive', { before, after: row, references, audit, trx });
     return row;
-  });
+  }).then(refreshAfterCatalogWrite);
 }
 
 /**

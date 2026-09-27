@@ -24,11 +24,18 @@ const withGate = (value, fn) => {
   const prev = process.env.GATE_UNIT_SCOPE_GUARDRAILS;
   if (value === undefined) delete process.env.GATE_UNIT_SCOPE_GUARDRAILS;
   else process.env.GATE_UNIT_SCOPE_GUARDRAILS = value;
-  try {
-    return fn();
-  } finally {
+  const restore = () => {
     if (prev === undefined) delete process.env.GATE_UNIT_SCOPE_GUARDRAILS;
     else process.env.GATE_UNIT_SCOPE_GUARDRAILS = prev;
+  };
+  try {
+    const result = fn();
+    if (result && typeof result.finally === 'function') return result.finally(restore);
+    restore();
+    return result;
+  } catch (error) {
+    restore();
+    throw error;
   }
 };
 
@@ -1041,9 +1048,9 @@ describe('lead webhook engine-input property type', () => {
     body: {},
     readiness: { ready: true, serviceInterest: 'Pest Control' },
   };
-  test('gate ON: defaults to unknown with a review marker AND parks the draft', () => {
-    withGate('true', () => {
-      const { automation } = buildAutomatedLeadDraftEstimate(args);
+  test('gate ON: defaults to unknown with a review marker AND parks the draft', async () => {
+    await withGate('true', async () => {
+      const { automation } = await buildAutomatedLeadDraftEstimate(args);
       expect(automation.engineInput.propertyType).toBe('unknown');
       expect(automation.review).toContain('property_type_unresolved');
       // The marker must change the status — a review string alone left the
@@ -1053,9 +1060,9 @@ describe('lead webhook engine-input property type', () => {
       expect(automation.generated).toBe(false);
     });
   });
-  test('gate ON: a supplied type the pricer silently defaults also parks', () => {
-    withGate('true', () => {
-      const { automation } = buildAutomatedLeadDraftEstimate({
+  test('gate ON: a supplied type the pricer silently defaults also parks', async () => {
+    await withGate('true', async () => {
+      const { automation } = await buildAutomatedLeadDraftEstimate({
         ...args,
         body: { propertyType: 'Apartment' },
       });
@@ -1063,9 +1070,9 @@ describe('lead webhook engine-input property type', () => {
       expect(automation.status).toBe('manual_review_required');
     });
   });
-  test('gate ON: a pricer-recognized type generates normally', () => {
-    withGate('true', () => {
-      const { automation } = buildAutomatedLeadDraftEstimate({
+  test('gate ON: a pricer-recognized type generates normally', async () => {
+    await withGate('true', async () => {
+      const { automation } = await buildAutomatedLeadDraftEstimate({
         ...args,
         body: { propertyType: 'condo_ground' },
       });
@@ -1073,9 +1080,9 @@ describe('lead webhook engine-input property type', () => {
       expect(automation.status).toBe('generated');
     });
   });
-  test('gate OFF: legacy Single Family default preserved', () => {
-    withGate(undefined, () => {
-      const { automation } = buildAutomatedLeadDraftEstimate(args);
+  test('gate OFF: legacy Single Family default preserved', async () => {
+    await withGate(undefined, async () => {
+      const { automation } = await buildAutomatedLeadDraftEstimate(args);
       expect(automation.engineInput.propertyType).toBe('Single Family');
       expect(automation.review).not.toContain('property_type_unresolved');
     });

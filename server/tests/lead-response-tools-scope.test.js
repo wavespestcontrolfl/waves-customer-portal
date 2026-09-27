@@ -84,6 +84,7 @@ mockDb.transaction = jest.fn(async callback => callback(mockDb));
 mockDb.raw = (sql, bindings) => ({ sql, bindings });
 jest.mock('../models/db', () => mockDb);
 const { executeLeadTool } = require('../services/lead-response-tools');
+const { LEAD_RESPONSE_AGENT_CONFIG } = require('../services/lead-response-agent-config');
 const context = { leadId: '00000000-0000-4000-8000-000000000001', customerId: '00000000-0000-4000-8000-000000000002', sessionId: 'session-1', toolUseId: 'tool-1' };
 beforeEach(() => {
   jest.clearAllMocks();
@@ -316,4 +317,35 @@ test.each(['SMS_OPTED_OUT', 'LEAD_SUBJECT_CHANGED'])('deterministic %s does not 
   expect(result.error).toBeUndefined();
   expect(result.failed).toBeUndefined();
   expect(mockPipeline).not.toHaveBeenCalled();
+});
+
+
+// Owner ruling 2026-09-26: customer texts are never signed.
+describe('lead texts carry no sign-off', () => {
+  test('the SMS actually sent is the stripped text, and the result hands that text back to the agent', async () => {
+    mockMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_fixture', auditLogId: 'audit-1' });
+    const result = await executeLeadTool('send_lead_response', { message: 'Ants are very treatable this time of year. Best,\nAdam' }, context);
+    // Stripped of its sign-off, then the first-touch opt-out line (#4915).
+    expect(mockMessage).toHaveBeenCalledWith(expect.objectContaining({ body: 'Ants are very treatable this time of year.\n\nReply STOP to opt out.' }));
+    expect(result).toMatchObject({ sent: true, message: 'Ants are very treatable this time of year.' });
+  });
+
+  test('the text handed back matches the pipeline-normalized body (curly quotes, URL scheme)', async () => {
+    mockMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_fixture', auditLogId: 'audit-1' });
+    const result = await executeLeadTool('send_lead_response', { message: 'We\u2019ll text you \u2014 see https://wavespestcontrol.com/ants' }, context);
+    expect(result.message).toBe("We'll text you - see wavespestcontrol.com/ants");
+  });
+
+  test('a message that is only a sign-off is refused before anything is sent', async () => {
+    expect(await executeLeadTool('send_lead_response', { message: '— Adam, Waves Pest Control' }, context))
+      .toMatchObject({ error: expect.any(String), validationError: true });
+    expect(mockMessage).not.toHaveBeenCalled();
+  });
+
+  test('the agent prompt forbids signing and the send tool no longer asks for it', () => {
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).not.toMatch(/always sign/i);
+    expect(LEAD_RESPONSE_AGENT_CONFIG.system).toMatch(/NO SIGNATURE: never sign/);
+    const sendTool = LEAD_RESPONSE_AGENT_CONFIG.tools.find(t => t.name === 'send_lead_response');
+    expect(sendTool.input_schema.properties.message.description).not.toMatch(/signed as/i);
+  });
 });

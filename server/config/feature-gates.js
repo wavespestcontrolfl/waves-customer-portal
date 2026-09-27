@@ -11,6 +11,7 @@
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
+ *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
  *   GATE_OUTBOUND_VOICEMAIL_SMS=true (admin click-to-call that hits the customer's voicemail hangs up and texts "sorry we missed you" instead)
@@ -2236,6 +2237,20 @@ const gates = {
   // would calibrate the estimator while logGateStatus reported it disabled.
   driveTimeCalibration: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION'),
 
+  // Schedule tie-proximity display order (owner ruling 2026-09-26) — when two
+  // stops on a tech's day start within 30 minutes of each other, the one
+  // closer to the previous stop shows first, instead of falling back to
+  // whichever was booked first. DISPLAY ONLY: server/services/schedule-tie-
+  // proximity.js returns a `displayOrder` per stop; nothing writes
+  // route_order or any other column, and no customer communication is sent.
+  // Uses the existing shared drive-time estimator (GATE_DRIVE_TIME_CALIBRATION
+  // governs which one) — no new Google API calls. Off (default in every
+  // environment) → the mobile day/week list and the desktop day board's route-
+  // order badge sort by window start alone, exactly as before this gate
+  // existed. Consumers read gateEnvValue() at CALL time, so a flip needs no
+  // redeploy. Kill switch: unset GATE_SCHEDULE_TIE_PROXIMITY.
+  scheduleTieProximity: gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY'),
+
   // Slot Travel Gap — the customer-facing pickers (estimate, one-tap, /book,
   // reschedule, re-service, voice, rain-out, AI assistant) and every commit
   // gate behind them require modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES
@@ -2701,6 +2716,12 @@ const gates = {
   // { available: false } and the completion screen keeps today's textareas.
   // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
   techTips: gateEnvValue('GATE_TECH_TIPS'),
+
+  // Searchable service-report completion vocabulary plus dated recommendations
+  // from the customer's previous three visits on the same service line. Dark
+  // by default and independent of GATE_TECH_TIPS. The dispatch route reads the
+  // env at request time through gateEnvValue so unsetting it is a live kill.
+  serviceReportCompletionChoices: gateEnvValue('GATE_SERVICE_REPORT_COMPLETION_CHOICES'),
 
   // Ops queue (2026-09-02): the Agents hub "Queue" tab — a read-only
   // projection of every long-running lane's persisted state (pending /

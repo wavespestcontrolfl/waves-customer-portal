@@ -59,6 +59,7 @@ import {
   setupIntentIncompleteMessage,
 } from '../../lib/stripeSetupActions';
 import SaveCardConsent from './SaveCardConsent';
+import { annualPrepayRenewalLine } from '../../lib/annualPrepayRenewal';
 import Icon from '../Icon';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import useModalFocus from '../../hooks/useModalFocus';
@@ -155,7 +156,12 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
 // the existing atomic workflow (choose/add → server repoints Auto Pay in
 // one transaction → old card untouched until then). onOpenRequestHandled
 // lets the parent clear the request so a later remount doesn't replay it.
-export default function AutopayCard({ onStateChange, openRequest = null, onOpenRequestHandled, embedded = false }) {
+// customer: the /me customer — its annualPrepay ({ termEnd, renewalDeclined,
+// awaitsInstallation, … }) drives the renewal copy, since billing_mode stays
+// 'annual_prepay' after the customer declines renewal.
+export default function AutopayCard({
+  onStateChange, openRequest = null, onOpenRequestHandled, embedded = false, customer,
+}) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -524,7 +530,8 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
               ? (perApplicationBilling
                 ? ['Auto Pay is on', 'Your saved payment method is charged after each application.']
                 : annualPrepayBilling
-                  ? ['Auto Pay is on', 'Your plan is prepaid; your saved method is used at renewal.']
+                  // Codex r2 P1: a declined plan won't renew — never promise a renewal charge.
+                  ? ['Auto Pay is on', annualPrepayRenewalLine(customer, formatDate, 'Your plan is prepaid; your saved method is used at renewal.')]
                   : perVisitBilling
                     ? ['Payment method saved', 'We send an invoice after each completed service.']
                     : monthlyUnpriced

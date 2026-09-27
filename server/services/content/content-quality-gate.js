@@ -1113,7 +1113,7 @@ function checkVoiceMatch(draft) {
 // ── citability nudges (supporting-blog, weight 0) ────────────────────
 //
 // Mirrors the writer prompt's CITABILITY section (same bracket codes). All
-// four are heuristics over the raw body: they detect the SHAPE of a citable
+// four are heuristics over the rendered body: they detect the SHAPE of a citable
 // post, never the truth of a claim — truth stays with the guardrails and the
 // evidence rules. Failing any of them only adds a nudge.
 
@@ -1174,29 +1174,62 @@ function renderedCitabilityBody(body) {
 // Service", "data from NOAA", "per Mote Marine Laboratory"): the writer
 // contract asks for the SPECIFIC authority the evidence came from, so the
 // hardcoded list above cannot be exhaustive (Codex P2, 2026-09-26). The
-// source must start with a capital; our own company never counts as the
-// authority behind a claim.
-const ATTRIBUTED_SOURCE_RE = /\b(?:[Aa]ccording to|[Pp]er|[Rr]eported by|[Pp]ublished by|[Dd]ata from|[Gg]uidance from|[Rr]esearch (?:from|by))\s+(?:the\s+)?([A-Z][\w&.'’-]*(?:\s+(?:of|for|and|&)?\s*[A-Z][\w&.'’-]*){0,6})/g;
-const OWN_COMPANY_RE = /^Waves\b/i;
-// Capitalization is not evidence that a source is specific. These generic
-// labels are common LLM attribution filler and must not satisfy the named-
-// source contract even when every word starts with a capital letter.
-const GENERIC_SOURCE_WORDS = new Set([
-  'and', 'authorities', 'authority', 'control', 'experts', 'expert', 'for', 'industry',
-  'local', 'of', 'officials', 'official', 'pest', 'professionals', 'professional',
-  'research', 'researchers', 'researcher', 'scientists', 'scientist', 'specialists',
-  'specialist', 'studies', 'study', 'the',
+// source must start with a capital.
+const ATTRIBUTED_SOURCE_RE = /\b([Aa]ccording to|[Pp]er|[Rr]eported by|[Pp]ublished by|[Dd]ata from|[Gg]uidance from|[Rr]esearch (?:from|by))\s+(?:the\s+)?([A-Z][\w&.'’-]*(?:\s+(?:of|for|and|&)?\s*[A-Z][\w&.'’-]*){0,6})/g;
+// "per" before a capitalized unit is a rate label, not a source
+// ("Cost per Linear Foot", "**Price per Visit**").
+const PER_UNIT_HEADS = new Set([
+  'acre', 'acres', 'application', 'applications', 'bag', 'bags', 'day', 'days', 'feet',
+  'foot', 'ft', 'gallon', 'gallons', 'home', 'homes', 'hour', 'hours', 'house', 'inch',
+  'inches', 'minute', 'minutes', 'month', 'months', 'ounce', 'ounces', 'pound', 'pounds',
+  'property', 'room', 'rooms', 'station', 'stations', 'trap', 'traps', 'treatment',
+  'treatments', 'unit', 'units', 'visit', 'visits', 'week', 'weeks', 'yard', 'yards',
+  'year', 'years',
 ]);
+// Our own company is never the authority behind a claim, however the phrase
+// is cased or introduced ("The Waves Pest Control", "Our Technicians").
+const OWN_SOURCE_RE = /^(?:waves|our|we|us)\b/i;
+// Capitalization is not evidence that a source is specific. Attribution
+// filler ends in a generic head noun whatever adjectives precede it
+// ("Leading Experts", "Trusted Industry Research") — unless the phrase names
+// its institution ("Department of Agriculture Researchers").
+const GENERIC_SOURCE_HEADS = new Set([
+  'agencies', 'analyst', 'analysts', 'authorities', 'authority', 'companies', 'company',
+  'control', 'data', 'entomologist', 'entomologists', 'evidence', 'expert', 'experts',
+  'exterminator', 'exterminators', 'findings', 'groups', 'homeowners', 'industry',
+  'institutions', 'official', 'officials', 'organizations', 'pest', 'professional',
+  'professionals', 'pros', 'report', 'reports', 'research', 'researcher', 'researchers',
+  'science', 'scientist', 'scientists', 'services', 'source', 'sources', 'specialist',
+  'specialists', 'statistics', 'studies', 'study', 'surveys', 'team', 'technician',
+  'technicians', 'universities',
+]);
+// A bare institution type names nobody ("according to the University").
+const BARE_INSTITUTION_TYPES = new Set([
+  'academy', 'agency', 'association', 'board', 'bureau', 'center', 'centre', 'clinic',
+  'college', 'commission', 'council', 'county', 'department', 'district', 'extension',
+  'government', 'hospital', 'institute', 'journal', 'lab', 'laboratory', 'magazine',
+  'ministry', 'museum', 'office', 'program', 'school', 'service', 'society', 'state',
+  'university',
+]);
+const NAMED_INSTITUTION_RE = /\b(?:academy|agency|association|board|bureau|center|centre|college|commission|council|department|division|institute|laboratory|ministry|museum|office|school|service|society|university)\s+(?:of|for)\s+[a-z]/i;
 
-function genericAttributedSource(source) {
-  const words = String(source || '').toLowerCase().match(/[a-z]+/g) || [];
-  return words.length > 0 && words.every((word) => GENERIC_SOURCE_WORDS.has(word));
+function namedAttributedSource(frame, raw) {
+  const source = String(raw || '').trim().replace(/^(?:the|a|an)\s+/i, '');
+  if (!source || OWN_SOURCE_RE.test(source)) return false;
+  const words = source.toLowerCase().replace(/['’]s\b/g, '').match(/[a-z]+/g) || [];
+  if (!words.length) return false;
+  const head = words[words.length - 1];
+  if (/^per$/i.test(frame) && PER_UNIT_HEADS.has(head)) return false;
+  if (words.length === 1 && BARE_INSTITUTION_TYPES.has(head)) return false;
+  return !GENERIC_SOURCE_HEADS.has(head) || NAMED_INSTITUTION_RE.test(source);
 }
 
+// Prose lines only: a Title-Case heading ("Research by Region") reads as a
+// proper noun to the capitalization test, and headings carry no attribution.
 function hasAttributedSource(body) {
-  for (const m of String(body || '').matchAll(ATTRIBUTED_SOURCE_RE)) {
-    const source = m[1].trim();
-    if (!OWN_COMPANY_RE.test(source) && !genericAttributedSource(source)) return true;
+  const prose = String(body || '').split('\n').filter((line) => !/^\s{0,3}#{1,6}\s/.test(line)).join('\n');
+  for (const m of prose.matchAll(ATTRIBUTED_SOURCE_RE)) {
+    if (namedAttributedSource(m[1], m[2])) return true;
   }
   return false;
 }
@@ -1226,12 +1259,24 @@ function checkCitabilityNamedSources(draft, brief) {
 // "10-14 days") count once.
 const CONCRETE_SPECIFIC_RE = /(?<![$\d.])\d+(?:\.\d+)?(?:\s?(?:-|–|to)\s?\d+(?:\.\d+)?)?\s?(?:%|(?:percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b)/gi;
 
+// Calendar windows ("June 1 – Sept 30", "March through October") are the
+// prompt's own example of a concrete specific (Codex P2, 2026-09-26).
+const MONTH = String.raw`(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?`;
+const DAY = String.raw`\d{1,2}(?:st|nd|rd|th)?`;
+const THROUGH = String.raw`\s*(?:-|–|—|to|through|until)\s*`;
+const CALENDAR_WINDOW_RE = new RegExp(
+  String.raw`\b${MONTH}(?:\s+${DAY})?${THROUGH}${MONTH}(?:\s+${DAY})?(?!\w)`
+  + String.raw`|\b${MONTH}\s+${DAY}${THROUGH}${DAY}\b`,
+  'g',
+);
+
 // Vague stand-ins for a measurement — the prompt's own examples ("tall",
 // "a couple of weeks", "deeply"). Softening is what the nudge targets.
 const VAGUE_QUALIFIER_RE = /\b(?:a (?:couple|few) (?:of )?(?:days|weeks|months|hours|inches|feet)|several (?:days|weeks|months|hours|inches)|(?:water|soak)(?:ing)? deeply|mow(?:ing)? (?:it )?(?:tall|high|short|low)|a while)\b/i;
 
 function countConcreteSpecifics(body) {
-  return (String(body || '').match(CONCRETE_SPECIFIC_RE) || []).length;
+  const text = String(body || '');
+  return (text.match(CONCRETE_SPECIFIC_RE) || []).length + (text.match(CALENDAR_WINDOW_RE) || []).length;
 }
 
 // NOT a count quota (Codex P2, 2026-09-26): a fixed minimum fired on every

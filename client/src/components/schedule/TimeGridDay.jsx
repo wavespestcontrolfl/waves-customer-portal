@@ -682,9 +682,17 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
         {showNowLine && <NowLine />}
         {(() => {
           const lanes = computeLanes(services);
+          // Tie-proximity display order (server, GATE_SCHEDULE_TIE_PROXIMITY):
+          // `services` here is already one technician's day, so a present
+          // `displayOrder` (a 0-based index the server computed by proximity
+          // for ties within 30 minutes) can be compared directly; absent
+          // (gate off) falls back to today's plain windowStart order.
           const orderedIds = [...services]
             .filter((s) => parseHHMM(s.windowStart) != null)
-            .sort((a, b) => (parseHHMM(a.windowStart) || 0) - (parseHHMM(b.windowStart) || 0))
+            .sort((a, b) => {
+              if (a.displayOrder != null && b.displayOrder != null) return a.displayOrder - b.displayOrder;
+              return (parseHHMM(a.windowStart) || 0) - (parseHHMM(b.windowStart) || 0);
+            })
             .map((s) => s.id);
           return services.map((svc) => {
             const startMin = parseHHMM(svc.windowStart);
