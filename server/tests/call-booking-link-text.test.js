@@ -32,6 +32,8 @@ const { isAmbiguousProviderOutcome } = require('../services/sms-auto-send');
 const {
   computeSendAt,
   stagingIneligibleReason,
+  outboundPriorContactMissing,
+  outboundStagingReason,
   dispatchClaimedCall,
   claimForDispatch,
   stage,
@@ -161,21 +163,64 @@ test('gate off: sweep never touches the database', async () => {
 
 // ── stage — a grace period before ever judging a fresh call ──────────────
 describe('stage', () => {
-  test('excludes calls newer than the staging grace period (codex pre-push P1: extraction can flip valid before lead linkage lands)', async () => {
+  function spyingConn() {
     const wheres = [];
+    const whereNulls = [];
     const conn = jest.fn(() => {
       const chain = {};
       ['where', 'orderBy', 'limit', 'select', 'whereRaw'].forEach((m) => {
         chain[m] = jest.fn((...args) => { if (m === 'where') wheres.push(args); return chain; });
       });
+      chain.whereNull = jest.fn((col) => { whereNulls.push(col); return chain; });
       chain.then = (resolve) => resolve([]);
       return chain;
     });
+    return { conn, wheres, whereNulls };
+  }
+
+  test('excludes a call still being processed', async () => {
+    const { conn, whereNulls } = spyingConn();
+    await stage(conn, { now: new Date('2026-09-26T18:00:00Z') });
+    expect(whereNulls).toContain('processing_token');
+  });
+
+  test('the grace period anchors on updated_at, not created_at (codex pre-push P1: created_at is fixed at ring time and can already be stale for a long call)', async () => {
+    const { conn, wheres } = spyingConn();
     const now = new Date('2026-09-26T18:00:00Z');
     await stage(conn, { now });
-    const graceWhere = wheres.find(([col, op]) => col === 'created_at' && op === '<=');
+    const graceWhere = wheres.find(([col, op]) => col === 'updated_at' && op === '<=');
     expect(graceWhere).toBeTruthy();
     expect(now.getTime() - graceWhere[2].getTime()).toBe(STAGING_GRACE_MINUTES * 60 * 1000);
+    expect(wheres.some(([col, op]) => col === 'created_at' && op === '<=')).toBe(false);
+  });
+});
+
+// ── outbound "return call" evidence ───────────────────────────────────────
+describe('outboundPriorContactMissing / outboundStagingReason', () => {
+  const callEnd = new Date('2026-09-26T18:00:00Z');
+  test('an inbound call never needs prior-contact evidence', () => {
+    expect(outboundPriorContactMissing({ direction: 'inbound', created_at: callEnd }, null)).toBe(false);
+  });
+  test('an outbound call to a lead that already existed (contacted us first) is fine', () => {
+    const lead = { first_contact_at: new Date('2026-09-20T12:00:00Z') };
+    expect(outboundPriorContactMissing({ direction: 'outbound', created_at: callEnd }, lead)).toBe(false);
+  });
+  test('an outbound call to a lead minted by this same call (or later) is not a return call', () => {
+    const mintedNow = { direction: 'outbound', created_at: callEnd };
+    expect(outboundPriorContactMissing(mintedNow, { first_contact_at: callEnd })).toBe(true);
+    expect(outboundPriorContactMissing(mintedNow, null)).toBe(true);
+  });
+  test('outboundStagingReason never queries the database for an inbound call', async () => {
+    const conn = jest.fn();
+    const reason = await outboundStagingReason(conn, { direction: 'inbound', created_at: callEnd }, 'lead-1');
+    expect(reason).toBeNull();
+    expect(conn).not.toHaveBeenCalled();
+  });
+  test('outboundStagingReason skips a genuinely cold outbound call', async () => {
+    const chain = { where: jest.fn(() => chain), first: jest.fn(async () => ({ first_contact_at: callEnd })) };
+    const conn = jest.fn(() => chain);
+    const reason = await outboundStagingReason(conn, { direction: 'outbound', created_at: callEnd }, 'lead-1');
+    expect(reason).toBe('outbound_without_prior_contact');
   });
 });
 
@@ -282,6 +327,21 @@ describe('dispatchClaimedCall', () => {
     const conn = makeDb({ lead: { ...OPEN_LEAD, is_commercial: true } });
     const result = await dispatchClaimedCall(conn, CALL, NOW);
     expect(result.skipped).toBe('commercial_lead');
+  });
+
+  test('a cold outbound call (no prior inbound contact) blocks the send', async () => {
+    const outboundCall = { ...CALL, direction: 'outbound' };
+    const conn = makeDb({ lead: { ...OPEN_LEAD, first_contact_at: outboundCall.created_at } });
+    const result = await dispatchClaimedCall(conn, outboundCall, NOW);
+    expect(result.skipped).toBe('outbound_without_prior_contact');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an outbound RETURN call (lead contacted us first) still sends', async () => {
+    const outboundCall = { ...CALL, direction: 'outbound' };
+    const conn = makeDb({ lead: { ...OPEN_LEAD, first_contact_at: new Date('2026-09-20T12:00:00Z') } });
+    const result = await dispatchClaimedCall(conn, outboundCall, NOW);
+    expect(result.sent).toBe(true);
   });
 
   test('booked since the call (any time after call end) blocks the send', async () => {

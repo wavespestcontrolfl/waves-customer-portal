@@ -78,9 +78,10 @@ const DISPATCH_BATCH = 50;
 // a call the INSTANT extraction is marked valid can catch it between those
 // two writes and stamp a permanent 'no_lead_linkage' for a lead that exists
 // moments later, with no retry (the metadata key itself is what stops a
-// second look). Waiting this long after the call's own created_at before
-// staging it at all is far cheaper than a retry/defer scheme, and costs
-// nothing against the 2-hour minimum delay this lane already imposes.
+// second look). Waiting this long after the row's own LAST WRITE
+// (updated_at — see stage()'s query) before staging it at all is far
+// cheaper than a retry/defer scheme, and costs nothing against the 2-hour
+// minimum delay this lane already imposes.
 const STAGING_GRACE_MINUTES = 15;
 
 // A call that ends without at least this much talk time is a hang-up, a
@@ -160,6 +161,28 @@ function extractionOf(call) {
 // sibling metadata key another writer set on the same call_log row.
 function metadataPatch(conn, value) {
   return conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [METADATA_KEY]: value })]);
+}
+
+// "an outbound return call to someone who contacted us first" (owner rule)
+// means the lead's OWN record already existed before THIS outbound call was
+// placed — an earlier inbound contact created it. A cold outbound call that
+// itself minted the lead (or one created after) is not a return call,
+// whatever the transcript's content classifies as (codex pre-push P1: the
+// V2 call_nature classifier judges the CONVERSATION, not who called whom
+// first, so a cold outbound pitch a caller responds to warmly can still
+// read as 'new_lead'). Shared by staging (its own lead fetch) and dispatch
+// (reusing the lead row it already fetched for other checks) so the two
+// never apply a different standard.
+function outboundPriorContactMissing(call, lead) {
+  if (!String(call.direction || '').startsWith('outbound')) return false;
+  const firstContact = lead?.first_contact_at || lead?.created_at;
+  return !firstContact || new Date(firstContact).getTime() >= new Date(call.created_at).getTime();
+}
+
+async function outboundStagingReason(conn, call, leadId) {
+  if (!String(call.direction || '').startsWith('outbound')) return null;
+  const lead = leadId ? await conn('leads').where({ id: leadId }).first('first_contact_at', 'created_at') : null;
+  return outboundPriorContactMissing(call, lead) ? 'outbound_without_prior_contact' : null;
 }
 
 // The 2-hour-after / 8am-ET-next-morning rule. A call ending at/after 6 PM
@@ -249,7 +272,17 @@ async function stage(conn = db, { now = new Date() } = {}) {
   const calls = await conn('call_log')
     .where('v2_extraction_status', 'valid')
     .where('created_at', '>=', cutoff)
-    .where('created_at', '<=', readyBy)
+    // The processor's own ownership fence (reschedule-link-promises.js's
+    // identical call_not_ready check) — never judge a row still being
+    // written. And the grace window anchors on `updated_at`, not
+    // `created_at` (codex pre-push P1): created_at is fixed at ring time,
+    // so for a long call or delayed extraction it can already be well past
+    // the grace window the MOMENT v2_extraction_status flips valid, while a
+    // separate lead-linkage write still lands after. `updated_at` moves with
+    // every write to the row, including that one, so the grace period keeps
+    // re-arming until the row has genuinely gone quiet.
+    .whereNull('processing_token')
+    .where('updated_at', '<=', readyBy)
     .whereRaw("metadata->:key IS NULL", { key: METADATA_KEY })
     .orderBy('created_at', 'asc')
     .limit(STAGING_BATCH)
@@ -275,7 +308,7 @@ async function stage(conn = db, { now = new Date() } = {}) {
 async function stageOne(conn, call, now) {
   const leadId = leadIdOf(call);
   const extraction = extractionOf(call);
-  const reason = stagingIneligibleReason(call, extraction, leadId);
+  const reason = stagingIneligibleReason(call, extraction, leadId) || (await outboundStagingReason(conn, call, leadId));
   const staged_at = now.toISOString();
   if (reason) {
     await claimMetadata(conn, call.id, { status: 'skipped', reason, staged_at });
@@ -374,6 +407,7 @@ const DISPATCH_CHECKS = [
   ({ lead }) => (lead.estimate_id ? 'estimate_linked' : null),
   ({ lead }) => (lead.is_commercial === true ? 'commercial_lead' : null),
   ({ lead }) => (!lead.phone || !isUsPhone(lead.phone) ? 'lead_phone_unusable' : null),
+  ({ call, lead }) => (outboundPriorContactMissing(call, lead) ? 'outbound_without_prior_contact' : null),
   async ({ conn, call, lead }) => {
     const callEnd = callEndedAt(call) || new Date(call.created_at);
     return (await bookedSinceCall(conn, lead.customer_id, callEnd)) ? 'booked_since_call' : null;
@@ -511,6 +545,8 @@ module.exports = {
   MIN_CONVERSATION_SECONDS,
   computeSendAt,
   stagingIneligibleReason,
+  outboundPriorContactMissing,
+  outboundStagingReason,
   stage,
   stageOne,
   claimForDispatch,
