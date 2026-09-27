@@ -1404,17 +1404,21 @@ async function moveStopsToDay(input, actionContext = {}) {
         throw Object.assign(new Error('move_set_changed'), { code: 'MOVE_SET_CHANGED', stopId: s.id });
       }
       c.committedTechId = committedRows[0]?.technician_id || null;
-      // Same-trip first-application resplit chokepoint (Codex #5021 P1): this
-      // batch mover writes scheduled_date directly and never called it — a
-      // moved member of a same-day combined first-application invoice would
-      // silently keep auto-charging the FULL combined total on the
-      // invoice-holding row while this row's own (unpriced) share billed
-      // nothing. Runs in its own savepoint off this trx (the "safely"
-      // wrapper) — a failure inside it never poisons this batch's commit.
-      if (c.observedDate !== dateStr) {
-        await require('../first-application-sibling-split')
-          .reconcileFirstApplicationSplitOnDateChangeSafely(trx, s.id, 'intelligence-bar batch move');
-      }
+    }
+    // Same-trip first-application resplit chokepoint (Codex #5021 P1 +
+    // pre-push round-2 P1): this batch mover writes scheduled_date directly
+    // and never called it. Deferred until EVERY row in this batch has
+    // committed its date write — a batch that moves BOTH siblings of a
+    // combined invoice to the SAME new day must never see one already
+    // moved and the other still on its old day mid-loop (that transient
+    // divergence would permanently split an invoice two rows that end up
+    // sharing a date). Runs in its own savepoint off this trx per row (the
+    // "safely" wrapper) — a failure inside it never poisons this batch's
+    // commit.
+    for (const c of classified) {
+      if (c.observedDate === dateStr) continue;
+      await require('../first-application-sibling-split')
+        .reconcileFirstApplicationSplitOnDateChangeSafely(trx, c.s.id, 'intelligence-bar batch move');
     }
     return overlappedIds;
   });

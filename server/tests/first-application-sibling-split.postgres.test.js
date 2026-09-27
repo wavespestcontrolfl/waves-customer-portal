@@ -489,6 +489,59 @@ suite('first-application-sibling-split — same-trip resplit on date change', ()
     expect(alerts.length).toBe(0);
   }));
 
+  test('every diverging sibling declined individually (no anchored share) raises the billing-review alert too, not just a whole-invoice decline', () => rollbackTest(async (trx) => {
+    // lawnSplit: 0 → anchoredSplitPerVisit returns null (amount > 0 is
+    // false) — the ONLY diverging sibling can never be allocated a price.
+    const ids = await fixture(trx, { lawnSplit: 0 });
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const result = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('skipped');
+    expect(result.reason).toBe('ineligible_siblings');
+    expect(result.declines).toEqual([{ id: ids.lawnId, reason: 'no_anchored_split' }]);
+
+    // Codex pre-push round-2 P1: this is a real money gap (the invoice
+    // still bills its full combined total while this sibling stays
+    // unpriced) — it must alert, not just log.
+    const alerts = await trx('notifications')
+      .where({ recipient_type: 'admin', category: 'billing' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`first_application_split_declined:${ids.invoiceId}`]);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0].body).toMatch(/could not be priced/i);
+    const state = await readState(trx, ids);
+    expect(state.lawn.estimated_price).toBeNull();
+    expect(Number(state.invoice.total)).toBe(153.6);
+  }));
+
+  test('a PARTIAL split (one sibling splits cleanly, another has no anchored share) still raises the billing-review alert for the declined one', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    // A third member of the same estimate/customer accept group — diverges
+    // off-date like lawn, but was never stamped an anchored split.
+    const termiteId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: termiteId, customer_id: ids.customerId, source_estimate_id: ids.estimateId, scheduled_date: '2026-10-03',
+      service_type: 'Termite', status: 'confirmed', is_recurring: true, estimated_price: null,
+    });
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const result = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('split');
+    expect(result.declines).toEqual([{ id: termiteId, reason: 'no_anchored_split' }]);
+
+    // The invoice WAS correctly reduced for lawn's own share — but termite
+    // is now unpriced AND uncovered by anything (the invoice no longer
+    // carries termite's share either). Same durable alert as a whole
+    // decline (Codex pre-push round-2 P1).
+    const alerts = await trx('notifications')
+      .where({ recipient_type: 'admin', category: 'billing' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`first_application_split_declined:${ids.invoiceId}`]);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0].body).toMatch(/could not be priced/i);
+
+    const state = await readState(trx, ids);
+    expect(Number(state.lawn.estimated_price)).toBe(56.4);
+    const termite = await trx('scheduled_services').where({ id: termiteId }).first();
+    expect(termite.estimated_price).toBeNull();
+  }));
+
   test('a non-anchor (recurring child) row moving is a no-op — only top-of-series rows are resplit candidates', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     const childId = randomUUID();

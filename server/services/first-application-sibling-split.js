@@ -133,23 +133,30 @@ function hasNegativeAdjustmentLine(lineItems) {
   });
 }
 
-// Durable billing-review alert for a DECLINED split (Codex P1, rebooker.js
-// :1750): a decline means the move committed but the shared invoice was NOT
-// reduced — the invoice-holding visit will still auto-charge the full
-// combined total at its own completion, while the moved sibling's own price
-// stays unset and bills nothing. That must not be a log line only. Reuses
-// the existing admin billing-review mechanism (notification-service's
-// notifyAdmin, category 'billing' — the same one complete-scheduled-service.js's
-// terminal-invoice / unminted-setup-fee manual-billing alerts use) rather
-// than inventing a new table. Runs in its OWN savepoint off the caller's
-// trx (mirrors the activity_log insert below) — a notification failure must
-// never poison the transaction that is otherwise a clean no-op decline.
-async function raiseDeclinedSplitAlert(trx, moved, invoice, reason) {
+// Durable billing-review alert for ANY outcome that leaves a diverging
+// sibling unpriced and uncovered — a whole-invoice decline (Codex P1,
+// rebooker.js :1750), every sibling in the batch declined individually
+// ('ineligible_siblings' — no anchored share, or the invoice's remaining
+// line couldn't cover its share), or a PARTIAL split where some siblings
+// split off cleanly but others did not (Codex pre-push round-2 P1: those
+// declined siblings are unpriced AND no longer covered by anything — the
+// invoice was already reduced for the siblings that DID split). None of
+// these may be a log line only. Reuses the existing admin billing-review
+// mechanism (notification-service's notifyAdmin, category 'billing' — the
+// same one complete-scheduled-service.js's terminal-invoice /
+// unminted-setup-fee manual-billing alerts use) rather than inventing a new
+// table. Runs in its OWN savepoint off the caller's trx (mirrors the
+// activity_log insert below) — a notification failure must never poison
+// the transaction that is otherwise a clean split or no-op decline.
+async function raiseDeclinedSplitAlert(trx, moved, invoice, reason, declines = []) {
   try {
+    const declineDetail = declines.length
+      ? ` Sibling visit(s) could not be priced: ${declines.map((d) => `${d.id} (${d.reason})`).join(', ')}.`
+      : '';
     await trx.transaction((logTrx) => require('./notification-service').notifyAdmin(
       'billing',
       'First-application invoice needs manual review — a same-trip visit moved days',
-      `Estimate #${moved.source_estimate_id}: a visit shared a first-application invoice (${invoice.invoice_number || invoice.id}) with a sibling that just moved to a different day, but the automatic split declined (${reason}). The invoice-holding visit will still bill the FULL combined amount at its own completion, and the moved sibling's price is unset — resolve the split manually (reduce this invoice and price the moved visit) before either visit completes.`,
+      `Estimate #${moved.source_estimate_id}: a visit shared a first-application invoice (${invoice.invoice_number || invoice.id}) with a sibling that just moved to a different day, but the automatic split declined (${reason}).${declineDetail} The invoice-holding visit will still bill the FULL combined amount at its own completion (or, for a partial split, its already-reduced amount), and the affected sibling's price is unset and now uncovered — resolve the split manually before either visit completes.`,
       {
         link: `/admin/invoices?invoice=${invoice.id}`,
         bell: true,
@@ -158,6 +165,7 @@ async function raiseDeclinedSplitAlert(trx, moved, invoice, reason) {
           invoiceId: invoice.id,
           movedScheduledServiceId: moved.id,
           reason,
+          ...(declines.length ? { declines } : {}),
         },
         dedupeKey: `first_application_split_declined:${invoice.id}`,
         refreshOnDedupe: true,
@@ -573,12 +581,15 @@ async function applySplitMutation(trx, classification) {
  * return) for rows that never touched an estimate accept.
  *
  * A DECLINED outcome (the invoice exists but is not safe to retotal — a
- * setup fee, a discount, an active payment plan, an in-flight charge...)
- * raises a durable billing-review bell (see raiseDeclinedSplitAlert) so the
- * office sees it — the move itself is never blocked; blocking would refuse a
- * legitimate reschedule over an invoice-level edge case unrelated to the
- * move itself, and every one of these states is rare and already staff-
- * visible on the invoice.
+ * setup fee, a discount, an active payment plan, an in-flight charge...),
+ * every diverging sibling declined individually ('ineligible_siblings' — no
+ * anchored share, or the invoice's remaining line couldn't cover its
+ * share), or a PARTIAL split (some siblings split cleanly, others did not)
+ * all raise the SAME durable billing-review bell (see raiseDeclinedSplitAlert)
+ * so the office sees it — the move itself is never blocked; blocking would
+ * refuse a legitimate reschedule over an invoice-level edge case unrelated
+ * to the move itself, and every one of these states is rare and already
+ * staff-visible on the invoice.
  *
  * @param {import('knex').Knex.Transaction} trx - the caller's OPEN transaction
  * @param {string} scheduledServiceId - the row whose date just changed (post-write id)
@@ -590,6 +601,13 @@ async function reconcileFirstApplicationSplitOnDateChange(trx, scheduledServiceI
     return { action: 'declined', reason: classification.reason, invoiceId: classification.invoice.id };
   }
   if (!classification.eligible) {
+    // 'ineligible_siblings' means at least one diverging unpriced sibling
+    // COULD NOT be allocated a price — a real money gap (Codex pre-push
+    // round-2 P1), never just logged: the invoice-holding row still bills
+    // its full uncollapsed amount while this sibling stays unpriced.
+    if (classification.reason === 'ineligible_siblings' && classification.declines?.length) {
+      await raiseDeclinedSplitAlert(trx, classification.moved, classification.invoice, classification.reason, classification.declines);
+    }
     // Narrow, JSON-safe result — never leak the full locked invoice/member
     // rows classifySplitEligibility carries internally to whatever caller
     // holds this (some await it without using it; none should ever need
@@ -602,7 +620,16 @@ async function reconcileFirstApplicationSplitOnDateChange(trx, scheduledServiceI
       ...(declines?.length ? { declines } : {}),
     };
   }
-  return applySplitMutation(trx, classification);
+  const result = await applySplitMutation(trx, classification);
+  // A PARTIAL split (some siblings split cleanly, others declined — no
+  // anchored share, or the remaining line couldn't cover their share)
+  // leaves those declined siblings unpriced AND now uncovered by anything:
+  // the invoice was already reduced for the ones that DID split off.
+  // Same durable alert as a whole-invoice decline (Codex pre-push round-2 P1).
+  if (result.action === 'split' && result.declines?.length) {
+    await raiseDeclinedSplitAlert(trx, classification.moved, classification.invoice, 'partial_split_ineligible_siblings', result.declines);
+  }
+  return result;
 }
 
 /**
