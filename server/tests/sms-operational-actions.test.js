@@ -1283,6 +1283,17 @@ describe('R2 payment evidence (owner ruling 2026-09-25): a payment receipt or pa
       'Did that payment method work?', 'Was this payment method charged?']) {
       expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(true);
     }
+    // Codex #4996 r2: a term the customer negates in its own clause is not the request.
+    for (const quote of ["Don't refund it; I only want to know whether my payment went through",
+      "I don't want to change my card, did the charge land?", 'I don’t want to change my card — did the charge land?',
+      "A refund isn't needed, did my payment go through?", 'No refund needed. Did you get my check?']) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description: 'Did the payment go through?', evidence: [{ quote }] })).toBe(true);
+    }
+    // A negation elsewhere in the sentence, "can't", or "haven't" leaves the request standing.
+    for (const quote of ['I did not authorize this charge, please refund it', 'No, I want a refund',
+      "I can't update my card online, can you do it?", "You haven't refunded me yet", 'Refund the extra charge not the whole invoice']) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description: 'Billing request', evidence: [{ quote }] })).toBe(false);
+    }
   });
 
   test('rule 6: a property-scoped ask needs the payment tied to that property; an unscoped ask admits any of the customer\'s own payments', () => {
@@ -1307,7 +1318,7 @@ describe('R2 payment evidence (owner ruling 2026-09-25): a payment receipt or pa
     expect(admissibleWitness(receiptSms, receiptAsk)).toBe(true);
     await verifySmsFulfillment(receiptAsk, { records: [receiptSms], failures: [] });
     const prompt = dispatchWithFallback.mock.calls.at(-1)[1].text;
-    expect(prompt).toContain('a delivered receipt text does answer a request for that receipt');
+    expect(prompt).toContain('a delivered receipt text or receipt email does answer a request for that receipt');
     expect(prompt).toContain('"witness_refs":["payment:sms-1"]');
   });
 

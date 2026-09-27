@@ -12,7 +12,9 @@
  * invoice it is a receipt for (invoices.scheduled_service_id) — a plain
  * payment-receipt SMS (InvoiceService.sendReceipt) carries no appointmentId
  * of its own, so without this a property-scoped settlement question could
- * never be answered by an ordinary receipt (Codex round 1 P2, #4996).
+ * never be answered by an ordinary receipt (Codex round 1 P2, #4996). With
+ * no visit at all, `estimateId` (a deposit receipt) stamps the estimate's
+ * property alone (Codex #4996 r2).
  *
  * Never throws: a failed lookup stamps the visit without a property (or
  * nothing at all), which cannot vouch for a property-scoped promise, and the
@@ -20,7 +22,7 @@
  */
 const db = require('../../models/db');
 
-async function noticeScope(appointmentId, { invoiceId, conn = db } = {}) {
+async function noticeScope(appointmentId, { invoiceId, estimateId, conn = db } = {}) {
   let visitId = appointmentId || null;
   if (!visitId && invoiceId) {
     try {
@@ -29,7 +31,7 @@ async function noticeScope(appointmentId, { invoiceId, conn = db } = {}) {
       visitId = null;
     }
   }
-  if (!visitId) return {};
+  if (!visitId) return estimateId ? estimateScope(estimateId, conn) : {};
   let propertyId = null;
   try {
     propertyId = (await conn('scheduled_services').where({ id: visitId }).first('property_id'))?.property_id || null;
@@ -37,6 +39,15 @@ async function noticeScope(appointmentId, { invoiceId, conn = db } = {}) {
     propertyId = null;
   }
   return { scheduled_service_id: String(visitId), ...(propertyId ? { property_id: String(propertyId) } : {}) };
+}
+
+async function estimateScope(estimateId, conn) {
+  try {
+    const propertyId = (await conn('estimates').where({ id: estimateId }).first('property_id'))?.property_id;
+    return propertyId ? { property_id: String(propertyId) } : {};
+  } catch {
+    return {};
+  }
 }
 
 module.exports = { noticeScope };

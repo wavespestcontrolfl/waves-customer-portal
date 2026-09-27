@@ -214,10 +214,15 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     ['stamps a receipt with its invoice\'s visit and that visit\'s property', { invoiceId: 'invoice-9' }, 'visit-9', 'prop-1'],
     ['keeps the visit a send names over its invoice\'s', { appointmentId: 'visit-123', invoiceId: 'invoice-9' }, 'visit-123', 'prop-1'],
     ['stamps nothing, and still sends, when the invoice lookup fails', { invoiceId: 'invoice-broken' }, undefined, undefined],
+    // A deposit receipt names only its estimate: that estimate's property,
+    // and no visit (Codex #4996 r2).
+    ['stamps a deposit receipt with its estimate\'s property alone', { estimateId: 'estimate-7' }, undefined, 'prop-estimate'],
+    ['keeps an invoice\'s visit over an estimate', { invoiceId: 'invoice-9', estimateId: 'estimate-7' }, 'visit-9', 'prop-1'],
   ])('%s', async (_label, extra, expected, expectedProperty) => {
     const rows = [];
     require('../models/db').mockImplementation((table) => {
       if (table === 'scheduled_services') return { where: () => ({ first: async () => ({ property_id: 'prop-1' }) }) };
+      if (table === 'estimates') return { where: () => ({ first: async () => ({ property_id: 'prop-estimate' }) }) };
       if (table === 'invoices') {
         return { where: ({ id }) => ({ first: async () => {
           if (id === 'invoice-broken') throw new Error('invoice lookup failed');

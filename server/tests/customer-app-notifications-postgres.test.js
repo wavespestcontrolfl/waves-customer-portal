@@ -53,7 +53,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     admin = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 1 } });
     await admin.schema.createSchema(schema);
     mockPg = require('knex')({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 4 } });
-    for (const table of ['customers', 'notification_prefs', 'notifications', 'push_subscriptions', 'invoices', 'sms_log', 'scheduled_services', 'payers', 'service_requests', 'technicians', 'ops_email_send_state']) {
+    for (const table of ['customers', 'notification_prefs', 'notifications', 'push_subscriptions', 'invoices', 'sms_log', 'scheduled_services', 'estimates', 'payers', 'service_requests', 'technicians', 'ops_email_send_state']) {
       await mockPg.raw('CREATE TABLE ?? (LIKE ?? INCLUDING ALL)', [table, `public.${table}`]);
     }
     expect(await mockPg.schema.hasColumn('notification_prefs', 'push_enabled')).toBe(true);
@@ -1044,6 +1044,52 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     const repaired = await mockPg('sms_log').where({ from_phone: 'push' });
     expect(repaired).toHaveLength(1);
     expect(repaired[0].metadata).toMatchObject({ proof_repaired: true, scheduled_service_id: visitId, property_id: homeId });
+  });
+
+  test('Codex #4996 r2: a lost proof for an invoice push is repaired with the scope its invoice\'s visit had at delivery', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const visitId = randomUUID();
+    const homeId = randomUUID();
+    await mockPg('scheduled_services').insert({ id: visitId, customer_id: property, property_id: homeId,
+      scheduled_date: '2026-09-09', service_type: 'Pest Control' });
+    const invoiceId = randomUUID();
+    // The send names only the invoice; its visit gives the scope.
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-10',
+      status: 'sent', scheduled_service_id: visitId });
+    const routing = require('../services/messaging/push-channel-routing');
+    const notice = { customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice_followup',
+      explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}:invoice-visit-repair` };
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect((await mockPg('sms_log').where({ from_phone: 'push' }).first()).metadata)
+      .toMatchObject({ scheduled_service_id: visitId, property_id: homeId });
+    await mockPg('sms_log').where({ from_phone: 'push' }).del();
+    await mockPg('scheduled_services').where({ id: visitId }).update({ property_id: randomUUID() });
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    const repaired = await mockPg('sms_log').where({ from_phone: 'push' });
+    expect(repaired).toHaveLength(1);
+    expect(repaired[0].metadata).toMatchObject({ proof_repaired: true, scheduled_service_id: visitId, property_id: homeId });
+  });
+
+  test('Codex #4996 r2: a deposit receipt pushed to the app carries its estimate\'s property, kept through a proof repair', async () => {
+    await device();
+    await put({ paymentConfirmationChannel: 'push' });
+    const estimateId = randomUUID();
+    const homeId = randomUUID();
+    await mockPg('estimates').insert({ id: estimateId, customer_id: property, property_id: homeId, status: 'accepted' });
+    const routing = require('../services/messaging/push-channel-routing');
+    const notice = { customerId: property, to: '+19415550101', body: 'Deposit received, thank you.', messageType: 'deposit_receipt',
+      explicitPushOnly: true, billingDeliveryCategory: 'payment_receipt', estimateId, notificationEventKey: `qa:${estimateId}:deposit` };
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    const proof = (await mockPg('sms_log').where({ from_phone: 'push' }).first()).metadata;
+    expect(proof).toMatchObject({ property_id: homeId });
+    expect(proof).not.toHaveProperty('scheduled_service_id');
+    await mockPg('sms_log').where({ from_phone: 'push' }).del();
+    await mockPg('estimates').where({ id: estimateId }).update({ property_id: randomUUID() });
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    const repaired = await mockPg('sms_log').where({ from_phone: 'push' });
+    expect(repaired).toHaveLength(1);
+    expect(repaired[0].metadata).toMatchObject({ proof_repaired: true, property_id: homeId });
   });
 
   test('Codex #4816 r50: when both proof writes fail, the settled scheduled row carries the delivered visit scope', async () => {

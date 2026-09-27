@@ -19,7 +19,7 @@ const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplici
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_SMS_TYPES } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_SMS_TYPES, EMAIL_DELIVERED_SQL } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -719,7 +719,7 @@ const UNSEEN_FLOOR = `GREATEST(${SOURCE_AT}, COALESCE(${EVENT_SEEN_AT}, ${SOURCE
 // the row's watermark rather than the customer's whole visit history.
 const unseen = (column) => `${column} <= ? AND ${column} > ${UNSEEN_FLOOR}`;
 // Visit activity, and money landing (R2): a paid payments row, a received
-// estimate deposit, or a delivered payment-confirmation text. Without the
+// estimate deposit, or a delivered payment receipt, text or email. Without the
 // money branches a payment-only ask waited for its cursor page — a full
 // rotation under backlog (Codex #4996 r1). A payment or deposit counts from
 // when its row last changed, not its settlement stamp: a late webhook
@@ -727,6 +727,9 @@ const unseen = (column) => `${column} <= ? AND ${column} > ${UNSEEN_FLOOR}`;
 // the watermark has long passed. A receipt text counts from its send; a
 // delivery callback later than the commit grace below waits for the cursors.
 const PAYMENT_CHANGED_AT = "GREATEST(pm.updated_at, COALESCE((pm.metadata->>'settled_event_at')::timestamptz, pm.created_at))";
+// A receipt email likewise counts from its last change: the provider's
+// delivery event lands after the send (webhooks-sendgrid.js stamps updated_at).
+const EMAIL_CHANGED_AT = 'GREATEST(em.updated_at, em.sent_at)';
 // Whose estimate a deposit is on: the customer's own, or an unowned one a
 // lead of theirs names. A superset of whereEstimateCustomerOwnership (which
 // also drops estimates another lead claims) is enough to trigger a check;
@@ -754,6 +757,14 @@ const UNSEEN_EVENT_ACTIVITY = `(SELECT MAX(a.at) FROM (
         AND (sm.status = 'delivered' OR (sm.status = 'sent' AND (sm.metadata->>'providerAccepted') = 'true'
           AND (sm.from_phone = 'push' OR (sm.metadata->>'channel') = 'push')))
         AND ${unseen('sm.created_at')}
+    UNION ALL SELECT ${EMAIL_CHANGED_AT} FROM invoices ri
+      JOIN email_messages em ON em.trigger_event_id = 'invoice_receipt:' || ri.id::text
+      WHERE ri.customer_id = s.customer_id AND em.recipient_type = 'customer' AND em.recipient_id = s.customer_id::text
+        AND ${EMAIL_DELIVERED_SQL('em')} AND ${unseen(EMAIL_CHANGED_AT)}
+    UNION ALL SELECT ${EMAIL_CHANGED_AT} FROM estimate_deposits ed JOIN estimates e ON e.id = ed.estimate_id
+      JOIN email_messages em ON em.trigger_event_id = 'deposit_receipt:' || ed.stripe_payment_intent_id
+      WHERE em.recipient_type = 'customer' AND em.recipient_id = s.customer_id::text
+        AND ${EMAIL_DELIVERED_SQL('em')} AND ${unseen(EMAIL_CHANGED_AT)} AND ${ESTIMATE_MAY_BELONG}
   ) a)`;
 
 // Match merge and intake: customer, source, then commitment. A relink, an
@@ -900,7 +911,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   // future) with unseen event activity (visit or payment), so an event is
   // checked on the next tick wherever the cursors stand (Codex #4816
   // r15–r17; Codex round 1 P2, #4996: payment activity joined the scan).
-  const tickBound = Array(7).fill(now);
+  const tickBound = Array(9).fill(now);
   // A row waiting out a provider/schema failure's retry_after cannot make
   // progress on the same evidence (verify returns the stored failure until
   // then), so it yields its slot rather than pinning the page through an

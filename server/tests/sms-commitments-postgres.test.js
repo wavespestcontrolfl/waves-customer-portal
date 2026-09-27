@@ -2198,6 +2198,103 @@ postgres('SMS commitments on PostgreSQL', () => {
       .toEqual([70, 71, 72].map((seconds) => at(seconds).getTime()));
   });
 
+  test('Codex #4996 r2: a customer-level Stripe charge such as the monthly autopay is payment evidence; one an invoice claims by its PaymentIntent, or names through a dispute, counts once, on the invoice', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const invoiceRow = (number, pi) => ({ customer_id: message.customer_id, token: randomUUID(), invoice_number: number,
+      title: 'Quarterly Pest Control', total: 89, subtotal: 89, line_items: '[]', status: 'paid', paid_at: after, stripe_payment_intent_id: pi });
+    // The second invoice's PaymentIntent was cleared when a dispute reopened it; the won dispute restored its payment.
+    const [claimed, disputed] = await mockPg('invoices').insert([invoiceRow('WPC-2026-0931', 'pi_invoice'),
+      invoiceRow('WPC-2026-0932', null)]).returning('id');
+    const stripeRow = (pi, metadata) => ({ customer_id: message.customer_id, amount: 89, status: 'paid', payment_date: etDateString(after),
+      processor: 'stripe', stripe_payment_intent_id: pi, metadata: JSON.stringify(metadata), created_at: after });
+    const [autopay, claimedPaid, disputedPaid] = await mockPg('payments').insert([
+      stripeRow('pi_autopay', { type: 'monthly_autopay', billed_month: '2026-09' }),
+      stripeRow('pi_invoice', {}),
+      stripeRow('pi_disputed', { dispute_id: 'dp_synthetic', dispute_invoice_id: disputed.id })]).returning('id');
+    const commitment = { kind: 'other', description: "Did this month's autopay go through?", sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const ledger = evidence.records.filter((r) => r.payment_source === 'ledger');
+    expect(ledger.map((r) => r.id)).toEqual([autopay.id]);
+    expect(ledger[0]).toMatchObject({ property_id: null, text: `Payment of $89.00 recorded ${etDateString(after)} (monthly autopay)` });
+    expect(admissibleWitness(ledger[0], commitment)).toBe(true);
+    expect(Object.fromEntries(evidence.records.filter((r) => r.payment_source === 'invoice').map((r) => [r.id, r.payment_id])))
+      .toEqual({ [claimed.id]: claimedPaid.id, [disputed.id]: disputedPaid.id });
+  });
+
+  test('Codex #4996 r2: a delivered receipt email to this customer answers for their own settled invoice at its visit\'s property, and for their deposit at its estimate\'s; undelivered, earlier, misaddressed and payer-billed ones never do', async () => {
+    const before = new Date(message.created_at.getTime() - 1000);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const otherCustomer = randomUUID();
+    await mockPg('customers').insert({ id: otherCustomer, first_name: 'Other', last_name: 'Fixture', phone: '+12025550199',
+      address_line1: '300 Example Lane', city: 'Sarasota', zip: '34236' });
+    const [payer] = await mockPg('payers').insert({ display_name: 'Synthetic Property Manager' }).returning('id');
+    const [visit] = await mockPg('scheduled_services').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
+      service_type: 'Quarterly Pest Control', scheduled_date: etDateString(message.created_at), window_start: '09:00:00', status: 'completed',
+      created_at: new Date(message.created_at.getTime() - 86400000) }).returning('id');
+    const invoiceRow = (number, extra = {}) => ({ customer_id: message.customer_id, token: randomUUID(), invoice_number: number,
+      title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: before, scheduled_service_id: visit.id, ...extra });
+    const [invoice, billedToPayer] = await mockPg('invoices').insert([invoiceRow('WPC-2026-0941'),
+      invoiceRow('WPC-2026-0942', { payer_id: payer.id })]).returning('id');
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
+      status: 'accepted', service_interest: 'Termite' }).returning('id');
+    await mockPg('estimate_deposits').insert({ estimate_id: estimate.id, amount: 150, status: 'received', received_at: before,
+      stripe_payment_intent_id: 'pi_deposit_receipt' });
+    const email = (trigger, extra = {}) => ({ trigger_event_id: trigger, recipient_type: 'customer', recipient_id: String(message.customer_id),
+      recipient_email_snapshot: 'pat.example@example.invalid', subject_snapshot: 'Your receipt', text_snapshot: 'Hi Pat, thanks for your payment.',
+      status: 'delivered', sent_at: after, delivered_at: after, ...extra });
+    const [delivered, depositReceipt] = await mockPg('email_messages').insert([email(`invoice_receipt:${invoice.id}`),
+      email('deposit_receipt:pi_deposit_receipt')]).returning('id');
+    await mockPg('email_messages').insert([
+      email(`invoice_receipt:${invoice.id}`, { status: 'bounced', bounced_at: after }),
+      email(`invoice_receipt:${invoice.id}`, { status: 'sent', delivered_at: null }),
+      email(`invoice_receipt:${invoice.id}`, { sent_at: before, delivered_at: before }),
+      email(`invoice_receipt:${invoice.id}`, { recipient_id: String(otherCustomer) }),
+      email(`invoice_receipt:${billedToPayer.id}`)]);
+    const commitment = { kind: 'other', description: 'Please send me the receipt', evidence: [{ quote: 'Please send me the receipt' }],
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const receipts = evidence.records.filter((r) => r.payment_source === 'email');
+    expect(receipts.map((r) => r.id).sort()).toEqual([delivered.id, depositReceipt.id].sort());
+    const byId = Object.fromEntries(receipts.map((r) => [r.id, r]));
+    expect(byId[delivered.id]).toMatchObject({ invoice_id: invoice.id, property_id: context.properties[0].id,
+      text: `Receipt email for invoice WPC-2026-0941 delivered ${etDateString(after)}` });
+    expect(byId[depositReceipt.id]).toMatchObject({ estimate_id: estimate.id, property_id: context.properties[0].id,
+      text: `Receipt email for a $150.00 deposit delivered ${etDateString(after)}` });
+    expect(admissibleWitness(byId[delivered.id], commitment)).toBe(true);
+    // An ask naming an address is answered only at that address.
+    const addressed = (address) => ({ ...commitment, evidence: [{ quote: `Please email the receipt to ${address}` }] });
+    expect(admissibleWitness(byId[delivered.id], addressed('pat.example@example.invalid'))).toBe(true);
+    expect(admissibleWitness(byId[delivered.id], addressed('someone.else@example.invalid'))).toBe(false);
+  });
+
+  test('Codex #4996 r2: a receipt-email witness holds its invoice at close; a writer holding it, or a refund since the check, fails the close', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0943',
+      title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: message.created_at }).returning('id');
+    const [receipt] = await mockPg('email_messages').insert({ trigger_event_id: `invoice_receipt:${invoice.id}`, recipient_type: 'customer',
+      recipient_id: String(message.customer_id), recipient_email_snapshot: 'pat.example@example.invalid', status: 'delivered',
+      sent_at: after, delivered_at: after }).returning('id');
+    const commitment = { kind: 'other', description: 'Please send me the receipt', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const witness = evidence.records.find((r) => r.payment_source === 'email');
+    const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
+    expect(grounded).toMatchObject({ verdict: 'fulfilled', record_id: receipt.id, payment_source: 'email',
+      linked_record_type: 'invoice', linked_record_id: invoice.id });
+    const verdict = { ...grounded, evidence_hash: fulfillmentFingerprint(commitment, evidence).evidenceHash };
+    const closes = () => mockPg.transaction((trx) => revalidateSmsFulfillment(trx, commitment, message, verdict, now));
+    expect(await closes()).toBe(true);
+    const writer = await mockPg.transaction();
+    try {
+      await writer('invoices').where({ id: invoice.id }).forUpdate().first('id');
+      expect(await closes()).toBe(false);
+    } finally { await writer.rollback(); }
+    await mockPg('invoices').where({ id: invoice.id }).update({ status: 'refunded' });
+    expect(await closes()).toBe(false);
+  });
+
   describe('Codex #4996 r1: money landing puts a payment question on the event page ahead of the cursors', () => {
     let target;
     let verify;
@@ -2229,6 +2326,13 @@ postgres('SMS commitments on PostgreSQL', () => {
       }],
       ['a delivered receipt text', (at) => mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound', from_phone: message.to_phone,
         to_phone: message.from_phone, message_body: 'Payment received, thank you.', message_type: 'receipt', status: 'delivered', created_at: at })],
+      ['a delivered receipt email', async (at) => {
+        const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0944',
+          title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: message.created_at }).returning('id');
+        await mockPg('email_messages').insert({ trigger_event_id: `invoice_receipt:${invoice.id}`, recipient_type: 'customer',
+          recipient_id: String(message.customer_id), recipient_email_snapshot: 'pat.example@example.invalid', status: 'delivered',
+          sent_at: at, delivered_at: at, updated_at: at });
+      }],
     ])('%s', async (_label, land) => {
       expect(await tick(minutes(1))).toMatchObject({ scanned: 0 });
       await land(minutes(2));
