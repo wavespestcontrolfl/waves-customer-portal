@@ -11,10 +11,12 @@
  * mrms-qpe's own fetch/parse contract is covered by rain-engine-mrms.test.js;
  * this suite mocks it and pins the enrichment: a measured reading (0"
  * included) → 'nws+mrms'; a gap or an outage degrades to NWS-only, never a
- * phantom 0"; "yesterday" is the ET calendar day, not UTC's. Freshness: no
- * cache carries a reading past ET midnight (when "yesterday" moves), and a
- * day's measured reading survives a later same-day outage instead of being
- * dropped — a missing reading can read as "dry".
+ * phantom 0"; "yesterday" is the ET calendar day, not UTC's. Freshness: every
+ * result carries one freshUntil — 3h, 15 min while a SWFL rain reading is
+ * missing (so a late IEM backfill shows up soon), never past ET midnight
+ * (when "yesterday" moves) — and a day's measured reading survives a later
+ * same-day outage instead of being dropped; a missing reading can read as
+ * "dry".
  */
 
 jest.mock('../services/mrms-qpe');
@@ -250,6 +252,38 @@ describe('getWeatherSignals MRMS rainfall enrichment (public pest forecast)', ()
 
       expect(after.recentRainIn).toBeNull();
       expect(after.source).toBe('nws');
+    });
+
+    test('a SWFL fill still missing its rain retries in 15 minutes, not 3 hours', async () => {
+      fetchMrmsDailyRain.mockResolvedValueOnce(mrmsDay('2026-07-14', null)); // not backfilled yet
+      const first = await forecast.getForecast({ location: 'bradenton-fl' });
+
+      jest.setSystemTime(new Date(MIDDAY_ET.getTime() + 14 * 60 * 1000));
+      await forecast.getForecast({ location: 'bradenton-fl' });
+      expect(fetchMrmsDailyRain).toHaveBeenCalledTimes(1); // still inside the retry window
+
+      jest.setSystemTime(new Date(MIDDAY_ET.getTime() + 16 * 60 * 1000));
+      fetchMrmsDailyRain.mockResolvedValueOnce(mrmsDay('2026-07-14', 0.6)); // IEM caught up
+      const later = await forecast.getForecast({ location: 'bradenton-fl' });
+
+      expect(fetchMrmsDailyRain).toHaveBeenCalledTimes(2);
+      expect(first.weather.recent_rain_in).toBeNull();
+      expect(later.weather.recent_rain_in).toBeCloseTo(0.6, 5);
+    });
+
+    const at = (ms) => new Date(ms).toISOString();
+    test.each([
+      ['a SWFL reading lasts 3 hours', MIDDAY_ET, 'bradenton-fl', 0.4, MIDDAY_ET.getTime() + 3 * 60 * 60 * 1000],
+      ['a SWFL fill missing its rain lasts 15 minutes', MIDDAY_ET, 'bradenton-fl', null, MIDDAY_ET.getTime() + 15 * 60 * 1000],
+      ['a 10 PM ET fill stops at ET midnight, not 3 hours later', new Date('2026-07-16T02:00:00Z'), 'bradenton-fl', 0.4, Date.parse('2026-07-16T04:00:00Z')],
+      ['a non-SWFL city (no rain expected) keeps the 3-hour lifetime', MIDDAY_ET, 'tampa-fl', undefined, MIDDAY_ET.getTime() + 3 * 60 * 60 * 1000],
+    ])('freshUntil: %s', async (_label, fillAt, location, inches, expected) => {
+      jest.setSystemTime(fillAt); // both fill times are ET 07-15, so "yesterday" is 07-14
+      if (inches !== undefined) fetchMrmsDailyRain.mockResolvedValueOnce(mrmsDay('2026-07-14', inches));
+
+      const { freshUntil } = await forecast.getForecastWithFreshness({ location });
+
+      expect(at(freshUntil)).toBe(at(expected));
     });
   });
 });

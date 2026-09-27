@@ -11,23 +11,16 @@
  *   GET /api/public/pest-forecast?zip=34205               → forecast (zip resolve)
  *   GET /api/public/pest-forecast/locations               → curated location list
  *
- * Responses are cached upstream (per-location, 3h) and carry CDN-friendly
- * Cache-Control so a popular embed costs almost nothing to serve.
+ * Responses are cached upstream (per-location, until the forecast's
+ * freshUntil) and carry CDN-friendly Cache-Control capped at the same instant
+ * so a popular embed costs almost nothing to serve.
  */
 
 const express = require('express');
 const router = express.Router();
 const logger = require('../services/logger');
-const { getForecast } = require('../services/pest-forecast/forecast');
+const { getForecastWithFreshness } = require('../services/pest-forecast/forecast');
 const { listLocations } = require('../services/pest-forecast/locations');
-const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
-
-// Seconds until the next ET midnight — when the forecast's rain signal
-// ("yesterday's" measured total) moves to a new day.
-function secondsUntilEtMidnight(now = new Date()) {
-  const midnight = parseETDateTime(`${etDateString(addETDays(now, 1))}T00:00`);
-  return Math.max(0, Math.floor((midnight.getTime() - now.getTime()) / 1000));
-}
 
 // CORS (Access-Control-Allow-Origin: * + OPTIONS preflight) is handled at the
 // app level in server/index.js, mounted ABOVE the global credentialed cors()
@@ -44,13 +37,15 @@ router.get('/', async (req, res) => {
     const location = typeof req.query.location === 'string' ? req.query.location.trim() : undefined;
     const zip = typeof req.query.zip === 'string' ? req.query.zip.trim() : undefined;
 
-    const forecast = await getForecast({ location, zip });
+    const { forecast, freshUntil } = await getForecastWithFreshness({ location, zip });
 
     // 1h browser / 3h shared-cache; lets the CDN absorb embed traffic while
-    // the per-location server cache (3h) handles the underlying weather calls.
-    // Neither outlives the ET day, same as the server caches.
-    const untilMidnight = secondsUntilEtMidnight();
-    res.set('Cache-Control', `public, max-age=${Math.min(3600, untilMidnight)}, s-maxage=${Math.min(10800, untilMidnight)}`);
+    // the per-location server cache handles the underlying weather calls.
+    // Both are capped at the forecast's own freshUntil, measured at send time
+    // — so a result computed before ET midnight but sent after it gets 0,
+    // never the next day's lifetime.
+    const freshFor = Number.isFinite(freshUntil) ? Math.max(0, Math.floor((freshUntil - Date.now()) / 1000)) : 0;
+    res.set('Cache-Control', `public, max-age=${Math.min(3600, freshFor)}, s-maxage=${Math.min(10800, freshFor)}`);
     res.json(forecast);
   } catch (err) {
     logger.error(`[public-pest-forecast] failed: ${err.message}`);

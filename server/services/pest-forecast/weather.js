@@ -15,21 +15,35 @@
  * Everything here is best-effort and fails soft: if the network is slow or the
  * upstreams are down, getWeatherSignals resolves to { hasWeather: false } and
  * the forecast degrades to its pure seasonal baseline. Results are cached per
- * rounded coordinate for 3 hours (never past ET midnight, when "yesterday"
- * moves) so a popular embed can't hammer NWS/MRMS.
+ * rounded coordinate until their freshUntil (3 hours; 15 minutes while a
+ * SWFL city's rain reading is missing; never past ET midnight, when
+ * "yesterday" moves) so a popular embed can't hammer NWS/MRMS.
  */
 
 const logger = require('../logger');
 const { fetchMrmsDailyRain } = require('../mrms-qpe');
-const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 const NWS_UA = 'WavesPestControl-PestForecast/1.0 (+https://www.wavespestcontrol.com)';
 const CACHE_TTL = 3 * 60 * 60 * 1000; // 3 hours
+// A SWFL fill still missing yesterday's rain (IEM backfills late; an outage)
+// is retried this soon, not published rain-less for the full CACHE_TTL — a
+// missing reading can read as "dry".
+const MISSING_RAIN_RETRY = 15 * 60 * 1000; // 15 minutes
 const TIMEOUT_MS = 4000;
 
-const _cache = new Map(); // key -> { at, day, value }
+const _cache = new Map(); // key -> signals (each carries its own freshUntil)
 // Last measured MRMS reading per coordinate, for the ET day it measured.
 const _rainMemo = new Map(); // key -> { day, inches }
+
+// Epoch ms at which signals filled at `at` stop being fresh: CACHE_TTL, or
+// MISSING_RAIN_RETRY for a rain-less SWFL fill, and never past the next ET
+// midnight, when "yesterday" moves. The forecast cache and the public
+// route's HTTP lifetimes honor this same instant.
+function freshUntil(at, { missingRain = false } = {}) {
+  const midnight = parseETDateTime(`${etDateString(addETDays(at, 1))}T00:00`).getTime();
+  return Math.min(at.getTime() + (missingRain ? MISSING_RAIN_RETRY : CACHE_TTL), midnight);
+}
 
 function cacheKey(lat, lng) {
   return `${Number(lat).toFixed(2)},${Number(lng).toFixed(2)}`;
@@ -111,23 +125,22 @@ async function fetchRecentRainIn(lat, lng, key, day) {
 /**
  * Resolve weekly weather signals for a coordinate. Never throws.
  * Returns: { hasWeather, tempHighF, precipChance, recentRainIn, source,
- *            warm, hot, dry, wet, coolSnap }
+ *            warm, hot, dry, wet, coolSnap, freshUntil }
  */
 async function getWeatherSignals({ lat, lng, region } = {}) {
+  const now = new Date();
   if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lng))) {
-    return flags({ hasWeather: false });
+    return { ...flags({ hasWeather: false }), freshUntil: freshUntil(now) };
   }
 
-  const now = new Date();
-  const today = etDateString(now);
   const key = cacheKey(lat, lng);
   const hit = _cache.get(key);
-  // An entry never outlives its ET day: "yesterday" moves at midnight.
-  if (hit && hit.day === today && now.getTime() - hit.at < CACHE_TTL) return hit.value;
+  if (hit && now.getTime() < hit.freshUntil) return hit;
 
   // SWFL points also get yesterday's measured rainfall. Started before the
   // NWS lookup so a cache fill waits for the slower of the two, not both.
-  const rainLookup = region === 'sw'
+  const wantsRain = region === 'sw';
+  const rainLookup = wantsRain
     ? fetchRecentRainIn(lat, lng, key, etDateString(addETDays(now, -1)))
     : Promise.resolve(null);
 
@@ -146,8 +159,8 @@ async function getWeatherSignals({ lat, lng, region } = {}) {
     base.source = base.source ? `${base.source}+mrms` : 'mrms';
   }
 
-  const value = flags(base);
-  _cache.set(key, { at: now.getTime(), day: today, value });
+  const value = { ...flags(base), freshUntil: freshUntil(now, { missingRain: wantsRain && recentRainIn == null }) };
+  _cache.set(key, value);
   return value;
 }
 

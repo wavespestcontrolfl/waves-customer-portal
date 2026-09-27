@@ -990,8 +990,16 @@ public NWS weather and NOAA MRMS radar rainfall (via the Iowa
 Environmental Mesonet); no request body. Intentionally CORS-open
 (`Access-Control-Allow-Origin: *`) so the free embeddable forecast
 widget can run on third-party domains; inherits the global `/api/` IP
-rate limit, served from a 3h per-location server cache and public CDN
-`Cache-Control`. Note: unlike the token-gated read routes, this surface
+rate limit. Caching: the per-location server cache and the forecast
+response's `Cache-Control: public, max-age=<≤3600>, s-maxage=<≤10800>`
+share one freshness instant — 3h after the forecast's weather was
+fetched, 15 minutes while a SWFL city's radar rain for yesterday is not
+available yet (IEM backfills late), and never past the next ET midnight
+(the rain signal is yesterday's measured total). Both HTTP lifetimes are
+the seconds left until that instant, measured when the response is sent,
+so a result computed before ET midnight and sent after it carries
+`max-age=0, s-maxage=0`; `/locations` stays `public, max-age=86400`.
+Note: unlike the token-gated read routes, this surface
 is deliberately cacheable and indexable — it exposes only modeled,
 non-sensitive forecast data, so `no-store`/`noindex` privacy headers do
 NOT apply here).
