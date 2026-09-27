@@ -402,6 +402,17 @@ describe('update_restock_request', () => {
 // dedicated db mock is used here (not makeRecordingDb, which ignores WHERE
 // conditions) because these tests specifically assert active-only filtering.
 describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
+  // jest.clearAllMocks() (the file-level beforeEach) clears call history but
+  // NOT a queued mockReturnValueOnce/mockResolvedValueOnce — a test whose
+  // code path never reaches the thread check (update_restock_request, a
+  // conflict, a non-bare follow-up, ...) leaves its queued "once" value
+  // sitting there for a LATER test to consume by accident. Reset these two
+  // back to a known default before every test in this block.
+  beforeEach(() => {
+    IbThreadsMock.threadsEnabled.mockReset().mockReturnValue(false);
+    IbThreadsMock.recentOperatorTurns.mockReset().mockResolvedValue([]);
+  });
+
   const TAURUS = { id: 'p-taurus', name: 'Taurus SC', active: true };
   const ALPINE = { id: 'p-alpine', name: 'Alpine WSG', active: true };
   const LESCO_FERTILIZER = { id: 'p-lesco-1', name: 'Lesco 24-5-11 Fertilizer', active: true };
@@ -485,15 +496,28 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     expect(result).toEqual({ productId: ALPINE.id });
   });
 
-  test.each([
-    ['Can you add 12 fluid ounces of Taurus ST to our inventory'],
-    ['Can you add 12 fluid ounces to the inventory of what we have on hand for Taurus SE'],
-  ])('a "Taurus S_" voice-typo grounds via the distinctive "taurus" token: %s', async (prompt) => {
+  test('a "Taurus ST" voice-typo grounds via the distinctive "taurus" token ("ST" is not a formulation code)', async () => {
     setGroundingDb({ products: [TAURUS, ALPINE] });
     const result = await resolveInventoryWriteTarget({
-      toolName: 'adjust_stock', prompt, preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+      toolName: 'adjust_stock',
+      prompt: 'Can you add 12 fluid ounces of Taurus ST to our inventory',
+      preview: { product: { id: TAURUS.id, name: TAURUS.name } },
     });
     expect(result).toEqual({ productId: TAURUS.id });
+  });
+
+  // "SE" IS a real formulation code (suspension emulsion), and the catalog
+  // row is "Taurus SC" — so this is now a genuine formulation conflict, not
+  // a typo to shrug off: the model should ask "did you mean Taurus SC?"
+  // rather than silently ground a mistyped formulation onto the wrong one.
+  test('"Taurus SE" refuses on a formulation conflict against the "Taurus SC" catalog row', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock',
+      prompt: 'Can you add 12 fluid ounces to the inventory of what we have on hand for Taurus SE',
+      preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+    });
+    expect(result).toMatchObject({ code: 'target_clarification_required' });
   });
 
   test('a follow-up naming nothing ("1 bottle") grounds off a recent prior OPERATOR turn', async () => {
@@ -663,5 +687,79 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     });
     expect(result).toMatchObject({ code: 'target_clarification_required' });
     expect(IbThreadsMock.recentOperatorTurns).not.toHaveBeenCalled();
+  });
+
+  // Concentration/formulation qualifiers: the catalog treats "10% SC" and
+  // "20% SC" as different products, so a TOKEN or ALIAS match must not
+  // ignore a qualifier the operator actually said. A full catalog-name match
+  // is unaffected (it already has to include the qualifiers to match at
+  // all) — only tested here at the token/alias sites.
+  describe('concentration/formulation qualifiers', () => {
+    const TAURUS_10 = { id: 'p-taurus-10', name: 'Taurus 10% SC', active: true };
+
+    test('"Taurus 20% SC" refuses against a "Taurus 10% SC" catalog row (the audit regression case)', async () => {
+      setGroundingDb({ products: [TAURUS_10, ALPINE] });
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock',
+        prompt: 'We bought Taurus 20% SC, add 12 oz',
+        preview: { product: { id: TAURUS_10.id, name: TAURUS_10.name } },
+      });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('"Taurus 10% SC" grounds — the qualifier matches the catalog row exactly', async () => {
+      setGroundingDb({ products: [TAURUS_10, ALPINE] });
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock',
+        prompt: 'We bought Taurus 10% SC, add 12 oz',
+        preview: { product: { id: TAURUS_10.id, name: TAURUS_10.name } },
+      });
+      expect(result).toEqual({ productId: TAURUS_10.id });
+    });
+
+    test('a bare "Taurus" with no qualifier at all still grounds', async () => {
+      setGroundingDb({ products: [TAURUS_10, ALPINE] });
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock',
+        prompt: 'we bought Taurus, add 12 oz',
+        preview: { product: { id: TAURUS_10.id, name: TAURUS_10.name } },
+      });
+      expect(result).toEqual({ productId: TAURUS_10.id });
+    });
+
+    test('a bare number with no "%" is never a concentration ("Taurus 78 ounces")', async () => {
+      setGroundingDb({ products: [TAURUS_10, ALPINE] });
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock',
+        prompt: 'Taurus 78 ounces',
+        preview: { product: { id: TAURUS_10.id, name: TAURUS_10.name } },
+      });
+      expect(result).toEqual({ productId: TAURUS_10.id });
+    });
+
+    test('an ALIAS match followed by a conflicting formulation/concentration also refuses', async () => {
+      setGroundingDb({
+        products: [TAURUS, ALPINE], // "Taurus SC" — no concentration in the name at all
+        aliases: [{ product_id: TAURUS.id, alias_name: 'Taurus Termiticide' }],
+      });
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock',
+        prompt: 'We need Taurus Termiticide 20% SC for the job',
+        preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+      });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('a qualifier conflict found only in a prior turn also refuses a bare follow-up', async () => {
+      setGroundingDb({ products: [TAURUS_10, ALPINE] });
+      IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+      IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['we bought Taurus 20% SC yesterday']);
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock', prompt: '1 bottle',
+        preview: { product: { id: TAURUS_10.id, name: TAURUS_10.name } },
+        actorId: 'actor-1', threadId: THREAD_ID,
+      });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
+    });
   });
 });

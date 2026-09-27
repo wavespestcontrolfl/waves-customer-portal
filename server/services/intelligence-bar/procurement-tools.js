@@ -959,6 +959,74 @@ function isCandidateToken(token) {
 
 const UUID_RE_THREAD = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// The codebase treats "10% SC" and "20% SC" as different products — a TOKEN
+// or ALIAS match (never a full catalog-name match, which already carries its
+// own qualifiers verbatim) must not ignore a concentration or formulation
+// qualifier the operator actually said. Closed set; single letters (F, G, L)
+// are too ambiguous in free text to trust. "AS" (aqueous suspension) is
+// deliberately left out too — it's an ordinary English word ("Taurus AS to
+// add...", a real production prompt), and a code this collision-prone is not
+// worth the false positives. Sorted longest-first so "WDG"/"WSG" are never
+// shadowed by the shorter "WG" alternative.
+const FORMULATION_CODES = ['SC', 'SE', 'EC', 'EW', 'CS', 'ME', 'WG', 'WDG', 'WSG', 'WP', 'WSP',
+  'SG', 'SL', 'SP', 'DF', 'DG', 'GR', 'TC', 'RTU', 'FL']
+  .sort((a, b) => b.length - a.length);
+const FORMULATION_CODE_ALT = FORMULATION_CODES.join('|');
+// A qualifier immediately follows a match when only whitespace, commas,
+// hyphens or periods sit between them. A bare number with no '%' is never a
+// concentration ("Taurus 78 ounces").
+const QUALIFIER_STEP_RE = new RegExp(`^[\\s,\\-.]*(?:(\\d+(?:\\.\\d+)?)\\s*%|(${FORMULATION_CODE_ALT})\\b)`, 'i');
+
+function escapeRegExpLiteral(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Where, in the RAW operator text, does this whole-word phrase (a single
+// token, or an alias's own words) first occur? Punctuation/whitespace may
+// separate the phrase's own words, mirroring containsWholeWords' tolerance.
+// Returns the index right after the match, or -1 if it doesn't occur.
+function findPhraseEndInRawText(rawText, words) {
+  const pattern = words.map(escapeRegExpLiteral).join('[^a-zA-Z0-9]+');
+  const match = new RegExp(`\\b${pattern}\\b`, 'i').exec(rawText);
+  return match ? match.index + match[0].length : -1;
+}
+
+// The concentration(s) and formulation code(s) that immediately trail a
+// match, reading forward from `fromIndex` in the RAW text (raw so '%'
+// survives — normalizeForMatch would drop it).
+function qualifiersFollowing(rawText, fromIndex) {
+  let rest = rawText.slice(fromIndex);
+  const concentrations = [];
+  const formulations = [];
+  let step = QUALIFIER_STEP_RE.exec(rest);
+  while (step) {
+    if (step[1] !== undefined) concentrations.push(Number(step[1]));
+    else formulations.push(step[2].toUpperCase());
+    rest = rest.slice(step[0].length);
+    step = QUALIFIER_STEP_RE.exec(rest);
+  }
+  return { concentrations, formulations };
+}
+
+// Does a TOKEN/ALIAS match of `words` conflict with `productNameRaw`? No
+// qualifier captured at all ⇒ never a conflict (e.g. "Taurus" alone, or
+// "Taurus 78 ounces" — a bare number is not a concentration). Any qualifier
+// captured must ALL appear in the product's own catalog name — a formulation
+// code as a normalized whole token, a concentration as an exact numeric match
+// against the percent numbers in the name's raw text — or it's a conflict.
+function qualifierConflict(rawText, words, productNameRaw) {
+  const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
+  const endIndex = findPhraseEndInRawText(rawText, words);
+  if (endIndex === -1) return false;
+  const { concentrations, formulations } = qualifiersFollowing(rawText, endIndex);
+  if (!concentrations.length && !formulations.length) return false;
+  const nameTokens = new Set(normalizeForMatch(productNameRaw).split(' '));
+  const nameConcentrations = [...productNameRaw.matchAll(/(\d+(?:\.\d+)?)\s*%/g)].map((m) => Number(m[1]));
+  const formulationsOk = formulations.every((code) => nameTokens.has(code.toLowerCase()));
+  const concentrationsOk = concentrations.every((n) => nameConcentrations.includes(n));
+  return !(formulationsOk && concentrationsOk);
+}
+
 // A prior operator turn may only stand in for a CURRENT prompt that carries
 // no product reference of its own — a genuine bare follow-up ("1 bottle",
 // "78 ounces", "Yes", "add it"). Strip quantities, units/containers (the same
@@ -989,15 +1057,23 @@ function isBareFollowUp(text) {
     || FOLLOW_UP_FILLER_WORDS.has(token));
 }
 
-// Which ACTIVE catalog products does normalized operator text name? A
-// product is named by its full catalog name, one of its product_aliases, or
-// a name token that belongs to it ALONE across the active catalog — each
-// matched as whole words (never a substring of a longer word). Returns a Set
-// of product ids: 0 (nothing named), 1 (grounded), or 2+ (ambiguous — the
-// caller refuses rather than guessing).
-async function productsNamedIn(textNorm) {
+// Which ACTIVE catalog products does operator text name? A product is named
+// by its full catalog name, one of its product_aliases, or a name token that
+// belongs to it ALONE across the active catalog — each matched as whole
+// words (never a substring of a longer word). Returns { named, conflict }:
+// `named` is a Set of product ids (0 = nothing named, 1 = grounded, 2+ =
+// ambiguous — the caller refuses rather than guessing); `conflict` is true
+// when an ALIAS or TOKEN match was disqualified by a concentration/
+// formulation qualifier that doesn't match that product's own catalog name
+// (e.g. "Taurus 20% SC" naming only a "Taurus 10% SC" catalog row) — a
+// conflict never grounds, on this text or any other (see
+// resolveByOperatorGrounding). A full-name match never needs this check: the
+// whole name (qualifiers included) already had to appear verbatim in
+// sequence to match at all.
+async function productsNamedIn(textNorm, rawText) {
   const named = new Set();
-  if (!textNorm) return named;
+  let conflict = false;
+  if (!textNorm) return { named, conflict };
   const { normalizeForMatch, containsWholeWords } = require('../purchase-receipts/product-matcher');
   const products = await db('products_catalog').where({ active: true }).select('id', 'name');
   const aliasRows = await db('product_aliases as pa')
@@ -1017,14 +1093,23 @@ async function productsNamedIn(textNorm) {
 
   for (const p of products) {
     const nameNorm = normalizeForMatch(p.name);
-    const byName = containsWholeWords(textNorm, nameNorm);
-    const byAlias = !byName && aliasRows.some((a) => a.product_id === p.id
+    if (containsWholeWords(textNorm, nameNorm)) { named.add(p.id); continue; }
+    const aliasMatch = aliasRows.find((a) => a.product_id === p.id
       && containsWholeWords(textNorm, normalizeForMatch(a.alias_name)));
-    const byToken = !byName && !byAlias && nameNorm.split(' ').some((token) => isCandidateToken(token)
+    if (aliasMatch) {
+      const words = normalizeForMatch(aliasMatch.alias_name).split(' ');
+      if (qualifierConflict(rawText, words, p.name)) { conflict = true; continue; }
+      named.add(p.id);
+      continue;
+    }
+    const tokenMatch = nameNorm.split(' ').find((token) => isCandidateToken(token)
       && tokenOwners.get(token)?.size === 1 && containsWholeWords(textNorm, token));
-    if (byName || byAlias || byToken) named.add(p.id);
+    if (tokenMatch) {
+      if (qualifierConflict(rawText, [tokenMatch], p.name)) { conflict = true; continue; }
+      named.add(p.id);
+    }
   }
-  return named;
+  return { named, conflict };
 }
 
 // Does the operator's own text (this prompt, or — only when the call site
@@ -1044,16 +1129,22 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { 
     const [id] = named;
     return id === preview.product.id ? { productId: id } : { mismatch: true };
   };
-  const currentNamed = await productsNamedIn(normalizeForMatch(prompt));
-  const fromCurrent = decide(currentNamed);
+  const current = await productsNamedIn(normalizeForMatch(prompt), prompt);
+  // A qualifier conflict ("Taurus 20% SC" against a "Taurus 10% SC" catalog
+  // row) never grounds, on this text or any other — never fall back either.
+  if (current.conflict) return null;
+  const fromCurrent = decide(current.named);
   if (fromCurrent) return fromCurrent;
-  if (currentNamed.size > 0) return null; // current prompt named something (ambiguous) — never fall back
+  if (current.named.size > 0) return null; // current prompt named something (ambiguous) — never fall back
   if (!allowPriorTurns || !isBareFollowUp(prompt)) return null;
   const IbThreads = require('./threads');
   if (!IbThreads.threadsEnabled() || !actorId || !UUID_RE_THREAD.test(String(threadId || ''))) return null;
   const turns = await IbThreads.recentOperatorTurns(actorId, threadId, { limit: 3, maxAgeMinutes: 30 });
   if (!turns.length) return null;
-  return decide(await productsNamedIn(normalizeForMatch(turns.join(' '))));
+  const priorText = turns.join(' ');
+  const prior = await productsNamedIn(normalizeForMatch(priorText), priorText);
+  if (prior.conflict) return null; // a conflict found while scanning prior turns also refuses
+  return decide(prior.named);
 }
 
 // Inventory noun slots come from the current operator request, never a model
