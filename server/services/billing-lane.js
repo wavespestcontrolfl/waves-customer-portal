@@ -798,11 +798,21 @@ async function siblingInvoiceCoverageVerdict(svc, dbConn) {
       ? { status: 'needs_review', invoice: null, canceledSetupFee: result.canceledSetupFee }
       : { status: 'none' };
   }
-  if (!inv.scheduled_service_id || String(inv.scheduled_service_id) === String(svc.id)) return { status: 'none' };
+  // A terminal/refunded match is handled BEFORE the own-visit exclusion
+  // below (codex round-2 P0): the shared lookup deliberately returns a
+  // refunded match ahead of any live replacement regardless of WHOSE row
+  // it sits on (no reliable refund-event clock — see that lookup's own
+  // header), with the live replacement riding along as `liveBeside`. The
+  // own-visit check below means "this exact row, not a sibling" — but
+  // discarding a REFUNDED own-visit match as "just my own row, nothing to
+  // see" also discards a live SIBLING invoice riding beside it as
+  // liveBeside, letting this resolver fall through to 'none' and mint the
+  // acceptance fee for a trip that sibling's live invoice already covers.
   const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
   if (CANCELLED_SERVICE_RESOLVED_STATUSES.includes(String(inv.status))) {
     return { status: 'needs_review', invoice: inv, liveBeside: result?.liveBeside || null };
   }
+  if (!inv.scheduled_service_id || String(inv.scheduled_service_id) === String(svc.id)) return { status: 'none' };
   return { status: 'covered', invoice: inv };
 }
 

@@ -213,6 +213,27 @@ describe('siblingInvoiceCoverageVerdict', () => {
     });
   });
 
+  // Codex round-2 P0: the shared lookup deliberately returns a refunded
+  // match ahead of any live replacement REGARDLESS of whose row it sits
+  // on (no reliable refund-event clock), with the live replacement riding
+  // along as `liveBeside`. The own-visit check ("just my own row, not a
+  // sibling") must NOT be evaluated before the terminal-status check — an
+  // own-visit REFUNDED match discarded as "none" would also discard a
+  // live SIBLING invoice riding beside it, letting a write caller mint
+  // the acceptance fee for a trip that sibling's live invoice already
+  // covers.
+  test('needs_review — a REFUNDED match naming this visit\'s OWN row, with a live SIBLING invoice riding as liveBeside', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: LAWN_SVC.id, status: 'refunded', total: 56.4 },
+      liveBeside: { id: 'inv-2', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+    });
+    expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, {})).toEqual({
+      status: 'needs_review',
+      invoice: { id: 'inv-1', scheduled_service_id: LAWN_SVC.id, status: 'refunded', total: 56.4 },
+      liveBeside: { id: 'inv-2', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+    });
+  });
+
   test('error — the shared lookup throws', async () => {
     findFirstApplicationInvoiceForEstimateService.mockRejectedValue(new Error('db down'));
     expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, {})).toEqual({ status: 'error' });
