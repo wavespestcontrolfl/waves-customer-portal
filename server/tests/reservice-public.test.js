@@ -14,7 +14,7 @@ jest.mock('../services/logger', () => ({
 
 // Gate switchboard — reservice code lazy-requires feature-gates per call, so
 // flipping this map flips the gate per test.
-const gateState = { reserviceSelfServe: true, selfBooking: true, bookingCustomersOnly: false };
+const gateState = { reserviceSelfServe: true, selfBooking: true, bookingCustomersOnly: false, reservicePestChips: false };
 jest.mock('../config/feature-gates', () => ({
   gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
   isEnabled: jest.fn((name) => (name in gateState ? gateState[name] : true)),
@@ -81,6 +81,7 @@ afterEach(() => {
   for (const key of Object.keys(firstResults)) delete firstResults[key];
   for (const key of Object.keys(listResults)) delete listResults[key];
   gateState.reserviceSelfServe = true;
+  gateState.reservicePestChips = false;
 });
 
 describe('lane classification', () => {
@@ -473,5 +474,122 @@ describe('selected-lane availability for a customer with both plans', () => {
     const res = await browse({ lane: 'termite' });
     expect(res.status).toHaveBeenCalledWith(400);
     expect(build).not.toHaveBeenCalled();
+  });
+});
+
+describe('GATE_RESERVICE_PEST_CHIPS', () => {
+  const POST_SLOT_DATE = etDateString(addETDays(new Date(), 3));
+  let config;
+  let build;
+
+  beforeEach(() => {
+    firstResults.customers = {
+      id: CUST_ID, first_name: 'Jamie', active: true,
+      latitude: 27.4, longitude: -82.4,
+      address_line1: '123 Palm Ave', city: 'Bradenton', state: 'FL', zip: '34205', phone: '9415550101',
+    };
+    listResults.services = [
+      { id: 'pest-service', service_key: 'pest_re_service', name: 'Pest Control Re-Service', default_duration_minutes: 20 },
+      { id: 'lawn-service', service_key: 'lawn_re_service', name: 'Lawn Care Re-Service', default_duration_minutes: 30 },
+    ];
+    listResults['scheduled_services as s'] = [
+      { category: 'pest_control', service_type: 'General Pest Control' },
+      { category: 'lawn_care', service_type: 'Monthly Lawn Care Program' },
+    ];
+    const booking = require('../routes/booking')._internals;
+    config = jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({});
+    build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({
+      slots: [],
+      days: [{ date: POST_SLOT_DATE, slots: [{ start_time: '09:00', end_time: '10:00', technician_id: 'tech-1' }] }],
+    });
+  });
+
+  afterEach(() => {
+    config.mockRestore();
+    build.mockRestore();
+  });
+
+  function getHandler() {
+    return reservicePublicRouter.stack.find((layer) => layer.route?.path === '/:token' && layer.route.methods.get).route.stack[0].handle;
+  }
+  function postHandler() {
+    return reservicePublicRouter.stack.find((layer) => layer.route?.path === '/:token' && layer.route.methods.post).route.stack.at(-1).handle;
+  }
+  async function callHandler(handler, req) {
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() };
+    const next = jest.fn((err) => { if (err) throw err; });
+    await handler(req, res, next);
+    return res;
+  }
+  // POST helper: spies on createSelfBooking and returns the arg it was
+  // called with, so each test below only states its body + assertions.
+  async function postAndCapture(body) {
+    const csb = jest.spyOn(require('../routes/booking')._internals, 'createSelfBooking').mockResolvedValue({
+      ok: true, body: { booking: { id: 'booking-1' }, confirmationCode: 'ABC123' },
+    });
+    try {
+      await callHandler(postHandler(), { params: { token: 'a'.repeat(64) }, body });
+      return csb.mock.calls[0]?.[0];
+    } finally {
+      csb.mockRestore();
+    }
+  }
+
+  test('gate off: GET carries no pestChoices key', async () => {
+    gateState.reservicePestChips = false;
+    const res = await callHandler(getHandler(), { params: { token: 'a'.repeat(64) }, query: {} });
+    const payload = res.json.mock.calls[0][0];
+    expect(payload).not.toHaveProperty('pestChoices');
+  });
+
+  test('gate on: GET includes pestChoices for both eligible/bookable lanes', async () => {
+    gateState.reservicePestChips = true;
+    const res = await callHandler(getHandler(), { params: { token: 'a'.repeat(64) }, query: {} });
+    const payload = res.json.mock.calls[0][0];
+    expect(Object.keys(payload.pestChoices).sort()).toEqual(['lawn', 'pest']);
+    expect(payload.pestChoices.pest.map((c) => c.key)).toEqual(['ants', 'roaches', 'spiders', 'wasps', 'other']);
+    expect(payload.pestChoices.lawn.map((c) => c.key)).toEqual(['weeds', 'lawn_insects', 'brown_patches', 'other']);
+  });
+
+  test('gate on: pestChoices is limited to the customer\'s eligible lanes (pest-only coverage)', async () => {
+    gateState.reservicePestChips = true;
+    listResults['scheduled_services as s'] = [{ category: 'pest_control', service_type: 'General Pest Control' }];
+    const res = await callHandler(getHandler(), { params: { token: 'a'.repeat(64) }, query: {} });
+    const payload = res.json.mock.calls[0][0];
+    expect(Object.keys(payload.pestChoices)).toEqual(['pest']);
+  });
+
+  test('gate off: POST ignores posted pests — legacy customer_notes, pests dropped from the callbackVisit', async () => {
+    gateState.reservicePestChips = false;
+    const arg = await postAndCapture({
+      date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'ants back', pests: ['ants', 'roaches'],
+    });
+    expect(arg.customer_notes).toBe('Re-service request: ants back');
+    expect(arg.callbackVisit.customerRequest).toEqual({ text: 'ants back', source: 'picker', pests: null });
+  });
+
+  test('gate on: normalizes pests for the chosen lane, drops invalid/wrong-lane keys, and formats customer_notes with details', async () => {
+    gateState.reservicePestChips = true;
+    const arg = await postAndCapture({
+      date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'ants are back',
+      // 'weeds' is a lawn-only key, 'made_up' is not a real key — both dropped.
+      pests: ['wasps', 'ants', 'ants', 'weeds', 'made_up'],
+    });
+    expect(arg.callbackVisit.customerRequest).toEqual({ text: 'ants are back', source: 'picker', pests: ['ants', 'wasps'] });
+    expect(arg.customer_notes).toBe('Re-service request (Ants, Wasps): ants are back');
+  });
+
+  test('gate on: pests present with no details uses the pests-only customer_notes form', async () => {
+    gateState.reservicePestChips = true;
+    const arg = await postAndCapture({ date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', pests: ['roaches'] });
+    expect(arg.customer_notes).toBe('Re-service request: Roaches');
+    expect(arg.callbackVisit.customerRequest).toEqual({ text: null, source: 'picker', pests: ['roaches'] });
+  });
+
+  test.each([[false], [true]])('the existing no-details, no-pests fallback is unchanged (gate %s)', async (on) => {
+    gateState.reservicePestChips = on;
+    const arg = await postAndCapture({ date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest' });
+    expect(arg.customer_notes).toBe('Re-service requested via self-serve link');
+    expect(arg.callbackVisit.customerRequest).toBeUndefined();
   });
 });

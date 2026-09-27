@@ -3603,6 +3603,12 @@ async function createSelfBooking(payload = {}) {
 
       const hasGenerationColumn = await trx.schema.hasColumn('scheduled_services', 'source_estimate_generation');
       const hasReconciledColumn = await trx.schema.hasColumn('scheduled_services', 'wizard_recovery_reconciled_at');
+      // callbackVisit.customerRequest (reservice-public.js only, migration
+      // 20260927100000) — hasColumn-guarded so a deploy that runs before the
+      // migration can't break booking.
+      const hasCustomerRequestColumn = callbackVisit?.customerRequest
+        ? await trx.schema.hasColumn('scheduled_services', 'customer_request')
+        : false;
       // Duplicate-kept decided HERE, atomically with the visit (owner
       // ruling 2026-08-27; pre-push P0): the post-commit seeding used to
       // be the only place this was decided, so a worker death between the
@@ -3691,6 +3697,16 @@ async function createSelfBooking(payload = {}) {
           is_callback: callbackVisit.isCallback !== false,
           service_id: callbackVisit.serviceId || null,
           create_invoice_on_complete: false,
+        } : {}),
+        // Clean re-service request storage (customer_request/_source/_pests,
+        // migration 20260927100000) — internal callers only (reservice-public
+        // customerRequest); hasColumn-guarded like hasGenerationColumn above.
+        ...(callbackVisit?.customerRequest && hasCustomerRequestColumn ? {
+          customer_request: callbackVisit.customerRequest.text || null,
+          customer_request_source: callbackVisit.customerRequest.source || null,
+          customer_request_pests: callbackVisit.customerRequest.pests
+            ? JSON.stringify(callbackVisit.customerRequest.pests)
+            : null,
         } : {}),
       }).returning('*');
       if (pestDuplicateKeptAtBooking) {

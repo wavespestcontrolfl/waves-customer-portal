@@ -2068,7 +2068,25 @@ reordered by this — every feasible slot the engine found is still there,
 and the commit-time single-day revalidation still accepts exactly what that
 list offers. Gate off (default): buildBookingAvailability ignores the
 profile and this route's payload is byte-for-byte identical to before this
-gate existed.
+gate existed. One-tap pest chips (owner-approved, GATE_RESERVICE_PEST_CHIPS,
+nested inside GATE_RESERVICE_SELF_SERVE): with the gate live, GET's `base`
+payload carries `pestChoices` — `server/services/reservice-request.js`'s
+RESERVICE_PEST_CHOICES map, keyed to only the customer's currently bookable
+lanes. POST accepts an optional `pests` array (chip keys for the CHOSEN
+lane only); `normalizeRequestPests` drops anything invalid or from the
+other lane, de-dupes, and caps at that lane's own choice count — an empty
+result is treated as no pests. The chosen pests fold into the same
+customer-visible `customer_notes` line the details box already produced
+(`Re-service request (Ants, Roaches): <details>`, or `Re-service request:
+Ants, Roaches` with no details) and are passed into `createSelfBooking`'s
+internal-only `callbackVisit.customerRequest = { text, source: 'picker',
+pests }` (`scheduled_services.customer_request` / `_source` / `_pests`,
+migration `20260927100000`, hasColumn-guarded). Gate off: GET omits
+`pestChoices` entirely, POST ignores any posted `pests`, and both the
+payload and the existing no-pests `customer_notes` fallbacks are
+byte-identical to before this gate existed. The columns themselves are
+additive and stamped from the details box regardless of this gate — only
+the pest-chip normalization is gated.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner

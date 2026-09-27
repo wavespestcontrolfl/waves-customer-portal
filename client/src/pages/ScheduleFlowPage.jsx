@@ -798,9 +798,15 @@ function ReserviceCoveredView({ data }) {
 }
 
 // Hero (eyebrow → title → intro) plus the "what needs another look"
-// card: the lane choice when more than one plan family is bookable, and the
-// optional details line the tech preps from.
-function ReserviceHero({ data, bookableLanes, selectedLane, onSelectLane, details, onDetails }) {
+// card: the lane choice when more than one plan family is bookable, the
+// optional one-tap pest chips (GATE_RESERVICE_PEST_CHIPS — data.pestChoices
+// absent entirely while the gate is dark, so this renders nothing extra),
+// and the details line the tech preps from.
+function ReserviceHero({
+  data, bookableLanes, selectedLane, onSelectLane, details, onDetails,
+  selectedPests, onTogglePest,
+}) {
+  const pestChoices = data?.pestChoices?.[selectedLane] || null;
   return (
     <>
       <div style={{ margin: '8px 2px 20px' }}>
@@ -847,8 +853,45 @@ function ReserviceHero({ data, bookableLanes, selectedLane, onSelectLane, detail
             </div>
           </div>
         ) : null}
+        {pestChoices ? (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>What are you seeing?</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {pestChoices.map((pest) => {
+                const active = selectedPests.includes(pest.key);
+                return (
+                  <button
+                    key={pest.key}
+                    type="button"
+                    aria-pressed={active}
+                    {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })}
+                    onClick={() => onTogglePest(pest.key)}
+                    style={{
+                      background: active ? COLORS.glassNavy : '#fff',
+                      color: active ? COLORS.white : S.text,
+                      border: `2px solid ${active ? COLORS.glassNavy : '#E7E2D7'}`,
+                      borderRadius: 999,
+                      padding: '9px 16px',
+                      minHeight: 44,
+                      cursor: 'pointer',
+                      fontFamily: FONT_BODY,
+                      fontSize: 14,
+                      fontWeight: 700,
+                    }}
+                  >
+                    {pest.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
         <label htmlFor="reservice-details" style={{ display: 'block', fontSize: 14, fontWeight: 700, marginBottom: 6 }}>
-          What are you seeing? <span style={{ fontWeight: 500, color: S.body }}>(optional — helps your tech prep)</span>
+          {pestChoices ? (
+            <>Anything else? <span style={{ fontWeight: 500, color: S.body }}>(optional)</span></>
+          ) : (
+            <>What are you seeing? <span style={{ fontWeight: 500, color: S.body }}>(optional — helps your tech prep)</span></>
+          )}
         </label>
         <textarea
           id="reservice-details"
@@ -1246,11 +1289,14 @@ const FLOWS = {
     Success: ({ result }) => <ReserviceSuccessCard result={result} />,
     canConfirm: ({ lane }) => !!lane,
     actionLabel: ({ submitting, lane }) => (submitting ? 'Booking…' : !lane ? 'Pick what needs another look above' : `Book ${'→'} free`),
-    payload: ({ slot, lane, details }) => ({
+    payload: ({ slot, lane, details, pests }) => ({
       lane,
       date: slot.date,
       start_time: slot.start_time,
       details: details.trim() || undefined,
+      // Only sent when at least one chip is selected (GATE_RESERVICE_PEST_CHIPS
+      // absent/off customers never see chips, so this is always undefined then).
+      ...(pests && pests.length ? { pests } : {}),
     }),
     // ALREADY_BOOKED / NOT_ELIGIBLE: office booked one, plan lapsed.
     stateChangedCodes: ['ALREADY_BOOKED', 'NOT_ELIGIBLE'],
@@ -1343,9 +1389,13 @@ export default function ScheduleFlowPage({ flow }) {
   // the filter — a stale "Two openings Tuesday afternoon" line must not sit
   // above the unfiltered calendar.
   const [aiSession, setAiSession] = useState(0);
-  // Re-service only: which plan family and the optional details line.
+  // Re-service only: which plan family, the optional details line, and any
+  // one-tap pest chips selected (GATE_RESERVICE_PEST_CHIPS). Chips are kept
+  // per lane, so a lawn selection can never ride into a pest booking.
   const [selectedLane, setSelectedLane] = useState(null);
   const [details, setDetails] = useState('');
+  const [pestsByLane, setPestsByLane] = useState({});
+  const selectedPests = pestsByLane[selectedLane] || [];
   // Inspection only: the out-of-area stop (STOPs the page like `blocked`,
   // but it's raised from a POST response rather than the GET's own state)
   // and the ?slot= preselect's "we moved you" notice.
@@ -1418,6 +1468,7 @@ export default function ScheduleFlowPage({ flow }) {
       return bookable.length === 1 ? bookable[0].key : null;
     });
   }, [data]);
+
 
   // Inspection only: ?slot=YYYY-MM-DD|HH:MM preselect (the new-lead email's
   // three slot buttons link with one). Applies once, the first time real
@@ -1555,7 +1606,7 @@ export default function ScheduleFlowPage({ flow }) {
     if (!selectedSlot || submitting || !cfg.canConfirm({ lane: selectedLane })) return;
     setSubmitting(true);
     setSubmitError(null);
-    const payload = cfg.payload({ slot: selectedSlot, data, lane: selectedLane, details, address: resolvedAddress });
+    const payload = cfg.payload({ slot: selectedSlot, data, lane: selectedLane, details, pests: selectedPests, address: resolvedAddress });
     try {
       const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}`, {
         method: 'POST',
@@ -1692,6 +1743,14 @@ export default function ScheduleFlowPage({ flow }) {
         }}
         details={details}
         onDetails={setDetails}
+        selectedPests={selectedPests}
+        onTogglePest={(key) => setPestsByLane((prev) => {
+          const current = prev[selectedLane] || [];
+          return {
+            ...prev,
+            [selectedLane]: current.includes(key) ? current.filter((k) => k !== key) : [...current, key],
+          };
+        })}
         // Inspection only: re-open the address form to correct the address
         // (Codex #4737 r5 P1 — an explicitly typed address wins on the
         // server, so a corrected retry books there).
