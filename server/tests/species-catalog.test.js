@@ -461,6 +461,18 @@ describe('resolveName regressions', () => {
     expect(catalog.resolveName('Florida blue centipede')).toMatchObject({ node: { slug: 'florida-blue-centipede' } });
   });
 
+  test.each(['black snake', 'black snakes'])('generic %s names the shared snake group', (name) => {
+    expect(catalog.resolveName(name)).toMatchObject({ via: 'node', node: { level: 'group', id: 'snakes' } });
+    expect(catalog.resolveName('southern black racer')).toMatchObject({ node: { slug: 'southern-black-racer' } });
+    expect(catalog.resolveName('black racer')).toMatchObject({ node: { slug: 'southern-black-racer' } });
+  });
+
+  test.each(['ground wasp', 'ground wasps'])('generic %s names the shared wasp and bee group', (name) => {
+    expect(catalog.resolveName(name)).toMatchObject({ via: 'node', node: { level: 'group', id: 'wasps-bees' } });
+    expect(catalog.resolveName('yellowjacket')).toMatchObject({ node: { slug: 'yellowjacket' } });
+    expect(catalog.resolveName('cicada killer')).toMatchObject({ node: { slug: 'cicada-killer' } });
+  });
+
   test('never a false substring match (the "walkingstick"/"antenna" class)', () => {
     expect(catalog.resolveName('walkingstick')).toBeNull();
     expect(catalog.resolveName('antenna')).toBeNull();

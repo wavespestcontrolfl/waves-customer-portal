@@ -180,6 +180,10 @@
       "id": "wasps-bees",
       "label": "Wasps, bees & hornets",
       "generic": "a wasp or bee",
+      "aliases": [
+        "ground wasp",
+        "ground wasps"
+      ],
       "category": "insect",
       "next_photo": {
         "ask": "A close-up of the nest shape and a wide shot of where it's attached, taken from a few feet away.",
@@ -324,6 +328,10 @@
       "id": "snakes",
       "label": "Snakes",
       "generic": "a snake",
+      "aliases": [
+        "black snake",
+        "black snakes"
+      ],
       "category": "wildlife",
       "next_photo": {
         "ask": "A photo of the head and body pattern from several feet away — never approach or handle it.",
@@ -936,7 +944,7 @@
     "silverfish": {
       "node": "silverfish",
       "kind": "entry",
-      "note": "v1 alias list also included \"firebrat\" (a separate species, added by another owner in this batch); resolves to silverfish for now."
+      "note": "The dedicated firebrat entry now resolves that separate species; this legacy slug maps only to silverfish."
     },
     "earwig": {
       "node": "earwig",
