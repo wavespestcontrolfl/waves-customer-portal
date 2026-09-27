@@ -1628,15 +1628,12 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         // real prompts without ever being an infinitive obligation — the
         // INFINITIVE_WRITE_RE lead-in requirement (have/has/had/am/is/are/
         // was/were/got before "to <verb>") is what keeps this grounding.
-        // (Worded as "We added ... to inventory" rather than the literal
-        // imperative "add ... to inventory" because that imperative phrasing
-        // matches the RIGID grammar clause a few lines up in this file —
-        // `^(?:add|record|request|receive|write off) <qty> <unit> of
-        // (.+)$` — which captures the trailing "to inventory" into the
-        // product name and fails to resolve it; that's a separate,
-        // pre-existing gap in the rigid clause's own name/suffix stripping,
-        // not something this round's isNotAnInstruction gate touches.)
         'We added two bottles of Taurus SC to inventory',
+        // The imperative form goes through the rigid grammar, which used to
+        // capture "Taurus SC to inventory" as the product name and fail the
+        // lookup; a trailing destination is now stripped first.
+        'add two bottles of Taurus SC to inventory',
+        'receive two bottles of Taurus SC into our stock',
       ])('"%s" still grounds — a request, a completed receipt, and "cans" as a container unit are not modal statements', async (prompt) => {
         setGroundingDb({ products: [TAURUS, ALPINE] });
         const result = await resolveInventoryWriteTarget({

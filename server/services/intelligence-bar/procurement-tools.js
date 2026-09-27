@@ -1660,7 +1660,11 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   // can read: this is the one place the free-phrasing fallback runs (and,
   // for a bare follow-up like "1 bottle", recent operator turns).
   if (!selected) return resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq: threadSeq, toolName });
-  let name = selected.replace(/\s+(?:to\s+(?:the\s+)?(?:restock|reorder)\s+list|that\s+(?:physically\s+)?arrived|on the shelf)[.!]?$/i, '').trim();
+  // A trailing destination ("… to inventory", "… into our stock") names
+  // where the stock goes, not the product: "add two bottles of Taurus SC to
+  // inventory" must look up "Taurus SC" (the grammar captured the whole
+  // remainder, so the lookup failed and asked the operator to clarify).
+  let name = selected.replace(/\s+(?:to\s+(?:the\s+)?(?:restock|reorder)\s+list|(?:to|into)\s+(?:the\s+|our\s+)?(?:inventory|stock)|that\s+(?:physically\s+)?arrived|on the shelf)[.!]?$/i, '').trim();
   let literal = null;
   const deadline = toolName === 'create_restock_request' && name.match(/^(.+?)\s+(?:before|by)\s+(?:(?:this|next)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|\d{4}-\d{2}-\d{2})[.!]?$/i);
   if (deadline) {
