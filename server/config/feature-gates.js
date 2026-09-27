@@ -1053,6 +1053,23 @@ const gates = {
   // reschedule flips status, and the SMS line renders empty again.
   reserviceStreamline: process.env.GATE_RESERVICE_STREAMLINE === 'true',
 
+  // Re-service picker one-tap pest chips (owner-approved 2026-09-26): the
+  // /reservice/:token picker's optional details box gets a row of one-tap
+  // pest chips (server/services/reservice-request.js — ants/roaches/spiders/
+  // wasps/other for pest, weeds/bugs in the lawn/brown patches/other for
+  // lawn) above the now-secondary "Anything else?" textarea, and GET's
+  // payload carries pestChoices for the customer's bookable lanes. Nested
+  // inside reserviceSelfServe — with that gate dark the whole route 404s
+  // before this one is ever read. Customer-facing surface, so opt-in in
+  // EVERY environment (fail-closed ==='true'). Kill switch: unset
+  // GATE_RESERVICE_PEST_CHIPS — GET drops pestChoices, POST ignores any
+  // posted `pests`, and the picker renders byte-identical to before this
+  // gate existed (the plain "What are you seeing?" textarea only). The
+  // customer_request/_source/_pests columns themselves (migration
+  // 20260927100000) are additive and are stamped from the details box
+  // regardless of this gate — only the pest-chip normalization is gated.
+  reservicePestChips: process.env.GATE_RESERVICE_PEST_CHIPS === 'true',
+
   // Re-service ranking demotion (owner ruling 2026-09-24: "prefer new
   // customers over existing — new-customer bookings get first pick of open
   // time; re-service/callback pickers rank after"). Nested inside
@@ -3053,6 +3070,45 @@ const gates = {
   // explicit offset, read by gateEnvTimestamp) set, independently of this
   // gate, or the lane does nothing (see sweep.js).
   purchaseReceiptRestock: gateEnvValue('GATE_PURCHASE_RECEIPT_RESTOCK'),
+  // Fast Complete for pest re-services (PR C): the tech portal opens a
+  // one-screen completion sheet for pest_re_service (free callback) visits
+  // instead of the full ServiceRecapModal. Read once at load and mirrored
+  // onto the schedule payload as `reserviceFastCompleteEnabled` per service
+  // (server/routes/admin-schedule.js, same pattern as `inspectionCredit`
+  // below) — so TechHomePage learns the gate state from the job payload it
+  // already fetches, no new endpoint. **Ships DARK: off unless exactly
+  // `true`.** Off = the tech portal routes pest re-services to
+  // ServiceRecapModal exactly as before. Kill switch: unset
+  // GATE_RESERVICE_FAST_COMPLETE.
+  reserviceFastComplete: process.env.GATE_RESERVICE_FAST_COMPLETE === 'true',
+
+  // Inventory agent (server/services/purchase-receipts/inventory-agent.js):
+  // an LLM-backed resolver for a purchase-receipt line the deterministic
+  // classifier held as unmatched/needs_size/size_mismatch — every proposal
+  // it makes is checked by deterministic code before anything is written
+  // (see the module header). Ships DARK: off unless set (gateEnvValue),
+  // read at call time by receipt-processor.js's hand-off and by the
+  // scheduler's post-sweep run — a flip needs no redeploy. Gate off leaves
+  // GATE_PURCHASE_RECEIPT_RESTOCK's behavior byte-for-byte unchanged: those
+  // three statuses stay held for a person exactly as before this lane.
+  inventoryAgent: gateEnvValue('GATE_INVENTORY_AGENT'),
+
+  // Confirm-time whole-route capacity re-check for self-serve bookings
+  // (owner-approved 2026-09-26 dispatch backlog). Under GATE_SCHEDULING_CAPACITY,
+  // the OFFER (find-time.js's findCapacitySlots, packed from arrival-route.js's
+  // whole-route arrival simulation) already certifies a slot against the
+  // technician's complete route and owner planning minutes, but createSelfBooking's
+  // commit-time re-check only re-ran the overlap predicate (findConflictingVisits) —
+  // another booking landing on the same tech-day between offer and confirm (a
+  // late arrival, a day pushed over capacity) could make the route infeasible
+  // without ever overlapping this exact window, and the commit still succeeded.
+  // This entry is for logGateStatus only — the canonical CALL-TIME reader is
+  // bookCapacityCommitLive() below. **Ships DARK: off unless exactly `true`/`1`/`on`**;
+  // requires GATE_SCHEDULING_CAPACITY on too (checked together at the call site).
+  // Kill switch: unset GATE_BOOK_CAPACITY_COMMIT — createSelfBooking's commit
+  // gate goes back to the overlap-only re-check, byte for byte.
+  bookCapacityCommit: gateEnvValue('GATE_BOOK_CAPACITY_COMMIT'),
+
   // Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
   // "E2: cookie-free read-depth counts"). Ships DARK: off unless exactly
   // 'true'. The route reads this via isEnabled('blogReadDepth') at request
@@ -3198,6 +3254,16 @@ function reserviceRankAfterNewLive() {
   return gateEnvValue('GATE_RESERVICE_RANK_AFTER_NEW');
 }
 
+// GATE_BOOK_CAPACITY_COMMIT read at CALL time — the one canonical reader
+// createSelfBooking's commit-time capacity re-check uses (server/routes/booking.js).
+// The `bookCapacityCommit` gates-map entry above is for logGateStatus only.
+// Also requires GATE_SCHEDULING_CAPACITY (scheduling/policy.js's capacityEnabled())
+// — the call site checks both, since re-running the whole-route placement
+// evaluation only makes sense once the offer itself comes from that model.
+function bookCapacityCommitLive() {
+  return gateEnvValue('GATE_BOOK_CAPACITY_COMMIT');
+}
+
 // Fresh annual contracts require the term-aware cancellation path. Read both
 // switches at call time so pricing, availability and delivery agree.
 function termiteAnnualPlanSelectionEnabled() {
@@ -3245,5 +3311,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, commercialSuiteSizingLive, autoDispatchSharedModelLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive };
 // gates 1775330914

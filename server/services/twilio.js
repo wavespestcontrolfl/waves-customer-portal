@@ -996,7 +996,8 @@ const TwilioService = {
         // operatorInitiated flag — admin attribution is operator provenance.
         adminAttributed: Boolean(options.adminUserId),
       });
-      if (typeof options.withSmsHandoff === 'function' && pushRoute !== 'sms_only') {
+      // Companion push starts only after the locked Twilio leg is accepted.
+      if (typeof options.withSmsHandoff === 'function' && pushRoute === 'push_first') {
         return { success: false, preSendBlocked: true, code: 'UNSUPPORTED_SMS_HANDOFF',
           error: 'Locked lead handoff requires SMS routing', validator: 'check_sms_handoff_authority' };
       }
@@ -1048,14 +1049,15 @@ const TwilioService = {
         deliveryOutcome = pushed.deliveryOutcome === 'uncertain' ? 'uncertain' : 'not_sent';
         providerCoordination.recordProviderOutcome(providerHandoffReservation, { deliveryOutcome });
         if (options.explicitPushOnly) {
-          if (pushed.blocked) return { success: false, guardBlocked: true, error: pushed.reason };
-          if (pushed.pending) return { success: false, appPending: true, deliveryOutcome: pushed.deliveryOutcome, error: pushed.reason };
-          if (pushed.retryable) return { success: false, appRetryable: true, deliveryOutcome: pushed.deliveryOutcome, error: pushed.reason, retryAfterMs: pushed.retryAfterMs };
+          const bell = pushed.bellPersisted ? { bellPersisted: true } : {};
+          if (pushed.blocked) return { success: false, guardBlocked: true, error: pushed.reason, ...bell };
+          if (pushed.pending) return { success: false, appPending: true, deliveryOutcome: pushed.deliveryOutcome, error: pushed.reason, ...bell };
+          if (pushed.retryable) return { success: false, appRetryable: true, deliveryOutcome: pushed.deliveryOutcome, error: pushed.reason, retryAfterMs: pushed.retryAfterMs, ...bell };
           if (pushed.deliveryOutcome === 'uncertain') {
             return { success: false, appRetryable: true, deliveryOutcome: 'uncertain',
-              error: pushed.reason || 'push_attempt_failed', retryAfterMs: pushed.retryAfterMs };
+              error: pushed.reason || 'push_attempt_failed', retryAfterMs: pushed.retryAfterMs, ...bell };
           }
-          return { success: false, appUnavailable: true, error: pushed.reason || 'push_unavailable' };
+          return { success: false, appUnavailable: true, error: pushed.reason || 'push_unavailable', ...bell };
         }
         if (pushed.deliveryOutcome === 'uncertain') {
           return { success: false, appRetryable: true, deliveryOutcome: 'uncertain',

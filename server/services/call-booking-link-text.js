@@ -905,19 +905,35 @@ async function bookedSinceCall(conn, customerId, since, leadPhone) {
 // Requiring the code to actually appear in an accepted outbound SMS is the
 // same evidence-not-intent standard reschedule-link-promises' matchingSend
 // applies to its own visit links.
+//
+// A lead can accumulate far more than a handful of minted codes — the manual
+// composer mints one on every open, sent or not — so this used to cap the
+// candidate codes at the 20 newest and check sms_log only for those. A lead
+// with 21+ minted codes in the window could then hide an older code that WAS
+// actually texted behind 20 newer opens that never sent, and we'd text the
+// same person twice inside the 14-day window. Do it as one correlated EXISTS
+// instead: every short_codes row in the window is a candidate, with no count
+// limit, and the same sms_log filters (excludeUnresolvedSendReservations,
+// direction, since, status) still apply.
 async function linkSentRecently(conn, leadId, now) {
   const since = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
-  const codes = await conn('short_codes').where({ kind: 'consultation', entity_type: 'leads', entity_id: leadId })
-    .where('created_at', '>=', since).orderBy('created_at', 'desc').limit(20).pluck('code');
-  if (!codes.length) return false;
   // excludeUnresolvedSendReservations (codex r1 P2): 'sending' also covers
   // a pre-provider reply/review-ask RESERVATION row — a placeholder that
   // never reached Twilio, not delivery evidence. Every other caller of
   // this helper applies it before its own further .where()s.
-  const row = await excludeUnresolvedSendReservations(conn('sms_log')).where('direction', 'outbound').where('created_at', '>=', since)
-    .whereIn('status', ['queued', 'accepted', 'sending', 'sent', 'delivered', 'read'])
-    .where((q) => { for (const code of codes) q.orWhere('message_body', 'like', `%/l/${code}%`); })
-    .first('id');
+  const row = await excludeUnresolvedSendReservations(conn('sms_log'))
+    .where('sms_log.direction', 'outbound')
+    .where('sms_log.created_at', '>=', since)
+    .whereIn('sms_log.status', ['queued', 'accepted', 'sending', 'sent', 'delivered', 'read'])
+    .whereExists(
+      conn('short_codes')
+        .where('short_codes.kind', 'consultation')
+        .where('short_codes.entity_type', 'leads')
+        .where('short_codes.entity_id', leadId)
+        .where('short_codes.created_at', '>=', since)
+        .whereRaw("sms_log.message_body LIKE '%/l/' || short_codes.code || '%'"),
+    )
+    .first('sms_log.id');
   return !!row;
 }
 

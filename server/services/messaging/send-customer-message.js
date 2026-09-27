@@ -353,11 +353,19 @@ async function sendCustomerMessageCore(input) {
     preDispatchCheck,
     preProviderCheck,
     preSendCheck,
-    providerPreSendCheck,
+    providerPreSendCheck: suppliedProviderPreSendCheck,
     onDispatchStart,
     onDispatchAbort,
-    withSmsHandoff,
+    withSmsHandoff: suppliedSmsHandoff,
     withProviderHandoff,
+    // Invoice-send-via-SMS's explicit billing Email leg only (see
+    // billingEmailLeg below): the invoice claim/visit/ownership/balance
+    // check withProviderHandoff runs for SMS/App, composed instead into
+    // providerPreparationCheck and run under the Email authority's OWN lock
+    // — withProviderHandoff itself is never invoked for this leg (see
+    // dispatchProvider below), so it never takes this handoff's lock on the
+    // same invoice row the authority already holds on a different connection.
+    billingEmailPreSendCheck,
     providerHandoffReservation: suppliedProviderHandoffReservation,
     ...inputRest
   } = input;
@@ -371,6 +379,10 @@ async function sendCustomerMessageCore(input) {
   // Request lifecycle email companions have no text leg. Keep their App
   // intent even when the saved choice or gate changes before dispatch.
   if (sendInput.metadata?.appOnly === true || sendInput.metadata?.billingDeliveryLeg === 'push') sendInput.channel = 'push';
+  // Recursive explicit App routing selects its leg before hook validation.
+  const previsitAppLeg = input.entryPoint === 'previsit_balance_reminder' && sendInput.channel === 'push';
+  const withSmsHandoff = previsitAppLeg ? null : suppliedSmsHandoff;
+  const providerPreSendCheck = previsitAppLeg ? undefined : suppliedProviderPreSendCheck;
   // The locked handoff holds a caller's authority rows through the actual
   // provider request. Immediate lead replies and the visit-summary bearer
   // link (its immediate send and its scheduled replay), plus promised
@@ -389,6 +401,13 @@ async function sendCustomerMessageCore(input) {
       && input.entryPoint === 'reschedule-link-promise'
       && input.metadata?.original_message_type === 'reschedule_link_promise'
       && Boolean(input.metadata?.followThroughCommitmentId))
+    // Legacy previsit balance Text keeps its current automatic App routing,
+    // but an actual Twilio leg holds the complete balance quote through the
+    // provider request. The producer supplies no preSendCheck; its final
+    // predicate is providerPreSendCheck on the held transaction.
+    || (input.audience === 'customer' && input.purpose === 'billing'
+      && input.entryPoint === 'previsit_balance_reminder'
+      && typeof providerPreSendCheck === 'function')
     // Recruiting texts hold the application row through the provider
     // request: the deferred replay (deferred-replay-registry
     // recruiting_comms_deferred) and the immediate sends (recruiting-comms.js
@@ -431,17 +450,42 @@ async function sendCustomerMessageCore(input) {
   }
   // Invoice delivery needs one lock boundary that covers whichever provider
   // the canonical router actually chooses (push-first, push+SMS, or Twilio).
-  // Keep this narrowly scoped to the invoice-send entry point: other callers
-  // use the stronger recipient/consent handoffs above, whose transaction is
-  // also threaded into their fresh suppression reads.
+  // Keep this narrowly scoped to the invoice-send entry point and its queued
+  // replay (the scheduler replays invoice_send_deferred rows under the
+  // invoice lock too — deferred-replay-registry.js): other callers use the
+  // stronger recipient/consent handoffs above, whose transaction is also
+  // threaded into their fresh suppression reads.
+  const invoiceDeliveryEntry = input.entryPoint === 'invoice_send_via_sms'
+    || (input.entryPoint === 'scheduled_sms_cron'
+      && input.metadata?.original_entry_point === 'invoice_send_deferred');
   const providerHandoffAllowed = input.audience === 'customer'
     && (sendInput.channel === 'sms' || (sendInput.channel === 'push' && input.metadata?.billingDeliveryLeg === 'push'))
     && input.purpose === 'payment_link'
-    && input.entryPoint === 'invoice_send_via_sms';
-  if (withProviderHandoff
+    && invoiceDeliveryEntry;
+  // The SAME invoice-send entry point's explicit billing Email leg (a
+  // customer selection of Email, fanned out by dispatchBillingChannels)
+  // never takes withProviderHandoff — that handoff's own
+  // withInvoiceDepositSettlement lock would deadlock against the Email
+  // authority's own lock on the same invoice row (billing-channel-email-
+  // authority.js, a different connection). It gets the SAME invoice
+  // preconditions a different way instead: billingEmailPreSendCheck, run
+  // under the authority's own lock (see providerPreparationCheck below).
+  // A caller on this leg with no such check is refused exactly like any
+  // other unsupported handoff — never silently dropped to "no invoice
+  // check at all".
+  const billingEmailLeg = input.audience === 'customer'
+    && sendInput.channel === 'email'
+    && input.metadata?.billingDeliveryLeg === 'email'
+    && input.purpose === 'payment_link'
+    && invoiceDeliveryEntry;
+  if (withProviderHandoff && !billingEmailLeg
     && (typeof withProviderHandoff !== 'function' || !providerHandoffAllowed || withSmsHandoff)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_PROVIDER_HANDOFF',
       reason: 'Locked provider handoff is restricted to invoice delivery' };
+  }
+  if (billingEmailLeg && typeof billingEmailPreSendCheck !== 'function') {
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_PROVIDER_HANDOFF',
+      reason: 'Billing Email delivery requires an invoice pre-send check' };
   }
   // SMS link schemes are removed before audit counting, matching the final
   // Twilio boundary for direct callers.
@@ -796,10 +840,12 @@ async function sendCustomerMessageCore(input) {
     providerBoundaryBlock = { ...verdict, validator };
     return verdict;
   };
-  const runCallerPreSendCheck = async () => {
+  // Email authority and App bell persistence pass their held transaction
+  // so the caller's boundary reads do not acquire another pooled connection.
+  const runCallerPreSendCheck = async (database) => {
     if (typeof preSendCheck !== 'function') return { ok: true };
     try {
-      const verdict = await preSendCheck({ channel: sendInput.channel });
+      const verdict = await preSendCheck({ channel: sendInput.channel, ...(database ? { database } : {}) });
       if (verdict?.ok === true) {
         if (Object.prototype.hasOwnProperty.call(verdict, 'validUntil')) {
           if (typeof verdict.validUntil !== 'number' || !Number.isFinite(verdict.validUntil)) {
@@ -845,28 +891,38 @@ async function sendCustomerMessageCore(input) {
       };
     }
   };
-  const providerPreparationCheck = async ({ database: billingEmailTrx } = {}) => {
+  const providerPreparationCheck = async ({ database: handoffDb } = {}) => {
     if (sendInput.metadata?.billingDeliveryLeg) {
       // Settings can change while a provider prepares its request. Never
       // send a leg the customer removed after the initial preference read.
-      // Codex r2 P1: an explicit Email leg's caller
-      // (billing-channel-email-authority.js) already holds
-      // withCustomerCommsLock's transaction for this exact recheck and
-      // threads it through as `database` — reuse it for these reads instead of
-      // opening a second root-pool connection (DB_POOL_MAX=2 deadlock risk
-      // under two concurrent billing emails). Push/SMS callers never supply
-      // a trx here, so they keep reading through the plain pool unchanged.
-      let latest = await loadContactState(sendInput, billingEmailTrx);
+      // Both the Email authority and App bell callback hold a transaction.
+      // Reuse it here; a scheduler may already occupy the other pool slot.
+      // Other callers continue to read through the root pool.
+      let latest = await loadContactState(sendInput, handoffDb);
       const latestSuppressionInput = !sendInput.to
         && String(latest.customer?.id) === String(sendInput.customerId)
         ? { ...sendInput, to: latest.customer.phone || null }
         : sendInput;
-      latest = await loadSuppressionState(latestSuppressionInput, latest, billingEmailTrx);
+      latest = await loadSuppressionState(latestSuppressionInput, latest, handoffDb);
       if (!latestSuppressionInput.to) latest.suppressionLoaded = true;
       const suppressionVerdict = await checkSuppression(sendInput, policy, latest);
       if (!suppressionVerdict.ok) return rememberBoundaryBlock(suppressionVerdict, 'check_suppression_boundary');
       const consentVerdict = await checkConsentForPurpose(sendInput, policy, latest);
       if (!consentVerdict.ok) return rememberBoundaryBlock(consentVerdict, 'check_consent_boundary');
+      // billingEmailLeg's own invoice guard (claim/visit/ownership/balance —
+      // the same checks withProviderHandoff runs for SMS/App), composed here
+      // instead of via that handoff: this runs under the Email authority's
+      // OWN lock on the invoice row (handoffDb IS that lock's
+      // transaction — see the comment above), never a second lock on the
+      // same row. billingEmailPreSendCheck is stripped from sendInput above
+      // and reaches here only when this leg is billingEmailLeg (the
+      // allowlist above refuses any other Email leg that supplies one).
+      if (sendInput.metadata?.billingDeliveryLeg === 'email' && typeof billingEmailPreSendCheck === 'function') {
+        const invoiceVerdict = await billingEmailPreSendCheck({ channel: 'email', database: handoffDb });
+        if (!invoiceVerdict || invoiceVerdict.ok !== true) {
+          return rememberBoundaryBlock(invoiceVerdict, 'billing_email_pre_send_check_boundary');
+        }
+      }
     }
     const windowVerdict = checkSendWindow(sendInput, policy, contactState);
     if (!windowVerdict || windowVerdict.ok !== true) {
@@ -890,11 +946,11 @@ async function sendCustomerMessageCore(input) {
     if (await callbackNumberHoldBlocksSend(sendInput)) {
       return rememberBoundaryBlock({ ...CALLBACK_NUMBER_HOLD_BLOCK }, 'callback_number_hold_boundary');
     }
-    const callerVerdict = await runCallerPreSendCheck();
+    const callerVerdict = await runCallerPreSendCheck(handoffDb);
     if (!callerVerdict.ok) return rememberBoundaryBlock(callerVerdict, 'pre_send_check_boundary');
     const providerVerdict = await runCallerPreProviderCheck();
     if (!providerVerdict.ok) return rememberBoundaryBlock(providerVerdict, 'pre_provider_check_boundary');
-    const annualVerdict = await annualOfferGuardVerdict(sendInput, billingEmailTrx);
+    const annualVerdict = await annualOfferGuardVerdict(sendInput, handoffDb);
     if (!annualVerdict.ok) return rememberBoundaryBlock(annualVerdict, 'annual_offer_guard_boundary');
     // The awaited caller guard may itself straddle 20:00 ET. Keep this pure
     // clock check as the final operation before returning to the provider.
@@ -941,11 +997,19 @@ async function sendCustomerMessageCore(input) {
   };
   const dispatchProvider = () => {
     providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
+    // A legacy previsit Text may route to App before provider dispatch. Its
+    // SMS-only authority callback is irrelevant there; omitting it lets the
+    // canonical App route deliver while every actual Twilio branch remains
+    // fenced. Other handoff callers retain the prior strict behavior.
+    const activeSmsHandoff = input.entryPoint === 'previsit_balance_reminder'
+      && sendInput.channel !== 'sms' ? null : withSmsHandoff;
+    const activeProviderPreSendCheck = input.entryPoint === 'previsit_balance_reminder'
+      && sendInput.channel !== 'sms' ? undefined : providerPreSendCheck;
     return dispatchToProvider(sendInput, {
     // The caller's handoff receives (trx, onProviderStart): the callback fires
     // immediately before the provider request, after the rechecks below, so a
     // caller can tell a failed recheck (nothing sent) from a failed request.
-    withSmsHandoff: withSmsHandoff && (dispatch => withSmsHandoff(async (trx, onProviderStart) => {
+    withSmsHandoff: activeSmsHandoff && (dispatch => activeSmsHandoff(async (trx, onProviderStart) => {
       // Lock acquisition may wait past an opt-out commit. Reuse the canonical
       // validators with fresh state on that same connection, before the SDK.
       const currentState = await loadSuppressionState(sendInput, await loadContactState(sendInput, trx), trx);
@@ -978,7 +1042,7 @@ async function sendCustomerMessageCore(input) {
     // after its authoritative annual-offer guard. Keeping it distinct from
     // preSendCheck avoids invoking existing opaque preparation callbacks a
     // second time at the provider boundary.
-    providerPreSendCheck,
+    providerPreSendCheck: activeProviderPreSendCheck,
     // The REAL attempt boundary (codex #5018 r15 P1) — invoked by twilio.js
     // itself, immediately before dispatchStarted flips true and
     // messages.create() runs, AFTER providerPreSendCheck and
@@ -998,7 +1062,11 @@ async function sendCustomerMessageCore(input) {
     providerHandoffReservation,
   });
   };
-  providerOutcome = providerCoordinationBlock || (withProviderHandoff
+  // billingEmailLeg never invokes withProviderHandoff itself (see the
+  // allowlist above) — its invoice check runs instead inside
+  // providerPreparationCheck, composed with billingEmailPreSendCheck, under
+  // the Email authority's own lock.
+  providerOutcome = providerCoordinationBlock || (withProviderHandoff && !billingEmailLeg
     ? await withProviderHandoff(dispatchProvider)
     : await dispatchProvider());
   await providerCoordination.finalizeProviderHandoffReservation({
@@ -1046,6 +1114,7 @@ async function sendCustomerMessageCore(input) {
       sent: false,
       blocked: true,
       deliveryOutcome: providerOutcome.deliveryOutcome,
+      ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}),
       code: providerOutcome.code,
       reason: providerOutcome.error,
       ...(providerOutcome.retryable ? { retryable: true } : {}),
@@ -1101,7 +1170,7 @@ async function sendCustomerMessageCore(input) {
       return { sent: false, blocked: true, ...preferenceChangeHold(), auditLogId: audit.id };
     }
     if (sendInput.metadata?.appOnly === true || sendInput.metadata?.billingDeliveryLeg === 'push') {
-      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id };
+      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id, ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (providerOutcome.error === 'preference_changed'
       && ['appointment_reminder_72h', 'appointment_reminder_24h'].includes(sendInput.purpose)) {
@@ -1139,6 +1208,7 @@ async function sendCustomerMessageCore(input) {
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
+      ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}),
     };
   }
 

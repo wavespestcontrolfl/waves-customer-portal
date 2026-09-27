@@ -151,10 +151,19 @@ async function scheduledDepositReceiptAllowed(msg) {
 //                    row on the bounded retry rail so the handoff reruns.
 function classifyDepositReplayFallback(fb = {}) {
   if (fb.sent === true || fb.reason === 'receipt_opted_out') return 'handled';
-  if (['email_opted_out', 'no_recipient_email', 'sendgrid_not_configured', 'no_received_deposit', 'estimate_not_found', 'no_estimate_ref'].includes(fb.reason)) {
+  if (['no_recipient_email', 'sendgrid_not_configured', 'no_received_deposit', 'estimate_not_found', 'no_estimate_ref'].includes(fb.reason)) {
     return 'sms_fallback';
   }
   return 'retry';
+}
+
+// Whether the inventory agent's own summary line is worth logging: any
+// outcome for a person to see, INCLUDING a run where every line is still
+// retrying (2026-09-27 review — a run that only bumped attempt counts, e.g.
+// every line hit a transient LLM failure, used to log nothing at all). A
+// truly silent tick is one where nothing happened in any of these buckets.
+function shouldLogInventoryAgentSummary(agentResult) {
+  return Boolean(agentResult.logged || agentResult.held || agentResult.ignored || agentResult.stillPending || agentResult.errors);
 }
 
 function scheduledSmsAttemptSql() {
@@ -2516,10 +2525,34 @@ function initScheduledJobs() {
       await runExclusive('purchase-receipt-restock', async () => {
         const { runPurchaseReceiptRestockSweep, summarize } = require('./purchase-receipts/sweep');
         const result = await runPurchaseReceiptRestockSweep();
+        // A skipped sweep (no valid PURCHASE_RECEIPT_SINCE) stops the agent
+        // too: clearing the cutoff is a kill switch for every receipt write.
         if (result.skipped) return;
         const { logged, held, errors } = summarize(result);
         if (logged || held || errors) {
           logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s)`);
+        }
+        // Inventory agent (GATE_INVENTORY_AGENT): resolves lines the sweep
+        // above just handed off as agent_pending (unmatched/needs_size/
+        // size_mismatch, see receipt-processor.js). Same runExclusive lock,
+        // right after the sweep, so it never races another tick over the
+        // same lines. Self-gated (also cheap to check twice).
+        if (gateEnvValue('GATE_INVENTORY_AGENT')) {
+          const { runInventoryAgent } = require('./purchase-receipts/inventory-agent');
+          const agentResult = await runInventoryAgent();
+          if (!agentResult.skipped && shouldLogInventoryAgentSummary(agentResult)) {
+            logger.info(`[inventory-agent] ${agentResult.logged} logged, ${agentResult.held} held for a person, `
+              + `${agentResult.ignored} ignored, ${agentResult.stillPending} still pending, ${agentResult.errors} error(s)`);
+          }
+        } else {
+          // The gate is off: drain anything already sitting agent_pending
+          // from before it flipped, so a queued line is never stranded
+          // (nothing else ever looks at that status while the gate is off).
+          const { drainAgentQueue } = require('./purchase-receipts/inventory-agent');
+          const drainResult = await drainAgentQueue({});
+          if (drainResult.drained || drainResult.errors) {
+            logger.info(`[inventory-agent] gate off: drained ${drainResult.drained} queued line(s), ${drainResult.errors} error(s)`);
+          }
         }
       });
     } catch (err) {
@@ -4107,6 +4140,10 @@ function initScheduledJobs() {
             scheduled_sms_log_id: msg.id,
             customer_id: msg.customer_id,
           };
+          const replayRegistry = require('./messaging/deferred-replay-registry');
+          const replayHandoffMeta = { ...claimMeta,
+            customer_id: msg.customer_id || claimMeta.customer_id || null,
+            to_phone: msg.to_phone || null };
           const replayInput = {
             to: toPhone,
             body: msg.message_body,
@@ -4116,10 +4153,17 @@ function initScheduledJobs() {
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
-            withSmsHandoff: require('./messaging/deferred-replay-registry')
-              .deferredSmsHandoff(claimMeta.entry_point, { ...claimMeta,
-                customer_id: msg.customer_id || claimMeta.customer_id || null,
-                to_phone: msg.to_phone || null }),
+            withSmsHandoff: replayRegistry.deferredSmsHandoff(claimMeta.entry_point, replayHandoffMeta),
+            // A queued invoice notice holds the same invoice lock as the
+            // immediate send: the Text/App provider handoff and the Email
+            // leg's check under the Email authority's lock (registry
+            // invoice_send_deferred). Undefined for every other entry point.
+            withProviderHandoff: replayRegistry.deferredProviderHandoff(claimMeta.entry_point, replayHandoffMeta),
+            billingEmailPreSendCheck: replayRegistry.deferredBillingEmailPreSendCheck(claimMeta.entry_point, replayHandoffMeta),
+            // An entry's own predicate at the true provider boundary
+            // (twilio.js runs it immediately before its request); undefined
+            // for entries that register none.
+            providerPreSendCheck: replayRegistry.deferredProviderPreSendCheck(claimMeta.entry_point, replayHandoffMeta),
             // Send-window operator provenance: only rows an operator
             // actually composed/scheduled keep the operator exemption — the
             // composer dispatches at the exact minute the operator picked,
@@ -4423,8 +4467,8 @@ function initScheduledJobs() {
             // off to the deposit email leg BEFORE the row goes terminal — the
             // immediate path treats the same opt-outs as "the email carries
             // the receipt". PURPOSE_OPTED_OUT can also mean the
-            // payment_receipt kill switch; the fallback re-checks it (and
-            // email_enabled) itself. A TRANSIENT fallback failure (prefs
+            // payment_receipt kill switch; the fallback re-checks it
+            // itself. A TRANSIENT fallback failure (prefs
             // blip / provider error) reschedules the row on the bounded
             // attempt rail so the handoff reruns, instead of discarding the
             // only remaining receipt path (codex P2 on a3de55b9); a
@@ -7335,6 +7379,7 @@ module.exports = {
   scheduledDepositReceiptAllowed,
   classifyDepositReplayFallback,
   holdFinalReviewUncertainty,
+  shouldLogInventoryAgentSummary,
   recoverStaleScheduledSmsClaims,
   runContentRegistryMaintenance,
   runAutonomousOpportunityMining,

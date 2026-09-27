@@ -47,21 +47,31 @@ function providerFailureStatus(err, error) {
   return match ? Number(match[1]) : null;
 }
 
+// Permanent Twilio rejections. Nothing was sent. The sender-side ones are
+// OUR configuration's problem, not the recipient's: fixing the sender or
+// account makes a later send to the same number viable, so a lane holding
+// a permanent one-text-per-number claim releases it for these instead of
+// consuming it (missed-call-text-back.js). The rest are about the
+// recipient.
+const SENDER_SIDE_TERMINAL_TWILIO_CODES = Object.freeze([
+  '21408', // permission denied for destination region
+  '21606', // From number cannot send SMS
+  '21608', // unverified trial destination
+]);
+const RECIPIENT_TERMINAL_TWILIO_CODES = Object.freeze([
+  '21211', // invalid To number
+  '21610', // recipient unsubscribed
+  '21612', // no route available
+  '21614', // number is not mobile/SMS-capable
+]);
+
 function classifyProviderFailure(err, fallbackError) {
   const error = err ? formatProviderError(err) : (sanitizeProviderError(fallbackError) || 'twilio rejected');
   const twilioCode = providerFailureCode(err, error);
   const httpStatus = providerFailureStatus(err, error);
   const lc = String(error || fallbackError || '').toLowerCase();
 
-  const terminalTwilioCodes = new Set([
-    '21211', // invalid To number
-    '21408', // permission denied for destination region
-    '21606', // From number cannot send SMS
-    '21608', // unverified trial destination
-    '21610', // recipient unsubscribed
-    '21612', // no route available
-    '21614', // number is not mobile/SMS-capable
-  ]);
+  const terminalTwilioCodes = new Set([...SENDER_SIDE_TERMINAL_TWILIO_CODES, ...RECIPIENT_TERMINAL_TWILIO_CODES]);
   const retryableTwilioCodes = new Set([
     '20429', // Twilio rate limit
   ]);
@@ -236,18 +246,18 @@ async function sendViaTwilioOnce(input, {
       return { sent: false, blocked: true, provider: input.channel === 'push' ? 'push' : 'twilio', deliveryOutcome: 'not_sent', code: 'DELIVERY_SUPPRESSED', error: result.error || result.sid, validator: 'delivery_guard' };
     }
     if (result.appUnavailable) {
-      return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', appUnavailable: true, error: result.error || 'push_unavailable' };
+      return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', appUnavailable: true, error: result.error || 'push_unavailable', ...(result.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (result.appPending) {
-      return { sent: false, blocked: true, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'PUSH_IN_FLIGHT', error: 'push_in_flight', retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString() };
+      return { sent: false, blocked: true, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'PUSH_IN_FLIGHT', error: 'push_in_flight', retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString(), ...(result.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (result.appRetryable) {
       if (Number.isFinite(result.retryAfterMs)) {
         const retryAfterMs = Math.max(60000, result.retryAfterMs);
         return { sent: false, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'APP_PROVIDER_RETRY', error: result.error,
-          retryable: true, deferred: true, retryAfterMs, nextAllowedAt: new Date(Date.now() + retryAfterMs).toISOString() };
+          retryable: true, deferred: true, retryAfterMs, nextAllowedAt: new Date(Date.now() + retryAfterMs).toISOString(), ...(result.bellPersisted ? { bellPersisted: true } : {}) };
       }
-      return { sent: false, blocked: true, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'APP_DELIVERY_HOLD', error: result.error, retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString() };
+      return { sent: false, blocked: true, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'APP_DELIVERY_HOLD', error: result.error, retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString(), ...(result.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (result.preSendBlocked || (result.guardBlocked && result.code)) {
       return {
@@ -394,6 +404,7 @@ module.exports = {
   // definitive-vs-ambiguous split decides whether a failed calls.create()
   // may still have reached Twilio.
   classifyProviderFailure,
+  SENDER_SIDE_TERMINAL_TWILIO_CODES,
   // Shared with sendCustomerMessage so the wrapper's MMS-vs-SMS decision
   // (GSM normalization exemption) uses the SAME predicate that decides
   // whether media URLs actually reach Twilio.

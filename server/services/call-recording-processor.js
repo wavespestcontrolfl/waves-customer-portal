@@ -14522,6 +14522,12 @@ const CallRecordingProcessor = {
               extracted,
               call,
               phone,
+              // The voicemail itself asked not to be contacted — both DNC
+              // shapes, as the clarify-ask gate below reads them: the V2
+              // consent object and the legacy flat field (V2 off,
+              // unavailable or schema-failed still sets the flat one).
+              doNotContactRequested: v2Result?.extraction?.consent?.do_not_contact_request === true
+                || extracted.do_not_contact_request === true,
             });
           } catch (smsErr) {
             logger.warn(`[call-proc] voicemail text-back failed (non-blocking): ${smsErr.message}`);
@@ -16808,6 +16814,17 @@ const CallRecordingProcessor = {
                 // transaction): stamp payer_id (per-job) so the completion
                 // invoice routes to the payer. (propertyLinkage resolved above,
                 // before the attach guard.)
+                // Clean re-service request storage (migration 20260927100000,
+                // hasColumn-guarded like the reservice-public/booking.js
+                // callers): the call extraction's pain_points, trimmed and
+                // capped, as a paraphrase of why the customer called — for
+                // re-service rows only, mirroring is_callback below.
+                const isReServiceBooking = isReServiceCatalogRow(callBookingCatalogRow);
+                const hasCustomerRequestColumn = isReServiceBooking
+                  && await trx.schema.hasColumn('scheduled_services', 'customer_request');
+                const callBookingCustomerRequest = isReServiceBooking
+                  ? (String(extracted.pain_points || '').trim().slice(0, 400) || null)
+                  : null;
                 const insertData = {
                   customer_id: customerId,
                   payer_id: callBookingPayerId || null,
@@ -16848,6 +16865,10 @@ const CallRecordingProcessor = {
                     is_callback: true,
                     estimated_price: null,
                     create_invoice_on_complete: false,
+                  } : {}),
+                  ...(hasCustomerRequestColumn ? {
+                    customer_request: callBookingCustomerRequest,
+                    ...(callBookingCustomerRequest ? { customer_request_source: 'call' } : {}),
                   } : {}),
                   status: 'confirmed',
                   customer_confirmed: true,

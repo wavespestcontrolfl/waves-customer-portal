@@ -715,6 +715,44 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(secondResult).toEqual({ sent: false, skipped: 'link_sent_recently' });
   });
 
+  // #5018 follow-up: linkSentRecently used to pull only the 20 newest
+  // short_codes minted in the window (the manual composer mints one on
+  // every open, sent or not, so a busy lead can easily mint more than 20 in
+  // 14 days) and check sms_log only for those. A lead with 21+ minted codes
+  // could hide an older code that WAS actually texted behind 20 newer opens
+  // that never sent, so this worker would text the same person twice inside
+  // the 14-day window. Mint 21 codes, oldest first, and put the ONLY real
+  // accepted send on the OLDEST one — the one a `.limit(20)` newest-first
+  // read would have dropped. linkSentRecently must still see it and skip.
+  test('linkSentRecently finds a real send on the OLDEST of 21+ minted codes, past any old newest-20 cap', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550777' });
+    const oldestCode = 'aa000';
+    const oldestMintedAt = new Date(NOW.getTime() - 13 * 24 * 60 * 60 * 1000);
+    await mockPg('short_codes').insert({
+      id: randomUUID(), code: oldestCode, target_url: 'https://portal.example.com/inspection/tok-old',
+      kind: 'consultation', entity_type: 'leads', entity_id: leadId,
+      created_at: oldestMintedAt, updated_at: oldestMintedAt,
+    });
+    // The evidence: a real accepted outbound send carrying the OLDEST code.
+    await mockPg('sms_log').insert({
+      id: randomUUID(), direction: 'outbound', from_phone: '+15555550100', to_phone: '+15555550777', status: 'accepted',
+      message_body: 'Pick a time: https://portal.example.com/l/aa000', created_at: oldestMintedAt,
+    });
+    // 21 more, newer, never-sent codes — every open of the manual composer
+    // that closed without a Send. These are the ones a `.limit(20)`
+    // newest-first read would have kept instead of the real send above.
+    for (let i = 0; i < 21; i += 1) {
+      const mintedAt = new Date(oldestMintedAt.getTime() + (i + 1) * 60 * 60 * 1000);
+      await mockPg('short_codes').insert({
+        id: randomUUID(), code: `nn${String(i).padStart(3, '0')}`, target_url: `https://portal.example.com/inspection/tok-${i}`,
+        kind: 'consultation', entity_type: 'leads', entity_id: leadId, created_at: mintedAt, updated_at: mintedAt,
+      });
+    }
+
+    const result = await callBookingLinkText._private.linkSentRecently(mockPg, leadId, NOW);
+    expect(result).toBe(true);
+  });
+
   // codex r3 P2 (this round) — new raw SQL added alongside the earlier
   // jsonb_build_object fix: recoverStaleClaims'/recoverAbandonedClaim's own
   // named-binding comparisons. The same class of bug (a mocked knex cannot

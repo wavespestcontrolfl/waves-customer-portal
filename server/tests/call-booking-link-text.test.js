@@ -1133,7 +1133,7 @@ describe('neverSendRecheck', () => {
   function dbi({ lead = OPEN, bookedSince = null, smsWithLink = null, freshCall = FRESH_CALL_LOG } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate', 'join']
+      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.first = jest.fn(async () => {
         if (table === 'leads') return lead;
@@ -1349,7 +1349,7 @@ describe('neverSendRecheck', () => {
     const conn = dbi();
     conn.mockImplementation((table) => {
       const chain = {};
-      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate', 'join']
+      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.first = jest.fn(async () => {
         if (table === 'leads') return OPEN;
@@ -1497,7 +1497,7 @@ describe('dispatchClaimedCall', () => {
     markerInsert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) })) } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
-      ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate', 'join']
+      ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'whereExists', 'orderBy', 'limit', 'modify', 'forUpdate', 'join']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.where = jest.fn((...args) => {
         if (table === 'scheduled_services' && args[0] === 'created_at') capture.bookedSinceBound = args[2];

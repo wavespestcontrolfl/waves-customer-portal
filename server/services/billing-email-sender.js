@@ -3,9 +3,12 @@
 // authority.js; owner ruling 2026-09-27): the authority's first read of the
 // recipient, the mapping of its refusals onto the outcome vocabulary those
 // senders' callers already settle on, the recording of a send's result, and
-// the classification of a thrown send.
+// the classification of a thrown send. An operator's explicit send skips the
+// customer's billing choices, as before, and rechecks ownership only.
+const db = require('../models/db');
 const logger = require('./logger');
 const { loadBillingEmailContext } = require('./billing-channel-email-authority');
+const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { isDefiniteRejection } = require('./sendgrid-mail');
 
 // Final refusals keep the reasons the callers already settle on, and a
@@ -17,7 +20,6 @@ const { isDefiniteRejection } = require('./sendgrid-mail');
 // (the loser is soft-deleted) and INVOICE_CUSTOMER_MISMATCH (the invoice
 // moved to the winner). The next run re-reads them all.
 const FINAL_REASONS = Object.freeze({
-  BILLING_EMAIL_DISABLED: 'email_disabled',
   NO_EMAIL_RECIPIENT: 'missing_email',
   INVOICE_PAYER_BILLED: 'invoice_payer_billed',
 });
@@ -46,6 +48,38 @@ async function billingEmailRecipient(authorityInput, logTag) {
   }
   if (context.error) return { refusal: billingEmailRefusal(context.error) };
   return { recipient: context.recipient, to: context.recipientEmail };
+}
+
+function isEmailLike(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim().toLowerCase());
+}
+
+// Who an operator's explicit send goes to: the billing recipient, whatever
+// the customer chose.
+async function operatorEmailRecipient(customer, logTag) {
+  const prefs = await db('notification_prefs')
+    .where({ customer_id: customer.id })
+    .first()
+    .catch((err) => {
+      logger.warn(`[${logTag}] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
+      return null;
+    });
+  const [recipient] = getInvoiceEmailRecipients(customer, prefs || {})
+    .filter((entry) => isEmailLike(entry.email));
+  if (!recipient?.email) return { refusal: { ok: false, skipped: true, reason: 'missing_email' } };
+  return { recipient, to: recipient.email };
+}
+
+// The operator send's provider handoff. Fail-closed: an unreadable invoice
+// aborts before dispatch, like every other ownership guard.
+function selfPayOnlyHandoff(invoiceId, state) {
+  return async (dispatch) => {
+    const verdict = await require('./invoice-helpers').selfPayAtDispatch(invoiceId, db)();
+    if (verdict.ok !== true) return verdict;
+    state.handoffStarted = true;
+    await dispatch();
+    return { ok: true };
+  };
 }
 
 // What the send returned, recorded through the sender's own `log` and
@@ -94,6 +128,8 @@ async function billingEmailSendFailure(err, handoffStarted, log, { logTag, label
 module.exports = {
   billingEmailRecipient,
   billingEmailRefusal,
+  operatorEmailRecipient,
+  selfPayOnlyHandoff,
   billingEmailSendOutcome,
   billingEmailSendFailure,
 };

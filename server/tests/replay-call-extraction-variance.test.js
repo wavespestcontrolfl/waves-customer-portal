@@ -775,6 +775,27 @@ describe('call extraction replay variance reporting', () => {
     });
   });
 
+  // scheduling.caller_accepted_slot / moved_appointment_date (schema
+  // 1.16.0): they decide whether the reschedule applier moves a visit and
+  // which one, so a model that drifts on either must show in the replay.
+  describe('reschedule agreement variance coverage', () => {
+    test('caller_accepted_slot and moved_appointment_date are registered as high-severity fields', () => {
+      expect(FIELD_GROUPS.high).toEqual(expect.arrayContaining(['caller_accepted_slot', 'moved_appointment_date']));
+    });
+
+    test('caller_accepted_slot treats a missing value as not accepted, like agent_committed_booking', () => {
+      expect(normalizeField('caller_accepted_slot', null)).toBe(false);
+      expect(normalizeField('caller_accepted_slot', true)).toBe(true);
+      const variances = compareFlatFields({ caller_accepted_slot: null }, { caller_accepted_slot: false }, true);
+      expect(variances.find((v) => v.field === 'caller_accepted_slot')).toBeUndefined();
+    });
+
+    test('compareFlatFields reports a high-severity variance when the moved appointment changes', () => {
+      const variances = compareFlatFields({ moved_appointment_date: '2026-09-24' }, { moved_appointment_date: '2026-12-24' }, true);
+      expect(variances.find((v) => v.field === 'moved_appointment_date')).toMatchObject({ severity: 'high' });
+    });
+  });
+
   // caller.caller_id_disclaimed / caller.phone_note (schema 1.14.0, live
   // miss 2026-09-25, call 6fee5f34): without these in FIELD_GROUPS, a model
   // that stops catching (or starts hallucinating) the disclaim would go

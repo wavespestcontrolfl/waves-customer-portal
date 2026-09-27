@@ -186,6 +186,65 @@ fields only: /api/booking/availability builds each public slot field by field
 (`routes/booking.js`) and the estimate routes build theirs through
 `classifySlot`, so neither field reaches a customer response. Gate-off availability is unchanged apart from the
 shared grid / day-end / lunch-gate rules above, which apply in both modes.
+Commit-time capacity re-check (`GATE_BOOK_CAPACITY_COMMIT`, owner-approved
+2026-09-26; needs `GATE_SCHEDULING_CAPACITY` live too): every `createSelfBooking`
+commit — `/api/booking/confirm` here and the re-service commit below — prepares
+the traffic-aware whole-route proof before scheduling locks, then reuses
+`arrival-route.js`'s `verifyArrivalCapacity` under the transaction's existing
+tech-day advisory locks. Capacity commits acquire the selected and unassigned
+tech-day keys together through `lockTechDays`, in canonical order and before
+row locks, because both memberships are fingerprint inputs. Verification then
+locks the relevant route rows, requires the live fingerprint to match the
+prepared route, and evaluates without a provider request while locks are held. This closes the gap the
+overlap-only re-check (`findConflictingVisits`) leaves: another booking landing
+on the tech-day between offer and confirm can push a LATER stop's promised
+window past its promise, or the day over capacity, without ever overlapping
+the confirmed window — that booking now refuses with the existing `SLOT_TAKEN`
+409 (the same shape and client recovery as every other slot race on this
+route) instead of committing a route the offer engine would no longer certify.
+If the customer's exact service point changes after traffic preparation,
+confirm asks for a fresh offer instead of reusing legs prepared for the old
+point, even when both points share the public rounded grid.
+A zone/no-tech confirm (no technician bound) has no single route to re-check
+and keeps only the overlap gate, unchanged. Either gate off skips this
+whole-route capacity re-check.
+
+Public-confirm location freshness applies with either capacity gate on or
+off. After the scheduling and customer-communications fences, the customer
+row is held `FOR SHARE` through the insert. A complete live pin in another
+signed-offer grid cell returns `LOCATION_CHANGED_RETRY` (409); a same-cell
+exact correction drives the final overlap probe when the capacity commit gate
+is off, while an already-prepared traffic proof requires a fresh offer.
+Customers without a complete stored pair are geocoded from their server-owned
+address before locks. The address and missing pair must still be unchanged under the fence,
+and a matching staff geocode-review hold refuses the fallback. A valid
+server-resolved pair must match the signed grid and is stamped with its
+address on the new visit so dispatch uses the same location the commit
+certified. The customer profile is not rewritten, cleared pins are not
+restored, and no geocoder request runs while scheduling locks are held.
+The official `/book` client sends its estimate identity, street-only line,
+dedicated unit, and structured city/state/ZIP on every availability,
+date-browse, and `/find-slots` request. The street stays free of a stale Places
+subpremise after a unit edit while the structured locality keeps same-street
+properties in different ZIPs distinct. The offer side
+resolves the same location: `/api/booking/availability` and `/find-slots` build
+an existing customer's offers (an estimate identifies the account and the
+typed address/unit selects the matching property row, else the unique
+unit-aware customer at that address) at that commit location — the
+stored pin, else a staff-verified pin or the canonical geocode — over any
+caller coordinates, and echo it only rounded; `/reservice/:token` builds its
+offers on it too. Everyone else keeps the caller's coordinates or address.
+For a bare signed-in `/book` entry, all three offer requests use the portal's
+authenticated fetch path. These routes validate the optional bearer and bind
+the typed property only within that server-resolved account while customers-
+only mode is enabled; a body/query customer id is never identity. With that
+gate off, offers and confirmation both ignore an ambient portal bearer and
+keep the same public address behavior. A bearer from a different account
+cannot sign offers on a pin that confirmation will refuse. An invalid or
+absent bearer also keeps public behavior. An expired
+access token gets the refreshable 401 only when the customers-only gate needs
+that identity. An estimate-linked request keeps the estimate account instead
+of inheriting an ambient portal session.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`
@@ -2107,7 +2166,29 @@ never bills the monthly rate; re-service catalog service_id; card-capture
 step + ad attribution skipped; `/booking/confirm` pins the option null
 after the body spread). The lane dedupe is re-checked INSIDE the commit
 transaction under a customer+lane advisory lock, so parallel commits
-cannot double-book a lane's free visit. find-slots mirrors the
+cannot double-book a lane's free visit. Because the commit runs through the
+SAME `createSelfBooking` transaction, it gets the SAME commit-time capacity
+re-check under `GATE_BOOK_CAPACITY_COMMIT` (see the `GATE_SCHEDULING_CAPACITY`
+paragraph above) — a tech-bound re-service slot that a later booking made
+infeasible refuses with `SLOT_TAKEN` and this route's existing refresh (fresh
+availability in the 409 body) instead of committing an infeasible route.
+For a customer missing a complete stored latitude/longitude pair, the route
+also reads the canonical address-bound staff review under `GATE_GEOCODE_REVIEW`.
+A matching permanent `address_review_required` result blocks online scheduling;
+the full stored address, including line 2, must match that review. Once a
+bookable lane is selected (or implicit), GET keeps its eligibility payload but
+returns `availability: null` and `location_review_required: true` instead of
+offering times. Search and confirm return HTTP 409
+`{ error, code: 'LOCATION_REVIEW_REQUIRED' }` before building availability or
+committing. A complete stored pair, a stale/nonblocking review, or the review
+gate being off retains the existing pre-check behavior. If the booking
+transaction later returns `LOCATION_CHANGED_RETRY` or
+`CUSTOMER_CHANGED_RETRY` (including an address or review change after the
+pre-check), confirm reloads the token row and maps it to that same 409 recovery
+without stale refreshed slots. The page clears its selected slot and availability,
+hides time search, and asks the customer to text or call Waves to confirm the
+service address. Ordinary `SLOT_TAKEN`/`DAY_FULL` races still refresh times.
+find-slots mirrors the
 reschedule search: model-backed parseWhen clamped on BOTH ends to the
 booking window, READ-ONLY, no raw query logging. Generic 404 for
 bad/unknown tokens and while the gate is off. Treat the reservice token,
@@ -2134,7 +2215,25 @@ reordered by this — every feasible slot the engine found is still there,
 and the commit-time single-day revalidation still accepts exactly what that
 list offers. Gate off (default): buildBookingAvailability ignores the
 profile and this route's payload is byte-for-byte identical to before this
-gate existed.
+gate existed. One-tap pest chips (owner-approved, GATE_RESERVICE_PEST_CHIPS,
+nested inside GATE_RESERVICE_SELF_SERVE): with the gate live, GET's `base`
+payload carries `pestChoices` — `server/services/reservice-request.js`'s
+RESERVICE_PEST_CHOICES map, keyed to only the customer's currently bookable
+lanes. POST accepts an optional `pests` array (chip keys for the CHOSEN
+lane only); `normalizeRequestPests` drops anything invalid or from the
+other lane, de-dupes, and caps at that lane's own choice count — an empty
+result is treated as no pests. The chosen pests fold into the same
+customer-visible `customer_notes` line the details box already produced
+(`Re-service request (Ants, Roaches): <details>`, or `Re-service request:
+Ants, Roaches` with no details) and are passed into `createSelfBooking`'s
+internal-only `callbackVisit.customerRequest = { text, source: 'picker',
+pests }` (`scheduled_services.customer_request` / `_source` / `_pests`,
+migration `20260927100000`, hasColumn-guarded). Gate off: GET omits
+`pestChoices` entirely, POST ignores any posted `pests`, and both the
+payload and the existing no-pests `customer_notes` fallbacks are
+byte-identical to before this gate existed. The columns themselves are
+additive and stamped from the details box regardless of this gate — only
+the pest-chip normalization is gated.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner
