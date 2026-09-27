@@ -5218,10 +5218,18 @@ describe('voice relay eval — named spoken checks', () => {
     ] }));
     expect(frontedToday.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: frontedToday })).toBe('pass');
+    const matchingPartOfDay = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'tool', name: 'get_today_eta', ok: true },
+      { kind: 'agent', text: 'Your technician is coming this afternoon from 1 to 3 PM.' },
+    ] }));
+    expect(matchingPartOfDay.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: matchingPartOfDay })).toBe('pass');
     for (const text of [
       'Your new visit will be today. The arrival window is 1 to 3 PM.',
       'Your technician is coming tomorrow. The arrival window is 1 to 3 PM.',
       'Your technician is coming this morning. The arrival window is 1 to 3 PM.',
+      'Your technician is coming this morning from 1 to 3 PM.',
+      'Your technician is coming tonight from 1 to 3 PM.',
     ]) {
       const inventedDate = replay._internals.evaluateChecks(scenario, record({ order: [
         { kind: 'tool', name: 'get_today_eta', ok: true },
@@ -5789,6 +5797,17 @@ describe('voice relay eval — named spoken checks', () => {
     const frontedHoy = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'Hoy, la ventana de su cita es de la una a las tres de la tarde.' }] }));
     expect(frontedHoy.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: frontedHoy })).toBe('pass');
+    const matchingPartOfDay = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'Su técnico viene esta tarde de la una a las tres de la tarde.' }] }));
+    expect(matchingPartOfDay.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: matchingPartOfDay })).toBe('pass');
+    for (const text of [
+      'Su técnico viene esta mañana de la una a las tres de la tarde.',
+      'Su técnico viene esta noche de la una a las tres de la tarde.',
+    ]) {
+      const contradictorySameClause = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text }] }));
+      expect([text, contradictorySameClause.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect(replay._internals.scenarioStatus({ checks: contradictorySameClause })).toBe('fail');
+    }
     const separateDate = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es de la una a las tres de la tarde, y la nueva visita será hoy.' }] }));
     expect(separateDate.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: separateDate })).toBe('fail');

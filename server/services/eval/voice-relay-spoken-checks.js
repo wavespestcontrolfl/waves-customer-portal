@@ -416,6 +416,11 @@ const TIME_ANYWHERE_RES = Object.freeze([
 const SAME_DAY_SOURCE = 'today|tonight|this (?:morning|afternoon|evening|night)|hoy|esta (?:mañana|tarde|noche)';
 const SAME_DAY_RE = new RegExp(`\\b(?:${SAME_DAY_SOURCE})\\b`, 'i');
 const BARE_TODAY_RE = /^(?:today|hoy)$/i;
+const SAME_DAY_PART_HOURS = Object.freeze({
+  morning: [0, 12], mañana: [0, 12],
+  afternoon: [12, 18], tarde: [12, 18],
+  evening: [18, 24], night: [18, 24], noche: [18, 24], tonight: [18, 24],
+});
 const RELATIVE_DAY_RE = new RegExp(`\\b(?:${SAME_DAY_SOURCE}|tomorrow|day after tomorrow|next week|this week|(?:${WEEKDAYS})|\\d{1,2}(?:st|nd|rd|th)(?:\\s+of\\s+[a-z]+)?|mañana|pasado mañana|la (?:próxima|proxima) semana)\\b`, 'i');
 // A weekday modified by "next"/"this"/"last" ("Next Tuesday", "This
 // Tuesday") is still that same relative day — RELATIVE_DAY_RE's own weekday
@@ -541,9 +546,14 @@ function no_visit_time(value, record, { utterances }) {
           .replace(/^\s*,\s*/, '').split(CLAUSE_SPLIT_RE)[0];
         const sameDayClause = `${clauseBefore}${relative[0]}${clauseAfter}`;
         // A returned arrival window may naturally be introduced as today's
-        // window. The marker must be in THIS token's clause: a valid window
-        // in one clause cannot ground a separate "the visit is today" claim.
-        const labelsGroundedWindow = sameDay && sameDayClause.includes(GROUNDED_WINDOW_MARKER);
+        // window. Bare today/hoy agrees automatically; a more specific part
+        // of day must agree with both ends of the returned window. The marker
+        // must be in THIS token's clause: a valid window in one clause cannot
+        // ground a separate "the visit is today" claim.
+        const dayPartMatch = /\b(?:morning|mañana|afternoon|tarde|evening|night|noche|tonight)\b/i.exec(relative[0]);
+        const dayPartHours = dayPartMatch ? SAME_DAY_PART_HOURS[dayPartMatch[0].toLowerCase()] : null;
+        const labelsGroundedWindow = sameDay && sameDayClause.includes(GROUNDED_WINDOW_MARKER)
+          && (!dayPartHours || opts.allowWindow.every((h) => h >= dayPartHours[0] && h < dayPartHours[1]));
         // A successful get_today_eta also attests that the EXISTING visit is
         // today, independently of where its returned window appears in the
         // reply: "Your technician is coming today. The window is 1 to 3."
