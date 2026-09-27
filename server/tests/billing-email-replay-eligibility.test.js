@@ -293,10 +293,34 @@ describe('annual-prepay payment reminder replay', () => {
     annual_prepay_terms: [{ ...term, ...patch.term }],
     invoices: [{ ...invoice, ...patch.invoice }],
     collections_contact_ledger: [],
+    notification_prefs: patch.prefs === undefined
+      ? [{ customer_id: customerId, billing_channels: ['email'] }]
+      : patch.prefs instanceof Error ? patch.prefs : patch.prefs ? [patch.prefs] : [],
   });
 
   test('accepts the bound unpaid term and current credited amount', async () => {
     await expect(billingEmailReplayEligible(meta, database())).resolves.toEqual({ eligible: true });
+  });
+
+  test.each([
+    ['missing row', null],
+    ['cleared legacy mode', { customer_id: customerId, billing_channels: null }],
+    ['empty explicit choice', { customer_id: customerId, billing_channels: [] }],
+    ['Text selected', { customer_id: customerId, billing_channels: ['sms'] }],
+    ['App selected', { customer_id: customerId, billing_channels: ['push'] }],
+  ])('holds queued annual Email replay after %s', async (_label, prefs) => {
+    await expect(billingEmailReplayEligible(meta, database({ prefs })))
+      .resolves.toEqual({ eligible: false, reason: 'annual-prepay-email-not-selected', retryable: true });
+  });
+
+  test('an unreadable choice fails closed with a static retryable reason', async () => {
+    await expect(billingEmailReplayEligible(meta, database({ prefs: new Error('private SQL binding') })))
+      .resolves.toEqual({ eligible: false, reason: 'annual-prepay-choice-unavailable', retryable: true });
+  });
+
+  test.each(['sms', 'push'])('the %s final handoff retains its own channel authority', async (channel) => {
+    await expect(billingEmailReplayEligible({ ...meta, delivery_channel: channel }, database({ prefs: null })))
+      .resolves.toEqual({ eligible: true });
   });
 
   test.each([
@@ -331,6 +355,7 @@ describe('annual-prepay payment reminder replay', () => {
       metadata: { notificationEventKey: meta.notificationEventKey } };
     await expect(billingEmailReplayEligible(meta, databaseWith({
       annual_prepay_terms: [term], invoices: [invoice], collections_contact_ledger: [own],
+      notification_prefs: [{ customer_id: customerId, billing_channels: ['email'] }],
     }))).resolves.toEqual({ eligible: true });
     expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({
       invoiceId: null, invoiceIds: [], offLedgerBalanceCents: 35000,

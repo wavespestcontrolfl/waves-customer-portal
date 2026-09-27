@@ -57,6 +57,9 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
       table.text('status'); table.date('term_start'); table.date('first_visit_date');
       table.date('payment_reminder_3d_attempted_for'); table.date('payment_reminder_1d_attempted_for');
     });
+    await mockPg.schema.createTable('notification_prefs', (table) => {
+      table.uuid('customer_id').primary(); table.jsonb('billing_channels');
+    });
     await mockPg.schema.createTable('invoice_followup_sequences', (table) => {
       table.uuid('invoice_id'); table.text('status'); table.timestamp('last_touch_at'); table.timestamp('next_touch_at');
     });
@@ -77,9 +80,12 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     await mockPg('scheduled_services').delete();
     await mockPg('invoice_followup_sequences').delete();
     await mockPg('annual_prepay_terms').delete();
+    await mockPg('notification_prefs').delete();
     await mockPg('invoices').delete();
     await mockPg('estimate_deposits').delete();
     await mockPg('estimates').delete();
+    await mockPg('notification_prefs').insert({ customer_id: customerId,
+      billing_channels: JSON.stringify(['email']) });
   });
 
   afterAll(async () => {
@@ -210,6 +216,43 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     });
     await expect(check()).resolves.toMatchObject({ ok: false, retryable: true });
     await expect(mockPg('invoices').where({ id: invoiceId }).update({ status: 'paid' })).resolves.toBe(1);
+  }, 15000);
+
+  test('queued annual Email replay holds its selected choice through the provider boundary', async () => {
+    delete process.env.GATE_COLLECTIONS_POLICY;
+    const termId = randomUUID();
+    const invoiceId = randomUUID();
+    const firstVisitDate = etDateString(addETDays(new Date(), 1));
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: customerId,
+      status: 'sent', total: '392.04', line_items: JSON.stringify([]) });
+    await mockPg('annual_prepay_terms').insert({ id: termId, customer_id: customerId,
+      prepay_invoice_id: invoiceId, status: 'payment_pending', term_start: firstVisitDate });
+    const replay = { customer_id: customerId, invoice_id: invoiceId,
+      source_entry_point: 'annual_prepay_payment_reminder',
+      notificationEventKey: `annual-prepay-payment:${termId}:1`,
+      annual_prepay_term_id: termId, first_visit_date: firstVisitDate,
+      days_out: 1, rendered_amount: '392.04' };
+    await mockPg.transaction(async (held) => {
+      expect(await billingEmailReplayEligible(replay, held)).toEqual({ eligible: true });
+      await expect(mockPg.transaction(async (contender) => {
+        await contender.raw("SET LOCAL lock_timeout = '100ms'");
+        await contender('notification_prefs').where({ customer_id: customerId })
+          .update({ billing_channels: null });
+      })).rejects.toMatchObject({ code: '55P03' });
+    });
+    await mockPg('notification_prefs').where({ customer_id: customerId })
+      .update({ billing_channels: null });
+    await expect(billingEmailReplayEligible(replay, mockPg)).resolves.toEqual({
+      eligible: false, reason: 'annual-prepay-email-not-selected', retryable: true,
+    });
+    await mockPg.schema.renameTable('notification_prefs', 'notification_prefs_unavailable');
+    try {
+      await expect(billingEmailReplayEligible(replay, mockPg)).resolves.toEqual({
+        eligible: false, reason: 'annual-prepay-choice-unavailable', retryable: true,
+      });
+    } finally {
+      await mockPg.schema.renameTable('notification_prefs_unavailable', 'notification_prefs');
+    }
   }, 15000);
 
   test.each([

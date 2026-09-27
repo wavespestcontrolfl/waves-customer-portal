@@ -179,6 +179,27 @@ function annualTermRefusal(meta, term, now) {
     ? null : refused('annual-prepay-reminder-window-passed');
 }
 
+function holdAnnualRow(query, lock) {
+  return lock ? query.forUpdate() : query;
+}
+
+async function annualEmailChoiceRefusal(meta, database, lock) {
+  // A queued provider retry has no delivery_channel in its stored context:
+  // it is necessarily the Email leg. The generic billing Email authority
+  // permits an untouched legacy preference, but this annual producer only
+  // creates Email after an explicit selection. Recheck that selection on the
+  // charged profile under the held handoff transaction, including at fetch.
+  if (meta.delivery_channel === 'sms' || meta.delivery_channel === 'push') return null;
+  try {
+    const prefs = await holdAnnualRow(database('notification_prefs')
+      .where({ customer_id: meta.customer_id }), lock).first('billing_channels');
+    return require('../billing-delivery-channels').billingChannelAllowed(prefs || {}, 'billing', 'email') === true
+      ? null : refused('annual-prepay-email-not-selected', true);
+  } catch {
+    return refused('annual-prepay-choice-unavailable', true);
+  }
+}
+
 async function annualPrepayReminderRefusal(meta, database) {
   if (meta.source_entry_point !== 'annual_prepay_payment_reminder') return null;
   if (!validAnnualPrepayReminderPin(meta)) return refused('annual-prepay-reminder-pin-missing');
@@ -186,10 +207,8 @@ async function annualPrepayReminderRefusal(meta, database) {
   // Hold invoice then term through Email/Text dispatch or the App bell commit.
   // Native App fan-out rechecks on the root DB after the visible bell commits.
   const lock = database?.isTransaction === true;
-  let invoiceQuery = database('invoices')
-    .where({ id: meta.invoice_id, customer_id: meta.customer_id });
-  if (lock) invoiceQuery = invoiceQuery.forUpdate();
-  const invoice = await invoiceQuery.first();
+  const invoice = await holdAnnualRow(database('invoices')
+    .where({ id: meta.invoice_id, customer_id: meta.customer_id }), lock).first();
   const helpers = require('../invoice-helpers');
   const invoiceRefusal = annualInvoiceRefusal(invoice, helpers);
   if (invoiceRefusal) return invoiceRefusal;
@@ -199,14 +218,14 @@ async function annualPrepayReminderRefusal(meta, database) {
     return refused('annual-prepay-deposit-settlement-pending', true);
   }
 
-  let termQuery = database('annual_prepay_terms')
-    .where({ id: meta.annual_prepay_term_id, prepay_invoice_id: meta.invoice_id, customer_id: meta.customer_id });
-  if (lock) termQuery = termQuery.forUpdate();
-  const term = await termQuery.first('id', 'status', 'term_start', 'first_visit_date',
+  const term = await holdAnnualRow(database('annual_prepay_terms')
+    .where({ id: meta.annual_prepay_term_id, prepay_invoice_id: meta.invoice_id,
+      customer_id: meta.customer_id }), lock).first('id', 'status', 'term_start', 'first_visit_date',
     'payment_reminder_3d_attempted_for', 'payment_reminder_1d_attempted_for');
   const now = new Date();
-  const termRefusal = annualTermRefusal(meta, term, now);
-  if (termRefusal) return termRefusal;
+  const sourceRefusal = annualTermRefusal(meta, term, now)
+    || await annualEmailChoiceRefusal(meta, database, lock);
+  if (sourceRefusal) return sourceRefusal;
   const amountDue = helpers.invoiceAmountDue(invoice);
   if (amountDue.toFixed(2) !== meta.rendered_amount) return refused('annual-prepay-amount-changed');
   try {
