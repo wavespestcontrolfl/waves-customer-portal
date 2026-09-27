@@ -27,6 +27,7 @@ const {
   VISIT_IN_PROGRESS_WINDOW_MS,
   TEXT_SCAN_LIMIT,
   NON_SERVICE_NATURES,
+  SERVICE_CONTACT_NATURES,
   NON_SERVICE_DISPOSITIONS,
   resolveOutboundCallReason,
   visitInProgress,
@@ -102,7 +103,13 @@ function installDb(byTable = {}) {
           const rows = state.byTable.call_log || [];
           return rows.filter((r) => {
             if (v2Clause && r.v2_extraction_status !== v2Clause[1]) return false;
-            if (natureClause && natureClause[1].includes(_private.callNature(r))) return false;
+            // The nature clause is an ALLOWLIST (IN) since codex r8; a NOT IN
+            // clause would be a denylist. Apply whichever the SQL says.
+            if (natureClause) {
+              const listed = natureClause[1].includes(_private.callNature(r));
+              const allowlist = !/NOT IN/i.test(String(natureClause[0]));
+              if (allowlist ? !listed : listed) return false;
+            }
             if (dispositionClause && dispositionClause[1].includes(String(r.disposition || ''))) return false;
             return true;
           });
@@ -460,6 +467,27 @@ describe('hasPriorContact', () => {
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
   });
 
+  // codex r8 P1: the call probe is an allowlist of service natures.
+  test.each(['new_lead', 'existing_customer_service', 'existing_customer_scheduling', 'billing_question'])(
+    'a prior valid inbound call with service nature %s counts',
+    async (nature) => {
+      installDb({ call_log: [{ id: 'in-1', created_at: hoursAgo(5), v2_extraction_status: 'valid', ai_extraction_enriched: { call_nature: nature } }] });
+      await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+    },
+  );
+
+  test.each([['silent_or_noise'], ['voicemail_message'], ['other'], [null]])(
+    'a prior valid inbound call with nature %p never counts (fails closed)',
+    async (nature) => {
+      installDb({ call_log: [{ id: 'in-1', created_at: hoursAgo(5), v2_extraction_status: 'valid', ai_extraction_enriched: { call_nature: nature } }] });
+      await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+    },
+  );
+
+  test('the call probe is exactly the service allowlist', () => {
+    expect([...SERVICE_CONTACT_NATURES].sort()).toEqual(['billing_question', 'existing_customer_scheduling', 'existing_customer_service', 'new_lead']);
+  });
+
   test('a prior inbound call from that number, even a year ago, counts', async () => {
     installDb({ call_log: [{ id: 'in-old', created_at: new Date('2025-01-01'), v2_extraction_status: 'valid', ai_extraction_enriched: { call_nature: 'new_lead' } }] });
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
@@ -488,18 +516,21 @@ describe('hasPriorContact', () => {
   // "returns" whatever rows a test installs, regardless of WHERE clauses —
   // so a nature exclusion is proven by asserting the QUERY the code built,
   // not by the mock filtering rows for us. Real Postgres applies it.
-  test('the call probe excludes every NON_SERVICE_NATURES value IN SQL, not via a row cap (codex pre-push r1 P2 + r5 P1)', async () => {
+  test('the call probe is a SERVICE_CONTACT_NATURES allowlist IN SQL, not via a row cap (codex pre-push r1 P2 + r5 P1 + r8 P1)', async () => {
     installDb({ call_log: [{ id: 'in-spam' }] });
     await hasPriorContact({ customerId: null, phone: PHONE, before: T0 });
     const callQuery = state.queries.find((q) => q.table === 'call_log');
     expect(callQuery.limits).toHaveLength(0); // no row cap
     const natureClause = callQuery.raws.find((r) => String(r[0]).includes('call_nature'));
-    expect(natureClause[0]).toContain('NOT IN');
-    // NON_SERVICE_NATURES (codex pre-push r5 P1), not the narrower
-    // NON_CONTACT_NATURES — a job_applicant or 'other'-natured call is
-    // exactly as non-qualifying as spam/robocall/wrong-number/vendor.
-    expect(natureClause[1]).toEqual([...NON_SERVICE_NATURES]);
-    expect(natureClause[1]).toEqual(expect.arrayContaining(['job_applicant', 'other']));
+    // An ALLOWLIST since codex r8: only positively service-classified
+    // natures count. job_applicant, other, silent_or_noise, voicemail_message
+    // and a null nature all fail closed.
+    expect(natureClause[0]).toContain(' IN (');
+    expect(natureClause[0]).not.toContain('NOT IN');
+    expect(natureClause[1]).toEqual([...SERVICE_CONTACT_NATURES]);
+    for (const excluded of ['job_applicant', 'other', 'silent_or_noise', 'voicemail_message']) {
+      expect(natureClause[1]).not.toContain(excluded);
+    }
     // Codex pre-push r7 P1: v2_extraction_status = 'valid' is a plain
     // equality where, applied ALONGSIDE the nature/disposition exclusions,
     // not a replacement for the legacy call_outcome / processing_status /
@@ -610,9 +641,11 @@ describe('hasPriorContact', () => {
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
   });
 
-  test('the SAME booked disposition on a row the V2 pipeline DID positively classify (v2_extraction_status: valid, no nature extracted) still counts', async () => {
+  test('a valid V2 row with NO nature never counts, even with a booked disposition (codex r8: the nature allowlist fails closed)', async () => {
+    // The schema says a null call_nature means "truly indeterminate". Only
+    // a positively service-classified nature grants implied consent.
     installDb({ call_log: [{ id: 'in-modern-booked', v2_extraction_status: 'valid', disposition: 'booked' }] });
-    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
   });
 
   test('the call probe reuses only literals that are live members of call-disposition.js\'s TERMINAL_DISPOSITIONS enum (never a drifted copy)', () => {

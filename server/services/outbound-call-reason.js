@@ -93,6 +93,13 @@ const NON_CONTACT_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_num
 // Natures that mean "not a customer or prospect contacting us about service"
 // — returning such a call never earns a text (owner ruling 2026-09-09).
 const NON_SERVICE_NATURES = new Set([...NON_CONTACT_NATURES, 'other', 'job_applicant']);
+// The call natures that POSITIVELY mean a customer or prospect called us
+// about service (the schema's call_nature enum). hasPriorContact's call
+// probe is an allowlist of these (codex r8 P1): a null nature (indeterminate),
+// silent_or_noise, voicemail_message, other, and every non-service nature
+// fail closed, so a call we can't positively classify never grants implied
+// consent.
+const SERVICE_CONTACT_NATURES = Object.freeze(['new_lead', 'existing_customer_service', 'existing_customer_scheduling', 'billing_question']);
 // call_log.disposition non-service verdicts (codex pre-push r6 P1): an
 // OLDER inbound row from before V2 call_nature extraction shipped has no
 // nature at all (COALESCE above reads it as '', which passes the nature
@@ -305,12 +312,11 @@ async function anyLeadRecord({ phoneLast10, before }) {
 // with no `.limit()` this time.
 async function existsQualifyingInboundCall({ phoneLast10, before }) {
   if (!phoneLast10) return false;
-  // NON_SERVICE_NATURES (codex pre-push r5 P1) — NOT the narrower
-  // NON_CONTACT_NATURES: a job_applicant or an 'other'-natured inbound call
-  // is exactly as non-qualifying here as spam/robocall/wrong-number/vendor —
-  // NON_SERVICE_NATURES is this file's own documented "never earns a text"
-  // set (owner ruling 2026-09-09), reused rather than a narrower copy.
-  const natures = [...NON_SERVICE_NATURES];
+  // SERVICE_CONTACT_NATURES, an ALLOWLIST (codex r8 P1). The earlier
+  // NON_SERVICE_NATURES denylist let through a null (indeterminate) nature
+  // and silent_or_noise; only a positively service-classified call counts
+  // now. A NULL nature fails the IN() test by SQL semantics, so no COALESCE.
+  const natures = [...SERVICE_CONTACT_NATURES];
   // NON_SERVICE_DISPOSITIONS (codex pre-push r6 P1): an OLDER inbound row
   // predating V2 call_nature extraction has no nature at all — the
   // COALESCE above reads it as '', which PASSES the nature filter — but it
@@ -332,7 +338,7 @@ async function existsQualifyingInboundCall({ phoneLast10, before }) {
     // fields: a row that never reached 'valid' never qualifies, full stop.
     .where('v2_extraction_status', 'valid')
     .whereRaw(
-      `COALESCE(lower(trim(ai_extraction_enriched->>'call_nature')), '') NOT IN (${natures.map(() => '?').join(',')})`,
+      `lower(trim(ai_extraction_enriched->>'call_nature')) IN (${natures.map(() => '?').join(',')})`,
       natures,
     )
     .whereRaw(
@@ -570,6 +576,7 @@ module.exports = {
   QUOTE_FORM_CHANNELS,
   NON_CONTACT_NATURES,
   NON_SERVICE_NATURES,
+  SERVICE_CONTACT_NATURES,
   NON_SERVICE_DISPOSITIONS,
   VISIT_IN_PROGRESS_WINDOW_MS,
   TEXT_SCAN_LIMIT,
