@@ -211,9 +211,28 @@ const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
   test('outside-area chooses the live primary pin over stale customer and review mirrors', async () => {
     const staleCustomerPin = { latitude: 27.41, longitude: -82.41 };
     const staleReviewPin = { latitude: 27.42, longitude: -82.42 };
+    const legacyVisitId = randomUUID();
+    const legacyParentId = randomUUID();
     await mockConnection('customers').update(staleCustomerPin);
     await mockConnection('customer_properties').update(PIN);
     await mockConnection('scheduled_services').update({ lat: PIN.latitude, lng: PIN.longitude, route_order: 6 });
+    await mockConnection('scheduled_services').insert([
+      visitRow(legacyVisitId, {
+        property_id: null, lat: staleCustomerPin.latitude, lng: staleCustomerPin.longitude, route_order: 7,
+      }),
+      visitRow(legacyParentId, {
+        property_id: null, status: 'completed', is_recurring: true, recurring_ongoing: true,
+        recurring_template_overrides: { appointment_address: {
+          property_id: null,
+          service_address_line1: ADDRESS.address_line1,
+          service_address_line2: ADDRESS.address_line2,
+          service_address_city: ADDRESS.city,
+          service_address_state: ADDRESS.state,
+          service_address_zip: ADDRESS.zip,
+          lat: staleCustomerPin.latitude, lng: staleCustomerPin.longitude, zone: 'legacy',
+        } },
+      }),
+    ]);
     await reviewStore.saveReview(mockConnection, await customer(), {
       status: 'needs_pin', reason: 'pin_changed', source: 'county_records', evidence: 'Stale fixture evidence',
       ...staleReviewPin,
@@ -226,6 +245,11 @@ const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
     expect((await customer()).longitude).toBeNull();
     expect((await primary()).latitude).toBeNull();
     expect(await visit()).toMatchObject({ lat: null, lng: null, route_order: null });
+    expect(await mockConnection('scheduled_services').where({ id: legacyVisitId }).first())
+      .toMatchObject({ lat: null, lng: null, route_order: null });
+    expect(require('../services/booking/visit-financial-stamps')
+      .recurringServiceAddress(await mockConnection('scheduled_services').where({ id: legacyParentId }).first()))
+      .toMatchObject({ lat: null, lng: null, zone: null });
     await expect(buildDispatchJobUpdatePayload(visitId, ACTOR_ID)).resolves.toMatchObject({
       lat: null, lng: null,
     });

@@ -152,7 +152,10 @@ test.each(['outside_service_area', 'revoke'])('%s broadcasts cleared visits afte
   if (action === 'outside_service_area') {
     expect(visits.clearMatchingPins).toHaveBeenCalledWith(
       expect.anything(), expect.anything(), expect.anything(), expect.anything(), expect.anything(),
-      { clearMirrors: true },
+      expect.objectContaining({
+        clearMirrors: true,
+        additionalPins: [expect.objectContaining(reviewedPin), expect.objectContaining(reviewedPin)],
+      }),
     );
   }
   expect(dispatch.emitDispatchJobUpdate).toHaveBeenCalledWith(expect.objectContaining({
