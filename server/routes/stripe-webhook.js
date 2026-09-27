@@ -3683,6 +3683,7 @@ async function handleChargeRefunded(charge) {
             refund_status: 'full',
             stripe_refund_id: refundId,
             metadata: JSON.stringify(metadataWithStampedRefund(row.metadata, refundId)),
+            updated_at: trx.fn.now(), // the ledger's refund time (Codex #4971 r6 P1)
           });
           const invId = meta.invoice_id || null;
           if (invId) {
@@ -3882,6 +3883,9 @@ async function handleChargeRefunded(charge) {
         refund_amount: cumulativeRefundAmountDollars,
         refund_status: isFullRefund ? 'full' : 'partial',
         stripe_refund_id: refundId,
+        // The ledger's refund time (Codex #4971 r6 P1: the termite renewal's
+        // late-paid alert dates a parent's revocation by it).
+        updated_at: trx.fn.now(),
       });
     const pmt = await trx('payments').where({ stripe_charge_id: chargeId }).first();
     let result = pmt;

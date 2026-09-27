@@ -1246,13 +1246,45 @@ async function bellLatePaidRenewal(successor, conn) {
   return bell;
 }
 
-// The parent's disqualifying change is dated by its decision time, else its
-// last row update (the cancel / refund sync that moved it); JS twin of leg
-// 7e's paidAfterParentChange SQL.
+// When did the parent stop authorizing its renewal? Codex #4971 r6 P1: the
+// EARLIEST durable evidence of the change, never only the term row — a refund
+// commits its ledger stamp (and, on the webhook path, the invoice's flip to
+// 'refunded') before the separate term-cancel sync moves the term, so a
+// successor that settled in that gap was dated "paid before the change" and
+// its refund-or-honor alert suppressed. The earliest of:
+//   - the parent's decision time (renewal_decision_at);
+//   - its dispute suspension (dispute_suspended_at);
+//   - its last row update (updated_at — an upper bound on a status change);
+//   - its prepay invoice's revocation (updated_at once it reads refunded /
+//     void / cancelled);
+//   - a full refund of that invoice on the payments ledger (the refund
+//     writers stamp payments.updated_at with the refund).
+// One SQL definition, read by leg 7e's scan and by paidAfterParentChanged.
+// Columns a narrow schema may lack are read through to_jsonb (NULL when
+// absent; LEAST ignores NULLs). `p` is the parent term, `pi` its prepay
+// invoice (a LEFT JOIN — a parent with no invoice has no invoice evidence).
+function parentChangedAtSql(p = 'p', pi = 'pi') {
+  const ts = (alias, column) => `(to_jsonb(${alias}) ->> '${column}')::timestamptz`;
+  return `LEAST(
+    ${p}.renewal_decision_at,
+    ${ts(p, 'dispute_suspended_at')},
+    ${p}.updated_at,
+    CASE WHEN lower(coalesce(${pi}.status, '')) IN ('void', 'cancelled', 'canceled', 'refunded') THEN ${ts(pi, 'updated_at')} END,
+    (SELECT MIN(${ts('rp', 'updated_at')}) FROM payments rp
+      WHERE (rp.status = 'refunded' OR rp.refund_status = 'full')
+        AND ((rp.stripe_payment_intent_id IS NOT NULL AND rp.stripe_payment_intent_id = ${pi}.stripe_payment_intent_id)
+          OR (rp.stripe_charge_id IS NOT NULL AND rp.stripe_charge_id = ${pi}.stripe_charge_id)))
+  )`;
+}
+
+// JS entry for the same test: was the renewal paid after the parent changed?
 async function paidAfterParentChanged(conn, successor, parent) {
-  const invoice = await conn('invoices').where({ id: successor.prepay_invoice_id }).first('paid_at');
-  const changedAt = parent?.renewal_decision_at || parent?.updated_at;
-  return Boolean(invoice?.paid_at && changedAt) && new Date(invoice.paid_at) > new Date(changedAt);
+  if (!parent?.id) return false;
+  const row = await conn('annual_prepay_terms as p')
+    .leftJoin('invoices as pi', 'pi.id', 'p.prepay_invoice_id')
+    .where('p.id', parent.id)
+    .first(conn.raw(`(SELECT i.paid_at FROM invoices i WHERE i.id = ?) > ${parentChangedAtSql()} AS paid_after`, [successor.prepay_invoice_id]));
+  return row?.paid_after === true;
 }
 
 // Leg 7e (Codex #4971 r4 P1, item 4b backstop): an ACTIVE, settled renewal
@@ -1267,6 +1299,7 @@ async function bellLatePaidRenewals({ conn = db, limit = 200, counts }) {
       conn('annual_prepay_terms as t')
         .join('annual_prepay_terms as p', 'p.id', 't.renewed_from_term_id')
         .join('invoices as i', 'i.id', 't.prepay_invoice_id')
+        .leftJoin('invoices as pi', 'pi.id', 'p.prepay_invoice_id')
         .whereNotNull('t.annual_plan_version')
         .where('t.status', 'active')
         .whereNull('t.renewal_late_paid_belled_at')
@@ -1276,7 +1309,7 @@ async function bellLatePaidRenewals({ conn = db, limit = 200, counts }) {
         // Paid AFTER the parent changed (twin of paidAfterParentChanged) —
         // an old legitimate renewal behind a later refund or dispute is
         // never selected, so it can never pin this page either.
-        .whereRaw('i.paid_at > coalesce(p.renewal_decision_at, p.updated_at)'),
+        .whereRaw(`i.paid_at > ${parentChangedAtSql()}`),
       'i',
     )
       .orderByRaw('t.renewal_sweep_deferred_at asc nulls first')

@@ -3940,14 +3940,35 @@ async function stampParentRenewedForSuccessor(successorTerm, contextLabel, conn 
   // rollback entirely (Codex round-2 finding). conn.transaction() on a
   // knex trx is a savepoint: a failure here rolls back to it and the
   // caller's transaction (the successor's own flip) stays healthy.
-  const work = (t) => recordDecision({ termId: successorTerm.renewed_from_term_id, action: 'renew', conn: t });
   try {
-    if (conn === db) await db.transaction(work);
-    else if (conn.isTransaction) await conn.transaction(work);
-    else await work(conn);
+    await recordParentRenewedIfEligible(successorTerm.renewed_from_term_id, conn);
   } catch (err) {
     logger.warn(`[annual-prepay] parent renewed-stamp (${contextLabel}) skipped for successor ${successorTerm.id}: ${err.message}`);
   }
+}
+
+// Codex #4971 r6 P1 — the ONE automatic "record the parent renewed" write
+// (the paid sync's hook above and reconcileParentRenewedStamps' backstop).
+// A parent refund commits its ledger stamp before its separate term-cancel
+// sync runs; a successor that settles in that gap used to stamp the
+// still-active parent 'renewed' — and a renewed parent is invisible to the
+// late-paid alert (leg 7e), so the refund-or-honor alert was lost. Under the
+// parent's decision gate (taken first; re-entrant), the parent is re-checked
+// with the charge path's own allow-list (resolveParentEligibility: a live or
+// renewing status, and its invoice paid and NOT revoked on the payments
+// ledger — chokepoint A); an ineligible parent is left undecided for leg 7e.
+// A staff "renew" (the admin decide route) is a human decision and does not
+// come through here. Runs in its own transaction, or a savepoint on the
+// caller's (the successor's activation), so a failure never takes that down.
+async function recordParentRenewedIfEligible(parentTermId, conn = db) {
+  const work = async (t) => {
+    await acquireTermiteGateAtEntry(t, { termIds: [parentTermId] });
+    const parent = await t('annual_prepay_terms').where({ id: parentTermId }).first();
+    const { resolveParentEligibility } = require('./termite-annual-renewal-charge')._private;
+    if (!(await resolveParentEligibility(t, parent)).eligible) return null;
+    return recordDecision({ termId: parentTermId, action: 'renew', conn: t });
+  };
+  return typeof conn.transaction === 'function' ? conn.transaction(work) : work(conn);
 }
 
 // Codex round-2 P1 (backstop): stampParentRenewedForSuccessor's own
@@ -3975,15 +3996,23 @@ async function reconcileParentRenewedStamps({ conn = db, limit = 200 } = {}) {
     // recordDecision can move (ACTIVE_STATUSES): an undecided parent that is
     // already cancelled/payment_pending would guard-miss every tick and pin
     // this bounded page forever.
+    // Codex #4971 r6 P1: the PARENT side reads the same chokepoint-A
+    // predicate — a parent whose own prepay invoice is revoked on the ledger
+    // is never offered to the renew stamp (recordParentRenewedIfEligible
+    // re-checks it per row, under the gate, with the JS twin).
     const { whereInvoiceSettledNotRevoked } = require('./termite-annual-renewal-charge')._private;
     candidates = await whereInvoiceSettledNotRevoked(
       conn('annual_prepay_terms as s')
         .join('annual_prepay_terms as p', 'p.id', 's.renewed_from_term_id')
         .join('invoices as i', 'i.id', 's.prepay_invoice_id')
+        .leftJoin('invoices as pi', 'pi.id', 'p.prepay_invoice_id')
         .whereNotNull('s.renewed_from_term_id')
         .whereIn('s.status', ACTIVE_STATUSES)
         .whereIn('p.status', ACTIVE_STATUSES)
-        .whereNull('p.renewal_decision'),
+        .whereNull('p.renewal_decision')
+        .where(function parentInvoiceSettled() {
+          this.whereNull('p.prepay_invoice_id').orWhere(function settled() { whereInvoiceSettledNotRevoked(this, 'pi'); });
+        }),
       'i',
     )
       .select('s.id as successor_id', 's.renewed_from_term_id as parent_id')
@@ -3995,7 +4024,7 @@ async function reconcileParentRenewedStamps({ conn = db, limit = 200 } = {}) {
   summary.scanned = candidates.length;
   for (const row of candidates) {
     try {
-      const decided = await recordDecision({ termId: row.parent_id, action: 'renew', conn });
+      const decided = await recordParentRenewedIfEligible(row.parent_id, conn);
       if (decided) summary.stamped += 1;
     } catch (err) {
       logger.warn(`[annual-prepay] parent-renewed reconcile failed for successor ${row.successor_id}: ${err.message}`);

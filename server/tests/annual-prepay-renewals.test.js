@@ -6654,6 +6654,12 @@ describe('annual_prepay billing_mode stamp timing', () => {
 // mint/decideAndCharge/grace-lapse suites and the real-Postgres grace-
 // coverage suite.
 describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook', () => {
+  // Codex #4971 r6 P1: the automatic renew stamp runs under the parent's
+  // gate (its lookup statement first) and re-checks the parent
+  // (resolveParentEligibility — a live parent with no linked invoice here)
+  // before recordDecision's own peek + write.
+  const LIVE_PARENT = { id: 'parent-term', status: 'active', renewal_decision: null, prepay_invoice_id: null };
+  const stampPrelude = () => [query({ rows: [] }), query({ first: LIVE_PARENT })];
   beforeEach(() => {
     jest.clearAllMocks();
     db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -6667,7 +6673,7 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
     // here since this fixture isn't testing that termite-scoping itself
     // (see the dedicated recordDecision termite-lock describe below).
     const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
-    setDbQueues({ annual_prepay_terms: [recordDecisionQ, recordDecisionQ] });
+    setDbQueues({ annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ] });
 
     await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
 
@@ -6686,7 +6692,7 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
 
   test('idempotent — a parent already decided (guard miss) is a silent no-op, never throws', async () => {
     const recordDecisionQ = query({ returning: [] }); // guard miss: recordDecision resolves null
-    setDbQueues({ annual_prepay_terms: [recordDecisionQ, recordDecisionQ] });
+    setDbQueues({ annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ] });
     await expect(_private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test')).resolves.toBeUndefined();
   });
 
@@ -6701,7 +6707,7 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
   // own activation flip.
   test('when the caller passes an existing transaction, the stamp runs as a SAVEPOINT on it (conn.transaction), never the global db', async () => {
     const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
-    const trxTableQueues = { annual_prepay_terms: [recordDecisionQ, recordDecisionQ] };
+    const trxTableQueues = { annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ] };
     const trx = jest.fn((table) => {
       const queue = trxTableQueues[table];
       if (!queue || !queue.length) throw new Error(`Unexpected trx table ${table}`);
@@ -6729,7 +6735,7 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
 
   test('a plain (non-db, non-transaction) conn runs the stamp directly, with no extra transaction/savepoint wrapper', async () => {
     const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
-    const plainConnQueues = { annual_prepay_terms: [recordDecisionQ, recordDecisionQ] };
+    const plainConnQueues = { annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ] };
     const plainConn = jest.fn((table) => {
       const queue = plainConnQueues[table];
       if (!queue || !queue.length) throw new Error(`Unexpected conn table ${table}`);
@@ -6758,7 +6764,8 @@ describe('reconcileParentRenewedStamps (Codex round-2 P1 backstop)', () => {
     // Codex round-7 P1 (redesigned): each recordDecision call now peeks
     // annual_plan_version first (same query object, same conn) before its
     // actual write — two dequeues per row.
-    setDbQueues({ 'annual_prepay_terms as s': [scanQ], annual_prepay_terms: [decision1, decision1, decision2, decision2] });
+    const prelude = (id) => [query({ rows: [] }), query({ first: { id, status: 'active', renewal_decision: null, prepay_invoice_id: null } })];
+    setDbQueues({ 'annual_prepay_terms as s': [scanQ], annual_prepay_terms: [...prelude('parent-1'), decision1, decision1, ...prelude('parent-2'), decision2, decision2] });
 
     const summary = await AnnualPrepayRenewals.reconcileParentRenewedStamps({});
 
@@ -6778,7 +6785,8 @@ describe('reconcileParentRenewedStamps (Codex round-2 P1 backstop)', () => {
     const badDecision = query();
     badDecision.returning = jest.fn().mockRejectedValue(new Error('boom'));
     const goodDecision = query({ returning: [{ id: 'parent-2', renewal_decision: 'renew' }] });
-    setDbQueues({ 'annual_prepay_terms as s': [scanQ], annual_prepay_terms: [badDecision, goodDecision] });
+    const prelude = (id) => [query({ rows: [] }), query({ first: { id, status: 'active', renewal_decision: null, prepay_invoice_id: null } })];
+    setDbQueues({ 'annual_prepay_terms as s': [scanQ], annual_prepay_terms: [...prelude('bad-parent'), query({ first: undefined }), badDecision, ...prelude('parent-2'), query({ first: undefined }), goodDecision] });
 
     const summary = await AnnualPrepayRenewals.reconcileParentRenewedStamps({});
 

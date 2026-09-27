@@ -3395,6 +3395,9 @@ const StripeService = {
               }
             : {}),
           metadata: JSON.stringify(clearedMeta),
+          // The ledger's refund time (Codex #4971 r6 P1: the termite
+          // renewal's late-paid alert dates a parent's revocation by it).
+          updated_at: new Date(),
         });
     };
     try {

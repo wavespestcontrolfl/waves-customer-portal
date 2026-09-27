@@ -103,7 +103,8 @@ async function createScratchDb() {
     status text,
     refund_status text,
     stripe_payment_intent_id text,
-    stripe_charge_id text
+    stripe_charge_id text,
+    updated_at timestamptz
   )`);
   await db.raw(`CREATE TABLE stripe_invoice_charge_attempts (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -541,6 +542,73 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       }
       expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
       expect(await db('annual_prepay_terms').whereNotNull('renewal_late_paid_belled_at').pluck('id')).toEqual([decidedBeforePaying.id]);
+    });
+  });
+
+  // Codex #4971 r6 P1 — a parent refund commits its ledger stamp before its
+  // separate term-cancel sync. A successor whose ACH settles in that gap must
+  // NOT stamp the still-active parent 'renewed' (the automatic renew stamp
+  // re-checks the parent's own invoice on the ledger, under the gate), and
+  // the late-paid alert dates the parent's change by the EARLIEST evidence —
+  // here the ledger's refund stamp — so it still rings once.
+  describe('r6: a successor that settles between the parent refund and its cancel sync', () => {
+    const MIN = 60000;
+    async function refundRace() {
+      const parentInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - 400 * 86400000), stripe_payment_intent_id: `pi_parent_${randomUUID().slice(0, 8)}` });
+      const parent = await insertParent({ prepay_invoice_id: parentInvoice.id, updated_at: new Date(Date.now() - 30 * 86400000) });
+      // t1: the refund's ledger stamp (the webhook / admin refund writer).
+      await db('payments').insert({ status: 'refunded', refund_status: 'full', stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id, updated_at: new Date(Date.now() - 10 * MIN) });
+      // t2: the successor's ACH settles.
+      const renewalInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - 5 * MIN) });
+      const successor = await insertSuccessor(parent, renewalInvoice, { status: 'active' });
+      return { parent, parentInvoice, successor };
+    }
+    const parentRow = (id) => db('annual_prepay_terms').where({ id }).first('status', 'renewal_decision');
+
+    test('the paid sync never stamps the refunded parent renewed; the backstop skips it too', async () => {
+      const { parent, successor } = await refundRace();
+      await Renewals._private.stampParentRenewedForSuccessor(successor, 'test', db);
+      expect(await parentRow(parent.id)).toEqual({ status: 'active', renewal_decision: null });
+      await expect(Renewals.reconcileParentRenewedStamps({ conn: db })).resolves.toEqual({ scanned: 0, stamped: 0 });
+      expect(await parentRow(parent.id)).toEqual({ status: 'active', renewal_decision: null });
+    });
+
+    test('leg 7e rings the refund-or-honor alert once, even after the cancel sync moved the parent AFTER the payment', async () => {
+      const { parent, successor } = await refundRace();
+      // t3: the parent's cancel sync runs after the successor paid.
+      await db('annual_prepay_terms').where({ id: parent.id }).update({ status: 'cancelled', updated_at: new Date() });
+
+      const counts = { latePaidScanned: 0, latePaidBelled: 0 };
+      await Charge._private.bellLatePaidRenewals({ conn: db, limit: 50, counts });
+      await Charge._private.bellLatePaidRenewals({ conn: db, limit: 50, counts: { latePaidScanned: 0, latePaidBelled: 0 } });
+
+      expect(counts).toEqual({ latePaidScanned: 1, latePaidBelled: 1 });
+      expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+      expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringContaining('refund it or honor it'), expect.objectContaining({
+        dedupeKey: `termite-renewal-charge:${successor.id}:paid_after_parent_ended`,
+      }));
+    });
+
+    test('a normal renewal (no refund) still stamps the parent renewed', async () => {
+      const parentInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - 400 * 86400000) });
+      const parent = await insertParent({ prepay_invoice_id: parentInvoice.id });
+      const successor = await insertSuccessor(parent, await insertInvoice({ status: 'paid', paid_at: new Date() }), { status: 'active' });
+      await Renewals._private.stampParentRenewedForSuccessor(successor, 'test', db);
+      expect(await parentRow(parent.id)).toEqual({ status: 'renewed', renewal_decision: 'renew' });
+    });
+
+    test('a refund stamped AFTER the renewal was paid (October paid, March refunded) stays silent', async () => {
+      const parentInvoice = await insertInvoice({ status: 'refunded', paid_at: new Date(Date.now() - 500 * 86400000), stripe_payment_intent_id: `pi_parent_${randomUUID().slice(0, 8)}` });
+      const parent = await insertParent({ status: 'cancelled', prepay_invoice_id: parentInvoice.id, updated_at: new Date(Date.now() - 10 * 86400000) });
+      await db('payments').insert({ status: 'refunded', refund_status: 'full', stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id, updated_at: new Date(Date.now() - 10 * 86400000) });
+      const successor = await insertSuccessor(parent, await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - 150 * 86400000) }), { status: 'active' });
+
+      const counts = { latePaidScanned: 0, latePaidBelled: 0 };
+      await Charge._private.bellLatePaidRenewals({ conn: db, limit: 50, counts });
+      expect(counts.latePaidScanned).toBe(0);
+      const fresh = await db('annual_prepay_terms').where({ id: successor.id }).first();
+      expect(await Charge._private.bellLatePaidRenewal(fresh, db)).toBe('not_owed');
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
     });
   });
 

@@ -3609,9 +3609,15 @@ describe('termite annual renewal charge', () => {
   // parent that no longer authorizes it stays ACTIVE with ONE staff alert
   // (refund or honor it) — never a customer message.
   describe('onRenewalSuccessorPaid (paid sync hook)', () => {
-    function hookConn({ parent }) {
+    function hookConn({ parent, paidAfter = true }) {
       const updates = [];
       const conn = jest.fn((table) => {
+        // paidAfterParentChanged: the ONE "paid after the parent changed"
+        // SQL test (parentChangedAtSql) — answered here directly.
+        if (table === 'annual_prepay_terms as p') {
+          const q = { leftJoin: jest.fn(() => q), where: jest.fn(() => q), first: jest.fn(async () => ({ paid_after: paidAfter })) };
+          return q;
+        }
         if (table === 'annual_prepay_terms') {
           return {
             where: jest.fn((filter) => ({
@@ -3625,6 +3631,7 @@ describe('termite annual renewal charge', () => {
         if (table === 'payments') return { whereRaw: jest.fn(() => ({ whereRaw: jest.fn(() => ({ first: jest.fn(async () => undefined) })) })) };
         throw new Error(`unexpected table ${table}`);
       });
+      conn.raw = jest.fn((sql) => sql);
       return { conn, updates };
     }
     const paidSuccessor = (over = {}) => baseSuccessor({ status: 'active', renewal_charge_failure_kind: 'outcome_pending', renewal_late_paid_belled_at: null, ...over });
