@@ -713,6 +713,29 @@ describe('content-registry reconciliation', () => {
     expect(row.live_status_checked_at).toBeNull();
   });
 
+  test('resets live truth when only the effective checked host changes', () => {
+    const row = registry.preserveLiveMirrorFields(
+      {
+        astro_source_path: 'src/content/blog/post.md',
+        live_url: '/termite/topic/',
+        canonical_url: 'https://www.sarasotaflpestcontrol.com/termite/topic/',
+      },
+      {
+        byAstroPath: new Map([['src/content/blog/post.md', {
+          astro_source_path: 'src/content/blog/post.md',
+          live_url: '/termite/topic/',
+          canonical_url: 'https://www.wavespestcontrol.com/termite/topic/',
+          live_status: 'live',
+          live_status_checked_at: new Date('2026-09-27T03:00:00Z'),
+        }]]),
+        byDbId: new Map(),
+      },
+    );
+
+    expect(row.live_status).toBeUndefined();
+    expect(row.live_status_checked_at).toBeNull();
+  });
+
   test('does not preserve live-check mirror fields when URL is gained or lost', () => {
     const gained = registry.preserveLiveMirrorFields(
       { canonical_url_normalized: '/new-url/', astro_source_path: 'src/content/blog/post.md' },

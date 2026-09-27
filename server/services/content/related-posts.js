@@ -32,7 +32,7 @@
  */
 
 const db = require('../../models/db');
-const { dbBlogRowToItem } = require('./content-registry');
+const { dbBlogRowToItem, registryLiveTargetUrl } = require('./content-registry');
 const { normalizeService } = require('./blog-seo-contract');
 const { HUB_SITE_KEYS, normalizeSpokeSites } = require('../content-astro/spoke-sites');
 
@@ -254,14 +254,7 @@ function parseJsonObject(value) {
 }
 
 function registryCheckedUrl(row) {
-  const liveUrl = row?.live_url;
-  if (/^https?:\/\//i.test(String(liveUrl || ''))) return String(liveUrl);
-  const canonical = [row?.canonical_url, row?.canonical_url_normalized]
-    .find((value) => /^https?:\/\//i.test(String(value || '')));
-  if (liveUrl && canonical) {
-    try { return new URL(String(liveUrl), canonical).toString(); } catch { /* fall through */ }
-  }
-  return liveUrl || canonical || row?.canonical_url_normalized || null;
+  return registryLiveTargetUrl(row) || null;
 }
 
 function registryFrontmatter(row) {

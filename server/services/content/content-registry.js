@@ -50,6 +50,20 @@ function normalizeContentUrl(value) {
   return out;
 }
 
+function registryLiveTargetUrl(row, baseUrl = 'https://www.wavespestcontrol.com') {
+  const liveUrl = row?.live_url;
+  if (/^https?:\/\//i.test(String(liveUrl || ''))) return String(liveUrl);
+  const canonical = [row?.canonical_url, row?.canonical_url_normalized]
+    .find((value) => /^https?:\/\//i.test(String(value || '')));
+  if (liveUrl && canonical) {
+    try { return new URL(String(liveUrl), canonical).toString(); } catch { /* fall through */ }
+  }
+  const value = liveUrl || canonical || row?.canonical_url_normalized;
+  if (!value) return '';
+  try { return new URL(String(value), `${String(baseUrl).replace(/\/+$/, '')}/`).toString(); }
+  catch { return ''; }
+}
+
 function slugFromUrl(value) {
   const normalized = normalizeContentUrl(value);
   if (!normalized || /^https?:\/\//.test(normalized)) return '';
@@ -451,8 +465,8 @@ function preserveLiveMirrorFields(row, previous) {
 }
 
 function liveTargetChanged(row, prev) {
-  const current = normalizeContentUrl(row.live_url || row.canonical_url || row.canonical_url_normalized);
-  const previous = normalizeContentUrl(prev.live_url || prev.canonical_url || prev.canonical_url_normalized);
+  const current = normalizeContentUrl(registryLiveTargetUrl(row));
+  const previous = normalizeContentUrl(registryLiveTargetUrl(prev));
   return current !== previous;
 }
 
@@ -974,6 +988,7 @@ function readGitSha(root) {
 
 module.exports = {
   normalizeContentUrl,
+  registryLiveTargetUrl,
   slugFromUrl,
   stableStringify,
   stableHash,
