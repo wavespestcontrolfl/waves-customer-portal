@@ -47,21 +47,31 @@ function providerFailureStatus(err, error) {
   return match ? Number(match[1]) : null;
 }
 
+// Permanent Twilio rejections. Nothing was sent. The sender-side ones are
+// OUR configuration's problem, not the recipient's: fixing the sender or
+// account makes a later send to the same number viable, so a lane holding
+// a permanent one-text-per-number claim releases it for these instead of
+// consuming it (missed-call-text-back.js). The rest are about the
+// recipient.
+const SENDER_SIDE_TERMINAL_TWILIO_CODES = Object.freeze([
+  '21408', // permission denied for destination region
+  '21606', // From number cannot send SMS
+  '21608', // unverified trial destination
+]);
+const RECIPIENT_TERMINAL_TWILIO_CODES = Object.freeze([
+  '21211', // invalid To number
+  '21610', // recipient unsubscribed
+  '21612', // no route available
+  '21614', // number is not mobile/SMS-capable
+]);
+
 function classifyProviderFailure(err, fallbackError) {
   const error = err ? formatProviderError(err) : (sanitizeProviderError(fallbackError) || 'twilio rejected');
   const twilioCode = providerFailureCode(err, error);
   const httpStatus = providerFailureStatus(err, error);
   const lc = String(error || fallbackError || '').toLowerCase();
 
-  const terminalTwilioCodes = new Set([
-    '21211', // invalid To number
-    '21408', // permission denied for destination region
-    '21606', // From number cannot send SMS
-    '21608', // unverified trial destination
-    '21610', // recipient unsubscribed
-    '21612', // no route available
-    '21614', // number is not mobile/SMS-capable
-  ]);
+  const terminalTwilioCodes = new Set([...SENDER_SIDE_TERMINAL_TWILIO_CODES, ...RECIPIENT_TERMINAL_TWILIO_CODES]);
   const retryableTwilioCodes = new Set([
     '20429', // Twilio rate limit
   ]);
@@ -386,6 +396,7 @@ module.exports = {
   // definitive-vs-ambiguous split decides whether a failed calls.create()
   // may still have reached Twilio.
   classifyProviderFailure,
+  SENDER_SIDE_TERMINAL_TWILIO_CODES,
   // Shared with sendCustomerMessage so the wrapper's MMS-vs-SMS decision
   // (GSM normalization exemption) uses the SAME predicate that decides
   // whether media URLs actually reach Twilio.
