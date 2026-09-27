@@ -116,7 +116,7 @@ describe('planRescheduleFromCall', () => {
     const base = { v2: v2({ service_request: { specific_service_name: null }, confidence: { primary_service_category: 0.95 } }), call: call(), customer: customer(), now: NOW };
     expect(planRescheduleFromCall({ ...base, candidates: [visit()] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
     expect(planRescheduleFromCall({ ...base, candidates: [visit(), visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-09-25' })] }).reason).toBe('service_needs_review');
-    expect(planRescheduleFromCall({ ...base, candidates: [visit({ scheduled_date: '2026-12-01' })] }).reason).toBe('service_needs_review');
+    expect(planRescheduleFromCall({ ...base, candidates: [visit({ scheduled_date: '2026-12-01' })] }).reason).toBe('no_visit_on_books');
     expect(planRescheduleFromCall({ ...base, candidates: [visit({ catalog_service_name: null })] }).reason).toBe('service_needs_review');
     // One program, two of its visits in span: the fallback does not guess.
     expect(planRescheduleFromCall({ ...base, candidates: [visit(), visit({ id: 'same-program-2', scheduled_date: '2026-09-28' })] }))
@@ -165,10 +165,11 @@ describe('planRescheduleFromCall', () => {
       .toBe('service_needs_review');
   });
 
-  // Nearness to the destination cannot choose between occurrences, and V2
-  // records only the new slot: with more than one upcoming occurrence the
-  // call must name exactly the one it moves.
-  test('with several upcoming occurrences the call must name the one it moves', () => {
+  // V2 records only the new slot, so nearness to it cannot say which of
+  // several upcoming visits the caller meant: with more than one, only a
+  // time change on a visit's own day is taken, and only when the call brings
+  // up none of the others.
+  test('with several upcoming visits only a same-day time change is taken', () => {
     const { hasAgentCommittedEvidence } = require('../services/call-triage-flags');
     const december = visit({ id: 'dec-visit', scheduled_date: '2026-12-24' });
     const plan = (startAt, transcription, now = NOW) => {
@@ -176,32 +177,28 @@ describe('planRescheduleFromCall', () => {
       return planRescheduleFromCall({ v2: v2({ scheduling: { confirmed_start_at: startAt } }), customer: customer(),
         candidates: [visit(), december], call: call({ transcription }), now });
     };
-    // September moved to December 17: December 24 is nearer but was not named.
+    // Moves to another day stay in review, whichever visit the call names:
+    // September moved to December 17 (December 24 is nearer), December moved
+    // to October 1 (September is nearer), even September named outright.
     expect(plan('2026-12-17T12:00:00-05:00', 'Caller: Move my September 24th visit to December 17th.\nAgent: Okay.'))
       .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
-    // December moved to October 1: September is nearer but was not named.
     expect(plan('2026-10-01T12:00:00-04:00', 'Caller: Move my December 24th visit to October 1st.\nAgent: Okay.'))
       .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
-    // Naming the moved visit exactly resolves it; naming neither or both does not.
-    expect(plan('2026-09-25T10:00:00-04:00', 'Caller: Can my September 24th visit be Friday instead?\nAgent: Okay.'))
-      .toMatchObject({ action: 'apply', visitId: VISIT_ID });
-    expect(plan('2026-09-25T10:00:00-04:00', 'Caller: Can we do Friday instead?\nAgent: Okay.').reason).toBe('ambiguous_visit');
-    expect(plan('2026-09-25T10:00:00-04:00', 'Caller: Keep December 24th, but can September 24th be Friday?\nAgent: Okay.').reason).toBe('ambiguous_visit');
-    // Even a loose reference to another occurrence ("the December one") leaves it to a person.
-    expect(plan('2026-09-25T10:00:00-04:00', 'Caller: Can my September 24th visit be Friday instead? The December one is fine.\nAgent: Okay.').reason).toBe('ambiguous_visit');
-    // A same-day time change can only mean the occurrence already on that day
+    expect(plan('2026-09-25T10:00:00-04:00', 'Caller: Not the December one, move September 24th to Friday.\nAgent: Okay.').reason).toBe('ambiguous_visit');
+    // A same-day time change can only mean the visit already on that day
     // (moving another onto it would double-book the program)...
     expect(plan('2026-09-24T12:00:00-04:00', `Agent: ${QUOTE}\nCaller: Thank you.`)).toMatchObject({ action: 'apply', visitId: VISIT_ID });
-    // ...unless the call brings up another occurrence.
+    // ...unless the call brings up another of them, by date or by month.
     expect(plan('2026-09-24T12:00:00-04:00', `Caller: Not the December one.\nAgent: ${QUOTE}`).reason).toBe('ambiguous_visit');
-    // Once September is behind today, December 24 is the only upcoming one.
+    expect(plan('2026-09-24T12:00:00-04:00', `Caller: Keep December 24th as it is.\nAgent: ${QUOTE}`).reason).toBe('ambiguous_visit');
+    // Once September is behind today, December 24 is the only upcoming visit.
     expect(plan('2026-12-17T12:00:00-05:00', 'Caller: Move it to December 17th.\nAgent: Okay.', new Date('2026-09-25T19:00:00Z')))
       .toMatchObject({ action: 'apply', visitId: 'dec-visit' });
   });
 
   // A name matching two programs: the other program's upcoming visit counts
-  // as a possible source too, so naming it leaves the choice to a person.
-  test('grounding covers every program the call\'s service name matched', () => {
+  // as one the caller may mean, so a move to another day stays in review.
+  test('the several-visits rule covers every program the call\'s service name matched', () => {
     const { hasAgentCommittedEvidence } = require('../services/call-triage-flags');
     const twin = visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-12-01' });
     hasAgentCommittedEvidence.mockReturnValueOnce(true);

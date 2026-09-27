@@ -27,13 +27,13 @@
  *     CANDIDATE_SPAN_DAYS of the target date — two candidates is ambiguous,
  *     zero means the call was about a visit we don't have (the booking lane
  *     owns that). An explicit service name that matches nothing stays in
- *     review. No name falls back to the property's one in-span visit of V2's
- *     own confident category (pest, mosquito or lawn only); a name matching
- *     several programs resolves only among those; either stays in review
- *     when more than one program (or more than one visit) sits in span or an
- *     in-span row's catalog identity no longer resolves. With more than one
- *     upcoming occurrence of the program, the call must name exactly one of
- *     their dates and it must be the visit chosen. A
+ *     review. No name falls back to the property's in-span visit of V2's own
+ *     confident category (pest, mosquito or lawn only); a name matching
+ *     several programs resolves only among those; two programs in span, or
+ *     an in-span row whose catalog identity no longer resolves, stays in
+ *     review. With more than one upcoming visit the call could mean, only a
+ *     time change on the visit's own day is taken, and only when the call
+ *     brings up none of the others. A
  *     grouped visit needs the whole-visit mover's
  *     disclosure a phone call never gave
  *   - the pipeline did not itself create an appointment from this call
@@ -89,8 +89,8 @@ const logger = require('./logger');
 
 const MIN_SCHEDULING_CONFIDENCE = 0.8;
 // A visit is a candidate only within this span of the target date. Among
-// several upcoming occurrences of a program, the call must also name the one
-// it moves: nearness to the destination alone never picks among them.
+// several upcoming visits, nearness to the destination alone never picks one:
+// only a same-day time change is taken then (planRescheduleFromCall).
 const CANDIDATE_SPAN_DAYS = 14;
 const LIVE_STATUSES = ['pending', 'confirmed', 'rescheduled'];
 // Automatic moves take ONLY these. A row parked at 'rescheduled' is out of
@@ -194,21 +194,22 @@ function humanHandledRescheduleCard(conn, callLogId, { excludeId = null } = {}) 
   return query.first('id');
 }
 
-// With several upcoming occurrences of a program, the call must identify the
-// one it moves. No other occurrence may come up even loosely (its exact
-// date, or its month without a day: "the December one is fine"). A move to
-// another day must name the moved visit's own date exactly ("move my October
-// 2nd visit"). A time change on the visit's own day needs nothing more: a
-// program never holds two visits on one day, so the occurrence already on
-// the destination date is the only one a same-day change can mean — moving
-// another occurrence onto that day would double-book it.
-function sourceOccurrenceGrounded({ call, chosen, others, newDate }) {
+// The catalog name a visit is matched on: its catalog row's name when it has
+// one (a repoint can leave service_type stale), else its own label. Null when
+// its catalog row no longer resolves.
+function authoritativeServiceName(row) {
+  return row.service_id ? row.catalog_service_name : row.service_type;
+}
+
+// Does the call bring up any of these visits: its exact date (a month and
+// day, today, tomorrow), or its month named without a day ("the December one
+// is fine")?
+function otherVisitsMentioned(call, others) {
+  if (!others.length) return false;
   const ctx = { transcript: call.transcription, callStartedAt: call.created_at };
   const named = exactDatesNamed(ctx);
   const looseMonths = monthsReferenced(ctx);
-  if (others.some((row) => named.has(dateOnly(row.scheduled_date)) || looseMonths.has(dateOnly(row.scheduled_date).slice(0, 7)))) return false;
-  const chosenDate = dateOnly(chosen.scheduled_date);
-  return chosenDate === newDate || named.has(chosenDate);
+  return others.some((row) => named.has(dateOnly(row.scheduled_date)) || looseMonths.has(dateOnly(row.scheduled_date).slice(0, 7)));
 }
 
 /**
@@ -284,8 +285,6 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     if (!atProperty.length) return skip('no_visit_on_books');
     // Match the named service BEFORE proximity. A different program near the
     // destination cannot stand in for the requested visit outside the span.
-    // A name that matches nothing stays in office review; no name, or a name
-    // matching several programs, falls back below to a single in-span visit.
     const namedServices = new Set(serviceNameCandidates(v2.service_request?.specific_service_name)
       .map((name) => stripServiceSuffixes(name).toLowerCase()));
     // A row that names a catalog service is matched on THAT catalog name only:
@@ -294,74 +293,51 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     // one. A row whose service_id no longer resolves has no authoritative
     // identity. A row with no service_id keeps its only identity: its label.
     const matchingServices = atProperty.filter((row) => {
-      const authoritative = row.service_id ? row.catalog_service_name : row.service_type;
+      const authoritative = authoritativeServiceName(row);
       if (!authoritative) return false;
       return serviceNameCandidates(authoritative).some((name) => namedServices.has(stripServiceSuffixes(name).toLowerCase()));
     });
     const programOf = (row) => row.service_id || stripServiceSuffixes(row.catalog_service_name || row.service_type || '').toLowerCase();
-    const programIds = new Set(matchingServices.map(programOf));
     const inSpanOf = (rows) => rows.filter((row) => {
       const d = dateOnly(row.scheduled_date);
       return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
     });
-    // Filter to span FIRST, then judge ambiguity on what's actually near the
-    // target date — not on every future occurrence of the same recurring
-    // program regardless of distance. loadCandidates has no upper date bound,
-    // so a customer with several quarterly visits on the books was ALWAYS
-    // ambiguous_visit before this fix (0/1,089 calls ever moved a visit).
-    // Every visit the call's service evidence could refer to: the grounding
-    // below checks the moved visit against ALL of their upcoming dates.
-    let sourcePool = matchingServices;
-    // An in-span visit at the property whose catalog identity no longer
-    // resolves may be the caller's actual target, whatever the name matched:
-    // it keeps every path in review.
-    if (inSpanOf(atProperty).some((row) => !(row.service_id ? row.catalog_service_name : row.service_type))) return skip('service_needs_review');
-    if (programIds.size !== 1) {
-      // Fallback ONLY where the call's own service evidence cannot pick a
-      // program: no service named at all (a program of V2's own category at
-      // the property), or a coarse name matching several programs (only those
-      // programs). An explicit name that matches nothing stays in review — a
-      // different program must never stand in for the one the caller asked
-      // about — and so does any in-span row at the property whose catalog
-      // identity no longer resolves, checked before any narrowing since it
-      // may be the caller's target.
-      if (namedServices.size && !programIds.size) return skip('service_needs_review');
-      let pool = matchingServices;
-      if (!namedServices.size) {
-        // V2's category only stands in for a name when V2 itself is sure of
-        // it: an uncertain "pest_general" on a mosquito call must not pick
-        // the pest visit (same bar as the scheduling window).
-        const tags = FALLBACK_CATEGORY_TAGS[v2.service_request?.primary_service_category];
-        const categoryConfidence = v2.confidence?.primary_service_category;
-        if (!tags || typeof categoryConfidence !== 'number' || categoryConfidence < MIN_SCHEDULING_CONFIDENCE) return skip('service_needs_review');
-        const tagger = require('./appointment-tagger');
-        pool = atProperty.filter((row) => tags.includes(tagger.classifyAppointmentType(row.service_id ? row.catalog_service_name : row.service_type).tag));
-      }
-      sourcePool = pool;
-      const inSpanAny = inSpanOf(pool);
-      if (!inSpanAny.length || new Set(inSpanAny.map(programOf)).size !== 1) return skip('service_needs_review');
-      // One program, but two of its visits near the target: which one the
-      // caller meant is as ambiguous here as on the named-service path.
-      if (inSpanAny.length > 1) return skip('ambiguous_visit', { candidateIds: inSpanAny.map((r) => r.id) });
-      nearby = inSpanAny; // invariant preserved: length is exactly 1 here
-    } else {
-      const inSpan = inSpanOf(matchingServices);
-      if (inSpan.length > 1) return skip('ambiguous_visit', { candidateIds: inSpan.map((r) => r.id) });
-      nearby = inSpan; // invariant preserved: length is 0 or 1 here
+    // An in-span visit whose catalog identity no longer resolves may be the
+    // caller's actual target, whatever the name matched: review.
+    if (inSpanOf(atProperty).some((row) => !authoritativeServiceName(row))) return skip('service_needs_review');
+    // The visits the call's service evidence can mean: the program(s) a name
+    // matched, or, when the call names no service, the property's visits of
+    // V2's own category — only when V2 is sure of it (an uncertain
+    // "pest_general" on a mosquito call must not pick the pest visit). A name
+    // that matches nothing stays in review.
+    let pool = matchingServices;
+    if (namedServices.size && !pool.length) return skip('service_needs_review');
+    if (!namedServices.size) {
+      const tags = FALLBACK_CATEGORY_TAGS[v2.service_request?.primary_service_category];
+      const categoryConfidence = v2.confidence?.primary_service_category;
+      if (!tags || typeof categoryConfidence !== 'number' || categoryConfidence < MIN_SCHEDULING_CONFIDENCE) return skip('service_needs_review');
+      const tagger = require('./appointment-tagger');
+      pool = atProperty.filter((row) => tags.includes(tagger.classifyAppointmentType(authoritativeServiceName(row)).tag));
     }
-    // Nearness to the destination cannot say WHICH visit the caller meant,
-    // and V2 records only the new slot: with more than one upcoming visit the
-    // call's service could refer to (every matched program, or the category's
-    // visits for an unnamed service), the call itself must identify it
-    // (sourceOccurrenceGrounded).
-    if (nearby.length === 1) {
-      const chosen = nearby[0];
-      const today = etDateString(now);
-      const upcoming = sourcePool.filter((row) => dateOnly(row.scheduled_date) >= today);
-      if (upcoming.length > 1 && !sourceOccurrenceGrounded({ call, chosen, others: upcoming.filter((row) => row.id !== chosen.id), newDate })) {
-        return skip('ambiguous_visit', { candidateIds: upcoming.map((r) => r.id) });
-      }
+    // Span FIRST, then ambiguity on what is actually near the target date:
+    // loadCandidates has no upper date bound, so judging every future
+    // occurrence made each recurring-plan customer ambiguous_visit (0 of 1,089
+    // replayed calls ever moved a visit). Two programs in span stay in review.
+    const inSpan = inSpanOf(pool);
+    if (new Set(inSpan.map(programOf)).size > 1) return skip('service_needs_review');
+    if (inSpan.length > 1) return skip('ambiguous_visit', { candidateIds: inSpan.map((r) => r.id) });
+    // V2 records only the new slot, so nearness to it cannot say WHICH of
+    // several upcoming visits the caller meant ("move December to October 1"
+    // would pick September). With more than one, only a time change on a
+    // visit's own day is taken: a program never holds two visits on one day,
+    // so the visit already on the destination date is the only one it can
+    // mean, unless the call brings up another of them.
+    const upcoming = pool.filter((row) => dateOnly(row.scheduled_date) >= etDateString(now));
+    if (inSpan.length === 1 && upcoming.length > 1
+      && (dateOnly(inSpan[0].scheduled_date) !== newDate || otherVisitsMentioned(call, upcoming.filter((row) => row.id !== inSpan[0].id)))) {
+      return skip('ambiguous_visit', { candidateIds: upcoming.map((r) => r.id) });
     }
+    nearby = inSpan; // invariant preserved: length is 0 or 1 here
   }
   if (nearby.length === 0) return skip('no_visit_on_books');
   const visit = nearby[0];
