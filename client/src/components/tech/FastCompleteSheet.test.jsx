@@ -187,11 +187,12 @@ describe('FastCompleteSheet', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
     expect(await screen.findByText(/couldn't confirm it saved/)).toBeTruthy();
 
-    // Edits, closing and switching forms are locked until the attempt resolves.
+    // Edits and switching forms are locked until the attempt resolves.
     const roaches = screen.getByRole('button', { name: 'Roaches' });
     expect(roaches.disabled).toBe(true);
-    expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(true);
+    // The recap form can't resume this attempt; closing is fine.
     expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(completeBodies(request)).toHaveLength(2));
     const [first, second] = completeBodies(request);
@@ -217,34 +218,58 @@ describe('FastCompleteSheet', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Light' }));
     fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
 
-    expect(await screen.findByText('This visit was already saved.')).toBeTruthy();
+    expect(await screen.findByText(/This visit was already saved/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Next stop' }));
     expect(onCompleted).toHaveBeenCalled();
   });
 
-  test('a partly saved earlier attempt (resume payload mismatch) sends the tech to the full form', async () => {
+  test.each([
+    ['completion_resume_payload_mismatch'],
+    ['idempotency_key_mismatch'],
+  ])('a 409 %s means an earlier attempt saved the visit', async (code) => {
     const request = makeRequest();
     const base = request.getMockImplementation();
     request.mockImplementation(async (path, options) => {
       if (path.endsWith('/complete')) {
         request.calls.push({ path, options });
-        throw Object.assign(new Error('Resume payload mismatch.'), { status: 409, code: 'completion_resume_payload_mismatch' });
+        throw Object.assign(new Error('Conflict.'), { status: 409, code });
       }
       return base(path, options);
     });
-    const onFullForm = vi.fn();
-    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onFullForm={onFullForm} />);
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
+
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+    expect(await screen.findByText(/already saved. The office will finish anything still pending/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  test('a conflict no retry can fix (future-dated visit) shows the reason and lets the tech leave', async () => {
+    const request = makeRequest();
+    const base = request.getMockImplementation();
+    request.mockImplementation(async (path, options) => {
+      if (path.endsWith('/complete')) {
+        request.calls.push({ path, options });
+        throw Object.assign(new Error('This visit is scheduled for a future date.'), { status: 409, code: 'future_scheduled_date' });
+      }
+      return base(path, options);
+    });
+    const onClose = vi.fn();
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={onClose} />);
 
     await screen.findByRole('button', { name: /Taurus SC/ });
     fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
     fireEvent.click(screen.getByRole('button', { name: 'Light' }));
     fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
 
-    expect(await screen.findByText(/Open the full form to finish it/)).toBeTruthy();
+    expect(await screen.findByText('This visit is scheduled for a future date.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Complete re-service' }).disabled).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Full form' }));
-    expect(onFullForm).toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalled();
   });
 
   test('an added product blocks Complete until its amount is entered; edited amounts and units are submitted', async () => {

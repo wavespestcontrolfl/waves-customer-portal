@@ -60,6 +60,28 @@ function genIdempotencyKey() {
   return `fastcomplete_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
 
+// Every /complete failure lands in one of four outcomes:
+//  saved       — the visit is already saved: this or an earlier attempt
+//                committed (a lost response, another device, or a partly
+//                finished earlier try whose changed body the resume check
+//                refuses — the office's Billing Recovery finishes those).
+//  correctable — a definitive pre-commit rejection: fix and resubmit under a
+//                fresh key (the full form's shared rule).
+//  retry       — outcome unknown or still running (network drop, 5xx, an
+//                attempt pending or finishing its side effects): resend the
+//                SAME body under the SAME key so the server replays/resumes.
+//  terminal    — a conflict no retry can fix (a future-dated or already
+//                closed visit): show it and let the tech leave.
+const SAVED_CODES = new Set(['service_already_completed', 'completion_resume_payload_mismatch', 'idempotency_key_mismatch']);
+const IN_PROGRESS_CODES = new Set(['service_completion_pending', 'completion_pending', 'completion_side_effects_running']);
+function completionFailureOutcome(err) {
+  const status = Number(err?.status);
+  if (status === 409 && SAVED_CODES.has(err?.code)) return 'saved';
+  if (shouldResetCompletionIdempotencyKey(err)) return 'correctable';
+  if (!Number.isFinite(status) || status >= 500 || (status === 409 && IN_PROGRESS_CODES.has(err?.code))) return 'retry';
+  return 'terminal';
+}
+
 function toggleInSet(set, value) {
   const next = new Set(set);
   if (next.has(value)) next.delete(value);
@@ -118,15 +140,13 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   const [error, setError] = useState('');
   const [done, setDone] = useState(null);
   const submitInFlight = useRef(false);
-  // The exact body of an attempt whose outcome is unknown (network drop,
-  // 5xx). The server refuses a reused key with a changed payload, so until
-  // that attempt resolves the form locks and Retry resends this body as-is.
+  // The exact body of an attempt whose outcome is unknown. The server
+  // refuses a reused key with a changed payload, so Retry resends this body
+  // as-is and the form stays locked.
   const pendingBodyRef = useRef(null);
-  const [retryPending, setRetryPending] = useState(false);
-  // An earlier attempt left this visit partly saved under a different
-  // payload (the server's resume check refuses a changed body even on a new
-  // key). This sheet can't finish it; the full form's recovery path can.
-  const [needsFullForm, setNeedsFullForm] = useState(false);
+  // null, or 'retry' / 'terminal' from completionFailureOutcome.
+  const [failure, setFailure] = useState(null);
+  const retryPending = failure === 'retry';
 
   useEffect(() => {
     let active = true;
@@ -191,9 +211,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
     : missingAmount ? `Enter the amount for ${missingAmount.name}.`
       : !pests.size ? 'Select at least one pest.' : !activity ? 'Select activity seen.' : '';
 
-  // An unconfirmed attempt holds the sheet open: closing or switching forms
-  // would drop the exact body a retry has to resend.
-  const close = useCallback(() => { if (!submitting && !retryPending) onClose?.(); }, [submitting, retryPending, onClose]);
+  const close = useCallback(() => { if (!submitting) onClose?.(); }, [submitting, onClose]);
   closeRef.current = close;
 
   const handleSubmit = useCallback(async () => {
@@ -230,43 +248,38 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
     try {
       await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
       pendingBodyRef.current = null;
-      setRetryPending(false);
+      setFailure(null);
       const productNames = activeProducts.map((p) => p.name).join(', ');
       setDone({ summary: `${productNames} · ${targets.join(', ')}` });
     } catch (err) {
-      if (err?.status === 409 && err?.code === 'service_already_completed') {
-        // Terminal, not uncertain: an earlier attempt (a lost response, or
-        // another device) already saved this visit, so every retry would
-        // get the same answer. Treat it as saved and let the tech move on.
+      const outcome = completionFailureOutcome(err);
+      if (outcome === 'saved') {
         pendingBodyRef.current = null;
-        setRetryPending(false);
-        setDone({ summary: 'This visit was already saved.' });
-      } else if (err?.status === 409 && ['completion_resume_payload_mismatch', 'idempotency_key_mismatch'].includes(err?.code)) {
-        pendingBodyRef.current = null;
-        setRetryPending(false);
-        setNeedsFullForm(true);
-        setError('An earlier try partly saved this visit. Open the full form to finish it.');
-      } else if (shouldResetCompletionIdempotencyKey(err)) {
-        // A definitive rejection: the tech corrects the form and the
-        // resubmit starts a new attempt under a fresh key.
+        setFailure(null);
+        setDone({ summary: 'This visit was already saved. The office will finish anything still pending.' });
+      } else if (outcome === 'correctable') {
         idempotencyKeyRef.current = genIdempotencyKey();
         pendingBodyRef.current = null;
-        setRetryPending(false);
+        setFailure(null);
         setError(err?.message || 'Completion failed');
-      } else {
-        // Outcome unknown: keep the key AND the body so Retry replays or
-        // resumes the same attempt instead of tripping the payload check.
+      } else if (outcome === 'retry') {
         pendingBodyRef.current = body;
-        setRetryPending(true);
+        setFailure('retry');
         setError(`${err?.message || 'Completion failed'} We couldn't confirm it saved. Tap Retry to send the same completion again.`);
+      } else {
+        pendingBodyRef.current = null;
+        setFailure('terminal');
+        setError(err?.message || 'This visit can\'t be completed here.');
       }
       setSubmitting(false);
       submitInFlight.current = false;
     }
   }, [base, request, missingReason, activeProducts, pests, areas, activity, note]);
 
-  // Nothing is editable while a save is in flight or its outcome is unknown.
-  const locked = retryPending || submitting || needsFullForm;
+  // Nothing is editable while a save is in flight, unresolved, or refused
+  // for good. The recap modal (Full form) can't resume a /complete attempt,
+  // so it is offered only before one may have reached the server.
+  const locked = submitting || failure !== null;
 
   return createPortal(
     <UiSurface
@@ -289,9 +302,9 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
             </p>
           </div>
           {!done && (
-            <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={submitting || retryPending}>Full form</Button>
+            <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked}>Full form</Button>
           )}
-          <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={close} disabled={submitting || retryPending} aria-label="Close">×</Button>
+          <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={close} disabled={submitting} aria-label="Close">×</Button>
         </header>
 
         {done ? (
@@ -379,9 +392,9 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
             </div>
             <footer className="tech-visit-footer">
               {error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{error}</ActionFeedback>}
-              {missingReason && !retryPending && <p className="tech-visit-muted" role="status">{missingReason}</p>}
+              {missingReason && !failure && <p className="tech-visit-muted" role="status">{missingReason}</p>}
               <div className="tech-visit-actions">
-                <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={handleSubmit} loading={submitting} disabled={needsFullForm || (!!missingReason && !retryPending)}>
+                <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={handleSubmit} loading={submitting} disabled={failure === 'terminal' || (!!missingReason && !retryPending)}>
                   {retryPending ? 'Retry' : 'Complete re-service'}
                 </Button>
               </div>
