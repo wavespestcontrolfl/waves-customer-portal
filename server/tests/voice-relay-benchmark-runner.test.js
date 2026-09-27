@@ -43,6 +43,18 @@ function stubChild(responses) {
 
 const CONDITION = { id: 'current-block', env: {} };
 
+// runBenchmark refuses to start without ANTHROPIC_API_KEY (the current-*
+// baselines always run Anthropic). Every test here runs stubbed children, so
+// a placeholder key stands in; the preflight's own test deletes it.
+let SAVED_ANTHROPIC_KEY;
+beforeEach(() => {
+  SAVED_ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+});
+afterEach(() => {
+  if (SAVED_ANTHROPIC_KEY === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = SAVED_ANTHROPIC_KEY;
+});
+
 describe('runOnce — a completed run vs. an inconclusive one vs. a real crash', () => {
   test('status "pass" (exit 0) is a completed run', async () => {
     const execFileImpl = stubChild([{
@@ -1051,6 +1063,83 @@ describe('assertOnlyHasIds / runBenchmark — --only must name at least one real
       argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=1', '--only= booking-happy-path , slot-gone , spanish-eta-matched-attested '],
       execFileImpl,
     })).resolves.toBeDefined();
+  });
+});
+
+describe('OpenAI candidates — GATE_VOICE_RELAY_OPENAI wiring', () => {
+  const OPENAI_CANDIDATE = 'gpt-6-sol'; // voice-eligible (MODEL_CATALOG `voice` entry)
+  const NON_VOICE_OPENAI = 'gpt-5.6-sol'; // openai, but no `voice` entry
+  let savedKey;
+  let savedGate;
+
+  beforeEach(() => {
+    savedKey = process.env.OPENAI_API_KEY;
+    savedGate = process.env.GATE_VOICE_RELAY_OPENAI;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.GATE_VOICE_RELAY_OPENAI;
+  });
+
+  afterEach(() => {
+    if (savedKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = savedKey;
+    if (savedGate === undefined) delete process.env.GATE_VOICE_RELAY_OPENAI; else process.env.GATE_VOICE_RELAY_OPENAI = savedGate;
+  });
+
+  test('buildConditions sets GATE_VOICE_RELAY_OPENAI=true on ONLY the two candidate-* conditions for an openai candidate', () => {
+    const conditions = buildConditions(OPENAI_CANDIDATE, 'openai');
+    expect(conditions.find((c) => c.id === 'current-block').env).toEqual({});
+    expect(conditions.find((c) => c.id === 'current-stream').env).toEqual({ VOICE_RELAY_RENDERER: 'stream' });
+    expect(conditions.find((c) => c.id === 'candidate-block').env).toEqual({ VOICE_RELAY_INBOUND_MODEL: OPENAI_CANDIDATE, GATE_VOICE_RELAY_OPENAI: 'true' });
+    expect(conditions.find((c) => c.id === 'candidate-stream').env).toEqual({ VOICE_RELAY_INBOUND_MODEL: OPENAI_CANDIDATE, GATE_VOICE_RELAY_OPENAI: 'true', VOICE_RELAY_RENDERER: 'stream' });
+  });
+
+  test('buildConditions never sets the gate for an anthropic candidate (unchanged behavior)', () => {
+    const conditions = buildConditions('claude-haiku-4-5-20251001', 'anthropic');
+    for (const c of conditions) expect(c.env).not.toHaveProperty('GATE_VOICE_RELAY_OPENAI');
+  });
+
+  // Codex r13 P2: the current-* baselines always run Anthropic — without its
+  // key an OpenAI candidate would spend on calls with nothing to compare.
+  test.each(['gpt-6-sol', 'claude-haiku-4-5-20251001'])('rejects %s with no ANTHROPIC_API_KEY, before any child process runs', async (model) => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    delete process.env.ANTHROPIC_API_KEY;
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: [`--candidate-model=${model}`, '--trials=1'], execFileImpl }))
+      .rejects.toThrow(/ANTHROPIC_API_KEY is not set/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('rejects an OpenAI candidate with no OPENAI_API_KEY, before any child process runs', async () => {
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: [`--candidate-model=${OPENAI_CANDIDATE}`, '--trials=1'], execFileImpl }))
+      .rejects.toThrow(/OPENAI_API_KEY is not set/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('rejects a non-voice-eligible OpenAI id even with OPENAI_API_KEY set', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: [`--candidate-model=${NON_VOICE_OPENAI}`, '--trials=1'], execFileImpl }))
+      .rejects.toThrow(/not an allowlisted model id/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('an OpenAI candidate with OPENAI_API_KEY set runs, gating ONLY the candidate-* children, and never mutates this process\'s own env', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    const seenEnvs = [];
+    const execFileImpl = (file, args, opts, cb) => {
+      seenEnvs.push({ model: opts.env.VOICE_RELAY_INBOUND_MODEL, gate: opts.env.GATE_VOICE_RELAY_OPENAI });
+      cb(null, JSON.stringify({ status: 'pass', summary: { scenarios: 1, passed: 1 }, attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1 } }] }), '');
+    };
+    const { exitCode } = await runBenchmark({ argv: [`--candidate-model=${OPENAI_CANDIDATE}`, '--trials=1'], execFileImpl });
+    expect(exitCode).toBe(0);
+    const currentEnvs = seenEnvs.filter((e) => !e.model);
+    const candidateEnvs = seenEnvs.filter((e) => e.model === OPENAI_CANDIDATE);
+    expect(currentEnvs).toHaveLength(2);
+    expect(candidateEnvs).toHaveLength(2);
+    for (const e of currentEnvs) expect(e.gate).toBe(''); // leak-guarded, never inherited
+    for (const e of candidateEnvs) expect(e.gate).toBe('true');
+    // This file's own header rule: never mutate this process's own env.
+    expect(process.env.GATE_VOICE_RELAY_OPENAI).toBeUndefined();
   });
 });
 

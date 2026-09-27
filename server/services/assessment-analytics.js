@@ -17,6 +17,7 @@ const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { loadCustomerGrassContext, normalizeGrassType } = require('./lawn-grass-context');
 const { recomputeEntryReviewGate } = require('./agronomic-wiki');
+const { coordinatesOf } = require('./property-coordinates');
 
 function slugify(t) {
   return t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
@@ -1054,7 +1055,8 @@ async function getTechFieldContext(customerId) {
     let weather = null;
     try {
       const FawnWeather = require('./fawn-weather');
-      weather = await FawnWeather.getCurrent();
+      const coordinates = coordinatesOf(customer);
+      if (coordinates) weather = await FawnWeather.getCurrent(coordinates);
     } catch { /* ignore */ }
 
     return {
