@@ -304,6 +304,20 @@ const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
     expect(require('../services/geocoder').ensureCustomerGeocoded).not.toHaveBeenCalled();
   });
 
+  test('a primary-only pin change after detail load invalidates the decision revision', async () => {
+    const staleRevision = (await reviewStore.getReviewDetail(CUSTOMER_ID, mockConnection)).revision;
+    await mockConnection('customer_properties').update(PIN);
+
+    await expect(act({
+      revision: staleRevision, action: 'outside_service_area', source: 'county_records',
+    })).rejects.toMatchObject({ statusCode: 409, code: 'review_changed' });
+
+    expect((await customer()).latitude).toBeNull();
+    expect(await primary()).toMatchObject({ latitude: String(PIN.latitude), longitude: String(PIN.longitude) });
+    expect(await review()).toBeUndefined();
+    expect(await audits()).toEqual([]);
+  });
+
   test('revoke clears a primary mirror that diverged from the reviewed customer pin', async () => {
     const divergentPrimary = { latitude: 27.4887654, longitude: -82.5887654 };
     await act();
