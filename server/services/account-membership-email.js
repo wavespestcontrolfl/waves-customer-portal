@@ -5,7 +5,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { isTrackTokenLive } = require('./track-token-expiry');
 const { getPrimaryContact } = require('./customer-contact');
 const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
-const { billingEmailRecipient, billingEmailRefusal } = require('./billing-email-sender');
+const { billingEmailRecipient, billingEmailSendOutcome } = require('./billing-email-sender');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { currency } = require('./email-template');
@@ -263,17 +263,12 @@ async function sendTemplate({
       } : {}),
     });
 
+    // A refusal at the billing handoff maps and logs like every other billing
+    // sender's (billing-email-sender.js).
     if (state.boundaryBlock) {
-      const refusal = billingEmailRefusal(state.boundaryBlock);
-      await logLifecycleEmailAttempt({
-        customerId: recipientCustomer.id,
-        templateKey,
-        eventType,
-        status: refusal.blocked ? 'blocked' : 'failed',
-        failureReason: refusal.reason,
-        metadata,
-      });
-      return refusal;
+      return await billingEmailSendOutcome(result, state, (fields) => logLifecycleEmailAttempt({
+        customerId: recipientCustomer.id, templateKey, eventType, metadata, ...fields,
+      }));
     }
 
     if (result.deduped) {
