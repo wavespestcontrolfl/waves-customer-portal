@@ -139,6 +139,12 @@ function proposalInclusions(items, noGuarantee) {
   return visible.length ? visible : null;
 }
 
+export function proposalMakesNoGuaranteeClaim(data = {}) {
+  return typeof data?.proposal?.noGuaranteeClaims === 'boolean'
+    ? data.proposal.noGuaranteeClaims
+    : data?.estimate?.noGuaranteeClaims === true;
+}
+
 export default function EstimateProposalDocument({ data, token }) {
   const estimate = data?.estimate || {};
   const proposal = data?.proposal || null;
@@ -199,9 +205,7 @@ export default function EstimateProposalDocument({ data, token }) {
   // An explicit false matters too: the ordinary page may classify a different
   // current service mix than a retained proposal itemization. Older payloads
   // keep the estimate-level flag as their compatibility fallback.
-  const noGuarantee = typeof proposal?.noGuaranteeClaims === 'boolean'
-    ? proposal.noGuaranteeClaims
-    : data?.estimate?.noGuaranteeClaims === true;
+  const noGuarantee = proposalMakesNoGuaranteeClaim(data);
   const inclusionStacks = useMemo(() => {
     if (authoredTermsPresent || programList.length) return [];
     if (isCommercial) {

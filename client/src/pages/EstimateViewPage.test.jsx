@@ -19,6 +19,7 @@ vi.mock('../lib/stripeLoader', () => ({ loadStripeSdk: vi.fn(async () => null) }
 afterEach(() => {
   cleanup();
   routerState.token = 'mixed-termite-token';
+  window.history.replaceState({}, '', '/');
   setGlassDefault(false);
   vi.unstubAllGlobals();
 });
@@ -446,6 +447,63 @@ describe('ServiceSection', () => {
 });
 
 describe('mixed-estimate approval microcopy', () => {
+  const documentPayload = (proposalNoGuaranteeClaims, estimateNoGuaranteeClaims) => ({
+    glassDefault: false,
+    documentRender: true,
+    publicOrigin: 'https://portal.wavespestcontrol.com',
+    estimate: {
+      token: 'mixed-termite-token', slug: 'EST-2099-4982', customerName: 'Casey Example',
+      customerPhone: '+19415551234', customerEmail: 'casey@example.com',
+      address: '1 Document Policy Way', createdAt: '2026-09-27T12:00:00.000Z',
+      expiresAt: '2026-10-27T12:00:00.000Z', licenseNumber: 'JB351547',
+      category: 'RESIDENTIAL', noGuaranteeClaims: estimateNoGuaranteeClaims,
+      isOneTimeOnly: false, intelligence: null, satelliteUrl: null,
+    },
+    proposal: {
+      enabled: false, synthesized: false, noGuaranteeClaims: proposalNoGuaranteeClaims,
+      pestRecurringOnly: proposalNoGuaranteeClaims === false, title: 'Service Proposal',
+      preparedFor: 'Casey Example', propertyAddress: '1 Document Policy Way', terms: null,
+      buildings: [{
+        name: '1 Document Policy Way', note: null,
+        lineItems: proposalNoGuaranteeClaims
+          ? [{ description: 'Termite trenching', quantity: 1, unitPrice: 1200, amount: 1200,
+            frequency: 'one_time', frequencyLabel: 'One-time', taxable: false }]
+          : [{ description: 'Pest Control', quantity: 1, unitPrice: 55, amount: 55,
+            frequency: 'monthly', frequencyLabel: 'Monthly', taxable: false }],
+      }],
+      totals: proposalNoGuaranteeClaims
+        ? { annualRecurring: 0, monthlyEquivalent: 0, oneTime: 1200, totalTax: 0,
+          firstYearTotal: 1200, hasTax: false, isMultiBuilding: false }
+        : { annualRecurring: 660, monthlyEquivalent: 55, oneTime: 0, totalTax: 0,
+          firstYearTotal: 660, hasTax: false, isMultiBuilding: false },
+    },
+    cta: { commercialProposal: false, commercialAutoPriced: false },
+  });
+
+  it.each([
+    ['retained termite rows override current eligible pest pricing', true, false, /Written estimate scope and terms apply/i],
+    ['eligible proposal rows override a stale estimate-level suppression', false, true, /Backed by the Waves Guarantee/i],
+  ])('uses the document policy for its visible shell footer: %s', async (
+    _name, proposalNoGuaranteeClaims, estimateNoGuaranteeClaims, expectedFooter,
+  ) => {
+    window.history.replaceState({}, '', '/estimate/mixed-termite-token?mode=pdf');
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, status: 200,
+      json: async () => documentPayload(proposalNoGuaranteeClaims, estimateNoGuaranteeClaims),
+    })));
+
+    render(<WavesShell><EstimateViewPage /></WavesShell>);
+
+    await screen.findByText(proposalNoGuaranteeClaims ? 'Termite trenching' : 'Pest Control');
+    const footer = within(screen.getByRole('contentinfo'));
+    expect(await footer.findByText(expectedFooter)).toBeInTheDocument();
+    if (proposalNoGuaranteeClaims) {
+      expect(footer.queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
+    } else {
+      expect(footer.queryByText(/Written estimate scope and terms apply/i)).not.toBeInTheDocument();
+    }
+  });
+
   it('scopes the server no-guarantee decision to the estimate shell beside one-time termite work', async () => {
     const frequency = {
       key: 'standard',

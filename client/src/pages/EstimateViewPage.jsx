@@ -72,7 +72,7 @@ const glassAppearanceActive = () => document.documentElement.hasAttribute('data-
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
-import EstimateProposalDocument from './EstimateProposalDocument';
+import EstimateProposalDocument, { proposalMakesNoGuaranteeClaim } from './EstimateProposalDocument';
 import { estimateCopyFor } from '../lib/estimate-copy';
 import {
   commercialGlassActive,
@@ -5452,11 +5452,6 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // slugs) need the identical torn-paint guarantee.
   useCommercialGlassActive();
   const [data, setData] = useState(null);
-  const estimateNoGuaranteeClaims = data === null ? null : data?.estimate?.noGuaranteeClaims === true;
-  useLayoutEffect(() => {
-    setFooterNoGuarantee?.(estimateNoGuaranteeClaims);
-    return () => setFooterNoGuarantee?.(false);
-  }, [estimateNoGuaranteeClaims, setFooterNoGuarantee]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [loadError, setLoadError] = useState(false);
@@ -5498,6 +5493,15 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       return null;
     }
   });
+  const footerNoGuaranteeClaims = data === null
+    ? null
+    : (pdfDocumentMode && data?.documentRender === true
+        ? proposalMakesNoGuaranteeClaim(data)
+        : data?.estimate?.noGuaranteeClaims === true);
+  useLayoutEffect(() => {
+    setFooterNoGuarantee?.(footerNoGuaranteeClaims);
+    return () => setFooterNoGuarantee?.(false);
+  }, [footerNoGuaranteeClaims, setFooterNoGuarantee]);
 
   const [selected, setSelected] = useState({});
   const [selectedAddOns, setSelectedAddOns] = useState({});
