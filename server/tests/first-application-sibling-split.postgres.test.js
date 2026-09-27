@@ -264,19 +264,22 @@ suite('first-application-sibling-split — periodic sweep', () => {
 
   // Real-data manual-split detection (pre-push P1 fix): the office's own
   // instructed fix — giving the moved sibling its own live invoice linked
-  // to its own scheduled_service_id — must stop the alert on its own,
-  // without relying on any invoice title/notes text.
-  test('a manual split with both invoices still unpaid → no alert, and an existing alert is cleared', () => rollbackTest(async (trx) => {
+  // to its own scheduled_service_id, AND actually reducing the combined
+  // invoice's total to stop double-billing the sibling — must stop the
+  // alert on its own, without relying on any invoice title/notes text.
+  test('a COMPLETE manual split (own invoice + combined total reduced), both unpaid → no alert, existing alert cleared', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     await sweepOnce(trx, ids.estimateId);
     const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
     expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
 
-    // Office completes the instructed manual split: the sibling visit gets
-    // its OWN live invoice, linked to its own scheduled_service_id — same
-    // linkage findFirstApplicationInvoiceForEstimateService uses elsewhere.
-    // Both invoices stay unpaid — ownership is the signal, not settlement.
+    // Office completes the FULL instructed manual split: the sibling visit
+    // gets its OWN live invoice, linked to its own scheduled_service_id —
+    // same linkage findFirstApplicationInvoiceForEstimateService uses
+    // elsewhere — AND the combined invoice is reduced by the sibling's
+    // carved-out share (153.60 - 42 = 111.60). Both invoices stay unpaid —
+    // ownership + a real reduction are the signal, not settlement.
     const lawnInvoiceId = randomUUID();
     await trx('invoices').insert({
       id: lawnInvoiceId, customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
@@ -284,6 +287,10 @@ suite('first-application-sibling-split — periodic sweep', () => {
       status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
       line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
       subtotal: 42, total: 42,
+    });
+    await trx('invoices').where({ id: ids.invoiceId }).update({
+      subtotal: 111.60, total: 111.60,
+      line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 111.60, amount: 111.60 }]),
     });
 
     const [result] = await sweepOnce(trx, ids.estimateId);
@@ -295,12 +302,43 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const metadata = typeof cleared.metadata === 'string' ? JSON.parse(cleared.metadata) : cleared.metadata;
     expect(metadata.autoCleared).toBe(true);
 
-    // Neither original invoice's money moved — the sweep never touches it.
-    const [pest, sharedInvoice] = await Promise.all([
-      trx('scheduled_services').where({ id: ids.pestId }).first(),
-      trx('invoices').where({ id: ids.invoiceId }).first(),
-    ]);
+    // The visit's OWN price and the invoice split amounts are never
+    // touched by the sweep — only the office's own manual edits above.
+    const pest = await trx('scheduled_services').where({ id: ids.pestId }).first();
     expect(Number(pest.estimated_price)).toBe(153.60);
+  }));
+
+  // Codex round-4 P1: a sibling's own live invoice is proof the office
+  // STARTED the split, never proof they FINISHED it — the combined
+  // invoice can still carry the sibling's full original charge even after
+  // a brand-new sibling invoice exists. That is an unresolved duplicate
+  // charge, and the alert must keep ringing until the combined invoice is
+  // actually reduced.
+  test('a sibling invoice is created but the COMBINED invoice total is left unchanged → still alerts', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await sweepOnce(trx, ids.estimateId);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
+
+    // A new $42 sibling invoice exists, but the combined $153.60 invoice
+    // is untouched — the sibling's charge is still double-billed.
+    await trx('invoices').insert({
+      id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
+      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      subtotal: 42, total: 42,
+    });
+
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('alerted');
+    expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
+
+    const stillOpen = await readBell(trx, dedupeKey);
+    expect(stillOpen.read_at).toBeNull();
+
+    const sharedInvoice = await trx('invoices').where({ id: ids.invoiceId }).first();
     expect(Number(sharedInvoice.total)).toBe(153.60);
   }));
 

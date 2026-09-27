@@ -102,14 +102,28 @@
 // same way a minted one would be. "Live" excludes the full canonical
 // canceled vocabulary (void, refunded, canceled, cancelled — Codex
 // round-1 P1: void alone let a canceled "split" invoice falsely clear the
-// alert), not just void. This is more robust than comparing the shared
+// alert), not just void.
+//
+// has_own_live_invoice is necessary but NOT sufficient (Codex round-4 P1):
+// a brand-new sibling invoice can exist while the combined invoice still
+// carries that sibling's full original charge (an unresolved duplicate
+// charge). evaluateGroupDivergence additionally requires
+// combinedChargeAdjusted — the combined invoice's CURRENT total strictly
+// less than anchor.estimated_price, which IS the full same-day combined
+// total at acceptance (reservedAcceptPerVisitSplit's `reservedPrice` — see
+// estimate-converter.js, "its price is the route's same-day total") — real
+// evidence something was actually carved back out of it, not merely that a
+// second invoice now exists. This is more robust than comparing the shared
 // invoice's line items/total against the per-visit split amounts
 // (reservedAcceptPerVisitSplit) — those amounts are derived only at
 // itemizeFirstApplication/closeout time (GATE_VISIT_CLOSEOUT-gated) and are
 // not a durable, always-available record to diff against for an arbitrary
-// group on an arbitrary sweep tick. evaluateGroupDivergence excludes any
-// diverging sibling with has_own_live_invoice from the alerted set; once
-// EVERY diverging sibling has its own invoice the group clears with reason
+// group on an arbitrary sweep tick; comparing against anchor.estimated_price
+// instead uses a value already persisted at acceptance, no re-derivation.
+// Unreadable/missing evidence FAILS CLOSED (never treated as adjusted).
+// evaluateGroupDivergence excludes any diverging sibling with BOTH
+// has_own_live_invoice AND combinedChargeAdjusted from the alerted set;
+// once EVERY diverging sibling clears that bar the group clears with reason
 // 'split_completed' (distinct from 'realigned', which means the dates
 // actually matched again).
 //
@@ -162,13 +176,16 @@ function divergingSiblings(anchor, members) {
     && dateOnly(m.scheduled_date) !== anchorDate);
 }
 
-// The pure detection predicate: given the group's anchor row, every member
-// row (each optionally carrying has_own_live_invoice — loadGroupMembers
-// stamps this from a real invoices.scheduled_service_id lookup), and the
-// shared invoice's current status, decide whether to alert, clear a
-// standing alert, or do nothing. No DB access — the sweep and every unit
-// test call this the same way.
-function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
+// The pure detection predicate: given the group's anchor row (carrying its
+// own estimated_price — see combinedChargeAdjusted below), every member row
+// (each optionally carrying has_own_live_invoice — loadGroupMembers stamps
+// this from a real invoices.scheduled_service_id lookup), the shared
+// invoice's current status, and its current total, decide whether to
+// alert, clear a standing alert, or do nothing. No DB access — the sweep
+// and every unit test call this the same way.
+function evaluateGroupDivergence({
+  anchor, members, invoiceStatus, invoiceTotal,
+}) {
   if (!anchor || !Array.isArray(members) || members.length < 2) {
     return { action: 'clear', reason: 'no_group' };
   }
@@ -179,12 +196,24 @@ function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
   if (!diverging.length) {
     return { action: 'clear', reason: 'realigned' };
   }
-  // A diverging sibling that has already picked up its OWN live invoice
-  // (linked to its own scheduled_service_id) has been split off by hand —
-  // the office completed the instructed manual split for that visit, so it
-  // no longer needs an alert. Only the still-unresolved diverging siblings
-  // are reported/alerted on.
-  const unresolved = diverging.filter((m) => !m.has_own_live_invoice);
+  // A diverging sibling's own live invoice is proof the office STARTED the
+  // split, but never proof they FINISHED it (Codex round-4 P1): a brand-new
+  // sibling invoice can exist while the combined invoice still carries that
+  // sibling's full original charge — an unresolved duplicate charge. Require
+  // the combined invoice's CURRENT total to be strictly LESS than the
+  // anchor's own originally-stamped price as real evidence the combined
+  // charge was actually reduced. anchor.estimated_price IS the full
+  // same-day combined total at acceptance (reservedAcceptPerVisitSplit's
+  // `reservedPrice` — see estimate-converter.js, "its price is the route's
+  // same-day total"), so a lower current invoice total is direct evidence
+  // something was carved back out of it. Unreadable/missing evidence (no
+  // anchor.estimated_price, or a non-finite invoiceTotal) FAILS CLOSED —
+  // never treated as adjusted, so a diverging sibling's own invoice alone
+  // never clears the alert.
+  const combinedChargeAdjusted = Number.isFinite(Number(anchor.estimated_price))
+    && Number.isFinite(Number(invoiceTotal))
+    && Number(invoiceTotal) < Number(anchor.estimated_price);
+  const unresolved = diverging.filter((m) => !(m.has_own_live_invoice && combinedChargeAdjusted));
   if (!unresolved.length) {
     return { action: 'clear', reason: 'split_completed' };
   }
@@ -217,6 +246,7 @@ const CANDIDATE_COLUMNS = [
   'i.total as invoice_total', 'i.created_at as invoice_created_at',
   'anchor.id as anchor_id', 'anchor.customer_id', 'anchor.source_estimate_id',
   'anchor.scheduled_date as anchor_scheduled_date', 'anchor.completed_at as anchor_completed_at',
+  'anchor.estimated_price as anchor_estimated_price',
 ];
 
 // Consolidates multiple candidate INVOICE rows for the SAME estimate down
@@ -328,7 +358,7 @@ async function loadGroupMembers(conn, { customerId, sourceEstimateId }) {
     .where({ customer_id: customerId, source_estimate_id: sourceEstimateId })
     .whereNull('recurring_parent_id')
     .orderBy('id')
-    .select('id', 'scheduled_date', 'completed_at');
+    .select('id', 'scheduled_date', 'completed_at', 'estimated_price');
   if (!members.length) return members;
   const ownInvoiceIds = await conn('invoices')
     .whereIn('scheduled_service_id', members.map((m) => m.id))
@@ -442,11 +472,16 @@ async function evaluateCandidate(conn, candidate) {
     invoice_id: invoiceId, invoice_status: invoiceStatus, invoice_number: invoiceNumber,
     invoice_total: invoiceTotal,
     anchor_scheduled_date: anchorScheduledDate, anchor_completed_at: anchorCompletedAt,
+    anchor_estimated_price: anchorEstimatedPrice,
   } = candidate;
   const members = await loadGroupMembers(conn, { customerId, sourceEstimateId: estimateId });
   const anchor = members.find((m) => String(m.id) === String(anchorId))
-    || { id: anchorId, scheduled_date: anchorScheduledDate, completed_at: anchorCompletedAt };
-  const verdict = evaluateGroupDivergence({ anchor, members, invoiceStatus });
+    || {
+      id: anchorId, scheduled_date: anchorScheduledDate, completed_at: anchorCompletedAt, estimated_price: anchorEstimatedPrice,
+    };
+  const verdict = evaluateGroupDivergence({
+    anchor, members, invoiceStatus, invoiceTotal,
+  });
   const prefix = DEDUPE_PREFIX(estimateId);
   if (verdict.action === 'clear') {
     const cleared = await clearStandingAlerts(conn, prefix);

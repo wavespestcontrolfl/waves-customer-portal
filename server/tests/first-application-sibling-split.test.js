@@ -112,26 +112,54 @@ describe('evaluateGroupDivergence', () => {
       .toEqual({ action: 'clear', reason: 'no_group' });
   });
 
-  test('a diverging sibling that already has its OWN live invoice → clear, split_completed (manual split done)', () => {
-    const a = anchor();
+  test('a diverging sibling with its OWN live invoice AND the combined invoice reduced → clear, split_completed', () => {
+    const a = anchor({ estimated_price: 153.60 });
     const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true });
-    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, b], invoiceStatus: 'draft' });
+    const verdict = evaluateGroupDivergence({
+      anchor: a, members: [a, b], invoiceStatus: 'draft', invoiceTotal: 111.60,
+    });
     expect(verdict).toEqual({ action: 'clear', reason: 'split_completed' });
   });
 
-  test('two diverging siblings, only one split off → alerts on the still-unresolved one only', () => {
-    const a = anchor();
+  // Codex round-4 P1: a sibling's own live invoice is proof the office
+  // STARTED the split, never proof they FINISHED it — the combined invoice
+  // can still carry the sibling's full original charge.
+  test('a diverging sibling has its OWN live invoice but the COMBINED invoice total is unchanged → still alerts', () => {
+    const a = anchor({ estimated_price: 153.60 });
+    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true });
+    const verdict = evaluateGroupDivergence({
+      anchor: a, members: [a, b], invoiceStatus: 'draft', invoiceTotal: 153.60,
+    });
+    expect(verdict.action).toBe('alert');
+    expect(verdict.diverging.map((m) => m.id)).toEqual(['b']);
+  });
+
+  test('a diverging sibling has its OWN live invoice but anchor.estimated_price is unreadable → fails closed, still alerts', () => {
+    const a = anchor({ estimated_price: null });
+    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true });
+    const verdict = evaluateGroupDivergence({
+      anchor: a, members: [a, b], invoiceStatus: 'draft', invoiceTotal: 42,
+    });
+    expect(verdict.action).toBe('alert');
+  });
+
+  test('two diverging siblings, only one split off with the combined invoice reduced → alerts on the still-unresolved one only', () => {
+    const a = anchor({ estimated_price: 153.60 });
     const split = member('split-off', { scheduled_date: '2026-10-05', has_own_live_invoice: true });
     const unresolved = member('still-needs-split', { scheduled_date: '2026-10-09' });
-    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, split, unresolved], invoiceStatus: 'draft' });
+    const verdict = evaluateGroupDivergence({
+      anchor: a, members: [a, split, unresolved], invoiceStatus: 'draft', invoiceTotal: 111.60,
+    });
     expect(verdict.action).toBe('alert');
     expect(verdict.diverging.map((m) => m.id)).toEqual(['still-needs-split']);
   });
 
   test('a diverging sibling with no invoice yet (has_own_live_invoice false/undefined) still alerts', () => {
-    const a = anchor();
+    const a = anchor({ estimated_price: 153.60 });
     const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: false });
-    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, b], invoiceStatus: 'draft' });
+    const verdict = evaluateGroupDivergence({
+      anchor: a, members: [a, b], invoiceStatus: 'draft', invoiceTotal: 111.60,
+    });
     expect(verdict.action).toBe('alert');
     expect(verdict.diverging.map((m) => m.id)).toEqual(['b']);
   });
