@@ -244,17 +244,20 @@ describe('invoice follow-up email sidecar', () => {
   // The customer's choice is read by the shared authority, first at
   // preparation and again under its locks at the provider handoff. Its
   // refusals map onto the reasons the sequence already settles on.
-  const disabled = { code: 'BILLING_EMAIL_DISABLED', blocked: true, reason: 'Email notifications are disabled for this customer' };
+  // A terminal refusal the shared authority can actually still produce (the
+  // portal-wide email switch no longer can — owner ruling 2026-09-26).
+  const noRecipient = { code: 'NO_EMAIL_RECIPIENT', blocked: true, reason: 'No billing email on file' };
   test.each([
     ['enabled', { email_enabled: true }, {}, null],
     ['missing row', undefined, {}, null],
     ['missing flag', {}, {}, null],
-    ['disabled legacy', { email_enabled: false }, { firstRead: disabled }, 'email_disabled'],
-    ['disabled selected Email and Text', { email_enabled: false, invoice_channels: ['email', 'sms'] }, { firstRead: disabled }, 'email_disabled'],
-    ['disabled Email only', { email_enabled: false, invoice_channels: ['email'] }, { firstRead: disabled, noSms: true }, 'email_disabled'],
+    ['portal-wide switch off (legacy)', { email_enabled: false }, {}, null],
+    ['portal-wide switch off with explicit Email and Text', { email_enabled: false, invoice_channels: ['email', 'sms'] }, {}, null],
+    ['no recipient email, legacy', { email_enabled: true }, { firstRead: noRecipient }, 'missing_email'],
+    ['no recipient email, Email only', { email_enabled: true, invoice_channels: ['email'] }, { firstRead: noRecipient, noSms: true }, 'missing_email'],
     ['operator-initiated', { email_enabled: false, invoice_channels: ['sms'] }, { operator: true }, null],
     ['unreadable authority context', {}, { readFailure: true }, 'billing_email_context_unavailable'],
-    ['opt-out at handoff', { email_enabled: true, invoice_channels: ['email', 'sms'] }, { handoff: disabled }, 'email_disabled'],
+    ['no recipient email at handoff', { email_enabled: true, invoice_channels: ['email', 'sms'] }, { handoff: noRecipient }, 'missing_email'],
   ])('%s preserves email opt-out, SMS delivery, and sequence progress', async (_label, prefs, options, emailReason) => {
     const emailSent = emailReason === null;
     // A send or a handoff refusal writes its own email audit row first.
@@ -335,7 +338,7 @@ describe('invoice follow-up email sidecar', () => {
       });
     }
     if (!emailSent) {
-      const terminal = emailReason === 'email_disabled' && !!prefs?.invoice_channels;
+      const terminal = emailReason === 'missing_email' && !!prefs?.invoice_channels;
       expect(require('../services/collections/contact-ledger').markSendFailed).toHaveBeenCalledWith(
         expect.anything(), expect.objectContaining({
           reason: emailReason,

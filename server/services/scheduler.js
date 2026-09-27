@@ -143,7 +143,7 @@ async function scheduledDepositReceiptAllowed(msg) {
 //                    row on the bounded retry rail so the handoff reruns.
 function classifyDepositReplayFallback(fb = {}) {
   if (fb.sent === true || fb.reason === 'receipt_opted_out') return 'handled';
-  if (['email_opted_out', 'no_recipient_email', 'sendgrid_not_configured', 'no_received_deposit', 'estimate_not_found', 'no_estimate_ref'].includes(fb.reason)) {
+  if (['no_recipient_email', 'sendgrid_not_configured', 'no_received_deposit', 'estimate_not_found', 'no_estimate_ref'].includes(fb.reason)) {
     return 'sms_fallback';
   }
   return 'retry';
@@ -4394,8 +4394,8 @@ function initScheduledJobs() {
             // off to the deposit email leg BEFORE the row goes terminal — the
             // immediate path treats the same opt-outs as "the email carries
             // the receipt". PURPOSE_OPTED_OUT can also mean the
-            // payment_receipt kill switch; the fallback re-checks it (and
-            // email_enabled) itself. A TRANSIENT fallback failure (prefs
+            // payment_receipt kill switch; the fallback re-checks it
+            // itself. A TRANSIENT fallback failure (prefs
             // blip / provider error) reschedules the row on the bounded
             // attempt rail so the handoff reruns, instead of discarding the
             // only remaining receipt path (codex P2 on a3de55b9); a

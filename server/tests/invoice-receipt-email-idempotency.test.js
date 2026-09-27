@@ -197,7 +197,6 @@ describe('sendReceiptEmail idempotency', () => {
   });
 
   test.each([
-    ['the portal-wide email switch', 'BILLING_EMAIL_DISABLED', { ok: false, error: 'email_opted_out' }],
     ['an explicit receipt choice without Email', 'BILLING_PREFERENCES_CHANGED',
       { ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected' }],
     ['no billing address', 'NO_EMAIL_RECIPIENT', { ok: false, error: 'No receipt recipient email' }],

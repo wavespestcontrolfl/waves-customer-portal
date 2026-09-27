@@ -156,7 +156,9 @@ postgres('billing Email provider preparation on its held connection', () => {
     } finally { mockPg.removeListener('query', collect); }
   }, 15000);
 
-  test.each([true, false])('full billing replay on one root slot respects current Email choice %s', async (emailEnabled) => {
+  // Owner ruling 2026-09-26: the portal-wide email switch never blocks a
+  // billing email, so the replay sends the same way whether it is on or off.
+  test.each([true, false])('full billing replay on one root slot sends regardless of the portal-wide email switch (%s)', async (emailEnabled) => {
     const chargeDate = etDateString(addETDays(new Date(), 1));
     await mockPg('customers').where({ id: customerId }).update({ active: true, autopay_enabled: true,
       monthly_rate: 100, billing_day: Number(chargeDate.slice(-2)), billing_mode: 'monthly_membership' });
@@ -178,15 +180,9 @@ postgres('billing Email provider preparation on its held connection', () => {
     });
     const outcome = await retryOne(stored);
     const saved = await mockPg('email_messages').where({ id: stored.id }).first();
-    if (emailEnabled) {
-      expect(outcome).toMatchObject({ sent: true });
-      expect(saved).toMatchObject({ status: 'sent', sent_at: expect.any(Date) });
-      expect(global.fetch).toHaveBeenCalledTimes(2);
-    } else {
-      expect(outcome).toMatchObject({ sent: false, stopped: true });
-      expect(saved).toMatchObject({ status: 'blocked', provider_retry_next_at: null });
-      expect(global.fetch).not.toHaveBeenCalled();
-    }
+    expect(outcome).toMatchObject({ sent: true });
+    expect(saved).toMatchObject({ status: 'sent', sent_at: expect.any(Date) });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
   }, 15000);
 
   test.each(['billing.notice', 'billing.receipt_notice'])('a contextless %s still reaches the existing provider retry path', async (templateKey) => {

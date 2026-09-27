@@ -76,10 +76,14 @@ describe('billing delivery channel contract', () => {
       .toThrow('Billing notification choices conflict');
     expect(mergedBillingChannelUpdates({ payment_issue_channel: 'sms' }, { payment_issue_channels: ['sms', 'push'] }))
       .toMatchObject({ payment_issue_channels: ['sms'] });
+    // The portal-wide email switch no longer governs billing email (owner
+    // ruling 2026-09-26), so an asymmetric email_enabled between the two
+    // profiles no longer strands the merge: Email alone keeps it valid even
+    // though sms_enabled disagrees.
     expect(() => mergedBillingChannelUpdates(
       { invoice_channels: ['email', 'sms'], email_enabled: true, sms_enabled: false },
       { invoice_channels: ['email', 'sms'], email_enabled: false, sms_enabled: true },
-    )).toThrow('Billing notification choices conflict');
+    )).not.toThrow();
     expect(() => mergedBillingChannelUpdates(
       { payment_receipt_channels: ['sms'], payment_confirmation_sms: true },
       { payment_receipt_channels: ['sms'], payment_confirmation_sms: false },
@@ -137,27 +141,32 @@ describe('billing delivery channel contract', () => {
     });
   });
 
-  test('legacy independent email copies follow address availability and the existing email flag', () => {
+  test('legacy independent email copies follow address availability, not the email switch', () => {
     const prefs = { payment_issue_channel: 'push', email_enabled: false };
-    expect(billingChannelsPayload(prefs).paymentIssueChannels).toEqual(['push']);
+    expect(billingChannelsPayload(prefs).paymentIssueChannels).toEqual(['email', 'push']);
     expect(billingChannelsPayload({ ...prefs, email_enabled: true }, { emailAvailable: false }).paymentIssueChannels)
       .toEqual(['push']);
   });
 
   test('legacy payment issues inherit the billing scalar only while their dedicated scalar is NULL', () => {
+    // email_enabled: false is included to show it has no bearing on either
+    // outcome (owner ruling 2026-09-26): only the dedicated-scalar/legacy
+    // inheritance and address availability matter.
     expect(billingChannelsPayload({
       payment_issue_channel: null, billing_channel: 'push', email_enabled: false,
-    }).paymentIssueChannels).toEqual(['push']);
+    }).paymentIssueChannels).toEqual(['email', 'push']);
     expect(billingChannelsPayload({
       payment_issue_channel: 'sms', billing_channel: 'push', email_enabled: false,
-    }).paymentIssueChannels).toEqual(['sms']);
+    }).paymentIssueChannels).toEqual(['email', 'sms']);
   });
 
   test('legacy email-only payment receipts stay email-only when deliverable and fall back to sms otherwise', () => {
     const prefs = { payment_receipt_channel: 'email' };
     expect(billingChannelsPayload(prefs).paymentConfirmationChannels).toEqual(['email']);
     expect(billingChannelsPayload(prefs, { emailAvailable: false }).paymentConfirmationChannels).toEqual(['sms']);
-    expect(billingChannelsPayload({ ...prefs, email_enabled: false }).paymentConfirmationChannels).toEqual(['sms']);
+    // The portal-wide email switch no longer takes billing email away (owner
+    // ruling 2026-09-26): an address on file still stays email-only.
+    expect(billingChannelsPayload({ ...prefs, email_enabled: false }).paymentConfirmationChannels).toEqual(['email']);
     expect(billingChannelsPayload({ payment_receipt_channel: 'both' }).paymentConfirmationChannels)
       .toEqual(['email', 'sms']);
   });
@@ -175,7 +184,10 @@ describe('billing delivery channel contract', () => {
     const prefs = { billing_channel: legacy };
     expect(billingChannelsPayload(prefs).billingReminderChannels).toEqual(legacy === 'email' ? ['email'] : ['email', 'sms']);
     expect(billingChannelsPayload(prefs, { emailAvailable: false }).billingReminderChannels).toEqual(['sms']);
-    expect(billingChannelsPayload({ ...prefs, email_enabled: false }).billingReminderChannels).toEqual(['sms']);
+    // The portal-wide email switch no longer takes billing email away
+    // (owner ruling 2026-09-26): this stays the same as the baseline above.
+    expect(billingChannelsPayload({ ...prefs, email_enabled: false }).billingReminderChannels)
+      .toEqual(legacy === 'email' ? ['email'] : ['email', 'sms']);
     expect(billingChannelsPayload({ ...prefs, billing_channels: ['email'], email_enabled: false }, { emailAvailable: false }).billingReminderChannels).toEqual(['email']);
   });
 });

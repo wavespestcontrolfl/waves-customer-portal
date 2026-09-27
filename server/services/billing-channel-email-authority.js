@@ -1,9 +1,11 @@
 // Provider-boundary authority for billing notification email. This module
 // owns everything a billing email send must prove true immediately before
 // (and again immediately at) the provider handoff: category/customer/prefs
-// validation, the portal-wide opt-out, the Email channel choice, invoice
-// ownership, recipient resolution, and the locked recheck that runs the
-// moment before dispatch. Callers (the billing-channel-email adapter, the
+// validation, the Email channel choice, invoice ownership, recipient
+// resolution, and the locked recheck that runs the moment before dispatch.
+// The portal-wide email switch (notification_prefs.email_enabled) is not
+// one of them: payment emails cannot be turned off (owner ruling
+// 2026-09-26); texts still honor STOP. Callers (the billing-channel-email adapter, the
 // provider-retry replay, and every billing email sender moved onto it, owner
 // ruling 2026-09-27) go through `loadBillingEmailContext` to prepare a send
 // and `dispatchUnderBillingEmailAuthority` to run one under the required
@@ -78,9 +80,6 @@ async function readContextRows(input, database, lockRecipients, lockedInvoice) {
 
 async function contextBlock(input, category, { customer, prefs, invoice }, database) {
   if (!customer || customer.deleted_at) return { error: blocked('CUSTOMER_NOT_FOUND', 'Customer is unavailable') };
-  if (prefs?.email_enabled === false) {
-    return { error: blocked('BILLING_EMAIL_DISABLED', 'Email notifications are disabled for this customer') };
-  }
   // Only an explicit billing channel choice without Email refuses. A
   // customer who never chose (no explicit selection for this category, or no
   // notification_prefs row at all) keeps Email: the rule every billing email
@@ -99,9 +98,8 @@ async function contextBlock(input, category, { customer, prefs, invoice }, datab
     // terminal drop. A first-read refusal (the customer never selected
     // Email at all) is retried the exact same way and simply reproduces the
     // same terminal-looking decision each time, so returning the schedulable
-    // shape here costs nothing. Kept distinct from BILLING_EMAIL_DISABLED (a
-    // portal-wide opt-out, not a channel-selection race) and the ownership
-    // refusals above, which stay terminal.
+    // shape here costs nothing. Kept distinct from the ownership refusals
+    // below, which stay terminal.
     return {
       error: {
         sent: false, provider: 'email', providerMessageId: null, blocked: true,
