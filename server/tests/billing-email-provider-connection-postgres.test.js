@@ -297,7 +297,7 @@ postgres('billing Email provider preparation on its held connection', () => {
       suppression_group_key_snapshot: 'transactional_required',
       payload_snapshot: { __billing_replay_context: { schema_version: 1, customer_id: customerId,
         invoice_id: invoiceId, category: 'billing', source_entry_point: 'late_payment_email',
-        notificationEventKey: event, rendered_amount: '129.00' } },
+        notificationEventKey: event, rendered_balance: '129.00' } },
       categories: JSON.stringify(['billing', 'late_payment', 'late_payment_30d']), send_attempt_token: attempt,
       provider_handoff_attempt_token: attempt, provider_handoff_phase: 'pending', status: 'queued',
       provider_retry_count: 1,

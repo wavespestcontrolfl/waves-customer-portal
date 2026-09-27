@@ -16,7 +16,9 @@ const SENDER_BINDINGS = Object.freeze({
   late_payment_email: Object.freeze({
     category: 'billing',
     categoryTag: 'billing',
-    pins: ['invoice_id', 'rendered_amount'],
+    // rendered_balance is the ACCOUNT total the email shows; rendered_amount
+    // stays the invoice-amount pin invoiceStillCollectible compares.
+    pins: ['invoice_id', 'rendered_balance'],
     templates: new Set([
       'billing_late_payment_7_day', 'billing_late_payment_14_day', 'billing_late_payment_30_day',
       'billing_late_payment_60_day', 'billing_late_payment_90_day',
@@ -55,6 +57,7 @@ const STRING_FIELDS = Object.freeze({
   customer_id: 160, invoice_id: 160, source_entry_point: 80, notificationEventKey: 240,
   collections_ledger_id: 160, payment_method_id: 160, expiry_stage: 20,
   appointment_id: 160, appointment_service_type: 160, followup_sequence_id: 160, rendered_amount: 40,
+  rendered_balance: 40,
 });
 
 function boundedString(value, max) {
@@ -147,6 +150,7 @@ function sanitizeBillingReplayContext(context) {
   if (!copyStrings(context, out) || !copyDates(context, out) || !copyExpiry(context, out)) return null;
   if (!out.customer_id || !out.notificationEventKey) return null;
   if (out.rendered_amount != null && !/^\d+\.\d{2}$/.test(out.rendered_amount)) return null;
+  if (out.rendered_balance != null && !/^\d+\.\d{2}$/.test(out.rendered_balance)) return null;
   if (!CATEGORIES.has(context.category) || !SOURCES.has(out.source_entry_point)) return null;
   out.category = context.category;
   return complete(out) ? out : null;
@@ -183,6 +187,7 @@ function buildBillingReplayContext(input, authorityContext, notificationEventKey
     appointment_rendered_on: meta.appointment_rendered_on,
     followup_sequence_id: meta.followup_sequence_id,
     rendered_amount: meta.rendered_amount,
+    rendered_balance: meta.rendered_balance,
   });
 }
 

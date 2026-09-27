@@ -246,7 +246,7 @@ describe('late-payment email sidecar', () => {
       billingReplayContext: {
         schema_version: 1, customer_id: 'cust-1', invoice_id: 'inv-1', category: 'billing',
         source_entry_point: 'late_payment_email', notificationEventKey: 'late_payment:inv-1:7',
-        rendered_amount: '129.00',
+        rendered_balance: '129.00',
       },
       payload: expect.objectContaining({
         first_name: 'Taylor',

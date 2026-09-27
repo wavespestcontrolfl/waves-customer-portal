@@ -207,7 +207,7 @@ async function billingEmailReplayEligible(meta, database = db) {
 // same email can still deliver it. An unreadable answer retries later.
 const PRODUCER_RULES = Object.freeze({
   late_payment_email: (meta) => require('../workflows/balance-reminder').latePaymentEmailStillOwed({
-    customerId: meta.customer_id, invoiceId: meta.invoice_id, renderedTotal: meta.rendered_amount,
+    customerId: meta.customer_id, invoiceId: meta.invoice_id, renderedTotal: meta.rendered_balance,
   }),
   invoice_followup_email: (meta) => require('../invoice-followups').followupEmailStillOwed({
     sequenceId: meta.followup_sequence_id, invoiceId: meta.invoice_id,

@@ -1234,7 +1234,7 @@ describe('email template library rendering', () => {
     const context = {
       schema_version: 1, customer_id: 'cust-1', invoice_id: 'inv-1', category: 'billing',
       source_entry_point: 'late_payment_email', notificationEventKey: 'late_payment:inv-1:30',
-      rendered_amount: '129.00',
+      rendered_balance: '129.00',
     };
     const facts = {
       templateKey: 'billing_late_payment_30_day', recipientType: 'customer', recipientId: 'cust-1',

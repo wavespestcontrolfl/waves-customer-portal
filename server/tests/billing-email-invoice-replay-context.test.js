@@ -86,3 +86,19 @@ describe('direct invoice Email replay context', () => {
     expect(isBillingEmailProviderReplay({ template_key: 'billing.notice', payload_snapshot: snapshot })).toBe(false);
   });
 });
+
+describe('late-payment Email replay pin', () => {
+  const late = {
+    schema_version: 1, customer_id: 'cust-1', invoice_id: 'inv-1', category: 'billing',
+    source_entry_point: 'late_payment_email', notificationEventKey: 'late_payment:inv-1:30',
+  };
+
+  // The email shows the account total; invoiceStillCollectible compares
+  // rendered_amount with the invoice's own amount, so the two pins differ.
+  test('pins the rendered account balance, not the invoice amount', () => {
+    expect(sanitizeBillingReplayContext({ ...late, rendered_balance: '129.00' }))
+      .toEqual({ ...late, rendered_balance: '129.00' });
+    expect(sanitizeBillingReplayContext({ ...late, rendered_amount: '129.00' })).toBeNull();
+    expect(sanitizeBillingReplayContext({ ...late, rendered_balance: '129' })).toBeNull();
+  });
+});

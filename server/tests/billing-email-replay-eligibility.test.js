@@ -208,7 +208,7 @@ describe('a moved billing sender\'s provider retry (owner ruling 2026-09-27)', (
 
 describe('a moved sender\'s own rules before the shared check', () => {
   const meta = { customer_id: customerId, invoice_id: 'inv-1', category: 'billing',
-    source_entry_point: 'late_payment_email', notificationEventKey: 'late_payment:inv-1:30', rendered_amount: '129.00' };
+    source_entry_point: 'late_payment_email', notificationEventKey: 'late_payment:inv-1:30', rendered_balance: '129.00' };
 
   test('the late-payment sender answers with its own balance and dunning rules', async () => {
     BalanceReminder.latePaymentEmailStillOwed.mockResolvedValueOnce({ owed: true });

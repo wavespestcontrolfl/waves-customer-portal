@@ -593,9 +593,9 @@ class BalanceReminder {
           category: "billing",
           source_entry_point: "late_payment_email",
           notificationEventKey: `late_payment:${latestInvoice.id}:${config.stageDays}`,
-          // The total this email shows (payload.amount_due): a retry refuses
-          // once the customer's overdue total differs.
-          rendered_amount: Number(balance.totalBalance || latestInvoice.total || 0).toFixed(2),
+          // The account total this email shows (payload.amount_due): a retry
+          // refuses once the customer's overdue total differs.
+          rendered_balance: Number(balance.totalBalance || latestInvoice.total || 0).toFixed(2),
         },
         withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
           input: authorityInput, recipientEmail: to, templateKey: config.templateKey, dispatch, state,
