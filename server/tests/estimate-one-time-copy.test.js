@@ -873,6 +873,30 @@ describe('server-rendered page', () => {
       [{ service: 'trenching', label: 'Front Trenching', amount: 900,
         warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }],
       ['Front Trenching']],
+    ['equal-price exact-label reservation before renamed fallback',
+      [
+        { service: 'trenching', label: 'Front Trenching', amount: 900 },
+        { service: 'trenching', label: 'Current rear scope', amount: 900 },
+      ],
+      [
+        { service: 'trenching', label: 'Front Trenching', amount: 900,
+          warrantyTier: 'none', warrantyAdder: 0 },
+        { service: 'trenching', label: 'Legacy rear scope', amount: 900,
+          warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+      ],
+      ['Current rear scope']],
+    ['reversed equal-price exact-label reservation before renamed fallback',
+      [
+        { service: 'trenching', label: 'Current rear scope', amount: 900 },
+        { service: 'trenching', label: 'Front Trenching', amount: 900 },
+      ],
+      [
+        { service: 'trenching', label: 'Legacy rear scope', amount: 900,
+          warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+        { service: 'trenching', label: 'Front Trenching', amount: 900,
+          warrantyTier: 'none', warrantyAdder: 0 },
+      ],
+      ['Current rear scope']],
   ])('public projection assigns warranty evidence to one distinct trenching job: %s', (
     _name, projectedRows, savedRows, purchasedLabels,
   ) => {

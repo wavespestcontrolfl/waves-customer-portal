@@ -1568,14 +1568,17 @@ function purchasedServiceScopeForQuestion(question, rows = []) {
   const exactLabelRows = selectedLabels.length
     ? subtypeRows.filter((row) => selectedLabels.includes(cleanText(row.label).toLowerCase()))
     : subtypeRows;
-  const amounts = [...question.matchAll(/\$\s*([\d,]+(?:\.\d{1,2})?)/g)]
-    .map((match) => Number(match[1].replace(/,/g, ''))).filter(Number.isFinite);
-  if (selectedLabels.length || amounts.length) {
+  const amounts = [...question.matchAll(
+    /\$\s*([\d,]+(?:\.\d{1,2})?)|\b([\d,]+(?:\.\d{1,2})?)\s*(?:-|\s)?dollars?\b|\b(?:priced?\s+at|costs?)\s+\$?\s*([\d,]+(?:\.\d{1,2})?)\b/g,
+  )].map((match) => Number((match[1] || match[2] || match[3]).replace(/,/g, '')))
+    .filter(Number.isFinite);
+  const statedPrice = amounts.length > 0 || /\$|\bdollars?\b|\b(?:priced?\s+at|costs?)\b/.test(question);
+  if (selectedLabels.length || statedPrice) {
     return {
       named: true,
       rows: amounts.length
         ? exactLabelRows.filter((row) => amounts.includes(Number(row.amount)))
-        : exactLabelRows,
+        : (statedPrice ? [] : exactLabelRows),
     };
   }
   if (namedSubtypes.length) {
@@ -1651,7 +1654,7 @@ function writtenServiceClaimAnswer(question, context = {}, fallback = null) {
     }
   }
   if (/\bsatisfaction\b/.test(question) && !/\b(callbacks?|money[- ]?back|re-?treat\w*|risk[- ]?free)\b/.test(question)) {
-    const satisfactionTerm = rows.map((row) => {
+    const satisfactionTerm = (namedScope.named ? namedScope.rows : rows).map((row) => {
       const clause = cleanText(row.detail).split(/(?<=[.!?;])\s+/)
         .find((part) => /\bsatisfaction guaranteed\b/i.test(part)
           && !/\b(?:no|not|never|without|excluded|isn't|is not|doesn't|does not)\b/i.test(part));

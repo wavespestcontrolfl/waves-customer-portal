@@ -142,6 +142,26 @@ describe('estimate assistant no-guarantee context', () => {
     expect(negated).not.toContain('detail on this estimate says');
   });
 
+  test.each([false, true])('satisfaction answers stay within the named service scope (reversed: %s)', (reverse) => {
+    const rows = [
+      { service: 'commercial_pest', label: 'Commercial Pest Control',
+        detail: 'Satisfaction guaranteed for the initial treatment only.' },
+      { service: 'rodent_bait', label: 'Rodent Bait Stations', detail: 'Station monitoring and service.' },
+    ];
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 55 },
+      pricingBundle: { frequencies: [{ key: 'monthly', monthly: 55,
+        included: reverse ? [...rows].reverse() : rows,
+      }] },
+    });
+
+    const rodent = answerEstimateQuestionFallback('Is satisfaction guaranteed for the rodent service?', context);
+    expect(rodent).toMatch(/written service scope and terms/i);
+    expect(rodent).not.toContain('Satisfaction guaranteed');
+    const commercial = answerEstimateQuestionFallback('Is satisfaction guaranteed for commercial pest?', context);
+    expect(commercial).toContain('“Satisfaction guaranteed for the initial treatment only.”');
+  });
+
   test.each(['pricing', 'saved'])('commercial %s scope remains neutral after normalizing its display name', (source) => {
     const rows = [{ service: 'pest_control', name: 'Commercial Pest Control', label: 'Commercial Pest Control', mo: 55 }];
     const context = buildEstimateAssistantContext({
@@ -362,6 +382,30 @@ describe('estimate assistant no-guarantee context', () => {
       [{ service: 'trenching', label: 'Front foundation', amount: 900,
         warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }],
       ['Front foundation']],
+    ['equal-price exact-label reservation before renamed fallback',
+      [
+        { service: 'trenching', label: 'Front foundation', amount: 900 },
+        { service: 'trenching', label: 'Current rear scope', amount: 900 },
+      ],
+      [
+        { service: 'trenching', label: 'Front foundation', amount: 900,
+          warrantyTier: 'none', warrantyAdder: 0 },
+        { service: 'trenching', label: 'Legacy rear scope', amount: 900,
+          warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+      ],
+      ['Current rear scope']],
+    ['reversed equal-price exact-label reservation before renamed fallback',
+      [
+        { service: 'trenching', label: 'Current rear scope', amount: 900 },
+        { service: 'trenching', label: 'Front foundation', amount: 900 },
+      ],
+      [
+        { service: 'trenching', label: 'Legacy rear scope', amount: 900,
+          warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+        { service: 'trenching', label: 'Front foundation', amount: 900,
+          warrantyTier: 'none', warrantyAdder: 0 },
+      ],
+      ['Current rear scope']],
   ])('pricing reconciliation assigns warranty evidence to one distinct trenching job: %s', (
     _name, pricedRows, savedRows, purchasedLabels,
   ) => {
@@ -422,6 +466,8 @@ describe('estimate assistant no-guarantee context', () => {
     });
     for (const question of [
       'Does the $700 trenching include a guarantee?',
+      'Does the 700 dollar trenching include a guarantee?',
+      'Does the trenching priced at 700 include a guarantee?',
       'Does the Front Trenching include a guarantee?',
     ]) {
       expect(answerEstimateQuestionFallback(question, context))
@@ -429,11 +475,17 @@ describe('estimate assistant no-guarantee context', () => {
     }
     for (const question of [
       'Does the $900 trenching include a guarantee?',
+      'Does the 900 dollars trenching include a guarantee?',
+      'Does the trenching priced at 900 include a guarantee?',
       'Does the Rear Trenching include a guarantee?',
     ]) {
       expect(answerEstimateQuestionFallback(question, context))
         .toContain('Annual inspection during the warranty period');
     }
+    expect(answerEstimateQuestionFallback('Does the trenching priced at seven hundred include a guarantee?', context))
+      .toMatch(/do not see an estimate-wide callback or money-back guarantee/i);
+    expect(answerEstimateQuestionFallback('Does the 3-year trenching include a guarantee?', context))
+      .toContain('Annual inspection during the warranty period');
   });
 
   test.each([

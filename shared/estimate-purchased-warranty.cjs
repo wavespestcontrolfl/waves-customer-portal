@@ -96,6 +96,17 @@ function matchingTrenchingWarrantyRow(target, rows = [], targets = [target]) {
     return value !== '' && value != null && Number(value) === amount;
   });
   const peerAmountCount = peers.filter((row) => {
+    const peerLabel = String(row.label || row.displayName || row.name || '').trim().toLowerCase();
+    const candidateLabelCount = peerLabel ? candidates.filter((candidate) => (
+      String(candidate.label || candidate.displayName || candidate.name || '').trim().toLowerCase() === peerLabel
+    )).length : 0;
+    const matchingPeerCount = peerLabel ? peers.filter((peer) => (
+      String(peer.label || peer.displayName || peer.name || '').trim().toLowerCase() === peerLabel
+    )).length : 0;
+    // An exact one-to-one label assignment reserves both its evidence row and
+    // its projected peer. Neither should make a remaining amount match look
+    // ambiguous.
+    if (row !== target && peerLabel && candidateLabelCount === 1 && matchingPeerCount === 1) return false;
     const value = row.amount ?? row.price ?? row.total;
     return value !== '' && value != null && Number(value) === amount;
   }).length;
