@@ -201,13 +201,26 @@ describe('containerAgreement — measured and count containers', () => {
     expect(containerAgreement(30, 4, 120)).toBe(120);
   });
 
-  test('a count container ("12 count") agrees the same way a measured one does', () => {
-    expect(containerAgreement(12, 1, 12)).toBe(12);
-    expect(containerAgreement(6, 2, 12)).toBe(12); // 2 packs of 6 = one 12-count container... reversed direction still agrees
+  test('a count container ("12 count"), called with { exact: true } as validateExisting does, agrees the same way a measured one does when the numbers are exact', () => {
+    expect(containerAgreement(12, 1, 12, { exact: true })).toBe(12);
+    expect(containerAgreement(6, 2, 12, { exact: true })).toBe(12); // 2 packs of 6 = one 12-count container... reversed direction still agrees
   });
 
   test('neither reading matches the container -> null (unsure)', () => {
     expect(containerAgreement(32, 1, 78)).toBeNull();
+  });
+
+  test('a measured size within 1% agrees (the default, unchanged tolerance)', () => {
+    expect(containerAgreement(99.5, 1, 100)).toBe(100); // 0.5% off — within the default slack
+  });
+
+  test('counts require EXACT integer equality — no 1% slack: "99 Count" against a "100 count" catalog container never agrees', () => {
+    expect(containerAgreement(99, 1, 100, { exact: true })).toBeNull(); // within 1% of 100, but NOT exact
+    expect(containerAgreement(100, 1, 100, { exact: true })).toBe(100);
+    // The SAME numbers, without { exact: true }, WOULD agree — this is the
+    // one-line difference the review flagged (containerAgreement's own
+    // sizesAgree tolerance is 1%, so 99 vs 100 falls inside it).
+    expect(containerAgreement(99, 1, 100)).toBe(100);
   });
 });
 
@@ -262,6 +275,13 @@ describe('classifyDecision — existing product', () => {
     expect(decision).toMatchObject({ kind: 'existing', status: 'logged', amount: 60, unit: 'each' });
   });
 
+  test('a count container requires EXACT agreement — "99 Count" against a "100 count" catalog container is unsure, never accepted within 1%', () => {
+    const trapProduct = { id: 'p-trap', name: 'Rat Trap', container_size: '100 count', inventory_unit: null };
+    const raw = { kind: 'existing', product_id: 'p-trap', reading: { size_text: '99 Count', size_number: 99, size_unit: 'each', pack_count: 1 } };
+    const decision = classifyDecision(raw, ctx({ rawTitle: 'Rat Trap Refill 99 Count', lineQuantity: 1, candidates: [trapProduct] }));
+    expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+  });
+
   test('no readable container_size at all: pack_count 1 sets a canonical container_size; a multi-pack is unsure instead', () => {
     const bare = { id: 'p-bare', name: 'No Size Product', container_size: null, inventory_unit: null };
     const single = classifyDecision(
@@ -275,6 +295,24 @@ describe('classifyDecision — existing product', () => {
       ctx({ rawTitle: 'No Size Product 78 oz (Pack of 2)', lineQuantity: 1, candidates: [bare] }),
     );
     expect(multi).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+  });
+
+  test('a NON-EMPTY container_size neither parsePackSize nor parsePackCount can read is never treated as missing — unsure, and setContainerSize is never offered', () => {
+    const unreadable = { id: 'p-unreadable', name: 'Odd Container Product', container_size: 'case of 4', inventory_unit: null };
+    const decision = classifyDecision(
+      { kind: 'existing', product_id: 'p-unreadable', reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_count: 1 } },
+      ctx({ rawTitle: 'Odd Container Product 78 oz', lineQuantity: 1, candidates: [unreadable] }),
+    );
+    expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure', reason: "the catalog container size can't be read" });
+  });
+
+  test('a blank/whitespace container_size IS treated as missing (setContainerSize still applies)', () => {
+    const blank = { id: 'p-blank', name: 'Blank Container Product', container_size: '   ', inventory_unit: null };
+    const decision = classifyDecision(
+      { kind: 'existing', product_id: 'p-blank', reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_count: 1 } },
+      ctx({ rawTitle: 'Blank Container Product 78 oz', lineQuantity: 1, candidates: [blank] }),
+    );
+    expect(decision).toMatchObject({ kind: 'existing', status: 'logged', setContainerSize: '78 oz' });
   });
 
   test('no size in the title at all -> unsure (never a guessed amount, and never an alias)', () => {
@@ -297,8 +335,21 @@ describe('classifyDecision — new_product', () => {
     }));
     expect(decision).toMatchObject({
       kind: 'new_product', status: 'logged', amount: 96, unit: 'oz',
-      newProduct: { name: 'Bifen XTS', category: 'insecticide', containerSize: '96 oz', inventoryUnit: 'oz', activeIngredient: 'Bifenthrin' },
+      newProduct: { name: 'Bifen XTS', category: 'insecticide', containerSize: '96 oz', inventoryUnit: 'oz' },
     });
+    // The model's own active_ingredient is NEVER carried into the decision —
+    // see the next test — even though this one proposed a plausible value.
+    expect(decision.newProduct.activeIngredient).toBeUndefined();
+  });
+
+  test('the model\'s active_ingredient is never persisted, however plausible — createCatalogProduct\'s own placeholder is used instead', () => {
+    const raw = {
+      kind: 'new_product', reason: 'not in the catalog',
+      new_product: { name: 'New Chemical', category: 'insecticide', active_ingredient: 'Some Confident-Sounding Chemical Name', epa_reg_no: null },
+      reading: { size_text: '32 oz', size_number: 32, size_unit: 'oz', pack_count: 1 },
+    };
+    const decision = classifyDecision(raw, ctx({ rawTitle: 'New Chemical 32 oz', allowedCategories }));
+    expect(decision.newProduct.activeIngredient).toBeUndefined();
   });
 
   test('a liquid size derives inventory_unit fl_oz even when the title reads gallons', () => {

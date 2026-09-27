@@ -2502,9 +2502,18 @@ function initScheduledJobs() {
         if (gateEnvValue('GATE_INVENTORY_AGENT')) {
           const { runInventoryAgent } = require('./purchase-receipts/inventory-agent');
           const agentResult = await runInventoryAgent();
-          if (!agentResult.skipped && (agentResult.logged || agentResult.held || agentResult.errors)) {
+          if (!agentResult.skipped && (agentResult.logged || agentResult.held || agentResult.ignored || agentResult.errors)) {
             logger.info(`[inventory-agent] ${agentResult.logged} logged, ${agentResult.held} held for a person, `
-              + `${agentResult.stillPending} still pending, ${agentResult.errors} error(s)`);
+              + `${agentResult.ignored} ignored, ${agentResult.stillPending} still pending, ${agentResult.errors} error(s)`);
+          }
+        } else {
+          // The gate is off: drain anything already sitting agent_pending
+          // from before it flipped, so a queued line is never stranded
+          // (nothing else ever looks at that status while the gate is off).
+          const { drainAgentQueue } = require('./purchase-receipts/inventory-agent');
+          const drainResult = await drainAgentQueue({});
+          if (drainResult.drained || drainResult.errors) {
+            logger.info(`[inventory-agent] gate off: drained ${drainResult.drained} queued line(s), ${drainResult.errors} error(s)`);
           }
         }
       });

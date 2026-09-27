@@ -9,7 +9,8 @@
 //   - deletes the agent-created product_aliases row, if any;
 //   - deactivates the agent-CREATED catalog product (never an existing one
 //     the agent merely restocked), but ONLY when, after the reversal, it
-//     carries no other movement;
+//     carries no other movement, no vendor_pricing row, and no
+//     product_aliases row besides the agent's own (already deleted above);
 //   - marks the line 'agent_unsure' with agent_decision.undoneAt.
 // Refuses — dry run or --execute — when anything wrote the product row
 // after the agent's own restock (usage, another restock, a manual count, an
@@ -63,6 +64,19 @@ async function otherMovements(conn, productId, excludeIds) {
   return conn('product_inventory_movements').where({ product_id: productId }).whereNotIn('id', excludeIds);
 }
 
+// Vendor pricing rows on this product — a person priced it since the agent
+// created it, so it's no longer purely the agent's own throwaway row.
+async function vendorPricingRows(conn, productId) {
+  return conn('vendor_pricing').where({ product_id: productId }).select('id');
+}
+
+// product_aliases rows on this product OTHER than the agent's own (which is
+// already deleted by the time this runs — see main()). Any survivor means a
+// person (or another line) linked another title to it since.
+async function otherAliases(conn, productId) {
+  return conn('product_aliases').where({ product_id: productId }).select('id');
+}
+
 
 
 async function main() {
@@ -102,7 +116,7 @@ async function main() {
   console.log(`Line ${line.id} ("${line.raw_title}"):`);
   console.log(`  reverse ${line.received_qty} ${line.received_unit} on "${product?.name || line.product_id}" (a correction of -${line.received_qty} ${line.received_unit})`);
   if (alias) console.log(`  delete product_aliases row ${alias.id} ("${alias.alias_name}")`);
-  if (isAgentCreatedProduct) console.log(`  deactivate "${product?.name}" (agent-created) IF it carries no other movement after this undo`);
+  if (isAgentCreatedProduct) console.log(`  deactivate "${product?.name}" (agent-created) IF it carries no other movement, vendor pricing, or alias after this undo`);
   console.log('  set the line\'s status to agent_unsure, stamping agent_decision.undoneAt');
   if (!EXECUTE) {
     console.log('\nDry run — pass --execute to apply.');
@@ -125,8 +139,14 @@ async function main() {
     if (alias) await trx('product_aliases').where({ id: alias.id }).del();
 
     if (isAgentCreatedProduct) {
+      // Deactivate only while the row is still, in every visible way, the
+      // agent's own throwaway create: no movement besides the one just
+      // reversed, no vendor pricing a person entered, and (with the agent's
+      // own alias already gone above) no alias linking any OTHER title to it.
       const stillHasMovements = await otherMovements(trx, line.product_id, [movement.id, reversal.movement.id]);
-      if (stillHasMovements.length === 0) {
+      const stillHasVendorPricing = await vendorPricingRows(trx, line.product_id);
+      const stillHasOtherAliases = await otherAliases(trx, line.product_id);
+      if (stillHasMovements.length === 0 && stillHasVendorPricing.length === 0 && stillHasOtherAliases.length === 0) {
         await trx('products_catalog').where({ id: line.product_id }).update({ active: false, updated_at: new Date() });
       }
     }

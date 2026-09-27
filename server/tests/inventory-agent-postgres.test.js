@@ -20,7 +20,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { runInventoryAgent, productUnchangedSinceAgent } = require('../services/purchase-receipts/inventory-agent');
+const { runInventoryAgent, drainAgentQueue, productUnchangedSinceAgent } = require('../services/purchase-receipts/inventory-agent');
 const inventoryOperations = require('../services/inventory-operations');
 const notifications = require('../services/notification-service');
 
@@ -98,6 +98,9 @@ jest.setTimeout(30000);
 
     const created = await mockConn('products_catalog').where({ name: 'Bifen XTS' }).first();
     expect(created).toMatchObject({ active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', default_unit: 'oz', best_vendor: 'Amazon' });
+    // The model proposed 'Bifenthrin' (see the decision above) — never
+    // persisted. createCatalogProduct's own placeholder is what's written.
+    expect(created.active_ingredient).toBe('Unknown - pending SDS');
     expect(await stockOf(created.id)).toBe(192); // 2 ordered x 96 oz
 
     const alias = await mockConn('product_aliases').where({ product_id: created.id }).first();
@@ -114,7 +117,7 @@ jest.setTimeout(30000);
     expect(await bellsFor(line.id)).toHaveLength(1);
   });
 
-  test('undo safety: the product row version recorded after the agent restock holds until any later stock write', async () => {
+  test('undo safety: the product row hash recorded after the agent restock holds until any later stock write', async () => {
     const line = await pendingLine();
     const decision = {
       kind: 'new_product', reason: 'not in the catalog', product_id: null,
@@ -124,13 +127,36 @@ jest.setTimeout(30000);
     await run({ ok: true, json: decision });
     const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
     const movement = await mockConn('product_inventory_movements').where({ id: saved.movement_id }).first();
-    expect(saved.agent_decision.productRowVersion).toEqual(expect.any(String));
+    expect(saved.agent_decision.productRowHash).toEqual(expect.any(String));
     expect(await productUnchangedSinceAgent(mockConn, saved, movement)).toEqual({ ok: true });
 
     // A later count on the product, whatever its created_at, changes the row.
     await inventoryOperations.adjustStock(saved.product_id, { movementType: 'correction', setTotal: 150, unit: 'oz' }, { source: 'admin_manual_adjustment' });
     const after = await productUnchangedSinceAgent(mockConn, saved, movement);
     expect(after.ok).toBe(false);
+  });
+
+  test('undo safety: an edit that does NOT bump updated_at (import enrichment, best-price recalculation) still fails the check — the hash catches it where updated_at alone would not', async () => {
+    const line = await pendingLine();
+    const decision = {
+      kind: 'new_product', reason: 'not in the catalog', product_id: null,
+      new_product: { name: 'Bifen XTS', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    await run({ ok: true, json: decision });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    const movement = await mockConn('product_inventory_movements').where({ id: saved.movement_id }).first();
+
+    // A price/import-style edit to a field the undo check never looked at
+    // before (best_vendor), with updated_at left exactly as the agent wrote
+    // it — the kind of write import enrichment and best-price recalculation
+    // do, per the review.
+    const before = await mockConn('products_catalog').where({ id: saved.product_id }).first();
+    await mockConn('products_catalog').where({ id: saved.product_id }).update({ best_vendor: 'SiteOne' }); // no updated_at touch
+    const after = await mockConn('products_catalog').where({ id: saved.product_id }).first();
+    expect(after.updated_at).toEqual(before.updated_at); // confirms the edit really left updated_at alone
+
+    expect(await productUnchangedSinceAgent(mockConn, saved, movement)).toMatchObject({ ok: false });
   });
 
   test('a correcting alias added while the model decides rolls the apply back; the line stays pending with one attempt', async () => {
@@ -187,7 +213,10 @@ jest.setTimeout(30000);
       new_product: { name: 'Bifen XTS', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
       reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
     };
-    await run({ ok: true, json: decision });
+    const result = await run({ ok: true, json: decision });
+    // 'skipped' is never person-facing (no bell) — it must count as
+    // `ignored`, not inflate `held` (review item 6).
+    expect(result).toMatchObject({ logged: 0, held: 0, ignored: 1 });
     const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
     expect(saved).toMatchObject({ status: 'skipped', movement_id: null });
     expect(saved.agent_decision).toMatchObject({ reason: 'shipment_handed_to_person' });
@@ -412,6 +441,97 @@ jest.setTimeout(30000);
     expect(saved.agent_decision.reason).toMatch(/notification service down/);
     expect(await stockOf(taurus.id)).toBe(0); // never applied
     expect(await bellsFor(line.id)).toHaveLength(1); // only the hand-off bell landed
+  });
+
+  test('totals: not_stock (agent_ignored) counts as `ignored`, never `held` — held is person-facing statuses only', async () => {
+    const line = await pendingLine({ raw_title: 'Personal Kindle Case' });
+    const result = await run({ ok: true, json: { kind: 'not_stock', reason: 'a personal purchase, not stock' } });
+    expect(result).toMatchObject({ logged: 0, held: 0, ignored: 1, stillPending: 0 });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved.status).toBe('agent_ignored');
+    expect(await bellsFor(line.id)).toHaveLength(0); // agent_ignored rings nothing
+  });
+
+  test('totals: agent_equipment and possible_duplicate still count as `held` (the person-facing statuses)', async () => {
+    await pendingLine({ raw_title: 'Backpack Sprayer 4 gal' });
+    const equipmentResult = await run({ ok: true, json: { kind: 'equipment', reason: 'a backpack sprayer' } });
+    expect(equipmentResult).toMatchObject({ held: 1, ignored: 0 });
+
+    await mockConn('product_inventory_movements').insert({
+      product_id: taurus.id, movement_type: 'restock', quantity: 10, unit: 'fl_oz',
+      metadata: { source: 'intelligence_bar_adjust_stock' }, created_at: new Date(RECEIVED_AT.getTime() - 10 * HOUR),
+    });
+    const dupLine = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-dup' });
+    const dupDecision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: taurus.id, new_product: null,
+      reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    const dupResult = await run({ ok: true, json: dupDecision });
+    expect(dupResult).toMatchObject({ held: 1, ignored: 0 });
+    expect((await mockConn('purchase_receipt_lines').where({ id: dupLine.id }).first()).status).toBe('possible_duplicate');
+  });
+
+  test('the catalog renaming or recategorizing the candidate while the model decides rolls the apply back as product_changed — not just container_size/inventory_unit (review item 7)', async () => {
+    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 1 });
+    const decision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: taurus.id, new_product: null,
+      reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    // An admin renames the product between the candidate read (before the
+    // "LLM call" below) and the apply transaction's own re-read under lock.
+    const llm = async () => {
+      await mockConn('products_catalog').where({ id: taurus.id }).update({ name: 'Taurus SC (Renamed)' });
+      return { ok: true, json: decision };
+    };
+    const result = await runInventoryAgent({ conn: mockConn, llm, notifyAdmin });
+    expect(result).toMatchObject({ logged: 0, stillPending: 1 });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'agent_pending', agent_attempts: 1 });
+    expect(await stockOf(taurus.id)).toBe(0); // never applied against the stale name
+  });
+
+  test('drainAgentQueue: gate-off restores queued lines to the status they would have held under without the agent (review item 2)', async () => {
+    const unmatchedLine = await pendingLine({ raw_title: 'Unmatched Item', product_id: null });
+    await mockConn('purchase_receipt_lines').where({ id: unmatchedLine.id }).update({ agent_decision: { handoffFrom: 'unmatched' } });
+
+    const [bare] = await mockConn('products_catalog').insert({
+      name: 'Granular Bait', active: true, category: 'bait', container_size: null, inventory_unit: null, inventory_on_hand: 0,
+    }).returning('*');
+    const needsSizeLine = await pendingLine({ raw_title: 'Granular Bait 16 oz Bag', product_id: bare.id, shipment_key: 'ship-needs-size' });
+    await mockConn('purchase_receipt_lines').where({ id: needsSizeLine.id }).update({ agent_decision: { handoffFrom: 'needs_size' } });
+
+    const sizeMismatchLine = await pendingLine({ raw_title: 'Taurus SC Termiticide 999 oz', product_id: taurus.id, shipment_key: 'ship-mismatch' });
+    await mockConn('purchase_receipt_lines').where({ id: sizeMismatchLine.id }).update({ agent_decision: { handoffFrom: 'size_mismatch' } });
+
+    // No recorded handoffFrom at all (defensive default).
+    const noHandoffLine = await pendingLine({ raw_title: 'No Handoff Recorded', product_id: null, shipment_key: 'ship-no-handoff' });
+
+    const llm = jest.fn();
+    const result = await drainAgentQueue({ conn: mockConn, notifyAdmin, limit: 25 });
+    expect(llm).not.toHaveBeenCalled(); // no LLM call at all
+    expect(result).toMatchObject({ drained: 4, errors: 0 });
+
+    expect((await mockConn('purchase_receipt_lines').where({ id: unmatchedLine.id }).first()).status).toBe('unmatched');
+    expect((await mockConn('purchase_receipt_lines').where({ id: needsSizeLine.id }).first()).status).toBe('needs_size');
+    expect((await mockConn('purchase_receipt_lines').where({ id: sizeMismatchLine.id }).first()).status).toBe('size_mismatch');
+    expect((await mockConn('purchase_receipt_lines').where({ id: noHandoffLine.id }).first()).status).toBe('unmatched');
+
+    // unmatched rings nothing; needs_size/size_mismatch ring the same "not
+    // added" bell the deterministic sweep rings for those statuses.
+    expect(await bellsFor(unmatchedLine.id)).toHaveLength(0);
+    expect(await bellsFor(noHandoffLine.id)).toHaveLength(0);
+    expect(await bellsFor(needsSizeLine.id)).toHaveLength(1);
+    expect(await bellsFor(sizeMismatchLine.id)).toHaveLength(1);
+    const mismatchBell = (await bellsFor(sizeMismatchLine.id))[0];
+    expect(mismatchBell.body).toMatch(/doesn't match the catalog container size/);
+  });
+
+  test('drainAgentQueue: a line no longer agent_pending by the time it\'s locked is left alone', async () => {
+    const line = await pendingLine({ agent_decision: { handoffFrom: 'unmatched' } });
+    await mockConn('purchase_receipt_lines').where({ id: line.id }).update({ status: 'logged' });
+    const result = await drainAgentQueue({ conn: mockConn, notifyAdmin, limit: 25 });
+    expect(result).toMatchObject({ drained: 0, errors: 0 });
+    expect((await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).status).toBe('logged');
   });
 
   test('gated off: runInventoryAgent does nothing', async () => {

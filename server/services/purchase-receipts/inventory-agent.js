@@ -17,7 +17,7 @@
  * bell for a person, never a guessed amount.
  *
  * The LLM call runs OUTSIDE any DB transaction (dispatchWithFallback, the
- * highStakes chain, bounded by LLM_TIMEOUT_MS) so a slow provider never
+ * fastStructured chain, bounded by LLM_TIMEOUT_MS) so a slow provider never
  * holds a row lock. Validation is pure (no I/O). Only the final apply — one
  * transaction per line, mirroring processReceiptLine's own discipline — and
  * the attempt-count bookkeeping touch the database.
@@ -228,9 +228,17 @@ function validateReading(reading, { rawTitle, lineQuantity }) {
 // tolerance primitive) — generalized here to run on either a measured
 // amount (against container.amount) or a count (against a count
 // container's N), since the arithmetic is identical either way.
-function containerAgreement(sizeAmount, packCount, containerAmount) {
-  if (sizesAgree(sizeAmount, containerAmount)) return packCount * containerAmount;
-  if (sizesAgree(sizeAmount * packCount, containerAmount)) return containerAmount;
+//
+// { exact: true } (a count container — "100 count", "12 count", "1
+// station") drops the 1% slack for an exact integer match instead: "99
+// Count" against a "100 count" catalog container is NOT agreement (unlike a
+// measured size, where rounding/labeling slack is expected, a count is
+// either right or it's the wrong number of items) — agent_unsure, never
+// accepted as close enough.
+function containerAgreement(sizeAmount, packCount, containerAmount, { exact = false } = {}) {
+  const agree = exact ? (a, b) => a === b : sizesAgree;
+  if (agree(sizeAmount, containerAmount)) return packCount * containerAmount;
+  if (agree(sizeAmount * packCount, containerAmount)) return containerAmount;
   return null;
 }
 
@@ -305,9 +313,18 @@ function validateExisting(raw, ctx) {
     if (candidate.inventory_unit && normalizeInventoryUnit(candidate.inventory_unit) !== 'each') {
       return { kind: 'unsure', status: 'agent_unsure', reason: 'a count product must track in each' };
     }
-    const perItem = containerAgreement(reading.sizeNumber, reading.packCount, countContainer.count);
+    const perItem = containerAgreement(reading.sizeNumber, reading.packCount, countContainer.count, { exact: true });
     if (perItem == null) return { kind: 'unsure', status: 'agent_unsure', reason: "the title count disagrees with the catalog's container count" };
     return { kind: 'existing', status: 'logged', product: candidate, amount: round4(lineQuantity * perItem), unit: 'each', setContainerSize: null, reading: raw.reading };
+  }
+
+  // A non-empty container_size that neither parsePackSize nor parsePackCount
+  // can read ("case of 4") is NOT a missing container — only a genuinely
+  // blank field may be set by this line's own reading (setContainerSize
+  // below). An unreadable value holds for a person instead: the catalog
+  // container might disagree with the title, and there's no way to check.
+  if (candidate.container_size && String(candidate.container_size).trim()) {
+    return { kind: 'unsure', status: 'agent_unsure', reason: "the catalog container size can't be read" };
   }
 
   // No readable container_size at all (never overwrite one that IS
@@ -352,13 +369,18 @@ function validateNewProduct(raw, ctx) {
     return { kind: 'unsure', status: 'agent_unsure', reason: 'the amount does not convert to the derived inventory unit' };
   }
 
-  const activeIngredient = typeof proposed.active_ingredient === 'string' && proposed.active_ingredient.trim() ? proposed.active_ingredient.trim() : null;
   const titleEpa = extractEpaRegNumber(rawTitle); // deterministic — never the model's own transcription
+  // The model's own active_ingredient is NEVER persisted, even when it looks
+  // plausible: it's printed on service reports and PDFs, and nothing here
+  // checks it against the title the way every number above is checked.
+  // Leaving it undefined lets createCatalogProduct write its own
+  // 'Unknown - pending SDS' placeholder, same as the admin "add product"
+  // screen — a person confirms the real value from the SDS.
   return {
     kind: 'new_product', status: 'logged', amount: reading.amount, unit: reading.unit, reading: raw.reading,
     newProduct: {
       name, category, containerSize: canonicalSizeText(reading.sizeNumber, reading.unit), inventoryUnit,
-      activeIngredient, epaRegNumber: titleEpa,
+      activeIngredient: undefined, epaRegNumber: titleEpa,
     },
   };
 }
@@ -522,7 +544,7 @@ Your reading is re-checked against the FULL title in code — every field must m
 }
 
 async function callDecision(dispatch, prompt) {
-  return dispatch(MODELS.TEXT_POLICIES.highStakes, {
+  return dispatch(MODELS.TEXT_POLICIES.fastStructured, {
     laneId: 'inventory_agent_decision',
     text: prompt,
     jsonMode: true,
@@ -545,7 +567,7 @@ function decisionRecord(decision, extra = {}) {
     reading: decision.reading || null,
     createdProductId: extra.createdProductId || null,
     createdAliasId: extra.createdAliasId || null,
-    productRowVersion: extra.productRowVersion || null,
+    productRowHash: extra.productRowHash || null,
   };
 }
 
@@ -608,8 +630,22 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
     if (decision.kind === 'existing') {
       productId = decision.product.id;
       const product = await trx('products_catalog').where({ id: productId }).forUpdate().first();
+      // 'active' is one of the fields the prompt's candidate line carried
+      // (candidateProducts only offers active rows) — a product deactivated
+      // between the LLM call and this transaction is exactly the same kind
+      // of drift the other fields below catch, just with its own reason.
       if (!product || !product.active) return { applied: false, reason: 'product_no_longer_active' };
-      if ((product.container_size || null) !== (decision.product.container_size || null)
+      // Every OTHER candidate field the prompt showed the model
+      // (candidateLine: name, category, container_size, inventory_unit)
+      // must still read exactly as it did when the decision was validated —
+      // an admin rename, recategorization or container/unit edit landing
+      // under this same lock is the catalog moving under the decision, and
+      // re-deciding against stale text (a name that no longer matches, an
+      // agreement check against a size that isn't there anymore) is worse
+      // than spending an attempt and re-running against the current state.
+      if ((product.name || null) !== (decision.product.name || null)
+        || (product.category || null) !== (decision.product.category || null)
+        || (product.container_size || null) !== (decision.product.container_size || null)
         || (product.inventory_unit || null) !== (decision.product.inventory_unit || null)) {
         // The catalog moved under the decision between the LLM call and
         // this transaction — leave it pending for the next run to
@@ -716,17 +752,20 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
       extraMetadata: { inventoryAgent: true, orderNumber: line.order_number, emailId: email.id, rawTitle: line.raw_title, reading: decision.reading || null },
       trx,
     });
-    // The product row's version right after this write, taken under the
-    // product lock. The undo CLI reverses only while the row still carries
-    // this exact version: any later stock write (count, usage, restock)
-    // updates the row, and movement timestamps can't order that (created_at
-    // is the transaction's start, not the moment its write landed).
-    const { row_version: productRowVersion } = await trx('products_catalog').where({ id: productId })
-      .first(trx.raw('updated_at::text as row_version'));
+    // A content fingerprint of the WHOLE product row right after this write,
+    // taken under the product lock. updated_at is NOT bumped by every writer
+    // (import enrichment, best-price recalculation), so it can't be trusted
+    // as a change marker — a hash of the row itself catches anything. The
+    // undo CLI reverses only while the row still hashes to this exact value:
+    // any later stock write (count, usage, restock) or field edit changes
+    // it, and movement timestamps can't order that (created_at is the
+    // transaction's start, not the moment its write landed).
+    const { row_hash: productRowHash } = await trx('products_catalog').where({ id: productId })
+      .first(trx.raw('md5(row_to_json(products_catalog.*)::text) as row_hash'));
 
     await trx('purchase_receipt_lines').where({ id: lineId }).update({
       status: 'logged', product_id: productId, received_qty: decision.amount, received_unit: decision.unit, movement_id: result.movement.id,
-      agent_decision: decisionRecord(decision, { createdProductId, createdAliasId, productRowVersion }), agent_decided_at: new Date(),
+      agent_decision: decisionRecord(decision, { createdProductId, createdAliasId, productRowHash }), agent_decided_at: new Date(),
       agent_created_product_id: createdProductId, agent_created_alias_id: createdAliasId,
     });
 
@@ -751,20 +790,22 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
 // ('llm_unavailable', an LLM failure reason, or an error message) stored in
 // agent_decision and folded into the bell's copy on the 3rd try.
 // Undo safety (ops/agents/inventory-agent-undo.js): is the product row still
-// exactly as the agent left it? The agent records
-// the row's version (updated_at::text) right after its own restock, under the
-// product lock. Any later stock write updates the row, so a changed version
-// (or a stock level that no longer equals the movement's stock_after) means
-// something followed the agent and a reversal would not restore a true
-// count. Movement timestamps can't answer this: created_at is the start of
-// the writing transaction, not the moment its write landed.
+// exactly as the agent left it? The agent records a content fingerprint of
+// the WHOLE row (md5(row_to_json(p)::text), NOT updated_at — plenty of
+// writers, import enrichment and best-price recalculation among them, touch
+// the row without bumping it) right after its own restock, under the
+// product lock. Any later write to ANY column changes the hash, so a
+// mismatch (or a stock level that no longer equals the movement's
+// stock_after) means something followed the agent and a reversal would not
+// restore a true count. Movement timestamps can't answer this: created_at is
+// the start of the writing transaction, not the moment its write landed.
 async function productUnchangedSinceAgent(conn, line, movement) {
-  const recorded = line.agent_decision?.productRowVersion;
-  if (!recorded) return { ok: false, why: 'the line has no recorded product version' };
+  const recorded = line.agent_decision?.productRowHash;
+  if (!recorded) return { ok: false, why: 'the line has no recorded product row hash' };
   const row = await conn('products_catalog').where({ id: line.product_id })
-    .first('inventory_on_hand', conn.raw('updated_at::text as row_version'));
+    .first('inventory_on_hand', conn.raw('md5(row_to_json(products_catalog.*)::text) as row_hash'));
   if (!row) return { ok: false, why: 'the product row is gone' };
-  if (row.row_version !== recorded) return { ok: false, why: 'the product changed after the agent\'s restock' };
+  if (row.row_hash !== recorded) return { ok: false, why: 'the product changed after the agent\'s restock' };
   if (Number(row.inventory_on_hand) !== Number(movement.stock_after)) {
     return { ok: false, why: `stock is ${row.inventory_on_hand}, not the ${movement.stock_after} the agent left` };
   }
@@ -874,11 +915,11 @@ async function runInventoryAgent({ conn = db, llm, notifyAdmin, limit = BATCH_LI
   const dispatch = llm || dispatchWithFallback;
 
   const lines = await conn('purchase_receipt_lines').where({ status: 'agent_pending' }).orderBy('created_at', 'asc').limit(limit);
-  if (!lines.length) return { logged: 0, held: 0, stillPending: 0, errors: 0 };
+  if (!lines.length) return { logged: 0, held: 0, ignored: 0, stillPending: 0, errors: 0 };
 
   const allowedCategories = await loadAllowedCategories(conn);
 
-  const totals = { logged: 0, held: 0, stillPending: 0, errors: 0 };
+  const totals = { logged: 0, held: 0, ignored: 0, stillPending: 0, errors: 0 };
   for (const line of lines) {
     try {
       // Reloaded fresh for EVERY line (not once for the whole run): an
@@ -890,6 +931,12 @@ async function runInventoryAgent({ conn = db, llm, notifyAdmin, limit = BATCH_LI
       const outcome = await processOneLine(conn, line, { dispatch, notifyAdmin: notify, allowedCategories, activeProducts, since });
       if (outcome.status === 'logged') totals.logged += 1;
       else if (outcome.status === 'still_pending' || outcome.status === 'no_longer_pending') totals.stillPending += 1;
+      // Never person-facing (no bell): a personal-purchase read (not_stock)
+      // or a line closed quietly (a handed-off shipment, a pre-cutoff
+      // receipt) is NOT something for a person to act on, so it must never
+      // inflate `held` — only agent_unsure/agent_equipment/possible_duplicate
+      // (the statuses that actually ring a bell) do.
+      else if (outcome.status === 'agent_ignored' || outcome.status === 'skipped') totals.ignored += 1;
       else totals.held += 1;
     } catch (err) {
       logger.error(`[inventory-agent] line ${line.id} ("${line.raw_title}") failed: ${err.message}`);
@@ -909,8 +956,57 @@ async function runInventoryAgent({ conn = db, llm, notifyAdmin, limit = BATCH_LI
   return totals;
 }
 
+const DRAIN_BATCH_LIMIT = 25;
+
+/**
+ * Drains the agent_pending queue when GATE_INVENTORY_AGENT is OFF. Without
+ * this, a line already queued agent_pending before the gate flipped off sits
+ * there forever — nothing else ever looks at that status. No LLM call, no
+ * validation: each line is restored to the status it would have held under
+ * WITHOUT the agent (agent_decision.handoffFrom, written at hand-off by
+ * receipt-processor.js's processReceiptLine — the ORIGINAL unmatched/
+ * needs_size/size_mismatch classification — or 'unmatched' when it's
+ * somehow missing), under the SAME line-lock-then-status-check discipline as
+ * every other writer here. needs_size/size_mismatch ring the exact "not
+ * added" bell the deterministic sweep rings for that status (sweep.js's own
+ * HELD_REASONS text, reused rather than duplicated, same dedupeKey pattern);
+ * unmatched rings nothing, exactly as it does in the sweep today. Called
+ * from the scheduler right after a non-skipped sweep, whenever the agent
+ * gate reads off (see scheduler.js) — it never checks the gate itself, since
+ * the caller already decided that.
+ */
+async function drainAgentQueue({ conn = db, notifyAdmin, limit = DRAIN_BATCH_LIMIT } = {}) {
+  const { HELD_REASONS } = require('./sweep');
+  const notify = notifyAdmin || ((...args) => require('../notification-service').notifyAdmin(...args));
+  const lines = await conn('purchase_receipt_lines').where({ status: 'agent_pending' }).orderBy('created_at', 'asc').limit(limit);
+  const totals = { drained: 0, errors: 0 };
+  for (const line of lines) {
+    try {
+      const outcome = await conn.transaction(async (trx) => {
+        const locked = await trx('purchase_receipt_lines').where({ id: line.id }).forUpdate().first();
+        if (!locked || locked.status !== 'agent_pending') return { status: 'no_longer_pending' };
+        const restoredStatus = locked.agent_decision?.handoffFrom || 'unmatched';
+        await trx('purchase_receipt_lines').where({ id: locked.id }).update({ status: restoredStatus });
+        if (HELD_REASONS[restoredStatus]) {
+          await ringBell(notify, {
+            lineId: locked.id, emailId: locked.email_id, status: restoredStatus, title: 'Inventory agent: not added',
+            body: `"${locked.raw_title}" wasn't added: ${HELD_REASONS[restoredStatus]}`, trx,
+          });
+        }
+        return { status: restoredStatus };
+      });
+      if (outcome.status !== 'no_longer_pending') totals.drained += 1;
+    } catch (err) {
+      logger.error(`[inventory-agent] drain of line ${line.id} failed: ${err.message}`);
+      totals.errors += 1;
+    }
+  }
+  return totals;
+}
+
 module.exports = {
   runInventoryAgent,
+  drainAgentQueue,
   productUnchangedSinceAgent,
   // Exported for unit tests — see server/tests/inventory-agent.test.js.
   // The first line is pure (no I/O); recordAttemptFailure is the one small
