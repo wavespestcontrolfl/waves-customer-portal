@@ -13638,6 +13638,16 @@ export function CompletionPanel({
   // exactly (pre-push audit P2, PR #5049 r1): merely opening a cockroach
   // completion must not mint a draft or a restore prompt on its own.
   const protocolCompletionDefaultsSnapshotRef = useRef(null);
+  // A DELIBERATE per-row removal of a seeded default (via removeProduct,
+  // below) — mirrors lawnRemovedDefaultIds exactly (pre-push audit P1, PR
+  // #5049 r2): without this, removing every seeded row empties
+  // selectedProducts, hasDraftContent goes false, no draft saves, and the
+  // next open silently re-seeds what the tech took off. Ids only (no
+  // names map) — nothing here renders a "skipped" summary the way lawn's
+  // does. Never touched by the non-performed-outcome clear below — that
+  // removal is OUTCOME-driven, not the tech's own, and must stay eligible
+  // to reseed.
+  const [protocolCompletionDefaultsRemovedIds, setProtocolCompletionDefaultsRemovedIds] = useState([]);
   useEffect(() => {
     if (protocolCompletionDefaultsSeededRef.current) return;
     // NOT gated on isTypedFindings: the "Products Applied" section renders
@@ -13660,12 +13670,16 @@ export function CompletionPanel({
       protocolCompletionDefaultsSeededRef.current = true;
       return;
     }
-    const rows = protocolCompletionDefaultSelections(protocolCompletionDefaults, products, buildSelectedProduct);
+    const rows = protocolCompletionDefaultSelections(protocolCompletionDefaults, products, buildSelectedProduct)
+      // A row the tech already removed by hand never comes back, even
+      // into a freshly emptied list (a sibling's removal, or the outage
+      // clearing effect, both restart from empty).
+      .filter((row) => !protocolCompletionDefaultsRemovedIds.includes(String(row.productId)));
     if (!rows.length) return;
     protocolCompletionDefaultsSeededRef.current = true;
     protocolCompletionDefaultsSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [protocolCompletionDefaults, products, service, isBedBugVisit, isLawn, visitOutcome, selectedProducts, draftLoading, showDraftPrompt]);
+  }, [protocolCompletionDefaults, products, service, isBedBugVisit, isLawn, visitOutcome, selectedProducts, draftLoading, showDraftPrompt, protocolCompletionDefaultsRemovedIds]);
   // Pre-push audit P1, PR #5049 r1: an inspection_only / customer_declined
   // outcome bills as NOTHING applied (shared/specialty-service-closeouts.js's
   // own NO_APPLICATION_OUTCOMES — the exact pair the submit-time
@@ -14736,6 +14750,7 @@ export function CompletionPanel({
       // batch 12, follow-up). Shared with the V2 page through CompletionPanel.
       (completionImprovements && isLawn && lawnAreaOverride !== undefined) ||
       lawnRemovedDefaultIds.length > 0 ||
+      protocolCompletionDefaultsRemovedIds.length > 0 ||
       customerInteraction ||
       customerConcern.trim() ||
       selectedProtocolActionLabels.length ||
@@ -14814,6 +14829,7 @@ export function CompletionPanel({
         // ledger's unlisted-skip audit with them (Codex #4113 P2).
         lawnRemovedDefaultIds: lawnDefaultsEnabled || lawnRemovedDefaultIds.length > 0 ? lawnRemovedDefaultIds : undefined,
         lawnRemovedDefaultNames: lawnDefaultsEnabled || lawnRemovedDefaultIds.length > 0 ? lawnRemovedDefaultNamesRef.current : undefined,
+        protocolCompletionDefaultsRemovedIds: protocolCompletionDefaultsRemovedIds.length > 0 ? protocolCompletionDefaultsRemovedIds : undefined,
         lawnDefaultsSeedSuppressed,
         sendSms,
         includePayLink,
@@ -14979,6 +14995,7 @@ export function CompletionPanel({
     completionImprovements,
     lawnAreaOverride,
     lawnRemovedDefaultIds,
+    protocolCompletionDefaultsRemovedIds,
     lawnDefaultsSeedSuppressed,
     stationNew,
     stationMoves,
@@ -15045,6 +15062,13 @@ export function CompletionPanel({
     // regardless of how many products the draft actually carried, is the
     // only signal that distinguishes them.
     protocolCompletionDefaultsSeededRef.current = true;
+    // The tech's own deliberate removals ride with the draft (pre-push
+    // audit P1, PR #5049 r2) — restoring them keeps a removed default from
+    // silently coming back on a LATER reseed attempt (e.g. the outcome
+    // clearing effect resets the seeded ref, and this list is what keeps
+    // that reseed from re-adding what was already taken off by hand).
+    setProtocolCompletionDefaultsRemovedIds(Array.isArray(savedDraft.protocolCompletionDefaultsRemovedIds)
+      ? [...new Set(savedDraft.protocolCompletionDefaultsRemovedIds.map(String))] : []);
     if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
     setLawnAreaOverride(savedDraft.lawnAreaOverride);
     setLawnRemovedDefaultIds(Array.isArray(savedDraft.lawnRemovedDefaultIds) ? [...new Set(savedDraft.lawnRemovedDefaultIds.map(String))] : []);
@@ -16321,6 +16345,14 @@ export function CompletionPanel({
       const removedName = selectedProducts.find((p) => p.productId === productId)?.name || (products || []).find((row) => String(row.id) === String(productId))?.name;
       if (removedName) lawnRemovedDefaultNamesRef.current = { ...lawnRemovedDefaultNamesRef.current, [String(productId)]: removedName };
       setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
+    }
+    // Same ledger, for the protocol-defaults seed (pre-push audit P1, PR
+    // #5049 r2) — a deliberate removal of a seeded default must survive
+    // the list going empty, or a later open re-seeds what the tech took
+    // off. Only THIS function (the tech's own tap) records one; the
+    // non-performed-outcome clearing effect deliberately does not.
+    if (selectedProducts.find((p) => p.productId === productId)?.protocolDefaultProduct) {
+      setProtocolCompletionDefaultsRemovedIds((ids) => [...new Set([...ids, String(productId)])]);
     }
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>

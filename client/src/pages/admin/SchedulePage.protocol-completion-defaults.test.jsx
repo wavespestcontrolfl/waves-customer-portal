@@ -7,7 +7,7 @@
 // skip the one program the hook is for (owner ruling 2026-09-26/27; see
 // the coordinator's correction — the "Products Applied" section renders
 // unconditionally, typed or not, so seeding must not be typed-gated).
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { CompletionPanel } from './SchedulePage';
 
@@ -323,4 +323,101 @@ it('does NOT re-seed when a restored draft deliberately saved an EMPTY product l
   expect(screen.queryByText('Alpine WSG')).toBeNull();
   expect(screen.queryByText('Gentrol IGR')).toBeNull();
   expect(screen.queryByText('Advion Cockroach Gel Bait')).toBeNull();
+});
+
+it('removing ALL three seeded rows persists a draft; restoring it re-seeds nothing (pre-push audit P1, PR #5049 r2)', async () => {
+  const visit = cockroachService();
+  const draftKey = `waves_completion_draft_${visit.id}`;
+
+  stubFetchWithImmediateDefaults();
+  let view;
+  await act(async () => {
+    view = render(
+      <CompletionPanel
+        service={visit}
+        products={cockroachCatalog}
+        onClose={() => {}}
+        onSubmit={vi.fn().mockResolvedValue({})}
+      />,
+    );
+  });
+  await screen.findByText('Alpine WSG');
+
+  // Remove all three, one tap at a time — the OTHER two stay put after
+  // each single removal (never all-or-nothing).
+  fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[0]);
+  await waitFor(() => expect(screen.getAllByRole('button', { name: 'Remove product' })).toHaveLength(2));
+  fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[0]);
+  await waitFor(() => expect(screen.getAllByRole('button', { name: 'Remove product' })).toHaveLength(1));
+  fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[0]);
+  await waitFor(() => expect(screen.queryAllByRole('button', { name: 'Remove product' })).toHaveLength(0));
+
+  view.unmount();
+  // A deliberate removal of every seeded row is still draft content — the
+  // removal ledger, not selectedProducts.length, is what autosave counts.
+  expect(localStorage.getItem(draftKey)).not.toBeNull();
+
+  // Reopen: the draft exists, so a Restore prompt appears — clicking it
+  // must re-seed NOTHING, not even the products it once carried.
+  await act(async () => {
+    render(
+      <CompletionPanel
+        service={visit}
+        products={cockroachCatalog}
+        onClose={() => {}}
+        onSubmit={vi.fn().mockResolvedValue({})}
+      />,
+    );
+  });
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await act(async () => { await Promise.resolve(); });
+
+  expect(screen.queryByText('Alpine WSG')).toBeNull();
+  expect(screen.queryByText('Gentrol IGR')).toBeNull();
+  expect(screen.queryByText('Advion Cockroach Gel Bait')).toBeNull();
+});
+
+it('removing ONE seeded row and restoring keeps only the other two — the removed one never comes back (pre-push audit P1, PR #5049 r2)', async () => {
+  const visit = cockroachService();
+  const draftKey = `waves_completion_draft_${visit.id}`;
+
+  stubFetchWithImmediateDefaults();
+  let view;
+  await act(async () => {
+    view = render(
+      <CompletionPanel
+        service={visit}
+        products={cockroachCatalog}
+        onClose={() => {}}
+        onSubmit={vi.fn().mockResolvedValue({})}
+      />,
+    );
+  });
+  await screen.findByText('Alpine WSG');
+
+  // Remove Gentrol IGR specifically (identifiable, unlike a bare index).
+  const gentrolRow = screen.getByText('Gentrol IGR').closest('div');
+  fireEvent.click(within(gentrolRow).getByRole('button', { name: 'Remove product' }));
+  await waitFor(() => expect(screen.queryByText('Gentrol IGR')).toBeNull());
+  expect(screen.getByText('Alpine WSG')).toBeTruthy();
+  expect(screen.getByText('Advion Cockroach Gel Bait')).toBeTruthy();
+
+  view.unmount();
+  expect(localStorage.getItem(draftKey)).not.toBeNull();
+
+  await act(async () => {
+    render(
+      <CompletionPanel
+        service={visit}
+        products={cockroachCatalog}
+        onClose={() => {}}
+        onSubmit={vi.fn().mockResolvedValue({})}
+      />,
+    );
+  });
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(screen.getByText('Alpine WSG')).toBeTruthy());
+  expect(screen.getByText('Advion Cockroach Gel Bait')).toBeTruthy();
+  // The deliberately removed one never comes back.
+  expect(screen.queryByText('Gentrol IGR')).toBeNull();
 });
