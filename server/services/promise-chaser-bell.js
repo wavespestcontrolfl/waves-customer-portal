@@ -88,6 +88,7 @@ const { etDateString, formatETDate, formatETTime } = require('../utils/datetime-
 const commitments = require('./call-commitments');
 const { whereNotBlockedCall, PHONE_KEY_SQL } = require('../middleware/spam-block');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+const { isSentinelPhone } = require('./external-phone');
 const { SLA_KINDS, followedUpIds, WHAT } = require('./followup-sla-watcher');
 
 // The rule's own scope: "an earlier call ... ended UNBOOKED". Same live
@@ -230,7 +231,21 @@ async function findPromiseToRing(call, now) {
       return RENEWAL_LOOKUP_FAILED;
     });
     if (renewedAt === RENEWAL_LOOKUP_FAILED) continue;
-    if (renewedAt && renewedAt.getTime() >= call.created_at.getTime()) continue;
+    // The commitment's own creation — or renewal, whichever is LATER —
+    // must precede THIS callback (Codex #5019 r5 P2): a human-added
+    // commitment (source 'human', e.g. a send_estimate or schedule_visit
+    // promise typed onto an OLDER call AFTER the fact) cannot possibly be
+    // "about" a callback that happened before it existed, exactly like a
+    // renewed callback cannot be about a callback that preceded the
+    // renewal. Every kind gets this check now, not only callbacks —
+    // obligationRenewedAt itself only ever returns non-null for a renewed
+    // callback, so every other kind's own boundary is simply its created_at.
+    // An unreadable created_at excludes the row (never a false ring on
+    // unverifiable creation time).
+    const createdAtMs = new Date(r.created_at).getTime();
+    if (!Number.isFinite(createdAtMs)) continue;
+    const boundaryMs = renewedAt && renewedAt.getTime() > createdAtMs ? renewedAt.getTime() : createdAtMs;
+    if (boundaryMs >= call.created_at.getTime()) continue;
     withRenewal.push({ ...r, __renewedAt: renewedAt });
   }
   if (!withRenewal.length) return null;
@@ -335,11 +350,18 @@ async function ringForCall(call, now = new Date()) {
     calledAtLabel: formatETTime(new Date(call.created_at)),
   }, { dedupeKey, shouldContinue: stillEligible, beforePush: stillEligible });
 
-  // Genuine delivery only (a bell row, or a push that actually sent) —
-  // triggerNotification never throws, so a swallowed insert failure or a
-  // failed preferences lookup simply reads as "nothing delivered" here;
-  // the next tick tries again.
-  const delivered = Boolean(stats && (stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+  // Genuine delivery (a bell row, or a push that actually sent) OR
+  // DELIBERATE suppression (every admin has both channels off, the bell
+  // policy silences the category, or an internal test customer — the
+  // `suppressed` / `policySilenced` results) both settle this key, the
+  // same posture missed-call-bell.js / repeat-caller-bell.js already use
+  // (Codex #5019 r5 P2): a shop that has genuinely chosen not to be told
+  // is not a delivery failure to retry forever. triggerNotification never
+  // throws, so a swallowed insert failure or a failed preferences lookup
+  // (retryable, not suppressed) simply reads as neither here; the next
+  // tick tries again.
+  const delivered = Boolean(stats && (stats.bellWritten || Number(stats.push?.sent || 0) > 0
+    || stats.suppressed || stats.policySilenced));
   if (delivered) {
     // Recorded AFTER dispatch, never before: the sweep is already
     // serialized (runExclusive, scheduler.js), so there is no concurrent
@@ -412,6 +434,13 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
       // (missed-call-bell.js's own sweepMissedCalls does the same).
       .select('*', db.raw('created_at::text AS sweep_created_at'));
     for (const call of calls) {
+      // Twilio's own withheld-caller-ID sentinels (Codex #5019 r5 P2 —
+      // the same exclusion missed-call-bell.js / repeat-caller-bell.js
+      // both apply via this shared helper, reused rather than
+      // re-listed): these numeric placeholders stand for many unrelated
+      // callers, so a promise "open" against one is never really about
+      // whoever is calling in on it now.
+      if (isSentinelPhone(call.from_phone)) continue;
       const delivered = await ringForCall(call, now).catch((err) => {
         logger.warn(`[promise-chaser-bell] failed for call ${String(call.twilio_call_sid).slice(-6)}: ${err.message}`);
         return false;

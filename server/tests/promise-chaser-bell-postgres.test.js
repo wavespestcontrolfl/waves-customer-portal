@@ -319,6 +319,18 @@ const OUR_NUMBER = '+19415550100';
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 
+  test('a Twilio withheld-caller-ID sentinel never rings, even when a sentinel-number promise is open (Codex #5019 r5 P2)', async () => {
+    const sentinelPhone = '7378742833'; // one of PHONE_SENTINELS (external-phone.js)
+    const earlier = callRow(240, { from_phone: sentinelPhone });
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(0, { from_phone: sentinelPhone });
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    expect(await sweepPromiseChasers()).toBe(0);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
   test('a voice-relay sandbox call is excluded from the sweep', async () => {
     const earlier = callRow(240);
     const commitment = commitmentRow(earlier.id);
@@ -458,6 +470,66 @@ const OUR_NUMBER = '+19415550100';
       // Untouched — the gate check is the very first thing sweepPromiseChasers does.
       const row = await mockConn('promise_chaser_deliveries').where({ dedupe_key: staleKey }).first('dedupe_key');
       expect(row).toBeTruthy();
+    });
+
+    test('a deliberately SUPPRESSED result (every admin opted out of both channels) settles the fact — no redispatch on the next tick (Codex #5019 r5 P2)', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      // Mirrors triggerNotification's own "every admin has both channels
+      // off" result shape — deliberate preference suppression, not a
+      // delivery failure (missed-call-bell.js / repeat-caller-bell.js both
+      // settle on this exact flag).
+      triggerNotification.mockResolvedValue({ bellWritten: false, push: null, suppressed: true });
+      expect(await sweepPromiseChasers()).toBe(1); // settles this tick
+      expect(await sweepPromiseChasers()).toBe(0); // the fact stops a redispatch
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+      const [, , opts] = triggerNotification.mock.calls[0];
+      const dedupeKey = `promise_chaser:${commitment.id}:0:${etDateString(new Date(now))}`;
+      expect(opts.dedupeKey).toBe(dedupeKey);
+      const row = await mockConn('promise_chaser_deliveries').where({ dedupe_key: dedupeKey }).first('dedupe_key');
+      expect(row).toBeTruthy();
+    });
+
+    test('a POLICY-SILENCED result settles the fact the same way as suppressed', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      triggerNotification.mockResolvedValue({ bellWritten: false, push: { sent: 0, skipped: 'bell_policy' }, policySilenced: true });
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(await sweepPromiseChasers()).toBe(0);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+      const dedupeKey = `promise_chaser:${commitment.id}:0:${etDateString(new Date(now))}`;
+      const row = await mockConn('promise_chaser_deliveries').where({ dedupe_key: dedupeKey }).first('dedupe_key');
+      expect(row).toBeTruthy();
+    });
+
+    test('an ACTUAL delivery failure (retryable, not suppressed) writes no fact — the next tick retries', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      // A genuine transient failure: neither bell nor push happened, and
+      // neither suppression flag is set — e.g. the technicians query or the
+      // preferences lookup blipped (notification-triggers.js's own
+      // `retryable` result).
+      triggerNotification.mockResolvedValue({ bellWritten: false, push: null, retryable: true });
+      expect(await sweepPromiseChasers()).toBe(0); // not counted as rung
+      const dedupeKey = `promise_chaser:${commitment.id}:0:${etDateString(new Date(now))}`;
+      const row = await mockConn('promise_chaser_deliveries').where({ dedupe_key: dedupeKey }).first('dedupe_key');
+      expect(row).toBeFalsy(); // no terminal fact — the next tick must retry
+
+      // Next tick, delivery genuinely succeeds — still rings.
+      triggerNotification.mockResolvedValue({ bellWritten: true, push: { sent: 1 } });
+      expect(await sweepPromiseChasers()).toBe(1);
     });
   });
 
@@ -604,6 +676,25 @@ const OUR_NUMBER = '+19415550100';
         resource_type: 'call_commitment', resource_id: commitment.id,
         metadata: JSON.stringify({ renewed_at: renewedAt.toISOString() }), created_at: renewedAt,
       });
+
+      expect(await sweepPromiseChasers()).toBe(0);
+      expect(triggerNotification).not.toHaveBeenCalled();
+    });
+
+    test('a human-added commitment created AFTER the callback never rings for it, even though it is not a renewal (Codex #5019 r5 P2)', async () => {
+      const earlier = callRow(240);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      // Staff typed this promise onto the OLDER call a moment AFTER `back`
+      // already came in — obligationRenewedAt returns null for a non-callback
+      // kind, so only the commitment's OWN created_at can catch this: it
+      // cannot possibly be "about" a callback that happened before it
+      // existed.
+      const commitment = commitmentRow(earlier.id, {
+        kind: 'send_estimate', description: 'Send the quote', source: 'human',
+        created_at: new Date(now + 1000), updated_at: new Date(now + 1000),
+      });
+      await mockConn('call_commitments').insert(commitment);
 
       expect(await sweepPromiseChasers()).toBe(0);
       expect(triggerNotification).not.toHaveBeenCalled();
