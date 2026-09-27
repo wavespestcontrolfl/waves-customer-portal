@@ -18,10 +18,9 @@ jest.mock('../config/twilio-numbers', () => ({
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const {
-  GATE, MESSAGE_TYPE, CLAIM_PREFIX, MAX_CALL_AGE_MS, SEND_SLOT_MS, VOICEMAIL_GRACE_MS,
+  GATE, MESSAGE_TYPE, CLAIM, MAX_CALL_AGE_MS, SEND_SLOT_MS, VOICEMAIL_GRACE_MS,
   _private: { textBackCoreEligible, tooOldToText, callbackClause, fromNumberForDialed, normalizePhoneE164 },
 } = require('../services/missed-call-text-back');
-const { PERMANENT_CLAIM_PREFIXES } = require('../services/sms-send-claims');
 
 // 2026-09-08T15:00Z = 11:00 ET (EDT) — inside the 8am–8pm send window.
 const IN_WINDOW = new Date('2026-09-08T15:00:00Z').getTime();
@@ -50,9 +49,9 @@ describe('gate', () => {
   });
 });
 
-describe('one text per number EVER', () => {
-  test('the claim prefix is exempt from the shared daily sms_send_claims prune', () => {
-    expect(PERMANENT_CLAIM_PREFIXES).toContain(CLAIM_PREFIX);
+describe('one text per number EVER (shared voicemail_sms_claims row)', () => {
+  test('every claim outcome fits the shared table\'s outcome column (varchar 30)', () => {
+    for (const outcome of Object.values(CLAIM)) expect(outcome.length).toBeLessThanOrEqual(30);
   });
 });
 

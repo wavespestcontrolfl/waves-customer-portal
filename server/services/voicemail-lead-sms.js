@@ -15,7 +15,10 @@
  *      an atomic per-lead claim on leads.extracted_data for same-lead
  *      idempotency. The phone claim is released ONLY on outcomes that never
  *      consumed the one-shot (template disabled, missing secret, re-queue
- *      failure, unexpected error).
+ *      failure, unexpected error). The table is shared with the missed-call
+ *      text-back (missed-call-text-back.js): a number either lane texted is
+ *      never texted by the other. That lane's rows have lead_id NULL; this
+ *      lane's always carry the lead, and its release/stamp touch only those.
  *   3. Landline pre-check via the shared phone_line_types cache + one paid
  *      Twilio Lookup per uncached number (a voicemail caller can easily be on
  *      a landline — don't burn the one-shot on an undeliverable send).
@@ -121,7 +124,7 @@ async function logActivity(leadId, activityType, description, metadata = {}) {
 // issue is fixed. Best-effort; a leaked claim fails safe (no text, no dup).
 async function releasePhoneClaim(phone) {
   try {
-    await db('voicemail_sms_claims').where({ phone }).del();
+    await db('voicemail_sms_claims').where({ phone }).whereNotNull('lead_id').del();
     return true;
   } catch (e) {
     logger.warn(`[voicemail-sms] phone claim release failed for ${maskPhone(phone)}: ${e.message}`);
@@ -135,7 +138,7 @@ async function releasePhoneClaim(phone) {
 // durable-finalize reason as stampStatus above.
 async function stampPhoneClaim(phone, outcome) {
   try {
-    await db('voicemail_sms_claims').where({ phone }).update({ outcome });
+    await db('voicemail_sms_claims').where({ phone }).whereNotNull('lead_id').update({ outcome });
     return true;
   } catch (e) {
     logger.warn(`[voicemail-sms] phone claim stamp failed for ${maskPhone(phone)}: ${e.message}`);

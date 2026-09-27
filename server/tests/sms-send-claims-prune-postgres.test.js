@@ -4,8 +4,7 @@
  * weekly claim for 8 days. Before this, tech-line and estimate-public
  * each deleted every row older than a day, so a Monday briefing claim
  * could vanish on Tuesday and a re-run could text the owner twice in one
- * week (pre-push audit, #4870). The missed-call text-back's one-text-per-
- * number-ever claim is never pruned.
+ * week (pre-push audit, #4870).
  */
 const path = require('path');
 const SKIP = !process.env.DATABASE_URL;
@@ -21,7 +20,7 @@ describeOrSkip('pruneSmsSendClaims on PostgreSQL', () => {
   });
   afterAll(async () => { if (knex) await knex.destroy(); });
 
-  test('daily claims go after a day; weekly briefing claims stay until 8 days; missed-call text claims stay forever', async () => {
+  test('daily claims go after a day; weekly briefing claims stay until 8 days', async () => {
     const tag = `prune-test-${Date.now()}`;
     const rows = {
       dailyOld: { claim_key: `tech-line-text:${tag}:old`, age: '2 days' },
@@ -30,8 +29,6 @@ describeOrSkip('pruneSmsSendClaims on PostgreSQL', () => {
       weeklyExpired: { claim_key: `bi_briefing_sms:${tag}-b`, age: '9 days' },
       // Underscores are LIKE wildcards; the prefix match must be exact.
       lookalikeOld: { claim_key: `biXbriefingXsms:${tag}`, age: '2 days' },
-      permanentOld: { claim_key: `missed_call_text:${tag}`, age: '400 days' },
-      permanentLookalikeOld: { claim_key: `missedXcallXtext:${tag}`, age: '2 days' },
     };
     // Everything runs in one transaction that is always rolled back.
     const ROLLBACK = new Error('rollback');
@@ -41,7 +38,7 @@ describeOrSkip('pruneSmsSendClaims on PostgreSQL', () => {
       }
       await pruneSmsSendClaims(trx);
       const left = await trx('sms_send_claims').where('claim_key', 'like', `%${tag}%`).pluck('claim_key');
-      expect(left.sort()).toEqual([rows.dailyFresh.claim_key, rows.weeklyThisWeek.claim_key, rows.permanentOld.claim_key].sort());
+      expect(left.sort()).toEqual([rows.dailyFresh.claim_key, rows.weeklyThisWeek.claim_key].sort());
       throw ROLLBACK;
     })).rejects.toBe(ROLLBACK);
   });

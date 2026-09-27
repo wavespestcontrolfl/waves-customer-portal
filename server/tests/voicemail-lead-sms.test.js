@@ -61,7 +61,7 @@ let state;
 
 function makeBuilder(table) {
   const b = {};
-  for (const m of ['where', 'whereRaw', 'whereNotIn', 'whereNull', 'select', 'onConflict', 'ignore', 'returning']) {
+  for (const m of ['where', 'whereRaw', 'whereNotIn', 'whereNull', 'whereNotNull', 'select', 'onConflict', 'ignore', 'returning']) {
     b[m] = jest.fn(() => b);
   }
   b.first = jest.fn(() => {
