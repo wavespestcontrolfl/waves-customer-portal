@@ -177,8 +177,10 @@ function validateCompanionSubmission({ profile, companionFindings, primaryFindin
     }
 
     // Activity score: strict integer 0-5 or null, same contract as the
-    // primary. Trend types require a score on a completed visit — derived
-    // prefill fills it when the tech didn't touch the picker.
+    // primary. Tech-set-only trend types (no derive mapping) require a
+    // score on a completed visit; a derive-mapped type has no separate
+    // gauge any more (owner ruling 2026-09-26) and is scored from the
+    // findings field alone, absent when that field is empty.
     const activityScore = entry.activityScore == null ? null : entry.activityScore;
     if (activityScore != null
       && (!Number.isInteger(activityScore) || activityScore < 0 || activityScore > 5)) {
@@ -201,18 +203,25 @@ function validateCompanionSubmission({ profile, companionFindings, primaryFindin
       } else if (derived) {
         finalScore = derived.score;
         finalScoreSource = 'derived';
-      } else {
+      } else if (!indicator.derive) {
+        // Tech-set-only gauge (no findings field to derive from) — still
+        // required on a completed visit.
         return reject(422, {
           error: `${indicator.label} requires an activity score (0-5) on a completed visit (${type} companion section)`,
           code: 'companion_activity_score_required',
           companionType: type,
         });
       }
-      // The FINAL score (pinned or derived) must agree with the findings at
-      // the cleared boundary — same rule as the primary typed path.
-      const scoreConsistency = ActivityIndicators.validateActivityScoreConsistency(
-        type, values || {}, finalScore,
-      );
+      // Owner ruling 2026-09-26: a derive-mapped type has no separate gauge
+      // on the companion panel any more — the score always comes from the
+      // findings field. An empty findings value means no indicator this
+      // visit (finalScore stays null), never a validation failure. The
+      // FINAL score (pinned or derived) must agree with the findings at the
+      // cleared boundary — same rule as the primary typed path — but only
+      // once a score actually exists.
+      const scoreConsistency = finalScore == null
+        ? { ok: true }
+        : ActivityIndicators.validateActivityScoreConsistency(type, values || {}, finalScore);
       if (!scoreConsistency.ok) {
         return reject(422, {
           error: scoreConsistency.error,

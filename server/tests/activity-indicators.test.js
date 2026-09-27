@@ -93,6 +93,40 @@ describe('deriveActivityScore', () => {
     expect(deriveActivityScore('cockroach', { activity_level: 'Bananas' })).toBeNull();
     expect(deriveActivityScore('mosquito_event', {})).toBeNull();
   });
+
+  // Owner ruling 2026-09-26: a derive-mapped type's separate gauge is
+  // hidden from the completion panel — the score comes from the findings
+  // field alone. An empty findings value means the indicator is simply
+  // absent this visit, never an error (complete-scheduled-service.js and
+  // companion-completions.js both stop 422ing on this case).
+  test('a derive-mapped type with no findings value yet is absent, not an error', () => {
+    expect(deriveActivityScore('cockroach', {})).toBeNull();
+    expect(deriveActivityScore('flea', {})).toBeNull();
+    expect(deriveActivityScore('termite_bait_station', {})).toBeNull();
+  });
+});
+
+// Owner ruling 2026-09-26: the redundant activity gauge is hidden for every
+// indicator with a derive mapping — the findings field alone drives the
+// score. These pin the resulting contract at the module level (the client
+// and route mirrors are covered in SchedulePage and combined-completions
+// tests). Next-step chips are unaffected by this ruling and keep their
+// existing required-type behavior (see the test above and elsewhere).
+describe('gauge/findings merge (owner ruling 2026-09-26)', () => {
+  test('every indicator with a derive mapping serves deriveField/deriveScores so the client can hide its gauge', () => {
+    const derivedTypes = Object.entries(ACTIVITY_INDICATORS).filter(([, cfg]) => cfg.derive);
+    expect(derivedTypes.length).toBeGreaterThan(0);
+    for (const [type, cfg] of derivedTypes) {
+      const schema = findingsSchemaForType(type);
+      expect(schema.activity.deriveField).toBe(cfg.derive.field);
+      expect(schema.activity.deriveScores).toEqual(cfg.derive.scores);
+    }
+    // Tech-set-only indicators serve no deriveField — the client keeps
+    // their gauge visible.
+    for (const [type, cfg] of Object.entries(ACTIVITY_INDICATORS).filter(([, c]) => !c.derive)) {
+      expect(findingsSchemaForType(type).activity.deriveField).toBeNull();
+    }
+  });
 });
 
 describe('validateTypedFindings', () => {

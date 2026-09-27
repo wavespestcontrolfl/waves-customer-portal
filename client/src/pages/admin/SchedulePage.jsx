@@ -9662,7 +9662,15 @@ export function TypedFindingsSection({
           {detailFields.map(renderField)}
         </details>
       )}
-      {schema.activity && (
+      {/* Owner ruling 2026-09-26: the gauge is redundant with the typed
+          findings field for every indicator with a derive mapping (e.g.
+          cockroach's Activity level) — it only ever showed the same value
+          back, asking the tech to re-confirm it. Hidden here; the score
+          still auto-recomputes from deriveScores[values[deriveField]] via
+          onFieldChange (contract §4) and completion derives it server-side
+          when the tech never touches the removed picker. Tech-set-only
+          indicators (no derive field) keep the gauge unchanged. */}
+      {schema.activity && !schema.activity.deriveField && (
         <div style={{ marginBottom: 12 }}>
           <div style={fieldLabelStyle}>
             {schema.activity.label}
@@ -16859,11 +16867,16 @@ export function CompletionPanel({
           }
         }
       }
-      // Gauge types require a score on any completed-side outcome — the
-      // server 422s (activity_score_required) when findings are submitted
-      // without one and the derive field can't fill it.
+      // Tech-set-only gauge types (no derive field) still require a score
+      // on any completed-side outcome — the server 422s
+      // (activity_score_required) the same way. A derive-mapped type has
+      // no gauge to fill any more (owner ruling 2026-09-26): its score
+      // comes from the findings field alone, so a missing one is never a
+      // blocker here.
       const typedScoreMissing =
-        !!typedFindingsSchema.activity && typedActivityScore == null;
+        !!typedFindingsSchema.activity
+        && !typedFindingsSchema.activity.deriveField
+        && typedActivityScore == null;
       // Mirror the server's next_step_required 422 pre-submit so the tech
       // gets the same inline validation as other required fields.
       const nextStepMissing =
@@ -16979,7 +16992,11 @@ export function CompletionPanel({
             }
           }
         }
-        const companionScoreMissing = !!schema.activity && entry.score == null;
+        // Same derive-mapped exemption as the primary (owner ruling
+        // 2026-09-26): a companion gauge with a findings-derived score is
+        // never blocked here, only a tech-set-only one.
+        const companionScoreMissing =
+          !!schema.activity && !schema.activity.deriveField && entry.score == null;
         const companionNextStepMissing =
           !!schema.nextStepRequired && !entry.chips.length;
         if (
