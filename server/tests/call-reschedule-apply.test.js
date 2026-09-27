@@ -163,17 +163,31 @@ describe('planRescheduleFromCall', () => {
       .toBe('service_needs_review');
   });
 
-  // Nearness to the destination cannot choose between occurrences: moving the
-  // September visit to December 17 must not move the December 24 one.
-  test('the moved visit must be its program\'s next occurrence from today', () => {
+  // Nearness to the destination cannot choose between occurrences, and V2
+  // records only the new slot: with more than one upcoming occurrence the
+  // call must name exactly the one it moves.
+  test('with several upcoming occurrences the call must name the one it moves', () => {
     const { hasAgentCommittedEvidence } = require('../services/call-triage-flags');
     const december = visit({ id: 'dec-visit', scheduled_date: '2026-12-24' });
-    const far = { v2: v2({ scheduling: { confirmed_start_at: '2026-12-17T12:00:00-05:00' } }), call: call(), customer: customer(), candidates: [visit(), december] };
-    hasAgentCommittedEvidence.mockReturnValueOnce(true);
-    expect(planRescheduleFromCall({ ...far, now: NOW })).toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
-    // Once the September visit is behind today, December 24 is the next one.
-    hasAgentCommittedEvidence.mockReturnValueOnce(true);
-    expect(planRescheduleFromCall({ ...far, now: new Date('2026-09-25T19:00:00Z') })).toMatchObject({ action: 'apply', visitId: 'dec-visit' });
+    const plan = (startAt, transcription, now = NOW) => {
+      hasAgentCommittedEvidence.mockReturnValueOnce(true);
+      return planRescheduleFromCall({ v2: v2({ scheduling: { confirmed_start_at: startAt } }), customer: customer(),
+        candidates: [visit(), december], call: call({ transcription }), now });
+    };
+    // September moved to December 17: December 24 is nearer but was not named.
+    expect(plan('2026-12-17T12:00:00-05:00', 'Caller: Move my September 24th visit to December 17th.\nAgent: Okay.'))
+      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
+    // December moved to October 1: September is nearer but was not named.
+    expect(plan('2026-10-01T12:00:00-04:00', 'Caller: Move my December 24th visit to October 1st.\nAgent: Okay.'))
+      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
+    // Naming the moved visit exactly resolves it; naming neither or both does not.
+    expect(plan('2026-09-25T10:00:00-04:00', 'Caller: Can my September 24th visit be Friday instead?\nAgent: Okay.'))
+      .toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    expect(plan('2026-09-25T10:00:00-04:00', 'Caller: Can we do Friday instead?\nAgent: Okay.').reason).toBe('ambiguous_visit');
+    expect(plan('2026-09-25T10:00:00-04:00', 'Caller: Keep December 24th, but can September 24th be Friday?\nAgent: Okay.').reason).toBe('ambiguous_visit');
+    // Once September is behind today, December 24 is the only upcoming one.
+    expect(plan('2026-12-17T12:00:00-05:00', 'Caller: Move it to December 17th.\nAgent: Okay.', new Date('2026-09-25T19:00:00Z')))
+      .toMatchObject({ action: 'apply', visitId: 'dec-visit' });
   });
 
   // A repoint leaves service_type stale, so the label alone can name the

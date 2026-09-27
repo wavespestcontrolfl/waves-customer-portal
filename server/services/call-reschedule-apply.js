@@ -31,8 +31,9 @@
  *     own confident category (pest, mosquito or lawn only); a name matching
  *     several programs resolves only among those; either stays in review
  *     when more than one program (or more than one visit) sits in span or an
- *     in-span row's catalog identity no longer resolves. The visit moved must
- *     also be its program's next occurrence from today. A
+ *     in-span row's catalog identity no longer resolves. With more than one
+ *     upcoming occurrence of the program, the call must name exactly one of
+ *     their dates and it must be the visit chosen. A
  *     grouped visit needs the whole-visit mover's
  *     disclosure a phone call never gave
  *   - the pipeline did not itself create an appointment from this call
@@ -75,6 +76,7 @@ const { lockTriageCall } = require('../utils/triage-locks');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { hasAgentCommittedEvidence, confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
+const { exactDatesNamed } = require('./call-date-mentions');
 const { addressKey } = require('./customer-properties');
 const { phoneMatchDigits } = require('../utils/phone');
 const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
@@ -86,9 +88,9 @@ const { createHash } = require('crypto');
 const logger = require('./logger');
 
 const MIN_SCHEDULING_CONFIDENCE = 0.8;
-// A visit is a candidate only within this span of the target date, and must
-// also be its program's next occurrence from today: nearness to the
-// destination alone never picks among several recurring visits.
+// A visit is a candidate only within this span of the target date. Among
+// several upcoming occurrences of a program, the call must also name the one
+// it moves: nearness to the destination alone never picks among them.
 const CANDIDATE_SPAN_DAYS = 14;
 const LIVE_STATUSES = ['pending', 'confirmed', 'rescheduled'];
 // Automatic moves take ONLY these. A row parked at 'rescheduled' is out of
@@ -323,16 +325,23 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
       if (inSpan.length > 1) return skip('ambiguous_visit', { candidateIds: inSpan.map((r) => r.id) });
       nearby = inSpan; // invariant preserved: length is 0 or 1 here
     }
-    // Nearness to the DESTINATION cannot say which occurrence the caller
-    // meant while an earlier one of the same program is still ahead: moving
-    // the September visit to December 17 must never move December 24
-    // instead. The visit moved must also be its program's next one from today.
+    // Nearness to the destination cannot say WHICH occurrence the caller
+    // meant, and V2 records only the new slot. So with more than one upcoming
+    // occurrence of the program, the call itself must name exactly one of
+    // their dates (month and day, today, tomorrow) and it must be the one
+    // chosen here: "move the September visit to December 17" never moves
+    // December 24, "move December to October 1" never moves September.
     if (nearby.length === 1) {
       const chosen = nearby[0];
       const today = etDateString(now);
-      const earlier = atProperty.filter((row) => row.id !== chosen.id && programOf(row) === programOf(chosen)
-        && dateOnly(row.scheduled_date) >= today && dateOnly(row.scheduled_date) < dateOnly(chosen.scheduled_date));
-      if (earlier.length) return skip('ambiguous_visit', { candidateIds: [...earlier.map((r) => r.id), chosen.id] });
+      const upcoming = atProperty.filter((row) => programOf(row) === programOf(chosen) && dateOnly(row.scheduled_date) >= today);
+      if (upcoming.length > 1) {
+        const named = exactDatesNamed({ transcript: call.transcription, callStartedAt: call.created_at });
+        const namedOccurrences = upcoming.filter((row) => named.has(dateOnly(row.scheduled_date)));
+        if (namedOccurrences.length !== 1 || namedOccurrences[0].id !== chosen.id) {
+          return skip('ambiguous_visit', { candidateIds: upcoming.map((r) => r.id) });
+        }
+      }
     }
   }
   if (nearby.length === 0) return skip('no_visit_on_books');
