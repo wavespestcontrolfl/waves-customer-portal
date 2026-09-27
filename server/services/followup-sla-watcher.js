@@ -224,8 +224,11 @@ function minuteOfDay(time) {
   return h * 60 + m;
 }
 
-async function followedUpIds(conn, rows) {
-  const renewed = await renewedFloors(conn, rows);
+// `renewed`: a caller that already loaded every row's renewal time (a
+// Map of id -> Date, promise-chaser-bell) passes it to skip a second
+// serial lookup per row.
+async function followedUpIds(conn, rows, { renewed: preloaded } = {}) {
+  const renewed = preloaded || await renewedFloors(conn, rows);
   // A caller with no customer record is matched by a USABLE number only —
   // an 'anonymous' or client: caller ID normalizes to nothing and gives the
   // row no contact to match on (never a match between two unusable values).

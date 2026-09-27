@@ -1786,6 +1786,13 @@ async function obligationRenewedAt(conn, commitment) {
       .whereIn('action', ['commitment_edit', 'commitment_reopen']).select('created_at', 'metadata');
     const meta = (e) => { try { return typeof e.metadata === 'string' ? JSON.parse(e.metadata) : (e.metadata || {}); } catch { return {}; } };
     const times = [commitment.source === 'human' ? commitment.created_at : null, ...events.map((e) => meta(e).renewed_at || e.created_at)];
+    // A row edited before these events existed has none: while none exists
+    // at all, an 'edited' row's reviewed_at is the only boundary on record
+    // (at worst later than the edit, never earlier) — the same legacy rule
+    // the callback branch below applies to a pre-card edit (Codex #5019
+    // r18 P0). Once any event exists, reviewed_at may have been advanced by
+    // an ordinary confirm and is not a boundary.
+    if (commitment.human_state === 'edited' && !events.length) times.push(commitment.reviewed_at);
     const ms = times.filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
     return ms.length ? new Date(Math.max(...ms)) : null;
   }

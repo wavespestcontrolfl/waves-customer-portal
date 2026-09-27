@@ -118,6 +118,17 @@ const OUR_NUMBER = '+19415550100';
     };
   }
 
+  test('a callback the pipeline classified as spam never rings, even from a number with an open promise (Codex #5019 r18 P2)', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(0, { processing_status: 'spam' });
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    expect(await sweepPromiseChasers()).toBe(0);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
   test('rings once per promise per ET day, across repeated sweep ticks and multiple callbacks', async () => {
     const earlier = callRow(240); // 4h ago — an unbooked call
     const commitment = commitmentRow(earlier.id);
@@ -1278,6 +1289,23 @@ const OUR_NUMBER = '+19415550100';
         resource_type: 'call_commitment', resource_id: commitment.id,
         metadata: JSON.stringify({ renewed_at: reopenedAt.toISOString() }), created_at: reopenedAt,
       });
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+    });
+
+    test('a send_estimate EDITED before commitment_edit events existed keeps reviewed_at as its boundary — stale pre-edit evidence is not kept (Codex #5019 r18 P0)', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the quote' });
+      const reached = callRow(200, { direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, duration_seconds: 90 });
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, reached, back]);
+      await mockConn('call_commitments').insert(commitment);
+      // A legacy edit: the row says edited, but no commitment_edit event was
+      // ever written (the writer did not exist yet).
+      const editedAt = new Date(now - 100 * 60000);
+      await mockConn('call_commitments').where({ id: commitment.id })
+        .update({ human_state: 'edited', reviewed_at: editedAt, updated_at: editedAt });
 
       expect(await sweepPromiseChasers()).toBe(1);
       expect(triggerNotification).toHaveBeenCalledTimes(1);

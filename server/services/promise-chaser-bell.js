@@ -131,10 +131,6 @@ const MAX_CALL_DURATION_MS = 4 * 60 * 60 * 1000;
 // that settles late still has most of the window left to be considered.
 const PROCESSING_SETTLE_GRACE_MS = 10 * 60 * 1000;
 
-// A `.catch()` sentinel distinguishable from every genuine obligationRenewedAt
-// result (null = never renewed, or a real Date) — never a value that value
-// could itself equal.
-const RENEWAL_LOOKUP_FAILED = Symbol('renewal_lookup_failed');
 
 // What we promised, and when — the two facts the alert body must carry.
 // A HUMAN-typed commitment (source 'human') wasn't necessarily made ON the
@@ -242,7 +238,20 @@ async function findPromiseToRing(call, now) {
   // reopened callback's own evidence boundary moves forward), reused
   // rather than reimplemented. A lookup failure reads the same as "nothing
   // open" — never a false ring, and the next tick tries again.
-  const followed = await followedUpIds(db, open).catch((err) => {
+  // Each row's renewal time, loaded once and shared by followedUpIds and
+  // the attribution check below (Codex #5019 r18 P2: both used to query it
+  // serially per row). A lookup failure holds the whole callback, exactly
+  // as a thrown followedUpIds already did — never a ring on unverified
+  // renewal state.
+  const renewedById = new Map();
+  try {
+    for (const r of open) renewedById.set(String(r.id), await commitments.obligationRenewedAt(db, r));
+  } catch (err) {
+    logger.warn(`[promise-chaser-bell] renewal lookup failed: ${err.message}`);
+    return null;
+  }
+  const renewedFloors = new Map([...renewedById].filter(([, at]) => at));
+  const followed = await followedUpIds(db, open, { renewed: renewedFloors }).catch((err) => {
     logger.warn(`[promise-chaser-bell] follow-up lookup failed: ${err.message}`);
     return null;
   });
@@ -256,18 +265,13 @@ async function findPromiseToRing(call, now) {
   // the sweep window when staff later reopen the SAME promise would get
   // re-attributed to the NEW obligation and ring a second time for a call
   // that already had its alert, purely because the dedupeKey versions on
-  // the renewal instant. Computed here (once per candidate, reused by
+  // the renewal instant. Read from renewedById (once per candidate, reused by
   // ringForCall for that same dedupeKey) rather than only after picking
-  // the winner, since the winner itself may be the one this excludes. A
-  // lookup failure excludes that row — never a false ring on unverified
-  // renewal state.
+  // the winner, since the winner itself may be the one this excludes (a
+  // renewal lookup failure already held the whole callback, above).
   const withRenewal = [];
   for (const r of open) {
-    const renewedAt = await commitments.obligationRenewedAt(db, r).catch((err) => {
-      logger.warn(`[promise-chaser-bell] renewal lookup failed for commitment ${r.id}: ${err.message}`);
-      return RENEWAL_LOOKUP_FAILED;
-    });
-    if (renewedAt === RENEWAL_LOOKUP_FAILED) continue;
+    const renewedAt = renewedById.get(String(r.id)) || null;
     // The commitment's own creation — or renewal, whichever is LATER —
     // must precede THIS callback (Codex #5019 r5 P2, then r6 P1): a
     // HUMAN-typed commitment (source 'human', e.g. a send_estimate or
@@ -661,6 +665,10 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
       // ringing (see module docstring) — a call the /voice webhook did not
       // stamp promise_chaser_eligible: true at arrival is never considered,
       // however the gate toggles afterward or however recently it arrived.
+      // A call the pipeline classified as spam is terminal but is no lead
+      // calling back — a spoofed caller ID on a number with an open promise
+      // must not ring (Codex #5019 r18 P2).
+      .whereRaw("COALESCE(processing_status, '') <> 'spam'")
       .whereRaw("metadata->>'promise_chaser_eligible' = 'true'")
       .whereRaw("COALESCE(metadata->>'preconnect_screen', '') NOT IN ('gated', 'failed')")
       .modify((q) => { if (cursor) q.whereRaw('(created_at, id) > (?, ?)', [cursor.sweep_created_at, cursor.id]); })
