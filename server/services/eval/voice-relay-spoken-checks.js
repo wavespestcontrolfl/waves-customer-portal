@@ -58,7 +58,9 @@ const SPANISH_CONDITIONAL_NOUN_LEAD_RE = /\b(?:el|la|los|las|un|una|unos|unas|es
 const SPANISH_CONDITIONAL_NOUN_TAIL_RE = /^\s+(?:para|que)\b/i;
 const SPANISH_UNCERTAINTY_RE = /\b(?:quiz[aá]s?|tal\s+vez|acaso|posiblemente|probablemente|puede\s+que|es\s+(?:posible|probable)\s+que|si|no\s+(?:s[eé]|sabemos|estoy\s+segur[oa]|estamos\s+segur[oa]s?)\s+si)\b/i;
 const SPANISH_NEGATION_RE = /\b(?:no|nunca|jam[aá]s|tampoco)\b/i;
-const SPANISH_INDEPENDENT_ASSERTION_RE = new RegExp(`^\\s*(?:(?:(?:el|la|los|las|un|una|este|esta|ese|esa|mi|tu|su|nuestro|nuestra)\\s+(?:[a-záéíóúñü]+\\s+){0,4}|(?:yo|nosotros|nosotras|ellos|ellas|usted|ustedes)\\s+)(?:(?:le|les|nos|se)\\s+)?|(?:le|les|nos|se)\\s+)(?:va(?:mos|n)?\\s+a\\s+)?${SPANISH_ASSERTION_VERB}[a-záéíóúñü]*\\b`, 'i');
+const SPANISH_EXPLICIT_SUBJECT_ASSERTION_RE = new RegExp(`^\\s*(?:(?:el|la|los|las|un|una|este|esta|ese|esa|mi|tu|su|nuestro|nuestra)\\s+(?:[a-záéíóúñü]+\\s+){0,4}|(?:yo|nosotros|nosotras|ellos|ellas|usted|ustedes)\\s+)(?:(?:le|les|nos|se)\\s+)?(?:va(?:mos|n)?\\s+a\\s+)?${SPANISH_ASSERTION_VERB}[a-záéíóúñü]*\\b`, 'i');
+const SPANISH_CLITIC_ASSERTION_RE = new RegExp(`^\\s*(?:le|les|nos|se)\\s+(?:va(?:mos|n)?\\s+a\\s+)?${SPANISH_ASSERTION_VERB}[a-záéíóúñü]*\\b`, 'i');
+const SPANISH_PENDING_STATUS_RE = /(?=[\s\S]*\b(?:cita|visita|solicitud|hora|horario)\b)(?=[\s\S]*\b(?:no|pendiente)\b)[\s\S]*\b(?:confirmad|reservad|agendad|programad|lista|hecha)[a-záéíóúñü]*\b/i;
 const SPANISH_WITHOUT_PREDICATE_RE = /\bsin\s+(?:llegar\s+a\s+)?(?:enviar|mandar|recibir|entregar|ofrecer|tener|haber)\b/i;
 const SPANISH_REASSURANCE_RE = /^\s*(?:no\s+(?:se\s+)?preocupe|no\s+hay\s+problema|sin\s+problema)\b[\s,:—–]*/i;
 const SPANISH_CERTAINTY_RE = /\b(?:sin\s+duda|no\s+s[oó]lo)\b/gi;
@@ -87,7 +89,9 @@ function assertedSpokenMatch(text, re) {
       const leftNonasserted = SPANISH_NEGATION_RE.test(left) || spanishClaimIsUncertain(left);
       const rightNonasserted = SPANISH_NEGATION_RE.test(right) || spanishClaimIsUncertain(right);
       if (rightNonasserted) candidates.push(left);
-      if (leftNonasserted && SPANISH_INDEPENDENT_ASSERTION_RE.test(right)) candidates.push(right);
+      const independentRight = SPANISH_EXPLICIT_SUBJECT_ASSERTION_RE.test(right)
+        || (SPANISH_PENDING_STATUS_RE.test(left) && SPANISH_CLITIC_ASSERTION_RE.test(right));
+      if (leftNonasserted && independentRight) candidates.push(right);
     }
     for (const candidate of candidates) {
       const seen = new Set();
