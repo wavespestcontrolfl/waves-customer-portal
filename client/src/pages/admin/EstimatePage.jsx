@@ -157,7 +157,7 @@ function FollowUpModal({ estimate, onClose, onSent }) {
   const firstName = estimate.customerName?.split(" ")[0] || "there";
   const addrShort = estimate.address?.split(",")[0] || "your property";
   const [message, setMessage] = useState(
-    `Hi ${firstName}, just checking in on the estimate I sent for ${addrShort}. Any questions? — Adam, Waves`,
+    `Hi ${firstName}, just checking in on the estimate I sent for ${addrShort}. Any questions?`,
   );
   const [sending, setSending] = useState(false);
 
