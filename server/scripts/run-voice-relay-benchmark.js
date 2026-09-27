@@ -523,8 +523,13 @@ function summarizeCondition(id, runs) {
  */
 function resolveOutPath(ARGS, { fsImpl = fs } = {}) {
   const outPath = path.resolve(ARGS.out || path.join(__dirname, '..', '..', `voice-relay-benchmark-${Date.now()}.json`));
-  const target = fsImpl.existsSync(outPath) ? outPath : path.dirname(outPath);
+  const exists = fsImpl.existsSync(outPath);
+  const target = exists ? outPath : path.dirname(outPath);
   try {
+    const stats = fsImpl.statSync(target);
+    if (exists ? !stats.isFile() : !stats.isDirectory()) {
+      throw new Error('output must be a regular file in an existing directory');
+    }
     fsImpl.accessSync(target, fs.constants.W_OK);
   } catch (err) {
     throw new Error(`--out destination is not writable: ${outPath} (${err.code || err.message})`);

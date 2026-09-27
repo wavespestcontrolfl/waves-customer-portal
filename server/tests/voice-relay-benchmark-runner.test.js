@@ -793,6 +793,15 @@ describe('runBenchmark — required --candidate-model and the benchmark-level ex
     expect(outPath).toBe(target);
   });
 
+  test('a writable directory is rejected before any paid child runs', async () => {
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({
+      argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=1', `--out=${require('os').tmpdir()}`],
+      execFileImpl,
+    })).rejects.toThrow(/output must be a regular file/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
   test('a fully clean run (every condition pass, no retries, no crashes) reports exitCode 0', async () => {
     const execFileImpl = stubChild([{
       code: 0,
