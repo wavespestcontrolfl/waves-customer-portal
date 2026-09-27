@@ -60,6 +60,33 @@ describe('sendgrid-mail sendOne: annual-offer guard at the provider boundary', (
     expect(annualHandoffGuard.mock.invocationCallOrder[0]).toBeLessThan(global.fetch.mock.invocationCallOrder[0]);
   });
 
+  test('the optional caller boundary runs after provider preparation and before fetch', async () => {
+    const providerBoundaryCheck = jest.fn(async () => ({ ok: true }));
+    const sendgrid = require('../services/sendgrid-mail');
+    await sendgrid.sendOne({
+      to: 'customer@example.test', fromEmail: 'contact@example.test', subject: 'S', html: 'h', text: 't',
+      providerBoundaryCheck,
+    });
+
+    expect(annualHandoffGuard.mock.invocationCallOrder[0])
+      .toBeLessThan(providerBoundaryCheck.mock.invocationCallOrder[0]);
+    expect(providerBoundaryCheck.mock.invocationCallOrder[0]).toBeLessThan(global.fetch.mock.invocationCallOrder[0]);
+  });
+
+  test('a caller boundary refusal is a definite pre-fetch outcome', async () => {
+    const sendgrid = require('../services/sendgrid-mail');
+    const refusal = Object.assign(new Error('Authority changed'), {
+      code: 'AUTHORITY_CHANGED', retryable: true, providerBoundaryBlocked: true,
+    });
+    const error = await sendgrid.sendOne({
+      to: 'customer@example.test', fromEmail: 'contact@example.test', subject: 'S', html: 'h', text: 't',
+      providerBoundaryCheck: async () => { throw refusal; },
+    }).catch(err => err);
+
+    expect(error).toBe(refusal);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
   test('a single estimateId (non-array) is normalized to a one-element list', async () => {
     const sendgrid = require('../services/sendgrid-mail');
     await sendgrid.sendOne({
@@ -129,6 +156,34 @@ describe('sendgrid-mail sendOne: annual-offer guard at the provider boundary', (
     });
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ messageId: 'msg-1' });
+  });
+
+  test('runs a caller boundary check after provider guards and can veto fetch', async () => {
+    const database = jest.fn();
+    const order = [];
+    annualHandoffGuard.mockImplementationOnce(() => async () => {
+      order.push('annual-guard');
+      return { blocked: false, reason: null, estimateId: null };
+    });
+    const providerBoundaryCheck = jest.fn(async ({ database: checkedDatabase }) => {
+      expect(checkedDatabase).toBe(database);
+      order.push('caller-authority');
+      throw Object.assign(new Error('Authority changed'), {
+        code: 'AUTHORITY_CHANGED', retryable: true, providerBoundaryBlocked: true,
+      });
+    });
+
+    const err = await require('../services/sendgrid-mail').sendOne({
+      to: 'customer@example.test', fromEmail: 'contact@example.test', subject: 'S',
+      html: '<p>Frozen content</p>', text: 'Frozen content', database, providerBoundaryCheck,
+    }).catch((e) => e);
+
+    expect(order).toEqual(['annual-guard', 'caller-authority']);
+    expect(providerBoundaryCheck).toHaveBeenCalledWith({ database });
+    expect(err).toMatchObject({
+      providerBoundaryBlocked: true, code: 'AUTHORITY_CHANGED', retryable: true,
+    });
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 });
 

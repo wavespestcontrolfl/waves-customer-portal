@@ -181,7 +181,9 @@ async function sendPaymentFailedThroughBillingAuthority({ enrollment, template, 
       const suppression = await activeAutomationSuppressionFor(template, email, trx);
       return suppression ? blocked('EMAIL_SUPPRESSED', automationSuppressionReason(suppression)) : null;
     },
-    dispatch: async () => { res = await dispatch(); },
+    // The authority's final check runs inside sendOne, after its own
+    // provider preparation and right before the request.
+    dispatch: async (_trx, providerBoundaryCheck) => { res = await dispatch(providerBoundaryCheck); },
     state,
   });
   if (state.boundaryBlock) return settlePaymentFailedRefusal({ enrollment, sendId, block: state.boundaryBlock });
@@ -670,7 +672,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     sendId: sendRow.id, testRecipient });
   if (deliveryBlock) return deliveryBlock;
 
-  const dispatch = () => sendgrid.sendOne({
+  const dispatch = (providerBoundaryCheck) => sendgrid.sendOne({
     to: recipient,
     fromEmail,
     fromName: step.from_name,
@@ -680,6 +682,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     text: text || undefined,
     categories: ['automation', `template_${template.key}`, `step_${step.step_order}`],
     asmGroupId,
+    ...(providerBoundaryCheck ? { providerBoundaryCheck } : {}),
   });
   try {
     const res = template.key === 'payment_failed' && enrollment.customer_id && !testRecipient

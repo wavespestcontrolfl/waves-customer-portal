@@ -294,12 +294,12 @@ describe('automation runner suppression guardrails', () => {
     });
     BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockReset()
       .mockImplementation(async ({ dispatch, state }) => {
-        state.handoffStarted = true;
-        await dispatch('authority-trx');
+        await dispatch('authority-trx', providerBoundaryCheck);
         state.providerAccepted = true;
         return { ok: true };
       });
   }
+  const providerBoundaryCheck = jest.fn(async () => ({ ok: true }));
 
   test('a customer\'s payment-failed step goes to the billing recipient through the shared billing email authority', async () => {
     paymentFailedQueues();
@@ -313,7 +313,11 @@ describe('automation runner suppression guardrails', () => {
     expect(BillingEmailAuthority.dispatchUnderBillingEmailAuthority).toHaveBeenCalledWith(expect.objectContaining({
       input, recipientEmail: 'customer@example.com', emailSuppression: expect.any(Function),
     }));
-    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ to: 'customer@example.com' }));
+    // The authority's final check rides into sendOne, which runs it right
+    // before the provider request (#5041).
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      to: 'customer@example.com', providerBoundaryCheck,
+    }));
   });
 
   test('the locked suppression recheck is this automation\'s own group, read on the authority\'s transaction', async () => {
