@@ -944,6 +944,10 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
         [callLogId, recordingSid],
       );
     }
+    // A slot proof rests on inputs this very pass may rewrite even from the
+    // same recording — the promise's stated time and the call's confirmed
+    // slot — so it reopens for the next refresh to re-judge.
+    await reopenSlotBookingProofs(trx, callLogId);
     // Reuse quote-family identities before the insert so a re-extraction
     // that adds an optional subject field cannot bypass a prior dismissal,
     // fulfillment, or uncertain delivery tied to an older suffixed key.
@@ -1442,25 +1446,20 @@ function whereEstimateCustomerOwnership(query, customerId) {
 }
 
 // The basis of a scheduling promise kept by a booking for its promised slot
-// (resolveFulfillment). The visit is found through the call's CUSTOMER, so a
-// relink reopens it (reopenSlotBookingProofs).
+// (resolveFulfillment). The visit is found through the call's CUSTOMER and
+// the slot through inputs a reprocess rewrites, so a relink or a new
+// commitments pass reopens it (reopenSlotBookingProofs).
 const SLOT_BOOKING_BASIS = "visit_booked_at_the_promised_time";
 
-// An instant as a bookable slot — its ET day and HH:MM — or null.
-function etSlotOf(value) {
-  const at = value ? new Date(value) : null;
-  if (!at || Number.isNaN(at.getTime())) return null;
-  const { hour, minute } = etParts(at);
-  return { at, day: etDateString(at), time: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}` };
-}
-
-// A promise's stated time as a bookable slot, or null: no stated time, one
-// labeled a deadline (the latest moment for the action, not an
-// appointment), or one no later than the evidence boundary (nothing left
-// to book).
+// A promise's stated time as a bookable slot — its ET day and minute of the
+// day — or null: no stated time, one labeled a deadline (the latest moment
+// for the action, not an appointment), or one no later than the evidence
+// boundary (nothing left to book).
 function statedSlot(commitment, after) {
-  const slot = commitment?.due_type === "deadline" ? null : etSlotOf(commitment?.due_at);
-  return slot && slot.at.getTime() > after.getTime() ? slot : null;
+  const at = commitment?.due_at && commitment.due_type !== "deadline" ? new Date(commitment.due_at) : null;
+  if (!at || Number.isNaN(at.getTime()) || at.getTime() <= after.getTime()) return null;
+  const { hour, minute } = etParts(at);
+  return { day: etDateString(at), minutes: hour * 60 + minute, time: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}` };
 }
 
 async function resolveFulfillment(conn, commitment, call) {
@@ -1697,14 +1696,17 @@ async function resolveFulfillment(conn, commitment, call) {
       // not a same-customer hint (owner ruling 2026-09-27). The stated time
       // alone is the promised ACTION's timing ("schedule the follow-up after
       // the 3 PM inspection" is a 3 PM floor), so the slot counts only when
-      // the call's own V2 scheduling extraction confirmed an appointment at
-      // that same minute (confirmed_start_at). schedule_visit only, like the
-      // moved-visit proof above; the follow-up pager applies the same slot
-      // test to its own evidence (appointmentSlot).
+      // the call's own V2 extraction CONFIRMED an appointment at that same
+      // minute — extractConfirmedSlot, the booking-miss watchdog's reader:
+      // scheduling.status 'confirmed' (a reschedule's proposed time is not
+      // one) and confirmed_start_at read by the booking path's wall-clock
+      // rule (an ET offset from the wrong season keeps its spoken time).
+      // schedule_visit only, like the moved-visit proof above; the follow-up
+      // pager applies the same slot test to its own evidence (appointmentSlot).
       const slot = commitment.kind === "schedule_visit" ? statedSlot(commitment, after) : null;
-      const confirmedSlot = slot && etSlotOf((await conn("call_log").where({ id: call.id, v2_extraction_status: "valid" })
-        .first(conn.raw("ai_extraction_enriched #>> '{scheduling,confirmed_start_at}' AS confirmed_start_at")))?.confirmed_start_at);
-      const grounded = !!confirmedSlot && confirmedSlot.day === slot.day && confirmedSlot.time === slot.time;
+      const v2 = slot && await conn("call_log").where({ id: call.id, v2_extraction_status: "valid" }).first("ai_extraction_enriched");
+      const confirmedSlot = v2 && require("./call-booking-miss-watchdog").extractConfirmedSlot(v2.ai_extraction_enriched);
+      const grounded = !!confirmedSlot && confirmedSlot.dateET === slot.day && confirmedSlot.minutes === slot.minutes;
       const atSlot = grounded && await conn("scheduled_services")
         .where("customer_id", customerId)
         .where("created_at", ">", after)
@@ -1922,11 +1924,12 @@ async function refreshFulfillment(conn, callLogId, call = null) {
   return { checked: open.length, fulfilled, hinted, cleared, failed };
 }
 
-// The call's customer changed (relinked or unlinked by the office): a
-// promise kept by a booking for its promised slot was matched through the
-// PREVIOUS customer, and refreshFulfillment never revisits a kept row, so
-// it reopens here and the next refresh judges it against the corrected
-// link. Untouched AI rows only — a human verdict stands. Returns the count.
+// A promise kept by a booking for its promised slot rests on the call's
+// customer, the promise's stated time and the call's confirmed slot.
+// refreshFulfillment never revisits a kept row, so whenever one of those
+// can change — the office relinks or unlinks the call, or a commitments
+// pass (re)writes the call — it reopens here and the next refresh judges
+// it again. Untouched AI rows only — a human verdict stands. Returns the count.
 async function reopenSlotBookingProofs(conn, callLogId) {
   return conn("call_commitments")
     .where({ call_log_id: callLogId, status: "fulfilled" })

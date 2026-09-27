@@ -372,11 +372,21 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     expect(await cc.resolveFulfillment(db, { ...promise, due_type: null }, call)).toMatchObject({ record_id: atSlot.id, strength: 'direct' });
     expect(await cc.resolveFulfillment(db, { ...promise, due_type: 'deadline' }, call)).toMatchObject({ strength: 'association' });
     expect(await cc.resolveFulfillment(db, { ...promise, kind: 'technician_follow_up' }, call)).toMatchObject({ strength: 'association' });
+    const scheduling = async (s) => db('call_log').where({ id: call.id }).update({ ai_extraction_enriched: JSON.stringify({ scheduling: s }) });
     // "Schedule the follow-up after the 3 PM inspection": the call confirmed
     // no appointment at 3, so the 3 PM booking (the inspection) is only a hint.
-    await db('call_log').where({ id: call.id }).update({ ai_extraction_enriched: JSON.stringify({ scheduling: { status: 'none', confirmed_start_at: null } }) });
+    await scheduling({ status: 'none', confirmed_start_at: null });
     expect(await cc.resolveFulfillment(db, promise, call)).toMatchObject({ strength: 'association' });
-    await db('call_log').where({ id: call.id }).update({ ai_extraction_enriched: JSON.stringify({ scheduling: { status: 'confirmed', confirmed_start_at: threePm } }) });
+    // A reschedule's confirmed_start_at can be the proposed new time — not a
+    // confirmed appointment (codex #5081 r2 P1).
+    await scheduling({ status: 'reschedule_requested', confirmed_start_at: threePm });
+    expect(await cc.resolveFulfillment(db, promise, call)).toMatchObject({ strength: 'association' });
+    // An ET offset from the wrong season keeps its spoken wall clock, the
+    // booking path's rule (codex #5081 r2 P2): "3 PM" still grounds 3 PM.
+    const wrongSeason = new Date(threePm).getUTCHours() === 19 ? '-05:00' : '-04:00';
+    await scheduling({ status: 'confirmed', confirmed_start_at: `${day}T15:00:00${wrongSeason}` });
+    expect(await cc.resolveFulfillment(db, promise, call)).toMatchObject({ record_id: atSlot.id, strength: 'direct' });
+    await scheduling({ status: 'confirmed', confirmed_start_at: threePm });
 
     // Kept through the call's customer: a relink reopens it, and only it.
     const [kept] = await db('call_commitments').insert({
@@ -391,6 +401,13 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     }).returning('id');
     expect(await cc.reopenSlotBookingProofs(db, call.id)).toBe(1);
     expect(await db('call_commitments').where({ id: kept.id }).first('status', 'fulfillment', 'fulfilled_at')).toEqual({ status: 'open', fulfillment: null, fulfilled_at: null });
+    expect((await db('call_commitments').where({ id: linked.id }).first('status')).status).toBe('fulfilled');
+    // A commitments pass — a reprocess of the same recording may rewrite the
+    // stated or confirmed slot — reopens it too (codex #5081 r2 P2).
+    await db('call_commitments').where({ id: kept.id }).update({ status: 'fulfilled', fulfilled_at: new Date(),
+      fulfillment: JSON.stringify({ kind: 'appointment_booked', record_id: atSlot.id, strength: 'direct', basis: 'visit_booked_at_the_promised_time' }) });
+    await cc.upsertCommitments(db, call.id, []);
+    expect((await db('call_commitments').where({ id: kept.id }).first('status')).status).toBe('open');
     expect((await db('call_commitments').where({ id: linked.id }).first('status')).status).toBe('fulfilled');
   });
 
