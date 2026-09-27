@@ -476,10 +476,10 @@ describe('readSSEEvents — line endings', () => {
   });
 });
 
-// Codex r5/r6 P1: with store:false, a reasoning model's tool loop needs its
-// reasoning items back — encrypted, each immediately before the item that
-// followed it (the round's original order, preamble message included),
-// within the same caller turn.
+// Codex r5/r6/r12 P1: with store:false, a reasoning model's tool loop needs
+// its reasoning items back — encrypted, each immediately before the item that
+// followed it (the round's original order, preamble message included), in
+// every later request.
 describe('reasoning items across tool-call rounds', () => {
   const RS = (id, enc = `enc-${id}`) => ({ type: 'reasoning', id, summary: [], encrypted_content: enc, status: 'completed' });
   const FC = (id, callId, name = 'lookup_customer') => ({ type: 'function_call', id, call_id: callId, name, arguments: '{}', status: 'completed' });
@@ -605,7 +605,27 @@ describe('reasoning items across tool-call rounds', () => {
     expect(items[2]).toMatchObject({ type: 'message', id: 'msg_1', status: 'incomplete' });
   });
 
-  test('replay: a round from an earlier caller turn goes back plain — no reasoning, no item ids', () => {
+  // Codex r12 P1: no turn cutoff. A barge-in stores a round's tool results
+  // with no model round after them (relay-conversation.js
+  // _abortStreamToolLoop), so the caller's next message arrives before that
+  // output is consumed — the round's reasoning must still go back.
+  test('replay: a round interrupted by a barge-in still goes back paired after the caller speaks again', () => {
+    const msg = round([RS('rs_1'), MSG('msg_1', 'Let me check.'), FC('fc_1', 'call_1')]);
+    const items = toResponsesInput([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: [{ type: 'text', text: 'Let me… [interrupted]' }, msg.content[1]] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'Not run — the current turn was interrupted.' }] },
+      { role: 'user', content: [{ type: 'text', text: '[clock]' }, { type: 'text', text: 'actually, never mind' }] },
+    ]);
+    expect(items.slice(1, 5)).toEqual([
+      rsIn('rs_1'),
+      msgIn('msg_1', 'Let me… [interrupted]'),
+      fcIn('fc_1', 'call_1'),
+      tr('call_1', 'Not run — the current turn was interrupted.'),
+    ]);
+  });
+
+  test('replay: a round from an earlier, completed caller turn is still replayed in order (the API ignores what it no longer needs)', () => {
     const msg = round([RS('rs_1'), MSG('msg_1', 'One moment.'), FC('fc_1', 'call_1')]);
     const items = toResponsesInput([
       { role: 'user', content: 'hi' },
@@ -614,9 +634,11 @@ describe('reasoning items across tool-call rounds', () => {
       { role: 'assistant', content: 'Hi Pat.' },
       { role: 'user', content: [{ type: 'text', text: '[clock]' }, { type: 'text', text: 'next question' }] },
     ]);
-    expect(items.some((i) => i.type === 'reasoning' || i.type === 'message')).toBe(false);
-    expect(items).toContainEqual({ role: 'assistant', content: 'One moment.' });
-    expect(items).toContainEqual(fcIn(null, 'call_1'));
+    expect(items.slice(1, 5)).toEqual([rsIn('rs_1'), msgIn('msg_1', 'One moment.'), fcIn('fc_1', 'call_1'), tr('call_1')]);
+    expect(items.slice(5)).toEqual([
+      { role: 'assistant', content: 'Hi Pat.' },
+      { role: 'user', content: [{ type: 'input_text', text: '[clock]' }, { type: 'input_text', text: 'next question' }] },
+    ]);
   });
 
   test('replay: a round whose call is missing from history falls back to the plain rebuild', () => {

@@ -31,7 +31,7 @@
  *       assistant text           → {role:'assistant', content:'<text>'} (a plain-string
  *                                  easy input message — valid for every role)
  *       assistant tool_use       → {type:'function_call', call_id, name, arguments}
- *       a current-turn tool round with reasoning → its original item order
+ *       a tool round with reasoning → its original item order
  *                                  (reasoning / message / function_call, ids kept; below)
  *       user tool_result         → {type:'function_call_output', call_id, output}
  *   tools (Anthropic {name, description, input_schema}) → Responses
@@ -40,13 +40,12 @@
  *     whenever the model reasons): a tool round's original item order —
  *     reasoning, message and function_call items, with ids — rides on its
  *     first tool_use block (`_openai`, adapter-private) and is replayed in
- *     that order in the next rounds of the same caller turn, so each
- *     reasoning item stays immediately before the item that followed it (the
- *     pairing the Responses API validates); only a terminal reasoning run,
- *     which has no following item, is dropped. Message items carry only the
- *     text the relay kept in history, possibly empty. Reasoning from an
- *     earlier turn, or a round missing an id or encrypted content, is not
- *     replayed.
+ *     that order in every later request (the API ignores reasoning it no
+ *     longer needs), so each reasoning item stays immediately before the
+ *     item that followed it (the pairing the Responses API validates); only
+ *     a terminal reasoning run, which has no following item, is dropped.
+ *     Message items carry only the text the relay kept in history, possibly
+ *     empty. A round missing an id or encrypted content is not replayed.
  *   max_tokens → max_output_tokens
  *   thinking / output_config (Anthropic-only effort control) → dropped;
  *     reasoning effort for THIS request is read from the model's own
@@ -123,21 +122,21 @@ function toOpenAITool(tool) {
  */
 function toResponsesInput(messages) {
   const items = [];
-  const list = messages || [];
-  // Reasoning is replayed only for tool rounds since the caller's last own
-  // message (a user turn carrying text, not just tool results) — the only
-  // reasoning the Responses API needs back.
-  let turnStart = -1;
-  list.forEach((m, i) => { if (m && m.role === 'user' && isCallerTurn(m)) turnStart = i; });
-  list.forEach((m, index) => {
+  // Every tool round that carries its reasoning (`_openai.order`) is replayed
+  // in its original order, whatever turn it belongs to — OpenAI's documented
+  // simplest path ("pass in all reasoning items … the system will smartly
+  // ignore any reasoning items that aren't relevant"). No turn cutoff: a
+  // barge-in stores a round's tool results with no model round after them,
+  // so the caller's next message can arrive before that output is consumed.
+  for (const m of messages || []) {
     const role = m.role === 'assistant' ? 'assistant' : 'user';
     const blocks = Array.isArray(m.content)
       ? m.content
       : [{ type: 'text', text: String(m.content ?? '') }];
-    const replayed = role === 'assistant' && index > turnStart ? replayRound(blocks) : null;
+    const replayed = role === 'assistant' ? replayRound(blocks) : null;
     if (replayed) {
       items.push(...replayed);
-      return;
+      continue;
     }
     let textRun = [];
     const flushText = () => {
@@ -165,7 +164,7 @@ function toResponsesInput(messages) {
       // Any other block type never appears in this relay's own history and is skipped.
     }
     flushText();
-  });
+  }
   return items;
 }
 
@@ -249,12 +248,6 @@ function replayRound(blocks) {
   if (orphanText) out.unshift({ role: 'assistant', content: orphanText });
   for (const [id, block] of toolUses) if (!emitted.has(id)) out.push(functionCallItem(block));
   return out;
-}
-
-/** A user message the caller (or the relay's own turn preamble) wrote — not tool results only. */
-function isCallerTurn(message) {
-  if (!Array.isArray(message.content)) return true;
-  return message.content.some((b) => b && b.type === 'text');
 }
 
 /** The model's own MODEL_CATALOG `voice.reasoning` effort, or null if unset. */
@@ -416,8 +409,8 @@ function mapResponseToMessage(response, requestedModel) {
   }
   // A tool round's reasoning rides on its first tool_use block (the one
   // block type every relay history path keeps) as the round's original item
-  // order, so toResponsesInput can pass it back in the next rounds of the
-  // same caller turn — see replayRound.
+  // order, so toResponsesInput can pass it back in every later request —
+  // see replayRound.
   const replayOrder = hasFunctionCall ? replayableOrder(order) : null;
   if (replayOrder) content.find((b) => b.type === 'tool_use')._openai = { order: replayOrder };
   // No non-blank text and no tool call — an empty output, reasoning only, or

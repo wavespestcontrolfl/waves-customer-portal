@@ -418,6 +418,64 @@ describe('a full turn loop on the OpenAI adapter — tool-call round then text r
     expect(JSON.stringify(input)).not.toMatch(/all set/);
   });
 
+  // Codex r12 P1: a barge-in during a reasoning tool round stores the round's
+  // tool results with no model round after them (_abortStreamToolLoop). The
+  // caller's next turn must still carry that round's reasoning, paired.
+  test('after a barge-in cuts a reasoning tool round, the next caller turn still sends its reasoning', async () => {
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_INBOUND_MODEL = OPENAI_CANDIDATE;
+    const savedRenderer = process.env.VOICE_RELAY_RENDERER;
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    try {
+      global.fetch = mockFetchSequence([
+        [
+          { type: 'response.output_item.added', item: { type: 'message' } },
+          { type: 'response.output_text.delta', delta: 'Let me check.' },
+          {
+            type: 'response.completed',
+            response: {
+              id: 'r1', model: OPENAI_CANDIDATE, status: 'completed',
+              output: [
+                { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc-1' },
+                { type: 'message', id: 'msg_1', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'Let me check.' }] },
+                { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'lookup_customer', arguments: '{"phone":"+19415551234"}', status: 'completed' },
+              ],
+            },
+          },
+        ],
+        [
+          { type: 'response.completed', response: { id: 'r2', model: OPENAI_CANDIDATE, status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'No problem.' }] }] } },
+        ],
+      ]);
+      const convo = new RelayConversation({ callSid: 'CA-openai-barge', from: '+19415551234', evalHarness: true, send: () => {} });
+      expect(convo.renderer).toBe('stream');
+      // Barge in right after the round finalizes, before its tool loop runs
+      // (the same injection voice-relay-stream-renderer.test.js uses).
+      const original = convo._finalizeStreamedRound.bind(convo);
+      convo._finalizeStreamedRound = async (...args) => {
+        const result = await original(...args);
+        convo.interrupt({ utteranceUntilInterrupt: 'Let me check.' });
+        return result;
+      };
+      await convo._runLoop('hi, this is Pat');
+      expect(global.fetch).toHaveBeenCalledTimes(1); // no post-tool model round after the barge-in
+      convo._finalizeStreamedRound = original;
+
+      await convo._runLoop('actually, never mind');
+      const input = JSON.parse(global.fetch.mock.calls[1][1].body).input;
+      const at = input.findIndex((i) => i.type === 'reasoning');
+      expect(at).toBeGreaterThan(-1);
+      expect(input[at]).toEqual({ type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc-1' });
+      expect(input[at + 1]).toMatchObject({ type: 'message', id: 'msg_1' });
+      expect(input[at + 2]).toMatchObject({ type: 'function_call', id: 'fc_1', call_id: 'call_1' });
+      expect(input[at + 3]).toMatchObject({ type: 'function_call_output', call_id: 'call_1', output: expect.stringMatching(/^Not run/) });
+      expect(input[input.length - 1]).toMatchObject({ role: 'user' });
+      expect(JSON.stringify(input[input.length - 1])).toMatch(/never mind/);
+    } finally {
+      if (savedRenderer === undefined) delete process.env.VOICE_RELAY_RENDERER; else process.env.VOICE_RELAY_RENDERER = savedRenderer;
+    }
+  });
+
   test('an OpenAI HTTP failure is an ordinary model failure — no silent Claude fallback', async () => {
     process.env.GATE_VOICE_RELAY_OPENAI = 'true';
     process.env.VOICE_RELAY_INBOUND_MODEL = OPENAI_CANDIDATE;
