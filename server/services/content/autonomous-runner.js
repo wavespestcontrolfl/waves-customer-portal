@@ -47,6 +47,12 @@ const { THRESHOLDS } = require('./scoring-config');
 // db-wide, so it also serializes across multiple app instances. 0x57415645 =
 // "WAVE" in ASCII; a fixed key shared by every publishing entry point.
 const ENGINE_PUBLISH_LOCK_KEY = 0x57415645;
+const CITABILITY_ADVISORY_CODES = new Set([
+  'CITABILITY_NAMED_SOURCES',
+  'CITABILITY_CONCRETE_SPECIFICS',
+  'CITABILITY_COMPARISON',
+  'CITABILITY_HOW_TO_CHOOSE',
+]);
 
 // Lazy loaders — keeps the runner usable on any branch in the stack.
 function lazy(name, path) {
@@ -1208,7 +1214,11 @@ class AutonomousRunner {
       // no_previous_version_to_compare) rather than as a top-level .error —
       // those are engine faults too, not writer misses.
       const qualityInfraFailure = Array.isArray(qualityResult?.hard_failures)
-        && qualityResult.hard_failures.some((f) => /^(evaluator_threw:|pii_scan_unavailable|no_previous_version_to_compare)/.test(String(f?.reason ?? f)));
+        && qualityResult.hard_failures.some((f) => {
+          const reason = String(f?.reason ?? f);
+          return /^(evaluator_threw:|pii_scan_unavailable|no_previous_version_to_compare)/.test(reason)
+            || reason.includes('unsupported_citability_gap');
+        });
       const gateInfraError = Boolean(uniquenessResult?.error || qualityResult?.error
         || seoCompletionResult?.error || prePublishVisibilityResult?.error) || qualityInfraFailure;
       if (!gatesPass && !brief.human_review_required && !gateInfraError) {
@@ -1234,7 +1244,8 @@ class AutonomousRunner {
       // affiliate_review OUTRANKS named_competitor_review: the latter is an
       // email-approvable kind, and every affiliate-bearing draft must stay in
       // the script-only lane (Codex r1 P1).
-      const reason = !gatesPass ? 'gate_fail'
+      const reason = gateInfraError ? 'gate_infrastructure_error'
+        : !gatesPass ? 'gate_fail'
         : affiliateReview ? 'affiliate_review'
         : forceNamedCompetitorReview ? 'named_competitor_review'
         : !trustBuildSatisfied ? `trust_build_${trustBuildCount}_of_${TRUST_BUILD_THRESHOLD}`
@@ -1891,7 +1902,9 @@ class AutonomousRunner {
   }
 
   async _pendingReviewClaimOrThrow(queue, opportunityId, reason, payload, actionType) {
-    const skip = actionType === 'new_supporting_blog' && reason !== 'astro_pr_pending_merge';
+    const skip = actionType === 'new_supporting_blog'
+      && reason !== 'astro_pr_pending_merge'
+      && reason !== 'gate_infrastructure_error';
     const ok = skip
       ? await queue.skip(opportunityId, reason, payload)
       : await queue.pendingReview(opportunityId, reason, payload);
@@ -1953,14 +1966,16 @@ class AutonomousRunner {
    * can't stamp feedback over another attempt.
    */
   async _recordGateRetry(opp, skipReason, blocking, claimToken) {
-    const findings = (blocking || []).map((f) => ({
+    const normalized = (blocking || []).map((f) => ({
       severity: f.severity,
       code: f.code,
       message: String(f.message || '').slice(0, 300),
     }));
+    const findings = normalized.filter((f) => !CITABILITY_ADVISORY_CODES.has(f.code));
+    const advisories = normalized.filter((f) => CITABILITY_ADVISORY_CODES.has(f.code));
     const meta = {
       ...(opp.signal_metadata || {}),
-      gate_retry: { at: new Date().toISOString(), skip_reason: skipReason, findings },
+      gate_retry: { at: new Date().toISOString(), skip_reason: skipReason, findings, advisories },
     };
     const updated = await db('opportunity_queue')
       .where('id', opp.id)

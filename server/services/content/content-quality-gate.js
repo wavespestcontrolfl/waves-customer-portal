@@ -1160,18 +1160,23 @@ function nonBlogTarget(brief) {
 // never restore inline comments or code beside otherwise visible prose.
 function renderedCitabilityBody(body) {
   const raw = String(body || '');
-  const { blankNonRenderedMarkdown, blankDefinitelyHiddenContent, maskJsxAttrQuotes } = require('./content-guardrails');
+  const {
+    blankNonRenderedMarkdown, blankDefinitelyHiddenContent, maskJsxAttrQuotes, projectMdxDisplayText,
+  } = require('./content-guardrails');
   // First remove comments/code, then containers a browser definitely hides;
   // finally mask JSX/HTML attribute values, which are configuration rather
   // than reader-visible copy. Keep tag names so visible ComparisonTable
   // components remain detectable.
-  const blanked = maskJsxAttrQuotes(blankDefinitelyHiddenContent(blankNonRenderedMarkdown(raw)));
+  const visible = blankDefinitelyHiddenContent(blankNonRenderedMarkdown(raw));
+  const blanked = maskJsxAttrQuotes(visible);
   const orig = raw.split(/\r?\n/);
   const mask = blanked.split(/\r?\n/);
   if (orig.length !== mask.length) return blanked;
-  return orig.map((line, i) => (
+  const prose = orig.map((line, i) => (
     mask[i].trim() ? line.match(/^[\t ]*/)[0] + mask[i].trimStart() : ''
   )).join('\n');
+  const componentText = projectMdxDisplayText(visible);
+  return componentText ? `${prose}\n${componentText}` : prose;
 }
 
 // Attribution to ANY proper-noun source ("according to the Florida Forest
@@ -1192,6 +1197,8 @@ const OWN_COMPANY_RE = /^(?:the\s+)?Waves\b/i;
 // the named-source contract even when arbitrary title-cased modifiers make
 // the whole phrase look proper ("Leading Experts", "Trusted Research").
 const GENERIC_SOURCE_HEAD_RE = /\b(?:authorities|authority|experts?|officials?|professionals?|research|researchers?|scientists?|specialists?|studies|study)\s*$/i;
+const SPECIFIC_SOURCE_ORG_RE = /\b(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program)\b/i;
+const CREDENTIALED_PERSON_RE = /^(?:Dr|Prof|Professor)\.?\s+[A-Z][\w.'’-]+(?:\s+[A-Z][\w.'’-]+)+$/;
 
 function genericAttributedSource(source) {
   return GENERIC_SOURCE_HEAD_RE.test(String(source || '').trim());
@@ -1200,7 +1207,9 @@ function genericAttributedSource(source) {
 function hasAttributedSource(body) {
   for (const m of String(body || '').matchAll(ATTRIBUTED_SOURCE_RE)) {
     const source = m[1].trim();
-    if (!OWN_COMPANY_RE.test(source) && !genericAttributedSource(source)) return true;
+    if (!OWN_COMPANY_RE.test(source)
+      && !genericAttributedSource(source)
+      && (SPECIFIC_SOURCE_ORG_RE.test(source) || CREDENTIALED_PERSON_RE.test(source))) return true;
   }
   for (const m of String(body || '').matchAll(DIRECT_INSTITUTION_SOURCE_RE)) {
     const source = m[1].trim();
@@ -1232,7 +1241,7 @@ function checkCitabilityNamedSources(draft, brief) {
 // as are bare years and bare counts ("3 ways", "2024") — those are not the
 // extractable measurements the nudge is after. Ranges ("3.5–4 inches",
 // "10-14 days") count once.
-const CONCRETE_SPECIFIC_RE = /(?<![$\d.])\d+(?:\.\d+)?(?:\s?(?:-|–|to)\s?\d+(?:\.\d+)?)?\s?(?:%|(?:percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b)/gi;
+const CONCRETE_SPECIFIC_RE = /(?<![$\d.])\d+(?:\.\d+)?(?:\s?(?:-|–|to)\s?\d+(?:\.\d+)?)?(?:\s*[-–—]\s*|\s*)(?:%|(?:percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b)/gi;
 const CALENDAR_WINDOW_RE = /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\s*(?:-|–|—|to|through)\s*(?:(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+)?\d{1,2}(?:st|nd|rd|th)?\b/gi;
 
 // Vague stand-ins for a measurement — the prompt's own examples ("tall",
@@ -1317,11 +1326,14 @@ function howToChooseSectionCriteria(body) {
     let items = 0;
     let topIndent = null;
     for (let j = i + 1; j < lines.length && !/^#{1,2}\s/.test(lines[j]); j += 1) {
-      const m = lines[j].match(/^(\s*)[-*+]\s+\S/);
+      const m = lines[j].match(/^(\s*)[-*+]\s+(\S.*)$/);
       if (!m) continue;
       const indent = m[1].replace(/\t/g, '    ').length;
       if (topIndent === null || indent < topIndent) { topIndent = indent; items = 0; }
-      if (indent === topIndent) items += 1;
+      const criterion = m[2];
+      const hasCondition = /^(?:if|when|for|where|with|without|after|before|once)\b/i.test(criterion);
+      const namesOption = /(?:→|->|\b(?:choose|pick|use|prefer|select|go with|call|hire|apply|install|schedule|start with|switch to)\b)/i.test(criterion);
+      if (indent === topIndent && hasCondition && namesOption) items += 1;
     }
     best = Math.max(best, items);
   }
@@ -1397,8 +1409,10 @@ function checkCitabilityBackfillGapsCleared(draft, brief, context) {
     const regressed = [];
     for (const gap of Object.keys(CITABILITY_GAP_CHECKS)) {
       if (brief.gsc_signal.citability_gaps.includes(gap)) continue;
-      if (backfillGapVerdict(gap, prevDraft, brief, {}).ok
-        && !backfillGapVerdict(gap, draft, brief, context).ok) regressed.push(gap);
+      const current = gap === 'concrete_specifics'
+        ? checkCitabilityConcreteSpecifics(draft, brief, { previousVersion: { body: prevBody } })
+        : backfillGapVerdict(gap, draft, brief, context);
+      if (backfillGapVerdict(gap, prevDraft, brief, {}).ok && !current.ok) regressed.push(gap);
     }
     if (regressed.length) return { ok: false, reason: `citability_traits_regressed:${regressed.join(',')}` };
   }

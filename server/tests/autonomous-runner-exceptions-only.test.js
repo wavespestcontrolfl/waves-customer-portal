@@ -239,13 +239,41 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
     await expect(runner.runNext()).resolves.toMatchObject({ outcome: 'deferred_gate_retry' });
 
     const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');
-    const stored = JSON.parse(retryWrite.patch.signal_metadata).gate_retry.findings;
+    const retry = JSON.parse(retryWrite.patch.signal_metadata).gate_retry;
+    const stored = retry.advisories;
     expect(stored.map((f) => f.code)).toEqual(expect.arrayContaining([
       'CITABILITY_NAMED_SOURCES',
       'CITABILITY_CONCRETE_SPECIFICS',
       'CITABILITY_COMPARISON',
       'CITABILITY_HOW_TO_CHOOSE',
     ]));
+    expect(retry.findings.map((f) => f.code)).not.toEqual(expect.arrayContaining([
+      'CITABILITY_NAMED_SOURCES',
+      'CITABILITY_CONCRETE_SPECIFICS',
+    ]));
+  });
+
+  test('an unsupported persisted citability gap parks as infrastructure/manual review', async () => {
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = 'false';
+    const queue = makeQueue({ id: 'opp_unknown_gap', action_type: 'new_supporting_blog', claimed_at: claimedAt, signal_metadata: {} });
+    const { runner } = loadRunner({
+      queue,
+      briefBuilder: makeBriefBuilder(),
+      dispatcher: makeDispatcher(),
+      uniquenessGate: { evaluateBlog: jest.fn().mockReturnValue({ ok: true }), evaluate: jest.fn().mockReturnValue({ ok: true }) },
+      qualityGate: { evaluate: jest.fn().mockReturnValue({
+        ok: false,
+        hard_failures: [{ name: 'citability_backfill_gaps_cleared', reason: 'planned_gaps_unresolved:named_sorces(unsupported_citability_gap)' }],
+        soft_failures: [],
+        total_score: 80,
+        min_total_score: 80,
+      }) },
+    });
+
+    await expect(runner.runNext()).resolves.toMatchObject({ skip_reason: 'gate_infrastructure_error' });
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_unknown_gap', 'gate_infrastructure_error', { claimToken: claimedAt });
+    expect(queue.defer).not.toHaveBeenCalled();
   });
 
   test('second failure (gate_retry already recorded) skips silently — never pending_review', async () => {

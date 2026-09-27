@@ -557,6 +557,27 @@ describe('buildRetryDirectives — gate-retry feedback for the one autonomous re
     expect(directives.join(' ')).toContain('FAQ');
   });
 
+  test('citability advisories stay explicitly optional and evidence-bound', () => {
+    const directives = buildRetryDirectives({
+      findings: [{ severity: 'P1', code: 'QUALITY_GATE', message: 'word count failed' }],
+      advisories: [{ severity: 'P2', code: 'CITABILITY_CONCRETE_SPECIFICS', message: 'no measurement found' }],
+    });
+    expect(directives[0]).toContain('hard content gates');
+    expect(directives.join(' ')).toContain('OPTIONAL CITABILITY ADVISORIES');
+    expect(directives.join(' ')).toContain('did not fail the draft');
+    expect(directives.join(' ')).toContain('Never invent or infer a source, number, comparison, or decision criterion');
+  });
+
+  test('the seeded backfill completion failure remains a binding canonical directive', () => {
+    const directives = buildRetryDirectives({
+      findings: [{ severity: 'P1', code: 'CITABILITY_BACKFILL_GAPS_CLEARED', message: 'named_sources remains unresolved' }],
+    });
+    expect(directives).toHaveLength(2);
+    expect(directives[1]).toContain('Restore every planned citability gap');
+    expect(directives[1]).toContain('never invent evidence');
+    expect(directives.join(' ')).not.toContain('OPTIONAL CITABILITY ADVISORIES');
+  });
+
   test('every frequent gate code from the prod audit maps to a specific corrective instruction, not the generic fallback', () => {
     const codes = [
       'HARDCODED_PRICE', 'FAQ_BLOCKED_SERVICE', 'DISALLOWED_EXTERNAL_LINK',

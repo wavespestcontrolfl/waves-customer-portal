@@ -65,6 +65,7 @@ const GATE_RETRY_INSTRUCTIONS = {
   EMPTY_AFFILIATE_LINK_TEXT: 'Every <AffiliateLink> must wrap visible link text and close with </AffiliateLink> — write <AffiliateLink product="…" placement="…">a plain product name</AffiliateLink>; never self-close it, leave it empty, or put only a comment or expression inside (the text becomes the link).',
   INVALID_INLINECTA_PROPS: 'Every <InlineCTA> prop must be one the component accepts (headline, description, ctaLabel, ctaHref, phone, tel, eyebrow — exact casing) with a valid literal value; tel must be a phone number (optionally tel:-prefixed). Remove or fix any other prop.',
   INVALID_INLINECTA_DESTINATION: 'Every <InlineCTA ctaHref> must be a single quoted literal that is a root-relative path (no dot segments) or an https URL — never a spread, expression, duplicate, or any other scheme; omit ctaHref entirely to use the default quote page.',
+  CITABILITY_BACKFILL_GAPS_CLEARED: 'Restore every planned citability gap named by this finding and preserve every cited/structured trait the prior page already had. Use only sources, measurements, comparison facts, and decision criteria supported by the brief or supplied evidence; never invent evidence to satisfy the gate.',
 };
 
 // The header defaults to the RUN-LEVEL framing (one feedback-informed
@@ -73,6 +74,7 @@ const GATE_RETRY_INSTRUCTIONS = {
 // so the "final attempt" language would be false there.
 function buildRetryDirectives(gateRetry, { header } = {}) {
   const findings = Array.isArray(gateRetry?.findings) ? gateRetry.findings : [];
+  const advisories = Array.isArray(gateRetry?.advisories) ? gateRetry.advisories : [];
   // Always carry the gate's own finding text alongside the canonical
   // directive: the message names the OFFENDING entity (which competitor,
   // which city, which product), and without it a directive like "move the
@@ -83,9 +85,18 @@ function buildRetryDirectives(gateRetry, { header } = {}) {
     if (!canonical) return `Previous draft failed ${f.severity || 'P0'} ${f.code || 'gate check'}${f.message ? `: ${f.message}` : ''} — do not repeat it.`;
     return f.message ? `${canonical} [Gate reported: ${f.message}]` : canonical;
   });
+  const advisoryDirectives = advisories.map((f) => (
+    `NON-BLOCKING ${f.code || 'CITABILITY'} advisory${f.message ? `: ${f.message}` : ''}. `
+    + 'Improve this only when the brief or supplied evidence already supports it. '
+    + 'Never invent or infer a source, number, comparison, or decision criterion; leave it unchanged when evidence is absent.'
+  ));
   return [
     header || 'PREVIOUS ATTEMPT REJECTED by hard content gates. This is the final attempt — the draft is discarded (never published, never reviewed) if any of these repeat:',
     ...Array.from(new Set(directives)),
+    ...(advisoryDirectives.length ? [
+      'OPTIONAL CITABILITY ADVISORIES below did not fail the draft and are not completion requirements:',
+      ...Array.from(new Set(advisoryDirectives)),
+    ] : []),
   ];
 }
 

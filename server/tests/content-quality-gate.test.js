@@ -1405,6 +1405,9 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityNamedSources({ body: 'According to Trusted Industry Research, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to Local Pest Professionals, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to Local Pest Control Experts, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to This Article, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Our Guide, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to Local Homeowners, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'Homeowners report ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'The Waves Pest Control reports ants are common.' }).ok).toBe(false);
     // Our own service name is not an authority; a county program or district is.
@@ -1428,6 +1431,7 @@ describe('citability nudges (weight-0, signal-only)', () => {
     // '%' is not a word char, so a trailing \b after it never matched (fallback auditor P2, 2026-09-25).
     expect(countConcreteSpecifics('Chinch bug damage covered 20% of the lawn and 35 % of the swale.')).toBe(2);
     expect(countConcreteSpecifics('The active window runs June 1 – Sept 30.')).toBe(1);
+    expect(countConcreteSpecifics('Use a 14-day interval, keep a 3.5-inch height, and wait 30-minutes.')).toBe(3);
   });
 
   test('concrete_specifics is not a quota: one supported number passes, a vague stand-in with none fails', () => {
@@ -1514,6 +1518,8 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n### Signs\n${bullets}` }).ok).toBe(true);
     const numbered = checkCitabilityHowToChoose({ body: `${table}## How to choose\n1. Inspect the area\n2. Apply bait\n3. Recheck the trail` });
     expect(numbered).toEqual({ ok: false, reason: 'how_to_choose_has_0_criteria_need_3+' });
+    const procedural = checkCitabilityHowToChoose({ body: `${table}## How to choose\n- Inspect the area\n- Apply bait\n- Recheck the trail` });
+    expect(procedural).toEqual({ ok: false, reason: 'how_to_choose_has_0_criteria_need_3+' });
   });
 
   test('evaluate(): citability misses surface in soft_failures but never change ok/score', () => {
@@ -1536,7 +1542,9 @@ describe('citability nudges (weight-0, signal-only)', () => {
 });
 
 describe('citability backfill completion (Codex r6 P2s)', () => {
-  const { checkCitabilityBackfillGapsCleared, checkImprovementOverPrior, PAGE_TYPE_CHECKS } = require('../services/content/content-quality-gate')._internals;
+  const {
+    checkCitabilityBackfillGapsCleared, checkCitabilityHowToChoose, checkImprovementOverPrior, PAGE_TYPE_CHECKS,
+  } = require('../services/content/content-quality-gate')._internals;
   const backfill = (gaps) => ({ gsc_signal: { bucket: 'citability_backfill', citability_gaps: gaps } });
   const prior = { previousVersion: { body: 'Experts say ants trail after rain. Water deeply.' } };
 
@@ -1568,6 +1576,56 @@ describe('citability backfill completion (Codex r6 P2s)', () => {
       backfill(['concrete_specifics']),
       { previousVersion: { body: 'Treatment depends on the home.' } },
     )).toEqual({ ok: true });
+  });
+  test('reader-visible ComparisonTable cells can clear specifics, but arbitrary props cannot', () => {
+    const ctx = { previousVersion: { body: 'Treatment timing varies.' } };
+    expect(checkCitabilityBackfillGapsCleared({
+      body: '<ComparisonTable columns={["Step","Timing"]} rows={[{ label: "Recheck", values: ["10–14 days"] }]} />',
+    }, backfill(['concrete_specifics']), ctx)).toEqual({ ok: true });
+    expect(checkCitabilityBackfillGapsCleared({
+      body: '<aside aria-label="Recheck in 10–14 days">Treatment timing varies.</aside>',
+    }, backfill(['concrete_specifics']), ctx)).toEqual({
+      ok: false,
+      reason: 'planned_gaps_unresolved:concrete_specifics(missing_concrete_specific)',
+    });
+    expect(checkCitabilityBackfillGapsCleared({
+      body: '<ComparisonTable columns={["Step","Timing"]} rows={[{ label: "Recheck", values: ["Varies", "10–14 days"] }]} />',
+    }, backfill(['concrete_specifics']), ctx)).toEqual({
+      ok: false,
+      reason: 'planned_gaps_unresolved:concrete_specifics(missing_concrete_specific)',
+    });
+  });
+  test('a reader-visible table caption can provide named-source attribution', () => {
+    const body = '<ComparisonTable caption="According to UF/IFAS, timing varies by season." columns={["Step","Timing"]} rows={[]} />';
+    expect(checkCitabilityBackfillGapsCleared(
+      { body },
+      backfill(['named_sources']),
+      { previousVersion: { body: 'Timing varies by season.' } },
+    )).toEqual({ ok: true });
+  });
+  test('approved component display props participate without exposing config props', () => {
+    expect(checkCitabilityBackfillGapsCleared(
+      { body: '<BottomLineBox verdict="Keep clear" recommendation="Maintain a 10-foot buffer." />' },
+      backfill(['concrete_specifics']),
+      { previousVersion: { body: 'Keep the buffer clear.' } },
+    )).toEqual({ ok: true });
+    expect(checkCitabilityBackfillGapsCleared(
+      { body: '<PestEvidenceGrid items={[{ label: "Roots", note: "Larvae stay 3 inches deep." }]} caption="According to UF/IFAS, inspect turf roots." />' },
+      backfill(['named_sources', 'concrete_specifics']),
+      { previousVersion: { body: 'Inspect turf roots.' } },
+    )).toEqual({ ok: true });
+    expect(checkCitabilityBackfillGapsCleared(
+      { body: '<SeasonalPressureChart caption="According to UF/IFAS, activity peaks after rain." />' },
+      backfill(['named_sources']),
+      { previousVersion: { body: 'Activity peaks after rain.' } },
+    )).toEqual({ ok: true });
+  });
+  test('component prop text cannot fabricate Markdown decision structure', () => {
+    const body = '<ComparisonTable columns={["## How to choose\\n- If A → B\\n- If C → D\\n- If E → F","Option"]} rows={[{ label: "Signal", values: ["Choice"] }]} />';
+    expect(checkCitabilityHowToChoose({ body })).toEqual({
+      ok: false,
+      reason: 'no_how_to_choose_section',
+    });
   });
   test('planned structures stay binding even when the draft removes the choice framing', () => {
     const reframed = { title: 'Ghost Ant Treatments', body: '## Treatment overview\nPlain prose.' };
@@ -1618,6 +1676,14 @@ describe('citability backfill completion (Codex r6 P2s)', () => {
       ok: false,
       reason: 'citability_traits_regressed:comparison,how_to_choose',
     });
+  });
+  test('a non-targeted specifics trait preserves the prior measurement count', () => {
+    const ctx = { previousVersion: { body: 'Wait 2 days, recheck in 3 weeks, and mow at 4 inches.' } };
+    expect(checkCitabilityBackfillGapsCleared(
+      { body: 'Per UF/IFAS, recheck in 3 weeks.' },
+      backfill(['named_sources']),
+      ctx,
+    )).toEqual({ ok: false, reason: 'citability_traits_regressed:concrete_specifics' });
   });
 });
 
