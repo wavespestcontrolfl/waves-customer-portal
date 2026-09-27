@@ -424,4 +424,20 @@ describe('billing channel email authority', () => {
     });
     expect(dispatch).not.toHaveBeenCalled();
   });
+
+  test('rechecks the quote after awaiting suppression before any provider handoff', async () => {
+    let quoteUnchanged = true;
+    mockActiveSuppressionFor.mockImplementationOnce(async () => {
+      quoteUnchanged = false; // A payment committed while recipient suppression was being read.
+      return null;
+    });
+    const preSendCheck = jest.fn(async () => quoteUnchanged ? { ok: true } : {
+      ok: false, code: 'PREVISIT_QUOTE_CHANGED', reason: 'Quoted debt changed', retryable: true,
+    });
+    const { outcome, state, dispatch } = await runAuthority({}, { preSendCheck });
+    expect(outcome).toEqual({ ok: false });
+    expect(state.boundaryBlock).toMatchObject({ code: 'PREVISIT_QUOTE_CHANGED', retryable: true });
+    expect(state.handoffStarted).toBe(false);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
 });

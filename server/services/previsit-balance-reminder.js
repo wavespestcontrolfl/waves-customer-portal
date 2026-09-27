@@ -397,7 +397,7 @@ function quotedBalanceStillOwed({ visit, quotedInvoices, quotedDuesCents }) {
         return changed('dunning stopped for a quoted invoice');
       }
     }
-    if (quotedDuesCents > 0 && (await currentDuesAllowanceCents(customerId, database)) !== quotedDuesCents) {
+    if ((await currentDuesAllowanceCents(customerId, database)) !== quotedDuesCents) {
       return changed('quoted monthly dues changed before dispatch');
     }
     return { ok: true };
