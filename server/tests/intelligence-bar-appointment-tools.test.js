@@ -109,7 +109,7 @@ function wireDb(queues) {
     // The member one-off discount lookup (owner 2026-09-27): no member
     // discount rows unless a test queues its own.
     if (table === 'discounts' && !queues.discounts) {
-      return { where() { return this; }, orderBy() { return this; }, select: () => Promise.resolve([]) };
+      return { where() { return this; }, whereIn() { return this; }, orderBy() { return this; }, select: () => Promise.resolve([]) };
     }
     const q = queues[table];
     if (!q || q.length === 0) throw new Error(`Unexpected db('${table}') call`);
@@ -230,6 +230,22 @@ describe('create_appointment', () => {
       'appt-1', 'cust-1', '2099-01-15T08:00', 'Pest Control', 'admin_ib',
       { sendConfirmation: true, deferConfirmation: true, closeReminderWindows: true, fromCommittedRow: true },
     );
+  });
+
+  test('a registration that returns no row (its own failure path) is a failure too: warned, and no confirmation is attempted', async () => {
+    AppointmentReminders.registerAppointment.mockResolvedValueOnce(null);
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) })],
+      scheduled_services: [chain(), chain()],
+    });
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '9:00 AM',
+    });
+    expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(result.warning).toMatch(/reminder registration failed/);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(AppointmentReminders.sendConfirmation).not.toHaveBeenCalled();
   });
 
   test('a reminder-registration failure never fails the already-committed create', async () => {
@@ -674,13 +690,16 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
     const LINE_DISCOUNT_COLS = {
       line_discount_id: {}, line_discount_name: {}, line_discount_type: {}, line_discount_amount: {}, line_discount_dollars: {},
     };
+    let memberListing;
     const wireMember = ({ rows, listed, picked, customer = MEMBER }) => {
       const insertChain = chain();
       insertChain.returning.mockImplementation(async () => [{ id: 'appt-1', ...insertChain.insert.mock.calls[0][0] }]);
+      const discounts = discountsQueue(listed, picked);
+      [memberListing] = discounts;
       wireDb({
         customers: [chain({ first: jest.fn().mockResolvedValue(customer) }), chain({ first: jest.fn().mockResolvedValue(customer) })],
         services: [catalog(rows), catalog(rows)],
-        discounts: discountsQueue(listed, picked),
+        discounts,
         // probe, the stamp helper's column read, then the insert
         scheduled_services: [chain(), chain({ columnInfo: jest.fn().mockResolvedValue(LINE_DISCOUNT_COLS) }), insertChain],
       });
@@ -701,6 +720,9 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
         line_discount_amount: 15,
         line_discount_dollars: 37.5,
       });
+      // Only the catalog's member rows, by stable key — an unrelated Bronze
+      // promotion can never pose as the member discount.
+      expect(memberListing.whereIn).toHaveBeenCalledWith('discount_key', ['waveguard_member_wdo', 'waveguard_member']);
     });
 
     test('the catalog\'s own member row wins by priority: a WDO inspection is free for members — a real $0, nothing invoiced', async () => {
@@ -711,6 +733,38 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       expect(insertChain.insert.mock.calls[0][0]).toMatchObject({
         estimated_price: 0, primary_line_price: 250, create_invoice_on_complete: false, line_discount_id: 'disc-wdo', line_discount_dollars: 250,
       });
+    });
+
+    test('a recurring customer with no tier or rate qualifies through live recurring coverage (the "or recurring customers" half)', async () => {
+      const recurringOnly = {
+        ...PER_VISIT, billing_mode: 'per_application', per_application_fee: 95, waveguard_tier: null, monthly_rate: 0, active: true,
+      };
+      const insertChain = chain();
+      insertChain.returning.mockImplementation(async () => [{ id: 'appt-1', ...insertChain.insert.mock.calls[0][0] }]);
+      const live = () => chain({ first: jest.fn().mockResolvedValue({ id: 'rec-visit' }) });
+      wireDb({
+        customers: [chain({ first: jest.fn().mockResolvedValue(recurringOnly) }), chain({ first: jest.fn().mockResolvedValue(recurringOnly) })],
+        services: [catalog([ONE_TIME_PEST]), catalog([ONE_TIME_PEST])],
+        discounts: discountsQueue([GENERIC], GENERIC),
+        // live-recurring check (a live visit), probe, the locked pass's
+        // check, the stamp helper's column read, then the insert
+        scheduled_services: [live(), chain(), live(), chain({ columnInfo: jest.fn().mockResolvedValue(LINE_DISCOUNT_COLS) }), insertChain],
+      });
+      const result = await book({ _booking_price: 212.5, _booking_service_id: 'svc-otp' });
+      expect(result).toMatchObject({ success: true, price: 212.5 });
+      expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 212.5, line_discount_id: 'disc-member' });
+    });
+
+    test('a member outside the dues lane booking one extra visit of a plan service gets the member discount — the visit is a one-off', async () => {
+      const foam = {
+        id: 'svc-foam', name: 'Recurring Termite Foam Service', short_name: null, service_key: 'foam_recurring',
+        price_range_min: '146.00', base_price: '164.00', category: 'termite', billing_type: 'recurring',
+      };
+      const perAppMember = { ...PER_VISIT, billing_mode: 'per_application', per_application_fee: 95, waveguard_tier: 'Gold', active: true };
+      const insertChain = wireMember({ rows: [foam], listed: [GENERIC], picked: GENERIC, customer: perAppMember });
+      const result = await book({ service_type: foam.name, _booking_price: 124.1, _booking_service_id: 'svc-foam' });
+      expect(result.success).toBe(true);
+      expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 124.1, primary_line_price: 146, line_discount_id: 'disc-member' });
     });
 
     test('a stated price is the operator\'s own number: no member discount is looked up or applied', async () => {
@@ -729,7 +783,9 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
         customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) }), chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })],
         services: [catalog([ONE_TIME_PEST]), catalog([ONE_TIME_PEST])],
         discounts: [listing([GENERIC]), listing([GENERIC])],
-        scheduled_services: [chain(), insertChain],
+        // the live-recurring check (none) on the preflight pass, the probe,
+        // the same check on the locked pass, then the insert
+        scheduled_services: [chain(), chain(), chain(), insertChain],
       });
       const result = await book({ _booking_price: 250, _booking_service_id: 'svc-otp' });
       expect(result.success).toBe(true);

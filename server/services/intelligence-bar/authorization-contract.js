@@ -760,7 +760,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
     if (bookingConfirmationText) {
-      contactLabel = 'Customer will be texted a booking confirmation, as on the Schedule screen (skipped if they opted out of texts or have no mobile number)';
+      contactLabel = 'Customer gets a booking confirmation, as on the Schedule screen: by text, email or both per their notice settings (email is the fallback when a text cannot go out), to their appointment contacts as they stand when it sends; after 8 PM it waits for 8 AM';
     }
     // Derived from the PINNED recipient set for batch moves (GH r21 P2):
     // a stop pinned with no SMS recipient cannot be texted — the card

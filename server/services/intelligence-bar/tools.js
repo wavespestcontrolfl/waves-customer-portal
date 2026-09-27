@@ -302,7 +302,7 @@ The first call returns a PREVIEW (before/after facts) and nothing changes; the o
     description: `Create a new scheduled service appointment.
 service_type examples (catalog names): "Quarterly Pest Control Service", "Bi-Monthly Lawn Care Service", "Seasonal Mosquito Control Service", "Bi-Monthly Tree & Shrub Care Service", "Waves Assessment". Quarterly Tree & Shrub is retired for new sales (existing quarterly plans only).
 time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".
-price: the visit price in dollars when the user states one. A stated price needs service_type to be the exact catalog name. Omit price to use the catalog price for service_type (a WaveGuard member's one-off gets the member discount); the confirmation card shows the price either way. A booking with a time texts the customer a confirmation, as the Schedule screen does. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.`,
+price: the visit price in dollars when the user states one. A stated price needs service_type to be the exact catalog name. Omit price to use the catalog price for service_type (a WaveGuard member's one-off gets the member discount); the confirmation card shows the price either way. A booking with a time sends the customer a booking confirmation (text, email or both per their settings), as the Schedule screen does. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -2433,32 +2433,54 @@ async function resolveTechnicianByName(name) {
   return matches[0] || null;
 }
 
-// The WaveGuard member discount a member's one-off catalog service carries
-// (owner 2026-09-27: "members or recurring customers get 15% off"). Every
-// customer with a live recurring series is a member under the discount
-// engine's own Bronze floor (tier, or active monthly-rate member), so its
-// eligibility check IS that rule. The catalog's member rows are the
-// percentage, non-tier rows with a Bronze floor, taken in the catalog's own
-// priority order: a service-specific one first (a WDO inspection is free
-// for members), else the generic 15% WaveGuard Member Discount.
+// The catalog's WaveGuard member discounts, by their stable keys — never
+// inferred from shared attributes, so an unrelated Bronze promotion can
+// never pose as one. The discount engine's own eligibility then picks the
+// row that fits this service (the Termite Inspection row names
+// wdo_inspection), in the catalog's priority order.
+const MEMBER_DISCOUNT_KEYS = ['waveguard_member_wdo', 'waveguard_member'];
+
+// Live recurring coverage: a future, not-terminal recurring visit — the
+// "or recurring customers" half of the owner's rule (2026-09-27).
+async function hasLiveRecurringCoverage(customerId, conn = db) {
+  const { terminalHistoryStatuses } = require('../service-library');
+  const row = await conn('scheduled_services')
+    .where({ customer_id: customerId, is_recurring: true })
+    .whereNotIn('status', terminalHistoryStatuses())
+    .where('scheduled_date', '>=', etDateString())
+    .first('id');
+  return !!row;
+}
+
+// The WaveGuard member discount a member's one-off catalog visit carries
+// (owner 2026-09-27: "members or recurring customers get 15% off"): the
+// first member row the discount engine finds eligible — for a member by
+// tier or monthly rate, or for a customer with live recurring coverage,
+// which meets the same Bronze floor the engine opens for recurring
+// coverage (the only extra query, run only when the plain check fails).
+// Returns { row, recurringCustomer } or null.
 async function memberOneOffDiscount({ customer, catalogRow, listPrice, conn = db }) {
   const rows = await conn('discounts')
-    .where({
-      is_active: true, show_in_invoices: true, requires_waveguard_tier: 'Bronze',
-      discount_type: 'percentage', is_waveguard_tier_discount: false,
-    })
-    .where((q) => q.whereNull('service_key_filter').orWhere('service_key_filter', catalogRow.service_key || ''))
+    .whereIn('discount_key', MEMBER_DISCOUNT_KEYS)
+    .where({ is_active: true, show_in_invoices: true })
     .orderBy('priority', 'asc')
     .orderBy('id', 'asc')
     .select('*');
+  if (!Array.isArray(rows) || !rows.length) return null;
   const DiscountEngine = require('../discount-engine');
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const failures = await DiscountEngine.manualEligibilityFailures(row, customer, {
-      subtotal: listPrice, serviceKey: catalogRow.service_key || null, serviceCategory: catalogRow.category || null,
-    }, conn);
-    if (!failures.length) return row;
-  }
-  return null;
+  const context = { subtotal: listPrice, serviceKey: catalogRow.service_key || null, serviceCategory: catalogRow.category || null };
+  const firstEligible = async (recurringMembershipBooking) => {
+    for (const row of rows) {
+      const failures = await DiscountEngine.manualEligibilityFailures(row, customer, { ...context, recurringMembershipBooking }, conn);
+      if (!failures.length) return row;
+    }
+    return null;
+  };
+  const byMembership = await firstEligible(false);
+  if (byMembership) return { row: byMembership, recurringCustomer: false };
+  if (!(await hasLiveRecurringCoverage(customer.id, conn))) return null;
+  const byRecurring = await firstEligible(true);
+  return byRecurring ? { row: byRecurring, recurringCustomer: true } : null;
 }
 
 // The booking's price, the way a Schedule-screen booking gets one (owner
@@ -2539,13 +2561,14 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   // Lazy: the route module is large and requires services that require this
   // module (same avoid-a-route-load-cycle pattern as schedule-tools).
   const { buildAppointmentPricing } = require('../../routes/admin-schedule');
-  // A member's one-off catalog service carries the member discount, as a
-  // line discount through the same builder a picked discount rides on the
-  // Schedule screen. Not for a stated price (the operator's own number), a
-  // recurring plan row (a dues member's is covered above), or the one-time
-  // mosquito line (its lot ladder already prices members as recurring
-  // customers).
-  const memberDiscount = !stated && catalogRow.billing_type !== 'recurring' && Number(catalogDefault) > 0
+  // A member's one-off visit carries the member discount, as a line
+  // discount through the same builder a picked discount rides on the
+  // Schedule screen. This tool books ONE non-recurring visit, so any
+  // catalog-priced visit here is a one-off (a dues member's plan visit
+  // already returned unpriced above). Not for a stated price (the
+  // operator's own number) or the one-time mosquito line (its lot ladder
+  // already prices members as recurring customers).
+  const memberDiscount = !stated && Number(catalogDefault) > 0
     ? await memberOneOffDiscount({ customer, catalogRow, listPrice: Number(catalogDefault), conn })
     : null;
   const pricing = await buildAppointmentPricing({
@@ -2553,7 +2576,10 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
     serviceType,
     serviceId: catalogRow.id,
     primaryLinePrice: stated ? statedPrice : catalogDefault,
-    ...(memberDiscount ? { primaryLineDiscount: { discountId: memberDiscount.id } } : {}),
+    ...(memberDiscount ? { primaryLineDiscount: { discountId: memberDiscount.row.id } } : {}),
+    // The builder re-checks the discount's eligibility; a recurring
+    // customer's Bronze floor rides the same recurring-coverage flag.
+    recurringMembershipBooking: !!memberDiscount?.recurringCustomer,
     customer,
   });
   // $0 is a real price only when a member discount made the visit free (the
@@ -2982,12 +3008,15 @@ async function createAppointment(input, actionContext = {}) {
     // The Schedule create's own options: fromCommittedRow reads the time
     // from the committed row, and a windowless booking's row is a
     // non-delivering placeholder (it never texts an 08:00 nobody chose).
-    await AppointmentReminders.registerAppointment(
+    const registered = await AppointmentReminders.registerAppointment(
       appointment.id, customer_id,
       `${dateStr}T${win.start || '08:00'}`,
       service_type, 'admin_ib',
       { sendConfirmation: true, deferConfirmation: true, closeReminderWindows: !win.start, fromCommittedRow: true },
     );
+    // registerAppointment reports its own failures as null (it alerts and
+    // never rejects) — the same partial failure as a throw.
+    if (!registered) throw new Error('registerAppointment returned no reminder row');
   } catch (err) {
     logger.error(`[intelligence-bar] reminder registration failed for appointment ${appointment.id}: ${err.message}`);
     // Surfaced on the confirm card as a partial-failure warning (W0B): the

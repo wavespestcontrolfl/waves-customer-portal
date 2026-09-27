@@ -1059,7 +1059,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       expect(body.pendingActions[0].params.price).toBe('$212.50 (catalog price $250.00 less 15% WaveGuard Member Discount) — invoiced when the visit is completed');
       // A timed booking texts its confirmation — the contract says so.
       const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
-      expect(labels).toContainEqual(expect.stringMatching(/^Customer will be texted a booking confirmation/));
+      expect(labels).toContainEqual(expect.stringMatching(/^Customer gets a booking confirmation, as on the Schedule screen: by text, email or both/));
     });
   });
 
