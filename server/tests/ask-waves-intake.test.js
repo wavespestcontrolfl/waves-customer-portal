@@ -73,6 +73,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     'There is a chance of mild irritation, so follow the label.',
     "The spray won't do a thing to termites; they need a soil treatment.",
     'Termites are unable to harm your home once treated.',
+    'Las termitas son incapaces de dañar su hogar una vez tratado.',
     'Ants are incapable of crossing the barrier once it is applied.',
   ])('leaves compliant replies untouched: %s', (reply) => {
     expect(scrubUnsafeClaims({ ...base, reply }).reply).toBe(reply);
