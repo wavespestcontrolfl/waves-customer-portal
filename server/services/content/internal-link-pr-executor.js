@@ -16,6 +16,7 @@ const policy = require('./internal-link-seo-policy');
 const judge = require('./internal-link-judge');
 const protectedPages = require('./protected-pages');
 const { runExclusive } = require('../../utils/cron-lock');
+const { etDateString } = require('../../utils/datetime-et');
 // Text-level checks are OWNED by the planner and shared here — the planner
 // applies every one of them before its site-wide cap, so it never plans a
 // task this executor's gate would reject on corpus-knowable grounds.
@@ -215,7 +216,10 @@ class InternalLinkPrExecutor {
         continue;
       }
 
-      selected.push({ task, source, target, validation, patchedContent, targetUrl });
+      // Content edits bump the page's freshness field (sitemap lastmod), the
+      // same rule publishRefresh / metadata rewrites follow; a one-line edit
+      // so the rest of the frontmatter stays byte-identical.
+      selected.push({ task, source, target, validation, patchedContent: bumpFreshnessLine(patchedContent, etDateString()), targetUrl });
       sourceCounts.set(sourceKey, sourceCount + 1);
       targetCounts.set(targetUrl, targetCount + 1);
       if (selected.length >= limit) break;
@@ -319,8 +323,12 @@ class InternalLinkPrExecutor {
   // Findings close the PR and park its tasks as skipped; a moved main closes
   // it and returns the tasks to patch_candidate for the next sweep.
   // Kill switch: AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE=false.
-  async runAutoMerge({ now = new Date() } = {}) {
+  // Called from the autonomous PR poller's tick (pollInternalLinkPr), which
+  // passes allowMerge=false once its per-tick merge cap is spent: checks
+  // still run (and close failures), the merge waits for a later tick.
+  async runAutoMerge({ now = new Date(), allowMerge = true } = {}) {
     if (!envBool('AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE', true)) return { status: 'disabled' };
+    if (!require('../../config/feature-gates').isEnabled('autonomousContentEngine')) return { status: 'disabled' };
     if (!shadowOff()) return { status: 'shadow' };
     const tasks = await db(TABLE).where('status', 'pr_open').whereNotNull('astro_pr_url').orderBy('updated_at', 'asc').select('*');
     if (!tasks.length) return { status: 'no_open_pr' };
@@ -330,8 +338,18 @@ class InternalLinkPrExecutor {
     if (!prNumber) return { status: 'pr_number_unknown', pr_url: prUrl };
 
     const pr = await GitHubClient.getPr(prNumber);
+    if (pr && !pr.merged && String(pr.state).toLowerCase() === 'closed') {
+      // Closed unmerged (by a gate here whose branch retirement failed, or by
+      // hand): retire the branch before the tasks leave pr_open.
+      const done = await this._closeLinkPr(pr, prTasks, {
+        status: 'failed',
+        failureReason: 'internal_link_pr_closed_unmerged',
+        note: 'Link PR closed without merging; branch retired.',
+      });
+      return { status: done ? 'closed' : 'hold', reason: done ? 'pr_closed_unmerged' : 'branch_retire_pending', pr_number: prNumber };
+    }
     if (!pr || String(pr.state).toLowerCase() !== 'open') {
-      // Merged/closed PRs are settled by runPostMergeVerification.
+      // Merged PRs are settled by runPostMergeVerification.
       return { status: 'pr_not_open', pr_number: prNumber };
     }
     if (prTasks.some((t) => t.executor_version !== PR_EXECUTOR_VERSION)) {
@@ -359,14 +377,10 @@ class InternalLinkPrExecutor {
       return { status: 'closed', reason: diff.reason, pr_number: prNumber };
     }
 
-    const { latestDeploymentForBranch, extractStatus, deploymentCommitSha } = require('../content-astro/pages-poll');
-    const deploy = await latestDeploymentForBranch(pr.head?.ref);
-    if (!deploy) return { status: 'hold', reason: 'preview_build_pending', pr_number: prNumber };
-    const buildStatus = extractStatus(deploy).status;
-    if (String(deploymentCommitSha(deploy) || '').toLowerCase() !== headSha) {
-      return { status: 'hold', reason: 'preview_build_stale_commit', pr_number: prNumber };
-    }
-    if (buildStatus === 'failure') {
+    // Same preview gate the blog lane merges on (autonomous-pr-poller).
+    const { previewGate } = require('./autonomous-pr-poller');
+    const preview = await previewGate(pr);
+    if (preview.failed) {
       await this._closeLinkPr(pr, prTasks, {
         status: 'failed',
         failureReason: 'internal_link_preview_build_failed',
@@ -374,7 +388,7 @@ class InternalLinkPrExecutor {
       });
       return { status: 'closed', reason: 'preview_build_failed', pr_number: prNumber };
     }
-    if (buildStatus !== 'success') return { status: 'hold', reason: `preview_build_${buildStatus || 'pending'}`, pr_number: prNumber };
+    if (!preview.ok) return { status: 'hold', reason: preview.reason, pr_number: prNumber };
 
     const codex = await this._codexVerdict(prNumber, headSha);
     if (codex.findings) {
@@ -390,6 +404,7 @@ class InternalLinkPrExecutor {
     if (!codex.clean && new Date(now).getTime() - openedAt < graceMs) {
       return { status: 'hold', reason: 'codex_review_pending', pr_number: prNumber };
     }
+    if (!allowMerge) return { status: 'hold', reason: 'merge_cap_reached', pr_number: prNumber };
 
     let merged;
     try {
@@ -435,7 +450,7 @@ class InternalLinkPrExecutor {
       const linkRe = new RegExp(`\\[([^\\]\\n]+)\\]\\(${escapeRegExp(targetUrl)}\\)`, 'g');
       const links = head.content.match(linkRe) || [];
       if (links.length !== 1) return { ok: false, reason: 'diff_link_count' };
-      if (head.content.replace(linkRe, '$1') !== base.content) return { ok: false, reason: 'diff_not_link_only_or_main_moved' };
+      if (restoreFreshnessLine(head.content.replace(linkRe, '$1'), base.content) !== base.content) return { ok: false, reason: 'diff_not_link_only_or_main_moved' };
     }
     return { ok: true, files: [...changed] };
   }
@@ -470,16 +485,27 @@ class InternalLinkPrExecutor {
   }
 
   async _closeLinkPr(pr, prTasks, { status, skipReason = null, failureReason = null, note }) {
-    try {
-      await GitHubClient.createIssueComment(pr.number, note);
-    } catch (err) {
-      logger.warn(`[internal-link-pr-executor] close note failed for PR #${pr.number}: ${err.message}`);
+    if (String(pr.state).toLowerCase() !== 'closed') {
+      try {
+        await GitHubClient.createIssueComment(pr.number, note);
+      } catch (err) {
+        logger.warn(`[internal-link-pr-executor] close note failed for PR #${pr.number}: ${err.message}`);
+      }
+      await GitHubClient.closePr(pr.number);
     }
-    await GitHubClient.closePr(pr.number);
+    // Clear the tasks' PR lifecycle only once the rejected branch is
+    // confirmed gone: while it survives, the PR could be reopened and merged,
+    // so the tasks stay pr_open (holding the one-open-PR guard) and the next
+    // poll tick retries the retirement (runAutoMerge's closed-PR path).
+    let retired = false;
     try {
-      await GitHubClient.retireBranch(pr.head?.ref);
+      retired = await GitHubClient.retireBranch(pr.head?.ref);
     } catch (err) {
       logger.warn(`[internal-link-pr-executor] branch cleanup failed for PR #${pr.number}: ${err.message}`);
+    }
+    if (!retired) {
+      logger.warn(`[internal-link-pr-executor] PR #${pr.number} closed but branch ${pr.head?.ref} not yet retired; tasks stay tracked`);
+      return false;
     }
     for (const task of prTasks) {
       await db(TABLE).where({ id: task.id, status: 'pr_open' }).update({
@@ -495,6 +521,7 @@ class InternalLinkPrExecutor {
       });
     }
     logger.info(`[internal-link-pr-executor] closed link PR #${pr.number}: ${note}`);
+    return true;
   }
 
   async _sourceProtection(source, task) {
@@ -616,6 +643,15 @@ class InternalLinkPrExecutor {
       // leaving it just as stuck. The periodic verify loop then auto-clears
       // these instead of accumulating pr_open zombies.
       if (String(prInfo.state).toLowerCase() === 'closed') {
+        // Retire the branch first: while it exists the PR can be reopened and
+        // merged, so the task keeps its PR lifecycle until it is confirmed gone.
+        let retired = false;
+        try {
+          retired = await GitHubClient.retireBranch(prInfo.head?.ref);
+        } catch (err) {
+          logger.warn(`[internal-link-pr-executor] branch retirement failed for PR #${resolvedPrNumber}: ${err.message}`);
+        }
+        if (!retired) return { task_id: task.id, status: task.status, transient: true, skipped: 'branch_retire_pending', pr_number: resolvedPrNumber };
         const reason = 'internal_link_pr_closed_unmerged';
         await this._failAbandonedPrTask(task.id, reason);
         return { task_id: task.id, status: 'failed', failure_reason: reason, pr_number: resolvedPrNumber };
@@ -1367,6 +1403,48 @@ function escapeRegExp(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Freshness field per content type: services carry `modified`
+// ("YYYY-MM-DDT12:00:00"), blog v2 carries `updated` ("YYYY-MM-DD") — the
+// same values astro-publisher writes on a metadata rewrite.
+const FRESHNESS_FIELDS = [
+  { key: 'modified', value: (day) => `${day}T12:00:00` },
+  { key: 'updated', value: (day) => day },
+];
+
+function freshnessLineRe(key) {
+  return new RegExp(`^(${key}:[ \\t]*)(["']?)([^"'\\r\\n]*)\\2[ \\t]*$`, 'm');
+}
+
+function bumpFreshnessLine(body, day) {
+  const block = frontmatterBlock(body);
+  if (!block) return body;
+  for (const { key, value } of FRESHNESS_FIELDS) {
+    const re = freshnessLineRe(key);
+    if (!re.test(block)) continue;
+    const bumped = block.replace(re, (_m, prefix, quote) => `${prefix}${quote}${value(day)}${quote}`);
+    return bumped + String(body).slice(block.length);
+  }
+  return body;
+}
+
+// Undo a freshness bump on `head` by restoring base's line for that field —
+// only when head's new value is a well-formed date for the field. Anything
+// else in the frontmatter still has to match byte-for-byte.
+function restoreFreshnessLine(head, base) {
+  const headBlock = frontmatterBlock(head);
+  const baseBlock = frontmatterBlock(base);
+  if (!headBlock || !baseBlock) return head;
+  for (const { key } of FRESHNESS_FIELDS) {
+    const re = freshnessLineRe(key);
+    const h = re.exec(headBlock);
+    const b = re.exec(baseBlock);
+    if (!h || !b || h[0] === b[0]) continue;
+    if (!/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2})?$/.test(h[3])) return head;
+    return headBlock.replace(re, () => b[0]) + String(head).slice(headBlock.length);
+  }
+  return head;
+}
+
 function frontmatterUnchanged(before, after) {
   return frontmatterBlock(before) === frontmatterBlock(after);
 }
@@ -1613,6 +1691,8 @@ async function requestCodexReview(pr, headSha, selected) {
 module.exports = new InternalLinkPrExecutor();
 module.exports.InternalLinkPrExecutor = InternalLinkPrExecutor;
 module.exports._internals = {
+  bumpFreshnessLine,
+  restoreFreshnessLine,
   EXECUTOR_VERSION,
   PR_EXECUTOR_VERSION,
   evaluateDryRunTask,

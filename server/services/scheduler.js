@@ -2308,23 +2308,6 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Internal-link GSC target planning failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
-  // EVERY 15 MIN — auto-merge the open internal-link PR once its checks pass
-  // (link-only diff, green hub preview, no Codex findings on the head); see
-  // InternalLinkPrExecutor.runAutoMerge. No human approval step (owner
-  // 2026-09-27). Kill switch: AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE=false.
-  cron.schedule('*/15 * * * *', async () => {
-    if (!isEnabled('autonomousContentEngine')) return;
-    try {
-      await runExclusive('internal-link-auto-merge', async () => {
-        const executor = require('./content/internal-link-pr-executor');
-        const result = await executor.runAutoMerge();
-        if (result?.status && !['no_open_pr', 'shadow', 'disabled'].includes(result.status)) {
-          logger.info(`Internal-link auto-merge: ${result.status}${result.reason ? ` (${result.reason})` : ''}${result.pr_number ? ` PR #${result.pr_number}` : ''}`);
-        }
-      });
-    } catch (err) { logger.error(`Internal-link auto-merge failed: ${err.message}`); }
-  }, { timezone: 'America/New_York' });
-
   // DAILY 1PM ET — Autonomous Content Engine catch-up. A deploy restarting
   // the container mid-batch killed the 9am run in place on 2026-06-12 —
   // zero posts AND zero alerts, with claimable work still queued. The
@@ -3316,8 +3299,9 @@ function initScheduledJobs() {
   // human merge → completes the run (IndexNow + internal-link planning),
   // close-unmerged → fails it, and — ONLY when AUTONOMOUS_BLOG_AUTO_MERGE is
   // set (default off) — merges green + Codex-clear PRs itself, capped per
-  // tick. runExclusive: a merge and its post-merge chain must not double-run
-  // across overlapping deploy instances.
+  // tick. The internal-link lane rides the same tick and cap (open link PR →
+  // InternalLinkPrExecutor.runAutoMerge). runExclusive: a merge and its
+  // post-merge chain must not double-run across overlapping deploy instances.
   // =========================================================================
   cron.schedule('*/2 * * * *', async () => {
     try {

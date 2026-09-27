@@ -866,7 +866,8 @@ describe('internal-link dry-run executor helpers', () => {
       update: jest.fn(async (patch) => { updatePatch = patch; return 1; }),
     };
     db.mockReturnValue(builder);
-    GitHubClient.getPr.mockResolvedValue({ number: 178, merged: false, state: 'closed' });
+    GitHubClient.getPr.mockResolvedValue({ number: 178, merged: false, state: 'closed', head: { ref: 'content/internal-link-x' } });
+    GitHubClient.retireBranch = jest.fn(async () => true);
 
     const result = await instance.verifyMergedTask({
       id: 'task-closed',
@@ -885,6 +886,16 @@ describe('internal-link dry-run executor helpers', () => {
       pr_commit_sha: null,
     });
     expect(instance._markTaskMerged).not.toHaveBeenCalled();
+  });
+
+  test('a closed-unmerged PR keeps its lifecycle until its branch is confirmed retired', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._failAbandonedPrTask = jest.fn();
+    GitHubClient.getPr.mockResolvedValue({ number: 178, merged: false, state: 'closed', head: { ref: 'content/internal-link-x' } });
+    GitHubClient.retireBranch = jest.fn(async () => false);
+    const result = await instance.verifyMergedTask({ id: 't', status: 'pr_open', astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/178' });
+    expect(result).toMatchObject({ status: 'pr_open', skipped: 'branch_retire_pending' });
+    expect(instance._failAbandonedPrTask).not.toHaveBeenCalled();
   });
 
   test('fails PR tasks terminally (clearing lifecycle fields) when the stored Astro PR 404s', async () => {
@@ -1347,11 +1358,53 @@ describe('internal-link PR auto-merge', () => {
     expect(GitHubClient.mergePr).not.toHaveBeenCalled();
   });
 
+  test('when the poller\'s merge cap is spent, checks run but the merge waits', async () => {
+    expect(await instance.runAutoMerge({ allowMerge: false })).toMatchObject({ status: 'hold', reason: 'merge_cap_reached' });
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('accepts a freshness-date bump alongside the link, and nothing else in frontmatter', async () => {
+    const base = '---\ntitle: "T"\nmodified: "2026-06-19T00:00:00"\n---\nA termite inspection in Florida helps.\n';
+    const head = '---\ntitle: "T"\nmodified: "2026-09-27T12:00:00"\n---\nA [termite inspection in Florida](/termite-inspection/) helps.\n';
+    GitHubClient.getFile.mockImplementation(async (_p, ref) => ({ content: ref === HEAD ? head : base }));
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'merged' });
+
+    GitHubClient.mergePr.mockClear();
+    GitHubClient.getFile.mockImplementation(async (_p, ref) => ({ content: ref === HEAD ? head.replace('title: "T"', 'title: "Changed"') : base }));
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'diff_not_link_only_or_main_moved' });
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a PR closed without merging is cleared only after its branch is retired', async () => {
+    GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'closed', merged: false, head: { sha: HEAD, ref: 'content/internal-link-x' }, base: { ref: 'main' } });
+    instance._closeLinkPr = jest.fn(async () => false);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'branch_retire_pending' });
+    instance._closeLinkPr = jest.fn(async () => true);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'pr_closed_unmerged' });
+  });
+
   test('kill switch and shadow mode disable it', async () => {
     process.env.AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE = 'false';
     expect(await instance.runAutoMerge()).toEqual({ status: 'disabled' });
     delete process.env.AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE;
     process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'true';
     expect(await instance.runAutoMerge()).toEqual({ status: 'shadow' });
+  });
+});
+
+describe('internal-link freshness bump', () => {
+  const { bumpFreshnessLine, restoreFreshnessLine } = executor._internals;
+  test('bumps services modified and blog updated in place, preserving quoting', () => {
+    const svc = '---\ntitle: "T"\nmodified: "2026-06-19T00:00:00"\n---\nBody\n';
+    expect(bumpFreshnessLine(svc, '2026-09-27')).toBe('---\ntitle: "T"\nmodified: "2026-09-27T12:00:00"\n---\nBody\n');
+    const blog = '---\ntitle: T\nupdated: 2026-01-02\n---\nBody\n';
+    expect(bumpFreshnessLine(blog, '2026-09-27')).toBe('---\ntitle: T\nupdated: 2026-09-27\n---\nBody\n');
+    const none = '---\ntitle: T\n---\nBody\n';
+    expect(bumpFreshnessLine(none, '2026-09-27')).toBe(none);
+  });
+  test('restore only undoes a well-formed date on the freshness line', () => {
+    const base = '---\nmodified: "2026-06-19T00:00:00"\n---\nB\n';
+    expect(restoreFreshnessLine('---\nmodified: "2026-09-27T12:00:00"\n---\nB\n', base)).toBe(base);
+    expect(restoreFreshnessLine('---\nmodified: "tomorrow"\n---\nB\n', base)).not.toBe(base);
   });
 });
