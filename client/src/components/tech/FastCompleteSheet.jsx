@@ -5,9 +5,12 @@
 // callback). Owner ask: today's forms are "too long and laborious for techs"
 // for what is, in practice, a quick targeted treatment.
 //
-// Records only what the application record needs — products (house mix
-// prefilled), their amounts and rates, pests targeted, where, how, and the
-// activity seen when the server keeps a tech rating — then submits the FULL
+// Records only what the application record needs for the HOUSE PEST MIX
+// (Taurus SC, Talstar P, surfactant — lib/pest-default-mix.js): which of
+// those went down, their amounts and rates, pests targeted, where, how, and
+// the activity seen when the server keeps a tech rating. Any other product
+// goes through the full form, which owns per-product method/unit rules for
+// the whole catalog. Then it submits the FULL
 // completion endpoint (POST /admin/dispatch/:id/complete →
 // completeScheduledService), NOT /pest-recap: the full path records
 // per-product method, targets, amounts, rates and areas. "Full form" reaches
@@ -19,7 +22,7 @@
 //
 // Product catalog and visit identity come from the SAME context endpoint
 // ServiceRecapModal loads (GET /admin/dispatch/:id/pest-recap/context).
-import React, { useCallback, useEffect, useMemo, useRef, useState, useId } from 'react';
+import React, { useCallback, useEffect, useRef, useState, useId } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
@@ -31,7 +34,7 @@ import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import { UiSurface, Button, Field, Input, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
-// House pest mix totals are all in whole/fractional ounces (pest-default-mix.js).
+// Fallback amount unit when the resolver names none.
 const DEFAULT_MIX_UNIT = 'oz';
 // Same six totals units the full completion form offers (SchedulePage's
 // STANDARD_AMOUNT_UNIT_OPTIONS), all on the server's VALID_RATE_UNITS list.
@@ -98,23 +101,20 @@ function toggleInSet(set, value) {
   return next;
 }
 
-// A row keeps its catalog product: its method comes from the catalog (the
-// shared pest resolver) unless it is a spray, which follows the How row; its
-// rate is resolved at the method actually submitted, so the recorded rate
-// and method always agree. A rate the tech typed (rateInput) wins.
+// A house-mix row keeps its catalog product: its method comes from the
+// catalog (the shared pest resolver) unless it is a spray, which follows the
+// How row; its rate AND amount unit are resolved at the method actually
+// submitted — the same resolver the full form seeds the mix with — so the
+// record's method, rate and unit agree. What the tech typed wins.
 function productRow(product, serviceType, totalAmount) {
-  const catalogMethod = defaultApplicationMethodForLine(product, 'pest', { serviceType });
-  const { amountUnit } = resolveRatePrefill(product, { applicationMethod: catalogMethod, serviceLine: 'pest' });
   return {
     product,
     productId: product.id,
     name: product.name,
     totalAmount,
-    // House-mix totals are ounces; an added product starts in its own base
-    // unit (per-basis "each/station" records a count of "each").
-    amountUnit: totalAmount === '' ? (amountUnit || DEFAULT_MIX_UNIT) : DEFAULT_MIX_UNIT,
-    catalogMethod,
+    catalogMethod: defaultApplicationMethodForLine(product, 'pest', { serviceType }),
     rateInput: null,
+    amountUnitInput: null,
     active: true,
   };
 }
@@ -133,7 +133,12 @@ function rowRate(row, sprayMethod) {
     ? resolved.labelMaxRate
     : resolved.usePestSprayDefault ? null : parseFloat(String(row.product?.max_label_rate_per_1000 ?? ''));
   const max = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : null;
-  return { rate: row.rateInput ?? prefill, rateUnit: resolved.rateUnit || '', max };
+  return {
+    rate: row.rateInput ?? prefill,
+    rateUnit: resolved.rateUnit || '',
+    max,
+    amountUnit: row.amountUnitInput ?? (resolved.amountUnit || DEFAULT_MIX_UNIT),
+  };
 }
 
 // Every requirement the application record needs, in screen order.
@@ -166,13 +171,13 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed }) {
     ...(visitIdentity ? { expectedVisit: visitIdentity } : {}),
     products: rows.filter((row) => row.active).map((row) => {
       const applicationMethod = rowMethod(row, form.method);
-      const { rate, rateUnit } = rowRate(row, form.method);
+      const { rate, rateUnit, amountUnit } = rowRate(row, form.method);
       return {
         productId: row.productId,
         applicationMethod,
         targets,
         totalAmount: Number(row.totalAmount),
-        amountUnit: row.amountUnit,
+        amountUnit,
         applicationArea,
         ...(Number(rate) > 0 && rateUnit ? { rate: Number(rate), rateUnit } : {}),
         ...(applicationMethod === 'perimeter_spray' ? { areaValue: Number(form.linearFt), areaUnit: 'linear_ft' } : {}),
@@ -195,7 +200,7 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed }) {
 // before anything can be completed here.
 function useFastCompleteContext({ base, request, serviceType }) {
   const [ctx, setCtx] = useState({
-    loading: true, loadError: '', blockedReason: '', catalog: [], rows: [], visitIdentity: null,
+    loading: true, loadError: '', blockedReason: '', rows: [], visitIdentity: null,
     rating: { allowed: false, scaleLabels: null },
   });
   useEffect(() => {
@@ -219,7 +224,6 @@ function useFastCompleteContext({ base, request, serviceType }) {
           blockedReason: reclassified
             ? 'This visit is no longer a pest re-service. Use the full form.'
             : closed ? `This visit is already ${visit.status}. Use the full form to edit it.` : '',
-          catalog: products,
           rows: pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, serviceType, totalAmount)),
           visitIdentity: recapVisitIdentity(visit),
           rating: { allowed: ratingContract?.allowed === true, scaleLabels: ratingContract?.scaleLabels || null },
@@ -348,14 +352,14 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
           )}
           <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={close} disabled={submitting} aria-label="Close">×</Button>
         </header>
-        <SheetBody service={service} ctx={ctx} submission={submission} locked={locked} onCompleted={onCompleted} />
+        <SheetBody service={service} ctx={ctx} submission={submission} locked={locked} onCompleted={onCompleted} onFullForm={onFullForm} />
       </section>
     </UiSurface>,
     document.body,
   );
 }
 
-function SheetBody({ service, ctx, submission, locked, onCompleted }) {
+function SheetBody({ service, ctx, submission, locked, onCompleted, onFullForm }) {
   if (submission.done) {
     return (
       <div className="tech-visit-body">
@@ -372,13 +376,12 @@ function SheetBody({ service, ctx, submission, locked, onCompleted }) {
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   const stop = ctx.loadError || ctx.blockedReason;
   if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
-  return <FastCompleteForm service={service} ctx={ctx} submission={submission} locked={locked} />;
+  return <FastCompleteForm ctx={ctx} submission={submission} locked={locked} onFullForm={onFullForm} />;
 }
 
-function FastCompleteForm({ service, ctx, submission, locked }) {
+function FastCompleteForm({ ctx, submission, locked, onFullForm }) {
   const [rows, setRows] = useState(ctx.rows);
   const [editAmounts, setEditAmounts] = useState(false);
-  const [adding, setAdding] = useState(false);
   const [form, setForm] = useState(() => ({
     pests: new Set(), otherPest: '', areas: new Set(), method: 'spot_treatment', linearFt: '', activity: '', note: '',
   }));
@@ -387,15 +390,6 @@ function FastCompleteForm({ service, ctx, submission, locked }) {
   const updateRow = useCallback((productId, patch) => {
     setRows((prev) => prev.map((row) => (row.productId === productId ? { ...row, ...patch } : row)));
   }, []);
-  // An added product has no house-mix total, so the amount editor opens and
-  // Complete stays blocked until the tech enters what they used.
-  const addProduct = useCallback((product) => {
-    setRows((prev) => (prev.some((row) => row.productId === product.id)
-      ? prev.map((row) => (row.productId === product.id ? { ...row, active: true } : row))
-      : [...prev, productRow(product, service?.serviceType, '')]));
-    setEditAmounts(true);
-    setAdding(false);
-  }, [service?.serviceType]);
   // A rate typed for one spray method doesn't carry to another.
   const chooseMethod = useCallback((next) => {
     setField('method', next);
@@ -412,13 +406,6 @@ function FastCompleteForm({ service, ctx, submission, locked }) {
     );
   };
 
-  if (adding) {
-    return (
-      <div className="tech-visit-body">
-        <AddProductPanel catalog={ctx.catalog} rows={rows} onPick={addProduct} onBack={() => setAdding(false)} />
-      </div>
-    );
-  }
   return (
     <>
       <div className="tech-visit-body">
@@ -431,7 +418,7 @@ function FastCompleteForm({ service, ctx, submission, locked }) {
             onToggleEdit={() => setEditAmounts((on) => !on)}
             onToggleRow={(row) => updateRow(row.productId, { active: !row.active })}
             onUpdateRow={updateRow}
-            onAdd={() => setAdding(true)}
+            onOtherProduct={onFullForm}
           />
           <PestsSection form={form} setField={setField} locked={locked} />
           <ChoiceSection title="Where" columns={3}>
@@ -469,7 +456,7 @@ function FastCompleteForm({ service, ctx, submission, locked }) {
   );
 }
 
-function ProductsSection({ rows, method, editAmounts, locked, onToggleEdit, onToggleRow, onUpdateRow, onAdd }) {
+function ProductsSection({ rows, method, editAmounts, locked, onToggleEdit, onToggleRow, onUpdateRow, onOtherProduct }) {
   return (
     <>
     <ChoiceSection
@@ -484,13 +471,15 @@ function ProductsSection({ rows, method, editAmounts, locked, onToggleEdit, onTo
         <Chip
           disabled={locked}
           key={row.productId}
-          label={hasAmount(row) ? `${row.name} — ${row.totalAmount} ${unitLabel(row.amountUnit)}` : `${row.name} — amount?`}
+          label={hasAmount(row) ? `${row.name} — ${row.totalAmount} ${unitLabel(rowRate(row, method).amountUnit)}` : `${row.name} — amount?`}
           pressed={row.active}
           onClick={() => onToggleRow(row)}
           className={!row.active ? 'tech-visit-product--off' : undefined}
         />
       ))}
-      <Chip disabled={locked} label="+ Add product" onClick={onAdd} />
+      {/* Any product beyond the house mix completes through the full form,
+          which applies the catalog's per-product method and unit rules. */}
+      <Chip disabled={locked} label="+ Other product" onClick={onOtherProduct} />
     </ChoiceSection>
     {editAmounts && rows.filter((row) => row.active).map((row) => (
       <AmountRow key={row.productId} row={row} rate={rowRate(row, method)} onChange={(patch) => onUpdateRow(row.productId, patch)} />
@@ -556,7 +545,7 @@ function NoteField({ note, onChange }) {
 function AmountRow({ row, rate, onChange }) {
   const inputId = useId();
   const rateId = useId();
-  const units = AMOUNT_UNITS.includes(row.amountUnit) ? AMOUNT_UNITS : [...AMOUNT_UNITS, row.amountUnit];
+  const units = AMOUNT_UNITS.includes(rate.amountUnit) ? AMOUNT_UNITS : [...AMOUNT_UNITS, rate.amountUnit];
   const overLabel = rate.max != null && parseFloat(rate.rate) > rate.max;
   return (
     <div className="tech-visit-amount-block">
@@ -575,8 +564,8 @@ function AmountRow({ row, rate, onChange }) {
         <select
           className="ui-control tech-visit-control"
           aria-label={`Unit for ${row.name}`}
-          value={row.amountUnit || DEFAULT_MIX_UNIT}
-          onChange={(e) => onChange({ amountUnit: e.target.value })}
+          value={rate.amountUnit}
+          onChange={(e) => onChange({ amountUnitInput: e.target.value })}
         >
           {units.map((unit) => <option key={unit} value={unit}>{unitLabel(unit)}</option>)}
         </select>
@@ -599,29 +588,5 @@ function AmountRow({ row, rate, onChange }) {
       ) : null}
       {overLabel && <p className="tech-visit-warning" role="status">&gt; label max {rate.max}</p>}
     </div>
-  );
-}
-
-function AddProductPanel({ catalog, rows, onPick, onBack }) {
-  const [query, setQuery] = useState('');
-  const products = useMemo(() => {
-    const already = new Set(rows.map((row) => row.productId));
-    const q = query.trim().toLowerCase();
-    return catalog
-      .filter((p) => !already.has(p.id) && (!q || String(p.name || '').toLowerCase().includes(q)))
-      .slice(0, 40);
-  }, [catalog, rows, query]);
-  return (
-    <>
-      <Button type="button" variant="ghost" className="tech-visit-action" onClick={onBack}>← Back</Button>
-      <Field label="Search products" className="tech-visit-field">
-        <Input className="tech-visit-control" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Product name" autoFocus />
-      </Field>
-      <div className="tech-visit-tile-grid tech-visit-tile-grid--2">
-        {products.length === 0
-          ? <p className="tech-visit-muted">No matching products.</p>
-          : products.map((product) => <Chip key={product.id} label={product.name} onClick={() => onPick(product)} />)}
-      </div>
-    </>
   );
 }

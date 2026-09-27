@@ -18,7 +18,6 @@ const CATALOG = [
   { id: 'talstar', name: 'Talstar P', category: 'Insecticide' },
   { id: 'surfactant', name: 'Non-ionic Surfactant', category: 'adjuvant' },
   { id: 'extra', name: 'Advion Ant Bait Gel', category: 'Bait' },
-  { id: 'stations', name: 'Bait Stations', category: 'Bait', default_rate: '1-4', default_unit: 'each/station' },
 ];
 
 // The context's visit identity (what recapVisitIdentity reads).
@@ -58,7 +57,7 @@ describe('FastCompleteSheet', () => {
     const request = makeRequest();
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
 
-    expect(await screen.findByRole('button', { name: /Taurus SC — 4 oz/ })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /Taurus SC — 4 fl oz/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /Talstar P — 4 oz/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /Non-ionic Surfactant — 0.25 oz/ })).toBeTruthy();
   });
@@ -107,16 +106,11 @@ describe('FastCompleteSheet', () => {
     expect(submit.disabled).toBe(false);
   });
 
-  test('a perimeter spray records its linear feet; bait stays bait placement; Other needs a name', async () => {
+  test('a perimeter spray records its linear feet in oz; Other needs a name', async () => {
     const request = makeRequest();
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
 
     await screen.findByRole('button', { name: /Taurus SC/ });
-    fireEvent.click(screen.getByRole('button', { name: '+ Add product' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Advion Ant Bait Gel' }));
-    fireEvent.change(screen.getByLabelText('Advion Ant Bait Gel'), { target: { value: '30' } });
-    fireEvent.change(screen.getByLabelText('Unit for Advion Ant Bait Gel'), { target: { value: 'g' } });
-
     fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
     fireEvent.click(screen.getByRole('button', { name: 'More' }));
     fireEvent.click(screen.getByRole('button', { name: 'Other' }));
@@ -135,12 +129,11 @@ describe('FastCompleteSheet', () => {
     const body = JSON.parse(request.calls.find((c) => c.path.endsWith('/complete')).options.body);
     const taurus = body.products.find((p) => p.productId === 'taurus');
     expect(taurus).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: 140, areaUnit: 'linear_ft', applicationArea: 'Outside' });
-    // At perimeter spray the shared resolver gives the 4-oz house default.
-    expect(taurus).toMatchObject({ rate: 4, rateUnit: 'oz' });
+    // At perimeter spray the shared resolver gives the 4-oz house default,
+    // rate and amount both in oz — what the full form seeds.
+    expect(taurus).toMatchObject({ rate: 4, rateUnit: 'oz', amountUnit: 'oz' });
     expect(taurus.targets).toEqual(['Ants', 'Palmetto bugs']);
-    const bait = body.products.find((p) => p.productId === 'extra');
-    expect(bait.applicationMethod).toBe('bait_placement');
-    expect(bait.areaValue).toBeUndefined();
+    expect(body.products.map((p) => p.productId).sort()).toEqual(['surfactant', 'talstar', 'taurus']);
   }, 15000);
 
   test('submits the full-completion body shape and shows the done view', async () => {
@@ -174,7 +167,9 @@ describe('FastCompleteSheet', () => {
 
     expect(body.products).toHaveLength(3);
     const taurus = body.products.find((p) => p.productId === 'taurus');
-    expect(taurus).toMatchObject({ totalAmount: 4, amountUnit: 'oz', applicationMethod: 'spot_treatment' });
+    // The unit follows the method, as the full form's resolver seeds it: at
+    // spot treatment Taurus's per-basis label (fl oz/gal) records fl oz.
+    expect(taurus).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz', applicationMethod: 'spot_treatment' });
     // The rate is resolved at the method actually sent: spot treatment
     // takes the catalog label band's low end in its own unit.
     expect(taurus).toMatchObject({ rate: 0.2, rateUnit: 'fl_oz/gal' });
@@ -332,32 +327,6 @@ describe('FastCompleteSheet', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  test('a count product keeps its own amount unit and catalog method', async () => {
-    const request = makeRequest();
-    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
-
-    await screen.findByRole('button', { name: /Taurus SC/ });
-    fireEvent.click(screen.getByRole('button', { name: '+ Add product' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Bait Stations' }));
-    expect(screen.getByLabelText('Unit for Bait Stations').value).toBe('each');
-    fireEvent.change(screen.getByLabelText('Bait Stations'), { target: { value: '3' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Outside' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Perimeter spray' }));
-    fireEvent.change(screen.getByLabelText('Linear ft sprayed'), { target: { value: '100' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
-
-    await waitFor(() => {
-      expect(request.calls.some((c) => c.path.endsWith('/complete'))).toBe(true);
-    });
-    const body = JSON.parse(request.calls.find((c) => c.path.endsWith('/complete')).options.body);
-    const stations = body.products.find((p) => p.productId === 'stations');
-    // The How row only moves sprays; the stations stay bait placement.
-    expect(stations).toMatchObject({ applicationMethod: 'bait_placement', totalAmount: 3, amountUnit: 'each' });
-    expect(stations.areaValue).toBeUndefined();
-  }, 15000);
-
   test('the activity row follows the server rating contract', async () => {
     const off = makeRequest({ rating: { allowed: false, scaleLabels: null } });
     const { unmount } = render(<FastCompleteSheet service={SERVICE} request={off} onClose={() => {}} />);
@@ -393,6 +362,17 @@ describe('FastCompleteSheet', () => {
     expect(screen.getByText('> label max 0.8')).toBeTruthy();
   });
 
+  test('only the house mix is offered; any other product goes to the full form', async () => {
+    const request = makeRequest();
+    const onFullForm = vi.fn();
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onFullForm={onFullForm} />);
+
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    expect(screen.queryByRole('button', { name: /Advion/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    expect(onFullForm).toHaveBeenCalled();
+  });
+
   test('a visit reclassified since the schedule loaded is not completed here', async () => {
     const request = makeRequest({ service: { ...CONTEXT_SERVICE, serviceKey: 'general_pest_control' } });
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
@@ -402,34 +382,4 @@ describe('FastCompleteSheet', () => {
     expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(false);
   });
 
-  test('an added product blocks Complete until its amount is entered; edited amounts and units are submitted', async () => {
-    const request = makeRequest();
-    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
-
-    await screen.findByRole('button', { name: /Taurus SC/ });
-    fireEvent.click(screen.getByRole('button', { name: '+ Add product' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Advion Ant Bait Gel' }));
-
-    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
-    const submit = screen.getByRole('button', { name: 'Complete re-service' });
-    expect(screen.getByText('Enter the amount for Advion Ant Bait Gel.')).toBeTruthy();
-    expect(submit.disabled).toBe(true);
-
-    // Adding a product opens the amount editor; the tech corrects the house
-    // mix total too.
-    fireEvent.change(screen.getByLabelText('Advion Ant Bait Gel'), { target: { value: '30' } });
-    fireEvent.change(screen.getByLabelText('Unit for Advion Ant Bait Gel'), { target: { value: 'g' } });
-    fireEvent.change(screen.getByLabelText('Taurus SC'), { target: { value: '6' } });
-    expect(submit.disabled).toBe(false);
-    fireEvent.click(submit);
-
-    await waitFor(() => {
-      expect(request.calls.some((c) => c.path.endsWith('/complete'))).toBe(true);
-    });
-    const body = JSON.parse(request.calls.find((c) => c.path.endsWith('/complete')).options.body);
-    expect(body.products.find((p) => p.productId === 'extra')).toMatchObject({ totalAmount: 30, amountUnit: 'g' });
-    expect(body.products.find((p) => p.productId === 'taurus')).toMatchObject({ totalAmount: 6, amountUnit: 'oz' });
-  });
 });
