@@ -177,6 +177,51 @@ async function latestQuoteFormLead({ customerId, phoneLast10, before, since }) {
     .first('id', 'created_at');
 }
 
+// Any lead row at all for this phone (not scoped to the form/quote channels
+// latestQuoteFormLead checks) — "a lead record" in the owner's own list of
+// what counts as prior contact (2026-09-26, outbound return-message gate).
+async function anyLeadRecord({ phoneLast10, before }) {
+  if (!phoneLast10) return null;
+  return db('leads')
+    .whereNull('deleted_at')
+    .where('created_at', '<', before)
+    .whereRaw("right(regexp_replace(phone, '\\D', '', 'g'), 10) = ?", [phoneLast10])
+    .orderBy('created_at', 'desc')
+    .first('id', 'created_at');
+}
+
+/**
+ * Did this phone (or customer) EVER contact Waves before `before`? UNBOUNDED
+ * — unlike resolveOutboundCallReason's own 48h LOOKBACK_MS above, which
+ * answers a different question ("why did we place THIS call") and is too
+ * narrow for "did they ever reach out first" (owner ruling 2026-09-26, the
+ * outbound return-message gate: GATE_CALL_OUTBOUND_RETURN_MESSAGES). Reuses
+ * the same probes this file already runs for the voicemail text-back reason
+ * — an inbound call, an inbound text, or a lead record — plus an existing
+ * customer link, rather than a second implementation of any of them.
+ * Fails CLOSED (no prior contact) on a probe error: the caller only uses
+ * this to ENABLE customer-facing sends, never to block one, so treating an
+ * unknown answer as "no" is the safe direction.
+ */
+async function hasPriorContact({ customerId = null, phone = null, before = new Date() } = {}) {
+  if (customerId) return true;
+  const phoneLast10 = last10(phone);
+  if (!phoneLast10) return false;
+  const at = new Date(before);
+  const since = new Date(0);
+  try {
+    const [inboundCall, inboundText, leadRow] = await Promise.all([
+      latestInboundCall({ customerId: null, phoneLast10, before: at, since }),
+      latestInboundText({ customerId: null, phoneLast10, before: at, since }),
+      anyLeadRecord({ phoneLast10, before: at }),
+    ]);
+    return !!(inboundCall || inboundText || leadRow);
+  } catch (e) {
+    logger.warn(`[outbound-call-reason] hasPriorContact probe failed — treating as no prior contact: ${e.code || e.name || 'db_error'}`);
+    return false;
+  }
+}
+
 /**
  * Was the call we are returning a non-service contact? Looks at the exact
  * call the callback button pointed at (relatedCallId), else the most recent
@@ -334,5 +379,6 @@ module.exports = {
   visitInProgress,
   nonServiceCaller,
   isSubstantiveText,
+  hasPriorContact,
   _private: { last10, callNature, parseMetadata },
 };

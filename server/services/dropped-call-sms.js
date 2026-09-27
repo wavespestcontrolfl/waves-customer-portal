@@ -112,12 +112,17 @@ function detectDroppedMidIntake({ durationSeconds, transcription, extracted = {}
  * Whether the caller is a prospect the automatic text may go to. A customer
  * record CREATED FROM THIS CALL is still a new prospect (Step 3 mints one
  * for any named live caller, address or not) — only a PRE-EXISTING linked
- * customer is excluded. Inbound only: the transactional consent basis is
- * "they called us", and on outbound legs to_phone is the prospect's own
- * number. call_nature must be POSITIVELY 'new_lead' (fail closed).
+ * customer is excluded. Inbound only by default: the transactional consent
+ * basis is "they called us", and on outbound legs to_phone is the
+ * prospect's own number. `outboundEligible` (owner ruling 2026-09-26,
+ * GATE_CALL_OUTBOUND_RETURN_MESSAGES) lets an OUTBOUND return call through
+ * on the SAME terms once the processor has confirmed prior contact — the
+ * caller passes it as false whenever the gate is off, so this stays exactly
+ * `isOutbound !== true` off-gate. call_nature must be POSITIVELY 'new_lead'
+ * (fail closed).
  */
-function eligibleNewProspect({ customerId, createdCustomerFromCall, isOutbound, v2Status, callNature, doNotContactRequested } = {}) {
-  return isOutbound !== true
+function eligibleNewProspect({ customerId, createdCustomerFromCall, isOutbound, outboundEligible = false, v2Status, callNature, doNotContactRequested } = {}) {
+  return (isOutbound !== true || outboundEligible === true)
     && (!customerId || createdCustomerFromCall === true)
     && v2Status === 'valid'
     && callNature === 'new_lead'

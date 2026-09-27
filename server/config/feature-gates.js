@@ -1420,6 +1420,24 @@ const gates = {
   // a staged rollout.) Requires a real catalog service (no generic-placeholder
   // fallback for outbound). Off → outbound bookings stay manual.
   callOutboundBooking: process.env.GATE_CALL_OUTBOUND_BOOKING === 'true',
+  // Owner ruling 2026-09-26: the four customer-facing call-processor features
+  // #4912 deliberately kept inbound-only (booking-confirmation implied
+  // consent, the dropped-mid-intake address text, customer-less lead
+  // creation, the approval-gated unit/address clarify draft) may run the
+  // same on an OUTBOUND call ONLY when the person contacted Waves FIRST —
+  // a prior inbound call/text, a lead record, or an existing customer
+  // (server/services/outbound-call-reason.js's hasPriorContact, unbounded,
+  // reused rather than a second query). NEVER on a cold/sales call we
+  // placed to someone who never contacted us. Each site keeps its own
+  // existing "real conversation" precondition (a confirmed booking, a
+  // workable lead signal, the missing-unit ask's own drop exclusion, or the
+  // drop detector's own MIN_CALL_SECONDS engagement floor) — this gate adds
+  // no separate duration check. Sends customer SMS + creates records —
+  // owner-flip only. Off → every one of the four sites stays byte-identical
+  // to today (the `!isOutboundCall(call)` checks are untouched; the lead-
+  // creation site's new outbound restriction is a no-op while this gate is
+  // off).
+  callOutboundReturnMessages: process.env.GATE_CALL_OUTBOUND_RETURN_MESSAGES === 'true',
   // Call-ingest completeness watchdog: a 30-min cron that diffs Twilio's own
   // call ledger against call_log and rings an admin bell for any answered
   // inbound call (completed, >=20s) the pipeline never received — born from

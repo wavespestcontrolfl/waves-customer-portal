@@ -9332,6 +9332,34 @@ const CallRecordingProcessor = {
       logger.info(`[call-proc] Voicemail ${callSid} has workable lead signal — continuing to lead creation`);
     }
 
+    // Outbound return-message eligibility (GATE_CALL_OUTBOUND_RETURN_MESSAGES,
+    // owner ruling 2026-09-26): whether the four customer-facing features
+    // #4912 kept inbound-only below (booking-confirmation implied consent,
+    // the dropped-mid-intake address text, customer-less lead creation, the
+    // clarify draft) may run the same on THIS outbound call. Requires the
+    // person to have contacted Waves FIRST — a prior inbound call/text, a
+    // lead record, or an existing customer (hasPriorContact, unbounded,
+    // reused from outbound-call-reason.js rather than a new query). Voicemail
+    // is already excluded above (an outbound call reaching the customer's
+    // voicemail terminal-returns before this point); each site below keeps
+    // its own existing "real conversation" precondition, so no separate
+    // duration check is added here. Gate off, or inbound, or a probe
+    // failure ⇒ false, and every `!isOutboundCall(call)` check downstream
+    // stays exactly as it reads today.
+    let outboundReturnMessagesEligible = false;
+    if (isOutboundCall(call) && isEnabled('callOutboundReturnMessages')) {
+      try {
+        outboundReturnMessagesEligible = await require('./outbound-call-reason').hasPriorContact({
+          customerId: call.customer_id || null,
+          phone: contactPhone,
+          before: call.created_at || new Date(),
+        });
+      } catch (eligErr) {
+        logger.warn(`[call-proc] outbound return-message eligibility check failed (fail-closed) for ${maskSid(callSid)}: ${eligErr.message}`);
+        outboundReturnMessagesEligible = false;
+      }
+    }
+
     // ── V2 routing gate — evaluated BEFORE canonical customer/lead writes ──
     // Hard vetoes (spam / out-of-area / do-not-contact) skip all canonical
     // writes. Soft blocks (not_confirmed, ambiguous, hoa, etc.) are real
@@ -9832,8 +9860,16 @@ const CallRecordingProcessor = {
           // Those alternate recipients still require explicit sms_consent_given
           // (v2SmsConsentExplicit, captured mode-independently above) and are
           // enforced at the send site.
+          // Outbound return calls count too (owner ruling 2026-09-26,
+          // GATE_CALL_OUTBOUND_RETURN_MESSAGES): they contacted Waves first,
+          // so the SAME implied consent covers the dialed number
+          // (contactPhone above is already resolveCallContactPhone's
+          // outbound leg — the customer's number, never a staff line).
+          // outboundReturnMessagesEligible is false whenever the gate is
+          // off, so this stays exactly `!isOutboundCall(call)` off-gate.
           const tcpa = checkTcpaConsent(v2Extraction, {
-            impliedConsent: isEnabled('callInboundImpliedConsent') && !isOutboundCall(call),
+            impliedConsent: isEnabled('callInboundImpliedConsent')
+              && (!isOutboundCall(call) || outboundReturnMessagesEligible),
           });
           v2SmsBlocked = !tcpa.canSms;
           v2SmsClearedByImpliedConsent = tcpa.canSms && tcpa.reason === 'implied_consent_inbound';
@@ -12584,7 +12620,19 @@ const CallRecordingProcessor = {
     // An operator's explicit UNLINK covers the lead too (Codex #3736 r8
     // P2): the call belongs to no one, so a reprocess must not mint or
     // reuse a customer-less lead from its phone and stamp the call with it.
+    // Cold/sales outbound calls (owner ruling 2026-09-26,
+    // GATE_CALL_OUTBOUND_RETURN_MESSAGES): blocks ONLY when the gate is
+    // explicitly on and this outbound call has no prior contact — a no-op
+    // whenever the gate is off, so this stays exactly today's (direction-
+    // blind) behavior off-gate. A return call that clears
+    // outboundReturnMessagesEligible still mints/reuses the lead below the
+    // same as inbound, which is also what lets an existing lead record for
+    // this phone (itself evidence of prior contact) get found and reused.
+    const outboundColdCallBlocksLead = isOutboundCall(call)
+      && isEnabled('callOutboundReturnMessages')
+      && !outboundReturnMessagesEligible;
     const workableUnnamedLead = !customerId && !nonLeadCall && !explicitUnlink
+      && !outboundColdCallBlocksLead
       && hasWorkableLeadSignal({ extracted, phone, voicemail: extracted.is_voicemail === true });
     // Set when a same-call row is dropped because it is no longer ours (see
     // the ownership re-read in Step 4b). workableUnnamedLead is false
@@ -12947,8 +12995,14 @@ const CallRecordingProcessor = {
         // the claim-race recovery below needs it to re-judge suppression
         // against the replacement row (codex P2 r8).
         let droppedDetectorFired = false;
+        // Owner ruling 2026-09-26 (GATE_CALL_OUTBOUND_RETURN_MESSAGES): an
+        // outbound return call that dropped mid-conversation gets the same
+        // "sorry we got cut off" text as inbound, but only once prior
+        // contact is confirmed — outboundReturnMessagesEligible is false
+        // whenever the gate is off, so this stays exactly
+        // `!isOutboundCall(call)` off-gate.
         if (leadId && !voicemailLeadPath && !extracted.is_voicemail && !extracted.is_spam
-          && !isOutboundCall(call) && transcription) {
+          && (!isOutboundCall(call) || outboundReturnMessagesEligible) && transcription) {
           try {
             const DroppedCallSmsDetect = require('./dropped-call-sms');
             // recordingDurationSeconds: fresh recording jobs can have
@@ -14337,15 +14391,22 @@ const CallRecordingProcessor = {
               customerId,
               createdCustomerFromCall,
               isOutbound: isOutboundCall(call),
+              outboundEligible: outboundReturnMessagesEligible,
               v2Status: v2Result?.status,
               callNature: v2Result?.extraction?.call_nature,
               doNotContactRequested: v2Result?.extraction?.consent?.do_not_contact_request === true,
             });
-            // TCPA: implied consent is PERSONAL to the inbound ANI. The
-            // resolved contact phone can be a DICTATED callback number —
-            // possibly someone else's handset — and must never receive the
-            // automated text (codex P1). No usable external ANI → card-only.
-            const smsAni = firstExternalPhone(call.from_phone);
+            // TCPA: implied consent is PERSONAL to the inbound ANI on
+            // inbound. On an eligible OUTBOUND return call, the ANI-
+            // equivalent is the number WE dialed (never a dictated
+            // callback number either) — resolveCallContactPhone(call) with
+            // no extracted-phone override resolves exactly that (to_phone,
+            // or the bridge's leadPhone), the same contract item 1's
+            // implied-consent comment relies on. No usable external ANI →
+            // card-only.
+            const smsAni = isOutboundCall(call)
+              ? resolveCallContactPhone(call)
+              : firstExternalPhone(call.from_phone);
             if (genuineNewProspect && !smsAni) {
               smsOutcome = { sent: false, skipped: 'no_usable_ani' };
             } else if (genuineNewProspect) {
@@ -14467,13 +14528,16 @@ const CallRecordingProcessor = {
         // Both DNC shapes gate it — the V2 consent object AND the legacy
         // flat extractor field (V2 off / unavailable / schema-failed still
         // sets the flat one) (codex r5 P1).
-        // Still INBOUND-only: an approved draft is sent under the voice
-        // channel's transactional consent (admin-drafts.js), and whether a
-        // call WE placed can carry that consent is the owner's pending
-        // outbound-SMS-consent decision (2026-09-26), not a routing rule —
-        // pre-push audit P1. clarifyAskTargetPhone already resolves the
-        // customer leg for both directions for when that decision lands.
-        if (leadId && !droppedMidIntake && !extracted.is_spam && !extracted.is_voicemail && !isOutboundCall(call)
+        // Owner ruling 2026-09-26 (GATE_CALL_OUTBOUND_RETURN_MESSAGES)
+        // resolved the pending outbound-SMS-consent decision: an approved
+        // draft is sent under the voice channel's transactional consent
+        // (admin-drafts.js), and a call WE placed carries that consent too
+        // once the person contacted Waves first — outboundReturnMessagesEligible
+        // is false whenever the gate is off, so this stays exactly
+        // `!isOutboundCall(call)` off-gate. clarifyAskTargetPhone already
+        // resolves the customer leg for both directions.
+        if (leadId && !droppedMidIntake && !extracted.is_spam && !extracted.is_voicemail
+          && (!isOutboundCall(call) || outboundReturnMessagesEligible)
           && v2Result?.extraction?.consent?.do_not_contact_request !== true
           && extracted.do_not_contact_request !== true) {
           try {

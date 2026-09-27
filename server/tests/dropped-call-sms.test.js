@@ -285,8 +285,17 @@ describe('eligibleNewProspect', () => {
     expect(eligibleNewProspect({ ...BASE, customerId: 'cust-1', createdCustomerFromCall: false })).toBe(false);
   });
 
-  it('excludes outbound calls (inbound-only consent basis)', () => {
+  it('excludes outbound calls (inbound-only consent basis) by default', () => {
     expect(eligibleNewProspect({ ...BASE, isOutbound: true })).toBe(false);
+  });
+
+  it('an eligible outbound return call (owner ruling 2026-09-26) passes the same as inbound', () => {
+    expect(eligibleNewProspect({ ...BASE, isOutbound: true, outboundEligible: true })).toBe(true);
+  });
+
+  it('outboundEligible never overrides the other eligibility checks', () => {
+    expect(eligibleNewProspect({ ...BASE, isOutbound: true, outboundEligible: true, doNotContactRequested: true })).toBe(false);
+    expect(eligibleNewProspect({ ...BASE, isOutbound: true, outboundEligible: true, customerId: 'cust-1', createdCustomerFromCall: false })).toBe(false);
   });
 
   it('caller asked not to be contacted on the call — never eligible for the text', () => {

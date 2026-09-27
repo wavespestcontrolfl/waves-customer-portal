@@ -31,6 +31,7 @@ const {
   visitInProgress,
   nonServiceCaller,
   isSubstantiveText,
+  hasPriorContact,
   _private,
 } = require('../services/outbound-call-reason');
 
@@ -369,5 +370,51 @@ describe('resolveOutboundCallReason', () => {
     await resolveOutboundCallReason({ call: call({ created_at: null }), phone: PHONE });
     const lt = state.queries[0].wheres.find((w) => w[1] === '<')[2];
     expect(lt.getTime()).toBeGreaterThanOrEqual(before);
+  });
+});
+
+// hasPriorContact backs the outbound return-message gate
+// (GATE_CALL_OUTBOUND_RETURN_MESSAGES, owner ruling 2026-09-26): UNBOUNDED,
+// unlike resolveOutboundCallReason's own 48h LOOKBACK_MS above — a lead from
+// months ago still counts as "they contacted us first".
+describe('hasPriorContact', () => {
+  test('an existing customer is prior contact without touching the DB', async () => {
+    await expect(hasPriorContact({ customerId: 'cust-1', phone: PHONE, before: T0 })).resolves.toBe(true);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('no customer, no usable phone → false, no DB query', async () => {
+    await expect(hasPriorContact({ customerId: null, phone: null, before: T0 })).resolves.toBe(false);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('no customer, nothing on file for the phone → false (cold/sales call)', async () => {
+    installDb({});
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+  });
+
+  test('a prior inbound call from that number, even a year ago, counts', async () => {
+    installDb({ call_log: [{ id: 'in-old', created_at: new Date('2025-01-01'), ai_extraction_enriched: { call_nature: 'new_lead' } }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+  });
+
+  test('a spam/robocall/wrong-number inbound call does not count as prior contact', async () => {
+    installDb({ call_log: [{ id: 'in-spam', created_at: hoursAgo(1), ai_extraction_enriched: { call_nature: 'spam_solicitation' } }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+  });
+
+  test('a prior substantive inbound text counts', async () => {
+    installDb({ sms_log: [{ id: 'sms-1', created_at: hoursAgo(2), message_body: 'Can you come look at the ants?', message_type: 'inbound' }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+  });
+
+  test('an existing lead record for the phone counts, whatever its channel', async () => {
+    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1) }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+  });
+
+  test('a probe failure fails CLOSED (no prior contact), never throws', async () => {
+    db.mockImplementation(() => { throw Object.assign(new Error('down'), { code: 'ECONNREFUSED' }); });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
   });
 });
