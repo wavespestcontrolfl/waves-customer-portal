@@ -564,16 +564,22 @@ const TERMITE_SLUG_BY_SCOPE = Object.freeze({
   [TERMITE_SCOPE.RECURRING_FOAM]: 'foam_recurring',
   [TERMITE_SCOPE.TERMITE]: 'termite_bait',
 });
+const PRIMARY_GLASS_SLUGS = Object.freeze([
+  ['pest_control', /pest/],
+  ['lawn_care', /lawn/],
+  ['mosquito', /mosquito/],
+  ['tree_shrub', /tree|shrub/],
+]);
 export function glassServiceSlug(keyOrLabel) {
   const raw = String(keyOrLabel || '').toLowerCase();
   const termiteScope = classifyTermiteScope(raw);
   // WDO/pre-slab certificate rows and explicitly named termite foam retain
   // their established early precedence. Product-only/historical foam names
   // still respect the primary pest/lawn/mosquito/tree ordering below.
-  const earlyTermiteSlug = EARLY_TERMITE_SLUG_BY_SCOPE[termiteScope]
-    || (termiteScope === TERMITE_SCOPE.FOAM && raw.includes('termite') ? 'termite_foam' : null);
+  const earlyTermiteSlug = EARLY_TERMITE_SLUG_BY_SCOPE[termiteScope];
   if (earlyTermiteSlug) return earlyTermiteSlug;
   if (raw.includes('trap_only') || raw.includes('trap-only')) return 'trap_only';
+  if (termiteScope === TERMITE_SCOPE.FOAM && raw.includes('termite')) return 'termite_foam';
   // Commercial PEST rows (commercial_pest keys / "Commercial Pest Control"
   // labels) get their own stack — but ONLY once the server has released
   // commercial glass (cta.commercialGlass → setCommercialGlass). Scoped to
@@ -584,10 +590,8 @@ export function glassServiceSlug(keyOrLabel) {
   // off this falls through to the residential slugs, exactly today's
   // behavior.
   if (commercialGlassReleased && raw.includes('commercial') && raw.includes('pest')) return 'commercial_pest';
-  if (raw.includes('pest')) return 'pest_control';
-  if (raw.includes('lawn')) return 'lawn_care';
-  if (raw.includes('mosquito')) return 'mosquito';
-  if (raw.includes('tree') || raw.includes('shrub')) return 'tree_shrub';
+  const primarySlug = PRIMARY_GLASS_SLUGS.find(([, pattern]) => pattern.test(raw))?.[0];
+  if (primarySlug) return primarySlug;
   const termiteSlug = TERMITE_SLUG_BY_SCOPE[termiteScope];
   if (termiteSlug) return termiteSlug;
   if (raw.includes('palm')) return 'palm_injection';

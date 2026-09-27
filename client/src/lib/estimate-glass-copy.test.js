@@ -290,6 +290,13 @@ describe('foam slug: termite foam only (rodent foam sealing stays rodent)', () =
   ])('preserves the primary client slug for combined label %s', (name, slug) => {
     expect(glassServiceSlug(name)).toBe(slug);
   });
+
+  it.each([
+    'trap_only Termite Foam',
+    'Trap-only Retainer with Termite Foam Treatment',
+  ])('keeps trap-only precedence over a termite-foam suffix in %s', (name) => {
+    expect(glassServiceSlug(name)).toBe('trap_only');
+  });
 });
 
 describe('glassOneTimeHeroOverlay', () => {
