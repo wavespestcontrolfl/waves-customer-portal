@@ -171,6 +171,29 @@ describe('billing channel email adapter', () => {
     expect(mockSendTemplate.mock.calls[0][0]).not.toHaveProperty('billingReplayContext');
   });
 
+  test.each([
+    ['a registered source whose context is incomplete', 'invoice_followup_sequence', true],
+    ['a registered source with normalized surrounding space', ' invoice_followup_sequence ', true],
+    ['an unregistered receipt source', 'monthly_billing_success', false],
+  ])('declares the replay contract only for %s', async (_label, entryPoint, declared) => {
+    mockLoadBillingEmailContext.mockResolvedValue(baseContext({ invoice: { id: 'inv-1', customer_id: 'cust-1' } }));
+    await sendBillingChannelEmail(input({ entryPoint, invoiceId: 'inv-1' }));
+    expect(mockSendTemplate.mock.calls[0][0]).toMatchObject({ billingReplayDeclared: declared });
+  });
+
+  test.each([['invoice_send_deferred', true], ['invoice_receipt_sms', false]])(
+    'invalid scheduled context preserves the normalized declaration for %s', async (originalEntryPoint, declared) => {
+      mockLoadBillingEmailContext.mockResolvedValue(baseContext({
+        category: 'invoice', invoice: { id: 'inv-1', customer_id: 'cust-1' },
+      }));
+      await sendBillingChannelEmail(input({ entryPoint: 'scheduled_sms_cron', invoiceId: 'inv-1',
+        metadata: { ...input().metadata, billingDeliveryCategory: 'invoice',
+          original_entry_point: originalEntryPoint, rendered_amount: 'invalid' } }));
+      expect(mockSendTemplate.mock.calls[0][0]).not.toHaveProperty('billingReplayContext');
+      expect(mockSendTemplate.mock.calls[0][0]).toMatchObject({ billingReplayDeclared: declared });
+    },
+  );
+
   test('routes a payment_receipt-category send through billing.receipt_notice', async () => {
     mockLoadBillingEmailContext.mockResolvedValue(baseContext({
       category: 'payment_receipt', categoryLabel: 'Payment receipt',
