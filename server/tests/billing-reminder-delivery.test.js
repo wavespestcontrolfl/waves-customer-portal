@@ -434,6 +434,48 @@ describe('billing reminder per-channel delivery progress', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  test.each(['payer resolve failed', 'dunning-stop check failed'])('incomplete evidence (%s) holds a restored waiver until the real policy can resume', async (reason) => {
+    const originalGate = process.env.GATE_COLLECTIONS_POLICY;
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    try {
+      rows.push({ id: 'prior-text', channel: 'sms', source: 'balance_reminder_workflow',
+        metadata: { notificationEventKey: 'invoice-1:gentle', selectedChannels: ['email', 'sms'],
+          delivered: true, policy_waived_channels: ['email'] } });
+      const ContactPolicy = require('../services/collections/contact-policy');
+      ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['invoice-1'],
+        denialReasons: [], balanceIncomplete: reason });
+      collectionsChannelPermitted.mockImplementation(jest.requireActual('../services/collections/rail-guard').collectionsChannelPermitted);
+      const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+      await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({
+        complete: false, deliveredNow: [],
+        results: { email: { sent: false, deliveryHeld: true, retryable: true, code: 'COLLECTIONS_POLICY' } },
+      });
+      expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+      expect(ContactLedger.claimAttempt).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+      expect(db.raw).not.toHaveBeenCalled();
+      expect(rows[0].metadata.policy_waived_channels).toEqual(['email']);
+      ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['invoice-1'], denialReasons: [] });
+      await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: true, deliveredNow: ['email'] });
+      expect(send.mock.calls.map(([channel]) => channel)).toEqual(['email']);
+      expect(rows[0].metadata.policy_waived_channels).toEqual([]);
+    } finally {
+      if (originalGate === undefined) delete process.env.GATE_COLLECTIONS_POLICY;
+      else process.env.GATE_COLLECTIONS_POLICY = originalGate;
+    }
+  });
+
+  test('one incomplete pending leg holds every selected leg before reservation', async () => {
+    collectionsChannelPermitted.mockImplementation(async ({ channel }) => ({ allowed: true,
+      ...(channel === 'email' ? { balanceIncomplete: 'payer resolve failed' } : {}) }));
+    const send = jest.fn();
+    await expect(deliver(['email', 'push'], send)).resolves.toMatchObject({ complete: false,
+      results: { email: { retryable: true }, push: { retryable: true } } });
+    expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+    expect(ContactLedger.claimAttempt).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
   test('a newly allowed Email removes its persisted waiver before a transient retry failure', async () => {
     let emailAllowed = false;
     collectionsChannelPermitted.mockImplementation(async ({ channel }) => (channel === 'email' && !emailAllowed

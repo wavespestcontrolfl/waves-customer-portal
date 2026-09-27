@@ -1101,3 +1101,29 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(block).not.toContain('None observed today,');
   });
 });
+
+describe('copyActivityScore — report copy follows the completion score rule (#5037 Codex r3)', () => {
+  const { copyActivityScore } = require('../routes/admin-schedule')._test;
+
+  test('a derive-mapped type ignores a submitted pin and scores from its findings field', () => {
+    // cockroach activity_level Low derives 1; a pre-deploy tab pins 5.
+    expect(copyActivityScore('cockroach', { activity_level: 'Low' }, 5)).toBe(1);
+    expect(copyActivityScore('termite_bait_station', { termite_activity: 'None observed' }, 4)).toBe(0);
+  });
+
+  test('a derive-mapped type with an empty findings field has no score, whatever was submitted', () => {
+    expect(copyActivityScore('cockroach', {}, 3)).toBeNull();
+    expect(copyActivityScore('flea', null, 2)).toBeNull();
+  });
+
+  test('a tech-set-only type keeps a valid submitted score and rejects an invalid one', () => {
+    expect(copyActivityScore('rodent_trapping', {}, 3)).toBe(3);
+    expect(copyActivityScore('rodent_trapping', {}, 9)).toBeNull();
+    expect(copyActivityScore('rodent_trapping', {}, '3')).toBeNull();
+  });
+
+  test('an unknown type falls back to the submitted-score validation', () => {
+    expect(copyActivityScore('not_a_type', {}, 2)).toBe(2);
+    expect(copyActivityScore(null, null, null)).toBeNull();
+  });
+});
