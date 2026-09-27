@@ -4,8 +4,9 @@
  * Three things this file pins:
  *  1. The session allowlist (isAllowedOverrideModel / resolveSessionModel)
  *     rejects a voice-eligible OpenAI override with the gate off (unchanged
- *     production default) and accepts it with the gate on — never a partial
- *     substitution.
+ *     production default) and accepts it with the gate on only for a sandbox
+ *     or eval-harness session — an ordinary production inbound session stays
+ *     Anthropic-only either way (Codex r4). Never a partial substitution.
  *  2. A full turn loop — a tool-call round then a text round — completes end
  *     to end on `relay-openai-client.js` with a MOCKED `global.fetch` SSE
  *     stream (no live API call). `client.fetchImpl` defaults to a bare
@@ -72,18 +73,39 @@ describe('gate — production default unchanged, opt-in only', () => {
     expect(isAllowedOverrideModel(OPENAI_CANDIDATE)).toBe(false);
   });
 
-  test('an OpenAI id is accepted once GATE_VOICE_RELAY_OPENAI is exactly "true"', () => {
+  test('an OpenAI id is accepted once GATE_VOICE_RELAY_OPENAI is exactly "true" — in an eval-harness session', () => {
     process.env.GATE_VOICE_RELAY_OPENAI = 'true';
-    expect(isAllowedOverrideModel(OPENAI_CANDIDATE)).toBe(true);
+    expect(isAllowedOverrideModel(OPENAI_CANDIDATE, { openaiContext: true })).toBe(true);
+    process.env.VOICE_RELAY_INBOUND_MODEL = OPENAI_CANDIDATE;
+    const result = resolveSessionModel({ sandbox: false, evalHarness: true });
+    expect(result).toEqual({ model: OPENAI_CANDIDATE, fallbackReason: null });
+  });
+
+  // Codex r4 P2: the gate alone never moves a real caller — production
+  // inbound stays on Claude (docs/sandy-benchmark.md "OpenAI candidates").
+  test('an ordinary production inbound session rejects an OpenAI override even with the gate on', () => {
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    expect(isAllowedOverrideModel(OPENAI_CANDIDATE)).toBe(false); // no context = production inbound
     process.env.VOICE_RELAY_INBOUND_MODEL = OPENAI_CANDIDATE;
     const result = resolveSessionModel({ sandbox: false });
-    expect(result).toEqual({ model: OPENAI_CANDIDATE, fallbackReason: null });
+    expect(result.model).toBe(MODEL);
+    expect(result.fallbackReason).toBe(`unknown_model_override:VOICE_RELAY_INBOUND_MODEL=${OPENAI_CANDIDATE}`);
+
+    const convo = new RelayConversation({ callSid: 'CA-prod-inbound', from: '+19415551234', send: () => {} });
+    expect(convo.model).toBe(MODEL);
+    expect(convo._provider).toBe('anthropic');
+  });
+
+  test('a sandbox session may take an OpenAI id from the inbound override too (gate on)', () => {
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_INBOUND_MODEL = OPENAI_CANDIDATE;
+    expect(resolveSessionModel({ sandbox: true })).toEqual({ model: OPENAI_CANDIDATE, fallbackReason: null });
   });
 
   test('a non-voice-eligible OpenAI id is rejected even with the gate on (e.g. gpt-5.6-sol carries no `voice` entry)', () => {
     process.env.GATE_VOICE_RELAY_OPENAI = 'true';
     expect(MODELS.MODEL_CATALOG['gpt-5.6-sol']).toBeTruthy();
-    expect(isAllowedOverrideModel('gpt-5.6-sol')).toBe(false);
+    expect(isAllowedOverrideModel('gpt-5.6-sol', { openaiContext: true })).toBe(false);
   });
 
   test('resolveSessionModel/isAllowedOverrideModel apply the same way to a sandbox session', () => {
@@ -99,11 +121,12 @@ describe('gate — production default unchanged, opt-in only', () => {
     jest.isolateModules(() => {
       jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: () => undefined }));
       const fresh = require('../services/voice-agent/relay-conversation');
-      expect(fresh.isAllowedOverrideModel(OPENAI_CANDIDATE)).toBe(false);
+      const ctx = { openaiContext: true };
+      expect(fresh.isAllowedOverrideModel(OPENAI_CANDIDATE, ctx)).toBe(false);
       process.env.GATE_VOICE_RELAY_OPENAI = 'TRUE';
-      expect(fresh.isAllowedOverrideModel(OPENAI_CANDIDATE)).toBe(false);
+      expect(fresh.isAllowedOverrideModel(OPENAI_CANDIDATE, ctx)).toBe(false);
       process.env.GATE_VOICE_RELAY_OPENAI = 'true';
-      expect(fresh.isAllowedOverrideModel(OPENAI_CANDIDATE)).toBe(true);
+      expect(fresh.isAllowedOverrideModel(OPENAI_CANDIDATE, ctx)).toBe(true);
     });
     jest.dontMock('../config/feature-gates');
   });
@@ -151,13 +174,13 @@ describe('a shared VOICE_RELAY_MODEL/MODEL_VOICE value is validated too (Codex r
     expect(result.fallbackReason).toBe(`unknown_shared_model:VOICE_RELAY_MODEL=${OPENAI_CANDIDATE}`);
   });
 
-  test('with the gate on, an OpenAI id is reachable through the inbound override instead', () => {
+  test('with the gate on, an eval-harness session reaches an OpenAI id through the inbound override instead', () => {
     process.env.GATE_VOICE_RELAY_OPENAI = 'true';
     process.env.VOICE_RELAY_MODEL = OPENAI_CANDIDATE;
     process.env.VOICE_RELAY_INBOUND_MODEL = OPENAI_CANDIDATE;
     let result;
     jest.isolateModules(() => {
-      result = require('../services/voice-agent/relay-conversation').resolveSessionModel({ sandbox: false });
+      result = require('../services/voice-agent/relay-conversation').resolveSessionModel({ sandbox: false, evalHarness: true });
     });
     expect(result).toEqual({ model: OPENAI_CANDIDATE, fallbackReason: null });
   });
@@ -222,7 +245,7 @@ describe('a full turn loop on the OpenAI adapter — tool-call round then text r
     ]);
 
     const spoken = [];
-    const convo = new RelayConversation({ callSid: 'CA-openai-1', from: '+19415551234', send: (t) => spoken.push(t) });
+    const convo = new RelayConversation({ callSid: 'CA-openai-1', from: '+19415551234', evalHarness: true, send: (t) => spoken.push(t) });
     expect(convo.model).toBe(OPENAI_CANDIDATE);
     expect(convo._provider).toBe('openai');
 
@@ -262,7 +285,7 @@ describe('a full turn loop on the OpenAI adapter — tool-call round then text r
     global.fetch = jest.fn(async () => ({ ok: false, status: 500, text: async () => 'server error' }));
 
     const spoken = [];
-    const convo = new RelayConversation({ callSid: 'CA-openai-fail', from: '+19415551234', send: (t) => spoken.push(t) });
+    const convo = new RelayConversation({ callSid: 'CA-openai-fail', from: '+19415551234', evalHarness: true, send: (t) => spoken.push(t) });
     await convo._runLoop('hello?');
 
     expect(global.fetch).toHaveBeenCalledTimes(1); // exactly one attempt — no fallback retry on another provider

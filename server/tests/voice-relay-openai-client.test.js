@@ -17,6 +17,7 @@ const {
   mapResponseToMessage,
   mapUsage,
   reasoningEffortFor,
+  readSSEEvents,
   RESPONSES_URL,
 } = require('../services/voice-agent/relay-openai-client');
 
@@ -233,6 +234,30 @@ describe('mapResponseToMessage — Responses response -> Anthropic Message shape
     expect(msg.stop_reason).toBe('max_tokens');
   });
 
+  // Codex r4 P2: a COMPLETED response with nothing the caller can hear is a
+  // failure too, not a silent clean end_turn.
+  test.each([
+    ['an empty output', []],
+    ['reasoning only', [{ type: 'reasoning', summary: [] }]],
+    ['blank output_text', [{ type: 'message', content: [{ type: 'output_text', text: '   ' }] }]],
+  ])('a completed response with %s rejects', (_label, output) => {
+    expect(() => mapResponseToMessage({ status: 'completed', output }, 'gpt-6-sol'))
+      .toThrow(/no usable output/);
+  });
+
+  // Codex r4 P2: a refusal is a failed leg (services/llm/call.js), never speech.
+  test('a refusal part rejects without quoting the refusal text, even beside output_text', () => {
+    const refusalOnly = () => mapResponseToMessage({
+      status: 'completed',
+      output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'I cannot help with Pat Sample.' }] }],
+    }, 'gpt-6-sol');
+    expect(refusalOnly).toThrow('OpenAI Responses API returned a refusal.');
+    expect(() => mapResponseToMessage({
+      status: 'completed',
+      output: [{ type: 'message', content: [{ type: 'output_text', text: 'Sure.' }, { type: 'refusal', refusal: 'no' }] }],
+    }, 'gpt-6-sol')).toThrow(/refusal/);
+  });
+
   test('an unfinished function_call (token exhaustion mid-arguments) rejects instead of running as a tool', () => {
     expect(() => mapResponseToMessage({
       status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' },
@@ -328,18 +353,45 @@ describe('OpenAIRelayClient.messages.stream — full SSE round trips', () => {
       .rejects.toThrow(/HTTP 429/);
   });
 
-  test('a response.failed event rejects finalMessage with the provider error message', async () => {
-    const fetchImpl = fetchStub([{ type: 'response.failed', response: { error: { message: 'model overloaded' } } }]);
+  // Codex r4 P1: a provider error MESSAGE can quote the rejected input and
+  // relay-conversation.js logs err.message — only a code / id may surface.
+  const LEAKY = 'caller Pat Sample at +19415551234, 12 Example Ln';
+
+  test('a response.failed event rejects with the provider code + response id, never its message', async () => {
+    const fetchImpl = fetchStub([{ type: 'response.failed', response: { id: 'resp_1', error: { code: 'server_error', message: LEAKY } } }]);
     const client = new OpenAIRelayClient({ apiKey: 'sk-test', fetchImpl });
-    await expect(client.messages.stream({ model: 'gpt-6-sol', messages: [] }, {}).finalMessage())
-      .rejects.toThrow(/model overloaded/);
+    const err = await client.messages.stream({ model: 'gpt-6-sol', messages: [] }, {}).finalMessage().catch((e) => e);
+    expect(err.message).toBe('OpenAI Responses API error: server_error (resp_1)');
+    expect(err.message).not.toMatch(/Pat|1941|Example/);
   });
 
-  test('a top-level error SSE event rejects finalMessage', async () => {
-    const fetchImpl = fetchStub([{ type: 'error', message: 'stream error' }]);
+  test('a top-level error SSE event rejects with its code only', async () => {
+    const fetchImpl = fetchStub([{ type: 'error', code: 'rate_limit_exceeded', message: LEAKY }]);
     const client = new OpenAIRelayClient({ apiKey: 'sk-test', fetchImpl });
-    await expect(client.messages.stream({ model: 'gpt-6-sol', messages: [] }, {}).finalMessage())
-      .rejects.toThrow(/stream error/);
+    const err = await client.messages.stream({ model: 'gpt-6-sol', messages: [] }, {}).finalMessage().catch((e) => e);
+    expect(err.message).toBe('OpenAI Responses API error: rate_limit_exceeded');
+  });
+
+  test('an error SSE event with no usable code still rejects, with a fixed label', async () => {
+    const fetchImpl = fetchStub([{ type: 'error', message: LEAKY }]);
+    const client = new OpenAIRelayClient({ apiKey: 'sk-test', fetchImpl });
+    const err = await client.messages.stream({ model: 'gpt-6-sol', messages: [] }, {}).finalMessage().catch((e) => e);
+    expect(err.message).toBe('OpenAI Responses API error: stream_error');
+  });
+
+  test('an HTTP error rejects with status, error code and request id — never the body message', async () => {
+    const body = JSON.stringify({ error: { code: 'invalid_request_error', message: `Invalid input: ${LEAKY}` } });
+    const fetchImpl = async () => ({ ok: false, status: 400, headers: { get: (h) => (h === 'x-request-id' ? 'req_abc123' : null) }, text: async () => body });
+    const client = new OpenAIRelayClient({ apiKey: 'sk-test', fetchImpl });
+    const err = await client.messages.stream({ model: 'gpt-6-sol', messages: [] }, {}).finalMessage().catch((e) => e);
+    expect(err.message).toBe('OpenAI Responses API HTTP 400 (invalid_request_error, request req_abc123)');
+  });
+
+  test('an HTTP error with a non-JSON body rejects with the status alone', async () => {
+    const fetchImpl = async () => ({ ok: false, status: 502, text: async () => `<html>${LEAKY}</html>` });
+    const client = new OpenAIRelayClient({ apiKey: 'sk-test', fetchImpl });
+    const err = await client.messages.stream({ model: 'gpt-6-sol', messages: [] }, {}).finalMessage().catch((e) => e);
+    expect(err.message).toBe('OpenAI Responses API HTTP 502');
   });
 
   test('a stream that ends with no completed/incomplete response rejects rather than resolving with nothing', async () => {
@@ -389,5 +441,37 @@ describe('OpenAIRelayClient.messages.stream — full SSE round trips', () => {
     await new Promise((r) => setTimeout(r, 10));
     controller.abort();
     await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
+// Codex r4 P2: SSE lines may end in CRLF, LF or a lone CR (the spec allows all
+// three); a CRLF stream must parse, including a CRLF split across chunks.
+describe('readSSEEvents — line endings', () => {
+  async function collect(chunks) {
+    const out = [];
+    for await (const evt of readSSEEvents((async function* gen() { yield* chunks; }()))) out.push(evt);
+    return out;
+  }
+
+  test('CRLF-separated events parse', async () => {
+    expect(await collect(['data: {"a":1}\r\n\r\ndata: {"b":2}\r\n\r\n'])).toEqual([{ a: 1 }, { b: 2 }]);
+  });
+
+  test('a CRLF split across chunks is one line ending, not two', async () => {
+    expect(await collect(['data: {"a":1}\r', '\n\r', '\ndata: {"b":2}\r\n', '\r\n'])).toEqual([{ a: 1 }, { b: 2 }]);
+  });
+
+  test('lone-CR line endings parse, including a final event completed by a trailing CR', async () => {
+    expect(await collect(['data: {"a":1}\r\rdata: {"b":2}\r', '\r'])).toEqual([{ a: 1 }, { b: 2 }]);
+    expect(await collect(['data: {"a":1}\r\r', 'data: {"b":2}\r\r'])).toEqual([{ a: 1 }, { b: 2 }]);
+  });
+
+  test('Uint8Array chunks with CRLF parse (the real fetch body shape)', async () => {
+    const enc = new TextEncoder();
+    expect(await collect([enc.encode('data: {"a":1}\r\n'), enc.encode('\r\n')])).toEqual([{ a: 1 }]);
+  });
+
+  test('an unterminated final event is still dropped (spec: incomplete events are discarded)', async () => {
+    expect(await collect(['data: {"a":1}\r\n\r\ndata: {"b":2}'])).toEqual([{ a: 1 }]);
   });
 });

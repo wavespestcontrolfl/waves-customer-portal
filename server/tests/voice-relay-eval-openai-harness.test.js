@@ -109,7 +109,7 @@ describe('installHarness — OpenAI relay client instrumentation', () => {
     h.state.modelFailuresLeft = 0;
 
     await expect(client.messages.stream({ model: 'gpt-6-sol', messages: [] }, {}).finalMessage()).rejects.toThrow(/HTTP 500/);
-    expect(record.modelErrors).toEqual(['OpenAI Responses API HTTP 500: server error']);
+    expect(record.modelErrors).toEqual(['OpenAI Responses API HTTP 500']); // status only — never the body (Codex r4 P1)
     expect(record.modelAborts).toBe(0);
     expect(record.modelRounds).toBe(0);
   });
@@ -158,5 +158,24 @@ describe('installHarness — OpenAI relay client instrumentation', () => {
     expect(() => client.messages.stream({ model: 'gpt-6-sol', messages: [] }, {})).toThrow('400 invalid request');
     expect(record.modelCalls).toBe(1);
     expect(record.modelErrors).toEqual(['400 invalid request']);
+  });
+});
+
+// Codex r4 P2: OpenAI candidates resolve only in a sandbox or eval-harness
+// session, so the replay must mark its conversations as the harness — or
+// every benchmark candidate condition would silently run on Claude.
+describe('runScenario — the replay is an eval-harness session', () => {
+  const KEYS = ['GATE_VOICE_RELAY_OPENAI', 'VOICE_RELAY_INBOUND_MODEL'];
+  let saved;
+  beforeEach(() => { saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]])); });
+  afterEach(() => { for (const k of KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
+
+  test('a gated OpenAI inbound candidate is the model the scenario record pins', async () => {
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'gpt-6-sol';
+    const replay = require('../services/eval/voice-relay-replay');
+    const record = await replay.runScenario({ id: 'harness-context', caller: {}, turns: [], checks: [] });
+    expect(record.model).toBe('gpt-6-sol');
+    expect(record.modelFallbackReason).toBeNull();
   });
 });

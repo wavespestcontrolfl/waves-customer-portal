@@ -1603,6 +1603,9 @@ function newConversation(h, scenario, record) {
     from: caller.from || null,
     to: EVAL_CALLER_TO,
     language: scenario.language === 'es' ? 'es-US' : null,
+    // The eval context: the only non-sandbox session that may resolve a
+    // gated OpenAI candidate (relay-conversation.js resolveSessionModel).
+    evalHarness: true,
     send: (text) => {
       const t = String(text || '');
       record.events.push({ kind: 'agent', text: t, turn: record.turn, modelRound: record.modelCalls, index: record.events.length });

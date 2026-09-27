@@ -28,7 +28,8 @@
  *   messages (Anthropic content-block shape, since relay-conversation.js
  *     pushes msg.content straight back into history) → input items:
  *       user text                → {role:'user', content:[{type:'input_text'}]}
- *       assistant text           → {role:'assistant', content:[{type:'output_text'}]}
+ *       assistant text           → {role:'assistant', content:'<text>'} (a plain-string
+ *                                  easy input message — valid for every role)
  *       assistant tool_use       → {type:'function_call', call_id, name, arguments}
  *       user tool_result         → {type:'function_call_output', call_id, output}
  *   tools (Anthropic {name, description, input_schema}) → Responses
@@ -42,12 +43,19 @@
  *
  * Response mapping (OpenAI Responses `response.completed`/`response.
  * incomplete` body → Anthropic Message shape):
- *   output[] message item's output_text/refusal parts → {type:'text', text}
- *   output[] function_call item                        → {type:'tool_use',
- *     id: call_id, name, input: JSON.parse(arguments)} — invalid JSON
- *     rejects finalMessage with a descriptive Error, never a swallowed input.
+ *   output[] message item's output_text parts → {type:'text', text}
+ *   output[] function_call item               → {type:'tool_use',
+ *     id: call_id, name, input: JSON.parse(arguments)} — invalid JSON, or a
+ *     call that did not complete, rejects finalMessage with a descriptive
+ *     Error, never a swallowed input or an unfinished tool run.
+ *   A refusal part, a response with no non-blank text and no tool call, and
+ *     an incomplete response for any reason but max_output_tokens all reject
+ *     too — each would otherwise end the turn in silence (or speak a safety
+ *     refusal) as if it were a clean round.
  *   stop_reason: 'tool_use' when any function_call is present, 'max_tokens'
  *     when the response is incomplete for max_output_tokens, else 'end_turn'.
+ *   Error messages carry only an HTTP status and a bounded provider code /
+ *     request id — never a provider message, which can quote caller input.
  *   usage (response.completed only) → Anthropic shape:
  *     input_tokens = usage.input_tokens - cached_tokens
  *     cache_read_input_tokens = usage.input_tokens_details.cached_tokens
@@ -179,41 +187,65 @@ function mapUsage(usage) {
   };
 }
 
+/**
+ * A bounded provider code / type / id token, or null. Provider error
+ * MESSAGES can quote the rejected input (caller name, phone, address) and
+ * relay-conversation.js logs `err.message`, so only a token like this ever
+ * reaches an Error from this file — services/llm/call.js's rule.
+ */
+function safeToken(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,80}$/.test(value) ? value : null;
+}
+
+/** The safe code of a provider error object ({ code, type, message }), or null. */
+function safeErrorCode(err) {
+  if (!err || typeof err !== 'object') return null;
+  return safeToken(err.code) || safeToken(err.type);
+}
+
+/** A message item's output_text parts → text blocks. A refusal part rejects. */
+function messageTextBlocks(item) {
+  const blocks = [];
+  for (const part of item.content || []) {
+    if (part.type === 'refusal') {
+      // A refusal is a failed leg, as an Anthropic stop_reason 'refusal' is
+      // (services/llm/call.js openAIVerdict) — never speech for the caller.
+      // Its text can echo customer detail, so it is not quoted here.
+      throw new Error('OpenAI Responses API returned a refusal.');
+    }
+    if (part.type === 'output_text' && typeof part.text === 'string') blocks.push({ type: 'text', text: part.text });
+  }
+  return blocks;
+}
+
+/** A function_call item → a tool_use block. An unfinished call or bad JSON rejects. */
+function functionCallBlock(item, response) {
+  const label = safeToken(item.name) || safeToken(item.call_id) || 'unknown';
+  // A call cut off mid-arguments (token exhaustion) must never run as a
+  // tool — an empty/partial argument string would default to {} below.
+  if (item.status && item.status !== 'completed') {
+    throw new Error(`OpenAI function_call "${label}" did not complete (${safeToken(item.status) || 'unknown'}).`);
+  }
+  if (response.status === 'incomplete' && !item.status) {
+    throw new Error(`OpenAI function_call "${label}" arrived in an incomplete response with no completion status.`);
+  }
+  let input;
+  try {
+    input = item.arguments ? JSON.parse(item.arguments) : {};
+  } catch {
+    // Neither the parse error's own message nor the raw arguments string
+    // is included: `item.arguments` is caller-supplied tool-call input
+    // (phone, name, address on a lookup/booking tool) and JSON.parse's
+    // error message can echo a slice of the malformed text verbatim —
+    // this error is logged (relay-conversation.js's model-round catch),
+    // so a fixed, content-free message is the only PII-safe choice here.
+    throw new Error(`OpenAI function_call "${label}" returned invalid JSON arguments (unparseable).`);
+  }
+  return { type: 'tool_use', id: item.call_id || item.id, name: item.name, input };
+}
+
 /** A completed/incomplete Responses `response` object → an Anthropic-shaped Message. */
 function mapResponseToMessage(response, requestedModel) {
-  const content = [];
-  let hasFunctionCall = false;
-  for (const item of response.output || []) {
-    if (item.type === 'message') {
-      for (const part of item.content || []) {
-        if (part.type === 'output_text' && typeof part.text === 'string') content.push({ type: 'text', text: part.text });
-        else if (part.type === 'refusal' && typeof part.refusal === 'string') content.push({ type: 'text', text: part.refusal });
-      }
-    } else if (item.type === 'function_call') {
-      // A call cut off mid-arguments (token exhaustion) must never run as a
-      // tool — an empty/partial argument string would default to {} below.
-      if (item.status && item.status !== 'completed') {
-        throw new Error(`OpenAI function_call "${item.name || item.call_id}" did not complete (${item.status}).`);
-      }
-      if (response.status === 'incomplete' && !item.status) {
-        throw new Error(`OpenAI function_call "${item.name || item.call_id}" arrived in an incomplete response with no completion status.`);
-      }
-      hasFunctionCall = true;
-      let input;
-      try {
-        input = item.arguments ? JSON.parse(item.arguments) : {};
-      } catch {
-        // Neither the parse error's own message nor the raw arguments string
-        // is included: `item.arguments` is caller-supplied tool-call input
-        // (phone, name, address on a lookup/booking tool) and JSON.parse's
-        // error message can echo a slice of the malformed text verbatim —
-        // this error is logged (relay-conversation.js's model-round catch),
-        // so a fixed, content-free message is the only PII-safe choice here.
-        throw new Error(`OpenAI function_call "${item.name || item.call_id}" returned invalid JSON arguments (unparseable).`);
-      }
-      content.push({ type: 'tool_use', id: item.call_id || item.id, name: item.name, input });
-    }
-  }
   // `incomplete` for max_output_tokens is a legitimate, non-error stop (the
   // Anthropic 'max_tokens' equivalent — the relay already knows what that
   // means). Any OTHER incomplete reason (content_filter, or anything else
@@ -226,15 +258,28 @@ function mapResponseToMessage(response, requestedModel) {
   // a real provider error already takes.
   const incompleteReason = response.status === 'incomplete' ? (response.incomplete_details || {}).reason || 'unknown' : null;
   if (incompleteReason && incompleteReason !== 'max_output_tokens') {
-    throw new Error(`OpenAI Responses API returned an incomplete response (${incompleteReason}).`);
+    throw new Error(`OpenAI Responses API returned an incomplete response (${safeToken(incompleteReason) || 'unknown'}).`);
   }
-  // Reasoning can spend the whole output budget before any visible text or
-  // tool call exists. Accepting that as a max_tokens stop would speak nothing
-  // while resetting the failure streak (and count a clean benchmark round), so
-  // a token-exhausted response with no usable output takes the failure path.
-  if (incompleteReason === 'max_output_tokens' && !hasFunctionCall
-    && !content.some((b) => b.type === 'text' && b.text.trim())) {
-    throw new Error('OpenAI Responses API exhausted max_output_tokens before any usable output.');
+  const content = [];
+  let hasFunctionCall = false;
+  for (const item of response.output || []) {
+    if (item.type === 'message') {
+      content.push(...messageTextBlocks(item));
+    } else if (item.type === 'function_call') {
+      hasFunctionCall = true;
+      content.push(functionCallBlock(item, response));
+    }
+    // Reasoning (and any other) items carry nothing the caller hears.
+  }
+  // No non-blank text and no tool call — an empty output, reasoning only, or
+  // blank text, whether completed or cut off by max_output_tokens (reasoning
+  // can spend the whole budget before any visible output). Accepting it would
+  // speak nothing while resetting the relay's failure streak and count a
+  // clean benchmark round, so it takes the failure path instead.
+  if (!hasFunctionCall && !content.some((b) => b.type === 'text' && b.text.trim())) {
+    throw new Error(incompleteReason === 'max_output_tokens'
+      ? 'OpenAI Responses API exhausted max_output_tokens before any usable output.'
+      : 'OpenAI Responses API returned no usable output (no text, no tool call).');
   }
   const stop_reason = hasFunctionCall ? 'tool_use' : (incompleteReason === 'max_output_tokens' ? 'max_tokens' : 'end_turn');
   return {
@@ -258,46 +303,72 @@ function normalizeAbort(err, signal) {
 }
 
 /**
+ * Split every complete SSE event off the front of an LF-normalized buffer.
+ * Returns the parsed `data:` payloads and the unconsumed remainder. A
+ * malformed individual event is skipped rather than failing the stream.
+ */
+function takeSSEEvents(buffer) {
+  const events = [];
+  let rest = buffer;
+  let idx;
+  while ((idx = rest.indexOf('\n\n')) !== -1) {
+    const rawEvent = rest.slice(0, idx);
+    rest = rest.slice(idx + 2);
+    const dataLines = rawEvent
+      .split('\n')
+      .filter((l) => l.startsWith('data:'))
+      .map((l) => l.slice(5).trimStart());
+    if (!dataLines.length) continue;
+    const dataStr = dataLines.join('\n');
+    if (dataStr === '[DONE]') continue;
+    try {
+      events.push(JSON.parse(dataStr));
+    } catch {
+      // A malformed individual SSE frame is skipped, not fatal.
+    }
+  }
+  return { events, rest };
+}
+
+function abortError() {
+  const err = new Error('The operation was aborted.');
+  err.name = 'AbortError';
+  return err;
+}
+
+/**
  * Decode an SSE byte/string stream into parsed `data:` JSON payloads. Accepts
  * either a real fetch Response body (async-iterable of Uint8Array) or a plain
  * async-iterable of strings (test convenience) — chunks of either kind may be
- * interleaved. A malformed individual event is skipped rather than failing
- * the whole stream; a genuinely truncated/garbage stream simply yields fewer
+ * interleaved. SSE lines may end in CRLF, LF or a lone CR; all three are
+ * normalized to LF before events are split. A chunk's trailing CR is held
+ * back until the next chunk, since it may be the first half of a CRLF split
+ * across chunks. A genuinely truncated/garbage stream simply yields fewer
  * events, which surfaces as "stream ended without a completed response".
  */
 async function* readSSEEvents(bodyStream, signal) {
   const decoder = new TextDecoder();
   let buffer = '';
+  let heldCR = false;
+  const append = (text) => {
+    let t = (heldCR ? '\r' : '') + text;
+    heldCR = t.endsWith('\r');
+    if (heldCR) t = t.slice(0, -1);
+    buffer += t.replace(/\r\n?/g, '\n');
+  };
   for await (const chunk of bodyStream) {
-    if (signal && signal.aborted) {
-      const err = new Error('The operation was aborted.');
-      err.name = 'AbortError';
-      throw err;
-    }
-    buffer += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
-    let idx;
-    while ((idx = buffer.indexOf('\n\n')) !== -1) {
-      const rawEvent = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
-      const dataLines = rawEvent
-        .split('\n')
-        .filter((l) => l.startsWith('data:'))
-        .map((l) => l.slice(5).trimStart());
-      if (!dataLines.length) continue;
-      const dataStr = dataLines.join('\n');
-      if (dataStr === '[DONE]') continue;
-      try {
-        yield JSON.parse(dataStr);
-      } catch {
-        // A malformed individual SSE frame is skipped, not fatal.
-      }
-    }
+    if (signal && signal.aborted) throw abortError();
+    append(typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true }));
+    const { events, rest } = takeSSEEvents(buffer);
+    buffer = rest;
+    yield* events;
   }
-  if (signal && signal.aborted) {
-    const err = new Error('The operation was aborted.');
-    err.name = 'AbortError';
-    throw err;
-  }
+  if (signal && signal.aborted) throw abortError();
+  // End of stream: flush the decoder, and a CR still held back was a line
+  // ending after all (it can complete a final event).
+  append(decoder.decode());
+  if (heldCR) buffer += '\n';
+  yield* takeSSEEvents(buffer).events;
 }
 
 /**
@@ -350,9 +421,13 @@ class OpenAIRelayStream {
       throw normalizeAbort(err, signal);
     }
     if (!resp.ok) {
-      let detail = '';
-      try { detail = await resp.text(); } catch { /* no body to read */ }
-      throw new Error(`OpenAI Responses API HTTP ${resp.status}${detail ? `: ${detail.slice(0, 500)}` : ''}`);
+      // Status, provider error code and request id only — the body's message
+      // can quote the rejected input, and this error is logged (safeToken).
+      let code = null;
+      try { code = safeErrorCode((JSON.parse(await resp.text()) || {}).error); } catch { /* no JSON body */ }
+      const requestId = resp.headers && typeof resp.headers.get === 'function' ? safeToken(resp.headers.get('x-request-id')) : null;
+      const detail = [code, requestId && `request ${requestId}`].filter(Boolean).join(', ');
+      throw new Error(`OpenAI Responses API HTTP ${resp.status}${detail ? ` (${detail})` : ''}`);
     }
     let finalResponse = null;
     let failure = null;
@@ -377,11 +452,14 @@ class OpenAIRelayStream {
           case 'response.incomplete':
             finalResponse = evt.response;
             break;
-          case 'response.failed':
-            failure = ((evt.response || {}).error || {}).message || 'OpenAI response failed';
+          case 'response.failed': {
+            const response = evt.response || {};
+            const id = safeToken(response.id);
+            failure = `${safeErrorCode(response.error) || 'response_failed'}${id ? ` (${id})` : ''}`;
             break;
+          }
           case 'error':
-            failure = evt.message || (evt.error || {}).message || 'OpenAI stream error';
+            failure = safeErrorCode(evt.error) || safeToken(evt.code) || 'stream_error';
             break;
           default:
             break;

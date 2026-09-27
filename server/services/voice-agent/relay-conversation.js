@@ -33,10 +33,13 @@
  * any other importer (e.g. collections-conversation.js's own independent
  * read of the same env).
  *
- * GATE_VOICE_RELAY_OPENAI (off in production): while live, the SAME override
- * envs above may also resolve to an OpenAI model MODEL_CATALOG marks
- * voice-eligible (`voice: {...}` — config/models.js) — a benchmark/sandbox
- * lane, never automatic for production inbound (isAllowedOverrideModel /
+ * GATE_VOICE_RELAY_OPENAI (off in production): while live, the SANDBOX and
+ * INBOUND override envs above may also resolve to an OpenAI model
+ * MODEL_CATALOG marks voice-eligible (`voice: {...}` — config/models.js), but
+ * only for a sandbox session or an eval-harness session (`evalHarness`,
+ * voice-relay-replay.js) — an ordinary production inbound call is
+ * Anthropic-only even with the gate on, and so is the shared
+ * VOICE_RELAY_MODEL fallback (isAllowedOverrideModel /
  * allowedOverrideModelIds read the gate at call time; see there). The
  * resolved session picks its client by MODEL_CATALOG[this.model].provider
  * (`this._provider`, pinned alongside `this.model`): 'anthropic' runs the
@@ -219,14 +222,22 @@ function voiceRelayOpenaiGateLive() {
     : process.env.GATE_VOICE_RELAY_OPENAI === 'true';
 }
 
-/** The full override allowlist for THIS call — gate-aware, always fresh. */
-function allowedOverrideModelIds() {
-  if (!voiceRelayOpenaiGateLive()) return new Set(ALLOWED_OVERRIDE_MODEL_IDS);
+/**
+ * The override allowlist for ONE session — gate-aware, always fresh. OpenAI
+ * ids join it only when `openaiContext` is set — a sandbox test call or the
+ * eval/benchmark harness, never an ordinary production inbound call — AND
+ * the gate is live. With no context (the default, and what the Models tab's
+ * inbound row reads) the list is Anthropic-only whatever the gate or the
+ * override envs say: production inbound stays on Claude
+ * (docs/sandy-benchmark.md "OpenAI candidates").
+ */
+function allowedOverrideModelIds({ openaiContext = false } = {}) {
+  if (openaiContext !== true || !voiceRelayOpenaiGateLive()) return new Set(ALLOWED_OVERRIDE_MODEL_IDS);
   return new Set([...ALLOWED_OVERRIDE_MODEL_IDS, ...OPENAI_VOICE_OVERRIDE_MODEL_IDS]);
 }
 
-function isAllowedOverrideModel(id) {
-  return typeof id === 'string' && id.length > 0 && allowedOverrideModelIds().has(id);
+function isAllowedOverrideModel(id, opts) {
+  return typeof id === 'string' && id.length > 0 && allowedOverrideModelIds(opts).has(id);
 }
 
 // A misconfigured override is re-read by every new call; the per-session
@@ -234,11 +245,11 @@ function isAllowedOverrideModel(id) {
 // the whole allowlist) is logged once per process per source/value — the
 // relay-profiles.js warnOnce pattern — so a busy line cannot flood the logs.
 const warnedOverrides = new Set();
-function warnRejectedOverrideOnce(source, value) {
+function warnRejectedOverrideOnce(source, value, opts) {
   const key = `${source}=${value}`;
   if (warnedOverrides.has(key)) return;
   warnedOverrides.add(key);
-  logger.warn(`[voice-relay] ignoring unknown model override ${key} — falling back (allowlist: ${[...allowedOverrideModelIds()].join(', ')})`);
+  logger.warn(`[voice-relay] ignoring unknown model override ${key} — falling back (allowlist: ${[...allowedOverrideModelIds(opts)].join(', ')})`);
 }
 
 /**
@@ -267,8 +278,14 @@ function warnRejectedOverrideOnce(source, value) {
  * always a valid, allowlisted Anthropic id) rather than silently reach the
  * OpenAI client, or an unrecognized provider entirely, with no override
  * ever having been rejected.
+ *
+ * OpenAI ids are eligible only for a sandbox session or an eval-harness
+ * session (`evalHarness`, set by services/eval/voice-relay-replay.js alone —
+ * the Twilio relay server never passes it); an ordinary production inbound
+ * session rejects them even with the gate on and an OpenAI inbound override.
  */
-function resolveSessionModel({ sandbox } = {}) {
+function resolveSessionModel({ sandbox, evalHarness } = {}) {
+  const allowOpts = { openaiContext: sandbox === true || evalHarness === true };
   const candidates = [];
   if (sandbox === true) {
     const sandboxRaw = process.env.VOICE_RELAY_SANDBOX_MODEL;
@@ -279,12 +296,12 @@ function resolveSessionModel({ sandbox } = {}) {
 
   let fallbackReason = null;
   for (const { source, value } of candidates) {
-    if (isAllowedOverrideModel(value)) {
+    if (isAllowedOverrideModel(value, allowOpts)) {
       return { model: value, fallbackReason };
     }
     if (!fallbackReason) {
       fallbackReason = `unknown_model_override:${source}=${value}`;
-      warnRejectedOverrideOnce(source, value);
+      warnRejectedOverrideOnce(source, value, allowOpts);
     }
   }
   // VOICE_RELAY_MODEL is shared with collections-conversation.js, which only
@@ -806,7 +823,7 @@ function getVoiceProfileTextNonBlocking() {
 }
 
 class RelayConversation {
-  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, resumed = false }) {
+  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, resumed = false, evalHarness = false }) {
     this.callSid = callSid || null;
     // ⭐ A SANDBOX CALL IS A DRY RUN. Proven at ws upgrade from the call_log
     // row's source (never the setup frame): the transcript, latency record and
@@ -821,7 +838,10 @@ class RelayConversation {
     // stamp below reads this.model, never the module-level MODEL, so a
     // mid-call env change or a concurrent call under a different env can
     // never leak into an in-flight session.
-    const modelResolution = resolveSessionModel({ sandbox: this.sandbox });
+    // `evalHarness` is set only by the eval/benchmark replay
+    // (services/eval/voice-relay-replay.js) — the one non-sandbox context in
+    // which resolveSessionModel may pick a gated OpenAI candidate.
+    const modelResolution = resolveSessionModel({ sandbox: this.sandbox, evalHarness: evalHarness === true });
     this.model = modelResolution.model;
     this._modelFallbackReason = modelResolution.fallbackReason;
     // Which client this session's model rounds run on — resolved once here,

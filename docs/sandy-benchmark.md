@@ -159,9 +159,13 @@ the combined report is only written after every trial finishes.
 
 `--candidate-model` may also be a voice-eligible OpenAI id — one MODEL_CATALOG
 marks with a `voice` object (`server/config/models.js`; today gpt-6-sol,
-gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra). Production inbound calls and
-Sandy's sandbox line stay on Claude Sonnet 5 either way — this only widens
-what a **benchmark candidate** may run on. The runner:
+gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra). Production inbound calls stay on
+Claude whatever the gate says: the relay accepts an OpenAI id only in a
+sandbox session or in the eval harness's own sessions (`evalHarness`, which
+`voice-relay-replay.js` alone sets), and the shared `VOICE_RELAY_MODEL` never
+takes one (collections reads it too). The runner never touches Sandy's
+sandbox line, so this only widens what a **benchmark candidate** may run on.
+The runner:
   - requires `OPENAI_API_KEY` in its OWN process environment up front (a
     usage error, exit 2, before any child runs) — without it every
     OpenAI-candidate condition would fail its first model call;

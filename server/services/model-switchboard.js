@@ -254,10 +254,19 @@ function inboundOverrideParse(raw) {
   const { isAllowedOverrideModel } = require('./voice-agent/relay-conversation');
   return isAllowedOverrideModel(raw) ? raw : null;
 }
+// The shared VOICE_RELAY_MODEL under the inbound pin: the relay takes it only
+// when it is an allowlisted Anthropic id (resolveSessionModel — collections
+// reads the same env and speaks only Anthropic), so an OpenAI or unknown value
+// shows as rejected here rather than as the model inbound calls run on.
+function inboundSharedModelParse(raw) {
+  const { ALLOWED_OVERRIDE_MODEL_IDS } = require('./voice-agent/relay-conversation');
+  return ALLOWED_OVERRIDE_MODEL_IDS.has(raw) ? raw : null;
+}
 function inboundOverrideAllowed() {
-  // Gate-aware (GATE_VOICE_RELAY_OPENAI) — includes the voice-eligible OpenAI
-  // ids too while that gate is live, so the tab's displayed allowlist never
-  // goes stale relative to what resolveSessionModel would actually accept.
+  // The production inbound allowlist — Anthropic-only even with
+  // GATE_VOICE_RELAY_OPENAI live, since OpenAI candidates resolve only in
+  // sandbox / eval-harness sessions — so the tab's displayed allowlist never
+  // goes stale relative to what resolveSessionModel accepts for this row.
   const { allowedOverrideModelIds } = require('./voice-agent/relay-conversation');
   return [...allowedOverrideModelIds()];
 }
@@ -379,7 +388,7 @@ const LANES = [
   // it would draft an env value inboundOverrideParse() (and the runtime's own
   // resolveSessionModel) reject outright, falling back after the restart the
   // owner thought would apply it.
-  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE')), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
+  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE'), { parse: inboundSharedModelParse }), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
   L('voice_relay_collections', 'Collections outbound calls', 'collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE')), null, { note: 'shares VOICE_RELAY_MODEL with inbound; VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL are inbound-only and never reach this lane' }),
   L('outreach_drafter', 'Backlink outreach drafting', 'seo/backlink-outreach-drafter.js', 'voice', E('MODEL_OUTREACH_DRAFTER', T('WORKHORSE'))),
 

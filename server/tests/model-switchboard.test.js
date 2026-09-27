@@ -548,6 +548,28 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
     expect(affected.map((l) => l.id).sort()).toEqual(['voice_relay', 'voice_relay_collections']);
   });
 
+  // The relay takes the shared VOICE_RELAY_MODEL only as an allowlisted
+  // Anthropic id (gate or no gate — collections reads the same env), so the
+  // inbound row must not show an OpenAI value as what inbound calls run on.
+  it('an OpenAI VOICE_RELAY_MODEL shows as rejected on voice_relay (runtime falls back) but as-is on collections', () => {
+    const savedGate = process.env.GATE_VOICE_RELAY_OPENAI;
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_MODEL = 'gpt-6-sol';
+    try {
+      jest.resetModules();
+      const MODELS = require('../config/models');
+      const { lanes } = require('../services/model-switchboard').getSwitchboard();
+      const inbound = lanes.find((l) => l.id === 'voice_relay');
+      const collections = lanes.find((l) => l.id === 'voice_relay_collections');
+      expect(inbound.primary.model).toBe(MODELS.VOICE);
+      expect(inbound.primary.via).toMatch(/VOICE_RELAY_MODEL rejected/);
+      expect(inbound.primary.dependsOnEnvs).toContain('VOICE_RELAY_MODEL');
+      expect(collections.primary.model).toBe('gpt-6-sol');
+    } finally {
+      if (savedGate === undefined) delete process.env.GATE_VOICE_RELAY_OPENAI; else process.env.GATE_VOICE_RELAY_OPENAI = savedGate;
+    }
+  });
+
   it('with VOICE_RELAY_INBOUND_MODEL set to a valid override, voice_relay no longer depends on VOICE_RELAY_MODEL — only collections is affected', () => {
     process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-haiku-4-5-20251001';
     process.env.VOICE_RELAY_MODEL = 'claude-sonnet-5';
