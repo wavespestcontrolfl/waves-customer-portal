@@ -140,6 +140,8 @@ describe('valid beacon', () => {
     });
     expect(row.day).toEqual(expect.objectContaining({ __raw: expect.stringContaining("America/New_York") }));
     expect(mergeArgs).toEqual(expect.objectContaining({ count: expect.objectContaining({ __raw: expect.stringContaining('count + 1') }) }));
+    // updated_at tracks the latest increment, not just the day's first beacon.
+    expect(mergeArgs.updated_at).toEqual({ __raw: 'now()' });
   });
 
   test('www. is stripped and a spoke origin maps to its bare-domain key', async () => {

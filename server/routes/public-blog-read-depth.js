@@ -109,7 +109,7 @@ async function writeCount(site, path, milestone) {
       count: 1,
     })
     .onConflict(['day', 'site', 'path', 'milestone'])
-    .merge({ count: db.raw('blog_read_depth_daily.count + 1') });
+    .merge({ count: db.raw('blog_read_depth_daily.count + 1'), updated_at: db.raw('now()') });
 }
 
 const router = express.Router();
