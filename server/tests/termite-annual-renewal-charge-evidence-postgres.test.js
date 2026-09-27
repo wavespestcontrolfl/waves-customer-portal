@@ -743,6 +743,104 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
     });
   });
 
+  // Codex #4971 pre-push P1: the automatic renew stamp re-reads the SUCCESSOR
+  // under the gate (both keys), not only the parent. The race is real here:
+  // another transaction holds the successor's gate key while the stamp —
+  // having already scanned / been handed the successor as active and paid —
+  // blocks on it; that transaction then revokes the successor's payment and
+  // commits, and the stamp must see the revocation.
+  describe('pre-push P1: the successor\'s payment is re-read under the renewal gate', () => {
+    async function paidRenewal() {
+      const parentInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - 400 * 86400000) });
+      const parent = await insertParent({ prepay_invoice_id: parentInvoice.id });
+      const renewalInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(), stripe_payment_intent_id: `pi_succ_${randomUUID().slice(0, 8)}` });
+      const successor = await insertSuccessor(parent, renewalInvoice, { status: 'active' });
+      return { parent, successor, renewalInvoice };
+    }
+    const parentRow = (id) => db('annual_prepay_terms').where({ id }).first('status', 'renewal_decision');
+
+    async function waitForAdvisoryWaiter() {
+      for (let i = 0; i < 200; i += 1) {
+        const { rows } = await db.raw("SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted");
+        if (rows[0].n > 0) return;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      throw new Error('the stamp never waited on the successor gate key');
+    }
+
+    // Holds the successor's gate key, lets `action` run up to the gate, then
+    // applies `mutate` and commits — the between-scan-and-gate window.
+    async function raceAtTheGate(successorId, mutate, action) {
+      let held;
+      let release;
+      const heldP = new Promise((r) => { held = r; });
+      const releaseP = new Promise((r) => { release = r; });
+      const holder = db.transaction(async (trx) => {
+        await Renewals.acquireTermiteGateAtEntry(trx, { termIds: [successorId] });
+        held();
+        await releaseP;
+        await mutate(trx);
+      });
+      await heldP;
+      const run = action();
+      await waitForAdvisoryWaiter();
+      release();
+      await holder;
+      return run;
+    }
+
+    const refundOnLedger = (renewalInvoice) => (trx) => trx('payments').insert({
+      status: 'refunded', refund_status: 'full', stripe_payment_intent_id: renewalInvoice.stripe_payment_intent_id, updated_at: new Date(),
+    });
+    // The dispute webhook's demotion shape (suspendActiveTermsForDisputedInvoice).
+    const disputeSuspend = (successor) => (trx) => trx('annual_prepay_terms').where({ id: successor.id })
+      .update({ status: 'payment_pending', dispute_suspended_at: new Date(), updated_at: new Date() });
+
+    test('backstop: a successor refunded in full on the ledger between the scan and the gate → no renew stamp', async () => {
+      const { parent, successor, renewalInvoice } = await paidRenewal();
+      const summary = await raceAtTheGate(successor.id, refundOnLedger(renewalInvoice), () => Renewals.reconcileParentRenewedStamps({ conn: db }));
+      expect(summary).toEqual({ scanned: 1, stamped: 0 }); // the scan saw it paid; the gate re-read refused
+      expect(await parentRow(parent.id)).toEqual({ status: 'active', renewal_decision: null });
+    });
+
+    test('backstop: a successor dispute-suspended between the scan and the gate → no renew stamp', async () => {
+      const { parent, successor } = await paidRenewal();
+      const summary = await raceAtTheGate(successor.id, disputeSuspend(successor), () => Renewals.reconcileParentRenewedStamps({ conn: db }));
+      expect(summary).toEqual({ scanned: 1, stamped: 0 });
+      expect(await parentRow(parent.id)).toEqual({ status: 'active', renewal_decision: null });
+    });
+
+    test('paid sync: the successor row the caller read is refunded / dispute-suspended before the gate → no renew stamp', async () => {
+      const refunded = await paidRenewal();
+      await raceAtTheGate(refunded.successor.id, refundOnLedger(refunded.renewalInvoice),
+        () => Renewals._private.stampParentRenewedForSuccessor(refunded.successor, 'test', db));
+      expect(await parentRow(refunded.parent.id)).toEqual({ status: 'active', renewal_decision: null });
+
+      const disputed = await paidRenewal();
+      await raceAtTheGate(disputed.successor.id, disputeSuspend(disputed.successor),
+        () => Renewals._private.stampParentRenewedForSuccessor(disputed.successor, 'test', db));
+      expect(await parentRow(disputed.parent.id)).toEqual({ status: 'active', renewal_decision: null });
+    });
+
+    test('a normal paid successor still stamps the parent renewed, on both paths', async () => {
+      const viaSync = await paidRenewal();
+      await raceAtTheGate(viaSync.successor.id, async () => {}, () => Renewals._private.stampParentRenewedForSuccessor(viaSync.successor, 'test', db));
+      expect(await parentRow(viaSync.parent.id)).toEqual({ status: 'renewed', renewal_decision: 'renew' });
+
+      const viaBackstop = await paidRenewal();
+      const summary = await raceAtTheGate(viaBackstop.successor.id, async () => {}, () => Renewals.reconcileParentRenewedStamps({ conn: db }));
+      expect(summary).toEqual({ scanned: 1, stamped: 1 });
+      expect(await parentRow(viaBackstop.parent.id)).toEqual({ status: 'renewed', renewal_decision: 'renew' });
+    });
+
+    test('a re-paid successor still carrying the dispute marker (recovery not yet finished) stamps as before', async () => {
+      const { parent, successor } = await paidRenewal();
+      await db('annual_prepay_terms').where({ id: successor.id }).update({ dispute_suspended_at: new Date(Date.now() - 86400000) });
+      await Renewals._private.stampParentRenewedForSuccessor(successor, 'test', db);
+      expect(await parentRow(parent.id)).toEqual({ status: 'renewed', renewal_decision: 'renew' });
+    });
+  });
+
   // OWNER RULING (pre-push item 6): a renewal whose invoice was already SENT
   // is withdrawn right away once the prior year becomes durably ineligible
   // — here a full refund of the parent's own invoice, recorded on the

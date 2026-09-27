@@ -6658,8 +6658,15 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
   // gate (its lookup statement first) and re-checks the parent
   // (resolveParentEligibility — a live parent with no linked invoice here)
   // before recordDecision's own peek + write.
+  //
+  // Codex #4971 pre-push P1: and re-reads the SUCCESSOR first (active, its
+  // own invoice paid and not refunded on the ledger), under both keys.
   const LIVE_PARENT = { id: 'parent-term', status: 'active', renewal_decision: null, prepay_invoice_id: null };
-  const stampPrelude = () => [query({ rows: [] }), query({ first: LIVE_PARENT })];
+  const PAID_SUCCESSOR = { id: 'succ-term', status: 'active', prepay_invoice_id: 'inv-succ', dispute_suspended_at: null };
+  const stampPrelude = (successor = PAID_SUCCESSOR) => [query({ rows: [] }), query({ first: successor }), query({ first: LIVE_PARENT })];
+  const paidEvidence = (invoice = { status: 'paid', stripe_payment_intent_id: 'pi_succ' }, ledgerRefund = undefined) => ({
+    invoices: [query({ first: invoice })], payments: [query({ first: ledgerRefund })],
+  });
   beforeEach(() => {
     jest.clearAllMocks();
     db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -6673,7 +6680,7 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
     // here since this fixture isn't testing that termite-scoping itself
     // (see the dedicated recordDecision termite-lock describe below).
     const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
-    setDbQueues({ annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ] });
+    setDbQueues({ annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ], ...paidEvidence() });
 
     await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
 
@@ -6685,6 +6692,55 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
     }));
   });
 
+  // Codex #4971 pre-push P1: the successor's own payment is re-read under
+  // the gate (both keys), never trusted from the caller's earlier read.
+  test('the gate is taken over BOTH the parent and the successor keys', async () => {
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    const [gateQ, ...rest] = stampPrelude();
+    setDbQueues({ annual_prepay_terms: [gateQ, ...rest, recordDecisionQ, recordDecisionQ], ...paidEvidence() });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    const [, bindings] = gateQ.whereRaw.mock.calls[0];
+    expect(bindings[0]).toBe('{parent-term,succ-term}');
+  });
+
+  const TERMS = 'annual_prepay_terms';
+  test.each([
+    ['refunded in full on the payments ledger', PAID_SUCCESSOR, paidEvidence(undefined, { id: 'pay-refunded' }), [TERMS, TERMS, 'invoices', 'payments']],
+    ['dispute-suspended (demoted to payment_pending)', { ...PAID_SUCCESSOR, status: 'payment_pending', dispute_suspended_at: new Date() }, {}, [TERMS, TERMS]],
+    ['cancelled', { ...PAID_SUCCESSOR, status: 'cancelled' }, {}, [TERMS, TERMS]],
+    ['on an invoice that is no longer paid', PAID_SUCCESSOR, { invoices: [query({ first: { status: 'open' } })] }, [TERMS, TERMS, 'invoices']],
+    ['on a missing invoice row (no evidence, never vacuous)', PAID_SUCCESSOR, { invoices: [query({ first: undefined })] }, [TERMS, TERMS, 'invoices']],
+    ['with no linked invoice', { ...PAID_SUCCESSOR, prepay_invoice_id: null }, {}, [TERMS, TERMS]],
+  ])('a successor %s under the gate → no renew stamp, the parent is never read', async (_label, successor, evidence, tables) => {
+    const parentQ = query({ first: LIVE_PARENT });
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    const successorQ = query({ first: successor });
+    setDbQueues({ annual_prepay_terms: [query({ rows: [] }), successorQ, parentQ, recordDecisionQ, recordDecisionQ], ...evidence });
+
+    await expect(_private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test')).resolves.toBeUndefined();
+
+    // Exactly the gate lookup, the successor re-read and its evidence — and
+    // nothing after (no parent read, no decision write).
+    expect(db.mock.calls.map(([table]) => table)).toEqual(tables);
+    expect(successorQ.where).toHaveBeenCalledWith({ id: 'succ-term' });
+    expect(parentQ.first).not.toHaveBeenCalled();
+    expect(recordDecisionQ.update).not.toHaveBeenCalled();
+  });
+
+  test('an ACTIVE successor still carrying the dispute marker (won / re-paid recovery, cleared after this stamp) with a paid invoice still stamps', async () => {
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({
+      annual_prepay_terms: [...stampPrelude({ ...PAID_SUCCESSOR, dispute_suspended_at: new Date() }), recordDecisionQ, recordDecisionQ],
+      ...paidEvidence(),
+    });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    expect(recordDecisionQ.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'renewed', renewal_decision: 'renew' }));
+  });
+
   test('a term with no renewed_from_term_id (ordinary annual prepay, or an original termite term) touches the db not at all', async () => {
     setDbQueues({}); // any db(table) call here throws "Unexpected db table" and fails the test
     await expect(_private.stampParentRenewedForSuccessor({ id: 'term-s', renewed_from_term_id: null }, 'test')).resolves.toBeUndefined();
@@ -6692,7 +6748,7 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
 
   test('idempotent — a parent already decided (guard miss) is a silent no-op, never throws', async () => {
     const recordDecisionQ = query({ returning: [] }); // guard miss: recordDecision resolves null
-    setDbQueues({ annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ] });
+    setDbQueues({ annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ], ...paidEvidence() });
     await expect(_private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test')).resolves.toBeUndefined();
   });
 
@@ -6707,7 +6763,7 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
   // own activation flip.
   test('when the caller passes an existing transaction, the stamp runs as a SAVEPOINT on it (conn.transaction), never the global db', async () => {
     const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
-    const trxTableQueues = { annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ] };
+    const trxTableQueues = { annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ], ...paidEvidence() };
     const trx = jest.fn((table) => {
       const queue = trxTableQueues[table];
       if (!queue || !queue.length) throw new Error(`Unexpected trx table ${table}`);
@@ -6735,7 +6791,7 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
 
   test('a plain (non-db, non-transaction) conn runs the stamp directly, with no extra transaction/savepoint wrapper', async () => {
     const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
-    const plainConnQueues = { annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ] };
+    const plainConnQueues = { annual_prepay_terms: [...stampPrelude(), recordDecisionQ, recordDecisionQ], ...paidEvidence() };
     const plainConn = jest.fn((table) => {
       const queue = plainConnQueues[table];
       if (!queue || !queue.length) throw new Error(`Unexpected conn table ${table}`);
@@ -6751,6 +6807,17 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
 });
 
 describe('reconcileParentRenewedStamps (Codex round-2 P1 backstop)', () => {
+  // Per stamp, under the gate: the gate lookup, the successor re-read (and
+  // its invoice + ledger), then the parent re-read.
+  const prelude = (id) => [
+    query({ rows: [] }),
+    query({ first: { id: `succ-of-${id}`, status: 'active', prepay_invoice_id: `inv-of-${id}` } }),
+    query({ first: { id, status: 'active', renewal_decision: null, prepay_invoice_id: null } }),
+  ];
+  const evidence = (n) => ({
+    invoices: Array.from({ length: n }, () => query({ first: { status: 'paid', stripe_payment_intent_id: 'pi_x' } })),
+    payments: Array.from({ length: n }, () => query({ first: undefined })),
+  });
   beforeEach(() => {
     jest.clearAllMocks();
     db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -6764,8 +6831,11 @@ describe('reconcileParentRenewedStamps (Codex round-2 P1 backstop)', () => {
     // Codex round-7 P1 (redesigned): each recordDecision call now peeks
     // annual_plan_version first (same query object, same conn) before its
     // actual write — two dequeues per row.
-    const prelude = (id) => [query({ rows: [] }), query({ first: { id, status: 'active', renewal_decision: null, prepay_invoice_id: null } })];
-    setDbQueues({ 'annual_prepay_terms as s': [scanQ], annual_prepay_terms: [...prelude('parent-1'), decision1, decision1, ...prelude('parent-2'), decision2, decision2] });
+    setDbQueues({
+      'annual_prepay_terms as s': [scanQ],
+      annual_prepay_terms: [...prelude('parent-1'), decision1, decision1, ...prelude('parent-2'), decision2, decision2],
+      ...evidence(2),
+    });
 
     const summary = await AnnualPrepayRenewals.reconcileParentRenewedStamps({});
 
@@ -6785,8 +6855,11 @@ describe('reconcileParentRenewedStamps (Codex round-2 P1 backstop)', () => {
     const badDecision = query();
     badDecision.returning = jest.fn().mockRejectedValue(new Error('boom'));
     const goodDecision = query({ returning: [{ id: 'parent-2', renewal_decision: 'renew' }] });
-    const prelude = (id) => [query({ rows: [] }), query({ first: { id, status: 'active', renewal_decision: null, prepay_invoice_id: null } })];
-    setDbQueues({ 'annual_prepay_terms as s': [scanQ], annual_prepay_terms: [...prelude('bad-parent'), query({ first: undefined }), badDecision, ...prelude('parent-2'), query({ first: undefined }), goodDecision] });
+    setDbQueues({
+      'annual_prepay_terms as s': [scanQ],
+      annual_prepay_terms: [...prelude('bad-parent'), query({ first: undefined }), badDecision, ...prelude('parent-2'), query({ first: undefined }), goodDecision],
+      ...evidence(2),
+    });
 
     const summary = await AnnualPrepayRenewals.reconcileParentRenewedStamps({});
 

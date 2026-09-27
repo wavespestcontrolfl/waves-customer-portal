@@ -3941,7 +3941,7 @@ async function stampParentRenewedForSuccessor(successorTerm, contextLabel, conn 
   // knex trx is a savepoint: a failure here rolls back to it and the
   // caller's transaction (the successor's own flip) stays healthy.
   try {
-    await recordParentRenewedIfEligible(successorTerm.renewed_from_term_id, conn);
+    await recordParentRenewedIfEligible({ successorId: successorTerm.id, parentTermId: successorTerm.renewed_from_term_id }, conn);
   } catch (err) {
     logger.warn(`[annual-prepay] parent renewed-stamp (${contextLabel}) skipped for successor ${successorTerm.id}: ${err.message}`);
   }
@@ -3960,15 +3960,43 @@ async function stampParentRenewedForSuccessor(successorTerm, contextLabel, conn 
 // A staff "renew" (the admin decide route) is a human decision and does not
 // come through here. Runs in its own transaction, or a savepoint on the
 // caller's (the successor's activation), so a failure never takes that down.
-async function recordParentRenewedIfEligible(parentTermId, conn = db) {
+//
+// Codex #4971 pre-push P1: the SUCCESSOR's payment is the other half of the
+// evidence — a successor refunded or dispute-suspended between the caller's
+// read and the gate must not record the parent renewed either. Both terms'
+// keys are gated (sorted; re-entrant), and under them the successor is
+// re-read (successorPaymentBacksRenewal) before the parent.
+async function recordParentRenewedIfEligible({ successorId, parentTermId }, conn = db) {
   const work = async (t) => {
-    await acquireTermiteGateAtEntry(t, { termIds: [parentTermId] });
+    await acquireTermiteGateAtEntry(t, { termIds: [parentTermId, successorId] });
+    const Charge = require('./termite-annual-renewal-charge')._private;
+    if (!(await successorPaymentBacksRenewal(t, successorId, Charge))) return null;
     const parent = await t('annual_prepay_terms').where({ id: parentTermId }).first();
-    const { resolveParentEligibility } = require('./termite-annual-renewal-charge')._private;
-    if (!(await resolveParentEligibility(t, parent)).eligible) return null;
+    if (!(await Charge.resolveParentEligibility(t, parent)).eligible) return null;
     return recordDecision({ termId: parentTermId, action: 'renew', conn: t });
   };
   return typeof conn.transaction === 'function' ? conn.transaction(work) : work(conn);
+}
+
+// Read under the gate: the renewal successor is live and its own renewal
+// invoice is settled and not revoked on the payments ledger (chokepoint A,
+// invoiceSettledNotRevoked). A dispute suspension demotes the successor to
+// payment_pending (suspendActiveTermsForDisputedInvoice) and reopens its
+// invoice, so the status and invoice checks refuse it. The marker ALONE is
+// not a refusal: on an ACTIVE row it is the won / re-paid recovery shape,
+// kept until finishDisputeRecoveryForTerm runs (after this stamp, by design
+// — see syncTermForInvoicePayment), and refusing it would drop the revival
+// branches' stamp.
+async function successorPaymentBacksRenewal(t, successorId, Charge) {
+  const successor = await t('annual_prepay_terms').where({ id: successorId }).first();
+  if (!successor || !ACTIVE_STATUSES.includes(successor.status)) return false;
+  if (!successor.prepay_invoice_id) return false;
+  // Strict, unlike the parent's vacuous "no invoice = covered": the
+  // successor's own payment is the whole reason to stamp, so a missing
+  // invoice row is no evidence at all.
+  const invoice = await t('invoices').where({ id: successor.prepay_invoice_id })
+    .first(...Charge.INVOICE_EVIDENCE_COLUMNS);
+  return Boolean(invoice) && Charge.invoiceSettledNotRevoked(t, invoice);
 }
 
 // Codex round-2 P1 (backstop): stampParentRenewedForSuccessor's own
@@ -4024,7 +4052,7 @@ async function reconcileParentRenewedStamps({ conn = db, limit = 200 } = {}) {
   summary.scanned = candidates.length;
   for (const row of candidates) {
     try {
-      const decided = await recordParentRenewedIfEligible(row.parent_id, conn);
+      const decided = await recordParentRenewedIfEligible({ successorId: row.successor_id, parentTermId: row.parent_id }, conn);
       if (decided) summary.stamped += 1;
     } catch (err) {
       logger.warn(`[annual-prepay] parent-renewed reconcile failed for successor ${row.successor_id}: ${err.message}`);
@@ -4293,6 +4321,12 @@ async function followThroughPaidDecidedLapse(lapse, conn) {
   return refreshed || lapse;
 }
 
+// The renewal gate's keys for a term: its parent's and its own when it is a
+// renewal successor; none otherwise.
+function renewalGateTermIds(term) {
+  return term.renewed_from_term_id ? [term.renewed_from_term_id, term.id] : [];
+}
+
 async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
   if (!(await annualPrepayTableExists())) return [];
   const invoice = typeof invoiceOrId === 'object'
@@ -4353,9 +4387,12 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // flip beside a failed cleanup left the restored stamp/replacement
       // live forever (the retry skips an already-active term).
       const reviveFromPending = async (t) => {
-        // Own transaction = entry point: the parent's gate first (the
-        // parent 'renewed' stamp below writes it) — see acquireTermiteGateAtEntry.
-        if (t !== conn) await acquireTermiteGateAtEntry(t, { termIds: [term.renewed_from_term_id] });
+        // Own transaction = entry point: the renewal gate first — the
+        // parent's key AND this successor's (the parent 'renewed' stamp
+        // below writes the parent and re-reads both under them; Codex #4971
+        // pre-push P1) — see acquireTermiteGateAtEntry. A term with no
+        // parent takes nothing, as before.
+        if (t !== conn) await acquireTermiteGateAtEntry(t, { termIds: renewalGateTermIds(term) });
         const [updated] = await t('annual_prepay_terms')
           .where({ id: term.id, status: PAYMENT_PENDING_STATUS })
           .whereNull('renewal_decision')
@@ -4394,7 +4431,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // next sync of this invoice picks the term up as active. Flip +
       // credits + setup cleanup commit TOGETHER (codex #3591 r52 P1).
       const reviveFromCancelled = async (t) => {
-        if (t !== conn) await acquireTermiteGateAtEntry(t, { termIds: [term.renewed_from_term_id] });
+        if (t !== conn) await acquireTermiteGateAtEntry(t, { termIds: renewalGateTermIds(term) });
         const [updated] = await t('annual_prepay_terms')
           .where({ id: term.id, status: 'cancelled' })
           .whereNull('renewal_decision')

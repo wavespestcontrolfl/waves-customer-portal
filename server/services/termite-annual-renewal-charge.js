@@ -3356,6 +3356,7 @@ module.exports = {
     parentInvoicePaidAndNotFullyRefunded,
     classifyRenewalInvoice,
     invoiceSettledNotRevoked,
+    INVOICE_EVIDENCE_COLUMNS,
     whereInvoiceSettledNotRevoked,
     whereInvoiceDelivered,
     whereAttemptSubmitted,
