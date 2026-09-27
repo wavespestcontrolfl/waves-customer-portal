@@ -102,7 +102,7 @@ async function readAreaMeasurements(scope, req, { knex = db, refresh = false, lo
     const performLookup = lookup || require('../routes/property-lookup-v2').performPropertyLookup;
     // A missing/offline cache cannot hide already saved measurements or
     // turn a successful review save into an apparent failure.
-    const result = await performLookup(address, refresh ? {} : { cacheOnly: true, persist: false })
+    const result = await performLookup(address, refresh ? { refresh: true } : { cacheOnly: true, persist: false })
       .catch(error => { if (refresh) throw error; return null; });
     estimates = lookupSuggestions(result?.enriched);
     // A slow lookup cannot return the former property's values after an

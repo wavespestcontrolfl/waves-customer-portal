@@ -2,7 +2,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { CompletionPanel } from './SchedulePage';
 import { refetchFlags } from '../../hooks/useFeatureFlag';
 const products = [
@@ -68,4 +68,15 @@ it('mosquito coverage is separate and never substitutes for finished mix gallons
   expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(3600);
   expect(screen.getByPlaceholderText('Sq ft')).toHaveValue(3600);
   expect(screen.getByPlaceholderText('Total')).toHaveValue(null);
+});
+
+it('a detached product area still withdraws a derived total when the amount unit changes', async () => {
+  mount(); await add('Snapshot 2.5TG');
+  fireEvent.change(screen.getByPlaceholderText('Sq ft'), { target: { value: '300' } });
+  const total = screen.getByPlaceholderText('Total');
+  expect(total).toHaveValue(0.69);
+  fireEvent.change(within(total.parentElement).getAllByRole('combobox')[1], { target: { value: 'oz' } });
+  expect(total).toHaveValue(null);
+  fireEvent.change(screen.getByPlaceholderText('Sq ft'), { target: { value: '600' } });
+  expect(total).toHaveValue(null);
 });

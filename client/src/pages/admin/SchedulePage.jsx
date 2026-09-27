@@ -16334,7 +16334,7 @@ export function CompletionPanel({
           next.lawnPlanManualFields = [...new Set([...(p.lawnPlanManualFields || []), field])];
         }
         if (["areaValue", "applicationMethod", "applicationArea"].includes(field)) next.propertyAreaDefault = null;
-        if (field === "amountUnit" && p.propertyAreaDefault) {
+        if (field === "amountUnit" && p.propertyServiceAreaField) {
           next.propertyAmountUnitManual = true;
           if (!p.totalAmountManual) next.totalAmount = "";
         }

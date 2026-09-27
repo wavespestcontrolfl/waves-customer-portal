@@ -67,7 +67,7 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
     expect(audit.metadata.after.lawn).toBeUndefined();
     const refreshed = await read(scope(), admin, { refresh: true });
     expect(refreshed.areas.beds).toEqual(result.areas.beds);
-    expect(lookup).toHaveBeenLastCalledWith(expect.stringContaining('100 Fixture Street'), {});
+    expect(lookup).toHaveBeenLastCalledWith(expect.stringContaining('100 Fixture Street'), { refresh: true });
   });
   test('secondary areas never overwrite primary mirrors or borrow the primary turf profile', async () => {
     await knex('customer_turf_profiles').insert({ customer_id: customerId, lawn_sqft: 4200 });
