@@ -26,6 +26,12 @@
  */
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
+// hasPriorContact reads the db singleton, so it's stubbed here. The staging
+// SELECT that feeds it (the dialed number) still runs for real.
+jest.mock('../services/outbound-call-reason', () => ({
+  ...jest.requireActual('../services/outbound-call-reason'),
+  hasPriorContact: jest.fn(async () => true),
+}));
 jest.mock('../services/lead-consultation-link', () => ({
   ...jest.requireActual('../services/lead-consultation-link'),
   buildLeadConsultationSmsLine: jest.fn(),
@@ -187,6 +193,24 @@ postgres('call-booking-link-text against PostgreSQL', () => {
 
     const preBoundaryRow = await mockPg('call_log').where({ id: preBoundaryCallId }).first('metadata');
     expect(preBoundaryRow.metadata.call_booking_link_text).toMatchObject({ status: 'skipped', reason: 'pre_activation' });
+  });
+
+  test('stage() hands an OUTBOUND return call\'s dialed number to the prior-contact check (the real SELECT carries it)', async () => {
+    const { hasPriorContact } = require('../services/outbound-call-reason');
+    await mockPg('system_settings').insert({ key: callBookingLinkText.ACTIVATION_SETTINGS_KEY, value: new Date('2027-01-13T00:00:00.000Z').toISOString(), category: 'call_booking_link_text' });
+    const leadId = await insertLead(mockPg, { phone: '+19415550123' });
+    const callId = await insertCall(mockPg, {
+      direction: 'outbound', from_phone: '+19412972817', to_phone: '+19415550123',
+      metadata: { lead_id: leadId },
+      created_at: new Date('2027-01-15T15:55:00.000Z'),
+      updated_at: new Date('2027-01-15T15:55:00.000Z'),
+    });
+
+    await callBookingLinkText.stage(mockPg, { now: NOW });
+
+    expect(hasPriorContact).toHaveBeenCalledWith(expect.objectContaining({ phone: '+19415550123' }));
+    const row = await mockPg('call_log').where({ id: callId }).first('metadata');
+    expect(row.metadata.call_booking_link_text).toMatchObject({ status: 'pending', lead_id: leadId });
   });
 
   test('stage() fails closed on two leads sharing one twilio_call_sid (ambiguous_lead_linkage), a real leads-table lookup', async () => {

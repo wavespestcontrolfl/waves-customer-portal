@@ -604,7 +604,10 @@ async function stage(conn = db, { now = new Date() } = {}) {
     .whereRaw("metadata->:key IS NULL", { key: METADATA_KEY })
     .orderBy('created_at', 'asc')
     .limit(STAGING_BATCH)
-    .select('id', 'customer_id', 'direction', 'bridged_at', 'duration_seconds', 'recording_duration_seconds', 'created_at', 'metadata', 'twilio_call_sid', 'ai_extraction_enriched', 'ai_address_validation');
+    // from_phone / to_phone / source: resolveCallContactPhone needs them to
+    // find an outbound call's dialed number for the prior-contact check
+    // (pre-push P1). Without them every outbound call read as cold.
+    .select('id', 'customer_id', 'direction', 'source', 'from_phone', 'to_phone', 'bridged_at', 'duration_seconds', 'recording_duration_seconds', 'created_at', 'metadata', 'twilio_call_sid', 'ai_extraction_enriched', 'ai_address_validation');
   let staged = 0;
   let ineligible = 0;
   for (const call of calls) {
