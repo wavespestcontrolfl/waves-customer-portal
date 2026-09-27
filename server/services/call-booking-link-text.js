@@ -55,6 +55,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { callEndedAt } = require('./call-commitments');
+const { callStartedAt } = require('../utils/call-timeline');
 const { etParts } = require('../utils/datetime-et');
 const { nextSendWindowOpenET, isWithinSendWindowET } = require('./messaging/send-window');
 const { isOpenLeadRow } = require('./lead-statuses');
@@ -173,10 +174,21 @@ function metadataPatch(conn, value) {
 // read as 'new_lead'). Shared by staging (its own lead fetch) and dispatch
 // (reusing the lead row it already fetched for other checks) so the two
 // never apply a different standard.
+//
+// Compares against callStartedAt(call), NOT call.created_at (codex pre-push
+// P1): call-recording-processor.js's own leadFirstContactAt stamps a newly
+// minted lead's first_contact_at from callStartedAt(call) too, and for a
+// post-call fallback row (status callback / recording-status recovery —
+// call-timeline.js's POST_CALL_ROW_SOURCES) created_at is stamped AFTER the
+// call ends while callStartedAt backs the call's own length out of it.
+// Comparing first_contact_at against the later created_at on such a row
+// would read a lead THIS SAME call minted as having contacted us first.
 function outboundPriorContactMissing(call, lead) {
   if (!String(call.direction || '').startsWith('outbound')) return false;
   const firstContact = lead?.first_contact_at || lead?.created_at;
-  return !firstContact || new Date(firstContact).getTime() >= new Date(call.created_at).getTime();
+  if (!firstContact) return true;
+  const callAt = callStartedAt(call) || new Date(call.created_at);
+  return new Date(firstContact).getTime() >= callAt.getTime();
 }
 
 async function outboundStagingReason(conn, call, leadId) {
@@ -286,7 +298,7 @@ async function stage(conn = db, { now = new Date() } = {}) {
     .whereRaw("metadata->:key IS NULL", { key: METADATA_KEY })
     .orderBy('created_at', 'asc')
     .limit(STAGING_BATCH)
-    .select('id', 'customer_id', 'direction', 'bridged_at', 'duration_seconds', 'created_at', 'metadata', 'ai_extraction_enriched', 'ai_address_validation');
+    .select('id', 'customer_id', 'direction', 'bridged_at', 'duration_seconds', 'recording_duration_seconds', 'created_at', 'metadata', 'ai_extraction_enriched', 'ai_address_validation');
   let staged = 0;
   let ineligible = 0;
   for (const call of calls) {

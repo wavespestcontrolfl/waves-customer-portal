@@ -222,6 +222,31 @@ describe('outboundPriorContactMissing / outboundStagingReason', () => {
     const reason = await outboundStagingReason(conn, { direction: 'outbound', created_at: callEnd }, 'lead-1');
     expect(reason).toBe('outbound_without_prior_contact');
   });
+
+  // codex pre-push P1 regression: a post-call fallback row (Studio Flow's
+  // /call-status on a TERMINAL event, or a recording-status recovery
+  // insert — call-timeline.js's POST_CALL_ROW_SOURCES) stamps created_at
+  // AFTER the call ends, while call-recording-processor.js's own
+  // leadFirstContactAt backs the call's own length out of created_at via
+  // the SAME callStartedAt() to set a newly minted lead's first_contact_at.
+  // Comparing against created_at directly (instead of callStartedAt) would
+  // read that lead as having contacted us BEFORE this very call.
+  test('a terminal status_callback row: comparing against created_at (not callStartedAt) would wrongly pass a same-call mint', () => {
+    const created_at = new Date('2026-09-26T18:10:00Z'); // stamped after the call ended
+    const duration_seconds = 300; // 5 minutes
+    const call = {
+      direction: 'outbound', created_at, duration_seconds,
+      metadata: { source: 'status_callback', inserted_on_status: 'completed' }, // terminal ⇒ post-call row
+    };
+    // The lead's first_contact_at, as leadFirstContactAt(call) would ACTUALLY
+    // stamp it: created_at minus the call's own duration.
+    const first_contact_at = new Date(created_at.getTime() - duration_seconds * 1000);
+    expect(outboundPriorContactMissing(call, { first_contact_at })).toBe(true);
+    // The bug this guards: first_contact_at (18:05) is indeed BEFORE
+    // created_at (18:10), so a naive created_at comparison would call this
+    // a return call — it is not; callStartedAt(call) is 18:05 too.
+    expect(first_contact_at.getTime()).toBeLessThan(created_at.getTime());
+  });
 });
 
 // ── claimForDispatch — atomic single-row claim ────────────────────────────
