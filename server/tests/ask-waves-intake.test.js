@@ -441,6 +441,8 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['It should be dry by now, so you can go back in.', 'When can I re-enter after treatment?'],
     ['Your dog can go back out.', 'When can my dog go back out after the spray?'],
     ['Puede volver a entrar ahora.', '¿Cuándo puedo volver a entrar?'],
+    ['You can go back inside.', 'What should I do after the treatment?'],
+    ['Go ahead and let the kids play outside.', 'What should I do after the treatment?'],
   ])('flags: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
   });
@@ -469,6 +471,9 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Our technician will go inside to inspect two rooms.', ''],
     ['The technician can go inside at 4 PM for the appointment.', ''],
     ['Yes, for about 30 minutes.', 'Will the technician need to go inside?'],
+    ['You can go back inside once everything is dry.', 'What should I do after the treatment?'],
+    ['You can get your price by tapping Get my price.', 'What should I do after the treatment?'],
+    ['We can go inside to treat the kitchen.', 'What should I do after the treatment?'],
   ])('leaves alone: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });

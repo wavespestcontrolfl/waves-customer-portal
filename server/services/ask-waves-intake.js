@@ -578,6 +578,15 @@ const VISIT_LENGTH_QUESTION_RE = /\bhow\s+long\s+(?:does|do|will|would|should|di
 // precaution ("Bring your dog inside while we treat") grants nothing.
 const REENTRY_PERMISSION_RE = /\b(?:you|y'?all|they|he|she|we|everyone|everybody|people|(?:the|your|my|our)\s+(?:kids?|children|child|family|dogs?|cats?|pets?|pupp(?:y|ies)|kittens?|bab(?:y|ies)|toddlers?|animals?|guests?)|kids?|children|pets?|dogs?|cats?)(?:\s+(?:can|may|could)(?!\s*not\b)|\s+(?:are|is)\s+(?:free|ok|okay|fine|good|welcome|clear|cleared)\s+to|(?:'ll|\s+will)\s+be\s+(?:able|fine|ok|okay|free|good)\s+to)\s+(?:\S+\s+){0,2}?(?:go|come|get|head|re-?enter|return|play|walk|use|let|move|be\s+(?:in|inside|out|outside|back))(?![a-z])|\bgo\s+ahead\s+(?:and\s+)?(?:\S+\s+){0,2}?(?:go|come|re-?enter|return|let|head|move)(?![a-z])|\b(?:it'?s|it\s+is)\s+(?:perfectly\s+|totally\s+|completely\s+)?(?:fine|ok|okay|good|alright|all\s+right)\s+to\s+(?:go|come|get|re-?enter|return|let|walk|play|use|head|move)(?![a-z])|\b(?:feel\s+free|you'?re\s+(?:free|welcome))\s+to\s+(?:go|come|re-?enter|return|let|head|move)(?![a-z])|\b(?:ya\s+)?(?:puede|pueden|puedes|podemos|podr[aá]n?)\s+(?:volver|regresar|entrar|salir|dejar|usar|jugar)(?![a-zñáéíóú])/i;
 const REENTRY_CONDITION_RE = /\b(?:dry|dries|dried|drying|wet|damp|label|labels|labeled|labelled|watered\s+in|depends\s+on|depending\s+on|(?:technician|tech)\s+(?:will|can|should|would)\s+(?:\w+\s+){0,2}?(?:tell|let\s+you\s+know|confirm|advise|explain|walk\s+you\s+through|go\s+over|give\s+you)|sec[oa]s?|secarse|seque|sequen|etiqueta|depende|t[eé]cnico\s+(?:le\s+)?(?:confirmar[aá]|indicar[aá]|dir[aá]|explicar[aá]))(?![a-zñáéíóú])/i;
+// The same grant said about the household in physical terms ("You can go
+// back inside.", "Your dog can go back out.", "Go ahead and let the kids
+// play outside.") is a re-entry claim whenever a treatment is the topic,
+// whatever the visitor asked ("What should I do after the treatment?").
+// Staff subjects ("we", "the technician") and non-physical grants ("you can
+// get a quote") never match.
+const HOUSEHOLD = "(?:you|y'?all|everyone|everybody|people|(?:the|your)\\s+(?:kids?|children|child|family|dogs?|cats?|pets?|pupp(?:y|ies)|kittens?|bab(?:y|ies)|toddlers?|animals?|guests?)|kids?|children|pets?|dogs?|cats?)";
+const PHYSICAL_RETURN = "(?:(?:go|come|get|head|move)\\s+(?:back\\s+)?(?:in|inside|indoors|out|outside|outdoors|home)|re-?enter\\w*|return\\s+(?:home|inside|indoors|to\\s+(?:the|your)\\s+(?:house|home|yard|lawn|room|rooms|area|kitchen|property))|play\\s+(?:outside|outdoors|in\\s+the\\s+(?:yard|grass|lawn))|walk\\s+on\\s+(?:the\\s+)?(?:lawn|grass|floors?|carpets?)|use\\s+(?:the\\s+)?(?:lawn|yard|pool|patio|kitchen|room|rooms))(?![a-z])";
+const HOUSEHOLD_RETURN_GRANT_RE = new RegExp(`\\b${HOUSEHOLD}(?:\\s+(?:can|may|could)(?!\\s*not\\b)|\\s+(?:are|is)\\s+(?:free|ok|okay|fine|good|welcome|clear|cleared)\\s+to|(?:'ll|\\s+will)\\s+be\\s+(?:able|fine|ok|okay|free|good)\\s+to)\\s+(?:\\S+\\s+){0,2}?${PHYSICAL_RETURN}|\\bgo\\s+ahead\\s+(?:and\\s+)?(?:let\\s+\\S+(?:\\s+\\S+)?\\s+)?${PHYSICAL_RETURN}|\\b(?:it'?s|it\\s+is)\\s+(?:perfectly\\s+|totally\\s+|completely\\s+)?(?:fine|ok|okay|good|alright|all\\s+right)\\s+to\\s+(?:let\\s+\\S+(?:\\s+\\S+)?\\s+)?${PHYSICAL_RETURN}|\\b(?:feel\\s+free|you'?re\\s+(?:free|welcome))\\s+to\\s+${PHYSICAL_RETURN}|\\blet\\s+(?:your|the)\\s+(?:kids?|children|dogs?|cats?|pets?|pupp(?:y|ies)|family)\\s+(?:back\\s+)?(?:in|inside|out|outside|back)\\b`, 'i');
 const DRYING_WORD_RE = /\b(?:dry|dries|dried|drying|wet|damp|sec[oa]s?|secar\w*|moj\w*|h[uú]med\w*)(?![a-zñáéíóú])/i;
 function fixedTimingClaim(reply, contextText, treatmentContext, activeMessage = contextText) {
   const text = String(reply || '');
@@ -655,6 +664,16 @@ function terseClaim(t, activeMessage) {
   return affirmationClaim(t, activeMessage) || shortAnswerClaim(t, activeMessage);
 }
 
+// A reply that lets people or pets back in without the label's condition:
+// any grant answering an access question, or a physical one about the
+// household whenever a treatment is the topic.
+function reentryGrantClaim(t, activeMessage) {
+  if (REENTRY_CONDITION_RE.test(t)) return false;
+  const physicalReply = t.replace(DIGITAL_ACCESS_RE, ' ');
+  return (visitorAccess(activeMessage) && REENTRY_PERMISSION_RE.test(physicalReply))
+    || (HOUSEHOLD_RETURN_GRANT_RE.test(physicalReply) && INTAKE_TREATMENT_CONTEXT_RE.test(`${t}\n${activeMessage}`));
+}
+
 const REFERENTIAL_RE = /\b(?:how\s+long\s+(?:is|was|does|would|will)\s+(?:that|it|this)|how\s+long\s+(?:should|do|must|would)\s+(?:they|we|i|he|she|you)\s+(?:wait|stay|keep)|and\s+how\s+long|how\s+much\s+longer|what\s+about\s+(?:the|my|our|them|him|her)|how\s+about|and\s+(?:the|my|our)\s+\w+|y\s+cu[aá]nto|cu[aá]nto\s+tiempo\s+(?:es|ser[ií]a|hay\s+que\s+esperar)|y\s+(?:los|las|el|la|mis)\s+\w+)(?![a-zñáéíóú])/i;
 function intakeSafetyClaimSupplement(rawReply, rawContext = '', rawActive = rawContext) {
   const t = foldTypography(rawReply);
@@ -674,8 +693,8 @@ function intakeSafetyClaimSupplement(rawReply, rawContext = '', rawActive = rawC
   // copy, which is itself a correct answer to any of those questions.
   if (safetyClaimIn(t)) return true;
   if (terseClaim(t, activeMessage)) return true;
+  if (reentryGrantClaim(t, activeMessage)) return true;
   const physicalReply = t.replace(DIGITAL_ACCESS_RE, ' ');
-  if (visitorAccess(activeMessage) && REENTRY_PERMISSION_RE.test(physicalReply) && !REENTRY_CONDITION_RE.test(t)) return true;
   const physicalActive = activeMessage.replace(DIGITAL_ACCESS_RE, ' ');
   // Treatment context comes from the reply and the ACTIVE message — an old
   // "tell me about your treatment" must not make "About 2 hours." (answering
