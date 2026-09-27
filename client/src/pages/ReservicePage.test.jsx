@@ -432,3 +432,84 @@ it('renders the curated strip order (adjusted score), not the day panel\'s raw p
   expect(order[0]).toContain('10:00 AM'); // packed (strip rank 1) renders first
   expect(order[1]).toContain('1:00 PM'); // demoted empty day (strip rank 2) renders second
 });
+
+// One-tap pest chips (GATE_RESERVICE_PEST_CHIPS): the server signals the
+// gate by including pestChoices in the GET payload — its absence must
+// render the page byte-identical to before this feature existed.
+describe('ReservicePage pest chips (GATE_RESERVICE_PEST_CHIPS)', () => {
+  const PEST_CHOICES = {
+    pest: [
+      { key: 'ants', label: 'Ants' },
+      { key: 'roaches', label: 'Roaches' },
+      { key: 'spiders', label: 'Spiders' },
+      { key: 'wasps', label: 'Wasps' },
+      { key: 'other', label: 'Something else' },
+    ],
+  };
+
+  it('renders one-tap pest chips when the server sends pestChoices, and toggling flips aria-pressed', async () => {
+    stubFetch({ get: jsonResponse(bookablePayload({ pestChoices: PEST_CHOICES })) });
+    renderPage();
+    // The chip row heading and every choice render.
+    expect(await screen.findByText('What are you seeing?')).toBeInTheDocument();
+    const antsChip = screen.getByRole('button', { name: 'Ants' });
+    expect(antsChip).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(antsChip);
+    expect(antsChip).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(antsChip);
+    expect(antsChip).toHaveAttribute('aria-pressed', 'false');
+    // The textarea's own label switches to the secondary copy once chips
+    // are present (the plain "What are you seeing?" label is gone from it —
+    // that phrase now belongs to the chip-row heading above instead).
+    expect(screen.getByLabelText(/Anything else\?/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/What are you seeing\?/)).not.toBeInTheDocument();
+  });
+
+  it('sends the selected pests in the POST body', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(bookablePayload({ pestChoices: PEST_CHOICES })),
+      post: jsonResponse({
+        success: true, lane: 'pest', serviceType: 'Pest Control Re-Service',
+        date: '2026-07-12', window: { start: '13:00', end: '13:45' },
+        startLabel: '1:00 PM', endLabel: '1:45 PM', confirmationCode: 'WVS-1',
+      }),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Roaches' }));
+    fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Book .* free/ }));
+    await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
+    const commit = fetchMock.mock.calls.find(([, opts]) => opts?.method === 'POST');
+    const body = JSON.parse(commit[1].body);
+    expect(body.pests).toEqual(['ants', 'roaches']);
+  });
+
+  it('omits `pests` from the POST body when none are selected', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(bookablePayload({ pestChoices: PEST_CHOICES })),
+      post: jsonResponse({
+        success: true, lane: 'pest', serviceType: 'Pest Control Re-Service',
+        date: '2026-07-12', window: { start: '13:00', end: '13:45' },
+        startLabel: '1:00 PM', endLabel: '1:45 PM', confirmationCode: 'WVS-1',
+      }),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Book .* free/ }));
+    await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
+    const commit = fetchMock.mock.calls.find(([, opts]) => opts?.method === 'POST');
+    const body = JSON.parse(commit[1].body);
+    expect(body).not.toHaveProperty('pests');
+  });
+
+  it('renders no chips, and keeps the original textarea label, when the server omits pestChoices (gate off — byte-identical)', async () => {
+    stubFetch({ get: jsonResponse(bookablePayload()) });
+    renderPage();
+    await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ });
+    expect(screen.queryByRole('button', { name: 'Ants' })).not.toBeInTheDocument();
+    // The original label + helper copy is untouched (byte-identical).
+    expect(screen.getByLabelText(/What are you seeing\?/)).toBeInTheDocument();
+    expect(screen.getByText('(optional — helps your tech prep)')).toBeInTheDocument();
+  });
+});

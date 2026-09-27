@@ -3398,9 +3398,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
         }
 
         // Activity score: strict integer 0-5 or null (same contract as
-        // clientPestRating). Gauge types require a score on a completed
-        // visit — derived prefill fills it when the tech didn't touch the
-        // picker.
+        // clientPestRating). Tech-set-only gauge types (no derive mapping)
+        // require a score on a completed visit; a derive-mapped type has no
+        // separate gauge any more (owner ruling 2026-09-26) and is scored
+        // from the findings field alone, absent when that field is empty.
         if (activityScore != null
           && (!Number.isInteger(activityScore) || activityScore < 0 || activityScore > 5)) {
           return {
@@ -3410,7 +3411,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
         }
         if (typedIndicator) {
           const derived = ActivityIndicators.deriveActivityScore(typedFindingsType, typedFindings.values);
-          if (activityScore != null) {
+          if (typedIndicator.derive) {
+            // Derive-mapped: the findings field is the only activity input
+            // (owner ruling 2026-09-26). A score still submitted by a tab
+            // loaded before the gauge was removed is obsolete, never
+            // authoritative — ignore it and use the derived value (or none).
+            typedActivityScore = derived ? derived.score : null;
+            typedScoreSource = derived ? 'derived' : null;
+          } else if (activityScore != null) {
             typedActivityScore = activityScore;
             typedScoreSource = activityScoreSource === 'derived' && derived?.score === activityScore
               ? 'derived'
@@ -3419,6 +3427,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             typedActivityScore = derived.score;
             typedScoreSource = 'derived';
           } else {
+            // Tech-set-only gauge (no findings field to derive from — the
+            // derive-mapped case is handled above) — still required on a
+            // completed visit.
             return {
               status: 422,
               body: {
@@ -3427,14 +3438,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
               },
             };
           }
+          // Owner ruling 2026-09-26: a type with a derive mapping has no
+          // separate gauge on the completion panel any more — the score
+          // always comes from the findings field above. An empty findings
+          // value means no indicator this visit (typedActivityScore stays
+          // null), never a validation failure.
           // The FINAL score (pinned or derived) must agree with the
           // findings at the cleared boundary — the headline follows the
           // score while areas/chip checks key off the select, so a
           // crossing override would publish a self-contradicting report
-          // (Codex P2).
-          const scoreConsistency = ActivityIndicators.validateActivityScoreConsistency(
-            typedFindingsType, typedFindings.values, typedActivityScore,
-          );
+          // (Codex P2). Only meaningful once a score exists.
+          const scoreConsistency = typedActivityScore == null
+            ? { ok: true }
+            : ActivityIndicators.validateActivityScoreConsistency(
+              typedFindingsType, typedFindings.values, typedActivityScore,
+            );
           if (!scoreConsistency.ok) {
             return {
               status: 422,
