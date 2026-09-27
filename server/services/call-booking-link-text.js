@@ -287,29 +287,48 @@ async function outboundStagingReason(conn, call, leadId) {
 // post-call/recovered rows (callStartedAt already subtracted the
 // duration — adding it back reaches the true end, not created_at's
 // inflated one), and plain outbound rows (start + duration, never the
-// bare start callEndedAt would return). The one row shape neither
-// function derives from created_at at all is a bridged outbound-connect
-// call, handled by its own branch below exactly as callEndedAt's is.
+// bare start callEndedAt would return). The two row shapes neither
+// function derives from created_at at all are a bridged outbound-connect
+// call and a callback attempt with its own signed customer-leg receipt,
+// both handled by their own branches below.
 function callEndFor(call) {
-  // Outbound-connect bridge: bridged_at is stamped the instant the admin
-  // presses 1 (twilio-voice-webhook.js's /outbound-connect,
-  // `record: 'record-from-answer-dual'`) — BEFORE the customer's own leg
-  // even starts ringing. duration_seconds is the PARENT (admin) leg's
-  // total length, which starts at the admin's OWN answer — earlier still —
-  // so bridged_at + duration_seconds double-counts the press-1 prompt and
-  // the customer's ring time (codex r1 P2). recording_duration_seconds is
-  // measured off `record-from-answer-dual`, which Twilio starts recording
-  // at the moment the DIALED (customer) leg answers — confirmed against
-  // /outbound-connect's own dial (codex r2 P2) — so bridged_at +
-  // recording_duration_seconds is the far closer proxy for the true end;
-  // duration_seconds is kept only as the fallback when no recording
-  // duration is available at all.
+  // The exact customer-leg end, when it exists (codex r3 P2 — replaces the
+  // two estimation branches this round's earlier fixes kept swapping
+  // between, neither of which was ever exact): /outbound-dial-complete
+  // (twilio-voice-webhook.js) stamps metadata.customer_leg = { status,
+  // sid, duration_seconds, ended_at } the instant Twilio's own
+  // DialCallStatus lands for the CUSTOMER leg itself, for a callback
+  // attempt placed through /outbound-connect (a relatedCallId/
+  // relatedCommitmentId bridge — exactly how a return call THIS lane cares
+  // about is placed). No estimation needed once this is on the row.
+  const customerLegEndedAt = parseMetadata(call)?.customer_leg?.ended_at;
+  if (String(call?.direction || '').startsWith('outbound') && customerLegEndedAt) {
+    const ended = new Date(customerLegEndedAt);
+    if (!Number.isNaN(ended.getTime())) return ended;
+  }
+  // Outbound-connect bridge with no customer-leg receipt yet (an older row,
+  // or the dial-complete write hasn't landed): bridged_at is stamped the
+  // instant the admin presses 1 — BEFORE the customer's own leg even
+  // starts ringing — and duration_seconds is the PARENT (admin) leg's
+  // total length, which starts at the admin's OWN answer, earlier still.
+  // bridged_at + duration_seconds can therefore only run LATE, by however
+  // long the press-1 prompt and the customer's own ring time took — never
+  // early (codex r1 P2 established the late direction; the recording-
+  // duration branch this replaced (codex r2 P2) ran EARLY instead, since
+  // Twilio's recorded duration measures only the customer's talk time and
+  // misses hold/silence on the line — codex r3 P2). Erring late here is
+  // the deliberately SAFE direction for this lane's own 2-hour-delay /
+  // 6pm-ET-cutoff rule: a text computed a few seconds later than the true
+  // end is harmless, while an early reading could place the computed
+  // send_at inside the owner's 2-hour staff-first window, or read a call
+  // that actually ended at/after 6 PM ET as ending just before it — sending
+  // at 8 PM instead of waiting for 8 AM the next morning.
   if (call?.bridged_at) {
     const bridged = new Date(call.bridged_at);
     if (!Number.isNaN(bridged.getTime())) {
-      const recorded = Number(call?.recording_duration_seconds);
-      const bridgeDurationMs = (Number.isFinite(recorded) && recorded > 0 ? recorded : callDurationSeconds(call)) * 1000;
-      return new Date(bridged.getTime() + bridgeDurationMs);
+      const duration = Number(call?.duration_seconds);
+      const durationSeconds = Number.isFinite(duration) && duration > 0 ? duration : 0;
+      return new Date(bridged.getTime() + durationSeconds * 1000);
     }
   }
   // Every other row: callStartedAt already backs the length out of a
@@ -504,6 +523,68 @@ async function activationBoundary(conn) {
   const configured = process.env.CALL_BOOKING_LINK_TEXT_ACTIVATED_AT;
   const parsed = configured ? new Date(configured) : null;
   return parsed && !Number.isNaN(parsed.getTime()) ? parsed : persistedActivationBoundary(conn);
+}
+
+// A second, independent settings row: the last instant a LIVE sweep ran
+// (written only from sweep(), and only after its own gate check — nothing
+// here is ever read or written while the gate is off, so gate-off stays
+// the same true no-op it always was). Separate key from
+// ACTIVATION_SETTINGS_KEY because this is a HEARTBEAT, not the boundary
+// itself — refreshLiveActivationBoundary below reads this one to decide
+// whether the boundary needs advancing, then writes a fresh value here
+// every tick regardless of that decision.
+const LAST_LIVE_SETTINGS_KEY = 'call_booking_link_text_last_live_at';
+// The cron cadence (scheduler.js) is 5 minutes; tolerating exactly one
+// missed tick (an ordinary slow deploy step, a transient DB hiccup) before
+// treating a gap as real avoids false-triggering a boundary advance on
+// every routine restart.
+const HEARTBEAT_GAP_MS = 2 * 5 * 60 * 1000;
+
+// Self-heals the activation boundary after a disabled interval (codex r3
+// P1): the ORIGINAL fix only ever set the boundary once, the first time any
+// process found nothing stored. A gate cycled on -> off -> on within
+// STAGING_LOOKBACK_DAYS left that same, now-stale boundary in place — every
+// call that landed during the off period (never staged, since sweep()
+// returns before stage() runs while the gate is off) would be staged as one
+// burst the instant the gate came back, exactly the "days of pre-existing
+// valid-but-unstaged calls" the boundary exists to prevent in the first
+// place.
+//
+// A LIVE sweep is the ONLY caller (sweep() invokes this immediately after
+// its own gate check, before stage()) — so nothing here is ever read or
+// written while the gate is off. Each tick reads the PREVIOUS heartbeat
+// first: missing, or older than HEARTBEAT_GAP_MS, means a real gap — the
+// gate was off, or the worker itself was down — and the boundary advances
+// to whichever is LATER of the currently-stored boundary and this
+// process's own MODULE_LOAD_AT. MODULE_LOAD_AT stands in for "the gate's
+// own re-enable instant" because a gate flip requires a fresh Railway
+// deploy (GATE_CALL_BOOKING_LINK_TEXT is read once at feature-gates.js's
+// own module load) — this process could not be seeing isEnabled(GATE)
+// return true unless it booted after that flip. A routine restart whose
+// gap still lands under the threshold leaves the boundary untouched, so an
+// ordinary deploy never loses anything. The env override always wins
+// regardless (see activationBoundary) — this function only ever touches
+// the PERSISTED value, so it is skipped entirely while an operator has
+// pinned an explicit instant, rather than churn a stored value nothing
+// reads while the override is set.
+async function refreshLiveActivationBoundary(conn, now) {
+  if (process.env.CALL_BOOKING_LINK_TEXT_ACTIVATED_AT) return;
+  const heartbeat = await conn('system_settings').where({ key: LAST_LIVE_SETTINGS_KEY }).first('value');
+  const gapMs = heartbeat?.value ? now.getTime() - new Date(heartbeat.value).getTime() : Infinity;
+  if (!Number.isFinite(gapMs) || gapMs > HEARTBEAT_GAP_MS) {
+    const stored = await persistedActivationBoundary(conn);
+    const advanced = new Date(Math.max(stored.getTime(), MODULE_LOAD_AT.getTime()));
+    if (advanced.getTime() > stored.getTime()) {
+      await conn('system_settings').insert({
+        key: ACTIVATION_SETTINGS_KEY, value: advanced.toISOString(), category: 'call_booking_link_text',
+        description: 'First live-activation instant for GATE_CALL_BOOKING_LINK_TEXT; a call that started before it is historical, not a live never-booked lead to chase.',
+      }).onConflict('key').merge(['value']);
+    }
+  }
+  await conn('system_settings').insert({
+    key: LAST_LIVE_SETTINGS_KEY, value: now.toISOString(), category: 'call_booking_link_text',
+    description: 'Heartbeat: the last instant a LIVE sweep ran. A gap past 2x the 5-minute cron cadence means the gate was off or the worker was down, and the NEXT live sweep advances the activation boundary to cover it.',
+  }).onConflict('key').merge(['value']);
 }
 
 /**
@@ -863,6 +944,20 @@ async function dispatchClaimedCall(conn, call, now) {
   // close to send time deserves a human look, not an automated guess.
   if (built.phone && built.phone !== lead.phone) return skip('phone_changed_before_send');
 
+  // Stamped on the SAME row, on THIS connection, immediately before the
+  // actual provider request — the one fact that later distinguishes "this
+  // attempt never reached Twilio" (safe to requeue through the ordinary
+  // retry rail) from "the provider may already have this" (never resend,
+  // exactly like an ambiguous provider outcome) if the process throws or
+  // dies anywhere between here and a recorded terminal outcome (codex r3
+  // P2 — the sweep's own catch used to stamp every such failure
+  // worker_error/terminal regardless of whether Twilio was ever called,
+  // and a failure in THIS write would otherwise leave the row 'claimed'
+  // forever with no way back). See recoverAbandonedClaim, sweep()'s own
+  // catch, and the stale-claim recovery pass below — all three read this
+  // same field to make that call.
+  await recordDecision(conn, call, { ...entry, status: 'claimed', handoff_started_at: now.toISOString() }, { logActivity: false });
+
   const managedLine = managedLineForCall(call);
   const result = await sendCustomerMessage({
     to: built.phone || lead.phone,
@@ -945,8 +1040,74 @@ async function recordSendOutcome(conn, call, entry, leadId, now, result) {
   return skip(blockedReason);
 }
 
+// A 'claimed' row a whole sweep tick failed to bring to a terminal status
+// itself (codex r3 P2) — either THIS process just saw dispatchClaimedCall
+// throw (sweep()'s own catch, immediately), or a LATER, possibly different,
+// process finds a row still 'claimed' well past when any single tick's
+// synchronous claim-then-dispatch could still legitimately be in flight
+// (staleClaimRecovery below, after STALE_CLAIM_MS — the previous worker
+// most likely died mid-dispatch and never got to run any catch at all).
+// Both callers share this one decision: handoff_started_at (stamped
+// immediately before dispatchClaimedCall's own sendCustomerMessage call) is
+// the ONE fact that says whether resending is safe. Present, the provider
+// may already have this exact attempt — leave the row 'claimed' (no
+// further write), the same fate as an ordinary ambiguous provider outcome:
+// never resent, visible only by querying call_log directly. Absent, the
+// failure happened strictly before any network attempt, so this is exactly
+// as safe to requeue as any other retryable send outcome — through the
+// SAME bounded rail (original_send_at's own 24h deadline, then the ordinary
+// backoff) recordSendOutcome already owns for that case.
+async function recoverAbandonedClaim(conn, call, now) {
+  const entry = parseMetadata(call)[METADATA_KEY] || {};
+  if (entry.handoff_started_at) return { ambiguous: true };
+  if (pastRetryDeadline(entry, now)) {
+    await recordDecision(conn, call, { status: 'skipped', reason: 'worker_error', lead_id: entry.lead_id, send_at: entry.send_at });
+    return { ambiguous: false, terminal: true };
+  }
+  const send_at = new Date(now.getTime() + RETRY_BACKOFF_MS).toISOString();
+  await recordDecision(conn, call, {
+    status: 'pending', lead_id: entry.lead_id, send_at, original_send_at: entry.original_send_at || entry.send_at,
+  }, { logActivity: false });
+  return { ambiguous: false, terminal: false };
+}
+
+// How long a 'claimed' row may sit with no terminal status before the next
+// sweep treats it as abandoned by a dead worker rather than one still
+// legitimately in flight — a single tick's own claim-then-dispatch is
+// synchronous and normally resolves in well under a second, so this is a
+// wide safety margin, not a tuning knob for ordinary latency.
+const STALE_CLAIM_MS = 15 * 60 * 1000;
+
+// Safety net for a worker that died between claimForDispatch and any
+// terminal write — no process ever ran a catch for that row, so without
+// this it would stay 'claimed' forever, invisible to the 'pending'-only
+// dispatch query above and to sweep()'s own per-row catch (codex r3 P2).
+// Re-reads each candidate fresh before recovering it — the batched SELECT
+// is only a candidate list; a row a concurrent tick already resolved
+// between that read and here must not be recovered twice.
+async function recoverStaleClaims(conn, now) {
+  const cutoff = new Date(now.getTime() - STALE_CLAIM_MS);
+  const stale = await conn('call_log')
+    .whereRaw("metadata->:key->>'status' = 'claimed'", { key: METADATA_KEY })
+    .whereRaw("(metadata->:key->>'claimed_at')::timestamptz <= :cutoff", { key: METADATA_KEY, cutoff })
+    .orderBy('created_at', 'asc').limit(DISPATCH_BATCH).select('id');
+  let recovered = 0;
+  for (const row of stale) {
+    try {
+      const call = await conn('call_log').where({ id: row.id }).first();
+      if (!call || (parseMetadata(call)[METADATA_KEY] || {}).status !== 'claimed') continue;
+      const outcome = await recoverAbandonedClaim(conn, call, now);
+      if (!outcome.ambiguous) recovered += 1;
+    } catch (err) {
+      logger.warn(`[call-booking-link-text] stale-claim recovery failed for call ${row.id} (${err.code || err.name || 'error'})`);
+    }
+  }
+  return recovered;
+}
+
 async function sweep(conn = db, { now = new Date() } = {}) {
   if (!isEnabled(GATE)) return { staged: 0, ineligible: 0, sent: 0, dispatchSkipped: 0 };
+  await refreshLiveActivationBoundary(conn, now);
   const { staged, ineligible } = await stage(conn, { now });
   const due = await conn('call_log')
     .whereRaw("metadata->:key->>'status' = 'pending'", { key: METADATA_KEY })
@@ -964,17 +1125,29 @@ async function sweep(conn = db, { now = new Date() } = {}) {
     } catch (err) {
       logger.warn(`[call-booking-link-text] dispatch failed for call ${row.id} (${err.code || err.name || 'error'})`);
       // A row left 'claimed' after a genuine failure would never be
-      // revisited (the dispatch query only selects 'pending') and would
-      // never surface a reason either. Park it terminal instead — matching
-      // reschedule-link-promises' own worker_error fallback — so it shows
-      // up once, with a reason, rather than vanishing silently.
-      await conn('call_log').where({ id: row.id }).update({
-        metadata: metadataPatch(conn, { status: 'skipped', reason: 'worker_error' }), updated_at: new Date(),
-      }).catch(() => {});
-      dispatchSkipped += 1;
+      // revisited by the 'pending'-only query above, so it must reach a
+      // terminal status here — but NEVER a blind worker_error the way this
+      // used to (codex r3 P2): recoverAbandonedClaim reads handoff_started_at
+      // off the row itself to decide whether the provider might already
+      // have this exact attempt (never resend) or whether it is safe to
+      // requeue through the ordinary retry rail instead of giving up
+      // outright on a failure that never reached Twilio at all.
+      const failedCall = await conn('call_log').where({ id: row.id }).first().catch(() => null);
+      const outcome = failedCall ? await recoverAbandonedClaim(conn, failedCall, now).catch(() => null) : null;
+      if (!outcome || !outcome.ambiguous) dispatchSkipped += 1;
     }
   }
-  return { staged, ineligible, sent, dispatchSkipped };
+  // Safety net for a worker that died between claimForDispatch and any
+  // terminal write in a PAST sweep — this process's own per-row catch above
+  // only ever covers a throw IT observes; nothing else would ever revisit
+  // such a row otherwise (see recoverStaleClaims' own doc comment).
+  let staleClaimsRecovered = 0;
+  try {
+    staleClaimsRecovered = await recoverStaleClaims(conn, now);
+  } catch (err) {
+    logger.warn(`[call-booking-link-text] stale-claim recovery sweep failed (${err.code || err.name || 'error'})`);
+  }
+  return { staged, ineligible, sent, dispatchSkipped, staleClaimsRecovered };
 }
 
 module.exports = {
@@ -995,13 +1168,19 @@ module.exports = {
   resolveLeadLinkage,
   activationBoundary,
   persistedActivationBoundary,
+  refreshLiveActivationBoundary,
   ACTIVATION_SETTINGS_KEY,
+  LAST_LIVE_SETTINGS_KEY,
+  HEARTBEAT_GAP_MS,
   MODULE_LOAD_AT,
   neverSendRecheck,
   stage,
   stageOne,
   claimForDispatch,
   dispatchClaimedCall,
+  recoverAbandonedClaim,
+  recoverStaleClaims,
+  STALE_CLAIM_MS,
   sweep,
   _private: { leadIdOf, extractionOf, parseMetadata, bookedSinceCall, linkSentRecently },
 };

@@ -41,10 +41,16 @@ const {
   resolveLeadLinkage,
   activationBoundary,
   persistedActivationBoundary,
+  refreshLiveActivationBoundary,
+  ACTIVATION_SETTINGS_KEY,
+  LAST_LIVE_SETTINGS_KEY,
+  HEARTBEAT_GAP_MS,
   MODULE_LOAD_AT,
   neverSendRecheck,
   dispatchClaimedCall,
   claimForDispatch,
+  recoverAbandonedClaim,
+  recoverStaleClaims,
   stage,
   stageOne,
   sweep,
@@ -107,7 +113,45 @@ describe('callEndFor', () => {
     expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:03:00Z').getTime());
   });
 
-  test('a bridged row with no recording duration: end is bridged_at + duration_seconds, regardless of created_at', () => {
+  // codex r3 P2: a signed customer-leg receipt (/outbound-dial-complete)
+  // is the EXACT end for a callback attempt — it wins over bridged_at and
+  // duration_seconds entirely, and even over a wildly different
+  // duration_seconds on the same row (a stale/inflated parent-leg field
+  // must never override the provider's own definitive receipt).
+  test('a customer_leg receipt is the exact end, regardless of bridged_at/duration_seconds', () => {
+    const call = {
+      direction: 'outbound', bridged_at: new Date('2026-09-26T19:00:00Z'), duration_seconds: 600,
+      metadata: { customer_leg: { status: 'completed', sid: 'CA1', duration_seconds: 30, ended_at: '2026-09-26T19:01:15.000Z' } },
+    };
+    expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:01:15.000Z').getTime());
+  });
+
+  test('an inbound row with a customer_leg key (never stamped for inbound) ignores it and falls through to the ordinary branch', () => {
+    const call = {
+      direction: 'inbound', created_at: new Date('2026-09-26T19:00:00Z'), duration_seconds: 300,
+      metadata: { customer_leg: { ended_at: '2026-09-26T20:00:00.000Z' } },
+    };
+    expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:05:00Z').getTime());
+  });
+
+  test('an unparseable customer_leg.ended_at falls through to the bridged fallback instead of NaN', () => {
+    const call = {
+      direction: 'outbound', bridged_at: new Date('2026-09-26T19:00:00Z'), duration_seconds: 240,
+      metadata: { customer_leg: { ended_at: 'not-a-date' } },
+    };
+    expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:04:00Z').getTime());
+  });
+
+  // codex r3 P2: the recording-duration branch (codex r2 P2) ran EARLY —
+  // Twilio's recorded duration measures only the customer's talk time and
+  // misses hold/silence — dropped entirely. bridged_at + duration_seconds
+  // is kept as the fallback for a bridged row with no customer_leg receipt
+  // yet: duration_seconds is the PARENT (admin) leg's length, starting at
+  // the admin's OWN answer — earlier than bridged_at (dial start) — so
+  // this can only run LATE (the press-1 prompt + the customer's own ring
+  // time), never early, which is the deliberately safe direction for this
+  // lane's 2-hour/6pm-ET rule.
+  test('a bridged row with no customer_leg receipt: end is bridged_at + duration_seconds, regardless of created_at', () => {
     const call = {
       direction: 'outbound', created_at: new Date('2026-09-26T18:50:00Z'), // dialing started here
       bridged_at: new Date('2026-09-26T19:00:00Z'), duration_seconds: 240, // the answer, 10 min later
@@ -115,27 +159,20 @@ describe('callEndFor', () => {
     expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:04:00Z').getTime());
   });
 
-  // codex r2 P2: duration_seconds is the PARENT (admin) leg's length,
-  // starting at the admin's OWN answer — earlier than bridged_at (dial
-  // start) — so bridged_at + duration_seconds double-counts the press-1
-  // prompt and the customer's ring time. recording_duration_seconds
-  // (record-from-answer-dual, confirmed against /outbound-connect) is the
-  // far closer proxy and takes priority when present and positive.
-  test('a bridged row WITH a recording duration: end is bridged_at + recording_duration_seconds, not the inflated duration_seconds', () => {
+  test('a bridged row with a recording_duration_seconds present is UNAFFECTED by it — duration_seconds alone decides', () => {
     const call = {
       direction: 'outbound', created_at: new Date('2026-09-26T18:50:00Z'),
-      bridged_at: new Date('2026-09-26T19:00:00Z'), duration_seconds: 600, // includes the press-1 prompt + customer ring
-      recording_duration_seconds: 90, // the actual recorded conversation
+      bridged_at: new Date('2026-09-26T19:00:00Z'), duration_seconds: 600, recording_duration_seconds: 90,
     };
-    expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:01:30Z').getTime());
+    expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:10:00Z').getTime());
   });
 
-  test('a bridged row with a zero/missing recording duration falls back to duration_seconds', () => {
+  test('a bridged row with a zero/missing duration_seconds falls back to bridged_at itself, never NaN', () => {
     const call = {
       direction: 'outbound', created_at: new Date('2026-09-26T18:50:00Z'),
-      bridged_at: new Date('2026-09-26T19:00:00Z'), duration_seconds: 240, recording_duration_seconds: 0,
+      bridged_at: new Date('2026-09-26T19:00:00Z'), duration_seconds: 0,
     };
-    expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:04:00Z').getTime());
+    expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:00:00Z').getTime());
   });
 
   test('a missing duration falls back to the call start, never NaN or a throw', () => {
@@ -635,6 +672,122 @@ describe('stage', () => {
     };
     const decided = await stageOne(conn, call, now, boundary);
     expect(decided).toBe('pending'); // NOT skipped as pre_activation
+  });
+});
+
+// ── refreshLiveActivationBoundary — self-heals the boundary after a
+// disabled interval (codex r3 P1) ─────────────────────────────────────────
+// Two independent system_settings rows: ACTIVATION_SETTINGS_KEY (the
+// boundary itself) and LAST_LIVE_SETTINGS_KEY (a heartbeat every LIVE sweep
+// writes). A gap since the last heartbeat past HEARTBEAT_GAP_MS means the
+// gate was off (or the worker was down) since then, and the boundary
+// advances to max(stored boundary, MODULE_LOAD_AT) — never regresses it.
+describe('refreshLiveActivationBoundary', () => {
+  function systemSettingsMock(initial = {}) {
+    const store = { ...initial };
+    const conn = jest.fn((table) => {
+      if (table !== 'system_settings') throw new Error(`unexpected table ${table}`);
+      let pendingKey;
+      const chain = {
+        where: jest.fn(({ key }) => { pendingKey = key; return chain; }),
+        first: jest.fn(async () => (store[pendingKey] !== undefined ? { value: store[pendingKey] } : undefined)),
+        insert: jest.fn((row) => ({
+          onConflict: jest.fn(() => ({
+            merge: jest.fn(async () => { store[row.key] = row.value; }),
+            ignore: jest.fn(async () => { if (store[row.key] === undefined) store[row.key] = row.value; }),
+          })),
+        })),
+      };
+      return chain;
+    });
+    return { conn, store };
+  }
+
+  afterEach(() => { delete process.env.CALL_BOOKING_LINK_TEXT_ACTIVATED_AT; });
+
+  test('an explicit env override skips this entirely — no read, no write, at any gap', async () => {
+    process.env.CALL_BOOKING_LINK_TEXT_ACTIVATED_AT = '2026-01-01T00:00:00.000Z';
+    const { conn } = systemSettingsMock();
+    await refreshLiveActivationBoundary(conn, new Date());
+    expect(conn).not.toHaveBeenCalled();
+  });
+
+  test('no heartbeat at all (first live sweep after a fresh boot) advances the boundary to MODULE_LOAD_AT and writes a fresh heartbeat', async () => {
+    const { conn, store } = systemSettingsMock({ [ACTIVATION_SETTINGS_KEY]: '2020-01-01T00:00:00.000Z' });
+    const now = new Date(MODULE_LOAD_AT.getTime() + 60 * 1000);
+    await refreshLiveActivationBoundary(conn, now);
+    expect(new Date(store[ACTIVATION_SETTINGS_KEY]).getTime()).toBe(MODULE_LOAD_AT.getTime());
+    expect(new Date(store[LAST_LIVE_SETTINGS_KEY]).getTime()).toBe(now.getTime());
+  });
+
+  // "on -> off (gap) -> on: off-period calls excluded" — a heartbeat older
+  // than the threshold is exactly what a gate cycled off (or a dead worker)
+  // for longer than 2 cron ticks leaves behind; a call landing during that
+  // gap must be pre_activation once the boundary catches up.
+  test('a stale heartbeat (past 2x the cron cadence) advances the boundary, so a call from the gap is pre_activation', async () => {
+    const now = new Date(MODULE_LOAD_AT.getTime() + 60 * 1000);
+    const staleHeartbeat = new Date(now.getTime() - HEARTBEAT_GAP_MS - 60 * 1000).toISOString();
+    const oldBoundary = new Date(MODULE_LOAD_AT.getTime() - 24 * 60 * 60 * 1000).toISOString(); // established a day before this boot
+    const { conn, store } = systemSettingsMock({ [ACTIVATION_SETTINGS_KEY]: oldBoundary, [LAST_LIVE_SETTINGS_KEY]: staleHeartbeat });
+    await refreshLiveActivationBoundary(conn, now);
+    expect(new Date(store[ACTIVATION_SETTINGS_KEY]).getTime()).toBe(MODULE_LOAD_AT.getTime());
+
+    // A call that started during the gap (after the old boundary, before
+    // the advanced one) now reads as pre_activation via the ordinary
+    // stageOne path — this is the actual "off-period calls excluded"
+    // guarantee, not just an isolated boundary-value assertion.
+    const gapCall = {
+      id: 'call-in-gap', direction: 'inbound', created_at: new Date(MODULE_LOAD_AT.getTime() - 60 * 1000),
+      duration_seconds: 90, metadata: { lead_id: 'lead-1' },
+    };
+    const advancedBoundary = new Date(store[ACTIVATION_SETTINGS_KEY]);
+    const stageConn = jest.fn(() => { const chain = {}; ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
+    stageConn.raw = jest.fn((sql, bindings) => { stageConn.raw.calls = stageConn.raw.calls || []; stageConn.raw.calls.push(bindings); return 'RAW'; });
+    const decided = await stageOne(stageConn, gapCall, now, advancedBoundary);
+    expect(decided).toBe('skipped');
+    const parsed = stageConn.raw.calls.map(([json]) => JSON.parse(json)).find((v) => v.call_booking_link_text);
+    expect(parsed.call_booking_link_text.reason).toBe('pre_activation');
+  });
+
+  // "a routine restart within the threshold: nothing lost" — an ordinary
+  // deploy's own gap (the process restarting, picking the cron back up)
+  // lands comfortably under the threshold and must never regress the
+  // boundary a call between the ORIGINAL boundary and now still needs.
+  test('a fresh heartbeat under the gap threshold leaves the boundary untouched — a call since the original boundary still stages', async () => {
+    const now = new Date('2026-09-26T15:00:00Z');
+    const recentHeartbeat = new Date(now.getTime() - 60 * 1000).toISOString(); // 1 min ago — well under the threshold
+    const originalBoundary = '2020-01-01T00:00:00.000Z';
+    const { conn, store } = systemSettingsMock({ [ACTIVATION_SETTINGS_KEY]: originalBoundary, [LAST_LIVE_SETTINGS_KEY]: recentHeartbeat });
+    await refreshLiveActivationBoundary(conn, now);
+    expect(store[ACTIVATION_SETTINGS_KEY]).toBe(originalBoundary); // untouched
+    expect(new Date(store[LAST_LIVE_SETTINGS_KEY]).getTime()).toBe(now.getTime()); // heartbeat still refreshed
+
+    const call = {
+      id: 'call-since-boundary', direction: 'inbound', created_at: new Date(now.getTime() - 60000), duration_seconds: 90,
+      metadata: { lead_id: 'lead-1' },
+      ai_extraction_enriched: {
+        meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
+        caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
+        property: { property_type: 'single_family' },
+        service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        sentiment_and_lead: { lead_quality: 'warm' },
+      },
+      ai_address_validation: { inServiceArea: true },
+    };
+    const stageConn = jest.fn(() => { const chain = {}; ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); }); chain.update = jest.fn(async () => 1); return chain; });
+    stageConn.raw = jest.fn(() => 'RAW');
+    const decided = await stageOne(stageConn, call, now, new Date(originalBoundary));
+    expect(decided).toBe('pending'); // nothing lost
+  });
+
+  test('a gap detected but the stored boundary is already newer than MODULE_LOAD_AT is never regressed (no boundary write at all)', async () => {
+    const now = new Date(MODULE_LOAD_AT.getTime() + 60 * 1000);
+    const futureBoundary = new Date(now.getTime() + 60 * 60 * 1000).toISOString(); // already ahead of MODULE_LOAD_AT
+    const { conn, store } = systemSettingsMock({ [ACTIVATION_SETTINGS_KEY]: futureBoundary }); // no heartbeat at all — a real gap
+    await refreshLiveActivationBoundary(conn, now);
+    expect(store[ACTIVATION_SETTINGS_KEY]).toBe(futureBoundary); // unchanged — never regressed
+    expect(new Date(store[LAST_LIVE_SETTINGS_KEY]).getTime()).toBe(now.getTime());
   });
 });
 
@@ -1269,5 +1422,164 @@ describe('dispatchClaimedCall', () => {
     expect(result3.deferred).toBeUndefined();
     expect(result3.skipped).toBe('send_retry_timeout'); // caught by the pre-send deadline check
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1); // only round 1 ever reached the sender
+  });
+
+  // ── handoff_started_at — the fact that decides safe-to-retry vs
+  // leave-for-review after a failure (codex r3 P2) ────────────────────────
+  describe('handoff_started_at is stamped right before the provider call', () => {
+    function lastMetadataPatch(conn) {
+      const call = [...conn.raw.mock.calls].reverse().find(([sql, bindings]) => sql.includes('jsonb') && Array.isArray(bindings) && typeof bindings[0] === 'string');
+      return call ? JSON.parse(call[1][0]).call_booking_link_text : null;
+    }
+
+    test('the stamp lands before sendCustomerMessage is ever called, and survives a subsequent successful send', async () => {
+      const conn = makeDb();
+      let stampWrittenBeforeSend = null;
+      sendCustomerMessage.mockImplementation(async () => {
+        stampWrittenBeforeSend = lastMetadataPatch(conn);
+        return { sent: true, providerMessageId: 'SM_test_sid', deliveryOutcome: 'accepted' };
+      });
+      const result = await dispatchClaimedCall(conn, CALL, NOW);
+      expect(result.sent).toBe(true);
+      expect(stampWrittenBeforeSend).toMatchObject({ status: 'claimed' });
+      expect(stampWrittenBeforeSend.handoff_started_at).toBeTruthy();
+    });
+
+    test('a throw from sendCustomerMessage AFTER the stamp leaves handoff_started_at on the row — recoverAbandonedClaim then treats it as ambiguous, never resent', async () => {
+      sendCustomerMessage.mockRejectedValue(new Error('provider timeout, no result'));
+      const conn = makeDb();
+      await expect(dispatchClaimedCall(conn, CALL, NOW)).rejects.toThrow('provider timeout, no result');
+      const patch = lastMetadataPatch(conn);
+      expect(patch.handoff_started_at).toBeTruthy(); // the stamp survived the throw
+
+      const stampedCall = { ...CALL, metadata: { ...CALL.metadata, call_booking_link_text: patch } };
+      const outcome = await recoverAbandonedClaim(conn, stampedCall, NOW);
+      expect(outcome).toEqual({ ambiguous: true });
+    });
+
+    test('a throw BEFORE the stamp (the link builder itself throws) leaves no handoff_started_at — safe for recoverAbandonedClaim to requeue', async () => {
+      buildLeadConsultationSmsLine.mockRejectedValue(new Error('db hiccup'));
+      const conn = makeDb();
+      await expect(dispatchClaimedCall(conn, CALL, NOW)).rejects.toThrow('db hiccup');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      const patch = lastMetadataPatch(conn);
+      expect(patch).toBeNull(); // the stamp write never happened at all
+
+      const outcome = await recoverAbandonedClaim(conn, CALL, NOW); // CALL's own metadata never carried handoff_started_at
+      expect(outcome.ambiguous).toBe(false);
+    });
+  });
+});
+
+// ── recoverAbandonedClaim — the shared before/after-handoff decision ─────
+describe('recoverAbandonedClaim', () => {
+  const NOW = new Date('2026-09-26T18:00:00Z');
+
+  function rawCapturingConn() {
+    const chain = {};
+    ['where', 'whereNull', 'whereRaw', 'orderBy', 'limit', 'select'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+    chain.update = jest.fn(async () => 1);
+    chain.insert = jest.fn(async () => {});
+    chain.first = jest.fn(async () => undefined);
+    const conn = jest.fn(() => chain);
+    conn.raw = jest.fn((sql, bindings) => { conn.raw.captured = conn.raw.captured || []; conn.raw.captured.push(bindings); return 'RAW'; });
+    return conn;
+  }
+
+  function lastPatch(conn) {
+    const [json] = conn.raw.captured[conn.raw.captured.length - 1];
+    return JSON.parse(json).call_booking_link_text;
+  }
+
+  test('no handoff_started_at, within the retry deadline: requeues as pending, preserving original_send_at (no activity_log entry)', async () => {
+    const conn = rawCapturingConn();
+    const entry = {
+      status: 'claimed', lead_id: 'lead-1', send_at: NOW.toISOString(),
+      original_send_at: new Date(NOW.getTime() - 60 * 60 * 1000).toISOString(),
+    };
+    const outcome = await recoverAbandonedClaim(conn, { id: 'call-1', metadata: { call_booking_link_text: entry } }, NOW);
+    expect(outcome).toEqual({ ambiguous: false, terminal: false });
+    const patch = lastPatch(conn);
+    expect(patch.status).toBe('pending');
+    expect(patch.original_send_at).toBe(entry.original_send_at);
+    expect(new Date(patch.send_at).getTime()).toBeGreaterThan(NOW.getTime());
+  });
+
+  test('no handoff_started_at, past the 24h retry deadline (measured from original_send_at): terminal skip, worker_error', async () => {
+    const conn = rawCapturingConn();
+    const entry = {
+      status: 'claimed', lead_id: 'lead-1', send_at: NOW.toISOString(),
+      original_send_at: new Date(NOW.getTime() - 25 * 60 * 60 * 1000).toISOString(),
+    };
+    const outcome = await recoverAbandonedClaim(conn, { id: 'call-1', metadata: { call_booking_link_text: entry } }, NOW);
+    expect(outcome).toEqual({ ambiguous: false, terminal: true });
+    const patch = lastPatch(conn);
+    expect(patch).toMatchObject({ status: 'skipped', reason: 'worker_error' });
+  });
+
+  test('handoff_started_at present: leaves the row claimed with no further write — the provider may already have this attempt', async () => {
+    const conn = rawCapturingConn();
+    const entry = { status: 'claimed', lead_id: 'lead-1', send_at: NOW.toISOString(), handoff_started_at: NOW.toISOString() };
+    const outcome = await recoverAbandonedClaim(conn, { id: 'call-1', metadata: { call_booking_link_text: entry } }, NOW);
+    expect(outcome).toEqual({ ambiguous: true });
+    expect(conn.raw).not.toHaveBeenCalled(); // no metadata write at all
+  });
+});
+
+// ── recoverStaleClaims — the safety net for a worker that died mid-dispatch
+// (codex r3 P2) ────────────────────────────────────────────────────────────
+describe('recoverStaleClaims', () => {
+  const NOW = new Date('2026-09-26T18:00:00Z');
+
+  function connFor(row) {
+    const chain = {};
+    ['whereRaw', 'orderBy', 'limit', 'where'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+    chain.select = jest.fn(async () => (row ? [{ id: row.id }] : []));
+    chain.first = jest.fn(async () => row);
+    chain.update = jest.fn(async () => 1);
+    chain.insert = jest.fn(async () => {});
+    const conn = jest.fn(() => chain);
+    conn.raw = jest.fn((sql, bindings) => { conn.raw.captured = conn.raw.captured || []; conn.raw.captured.push(bindings); return 'RAW'; });
+    return conn;
+  }
+
+  test('a stale claimed row with no handoff is requeued and counted', async () => {
+    const row = {
+      id: 'call-stale-1',
+      metadata: { call_booking_link_text: { status: 'claimed', lead_id: 'lead-1', send_at: NOW.toISOString(), original_send_at: NOW.toISOString() } },
+    };
+    const conn = connFor(row);
+    const recovered = await recoverStaleClaims(conn, NOW);
+    expect(recovered).toBe(1);
+    expect(conn.raw).toHaveBeenCalled(); // recoverAbandonedClaim actually wrote a requeue
+  });
+
+  test('a stale-looking candidate already resolved by a concurrent tick (no longer claimed) is skipped, never double-recovered', async () => {
+    const row = { id: 'call-stale-2', metadata: { call_booking_link_text: { status: 'sent' } } };
+    const conn = connFor(row);
+    const recovered = await recoverStaleClaims(conn, NOW);
+    expect(recovered).toBe(0);
+    expect(conn.raw).not.toHaveBeenCalled(); // recoverAbandonedClaim never even ran
+  });
+
+  test('a stale claimed row WITH handoff_started_at is left claimed (ambiguous) and not counted', async () => {
+    const row = { id: 'call-stale-3', metadata: { call_booking_link_text: { status: 'claimed', handoff_started_at: NOW.toISOString() } } };
+    const conn = connFor(row);
+    const recovered = await recoverStaleClaims(conn, NOW);
+    expect(recovered).toBe(0);
+  });
+
+  test('a row no longer found at all (deleted/merged since the candidate SELECT) is skipped without throwing', async () => {
+    const conn = connFor(undefined);
+    conn.mockImplementation((table) => {
+      const chain = {};
+      ['whereRaw', 'orderBy', 'limit', 'where'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.select = jest.fn(async () => [{ id: 'call-gone' }]);
+      chain.first = jest.fn(async () => undefined);
+      chain.update = jest.fn(async () => 1);
+      chain.insert = jest.fn(async () => {});
+      return chain;
+    });
+    await expect(recoverStaleClaims(conn, NOW)).resolves.toBe(0);
   });
 });

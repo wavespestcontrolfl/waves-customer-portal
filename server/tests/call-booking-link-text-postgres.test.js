@@ -304,4 +304,56 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     const secondResult = await callBookingLinkText.dispatchClaimedCall(mockPg, secondCall, NOW);
     expect(secondResult).toEqual({ sent: false, skipped: 'link_sent_recently' });
   });
+
+  // codex r3 P1/P2 (this round) — new raw SQL added alongside the earlier
+  // jsonb_build_object fix: refreshLiveActivationBoundary's onConflict().
+  // merge() write and recoverStaleClaims'/recoverAbandonedClaim's own
+  // named-binding comparisons. The same class of bug (a mocked knex cannot
+  // see a real Postgres parser rejection) could just as easily hide here.
+  test('refreshLiveActivationBoundary advances a stale boundary via a real onConflict().merge() write', async () => {
+    const oldBoundary = new Date('2020-01-01T00:00:00.000Z');
+    await mockPg('system_settings').insert({ key: callBookingLinkText.ACTIVATION_SETTINGS_KEY, value: oldBoundary.toISOString(), category: 'call_booking_link_text' });
+    // No heartbeat row at all — a real gap.
+    await callBookingLinkText.refreshLiveActivationBoundary(mockPg, NOW);
+
+    const boundaryRow = await mockPg('system_settings').where({ key: callBookingLinkText.ACTIVATION_SETTINGS_KEY }).first('value');
+    expect(new Date(boundaryRow.value).getTime()).toBe(callBookingLinkText.MODULE_LOAD_AT.getTime());
+    const heartbeatRow = await mockPg('system_settings').where({ key: callBookingLinkText.LAST_LIVE_SETTINGS_KEY }).first('value');
+    expect(new Date(heartbeatRow.value).getTime()).toBe(NOW.getTime());
+
+    // Calling it again immediately (heartbeat now fresh) must NOT regress
+    // the just-advanced boundary — a real round trip through the same
+    // onConflict().merge() write, not just a JS-level assertion.
+    await callBookingLinkText.refreshLiveActivationBoundary(mockPg, new Date(NOW.getTime() + 1000));
+    const boundaryAfter = await mockPg('system_settings').where({ key: callBookingLinkText.ACTIVATION_SETTINGS_KEY }).first('value');
+    expect(new Date(boundaryAfter.value).getTime()).toBe(callBookingLinkText.MODULE_LOAD_AT.getTime());
+  });
+
+  test('recoverStaleClaims finds a real stale claimed row via its named-binding timestamptz comparison and requeues it through recoverAbandonedClaim', async () => {
+    const leadId = await insertLead(mockPg);
+    const staleClaimedAt = new Date(NOW.getTime() - callBookingLinkText.STALE_CLAIM_MS - 5 * 60 * 1000);
+    const originalSendAt = new Date(NOW.getTime() - 2 * 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      metadata: {
+        lead_id: leadId,
+        call_booking_link_text: {
+          status: 'claimed', lead_id: leadId, send_at: originalSendAt, original_send_at: originalSendAt, claimed_at: staleClaimedAt.toISOString(),
+        },
+      },
+    });
+    // A row that is NOT yet stale (claimed a moment ago) must be left alone.
+    const freshLeadId = await insertLead(mockPg);
+    const freshCallId = await insertCall(mockPg, {
+      metadata: { lead_id: freshLeadId, call_booking_link_text: { status: 'claimed', lead_id: freshLeadId, send_at: originalSendAt, original_send_at: originalSendAt, claimed_at: NOW.toISOString() } },
+    });
+
+    const recovered = await callBookingLinkText.recoverStaleClaims(mockPg, NOW);
+    expect(recovered).toBe(1);
+
+    const row = await mockPg('call_log').where({ id: callId }).first('metadata');
+    expect(row.metadata.call_booking_link_text).toMatchObject({ status: 'pending', lead_id: leadId, original_send_at: originalSendAt });
+
+    const freshRow = await mockPg('call_log').where({ id: freshCallId }).first('metadata');
+    expect(freshRow.metadata.call_booking_link_text.status).toBe('claimed'); // untouched — not yet stale
+  });
 });
