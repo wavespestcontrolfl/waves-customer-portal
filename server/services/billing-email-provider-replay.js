@@ -67,7 +67,7 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch) {
         retryable: verdict?.retryable === true,
       };
     },
-    dispatch: (database) => dispatch(database),
+    dispatch: (database, providerBoundaryCheck) => dispatch(database, providerBoundaryCheck),
     state,
   });
 

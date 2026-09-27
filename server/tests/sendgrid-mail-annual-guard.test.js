@@ -130,6 +130,32 @@ describe('sendgrid-mail sendOne: annual-offer guard at the provider boundary', (
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ messageId: 'msg-1' });
   });
+
+  test('runs a caller boundary check after provider guards and can veto fetch', async () => {
+    const database = jest.fn();
+    const order = [];
+    annualHandoffGuard.mockImplementationOnce(() => async () => {
+      order.push('annual-guard');
+      return { blocked: false, reason: null, estimateId: null };
+    });
+    const providerBoundaryCheck = jest.fn(async ({ database: checkedDatabase }) => {
+      expect(checkedDatabase).toBe(database);
+      order.push('caller-authority');
+      return { ok: false, code: 'AUTHORITY_CHANGED', reason: 'Authority changed', retryable: true };
+    });
+
+    const err = await require('../services/sendgrid-mail').sendOne({
+      to: 'customer@example.test', fromEmail: 'contact@example.test', subject: 'S',
+      html: '<p>Frozen content</p>', text: 'Frozen content', database, providerBoundaryCheck,
+    }).catch((e) => e);
+
+    expect(order).toEqual(['annual-guard', 'caller-authority']);
+    expect(providerBoundaryCheck).toHaveBeenCalledWith({ database });
+    expect(err).toMatchObject({
+      providerBoundaryBlocked: true, code: 'AUTHORITY_CHANGED', retryable: true,
+    });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
 });
 
 // Round 9 structural fix (P1): the rewrite-vs-refuse policy decision — and

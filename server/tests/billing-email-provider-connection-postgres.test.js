@@ -137,13 +137,14 @@ postgres('billing Email provider preparation on its held connection', () => {
       const outcome = await dispatchUnderBillingEmailAuthority({
         input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
         recipientEmail: 'qa@example.invalid', state,
-        dispatch: async (database) => {
+        dispatch: async (database, providerBoundaryCheck) => {
           expect(database.isTransaction).toBe(true);
           await database('estimates').insert({ id: estimateId, token, status: 'accepted', estimate_data: {} });
           await sendgrid.sendOne({
             to: 'qa@example.invalid', subject: 'Synthetic billing update',
             html: `<a href="https://example.invalid/estimate/${token}">Review</a>`,
-            text: `https://example.invalid/estimate/${token}`, withheldLinkPolicy: policy, database,
+            text: `https://example.invalid/estimate/${token}`, withheldLinkPolicy: policy,
+            database, providerBoundaryCheck,
           });
         },
       });
@@ -315,8 +316,10 @@ postgres('billing Email provider preparation on its held connection', () => {
       expect(await dispatchUnderBillingEmailAuthority({
         input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
         recipientEmail: 'qa@example.invalid', state,
-        dispatch: (database) => sendgrid.sendOne({ to: 'qa@example.invalid', subject: 'Synthetic update',
-          html: '<p>Authorized Email</p>', text: 'Authorized Email', database }),
+        dispatch: (database, providerBoundaryCheck) => sendgrid.sendOne({
+          to: 'qa@example.invalid', subject: 'Synthetic update',
+          html: '<p>Authorized Email</p>', text: 'Authorized Email', database, providerBoundaryCheck,
+        }),
       })).toEqual({ ok: true });
       expect(state.providerAccepted).toBe(true);
       expect(global.fetch).toHaveBeenCalledTimes(1);
@@ -374,10 +377,10 @@ postgres('billing Email provider preparation on its held connection', () => {
           await waitForPhoneLock(pid);
           return { ok: true };
         },
-        dispatch: async (database) => {
+        dispatch: async (database, providerBoundaryCheck) => {
           expect(committed).toBe(false);
           await sendgrid.sendOne({ to: 'qa@example.invalid', subject: 'Synthetic billing update',
-            html: '<p>Authorized</p>', text: 'Authorized', database });
+            html: '<p>Authorized</p>', text: 'Authorized', database, providerBoundaryCheck });
           expect(committed).toBe(false);
         },
       });

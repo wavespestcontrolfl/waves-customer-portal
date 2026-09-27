@@ -271,15 +271,19 @@ async function alertIfProviderRetriesExhausted(message, ev) {
   );
 }
 
-async function markRetryFailure(message, err, now = new Date(), { rejectedAfterStart = false } = {}) {
+async function markRetryFailure(message, err, now = new Date(), { rejectedAfterStart = false, markerWriteFailed = false } = {}) {
   const reason = emailTemplates.redactEmailAddresses(String(err?.message || 'SendGrid retry failed')).slice(0, 1000);
   const retryCount = Number(message.provider_retry_count || 0);
   const exhausted = retryCount >= MAX_RETRIES;
   const nextAt = exhausted ? null : new Date(now.getTime() + RETRY_DELAYS_MS[retryCount]);
   const expectedPhase = rejectedAfterStart ? HANDOFF_PHASE_STARTED : HANDOFF_PHASE_PENDING;
-  const [updated] = await db('email_messages')
+  const failureQuery = db('email_messages')
     .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued',
-      provider_handoff_phase: expectedPhase, provider_handoff_attempt_token: message.send_attempt_token })
+      provider_handoff_attempt_token: message.send_attempt_token });
+  if (markerWriteFailed) {
+    failureQuery.whereIn('provider_handoff_phase', [HANDOFF_PHASE_PENDING, HANDOFF_PHASE_STARTED]);
+  } else failureQuery.where({ provider_handoff_phase: expectedPhase });
+  const [updated] = await failureQuery
     .update({
       status: 'failed',
       error_message: reason,
@@ -464,8 +468,10 @@ async function retryOne(message) {
   // dispatchStarted is set immediately before the Mail Send request: a
   // failure clearing the provider block is provably pre-send and keeps the
   // ordinary retry schedule.
-  const state = { dispatchStarted: false, rejected: false, result: null, blocked: false };
-  const dispatchToProvider = async (database) => {
+  const state = {
+    dispatchStarted: false, rejected: false, result: null, blocked: false, markerWriteFailed: false,
+  };
+  const dispatchToProvider = async (database, providerBoundaryCheck) => {
     // Blocks are a provider-specific suppression distinct from hard bounces.
     // If it remains, SendGrid will drop the retry before attempting delivery.
     await sendgrid.clearBlockedAddress(message.recipient_email_snapshot);
@@ -479,11 +485,17 @@ async function retryOne(message) {
       .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued',
         provider_handoff_phase: HANDOFF_PHASE_PENDING, provider_handoff_attempt_token: message.send_attempt_token });
     if (message.template_key === 'service.visit_summary') marker.where({ error_message: HANDOFF_PENDING });
-    const started = await marker.update({
-      provider_handoff_phase: HANDOFF_PHASE_STARTED,
-      ...(message.template_key === 'service.visit_summary' ? { error_message: HANDOFF_STARTED } : {}),
-      updated_at: new Date(),
-    });
+    let started;
+    try {
+      started = await marker.update({
+        provider_handoff_phase: HANDOFF_PHASE_STARTED,
+        ...(message.template_key === 'service.visit_summary' ? { error_message: HANDOFF_STARTED } : {}),
+        updated_at: new Date(),
+      });
+    } catch (err) {
+      state.markerWriteFailed = true;
+      throw err;
+    }
     if (Number(started) !== 1) {
       const lost = new Error('Provider retry claim was reclaimed before the provider request');
       lost.retryClaimLost = true;
@@ -534,6 +546,7 @@ async function retryOne(message) {
         suppressErrorLog: true,
         templateKey: message.template_key,
         database,
+        ...(providerBoundaryCheck ? { providerBoundaryCheck } : {}),
       });
     } catch (err) {
       // Pre-push audit P1 (b49be57b12 round 4): a guard INFRASTRUCTURE
@@ -549,8 +562,13 @@ async function retryOne(message) {
       // catch), same as any other pre-send recheck failure.
       state.rejected = !!(err && (err.annualOfferWithheld
         || err.annualOfferGuardFailed
+        || err.providerBoundaryBlocked
         || err.code === 'SENDGRID_NOT_CONFIGURED'
         || sendgrid.isDefiniteRejection(err)));
+      if (err?.providerBoundaryBlocked) {
+        state.dispatchStarted = false;
+        return;
+      }
       if (err && err.annualOfferWithheld) {
         state.blocked = true;
         return;
@@ -572,10 +590,12 @@ async function retryOne(message) {
         if (handoff.retryable) {
           const err = new Error(handoff.reason);
           err.code = handoff.code;
-          await markRetryFailure(message, err);
+          await markRetryFailure(message, err, new Date(), { rejectedAfterStart: state.rejected });
           return { sent: false, error: err };
         }
-        return await stopRetry(message, { status: 'blocked', reason: handoff.reason });
+        return await stopRetry(message, {
+          status: 'blocked', reason: handoff.reason, rejectedAfterStart: state.rejected,
+        });
       }
     } else {
       await dispatchToProvider();
@@ -594,7 +614,9 @@ async function retryOne(message) {
       await markRetryUncertain(message, err).catch((again) => logger.error(`[email-provider-retry] uncertain settlement failed twice for ${message.id}: ${again.message}`));
       return { sent: false, uncertain: true, error: err };
     }
-    await markRetryFailure(message, err, new Date(), { rejectedAfterStart: state.rejected });
+    await markRetryFailure(message, err, new Date(), {
+      rejectedAfterStart: state.rejected, markerWriteFailed: state.markerWriteFailed,
+    });
     return { sent: false, error: err };
   }
 }

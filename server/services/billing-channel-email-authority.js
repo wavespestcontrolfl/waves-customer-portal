@@ -194,14 +194,31 @@ async function verifyAndDispatch({ input, trx, invoice, phone, recipientEmail, p
       'Billing email recipient changed before delivery',
       { retryable: true },
     );
-  } else state.boundaryBlock = await preSendBlock(preSendCheck, trx);
+  }
   if (!state.boundaryBlock) {
     state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category, fresh.customer);
   }
   if (state.boundaryBlock) return { ok: false };
 
-  state.handoffStarted = true;
-  await dispatch(trx);
+  // Keep the caller's last authority check after every asynchronous provider
+  // preparation step. Once it passes, sendOne reaches fetch without another
+  // await while this transaction and its locks remain held.
+  const providerBoundaryCheck = async ({ database } = {}) => {
+    state.boundaryBlock = await preSendBlock(preSendCheck, database || trx);
+    if (state.boundaryBlock) {
+      return {
+        ok: false,
+        code: state.boundaryBlock.code,
+        reason: state.boundaryBlock.reason,
+        retryable: state.boundaryBlock.retryable,
+      };
+    }
+    state.handoffStarted = true;
+    return { ok: true };
+  };
+  state.providerPreparationStarted = true;
+  await dispatch(trx, providerBoundaryCheck);
+  if (state.boundaryBlock) return { ok: false };
   state.providerAccepted = true;
   return { ok: true };
 }
@@ -229,6 +246,13 @@ async function dispatchUnderBillingEmailAuthority({ input, recipientEmail, preSe
   } catch (err) {
     if (state.providerAccepted) return { ok: true };
     if (state.handoffStarted) throw err;
+    // A final-boundary veto is a definite refusal. Preserve the caller's
+    // decision even when a direct dispatch represents it as a tagged throw.
+    if (state.boundaryBlock) return { ok: false };
+    // Provider preparation owns marker and link-guard failures. Propagate
+    // them so a marker write whose acknowledgement was lost can be recovered
+    // against either pending or started without assuming a request occurred.
+    if (state.providerPreparationStarted) throw err;
     // Query errors can contain recipient bindings; callers persist this reason.
     state.boundaryBlock = blocked('BILLING_EMAIL_RECHECK_FAILED',
       'Billing email authority could not be verified', { retryable: true });
