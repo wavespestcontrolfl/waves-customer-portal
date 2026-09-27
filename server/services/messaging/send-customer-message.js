@@ -355,6 +355,7 @@ async function sendCustomerMessageCore(input) {
     preSendCheck,
     providerPreSendCheck,
     onDispatchStart,
+    onDispatchAbort,
     withSmsHandoff,
     withProviderHandoff,
     providerHandoffReservation: suppliedProviderHandoffReservation,
@@ -986,6 +987,14 @@ async function sendCustomerMessageCore(input) {
     // provider" marker belongs here, never inside providerPreSendCheck
     // itself, which still has real refusal paths ahead of it.
     onDispatchStart,
+    // codex #5018 r15 pre-push P1: onDispatchStart's own await is real
+    // wall-clock time, which can itself cross the send window's close
+    // boundary that the LAST synchronous isStillValid() check ran before
+    // it. twilio.js invokes this to let the caller UNDO its own marker
+    // when that recheck, run again right after onDispatchStart, finds the
+    // window has closed — otherwise a send that never reached
+    // messages.create() would be misclassified as ambiguous forever.
+    onDispatchAbort,
     providerHandoffReservation,
   });
   };

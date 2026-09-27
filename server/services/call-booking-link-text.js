@@ -1321,6 +1321,16 @@ async function dispatchClaimedCall(conn, call, now) {
     // is the one that matters; never overwritten.
     onDispatchStart: () => markerDb()(HANDOFF_MARKER_TABLE)
       .insert({ call_log_id: call.id, handoff_started_at: new Date() }).onConflict('call_log_id').ignore(),
+    // codex #5018 r15 pre-push P1: onDispatchStart's own INSERT is a real
+    // await, real wall-clock time that can itself carry the send window's
+    // close boundary the last isStillValid() check ran before it. When
+    // twilio.js's OWN recheck right after that await refuses for exactly
+    // that reason, it calls this to remove the marker just written — the
+    // attempt never reached dispatchStarted/messages.create() at all, so
+    // recoverAbandonedClaim must see NO marker here, not a permanent
+    // "ambiguous, never resent" for a send that was provably never
+    // attempted.
+    onDispatchAbort: () => markerDb()(HANDOFF_MARKER_TABLE).where({ call_log_id: call.id }).del(),
     // codex #5018 r11 P1: without a locked handoff, a STOP committed after
     // send-customer-message.js's FIRST suppression/consent read (well before
     // this call even reaches the provider) and before this hook's own

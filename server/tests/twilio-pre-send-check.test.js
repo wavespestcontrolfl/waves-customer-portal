@@ -159,7 +159,12 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     expect(result.success).toBe(true);
   });
 
-  test('handoff locks enclose only the SDK call; log time follows lock acquisition', async () => {
+  // codex #5018 r15 pre-push P1: sms_log now writes INSIDE dispatch(), on
+  // the caller's own trx when one exists — so it lands BEFORE the lock
+  // releases, never after. Writing it after (this test's OLD assertion,
+  // ['locked', 'sdk', 'released', 'sms_log']) let a second locker waiting
+  // on the SAME key acquire it, see no evidence yet, and send a duplicate.
+  test('handoff locks enclose the SDK call AND the sms_log write; log time follows lock acquisition', async () => {
     const events = [];
     const acquiredAt = new Date('2026-01-01T15:00:02Z');
     jest.useFakeTimers();
@@ -182,8 +187,29 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
         },
       });
       expect(result.success).toBe(true);
-      expect(events).toEqual(['locked', 'sdk', 'released', 'sms_log']);
+      expect(events).toEqual(['locked', 'sdk', 'sms_log', 'released']);
     } finally { jest.useRealTimers(); require('../models/db').mockReset(); }
+  });
+
+  // codex #5018 r15 pre-push P1: the SAME evidence-before-release ordering,
+  // but with a real trx object supplied to dispatch — the write must land
+  // on THAT connection, never silently fall back to the plain db, or a
+  // caller's own transaction rollback would not also roll back the log row.
+  test('with a caller-supplied trx, the sms_log write lands on THAT connection, never the plain db', async () => {
+    const trxInsert = jest.fn(async () => {});
+    // knex convention: calling the trx itself as a function selects a table.
+    const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    require('../models/db').mockImplementation(() => ({
+      insert: jest.fn(async () => { throw new Error('sms_log must not write on the plain db when a trx is held'); }),
+    }));
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+        messageType: 'manual', fromNumber: FROM,
+        withSmsHandoff: async dispatch => { await dispatch(trx); return { ok: true }; },
+      });
+      expect(result.success).toBe(true);
+      expect(trxInsert).toHaveBeenCalledTimes(1);
+    } finally { require('../models/db').mockReset(); }
   });
 
   test.each([
@@ -689,6 +715,70 @@ describe('annual-offer guard at the TRUE provider boundary (Codex round 3 on #46
     const result = await TwilioService.sendSMS(TO, 'Reminder body', {
       messageType: 'manual', fromNumber: FROM, preSendCheck,
     });
+    expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(true);
+  });
+
+  // codex #5018 r15 pre-push P1: onDispatchStart's own await is real
+  // wall-clock time, sitting AFTER the isStillValid() recheck above — a
+  // second, later window-close is invisible to that first check alone.
+  test('codex #5018 r15 pre-push P1: onDispatchStart runs, then a SECOND isStillValid recheck lets the send proceed when the window is still open', async () => {
+    const preSendCheck = jest.fn(async () => ({ ok: true }));
+    preSendCheck.isStillValid = jest.fn(() => true);
+    const onDispatchStart = jest.fn(async () => {});
+    const onDispatchAbort = jest.fn(async () => {});
+
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, preSendCheck, onDispatchStart, onDispatchAbort,
+    });
+
+    expect(onDispatchStart).toHaveBeenCalledTimes(1);
+    expect(preSendCheck.isStillValid).toHaveBeenCalledTimes(2); // the original check, plus the new post-marker recheck
+    expect(onDispatchAbort).not.toHaveBeenCalled();
+    expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(true);
+  });
+
+  test('codex #5018 r15 pre-push P1: a window close DURING onDispatchStart\'s own await aborts the marker and refuses, never reaching the SDK', async () => {
+    const preSendCheck = jest.fn(async () => ({ ok: true }));
+    // First call (before onDispatchStart) still open; second call (right
+    // after it) finds the window has closed while that await ran.
+    preSendCheck.isStillValid = jest.fn().mockReturnValueOnce(true).mockReturnValueOnce(false);
+    const events = [];
+    const onDispatchStart = jest.fn(async () => { events.push('onDispatchStart'); });
+    const onDispatchAbort = jest.fn(async () => { events.push('onDispatchAbort'); });
+
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, preSendCheck, onDispatchStart, onDispatchAbort,
+    });
+
+    expect(events).toEqual(['onDispatchStart', 'onDispatchAbort']);
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, preSendBlocked: true, code: 'QUIET_HOURS_HOLD', retryable: true });
+  });
+
+  test('codex #5018 r15 pre-push P1: onDispatchAbort throwing is swallowed — the window-close refusal still surfaces, never a worse thrown error', async () => {
+    const preSendCheck = jest.fn(async () => ({ ok: true }));
+    preSendCheck.isStillValid = jest.fn().mockReturnValueOnce(true).mockReturnValueOnce(false);
+    const onDispatchStart = jest.fn(async () => {});
+    const onDispatchAbort = jest.fn(async () => { throw new Error('marker table unreachable'); });
+
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+      messageType: 'manual', fromNumber: FROM, preSendCheck, onDispatchStart, onDispatchAbort,
+    });
+
+    expect(onDispatchAbort).toHaveBeenCalledTimes(1);
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, preSendBlocked: true, code: 'QUIET_HOURS_HOLD', retryable: true });
+  });
+
+  test('codex #5018 r15 pre-push P1: no onDispatchStart at all keeps isStillValid a SINGLE call, byte-identical to before', async () => {
+    const preSendCheck = jest.fn(async () => ({ ok: true }));
+    preSendCheck.isStillValid = jest.fn(() => true);
+
+    const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, preSendCheck });
+
+    expect(preSendCheck.isStillValid).toHaveBeenCalledTimes(1);
     expect(mockTwilioCreate).toHaveBeenCalledTimes(1);
     expect(result.success).toBe(true);
   });
