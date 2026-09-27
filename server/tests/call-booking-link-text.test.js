@@ -965,6 +965,20 @@ describe('neverSendRecheck', () => {
     });
     await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'link_sent_recently' });
   });
+
+  // codex r3 P1: an UNCAUGHT throw here (a transient DB failure, not a
+  // deliberate refusal) would leave twilio.js's own providerPreSendCheck
+  // contract with no `.retryable` flag on the resulting error, turning an
+  // ordinary infrastructure hiccup into a PERMANENT, non-retryable skip
+  // even though Twilio was never contacted. This must be a RETURNED
+  // retryable refusal instead, never a thrown error.
+  test('a transient DB failure inside the recheck returns a retryable refusal, never throws', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1');
+    const failing = jest.fn(() => { throw new Error('connection reset'); });
+    await expect(check({ dbi: failing })).resolves.toEqual({
+      ok: false, retryable: true, code: 'never_send_recheck_failed', reason: 'connection reset',
+    });
+  });
 });
 
 // ── claimForDispatch — atomic single-row claim ────────────────────────────

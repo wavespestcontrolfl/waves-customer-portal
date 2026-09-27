@@ -832,13 +832,29 @@ async function dispatchIneligibleReason(ctx) {
 // caught it moments earlier.
 function neverSendRecheck(call, leadId) {
   return async ({ dbi }) => {
-    const lead = await dbi('leads').where({ id: leadId }).whereNull('deleted_at').first();
-    if (!lead || !isOpenLeadRow(lead)) return { ok: false, code: 'lead_no_longer_open' };
-    if (lead.estimate_id) return { ok: false, code: 'estimate_linked' };
-    const callStart = callStartedAt(call) || new Date(call.created_at);
-    if (await bookedSinceCall(dbi, lead.customer_id, callStart)) return { ok: false, code: 'booked_since_call' };
-    if (await linkSentRecently(dbi, leadId, new Date())) return { ok: false, code: 'link_sent_recently' };
-    return { ok: true };
+    try {
+      const lead = await dbi('leads').where({ id: leadId }).whereNull('deleted_at').first();
+      if (!lead || !isOpenLeadRow(lead)) return { ok: false, code: 'lead_no_longer_open' };
+      if (lead.estimate_id) return { ok: false, code: 'estimate_linked' };
+      const callStart = callStartedAt(call) || new Date(call.created_at);
+      if (await bookedSinceCall(dbi, lead.customer_id, callStart)) return { ok: false, code: 'booked_since_call' };
+      if (await linkSentRecently(dbi, leadId, new Date())) return { ok: false, code: 'link_sent_recently' };
+      return { ok: true };
+    } catch (err) {
+      // A DB read failing here is an infrastructure hiccup, not a
+      // deliberate "never eligible" refusal (codex r3 P1): twilio.js's own
+      // providerPreSendCheck contract maps an UNCAUGHT throw's retryable
+      // flag through checkErr?.retryable, which a plain thrown Error never
+      // carries — so letting this propagate would turn an ordinary
+      // transient failure into a PERMANENT, non-retryable skip even though
+      // Twilio was never contacted. Returning (never throwing) a retryable
+      // refusal instead flows through sendSMS's own verdict shape into
+      // recordSendOutcome's existing bounded retry rail — the SAME rail an
+      // ordinary retryable send outcome already uses — so this row is
+      // picked back up on a later sweep instead of being lost.
+      logger.warn(`[call-booking-link-text] neverSendRecheck failed for call ${call.id} (${err.code || err.name || 'error'})`);
+      return { ok: false, retryable: true, code: 'never_send_recheck_failed', reason: err.message };
+    }
   };
 }
 
