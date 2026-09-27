@@ -1815,6 +1815,34 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(cust.email).toBeNull();
   });
 
+  test('a refused email claim (merge-undo holder) is cleared from the estimate too', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-13',
+      token: 'tok-contact-13-x0123456789',
+      customer_id: 'cust-undo',
+      customer_phone: null,
+      customer_name: 'Pat Original',
+      customer_email: null,
+    }));
+    db.__state.tables.customers = [{ id: 'cust-undo', first_name: 'Pat', last_name: 'Original', email: null, phone: null }];
+    conversionOk('cust-undo');
+    const fanout = require('../services/customer-email-fanout');
+    const spy = jest.spyOn(fanout, 'backfillCustomerEmailInTrx').mockResolvedValueOnce({
+      emailApplied: false,
+      emailDroppedReason: 'address was restored to a merged-away customer by an undo',
+    });
+    try {
+      const res = await putAccept('tok-contact-13-x0123456789', { contactEmail: 'restored@example.com' });
+      expect(res.status).toBe(200);
+      expect(spy).toHaveBeenCalled();
+      expect(storedEstimate().customer_email == null).toBe(true);
+      const cust = db.__state.tables.customers.find((c) => c.id === 'cust-undo');
+      expect(cust.email).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('a crafted request for a field the page never offered writes nothing (estimate already has full name + email)', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-10',

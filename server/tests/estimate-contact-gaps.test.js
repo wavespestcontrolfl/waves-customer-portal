@@ -120,3 +120,9 @@ describe('sanitizeContactEmail', () => {
     expect(error?.code).toBe('CONTACT_EMAIL_INVALID');
   });
 });
+
+describe('computeContactGaps — stored placeholder names', () => {
+  test.each(['Unknown caller', 'New Customer', '  unknown   CALLER '])('%s reads as a missing last name', (name) => {
+    expect(computeContactGaps({ estimate: { customer_name: name, customer_email: 'x@example.com' } }).lastName).toBe(true);
+  });
+});

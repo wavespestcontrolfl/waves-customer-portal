@@ -22,7 +22,14 @@ const CONTROL_CHARS_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
 // Mirrors estimate-public.js's cleanStoredName: strips the legacy
 // "undefined"/"null" concatenation artifacts before counting name tokens,
 // so a row poisoned by that old bug doesn't read as having a real last name.
+// System fallbacks stored when no name was captured (call-derived drafts
+// stamp 'Unknown caller'; accept/service-request default 'New Customer').
+// Two tokens, but no real name — they must read as missing, not complete.
+const PLACEHOLDER_NAMES = new Set(['unknown caller', 'new customer']);
+
 function cleanedNameTokens(value) {
+  const raw = String(value == null ? '' : value).trim().replace(/\s+/g, ' ');
+  if (PLACEHOLDER_NAMES.has(raw.toLowerCase())) return [];
   return String(value == null ? '' : value)
     .trim()
     .replace(/(?:^|\s)(?:undefined|null)(?=\s|$)/gi, ' ')
@@ -104,9 +111,9 @@ async function fillExistingCustomerLastName(trx, customerId, lastName) {
 // blank-email backfill takes, so a racing merge undo cannot leave this
 // customer holding an address it just restored to the merged-away row.
 async function fillExistingCustomerEmail(trx, customerId, email) {
-  if (!customerId || !email) return;
+  if (!customerId || !email) return null;
   const { backfillCustomerEmailInTrx } = require('./customer-email-fanout');
-  await backfillCustomerEmailInTrx(trx, { customerId, email, source: 'estimate-accept-contact' });
+  return backfillCustomerEmailInTrx(trx, { customerId, email, source: 'estimate-accept-contact' });
 }
 
 module.exports = {

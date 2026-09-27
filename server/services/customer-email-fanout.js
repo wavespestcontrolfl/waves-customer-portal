@@ -1684,14 +1684,19 @@ async function applyCustomerUpdatesWithEmailClaimGuard({
 async function backfillCustomerEmailInTrx(trx, { customerId, email, source = 'intake' }) {
   const emailKeyNorm = emailKey(email);
   if (!customerId || !email || !emailKeyNorm) return { emailApplied: false, emailDroppedReason: null };
-  const current = await trx('customers').where({ id: customerId }).first('email');
-  if (!current) return { emailApplied: false, emailDroppedReason: 'customer row gone' };
-  if (String(current.email || '').trim()) return { emailApplied: false, emailDroppedReason: 'email already on file' };
-  const replaceExpectedEmail = current.email ? current.email : null;
   try {
-    return await trx.transaction((sp) => claimGuardedCustomerUpdateInTrx(sp, {
-      customerId, updates: { email }, emailKeyNorm, replaceExpectedEmail,
-    }));
+    // The blank check runs INSIDE the savepoint too: a statement-level
+    // failure here (lock/statement timeout) must drop only the backfill,
+    // never abort the caller's transaction.
+    return await trx.transaction(async (sp) => {
+      const current = await sp('customers').where({ id: customerId }).first('email');
+      if (!current) return { emailApplied: false, emailDroppedReason: 'customer row gone' };
+      if (String(current.email || '').trim()) return { emailApplied: false, emailDroppedReason: 'email already on file' };
+      const replaceExpectedEmail = current.email ? current.email : null;
+      return claimGuardedCustomerUpdateInTrx(sp, {
+        customerId, updates: { email }, emailKeyNorm, replaceExpectedEmail,
+      });
+    });
   } catch (e) {
     logger.warn(`[email-fanout] in-transaction email-claim guard failed for ${source} (customer ${customerId}) — skipping the email backfill: ${e.message}`);
     return { emailApplied: false, emailDroppedReason: `guard failed: ${e.message}` };

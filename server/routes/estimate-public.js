@@ -10874,6 +10874,23 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           contactFillEmail = null;
         }
       }
+      // Existing-customer email fill through the shared claim guard. A
+      // REFUSED claim (the address was just restored to a merged-away
+      // customer by an undo, or the guard failed) must not survive on the
+      // estimate either — the accepted-onboarding email falls back to
+      // estimates.customer_email when the customer has none (codex #5102
+      // r2 P1). "Already on file" / "filled concurrently" leave the
+      // customer's own standing value, so the estimate copy is harmless.
+      const applyAcceptContactEmailFill = async (targetCustomerId) => {
+        if (!contactFillEmail) return;
+        const claim = await fillExistingCustomerEmail(trx, targetCustomerId, contactFillEmail);
+        const reason = claim?.emailDroppedReason || '';
+        if (claim && !claim.emailApplied && reason && reason !== 'email already on file' && reason !== 'email filled concurrently') {
+          await trx('estimates').where({ id: estimate.id }).where('customer_email', contactFillEmail).update({ customer_email: null });
+          if (estimate.customer_email === contactFillEmail) estimate.customer_email = null;
+          contactFillEmail = null;
+        }
+      };
       let customerId = estimate.customer_id;
       // Already-linked customer: fill its last_name/email ONLY if blank/the
       // 'Customer' placeholder (the fill helpers re-check that under this
@@ -10882,7 +10899,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // here). Never overwrites a real value already on file.
       if (customerId) {
         if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName);
-        if (contactFillEmail) await fillExistingCustomerEmail(trx, customerId, contactFillEmail);
+        await applyAcceptContactEmailFill(customerId);
       }
       // Grouped multi-property accept: a sibling estimate in the same group
       // that already resolved its customer is the DETERMINISTIC owner of this
@@ -10927,7 +10944,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
           // Sibling's existing customer: same guarded, never-overwrite fill.
           if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName);
-          if (contactFillEmail) await fillExistingCustomerEmail(trx, customerId, contactFillEmail);
+          await applyAcceptContactEmailFill(customerId);
         }
       }
       if (!customerId && estimate.customer_phone) {
@@ -10966,7 +10983,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // blank/the 'Customer' placeholder — same guarded helpers as the
           // already-linked branch above, now under this authoritative lock.
           if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName);
-          if (contactFillEmail) await fillExistingCustomerEmail(trx, customerId, contactFillEmail);
+          await applyAcceptContactEmailFill(customerId);
         } else {
           const nameParts = (estimate.customer_name || 'New Customer').split(' ');
           const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
