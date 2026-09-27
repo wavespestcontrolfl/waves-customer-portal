@@ -1256,7 +1256,7 @@ describe('annual prepay late-payment gap fixes', () => {
     // the dispute reopen flips the prepay invoice to 'overdue' with its PI
     // linkage CLEARED, so this guard is the only thing that can revoke
     // decided coverage.
-    function captureStatusGuard() {
+    function captureStatusGuard(coverageDate = null) {
       let guard = null;
       const b = {};
       ['leftJoin', 'whereRaw', 'whereIn', 'select', 'distinct', 'first'].forEach((m) => {
@@ -1266,7 +1266,7 @@ describe('annual prepay late-payment gap fixes', () => {
         if (typeof arg === 'function' && !guard) guard = arg;
         return b;
       };
-      AnnualPrepayRenewals.coveredTermsAsOf(() => b, null);
+      AnnualPrepayRenewals.coveredTermsAsOf(() => b, coverageDate);
       if (!guard) throw new Error('statusGuard callback not captured');
       return guard;
     }
@@ -1347,9 +1347,17 @@ describe('annual prepay late-payment gap fixes', () => {
     // grace-coverage branch; a payment_pending row with the same shape but
     // missing the termite marker does not.
     test('P2-4: only a termite renewal successor (renewed_from_term_id AND annual_plan_version) reaches the grace-coverage branch', () => {
-      const guard = captureStatusGuard();
+      const guard = captureStatusGuard('2026-10-07');
       expect(evaluateGuard(guard, rows.termiteGraceUnpaidSuccessor)).toBe(true);
       expect(evaluateGuard(guard, rows.pendingSuccessorNoTermiteMarker)).toBe(false);
+    });
+
+    // Codex #4971 pre-push P1: grace is DATED coverage only — the date-less
+    // form ("still-valid PAID coverage, whatever the window") never has the
+    // grace branch at all.
+    test('the date-less form has no grace branch: an unpaid successor is never date-less "covered"', () => {
+      const guard = captureStatusGuard(null);
+      expect(evaluateGuard(guard, rows.termiteGraceUnpaidSuccessor)).toBe(false);
     });
   });
 });

@@ -1712,7 +1712,13 @@ async function deliverRenewalInvoice(successor) {
   }
   try {
     const InvoiceService = require('./invoice');
+    // Codex #4971 pre-push P1: firstDeliveryOnly — invoice.js's ATOMIC
+    // first-delivery guard. Every caller reads the invoice's delivery stamps
+    // before calling here, but a staff or scheduled send can complete in
+    // between; the claim flip itself (whereNull sent_at/sms_sent_at/
+    // email_sent_at) then refuses instead of texting the customer twice.
     const result = await InvoiceService.sendViaSMSAndEmail(successor.prepay_invoice_id, {
+      firstDeliveryOnly: true,
       payUrlParams: {
         source: 'termite_annual_renewal', saveCard: '1', saveRequired: '1', billingTerm: 'prepay_annual',
       },
@@ -1722,9 +1728,25 @@ async function deliverRenewalInvoice(successor) {
     }
     return result;
   } catch (err) {
+    if (err?.code === 'already_delivered') return alreadyDeliveredOutcome(successor, err);
     logger.error(`[termite-annual-renewal] renewal invoice delivery failed for term ${successor.id}: ${err.message}`);
-    return { ok: false, error: err.message };
+    return { ok: false, code: err?.code || null, error: err.message };
   }
+}
+
+// invoice.js refused a first delivery because the row already looks
+// delivered (invoiceAlreadyDeliveredError, code 'already_delivered' — its
+// alreadyDeliveredForFirstSend also counts a sent/viewed/overdue STATUS).
+// Counted as delivered ONLY on persisted delivery evidence (chokepoint A's
+// stamps); a status alone is not proof it reached the customer, so that
+// case stays a transient failure the caller rotates and retries.
+async function alreadyDeliveredOutcome(successor, err) {
+  const invoice = await db('invoices').where({ id: successor.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS);
+  if (classifyRenewalInvoice(invoice).delivered) {
+    logger.info(`[termite-annual-renewal] renewal invoice for term ${successor.id} was already delivered by another send — not sent again`);
+    return { ok: true, alreadyDelivered: true };
+  }
+  return { ok: false, code: 'already_delivered_unverified', error: err.message };
 }
 
 // The templated "your renewal payment didn't go through" notice — only
@@ -2510,7 +2532,7 @@ async function bellAndVerifyDeliveryForNeverReachedStripe(successor, conn) {
   const invoice = classifyRenewalInvoice(await conn('invoices').where({ id: successor.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS));
   if (invoice.delivered) return true;
   const delivery = await deliverRenewalInvoice(successor);
-  if (delivery?.ok) return 'delivered';
+  if (delivery?.ok) return delivery.alreadyDelivered ? true : 'delivered';
   if (delivery?.code === 'payer_billed') {
     // A payer assigned since the mint owns this bill: nothing was sent to
     // the homeowner. Handled once staff are told to route it to the payer.

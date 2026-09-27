@@ -3236,22 +3236,36 @@ function coveredTermsAsOf(conn, coverageDate = null) {
               .orWhere('i.status', 'paid')
               .orWhereNotNull('i.paid_at');
           });
-        })
-        // P2-4 (owner ruling 2026-09-26): an UNPAID termite renewal
-        // successor stays covered through its own 30-day payment grace —
-        // termiteRenewalGraceDeadlineSql is the SAME cutoff the renewal-
-        // charge job's grace-lapse pass voids on, so the two can never
-        // disagree. Scoped tight on purpose: payment_pending status, a
-        // termite renewal SUCCESSOR specifically (renewed_from_term_id NOT
-        // NULL) and the termite marker (annual_plan_version NOT NULL) — a
-        // non-termite payment_pending term, or an ORIGINAL (non-successor)
-        // termite term still awaiting its first payment, never matches.
-        // Once the lapse pass actually voids the invoice, `i.status`
-        // flips to a cancelled shape and the whereRaw exclusion below
-        // drops this row on its own — no separate revocation needed here.
-        .orWhere(function termiteRenewalGraceCovered() {
-          whereTermiteRenewalInGrace(this, 't', coverageDate || etDateString());
         });
+      // P2-4 (owner ruling 2026-09-26): an UNPAID termite renewal
+      // successor stays covered through its own 30-day payment grace —
+      // termiteRenewalGraceDeadlineSql is the SAME cutoff the renewal-
+      // charge job's grace-lapse pass voids on, so the two can never
+      // disagree. Scoped tight on purpose: payment_pending status, a
+      // termite renewal SUCCESSOR specifically (renewed_from_term_id NOT
+      // NULL) and the termite marker (annual_plan_version NOT NULL) — a
+      // non-termite payment_pending term, or an ORIGINAL (non-successor)
+      // termite term still awaiting its first payment, never matches.
+      // Once the lapse pass actually voids the invoice, `i.status`
+      // flips to a cancelled shape and the whereRaw exclusion below
+      // drops this row on its own — no separate revocation needed here.
+      //
+      // Codex #4971 pre-push P1: DATED only. Grace is a date-bounded
+      // promise (30 days from the successor's start), never paid
+      // coverage, so the date-less form — "which terms carry still-valid
+      // PAID coverage, whatever the window" — never includes it. Every
+      // date-less caller (card-expiry exemptions, the setup-fee and
+      // cancellation / offboarding / lifecycle guards, the stamped-visit
+      // and decided-lapse checks, the sweep's marker legs, …) means
+      // paid-backed, and several read the term's FULL term_start/term_end
+      // range: card-expiry exemptions used to treat a grace-only
+      // successor's 30 days as a whole covered year across their 60-day
+      // horizon. A dated caller still gets grace for that one day.
+      if (coverageDate) {
+        this.orWhere(function termiteRenewalGraceCovered() {
+          whereTermiteRenewalInGrace(this, 't', coverageDate);
+        });
+      }
     })
     .whereRaw(
       `lower(coalesce(i.status, 'paid')) not in (${cancelledStatuses.map(() => '?').join(', ')})`,

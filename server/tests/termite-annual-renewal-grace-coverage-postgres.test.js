@@ -212,6 +212,32 @@ describeOrSkip('coveredTermsAsOf — termite renewal grace coverage (P2-4), real
     await expect(AnnualPrepayRenewals.annualPrepayCoversVisit(visit, db)).resolves.toBe(false);
   });
 
+  // Codex #4971 pre-push P1: grace is DATED coverage only. The date-less
+  // form means "still-valid PAID coverage, whatever the window" — and its
+  // callers read the term's FULL range: card-expiry exemptions used to
+  // treat a grace-only successor's 30 days as a whole covered year across
+  // their 60-day horizon, suppressing card-expiry warnings.
+  test('the date-less form never includes a grace-only successor — so a card-expiry exemption is never granted over its full year', async () => {
+    const id = await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z', termEnd: '2027-09-26' });
+
+    // Dated: covered on grace day 10.
+    expect(await AnnualPrepayRenewals.coveredTermsAsOf(db, '2026-10-07').where('t.id', id).first('t.id')).toBeDefined();
+    // Date-less: not paid-backed coverage at all.
+    expect(await AnnualPrepayRenewals.coveredTermsAsOf(db, null).where('t.id', id).first('t.id')).toBeUndefined();
+    expect(await AnnualPrepayRenewals.coveredTermsAsOf(db).where('t.id', id).first('t.id')).toBeUndefined();
+    // computeCardExpiryExemptions' own coverage query (same shape) over a
+    // 60-day horizon finds nothing to span it — no exemption.
+    const rows = await AnnualPrepayRenewals.coveredTermsAsOf(db, null)
+      .where('t.term_start', '<=', '2026-11-26')
+      .where('t.term_end', '>=', '2026-09-27')
+      .select('t.customer_id', 't.term_start', 't.term_end');
+    expect(rows).toEqual([]);
+
+    // Once genuinely paid, the date-less form includes it again (paid-backed).
+    await db('invoices').where({ id: invoiceId }).update({ status: 'paid', paid_at: new Date() });
+    expect(await AnnualPrepayRenewals.coveredTermsAsOf(db, null).where('t.id', id).first('t.id')).toBeDefined();
+  });
+
   test('a non-termite payment_pending term (no annual_plan_version) is still NOT covered', async () => {
     const id = await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z', overrides: { annual_plan_version: null } });
     const row = await AnnualPrepayRenewals.coveredTermsAsOf(db, '2026-10-01').where('t.id', id).first('t.id');

@@ -958,6 +958,27 @@ describe('termite annual renewal charge', () => {
       expect(retry.skipStampUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_charge_skip_reason: 'no_consent' }));
     });
 
+    test('no consent: a send that landed between the stamp read and the call is not repeated — marked skipped (handled)', async () => {
+      mockCommon();
+      jest.doMock('../models/db', () => {
+        const dbFn = jest.fn(() => ({ where: jest.fn(() => ({ first: jest.fn(async () => ({ status: 'sent', sent_at: new Date() })) })) }));
+        dbFn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+        return dbFn;
+      });
+      const sendViaSMSAndEmail = jest.fn(async () => { throw Object.assign(new Error('already delivered'), { code: 'already_delivered' }); });
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+      jest.doMock('../services/recurring-card-on-file', () => ({ resolvePrepayChargeMethod: jest.fn() }));
+      jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined), chargeInvoiceWithSavedCard: jest.fn(), quoteInvoiceSavedCardCharge: jest.fn() }));
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const { conn, skipStampUpdate } = makeClaimConn({ successorInvoice: { status: 'draft' } });
+
+      await _private.decideAndCharge(baseSuccessor(), baseParent({ renewal_charge_consent_at: null }), conn);
+
+      expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1);
+      expect(skipStampUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_charge_skip_reason: 'no_consent' }));
+    });
+
     test('consent present but no chargeable saved method -> invoice + bell, no Stripe call', async () => {
       mockCommon();
       const sendViaSMSAndEmail = jest.fn(async () => ({ ok: true }));
@@ -3401,6 +3422,29 @@ describe('termite annual renewal charge', () => {
       expect(stampUpdate).toHaveBeenCalledTimes(1);
     });
 
+    test('6b P1: a send that lands between 7b\'s stamp read and its call is not repeated — the leg counts it delivered', async () => {
+      mockCommon();
+      jest.doMock('../models/db', () => {
+        const dbFn = jest.fn(() => ({ where: jest.fn(() => ({ first: jest.fn(async () => ({ status: 'sent', email_sent_at: new Date() })) })) }));
+        dbFn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+        return dbFn;
+      });
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+      const sendViaSMSAndEmail = jest.fn(async () => { throw Object.assign(new Error('already delivered'), { code: 'already_delivered' }); });
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      const successor = baseSuccessor({ renewed_from_term_id: 'parent-1', annual_plan_version: 'v3' });
+      const { conn, stampUpdate } = makeLeg7bConn(successor); // 7b's own read: an undelivered draft
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const counts = { reconcileNeverReachedStripeBelled: 0 };
+      await _private.reconcileStuckSuccessors({ conn, limit: 200, counts });
+
+      expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1);
+      expect(sendViaSMSAndEmail).toHaveBeenCalledWith('succ-invoice-1', expect.objectContaining({ firstDeliveryOnly: true }));
+      expect(stampUpdate).toHaveBeenCalledTimes(1);
+      expect(counts.reconcileNeverReachedStripeBelled).toBe(0); // not a fresh delivery of ours
+    });
+
     test('6b P1: a TRANSIENT parent refusal (its own invoice in dispute) sends nothing, retires nothing, and stays retryable — rotated to the back', async () => {
       mockCommon();
       jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
@@ -3598,6 +3642,57 @@ describe('termite annual renewal charge', () => {
       expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.any(String), expect.objectContaining({
         dedupeKey: 'termite-renewal-charge:succ-term-1:ineligible',
       }));
+      expect(updates.some((u) => 'renewal_charge_failure_handled_at' in u)).toBe(false);
+      expect(updates).toContainEqual({ renewal_sweep_deferred_at: expect.any(Date) });
+    });
+
+    // Codex #4971 pre-push P1: deliverRenewalInvoice uses invoice.js's
+    // ATOMIC first-delivery guard (firstDeliveryOnly). A staff or scheduled
+    // send that completes between the caller's own stamp read and the send
+    // is refused by the claim itself ('already_delivered') — no second text
+    // — and counts as delivered only on persisted delivery evidence.
+    function alreadyDeliveredErr() {
+      return Object.assign(new Error('Invoice INV-1 was already delivered (status: sent) — not sent again'), { code: 'already_delivered' });
+    }
+    function mockGlobalInvoiceRead(invoice) {
+      jest.doMock('../models/db', () => {
+        const dbFn = jest.fn(() => ({ where: jest.fn(() => ({ first: jest.fn(async () => invoice) })) }));
+        dbFn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+        return dbFn;
+      });
+    }
+
+    test('a send that completes between the stamp read and the call: no second send; the follow-through counts it delivered', async () => {
+      mockCommon();
+      mockGlobalInvoiceRead({ status: 'sent', sms_sent_at: new Date('2026-09-27T15:00:00Z') });
+      const sendViaSMSAndEmail = jest.fn(async () => { throw alreadyDeliveredErr(); });
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      // The caller's own read still sees the undelivered draft.
+      const owed = baseSuccessor({ renewal_charge_failure_kind: 'refused', renewal_charge_failure_reason: 'Auto Pay inactive' });
+      const { conn, updates } = followThroughConn({ rows: [owed], invoice: { status: 'draft' } });
+
+      await _private.reconcileChargeFollowThrough({ conn, limit: 50, counts: {} });
+
+      expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1);
+      expect(sendViaSMSAndEmail).toHaveBeenCalledWith('succ-invoice-1', expect.objectContaining({ firstDeliveryOnly: true }));
+      expect(updates).toContainEqual({ renewal_charge_failure_handled_at: expect.any(Date) });
+    });
+
+    test('an already-delivered refusal WITHOUT a persisted delivery stamp is not trusted — still owed, rotated', async () => {
+      mockCommon();
+      mockGlobalInvoiceRead({ status: 'sent', sent_at: null, sms_sent_at: null, email_sent_at: null });
+      const sendViaSMSAndEmail = jest.fn(async () => { throw alreadyDeliveredErr(); });
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const owed = baseSuccessor({ renewal_charge_failure_kind: 'refused', renewal_charge_failure_reason: 'Auto Pay inactive' });
+      const { conn, updates } = followThroughConn({ rows: [owed], invoice: { status: 'draft' } });
+
+      await _private.reconcileChargeFollowThrough({ conn, limit: 50, counts: {} });
+
+      expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1);
       expect(updates.some((u) => 'renewal_charge_failure_handled_at' in u)).toBe(false);
       expect(updates).toContainEqual({ renewal_sweep_deferred_at: expect.any(Date) });
     });
