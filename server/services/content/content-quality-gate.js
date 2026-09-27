@@ -1161,14 +1161,14 @@ function nonBlogTarget(brief) {
 function renderedCitabilityBody(body) {
   const raw = String(body || '');
   const {
-    blankNonRenderedMarkdown, blankDefinitelyHiddenContent, maskJsxAttrQuotes, projectMdxDisplayText,
+    blankNonRenderedMarkdown, blankDefinitelyHiddenContent, blankExpressions, maskJsxAttrQuotes, projectMdxDisplayText,
   } = require('./content-guardrails');
   // First remove comments/code, then containers a browser definitely hides;
   // finally mask JSX/HTML attribute values, which are configuration rather
   // than reader-visible copy. Keep tag names so visible ComparisonTable
   // components remain detectable.
   const visible = blankDefinitelyHiddenContent(blankNonRenderedMarkdown(raw));
-  const blanked = maskJsxAttrQuotes(visible);
+  const blanked = maskJsxAttrQuotes(blankExpressions(visible));
   const orig = raw.split(/\r?\n/);
   const mask = blanked.split(/\r?\n/);
   if (orig.length !== mask.length) return blanked;
@@ -1330,7 +1330,7 @@ function howToChooseSectionCriteria(body) {
       if (!m) continue;
       const indent = m[1].replace(/\t/g, '    ').length;
       if (topIndent === null || indent < topIndent) { topIndent = indent; items = 0; }
-      const criterion = m[2];
+      const criterion = visibleInlineText(m[2]).trim();
       const hasCondition = /^(?:if|when|for|where|with|without|after|before|once)\b/i.test(criterion);
       const namesOption = /(?:→|->|\b(?:choose|pick|use|prefer|select|go with|call|hire|apply|install|schedule|start with|switch to)\b)/i.test(criterion);
       if (indent === topIndent && hasCondition && namesOption) items += 1;

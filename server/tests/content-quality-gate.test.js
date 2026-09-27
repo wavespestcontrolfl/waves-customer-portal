@@ -1514,6 +1514,7 @@ describe('citability nudges (weight-0, signal-only)', () => {
     const nested = checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → B\n  - because X\n  - and Y` });
     expect(nested).toEqual({ ok: false, reason: 'how_to_choose_has_1_criteria_need_3+' });
     expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → B\n  - because X\n- If C → D\n- If E → F\n  1. detail` }).ok).toBe(true);
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- **If you see mud tubes** → call for an inspection\n- [When activity continues](/pest-control-services/) → choose professional service\n- *For a single visible ant* → use the identification guide` }).ok).toBe(true);
     // H3 subsections inside the H2 stay part of it.
     expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n### Signs\n${bullets}` }).ok).toBe(true);
     const numbered = checkCitabilityHowToChoose({ body: `${table}## How to choose\n1. Inspect the area\n2. Apply bait\n3. Recheck the trail` });
@@ -1543,7 +1544,8 @@ describe('citability nudges (weight-0, signal-only)', () => {
 
 describe('citability backfill completion (Codex r6 P2s)', () => {
   const {
-    checkCitabilityBackfillGapsCleared, checkCitabilityHowToChoose, checkImprovementOverPrior, PAGE_TYPE_CHECKS,
+    checkCitabilityBackfillGapsCleared, checkCitabilityHowToChoose, checkCitabilityNamedSources,
+    checkImprovementOverPrior, PAGE_TYPE_CHECKS,
   } = require('../services/content/content-quality-gate')._internals;
   const backfill = (gaps) => ({ gsc_signal: { bucket: 'citability_backfill', citability_gaps: gaps } });
   const prior = { previousVersion: { body: 'Experts say ants trail after rain. Water deeply.' } };
@@ -1626,6 +1628,18 @@ describe('citability backfill completion (Codex r6 P2s)', () => {
       ok: false,
       reason: 'no_how_to_choose_section',
     });
+  });
+  test('non-components and conditional JSX do not project display props', () => {
+    expect(checkCitabilityNamedSources({ body: '<comparisontable caption="According to UF/IFAS, timing varies." />' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({
+      body: '{false && <ComparisonTable columns={["A","B"]} rows={[]} caption="According to UF/IFAS, timing varies." />}',
+    }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({
+      body: '<ComparisonTable columns={["A","B"]} rows={[]} caption="According to UF/IFAS, timing varies." />',
+    }).ok).toBe(true);
+    expect(checkCitabilityHowToChoose({
+      body: '<ComparisonTable columns={["A","B"]} rows={[]} />\n{false && <>## How to choose\n- If A → B\n- If C → D\n- If E → F</>}',
+    })).toEqual({ ok: false, reason: 'no_how_to_choose_section' });
   });
   test('planned structures stay binding even when the draft removes the choice framing', () => {
     const reframed = { title: 'Ghost Ant Treatments', body: '## Treatment overview\nPlain prose.' };

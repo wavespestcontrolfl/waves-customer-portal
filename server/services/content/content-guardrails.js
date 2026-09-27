@@ -2568,6 +2568,17 @@ const MDX_DISPLAY_COLLECTIONS = Object.freeze({
   seasonalpressurechart: { seasons: ['name', 'months', 'level', 'note'] },
   spideridboard: { species: ['name', 'sciName', 'where', 'hunt', 'eggSac', 'source.label'] },
 });
+const MDX_DISPLAY_COMPONENT_NAMES = new Map([
+  ['AppPhone', 'appphone'],
+  ['BottomLineBox', 'bottomlinebox'],
+  ['HonestRejection', 'honestrejection'],
+  ['InlineCTA', 'inlinecta'],
+  ['PestEvidenceGrid', 'pestevidencegrid'],
+  ['HomeZoneMap', 'homezonemap'],
+  ['SeasonalPressureChart', 'seasonalpressurechart'],
+  ['SpiderIdBoard', 'spideridboard'],
+  ['ComparisonTable', 'comparisontable'],
+]);
 
 function staticJsxAttrValue(attr) {
   if (attr.literal !== null) return attr.literal;
@@ -2611,11 +2622,16 @@ function componentDisplayValues(tag) {
 }
 
 function projectMdxDisplayText(text) {
+  const source = String(text || '');
+  const expressionView = blankExpressions(source);
   const values = [];
-  for (const tag of eachTag(String(text || ''))) {
-    if (!tag.isClose && (MDX_DISPLAY_SCALARS[tag.name] || MDX_DISPLAY_COLLECTIONS[tag.name])) {
-      values.push(...componentDisplayValues(tag));
-    }
+  for (const tag of eachTag(expressionView)) {
+    if (tag.isClose) continue;
+    const opener = /^<([A-Za-z][\w-]*)/.exec(source.slice(tag.start, tag.end + 1));
+    const name = MDX_DISPLAY_COMPONENT_NAMES.get(opener?.[1]);
+    if (!name) continue;
+    const attrsStart = tag.start + opener[0].length;
+    values.push(...componentDisplayValues({ ...tag, name, attrs: source.slice(attrsStart, tag.end) }));
   }
   return values.filter((value) => typeof value === 'string' && value.trim())
     .map((value) => `Component display text: ${value.replace(/\s+/g, ' ').trim()}`)
