@@ -205,7 +205,7 @@ describe('voicemail lead text-back gates', () => {
       const at = new Date('2026-09-26T15:00:00Z');
       await sendVoicemailQuoteLink(args({ call: { id: 'call-9', twilio_call_sid: 'CA-test-1', created_at: at } }));
       expect(autoTextHoldReason).toHaveBeenCalledWith(PHONE, expect.objectContaining({
-        before: at, excludeCallLogId: 'call-9', excludeMessageTypes: [MESSAGE_TYPE],
+        callAt: at, excludeCallLogId: 'call-9', excludeMessageTypes: [MESSAGE_TYPE],
       }));
     });
 
@@ -397,7 +397,8 @@ describe('voicemail lead text-back send outcomes', () => {
     sendCustomerMessage.mockResolvedValue({
       sent: false, blocked: false, retryable: true, code: 'PROVIDER_FAILURE', nextAllowedAt,
     });
-    const result = await sendVoicemailQuoteLink(args());
+    const callAt = new Date('2026-07-01T23:30:00Z');
+    const result = await sendVoicemailQuoteLink(args({ call: { id: 'call-7', twilio_call_sid: 'CA-test-1', created_at: callAt } }));
     expect(result).toEqual({ sent: false, scheduled: true, nextAllowedAt });
 
     const queued = state.inserts.find((i) => i.table === 'sms_log');
@@ -413,6 +414,9 @@ describe('voicemail lead text-back send outcomes', () => {
     const meta = JSON.parse(queued.payload.metadata);
     expect(meta.consent_basis).toEqual(expect.objectContaining({ status: 'transactional_allowed' }));
     expect(meta.lead_id).toBe(LEAD_ID);
+    // The replay re-runs the holds against the originating call.
+    expect(meta.call_log_id).toBe('call-7');
+    expect(new Date(meta.call_created_at)).toEqual(callAt);
     expect(stampsFor()).toContain('scheduled');
     expect(phoneClaimOutcomes()).toContain('scheduled');
     expect(phoneClaimReleased()).toBe(false);

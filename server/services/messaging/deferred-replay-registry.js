@@ -929,6 +929,18 @@ const REGISTRY = {
         if (status && !['new', 'pending', 'started'].includes(status)) {
           return { eligible: false, reason: `lead-${status}` };
         }
+        // The same holds the immediate send ran (messaging/auto-text-holds.js):
+        // a quote sent, a lead assigned, a do-not-contact or not-a-prospect
+        // call, or a conversation since the voicemail stops the queued text.
+        if (meta.voicemail_phone) {
+          const { autoTextHoldReason } = require('./auto-text-holds');
+          const hold = await autoTextHoldReason(meta.voicemail_phone, {
+            callAt: meta.call_created_at ? new Date(meta.call_created_at) : undefined,
+            excludeCallLogId: meta.call_log_id || null,
+            excludeMessageTypes: ['voicemail_quote_link'],
+          });
+          if (hold) return { eligible: false, reason: hold };
+        }
         return { eligible: true };
       } catch (err) {
         return failClosed('voicemail-text-back', meta.lead_id, err);

@@ -11,8 +11,10 @@
  *   asked_not_to_be_contacted — asked not to be contacted on an earlier call
  *   not_a_prospect            — an earlier call showed a salesperson, vendor,
  *                               robocall, wrong number or job applicant
- *   recent_conversation       — texted with us, either way, in the 7 days
- *                               before this call
+ *   recent_conversation       — texted with us, either way, from 7 days
+ *                               before this call up to now (so a deferred
+ *                               send replayed later still sees a text that
+ *                               came after the call)
  * Every phone comparison is on the last 10 digits, so a number stored in any
  * shape still matches.
  */
@@ -67,13 +69,13 @@ function callsWith(dbi, digits, excludeCallLogId) {
 /**
  * @param {string} phone                        the number about to be texted
  * @param {object} [opts]
- * @param {Date}   [opts.before]                the call that sets the text off (recent-conversation window end)
+ * @param {Date}   [opts.callAt]                when the call that sets the text off came in (window start = 7 days before it)
  * @param {string} [opts.excludeCallLogId]      that call itself — it is not an "earlier" call
  * @param {string[]} [opts.excludeMessageTypes] the lane's own sms_log types (its one-shot, not a conversation)
  * @returns {Promise<string|null>} a hold reason, or null when the text may go
  */
 async function autoTextHoldReason(phone, {
-  before = new Date(), excludeCallLogId = null, excludeMessageTypes = [], dbi = db,
+  callAt = new Date(), excludeCallLogId = null, excludeMessageTypes = [], dbi = db,
 } = {}) {
   const digits = phoneDigits(phone);
   if (!digits) return null;
@@ -104,11 +106,10 @@ async function autoTextHoldReason(phone, {
     .first('id');
   if (notAProspect) return 'not_a_prospect';
 
-  const since = new Date(new Date(before).getTime() - RECENT_CONVERSATION_MS);
+  const since = new Date(new Date(callAt).getTime() - RECENT_CONVERSATION_MS);
   const recentText = await deliveredTexts(dbi)
     .where((q) => q.whereRaw(...matches('from_phone', digits)).orWhereRaw(...matches('to_phone', digits)))
     .where('created_at', '>=', since)
-    .where('created_at', '<', before)
     .modify((q) => {
       if (excludeMessageTypes.length) q.whereRaw("COALESCE(message_type, '') <> ALL(?)", [excludeMessageTypes]);
     })

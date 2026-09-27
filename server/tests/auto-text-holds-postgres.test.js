@@ -38,7 +38,7 @@ jest.setTimeout(30000);
     await database.destroy();
   });
 
-  const hold = (opts = {}) => autoTextHoldReason(PHONE, { before: CALL_AT, ...opts });
+  const hold = (opts = {}) => autoTextHoldReason(PHONE, { callAt: CALL_AT, ...opts });
   const lead = (extra) => database('leads').insert({ id: randomUUID(), phone: '(941) 555-0100', status: 'new', ...extra });
   const priorCall = (extra) => database('call_log').insert({
     id: randomUUID(), direction: 'inbound', from_phone: PHONE, to_phone: '+19412975749',
@@ -141,9 +141,9 @@ jest.setTimeout(30000);
       expect(await hold({ excludeMessageTypes: ['voicemail_quote_link'] })).toBeNull();
     });
 
-    test('a text after the call is not "before" it (the lane\'s own contact checks own that window)', async () => {
-      await text({ created_at: new Date(CALL_AT.getTime() + 60 * 1000) });
-      expect(await hold()).toBeNull();
+    test('a text after the call counts too — a deferred send replayed later still sees it', async () => {
+      await text({ created_at: new Date(CALL_AT.getTime() + 60 * 60 * 1000) });
+      expect(await hold()).toBe('recent_conversation');
     });
   });
 });

@@ -193,11 +193,12 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
   // be contacted, showed on an earlier call to be a salesperson / vendor /
   // robocall / wrong number / job applicant, or texted with us in the last 7
   // days. Checked BEFORE the claim, so a hold never consumes the one-shot;
-  // an unreadable check fails closed.
+  // an unreadable check fails closed. A deferred send re-runs the same check
+  // at replay (deferred-replay-registry.js voicemail_lead_sms_deferred).
   if (doNotContactRequested) return { sent: false, skipped: 'asked_not_to_be_contacted' };
   try {
     const hold = await autoTextHoldReason(phone, {
-      before: call.created_at ? new Date(call.created_at) : new Date(),
+      callAt: call.created_at ? new Date(call.created_at) : new Date(),
       excludeCallLogId: call.id || null,
       excludeMessageTypes: [MESSAGE_TYPE],
     });
@@ -417,6 +418,10 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
           // row's to_phone column — this copy just reaches the hooks.
           voicemail_phone: phone,
           call_sid: call.twilio_call_sid || null,
+          // The originating call, for the replay's hold recheck: it is not an
+          // "earlier" call, and its time opens the recent-conversation window.
+          call_log_id: call.id || null,
+          call_created_at: call.created_at || null,
           original_block_code: result.code || null,
           // The scheduled-SMS cron replays this row through sendCustomerMessage,
           // and an anonymous-lead transactional send only clears the consent

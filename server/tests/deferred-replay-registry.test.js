@@ -79,6 +79,7 @@ const mockVmClaims = {
   releasePhoneClaim: jest.fn(async () => true),
 };
 jest.mock('../services/voicemail-lead-sms', () => ({ _deferredClaims: mockVmClaims }));
+jest.mock('../services/messaging/auto-text-holds', () => ({ autoTextHoldReason: jest.fn(async () => null) }));
 jest.mock('../services/account-membership-email', () => ({
   sendCancellationReceived: jest.fn(async () => ({ ok: true })),
 }));
@@ -245,6 +246,33 @@ describe('deferred-replay registry', () => {
       payment_id: 'pay-1', customer_id: 'cust-1', retry_count: 1,
     })).toMatchObject({ eligible });
     expect(q.where).toHaveBeenCalledWith({ id: 'pay-1', customer_id: 'cust-1' });
+  });
+
+  describe('voicemail quote-link replay re-runs the auto-text holds', () => {
+    const { autoTextHoldReason } = require('../services/messaging/auto-text-holds');
+    const meta = {
+      lead_id: 'lead-1', voicemail_phone: '+19415550101', call_log_id: 'call-7', call_created_at: '2026-09-26T23:30:00.000Z',
+    };
+
+    test('a hold that appeared since the voicemail stops the queued text', async () => {
+      db.mockReturnValueOnce(firstChain({ id: 'lead-1', status: 'new' }));
+      autoTextHoldReason.mockResolvedValueOnce('quote_on_file');
+      expect(await recheckDeferredReplay('voicemail_lead_sms_deferred', meta)).toEqual({ eligible: false, reason: 'quote_on_file' });
+      expect(autoTextHoldReason).toHaveBeenCalledWith('+19415550101', {
+        callAt: new Date('2026-09-26T23:30:00.000Z'), excludeCallLogId: 'call-7', excludeMessageTypes: ['voicemail_quote_link'],
+      });
+    });
+
+    test('no hold keeps the queued text eligible', async () => {
+      db.mockReturnValueOnce(firstChain({ id: 'lead-1', status: 'new' }));
+      expect(await recheckDeferredReplay('voicemail_lead_sms_deferred', meta)).toEqual({ eligible: true });
+    });
+
+    test('an unreadable hold check holds the text for a retry', async () => {
+      db.mockReturnValueOnce(firstChain({ id: 'lead-1', status: 'new' }));
+      autoTextHoldReason.mockRejectedValueOnce(new Error('db down'));
+      expect(await recheckDeferredReplay('voicemail_lead_sms_deferred', meta)).toMatchObject({ eligible: false, retryable: true });
+    });
   });
 
   test('billing failure replay retains its retry on a database outage', async () => {
