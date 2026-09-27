@@ -130,6 +130,31 @@ describe('pre-visit balance email through the shared billing email authority', (
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['provider acceptance survives a later throw', () => { throw Object.assign(new Error('audit write failed'), {
+      providerOutcome: { deliveryOutcome: 'accepted' },
+    }); }, { ok: true }, 'sent'],
+    ['a throw after the handoff started stays uncertain', () => { throw new Error('provider response lost'); },
+      { ok: false, error: 'provider response lost', deliveryOutcome: 'uncertain' }, 'failed'],
+  ])('%s', async (_label, providerCall, expected, loggedStatus) => {
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) =>
+      withProviderHandoff(async () => providerCall()));
+
+    const result = await AccountMembershipEmail.sendPrevisitBalanceReminder(reminder);
+
+    expect(result).toEqual(expected);
+    expect(JSON.parse(interactions[0].insert.mock.calls[0][0].metadata)).toMatchObject({ status: loggedStatus });
+  });
+
+  test('a throw before the handoff began is definitely not sent', async () => {
+    EmailTemplates.sendTemplate.mockRejectedValueOnce(new Error('template read unavailable'));
+
+    const result = await AccountMembershipEmail.sendPrevisitBalanceReminder(reminder);
+
+    expect(result).toEqual({ ok: false, error: 'template read unavailable', deliveryOutcome: 'not_sent' });
+    expect(BillingEmailAuthority.dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
+  });
+
   test('a staff do-not-contact at the provider handoff is refused, logged and reported as a suppression', async () => {
     BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => {
       state.boundaryBlock = { code: 'SUPPRESSED_MANUAL_DNC', reason: 'manual_dnc' };

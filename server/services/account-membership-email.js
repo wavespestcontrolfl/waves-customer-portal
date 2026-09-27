@@ -5,7 +5,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { isTrackTokenLive } = require('./track-token-expiry');
 const { getPrimaryContact } = require('./customer-contact');
 const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
-const { billingEmailRecipient, billingEmailSendOutcome } = require('./billing-email-sender');
+const { billingEmailRecipient, billingEmailSendOutcome, billingEmailSendFailure } = require('./billing-email-sender');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { currency } = require('./email-template');
@@ -240,7 +240,12 @@ async function sendTemplate({
     ...payload,
   };
 
+  // A billing email's refusals and thrown sends map and log like every other
+  // billing sender's (billing-email-sender.js).
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+  const billingLog = (fields) => logLifecycleEmailAttempt({
+    customerId: recipientCustomer.id, templateKey, eventType, metadata, ...fields,
+  });
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
@@ -263,13 +268,7 @@ async function sendTemplate({
       } : {}),
     });
 
-    // A refusal at the billing handoff maps and logs like every other billing
-    // sender's (billing-email-sender.js).
-    if (state.boundaryBlock) {
-      return await billingEmailSendOutcome(result, state, (fields) => logLifecycleEmailAttempt({
-        customerId: recipientCustomer.id, templateKey, eventType, metadata, ...fields,
-      }));
-    }
+    if (state.boundaryBlock) return await billingEmailSendOutcome(result, state, billingLog);
 
     if (result.deduped) {
       return {
@@ -301,6 +300,11 @@ async function sendTemplate({
       ? { ok: true, messageId: result.message?.provider_message_id || null, sentAt: result.message?.sent_at || null }
       : { ok: false, blocked: !!result.blocked, reason: result.reason || 'email_not_sent' };
   } catch (err) {
+    if (billingAuthorityInput) {
+      return billingEmailSendFailure(err, state.handoffStarted, billingLog, {
+        logTag: 'account-membership-email', label: `${eventType} for ${recipientCustomer.id}`,
+      });
+    }
     await logLifecycleEmailAttempt({
       customerId: recipientCustomer.id,
       templateKey,
