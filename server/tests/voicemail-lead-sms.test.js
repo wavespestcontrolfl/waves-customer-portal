@@ -209,6 +209,25 @@ describe('voicemail lead text-back gates', () => {
       }));
     });
 
+    test('a hold that appears while the claims, lookup and render run is caught at the handoff — both claims released', async () => {
+      autoTextHoldReason.mockResolvedValueOnce(null).mockResolvedValueOnce('recent_conversation');
+      const result = await sendVoicemailQuoteLink(args());
+      expect(result).toEqual({ sent: false, skipped: 'recent_conversation' });
+      expect(autoTextHoldReason).toHaveBeenCalledTimes(2);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(phoneClaimReleased()).toBe(true);
+      expect(leadClaimCleared()).toBe(true);
+    });
+
+    test('an unreadable handoff recheck fails CLOSED and releases both claims', async () => {
+      autoTextHoldReason.mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('db down'));
+      const result = await sendVoicemailQuoteLink(args());
+      expect(result).toEqual({ sent: false, skipped: 'hold_check_failed' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(phoneClaimReleased()).toBe(true);
+      expect(leadClaimCleared()).toBe(true);
+    });
+
     test('an unreadable hold check fails CLOSED', async () => {
       autoTextHoldReason.mockRejectedValueOnce(new Error('db down'));
       const result = await sendVoicemailQuoteLink(args());

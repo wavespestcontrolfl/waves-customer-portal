@@ -12,7 +12,9 @@
  *                               (an estimator-engine call draft included)
  *                               that was not sent
  *   lead_assigned             — has an open lead a staff member is working
- *   asked_not_to_be_contacted — asked not to be contacted on an earlier call
+ *   asked_not_to_be_contacted — asked not to be contacted on any call,
+ *                               including the one setting the text off (a
+ *                               reprocess can correct it after a deferral)
  *   not_a_prospect            — an earlier call showed a salesperson, vendor,
  *                               robocall, wrong number or job applicant
  *   recent_conversation       — texted with us, either way, from 7 days
@@ -76,7 +78,8 @@ function callsWith(dbi, digits, excludeCallLogId) {
  * @param {string} phone                        the number about to be texted
  * @param {object} [opts]
  * @param {Date}   [opts.callAt]                when the call that sets the text off came in (window start = 7 days before it)
- * @param {string} [opts.excludeCallLogId]      that call itself — it is not an "earlier" call
+ * @param {string} [opts.excludeCallLogId]      that call itself — not an "earlier" call for not_a_prospect (the
+ *                                              lane already judged it); still read for do-not-contact
  * @param {string[]} [opts.excludeMessageTypes] the lane's own sms_log types (its one-shot, not a conversation)
  * @returns {Promise<string|null>} a hold reason, or null when the text may go
  */
@@ -105,15 +108,21 @@ async function autoTextHoldReason(phone, {
   if (assignedLead) return 'lead_assigned';
 
   // Both DNC shapes: the V2 consent object, and the legacy extraction's flat
-  // field (a call processed with V2 off, unavailable or schema-failed).
-  const doNotContact = await callsWith(dbi, digits, excludeCallLogId)
+  // field (a call processed with V2 off, unavailable or schema-failed). Read
+  // from ANY stored extraction, valid or not, and from the call setting this
+  // text off too: an opt-out is honoured wherever it was heard.
+  const doNotContact = await callsWith(dbi, digits, null)
     .where((q) => q.whereRaw("ai_extraction_enriched->'consent'->>'do_not_contact_request' = 'true'")
       .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"do_not_contact_request"\\s*:\\s*true'`))
     .first('id');
   if (doNotContact) return 'asked_not_to_be_contacted';
 
+  // Only a VALID V2 extraction's nature counts (a schema-failed one can
+  // persist a normalized but wrong call_nature); the legacy fields cover a
+  // call without one.
   const notAProspect = await callsWith(dbi, digits, excludeCallLogId)
-    .where((q) => q.whereRaw("ai_extraction_enriched->>'call_nature' = ANY(?)", [NOT_A_PROSPECT_NATURES])
+    .where((q) => q.where((v2) => v2.where('v2_extraction_status', 'valid')
+      .whereRaw("ai_extraction_enriched->>'call_nature' = ANY(?)", [NOT_A_PROSPECT_NATURES]))
       .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"is_spam"\\s*:\\s*true'`)
       .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"call_type"\\s*:\\s*"(spam|wrong_number)"'`))
     .first('id');

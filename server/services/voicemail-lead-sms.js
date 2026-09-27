@@ -162,6 +162,18 @@ async function clearLeadClaim(leadId) {
   }
 }
 
+// The shared hold check's options for this voicemail (the early check and
+// the recheck at the handoff): its own call opens the recent-conversation
+// window, is not an "earlier" call, and the lane's own texts are its
+// one-shot's business, not a conversation.
+function holdOptions(call) {
+  return {
+    callAt: call.created_at ? new Date(call.created_at) : new Date(),
+    excludeCallLogId: call.id || null,
+    excludeMessageTypes: [MESSAGE_TYPE],
+  };
+}
+
 async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone: rawPhone, doNotContactRequested = false } = {}) {
   if (!isEnabled('voicemailLeadSms')) {
     logger.info(`[voicemail-sms] Gate off — text-back skipped for lead ${leadId || 'unknown'}`);
@@ -197,11 +209,7 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
   // at replay (deferred-replay-registry.js voicemail_lead_sms_deferred).
   if (doNotContactRequested) return { sent: false, skipped: 'asked_not_to_be_contacted' };
   try {
-    const hold = await autoTextHoldReason(phone, {
-      callAt: call.created_at ? new Date(call.created_at) : new Date(),
-      excludeCallLogId: call.id || null,
-      excludeMessageTypes: [MESSAGE_TYPE],
-    });
+    const hold = await autoTextHoldReason(phone, holdOptions(call));
     if (hold) {
       logger.info(`[voicemail-sms] Text-back held for lead ${leadId}: ${hold}`);
       return { sent: false, skipped: hold };
@@ -356,6 +364,24 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
     await releasePhoneClaim(phone);
     logger.info(`[voicemail-sms] Template ${MESSAGE_TYPE} missing/disabled — text-back skipped for lead ${leadId}`);
     return { sent: false, skipped: 'template_disabled' };
+  }
+
+  // Recheck the holds at the handoff: the claims, the landline lookup, the
+  // short link and the render all awaited since the first check, and a text
+  // exchanged, a lead assigned or an estimate sent meanwhile still stops
+  // it. A late hold never consumed the one-shot — release both claims.
+  let lateHold;
+  try {
+    lateHold = await autoTextHoldReason(phone, holdOptions(call));
+  } catch (e) {
+    logger.warn(`[voicemail-sms] handoff hold recheck failed — releasing claims (fail closed): ${e.message}`);
+    lateHold = 'hold_check_failed';
+  }
+  if (lateHold) {
+    await clearLeadClaim(leadId);
+    await releasePhoneClaim(phone);
+    logger.info(`[voicemail-sms] Text-back held at the handoff for lead ${leadId}: ${lateHold}`);
+    return { sent: false, skipped: lateHold };
   }
 
   const result = await sendCustomerMessage({

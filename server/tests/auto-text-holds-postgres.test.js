@@ -118,14 +118,18 @@ jest.setTimeout(30000);
       expect(await hold()).toBe('asked_not_to_be_contacted');
     });
 
-    test('never: the call setting this text off (excluded), or a call with no such request', async () => {
+    test('the call setting this text off counts too — a reprocess can correct it after a deferral', async () => {
       const current = randomUUID();
       await priorCall({ id: current, ai_extraction_enriched: JSON.stringify({ consent: { do_not_contact_request: true } }) });
+      expect(await hold({ excludeCallLogId: current })).toBe('asked_not_to_be_contacted');
+    });
+
+    test('never: a call with no such request, in either shape', async () => {
       await priorCall({
         ai_extraction_enriched: JSON.stringify({ consent: { do_not_contact_request: false } }),
         ai_extraction: '{"do_not_contact_request": false}',
       });
-      expect(await hold({ excludeCallLogId: current })).toBeNull();
+      expect(await hold()).toBeNull();
     });
   });
 
@@ -133,10 +137,17 @@ jest.setTimeout(30000);
     test.each(['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner', 'job_applicant'])(
       'an earlier call the V2 extraction called %s',
       async (nature) => {
-        await priorCall({ ai_extraction_enriched: JSON.stringify({ call_nature: nature }) });
+        await priorCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ call_nature: nature }) });
         expect(await hold()).toBe('not_a_prospect');
       },
     );
+
+    test('never: a schema-failed V2 extraction\'s nature (it can persist a wrong call_nature), or the call setting this text off', async () => {
+      const current = randomUUID();
+      await priorCall({ v2_extraction_status: 'schema_failed', ai_extraction_enriched: JSON.stringify({ call_nature: 'wrong_number' }) });
+      await priorCall({ id: current, v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ call_nature: 'vendor_or_partner' }) });
+      expect(await hold({ excludeCallLogId: current })).toBeNull();
+    });
 
     test('an earlier call the legacy extraction marked spam or wrong number (the text column)', async () => {
       await priorCall({ ai_extraction: '{"call_type": "wrong_number", "is_spam": false}' });
@@ -149,7 +160,7 @@ jest.setTimeout(30000);
     });
 
     test('never: a new-lead call, or an unreadable legacy extraction', async () => {
-      await priorCall({ ai_extraction_enriched: JSON.stringify({ call_nature: 'new_lead' }), ai_extraction: '{"call_type":"new_inquiry","is_spam":false}' });
+      await priorCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ call_nature: 'new_lead' }), ai_extraction: '{"call_type":"new_inquiry","is_spam":false}' });
       await priorCall({ ai_extraction: 'not json at all' });
       expect(await hold()).toBeNull();
     });
