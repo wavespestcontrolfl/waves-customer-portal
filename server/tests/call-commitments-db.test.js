@@ -349,10 +349,13 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       status: 'completed', customer_id: cust.id, created_at: new Date(Date.now() - 10 * 60 * 1000),
     }).returning('*');
     cleanup.callIds.push(call.id);
-    // "I'll put you on the schedule for around 3" — 3 PM ET on a fixed future day.
-    const promise = { kind: 'schedule_visit', due_at: '2026-10-15T15:00:00-04:00', due_type: 'floor' };
+    // "I'll put you on the schedule for around 3" — 3 PM ET a week out (the
+    // slot must stay after the call's end, so never a fixed date).
+    const { addETDays, etDateString, parseETDateTime } = require('../utils/datetime-et');
+    const day = etDateString(addETDays(new Date(), 7));
+    const promise = { kind: 'schedule_visit', due_at: parseETDateTime(`${day}T15:00`).toISOString(), due_type: 'floor' };
     const book = async (window_start, extra = {}) => {
-      const [v] = await db('scheduled_services').insert({ scheduled_date: '2026-10-15', window_start, service_type: 'Rodent Trapping Service', status: 'pending', customer_id: cust.id, created_at: new Date(Date.now() - 60 * 1000), ...extra }).returning('id');
+      const [v] = await db('scheduled_services').insert({ scheduled_date: day, window_start, service_type: 'Rodent Trapping Service', status: 'pending', customer_id: cust.id, created_at: new Date(Date.now() - 60 * 1000), ...extra }).returning('id');
       cleanup.visitIds.push(v.id);
       return v;
     };
