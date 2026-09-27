@@ -3,6 +3,19 @@
 let mockPg;
 let mockProbeParent = false;
 const mockCreate = jest.fn();
+const mockEmailTransport = jest.fn();
+jest.mock('../services/email-template-library', () => ({
+  ...jest.requireActual('../services/email-template-library'),
+  loadTemplateByKey: async () => ({ template: { template_key: 'billing.notice' } }),
+  activeSuppressionFor: async () => null,
+  sendTemplate: jest.fn(async (input) => {
+    const outcome = await input.withProviderHandoff(async (database, boundary) => {
+      await boundary({ database });
+      await mockEmailTransport(database);
+    });
+    return outcome?.ok ? { sent: true, messageId: 'qa-email' } : { sent: false };
+  }),
+}));
 jest.mock('../models/db', () => {
   const database = (...args) => mockPg(...args);
   database.transaction = (callback) => mockPg.transaction(async (trx) => {
@@ -38,7 +51,7 @@ const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const PushRouting = require('../services/messaging/push-channel-routing');
-const { _test } = require('../services/previsit-balance-reminder');
+const { _test, previsitReplayQuoteEligible } = require('../services/previsit-balance-reminder');
 const { addETDays, etDateString } = require('../utils/datetime-et');
 
 const connection = process.env.APP_TEST_DATABASE_URL;
@@ -156,6 +169,7 @@ postgres('previsit Text billing authority (PostgreSQL)', () => {
   }, 30000);
 
   beforeEach(() => {
+    mockEmailTransport.mockReset().mockResolvedValue(undefined);
     mockCreate.mockReset().mockResolvedValue({ sid: `SM${'a'.repeat(32)}` });
     PushRouting.wantsAppFirst.mockResolvedValue(false);
     PushRouting.gatePushRoutingOn.mockReturnValue(false);
@@ -167,6 +181,7 @@ postgres('previsit Text billing authority (PostgreSQL)', () => {
     delete process.env.GATE_COLLECTIONS_POLICY;
     await mockPg('collections_contact_ledger').del();
     await mockPg('notification_prefs').del();
+    await mockPg('customers').where({ id: customerId }).update({ phone });
     await mockPg('payments').whereNot({ id: failedPaymentId }).del();
     await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sent', credit_applied: 0 });
     await mockPg('invoices').whereNot({ id: invoiceId }).del();
@@ -343,6 +358,112 @@ postgres('previsit Text billing authority (PostgreSQL)', () => {
     expect(explicit).toEqual(expect.objectContaining({ sent: true }));
     expect(handoff).not.toHaveBeenCalled();
     expect(mockCreate).toHaveBeenCalledTimes(1);
+  }, 15000);
+
+  async function replayFixture() {
+    const ledgerId = randomUUID();
+    const context = { schema_version: 1, category: 'billing', source_entry_point: 'previsit_balance_reminder',
+      customer_id: customerId, appointment_id: visitId, appointment_date: visit.scheduled_date,
+      appointment_service_type: visit.service_type, appointment_rendered_on: etDateString(),
+      notificationEventKey: `previsit-balance:${visitId}`, collections_ledger_id: ledgerId,
+      rendered_amount: '96.60', invoice_ids: [invoiceId], invoice_quotes: [{ id: invoiceId, dueCents: 9660 }],
+      dues_cents: 0, selected_channels: ['email', 'push'] };
+    await mockPg('collections_contact_ledger').insert({ id: ledgerId, customer_id: customerId,
+      channel: 'email', purpose: 'balance_reminder', source: 'previsit_balance_reminder',
+      invoice_ids: JSON.stringify([invoiceId]), metadata: { pending: true, notificationEventKey: context.notificationEventKey } });
+    await mockPg('notification_prefs').insert({ customer_id: customerId, billing_channels: ['email', 'push'] });
+    await mockPg('customers').where({ id: customerId }).update({ phone: null });
+    return context;
+  }
+
+  test.each(['fresh', 'retry'])('%s Email uses the held authority without a phone, and fences debt through provider completion', async (attempt) => {
+    const context = await replayFixture();
+    if (attempt === 'retry') await mockPg('scheduled_services').where({ id: visitId }).update({ balance_reminder_sent_at: null });
+    let entered;
+    let release;
+    const atProvider = new Promise((resolve) => { entered = resolve; });
+    const complete = new Promise((resolve) => { release = resolve; });
+    const provider = jest.fn(async (database) => { expect(database.isTransaction).toBe(true); entered(); await complete; });
+    let sending;
+    if (attempt === 'fresh') {
+      mockEmailTransport.mockImplementationOnce(provider);
+      sending = require('../services/billing-channel-email').sendBillingChannelEmail({
+        channel: 'email', customerId, appointmentId: visitId, entryPoint: 'previsit_balance_reminder',
+        body: 'Your recurring service balance is $96.60.', metadata: { ...context, billingDeliveryCategory: 'billing' },
+      }, { preSendCheck: ({ database }) => previsitReplayQuoteEligible(context, database) });
+    } else {
+      sending = require('../services/billing-email-provider-replay').runBillingEmailProviderReplayHandoff({
+        template_key: 'billing.notice', recipient_type: 'customer', recipient_id: customerId,
+        recipient_email_snapshot: 'previsit-authority@example.invalid', trigger_event_id: context.notificationEventKey,
+        idempotency_key: `billing_channel_email:${context.notificationEventKey}:email`, categories: ['billing'],
+        payload_snapshot: { __billing_replay_context: context },
+      }, provider);
+    }
+    // A refused send must fail this race promptly rather than leave the provider-pause fixture hanging.
+    await Promise.race([atProvider, sending.then((result) => { throw new Error(`Email refused: ${JSON.stringify(result)}`); })]);
+    try {
+      for (const mutate of [
+        (trx) => trx('invoices').where({ id: invoiceId }).update({ credit_applied: 20 }),
+        (trx) => trx('payments').where({ id: failedPaymentId }).update({ status: 'paid' }),
+        (trx) => trx('invoices').insert({ ...quotedInvoice, id: randomUUID(), token: randomUUID(),
+          invoice_number: `QA-${randomUUID()}`, line_items: JSON.stringify([]) }),
+      ]) {
+        await expect(writer.transaction(async (trx) => {
+          await trx.raw("SET LOCAL lock_timeout = '100ms'"); await mutate(trx);
+        })).rejects.toMatchObject({ code: '55P03' });
+      }
+    } finally { release(); }
+    expect(await sending).toMatchObject(attempt === 'fresh' ? { sent: true } : { handled: true, allowed: true });
+    expect(provider).toHaveBeenCalledTimes(1);
+    await writer('invoices').where({ id: invoiceId }).update({ credit_applied: 1 });
+    await mockPg('scheduled_services').where({ id: visitId }).update({ balance_reminder_sent_at: new Date() });
+  }, 15000);
+
+  test('App bell transaction fences the quote, native read-only recheck takes no new authority transaction', async () => {
+    const context = await replayFixture();
+    await mockPg.transaction(async (trx) => {
+      expect(await previsitReplayQuoteEligible(context, trx, { channel: 'push' })).toEqual({ ok: true });
+      await expect(writer.transaction(async (competing) => {
+        await competing.raw("SET LOCAL lock_timeout = '100ms'");
+        await competing('invoices').where({ id: invoiceId }).update({ credit_applied: 1 });
+      })).rejects.toMatchObject({ code: '55P03' });
+    });
+    expect(await previsitReplayQuoteEligible(context, mockPg, { channel: 'push' })).toEqual({ ok: true });
+    await writer('invoices').where({ id: invoiceId }).update({ credit_applied: 1 });
+    expect(await previsitReplayQuoteEligible(context, mockPg, { channel: 'push' }))
+      .toMatchObject({ ok: false, code: 'PREVISIT_QUOTE_CHANGED', supersessionReason: 'previsit-quote-changed' });
+  }, 15000);
+
+  test('previsit Email replay rejects an unheld connection and missing episode reservation without provider work', async () => {
+    const context = await replayFixture();
+    expect(await previsitReplayQuoteEligible(context, mockPg)).toMatchObject({ ok: false, retryable: true });
+    await mockPg('collections_contact_ledger').where({ id: context.collections_ledger_id }).update({
+      metadata: { notificationEventKey: 'previsit-balance:unrelated' },
+    });
+    const verdict = await mockPg.transaction((trx) => require('../services/messaging/billing-email-replay-eligibility')
+      .billingEmailReplayEligible(context, trx));
+    expect(verdict).toMatchObject({ eligible: false, reason: 'previsit reservation changed' });
+    expect(mockEmailTransport).not.toHaveBeenCalled();
+  });
+
+  test('first incomplete Email policy snapshot refuses retryably without a second consultation and recovers the same quote', async () => {
+    const context = await replayFixture();
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const followups = require('../services/invoice-followups');
+    const stop = jest.spyOn(followups, 'isDunningStopped').mockImplementation(async (_id, database) =>
+      database.transaction((savepoint) => savepoint.raw('SELECT missing_previsit_email_column')));
+    const evaluate = jest.spyOn(require('../services/collections/contact-policy'), 'evaluate');
+    try {
+      await mockPg.transaction(async (trx) => {
+        expect(await previsitReplayQuoteEligible(context, trx)).toMatchObject({ ok: false, retryable: true });
+        expect((await trx.raw('SELECT 1 AS usable')).rows[0].usable).toBe(1);
+      });
+      expect(evaluate).toHaveBeenCalledTimes(1);
+      expect((await mockPg('collections_contact_ledger').where({ id: context.collections_ledger_id }).first()).metadata)
+        .toMatchObject({ pending: true });
+      stop.mockRestore();
+      await expect(mockPg.transaction((trx) => previsitReplayQuoteEligible(context, trx))).resolves.toEqual({ ok: true });
+    } finally { stop.mockRestore(); evaluate.mockRestore(); }
   }, 15000);
 
 });
