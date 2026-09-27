@@ -19,7 +19,7 @@ const logger = require('../services/logger');
 const { gates } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const {
-  sweepPromiseChasers, sweepSince, windowFloor, activationBoundary,
+  sweepPromiseChasers, ringForCall, sweepSince, windowFloor, activationBoundary,
 } = require('../services/promise-chaser-bell');
 const ACTIVATION_KEY = 'promise_chaser_activated_at';
 
@@ -541,6 +541,24 @@ const OUR_NUMBER = '+19415550100';
 
       expect(await sweepPromiseChasers()).toBe(0);
       expect(triggerNotification).not.toHaveBeenCalled();
+    });
+
+    test("the ET day in dedupeKey comes from the callback's OWN created_at, never the sweep tick's current time (Codex #5019 r18 P1)", async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      // A tick landing well after this callback — e.g. one that crossed an
+      // ET midnight while `back` was still inside the sweep's own window —
+      // must compute the IDENTICAL dedupeKey `back` always had, not one
+      // stamped with whatever day "now" itself happens to fall on.
+      const muchLaterTick = new Date(now + 3 * 24 * 60 * 60 * 1000);
+      expect(await ringForCall(back, muchLaterTick)).toBe(true);
+      const [, , opts] = triggerNotification.mock.calls[0];
+      expect(opts.dedupeKey).toBe(`promise_chaser:${commitment.id}:0:${etDateString(new Date(back.created_at))}`);
+      expect(opts.dedupeKey).not.toContain(etDateString(muchLaterTick));
     });
   });
 });

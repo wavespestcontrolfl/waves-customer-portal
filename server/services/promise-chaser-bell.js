@@ -294,7 +294,16 @@ async function ringForCall(call, now = new Date()) {
   // preceded the renewal) lets it ring again for THAT obligation while
   // repeated calls chasing the SAME unrenewed one still collapse onto the
   // one bell.
-  const dedupeKey = `promise_chaser:${promise.id}:${renewedAt ? renewedAt.getTime() : 0}:${etDateString(now)}`;
+  //
+  // The ET day comes from the CALLBACK's own created_at, never the
+  // sweep's own current tick time: a callback still sitting in the
+  // 30-minute window is retried by more than one tick, and `now` moves
+  // forward with every one of them — a call alerted right before midnight
+  // would otherwise get a brand-new key (and a second ring for the exact
+  // same call) the instant a later tick crosses into the next ET day. The
+  // callback's own timestamp is fixed, so every tick that retries it
+  // computes the identical key.
+  const dedupeKey = `promise_chaser:${promise.id}:${renewedAt ? renewedAt.getTime() : 0}:${etDateString(new Date(call.created_at))}`;
 
   // The canonical "already delivered" check missed-call-bell.js and
   // repeat-caller-bell.js both use before an atomic-claim reclaim — a
@@ -416,6 +425,6 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
 }
 
 module.exports = {
-  sweepPromiseChasers, sweepSince, windowFloor, activationBoundary, persistedActivationBoundary,
+  sweepPromiseChasers, ringForCall, sweepSince, windowFloor, activationBoundary, persistedActivationBoundary,
   describePromise, MODULE_LOAD_AT,
 };
