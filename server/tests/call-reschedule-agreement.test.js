@@ -94,7 +94,7 @@ describe('groundRescheduleAgreement', () => {
   test('the recorded slot words must be in the slot quote', () => {
     const withWords = (words) => ground(v2({ scheduling: { agreed_slot_words: { ...WORDS, ...words } } }));
     expect(withWords({ period: 'pm' })).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
-    expect(withWords({ day: 'Thursday afternoon' })).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    expect(withWords({ day: 'Thurs.' })).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     // Whole words only: "two" is not in "twenty".
     expect(agreedAt(THURSDAY_2PM, 'We will see you Thursday at twenty past in the afternoon.', WORDS)).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
   });
@@ -116,6 +116,22 @@ describe('groundRescheduleAgreement', () => {
     expect(agreedAt('2026-09-24T20:00:00-04:00', 'We will be there between eight and nine tonight.', { day: 'tonight', hour: 'eight', period: 'tonight' }))
       .toMatchObject({ ok: false, reason: 'agreed_slot_words_mismatch' }); // "tonight" is the call's own day, not Thursday
     expect(agreedAt('2026-09-23T20:00:00-04:00', 'We will be there between eight and nine tonight.', { day: 'tonight', hour: 'eight', period: 'tonight' }).ok).toBe(true);
+  });
+
+  // Codex #5092 r4: day words are read by the shared reschedule date grammar
+  // (reschedule-date-evidence.js), abbreviations included.
+  test('day words are one date the shared grammar reads, bounded by what they leave unstated', () => {
+    const on = (day, slot = THURSDAY_2PM) => agreedAt(slot, `We will see you ${day} at two in the afternoon.`, { day, hour: 'two', period: 'in the afternoon' });
+    for (const day of ['Thurs.', 'Thu', 'next Thursday', 'this Thursday', 'tomorrow', 'Sept. 24th', 'September 24', 'the 24th', '9/24', 'Thurs., Sept. 24']) {
+      expect([day, on(day).ok]).toEqual([day, true]);
+    }
+    // Wrong day, not one date, or out of reach.
+    for (const day of ['Friday', 'the 25th', 'Thursday or Friday', 'sometime Thursday', 'Wednesday, September 24']) {
+      expect([day, on(day).reason]).toEqual([day, 'agreed_slot_words_mismatch']);
+    }
+    expect(on('Thursday', '2026-10-08T14:00:00-04:00').ok).toBe(false); // three weeks out: not this week or next
+    expect(on('the 24th', '2026-12-24T14:00:00-05:00').ok).toBe(false); // three months out
+    expect(on('December 24th', '2026-12-24T14:00:00-05:00').ok).toBe(true);
   });
 
   test('a weekday beside an explicit date describes that date', () => {

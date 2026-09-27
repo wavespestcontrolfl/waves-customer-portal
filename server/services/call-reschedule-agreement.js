@@ -38,7 +38,8 @@
 'use strict';
 
 const { etWallClockOfConfirmedStart } = require('./call-triage-flags');
-const { normalize, parseTurns, parseDayMentions } = require('./call-time-mentions');
+const { statedDateComponents } = require('./reschedule-date-evidence');
+const { etDateString } = require('../utils/datetime-et');
 
 const MIN_FRAGMENT_WORDS = 3;
 
@@ -51,6 +52,29 @@ const PERIOD_WORDS = {
 };
 
 function padded(s) { return ` ${s} `; }
+
+// Lowercase words, punctuation dropped, with "a.m." / "p.m." kept as one
+// word ("am") so a quote matches its turn however either was punctuated
+// and the period words read the same whichever way they were written.
+function normalize(s) {
+  return String(s || '')
+    .replace(/\b([ap])\.\s?m\b\.?/gi, '$1m')
+    .replace(/(\d)([ap]m)\b/gi, '$1 $2')
+    .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// The transcript's turns ({ agent, ns }); null on any unlabeled line, where
+// turn boundaries cannot be trusted.
+function parseTurns(transcript) {
+  const turns = [];
+  for (const line of String(transcript || '').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const m = line.match(/^\s*(agent|caller)\s*:\s*(.*)$/i);
+    if (!m) return null;
+    turns.push({ agent: m[1].toLowerCase() === 'agent', ns: normalize(m[2]) });
+  }
+  return turns;
+}
 
 // Where this quote appears word for word in a turn of this speaker: the
 // turns it is found in. A quote under three words must be that whole turn.
@@ -82,14 +106,28 @@ function statedHour(hourWords, periodWords) {
   return (n % 12) + (halves.has('pm') ? 12 : 0);
 }
 
-// Is every day these words name `date`? A weekday beside an explicit date
-// only describes it ("Thursday, December 17"), so it must be that date's
-// weekday; alone, a weekday names this week's or next week's.
+// "Next Thursday" / "this coming Thursday" read as the weekday (both are
+// bounded to this week or next below); "tonight" is the call's own day.
+const WEEKDAY_LEAD = /^\s*(?:this coming|this|coming|next)\s+/i;
+
+// Do these words name `date` (YYYY-MM-DD)? The words must be exactly one
+// date the shared reschedule date grammar reads
+// (reschedule-date-evidence.js statedDateComponents), every component they
+// state must be the date's, and what they leave unstated bounds how far
+// ahead they reach from the call's ET day: a weekday alone this week or
+// next (13 days), a day of the month alone this month or next (62), a
+// month and day this year or next (366).
 function namesDate(words, date, started) {
-  const days = parseDayMentions(words, started);
-  const pinned = days.some((d) => d.weekday == null);
-  const weekday = new Date(`${date}T12:00:00Z`).getUTCDay();
-  return days.length > 0 && days.every((d) => (pinned && d.weekday != null ? d.weekday === weekday : d.candidates.has(date)));
+  const said = statedDateComponents(String(words).replace(/\btonight\b/gi, 'today').replace(WEEKDAY_LEAD, ''), started);
+  if (!said) return false;
+  const [year, month, day] = date.split('-').map(Number);
+  const is = { year, month, day, weekday: new Date(`${date}T12:00:00Z`).getUTCDay() };
+  if (!['year', 'month', 'day', 'weekday'].every((k) => said[k] === undefined || said[k] === is[k])) return false;
+  const ahead = (Date.UTC(year, month - 1, day) - Date.parse(`${etDateString(started)}T00:00:00Z`)) / 86400000;
+  let reach = 366;
+  if (said.day === undefined) reach = 13;
+  else if (said.month === undefined) reach = 62;
+  return said.year !== undefined || (ahead >= 0 && ahead <= reach);
 }
 
 // Do the recorded slot words state exactly this slot? No day words only
