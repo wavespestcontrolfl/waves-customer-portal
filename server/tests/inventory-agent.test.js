@@ -325,6 +325,19 @@ describe('classifyDecision — existing product', () => {
 describe('classifyDecision — new_product', () => {
   const allowedCategories = new Set(['insecticide', 'rodenticide']);
 
+  test('a new-product name that is not taken from the title is held (never a made-up product)', () => {
+    const raw = {
+      kind: 'new_product', reason: 'not in the catalog',
+      new_product: { name: 'Termidor SC', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_count: 1 },
+    };
+    const decision = classifyDecision(raw, ctx({
+      rawTitle: 'Control Solutions Bifen XTS Insecticide 96 oz', lineQuantity: 1, allActiveProducts: [], allowedCategories,
+    }));
+    expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+    expect(decision.reason).toMatch(/not taken from the purchase title/);
+  });
+
   test('a validated new-product proposal computes the container size, inventory unit and amount', () => {
     const raw = {
       kind: 'new_product', reason: 'not in the catalog',
