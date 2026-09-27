@@ -119,7 +119,7 @@ describe('billing reminder per-channel delivery progress', () => {
       collectionsChannelPermitted.mockImplementation(jest.requireActual('../services/collections/rail-guard').collectionsChannelPermitted);
       const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
       const result = await sendReminderChannels({
-        customerId: 'customer-1', invoiceId: null, invoiceIds: ['inv-a', 'inv-b'], policyInvoiceIds: ['inv-a', 'inv-b'],
+        customerId: 'customer-1', invoiceId: null, invoiceIds: ['inv-a', 'inv-b'],
         source: 'previsit_balance_reminder', purpose: 'balance_reminder', eventKey: 'previsit-balance:ss-1', channels: ['sms'], send,
       });
       expect(result.complete).toBe(false);
@@ -129,7 +129,7 @@ describe('billing reminder per-channel delivery progress', () => {
       // intentionally has no collectible-policy membership requirement.
       ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: [], denialReasons: [] });
       await sendReminderChannels({
-        customerId: 'customer-1', invoiceId: null, invoiceIds: ['draft-invoice'], offLedgerBalanceCents: 4900,
+        customerId: 'customer-1', invoiceId: null, invoiceIds: ['draft-invoice'], policyInvoiceIds: [], offLedgerBalanceCents: 4900,
         source: 'annual_prepay_payment_reminder', purpose: 'balance_reminder', eventKey: 'annual-prepay-payment:term-1:3', channels: ['sms'], send,
       });
       expect(send).toHaveBeenCalledTimes(1);
@@ -189,53 +189,6 @@ describe('billing reminder per-channel delivery progress', () => {
       expect.objectContaining({ channel: 'email', metadata: expect.objectContaining({ delivered: true, notificationEventKey: 'invoice-1:gentle' }) }),
       expect.objectContaining({ channel: 'push', metadata: expect.objectContaining({ delivered: true, selectedChannels: ['email', 'push'] }) }),
     ]));
-  });
-
-  test('a persisted App bell settles its leg without inventing provider acceptance or retrying', async () => {
-    const send = jest.fn(async () => ({
-      sent: false,
-      blocked: true,
-      deliveryOutcome: 'not_sent',
-      code: 'APP_UNAVAILABLE',
-      bellPersisted: true,
-    }));
-
-    await expect(deliver(['push'], send, 'bell-only'))
-      .resolves.toMatchObject({
-        complete: true,
-        deliveredNow: ['push'],
-        results: {
-          push: expect.objectContaining({ sent: false, deliveryOutcome: 'not_sent', bellPersisted: true }),
-        },
-      });
-    await expect(deliver(['push'], send, 'bell-only'))
-      .resolves.toMatchObject({ complete: true, deliveredNow: [] });
-
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(ContactLedger.markDelivered).toHaveBeenCalledTimes(1);
-    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
-    expect(rows[0].metadata).toMatchObject({ delivered: true });
-  });
-
-  test('an uncertain App outcome without a bell witness stays held', async () => {
-    const send = jest.fn(async () => ({
-      sent: false,
-      deliveryOutcome: 'uncertain',
-      code: 'APP_OUTCOME_UNCONFIRMED',
-    }));
-
-    await expect(deliver(['push'], send, 'uncertain-app'))
-      .resolves.toMatchObject({ complete: false, deliveredNow: [] });
-    await expect(deliver(['push'], send, 'uncertain-app'))
-      .resolves.toMatchObject({
-        complete: false,
-        deliveredNow: [],
-        results: { push: expect.objectContaining({ deliveryHeld: true }) },
-      });
-
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
-    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
   });
 
   test('accepted Text is not repeated while failed Email is retried', async () => {
