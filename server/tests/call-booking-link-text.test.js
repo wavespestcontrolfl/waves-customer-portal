@@ -47,6 +47,7 @@ const {
   HEARTBEAT_GAP_MS,
   MODULE_LOAD_AT,
   neverSendRecheck,
+  consentedDestination,
   dispatchClaimedCall,
   claimForDispatch,
   recoverAbandonedClaim,
@@ -901,12 +902,60 @@ describe('resolveLeadId / resolveLeadLinkage', () => {
   });
 });
 
+// ── consentedDestination — implied consent is PERSONAL to the caller
+// (codex r5 P1) ────────────────────────────────────────────────────────────
+describe('consentedDestination', () => {
+  const ANI = '+19415550100';
+  const SPOKEN = '+19415559999'; // a different number the caller SPOKE on the call
+  const EDITED = '+19415551234'; // neither the ANI nor spoken — e.g. the lead record edited later
+
+  const inboundCall = { direction: 'inbound', from_phone: ANI, to_phone: '+19415550200' };
+  const outboundCall = { direction: 'outbound', from_phone: '+19415550200', to_phone: ANI };
+
+  test('the inbound ANI (no consent record needed) sends', () => {
+    expect(consentedDestination(inboundCall, null, ANI)).toBe(true);
+  });
+
+  test('a lead phone edited to a different number since the call is never consented', () => {
+    expect(consentedDestination(inboundCall, null, EDITED)).toBe(false);
+    expect(consentedDestination(inboundCall, { caller: {}, consent: {} }, EDITED)).toBe(false);
+  });
+
+  test('a spoken number WITH explicit sms_consent_given sends', () => {
+    const extraction = { caller: { phone_e164: SPOKEN }, consent: { sms_consent_given: true } };
+    expect(consentedDestination(inboundCall, extraction, SPOKEN)).toBe(true);
+  });
+
+  test('a spoken number WITHOUT explicit consent is refused — implied consent alone never covers it', () => {
+    const extraction = { caller: { phone_e164: SPOKEN }, consent: {} };
+    expect(consentedDestination(inboundCall, extraction, SPOKEN)).toBe(false);
+    const explicitlyRefused = { caller: { phone_e164: SPOKEN }, consent: { sms_consent_given: false } };
+    expect(consentedDestination(inboundCall, explicitlyRefused, SPOKEN)).toBe(false);
+  });
+
+  test('outbound: the dialed number (to_phone), not from_phone, is the call\'s own contact number', () => {
+    expect(consentedDestination(outboundCall, null, ANI)).toBe(true);
+    expect(consentedDestination(outboundCall, null, '+19415550200')).toBe(false); // from_phone alone is never it
+  });
+
+  test('phone identity compares by canonical NANP digits, not a raw string match', () => {
+    expect(consentedDestination(inboundCall, null, '19415550100')).toBe(true); // no leading +
+    expect(consentedDestination(inboundCall, null, '(941) 555-0100')).toBe(true);
+  });
+
+  test('a null/empty destination is never consented', () => {
+    expect(consentedDestination(inboundCall, null, null)).toBe(false);
+    expect(consentedDestination(inboundCall, null, '')).toBe(false);
+  });
+});
+
 // ── neverSendRecheck — the providerPreSendCheck hook ──────────────────────
 // codex r2 P2: re-runs the MUTABLE never-send predicates on the connection
 // send-customer-message.js hands this callback, right before Twilio's own
 // messages.create() — never this module's own outer `conn`.
 describe('neverSendRecheck', () => {
-  const CALL_FOR_RECHECK = { id: 'call-1', created_at: new Date('2026-09-26T15:30:00Z'), direction: 'inbound' };
+  const CALL_FOR_RECHECK = { id: 'call-1', created_at: new Date('2026-09-26T15:30:00Z'), direction: 'inbound', from_phone: '+19415550100' };
+  const DESTINATION = '+19415550100'; // matches CALL_FOR_RECHECK's own ANI — consent isolated from these tests' own concerns
   const OPEN = { id: 'lead-1', status: 'new', converted_at: null, estimate_id: null, customer_id: null, deleted_at: null };
 
   function dbi({ lead = OPEN, bookedSince = null, smsWithLink = null } = {}) {
@@ -926,34 +975,34 @@ describe('neverSendRecheck', () => {
   }
 
   test('an open lead with no estimate, not booked, no recent link: ok', async () => {
-    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1');
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
     await expect(check({ dbi: dbi() })).resolves.toEqual({ ok: true });
   });
 
   test('a lead closed since dispatchIneligibleReason ran blocks the send', async () => {
-    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1');
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
     const closed = dbi({ lead: { ...OPEN, status: 'won', converted_at: new Date() } });
     await expect(check({ dbi: closed })).resolves.toEqual({ ok: false, code: 'lead_no_longer_open' });
   });
 
   test('a missing lead blocks the send the same way', async () => {
-    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1');
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
     await expect(check({ dbi: dbi({ lead: null }) })).resolves.toEqual({ ok: false, code: 'lead_no_longer_open' });
   });
 
   test('an estimate linked since then blocks the send', async () => {
-    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1');
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
     await expect(check({ dbi: dbi({ lead: { ...OPEN, estimate_id: 'est-1' } }) })).resolves.toEqual({ ok: false, code: 'estimate_linked' });
   });
 
   test('booked since the call started blocks the send', async () => {
-    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1');
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
     const conn = dbi({ lead: { ...OPEN, customer_id: 'cust-1' }, bookedSince: { id: 'visit-1' } });
     await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'booked_since_call' });
   });
 
   test('a link delivered in the last 14 days blocks the send', async () => {
-    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1');
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
     const conn = dbi();
     conn.mockImplementation((table) => {
       const chain = {};
@@ -973,7 +1022,7 @@ describe('neverSendRecheck', () => {
   // even though Twilio was never contacted. This must be a RETURNED
   // retryable refusal instead, never a thrown error.
   test('a transient DB failure inside the recheck returns a retryable refusal, never throws', async () => {
-    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1');
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
     const failing = jest.fn(() => { throw new Error('connection reset'); });
     await expect(check({ dbi: failing })).resolves.toEqual({
       ok: false, retryable: true, code: 'never_send_recheck_failed', reason: 'connection reset',
@@ -997,6 +1046,7 @@ describe('claimForDispatch', () => {
 describe('dispatchClaimedCall', () => {
   const NOW = new Date('2026-09-26T18:00:00Z'); // 2:00 PM ET — inside the window
   const CALL = { id: 'call-1', created_at: new Date('2026-09-26T15:30:00Z'), duration_seconds: 90,
+    direction: 'inbound', from_phone: '+19415550100', // the ANI — matches OPEN_LEAD.phone below by default
     v2_extraction_status: 'valid', processing_token: null,
     metadata: { lead_id: 'lead-1', call_booking_link_text: { status: 'claimed', lead_id: 'lead-1', send_at: NOW.toISOString() } },
     ai_extraction_enriched: {
@@ -1290,6 +1340,20 @@ describe('dispatchClaimedCall', () => {
     const result = await dispatchClaimedCall(conn, CALL, NOW);
     expect(result.sent).toBe(true);
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: OPEN_LEAD.phone }));
+  });
+
+  // codex r5 P1: implied transactional consent is PERSONAL to whoever was
+  // actually ON the call — it never extends to a number the lead record
+  // was edited to sometime AFTER the call, even when that new number is
+  // internally consistent (the token minted for it matches lead.phone, so
+  // phone_changed_before_send never fires).
+  test('a lead phone edited to a number never on this call blocks the send with destination_not_consented', async () => {
+    const editedPhone = '+19415551234'; // neither CALL.from_phone (the ANI) nor any spoken number
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://wavespest.co/l/abcd', line: 'Pick a time...\n\n', phone: editedPhone });
+    const conn = makeDb({ lead: { ...OPEN_LEAD, phone: editedPhone } });
+    const result = await dispatchClaimedCall(conn, CALL, NOW);
+    expect(result.skipped).toBe('destination_not_consented');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   // codex r1 P2: reply from the line the caller actually reached, not

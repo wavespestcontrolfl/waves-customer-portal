@@ -227,6 +227,7 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     const leadId = await insertLead(mockPg, { phone: '+15555550111' });
     const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
     const callId = await insertCall(mockPg, {
+      from_phone: '+15555550111', // the ANI — implied consent requires the destination to match it
       metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
     });
     buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-1', line: 'Pick a time.\n\n', phone: '+15555550111' });
@@ -285,6 +286,7 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest0000000000000000000000002' });
 
     const firstCallId = await insertCall(mockPg, {
+      from_phone: '+15555550333', // the ANI — implied consent requires the destination to match it
       metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
     });
     const firstCall = await mockPg('call_log').where({ id: firstCallId }).first();

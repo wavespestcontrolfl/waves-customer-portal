@@ -66,6 +66,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isRealProviderSend, isAmbiguousProviderOutcome } = require('./sms-auto-send');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { phoneIdentityKey } = require('../utils/phone');
 
 const GATE = 'callBookingLinkText';
 const METADATA_KEY = 'call_booking_link_text';
@@ -801,6 +802,41 @@ const DISPATCH_CHECKS = [
 ];
 
 // The FIRST check (lead_not_found) always returns a reason when `lead` is
+// Implied transactional consent from a call is PERSONAL to whoever was
+// actually ON the call — the same rule call-recording-processor.js's own
+// confirmation-SMS send enforces ("implied consent is PERSONAL to the
+// caller... It authorizes texting only the number that reached us"; see
+// its own checkTcpaConsent call site). It never extends to a number a lead
+// record was edited to AFTER the call (codex r5 P1) — this lane's
+// consentBasis: 'transactional_allowed' is only honest when the actual
+// send destination is one of:
+//   (a) the call's own contact number itself — the inbound ANI, or for an
+//       outbound call the number actually dialed — via
+//       resolveCallContactPhone(call, null) (no extracted-phone override,
+//       exactly like admin-triage.js's own disclaimed-number check reuses
+//       it); or
+//   (b) the number the caller SPOKE on this call
+//       (extraction.caller.phone_e164), and ONLY when the extraction
+//       itself recorded EXPLICIT SMS consent for it
+//       (consent.sms_consent_given === true) — implied consent alone never
+//       covers a spoken alternate, matching the owner's caller_id_disclaimed
+//       staging rule and checkTcpaConsent's own explicit-consent branch.
+// Anything else (most commonly: the lead's phone was edited to a different
+// number sometime after the call) fails closed — no consent basis covers
+// it, so this never sends there, retryable or not; a human can always
+// text that new number by hand. Compared by the repo's canonical phone
+// identity (NANP last-10 / +digits — server/utils/phone.js), never a raw
+// string match.
+function consentedDestination(call, extraction, phone) {
+  const target = phoneIdentityKey(phone);
+  if (!target) return false;
+  const { resolveCallContactPhone } = require('./call-recording-processor');
+  const contactPhone = resolveCallContactPhone(call, null);
+  if (contactPhone && target === phoneIdentityKey(contactPhone)) return true;
+  const spoken = extraction?.caller?.phone_e164;
+  return !!spoken && target === phoneIdentityKey(spoken) && extraction?.consent?.sms_consent_given === true;
+}
+
 // falsy, so the loop returns before any later check ever dereferences it —
 // every check past that point may safely assume `lead` is a real row.
 async function dispatchIneligibleReason(ctx) {
@@ -830,12 +866,17 @@ async function dispatchIneligibleReason(ctx) {
 // recordSendOutcome's own final fallback then records it as a terminal
 // skip under that code, exactly as if dispatchIneligibleReason itself had
 // caught it moments earlier.
-function neverSendRecheck(call, leadId) {
+function neverSendRecheck(call, leadId, destinationPhone) {
   return async ({ dbi }) => {
     try {
       const lead = await dbi('leads').where({ id: leadId }).whereNull('deleted_at').first();
       if (!lead || !isOpenLeadRow(lead)) return { ok: false, code: 'lead_no_longer_open' };
       if (lead.estimate_id) return { ok: false, code: 'estimate_linked' };
+      // Re-verified even though nothing between the earlier send-time check
+      // and here can change the destination string itself (codex r5 P1) —
+      // the same last-moment-before-the-provider-request discipline every
+      // other check on this hook already follows.
+      if (!consentedDestination(call, extractionOf(call), destinationPhone)) return { ok: false, code: 'destination_not_consented' };
       const callStart = callStartedAt(call) || new Date(call.created_at);
       if (await bookedSinceCall(dbi, lead.customer_id, callStart)) return { ok: false, code: 'booked_since_call' };
       if (await linkSentRecently(dbi, leadId, new Date())) return { ok: false, code: 'link_sent_recently' };
@@ -960,6 +1001,14 @@ async function dispatchClaimedCall(conn, call, now) {
   // close to send time deserves a human look, not an automated guess.
   if (built.phone && built.phone !== lead.phone) return skip('phone_changed_before_send');
 
+  // Implied transactional consent covers ONLY the call's own contact
+  // number or an explicitly-consented spoken number — never a number the
+  // lead was edited to since (codex r5 P1; see consentedDestination's own
+  // doc comment). destinationPhone is the exact string the actual send
+  // below targets, never recomputed differently.
+  const destinationPhone = built.phone || lead.phone;
+  if (!consentedDestination(call, extractionOf(call), destinationPhone)) return skip('destination_not_consented');
+
   // Stamped on the SAME row, on THIS connection, immediately before the
   // actual provider request — the one fact that later distinguishes "this
   // attempt never reached Twilio" (safe to requeue through the ordinary
@@ -976,7 +1025,7 @@ async function dispatchClaimedCall(conn, call, now) {
 
   const managedLine = managedLineForCall(call);
   const result = await sendCustomerMessage({
-    to: built.phone || lead.phone,
+    to: destinationPhone,
     body: built.line,
     channel: 'sms',
     audience: 'lead',
@@ -986,7 +1035,7 @@ async function dispatchClaimedCall(conn, call, now) {
     consentBasis: { status: 'transactional_allowed', source: 'call_booking_link_text' },
     entryPoint: 'call_booking_link_text',
     metadata: { original_message_type: MESSAGE_TYPE, call_log_id: call.id, lead_id: lead.id, ...(managedLine ? { fromNumber: managedLine } : {}) },
-    providerPreSendCheck: neverSendRecheck(call, leadId),
+    providerPreSendCheck: neverSendRecheck(call, leadId, destinationPhone),
   }).catch((err) => (isRealProviderSend(err?.providerOutcome) || isAmbiguousProviderOutcome(err?.providerOutcome)) ? err.providerOutcome : Promise.reject(err));
 
   return recordSendOutcome(conn, call, entry, leadId, now, result);
@@ -1190,6 +1239,7 @@ module.exports = {
   HEARTBEAT_GAP_MS,
   MODULE_LOAD_AT,
   neverSendRecheck,
+  consentedDestination,
   stage,
   stageOne,
   claimForDispatch,
