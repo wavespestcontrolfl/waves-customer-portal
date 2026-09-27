@@ -27,6 +27,10 @@ test('Snapshot respects property, recent applications, rolling limits and unknow
   expect(due([application('Snapshot 2.5TG', '2028-04-01', { rate_unit: 'oz' })])).toMatch(/prior Snapshot rates/);
   expect(due(['2027-10-01', '2028-01-01', '2028-04-01'].map(date => application('Snapshot 2.5TG', date, { application_rate: 3.45 })))).toMatch(/annual limit/);
   expect(due([application('Snapshot 2.5TG', '2028-07-01')])).toMatch(/already recorded/);
+  for (const date of [null, '', 'invalid', new Date(NaN)]) {
+    expect(due([application('Snapshot 2.5TG', date)])).toMatch(/unconfirmed property or date/);
+    expect(treeShrubDueReason('snapshot', [], date, 'property-a')).toMatch(/visit date/);
+  }
 });
 
 test('both palm fertilizers and the old palm product share one three-month/four-feeding history', () => {

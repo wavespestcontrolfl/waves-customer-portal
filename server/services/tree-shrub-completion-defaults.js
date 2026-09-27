@@ -6,8 +6,11 @@ const MAX_SNAPSHOT_LB_PER_1000 = 600 / 43.56;
 
 // Calendar dates are compared at UTC noon, independent of server TZ/DST.
 function dayNumber(value) {
-  const day = etCalendarDayOf(value);
-  return day ? Date.parse(`${day}T12:00:00Z`) / 86400000 : NaN;
+  if (value == null || value === '') return NaN;
+  try {
+    const day = etCalendarDayOf(value);
+    return day ? Date.parse(`${day}T12:00:00Z`) / 86400000 : NaN;
+  } catch { return NaN; }
 }
 
 function monthsAfter(value, count) {
