@@ -15,6 +15,7 @@ const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = r
 const logger = require('../logger');
 const { applyAssignable, assertAssignableTechnician } = require('../technician-eligibility');
 const { createDefaultCustomerRows } = require('../customer-default-rows');
+const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed, dateOnlyString,
   windowDurationMinutes, deriveWindowEnd,
@@ -298,7 +299,7 @@ The first call returns a PREVIEW (before/after facts) and nothing changes; the o
     description: `Create a new scheduled service appointment.
 service_type examples (catalog names): "Quarterly Pest Control Service", "Bi-Monthly Lawn Care Service", "Seasonal Mosquito Control Service", "Bi-Monthly Tree & Shrub Care Service", "Waves Assessment". Quarterly Tree & Shrub is retired for new sales (existing quarterly plans only).
 time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".
-This tool sets no price. It refuses a visit that would then complete with no invoice (a customer billed per visit, one-time, annual prepay, or per application with no fee on file) unless the visit type is free (appointment, estimate, re-service, follow-up); tell the user to book those from the Schedule screen with a price.`,
+price: the visit price in dollars when the user states one. Omit it to use the catalog price for service_type; the confirmation card shows the price either way. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -309,6 +310,7 @@ This tool sets no price. It refuses a visit that would then complete with no inv
         technician_id: { type: 'string', format: 'uuid', description: 'Exact technician id — use after an ambiguous name match' },
         time_window: { type: 'string' },
         notes: { type: 'string' },
+        price: { type: 'number', exclusiveMinimum: 0, maximum: 100000, description: 'Visit price in dollars, only when the user states one' },
       },
       required: ['customer_id', 'scheduled_date', 'service_type'],
     },
@@ -2428,50 +2430,104 @@ async function resolveTechnicianByName(name) {
   return matches[0] || null;
 }
 
-// ADMIN-BUG-R12: this tool has no price input and stamps no price, so a
-// booking for a customer whose billing needs a number ON THE VISIT (per-visit
-// and one-time lanes, annual prepay, per-application with no fee on file, a
-// member with no monthly rate, a legacy row with no membership tier) would
-// complete with no invoice. The verdict is the Schedule screen's own
-// billable-amount booking gate — one classifier, never a local lane list — so
-// dues-covered members, per-application customers with a fee, and
-// free-by-design visit types (appointment / estimate / re-service /
-// follow-up) still book here. Returns the model-facing refusal, or null when
-// the booking bills or is free.
-function ibBookingBillingRefusal(customer, serviceType) {
+// The booking's price, the way a Schedule-screen booking gets one (owner
+// 2026-09-27: the Intelligence Bar books like the Schedule screen, it does
+// not send the operator there). Both paths run the Schedule POST's own
+// buildAppointmentPricing: an operator-stated price is the primary line
+// price; with none, the price the Schedule screen pre-fills for the named
+// catalog service (the one-time mosquito lot ladder, else the catalog base
+// price). The catalog row resolves by exact name only — the call pipeline's
+// findServiceByName (name / short name / service key, plus rename
+// bridging), never a partial match: a price must come from the service the
+// operator named. A free visit type (appointment / estimate / re-service /
+// follow-up) never carries a price — completion never bills one.
+// Returns { price, source, catalogRow, pricing } or { error }.
+async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db }) {
+  const services = await conn('services').where({ is_active: true })
+    .select('id', 'name', 'short_name', 'service_key', 'base_price', 'category');
+  const { findServiceByName } = require('../call-booking-catalog');
+  const catalogRow = findServiceByName(Array.isArray(services) ? services : [], serviceType);
+  const stated = statedPrice !== undefined && statedPrice !== null;
+  if (isAlwaysFreeServiceType(serviceType)) {
+    if (stated) {
+      return { error: `"${serviceType}" is a free visit type — completion never bills it, so it cannot carry a price. Book it without one, or name the billable service. Nothing was booked.` };
+    }
+    return { price: null, source: null, catalogRow, pricing: null };
+  }
+  if (!stated && !catalogRow) return { price: null, source: null, catalogRow: null, pricing: null };
   // Lazy: the route module is large and requires services that require this
   // module (same avoid-a-route-load-cycle pattern as schedule-tools).
+  const { buildAppointmentPricing } = require('../../routes/admin-schedule');
+  const pricing = await buildAppointmentPricing({
+    serviceRecord: catalogRow,
+    serviceType,
+    serviceId: catalogRow?.id || null,
+    primaryLinePrice: stated ? statedPrice : undefined,
+    customer,
+  });
+  if (!(Number(pricing.finalPrice) > 0)) return { price: null, source: null, catalogRow, pricing: null };
+  return { price: Number(pricing.finalPrice), source: stated ? 'stated' : 'catalog', catalogRow, pricing };
+}
+
+// Cent-exact comparison of two booking prices (null = no price).
+function sameBookingPrice(a, b) {
+  if (a == null || b == null) return a == null && b == null;
+  return Math.round(Number(a) * 100) === Math.round(Number(b) * 100);
+}
+
+const BOOKING_PRICE_CHANGED_ERROR = 'This visit\'s price or catalog service changed since the card was shown — nothing was booked. Ask again for a fresh confirmation card.';
+
+// ADMIN-BUG-R12: a booking must never complete with no invoice when the
+// customer's billing needs a number on the visit (per-visit and one-time
+// lanes, annual prepay, per-application with no fee on file, a member with
+// no monthly rate, a legacy row with no membership tier). The verdict is the
+// Schedule screen's own billable-amount booking gate — one classifier, never
+// a local lane list — so dues-covered members, per-application customers
+// with a fee, free-by-design visit types, and every PRICED booking pass.
+// Returns the model-facing refusal, or null when the booking bills or is free.
+function ibBookingBillingRefusal(customer, serviceType, price) {
   const { recurringWithoutBillableAmount } = require('../../routes/admin-schedule');
+  const priced = Number(price) > 0;
   // Below its recurring early return, the gate asks a question that does not
   // depend on recurrence: would completing a visit at this price, for this
   // customer, cut an invoice (or be dues-covered, or free by design)? Asked
-  // for ONE visit at a $0 floor with the stamps this insert writes: no
-  // create-invoice flag, no callback marker, and no typed one-time profile
-  // (that mint trigger needs a PRICED visit, so it cannot change a $0 verdict).
+  // for ONE visit with the stamps this insert writes: a priced booking
+  // carries create_invoice_on_complete (the Schedule modal's own default), an
+  // unpriced one carries neither, and no callback marker or typed one-time
+  // profile (that mint trigger needs a price, and a priced booking already
+  // mints through the create-invoice stamp).
   const verdict = recurringWithoutBillableAmount({
     isRecurring: true,
-    recurringFloorPrice: 0,
+    recurringFloorPrice: priced ? price : 0,
     customer,
-    createInvoiceOnComplete: false,
+    createInvoiceOnComplete: priced,
     typedOneTimeBilling: false,
     isCallback: false,
     serviceType,
   });
   if (!verdict) return null;
-  const remedy = verdict.fix?.perApplicationFee
-    ? 'Set a per-application fee on the customer profile, or book it from the Schedule screen with a visit price'
-    : 'Book it from the Schedule screen with a visit price';
-  return `This visit would complete with no invoice: the Intelligence Bar books without a price, and this customer's billing needs one on the visit. ${remedy}. Nothing was booked.`;
+  const orFee = verdict.fix?.perApplicationFee ? ', or set a per-application fee on the customer profile' : '';
+  return `This visit needs a price: "${serviceType}" has no catalog price, and nothing in this customer's billing would invoice it. Ask the user for the visit price and propose the booking again with price${orFee}. Nothing was booked.`;
 }
 
-// Proposal-time twin for the confirm-card route: reads the customer and asks
-// the same verdict, so a booking that would be refused never reaches a card.
-// A read error THROWS (the caller fails the proposal closed); a missing
+// Proposal-time twin for the confirm-card route: the same price and billing
+// verdict the executor asks at commit, so the card shows the price the
+// booking will carry and a booking that would be refused never reaches a
+// card. A read error THROWS (the caller fails the proposal closed); a missing
 // customer returns null — the route's own customer pin refuses that case.
-async function ibBookingBillingRefusalFor(customerId, serviceType) {
+async function ibBookingProposal(customerId, serviceType, statedPrice) {
   const customer = await db('customers').where({ id: customerId }).first();
   if (!customer) return null;
-  return ibBookingBillingRefusal(customer, serviceType);
+  const booking = await ibBookingPricing({ customer, serviceType, statedPrice });
+  if (booking.error) return { error: booking.error };
+  const refusal = ibBookingBillingRefusal(customer, serviceType, booking.price);
+  if (refusal) return { error: refusal };
+  return {
+    price: booking.price,
+    source: booking.source,
+    serviceId: booking.catalogRow?.id || null,
+    serviceName: booking.catalogRow?.name || null,
+  };
 }
 
 async function createAppointment(input, actionContext = {}) {
@@ -2522,10 +2578,24 @@ async function createAppointment(input, actionContext = {}) {
   if (customer.deleted_at) {
     return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was booked.', preview_changed: true };
   }
+  // The visit's price: the operator's stated price, else the Schedule
+  // screen's catalog default. The card showed exactly this price (or none)
+  // through the proposal's pins, so drift since then refuses — a booking
+  // never carries a price the operator did not approve. A call with no pins
+  // (never proposed through a card) may only book unpriced.
+  const booking = await ibBookingPricing({ customer, serviceType: service_type, statedPrice: input.price });
+  if (booking.error) return { error: booking.error };
+  const approvedPrice = input._booking_price === undefined ? null : input._booking_price;
+  const approvedServiceId = input._booking_service_id === undefined
+    ? (booking.catalogRow?.id || null) : input._booking_service_id;
+  if (!sameBookingPrice(approvedPrice, booking.price)
+    || String(approvedServiceId || '') !== String(booking.catalogRow?.id || '')) {
+    return { error: BOOKING_PRICE_CHANGED_ERROR, preview_changed: true };
+  }
   // Refused before any lock or write when the visit could never bill
   // (ADMIN-BUG-R12); re-asserted on the locked row inside the booking
   // transaction below, since this read is unlocked.
-  const billingRefusal = ibBookingBillingRefusal(customer, service_type);
+  const billingRefusal = ibBookingBillingRefusal(customer, service_type, booking.price);
   if (billingRefusal) return { error: billingRefusal };
 
   // Resolve the technician BEFORE any write. The old `.first()` on an
@@ -2610,11 +2680,21 @@ async function createAppointment(input, actionContext = {}) {
       err.customerNoLongerLive = true;
       throw err;
     }
-    // The billing verdict on the LOCKED row (ADMIN-BUG-R12): a lane, rate or
-    // fee edit committed since the preflight must not slip an unbillable
-    // visit through. The customer row stays locked through the insert, so
-    // the verdict holds for the row this booking writes against.
-    const lockedBillingRefusal = ibBookingBillingRefusal(lockedCustomer, service_type);
+    // Price and billing verdict on the LOCKED row (ADMIN-BUG-R12): a lane,
+    // rate, fee, lot-size or catalog edit committed since the preflight must
+    // neither change the approved price nor slip an unbillable visit
+    // through. The customer row stays locked through the insert, so both
+    // hold for the row this booking writes against.
+    const lockedBooking = await ibBookingPricing({
+      customer: lockedCustomer, serviceType: service_type, statedPrice: input.price, conn: trx,
+    });
+    if (lockedBooking.error || !sameBookingPrice(lockedBooking.price, booking.price)
+      || String(lockedBooking.catalogRow?.id || '') !== String(booking.catalogRow?.id || '')) {
+      const err = new Error('booking_price_changed');
+      err.bookingPriceChanged = true;
+      throw err;
+    }
+    const lockedBillingRefusal = ibBookingBillingRefusal(lockedCustomer, service_type, lockedBooking.price);
     if (lockedBillingRefusal) {
       const err = new Error('booking_unbillable');
       err.bookingUnbillable = lockedBillingRefusal;
@@ -2635,6 +2715,20 @@ async function createAppointment(input, actionContext = {}) {
       window_start: win.start,
       window_end: windowEnd,
       notes: notes || null,
+      // The catalog link and the price exactly as the Schedule POST stamps
+      // them: service_id + key/category snapshots, and for a priced visit
+      // estimated_price, the primary line's gross, and the create-invoice
+      // flag its booking modal always sends.
+      ...(lockedBooking.catalogRow ? {
+        service_id: lockedBooking.catalogRow.id,
+        service_key_snapshot: lockedBooking.catalogRow.service_key || null,
+        service_category_snapshot: lockedBooking.catalogRow.category || null,
+      } : {}),
+      ...(lockedBooking.price != null ? {
+        estimated_price: lockedBooking.price,
+        primary_line_price: lockedBooking.pricing.primaryBase,
+        create_invoice_on_complete: true,
+      } : {}),
       created_at: new Date(),
       updated_at: new Date(),
     }).returning('*');
@@ -2700,6 +2794,9 @@ async function createAppointment(input, actionContext = {}) {
     }
     if (err && err.bookingUnbillable) {
       return { error: err.bookingUnbillable, preview_changed: true };
+    }
+    if (err && err.bookingPriceChanged) {
+      return { error: BOOKING_PRICE_CHANGED_ERROR, preview_changed: true };
     }
     if (err && err.previewChanged) {
       return {
@@ -2793,6 +2890,7 @@ async function createAppointment(input, actionContext = {}) {
     customer_name: `${customer.first_name} ${customer.last_name}`,
     date: dateStr,
     service_type,
+    price: appointment.estimated_price != null ? Number(appointment.estimated_price) : null,
     // The RESOLVED tech's canonical name — never the raw input, which can be
     // absent on an id-only retry or disagree with the id it rode in with.
     technician: resolvedTechnicianName || 'Unassigned',
@@ -3490,5 +3588,5 @@ async function resolveActiveTechnicianById(id) {
 }
 
 module.exports = {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingBillingRefusalFor,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal,
 };

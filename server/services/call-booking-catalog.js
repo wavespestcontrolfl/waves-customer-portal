@@ -866,6 +866,9 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
 
 module.exports = {
   loadBookableCallServices,
+  // Exact-name catalog match (name / short name / service key + rename
+  // bridging) — also the IB create_appointment's price lookup.
+  findServiceByName,
   loadCallReServiceRows,
   hasCallReServiceIntent,
   isReServiceCatalogRow,
