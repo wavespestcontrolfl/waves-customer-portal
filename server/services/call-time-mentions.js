@@ -172,6 +172,7 @@ const HOUR_LEADS = new Set(['at', 'around', 'about']);
 // Words right before an hour that make it a bound, not the hour: "before
 // noon", "by two", "after 2 pm", "until two".
 const RELATIVE_HOUR_LEADS = new Set(['before', 'by', 'after', 'until', 'till', 'til']);
+const TRAILING_BOUNDS = [['or', 'later'], ['or', 'earlier'], ['or', 'so'], ['or', 'after'], ['or', 'before'], ['at', 'the', 'latest'], ['at', 'the', 'earliest']];
 // "Two o'clock" normalizes to "two o clock" or "two oclock".
 const OCLOCK = new Set(['o', 'oclock']);
 // A number running into a unit of time is a length, not a clock time.
@@ -259,6 +260,16 @@ function periodAfter(toks, j) {
   return toks[k] === 'am' || toks[k] === 'pm' ? toks[k] : null;
 }
 
+// Is the hour at `i`, its mention ending at `end`, inexact: a fraction
+// lead-in ("half past two", "quarter past noon"), or a bound before it
+// ("before noon", "by two", "until two") or after it ("two or later", "noon
+// at the latest")? Such a mention never grounds an on-the-hour slot.
+function inexactAt(toks, i, end) {
+  return (['past', 'after', 'to'].includes(toks[i - 1]) && ['half', 'quarter'].includes(toks[i - 2]))
+    || RELATIVE_HOUR_LEADS.has(toks[i - 1])
+    || TRAILING_BOUNDS.some((bound) => toks.slice(end, end + bound.length).join(' ') === bound.join(' '));
+}
+
 function clockHour(n, period) {
   return (n % 12) + (period === 'pm' ? 12 : 0);
 }
@@ -299,22 +310,17 @@ function extractHourMentions(turnText) {
     const sentencePeriod = dayParts.size === 1 ? [...dayParts][0] : null;
     let rangeEnd = -1;
     for (let i = 0; i < toks.length; i += 1) {
-      // "Half past two", "quarter past noon": a fraction lead-in is off the
-      // hour; "before noon", "by two", "after 2 pm", "until two" name no exact
-      // hour. Either way the mention never grounds an on-the-hour slot.
-      const inexact = (['past', 'after', 'to'].includes(toks[i - 1]) && ['half', 'quarter'].includes(toks[i - 2]))
-        || RELATIVE_HOUR_LEADS.has(toks[i - 1]);
-      if (Object.hasOwn(NAMED_HOURS, toks[i])) mentions.push({ hour24: NAMED_HOURS[toks[i]], offHour: inexact, pos: offset + i, end: offset + i + 1 });
+      if (Object.hasOwn(NAMED_HOURS, toks[i])) mentions.push({ hour24: NAMED_HOURS[toks[i]], offHour: inexactAt(toks, i, i + 1), pos: offset + i, end: offset + i + 1 });
       const n = hourNumber(toks[i]);
       if (n == null || i === rangeEnd) continue;
       const after = i + 1 + minuteTokensAfter(toks, i);
       rangeEnd = rangeEndAfter(toks, i, after);
-      const offHour = after > i + 1 || inexact;
+      let end = Math.max(after, rangeEnd + 1);
+      while (CLOCK_TAIL.has(toks[end])) end += 1;
+      const offHour = after > i + 1 || inexactAt(toks, i, end);
       const period = periodAfter(toks, after) || sentencePeriod;
       const marked = offHour || rangeEnd > 0 || period || OCLOCK.has(toks[after]) || HOUR_LEADS.has(toks[i - 1]) || toks[i + 1] === 'ish';
       if (!marked || runsIntoDuration(toks, after)) continue;
-      let end = Math.max(after, rangeEnd + 1);
-      while (CLOCK_TAIL.has(toks[end])) end += 1;
       mentions.push({ hour24: period ? clockHour(n, period) : rangeStartHour(toks, n, rangeEnd), offHour, pos: offset + i, end: offset + end });
       i = after - 1;
     }

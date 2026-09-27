@@ -370,6 +370,9 @@ describe('rescheduleAgreementEvidence', () => {
 
   test('a commitment conditioned on the caller, or on an unanswered proposal, is not an agreement', () => {
     expect(evidence('Caller: Can we move my visit to Thursday at two?\nAgent: I will do that if you can confirm with your husband.').ok).toBe(false);
+    expect(evidence('Caller: Can we move it to Thursday at two?\nAgent: I will do that once you confirm with your husband.').ok).toBe(false);
+    expect(evidence('Caller: Can we move it to Thursday at two?\nAgent: We will see you then, pending availability.').ok).toBe(false);
+    expect(evidence('Caller: Can we move it?\nAgent: We will see you Thursday at two or later.').ok).toBe(false);
     expect(evidence('Caller: Can we move my visit?\nAgent: Would Thursday at two work for you?\nAgent: You are all set.').ok).toBe(false);
     expect(evidence('Caller: Can we move my visit?\nAgent: Would Thursday at two work for you?\nCaller: Yes.\nAgent: You are all set.').ok).toBe(true);
     // The answer must accept: a hedge or a question is not an answer.

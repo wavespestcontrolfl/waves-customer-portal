@@ -130,7 +130,8 @@ const COMMITMENT_MARKERS = [
 
 // A condition on the commitment itself ("we'll see you then if a slot opens
 // up") leaves the slot unsettled.
-const CONDITION_WORDS = ['if', 'unless', 'as long as', 'provided', 'assuming', 'hopefully', 'should be able'];
+const CONDITION_WORDS = ['if', 'unless', 'as long as', 'provided', 'assuming', 'hopefully', 'should be able',
+  'pending', 'once you', 'once we', 'when you confirm', 'after you confirm'];
 
 function padded(s) { return ` ${s} `; }
 // Conditions that are courtesies, not conditions on the slot: a polite
