@@ -63,6 +63,7 @@
 'use strict';
 
 const db = require('../models/db');
+const markerDb = require('../models/marker-db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { callStartedAt, callDurationSeconds } = require('../utils/call-timeline');
@@ -1007,28 +1008,32 @@ function neverSendRecheck(call, leadId, destinationPhone) {
       const callStart = callStartedAt(call) || new Date(call.created_at);
       if (await bookedSinceCall(dbi, lead.customer_id, callStart)) return { ok: false, code: 'booked_since_call' };
       if (await linkSentRecently(dbi, leadId, new Date())) return { ok: false, code: 'link_sent_recently' };
-      // Stamped HERE, on THIS connection (dbi), as the LAST thing before
-      // returning ok — the true provider-start boundary (codex r8 P2). dbi
-      // is now the phone-locked transaction the lane's own withSmsHandoff
-      // opens (codex #5018 r11 P1), the same one send-customer-message.js's
-      // suppression/consent reload and Twilio's own request run on, so this
-      // stamp, those rereads, and the SDK call all commit or roll back
-      // together. Moved out of dispatchClaimedCall's own body, which used to
-      // stamp this before
-      // ever calling sendCustomerMessage at all: that function still does
-      // its OWN fallible pre-provider work first (acquiring the provider
-      // handoff reservation, a fresh suppression/consent read) — a throw
-      // anywhere in that gap left the row 'claimed' with handoff_started_at
-      // already set, permanently ambiguous (never resent) even though
-      // Twilio was never contacted. Every check above this line, and every
-      // one of sendCustomerMessage's own earlier steps, now fails or throws
-      // BEFORE this write — flowing to recoverAbandonedClaim's ordinary
-      // retry rail — and only a failure in the narrow window AFTER this
-      // (the callback_number_needed check, the final isStillValid recheck,
-      // or messages.create() itself) is still, correctly, terminal-
-      // ambiguous.
+      // Stamped HERE, as the LAST thing before returning ok — the true
+      // provider-start boundary (codex r8 P2). NOT on dbi (codex #5018 r11
+      // pre-push P1): dbi is now the phone-locked transaction the lane's
+      // own withSmsHandoff opens, the SAME one Twilio's own request runs
+      // on — a timeout/thrown error from messages.create() itself rolls
+      // that whole transaction back, discarding this stamp right along
+      // with it even though Twilio may already have the request. That
+      // would make recoverStaleClaims/recoverAbandonedClaim misread a
+      // genuinely ambiguous send as a safe-to-retry pre-provider failure
+      // and text the lead twice. markerDb() (models/marker-db.js) is the
+      // SAME dedicated single-statement connection outside the root pool
+      // that visit-completion-summary.js's own claimDispatchThroughHandoff
+      // uses for exactly this "durable marker from inside a held handoff"
+      // need (CLAUDE.md rule 15) — this UPDATE commits immediately and
+      // independently, so it survives whatever dbi/Twilio do next. Every
+      // check above this line still reads dbi (the freshest, lock-
+      // consistent view) — only this one write moves. Every one of
+      // sendCustomerMessage's own earlier pre-provider steps (acquiring the
+      // handoff reservation, its first suppression/consent read) still
+      // fails or throws BEFORE this write — flowing to
+      // recoverAbandonedClaim's ordinary retry rail — and only a failure in
+      // the narrow window AFTER this (the callback_number_needed check, the
+      // final isStillValid recheck, or messages.create() itself) is still,
+      // correctly, terminal-ambiguous, now durably so.
       const entry = parseMetadata(call)[METADATA_KEY] || {};
-      await recordDecision(dbi, call, { ...entry, status: 'claimed', handoff_started_at: new Date().toISOString() }, { logActivity: false });
+      await recordDecision(markerDb(), call, { ...entry, status: 'claimed', handoff_started_at: new Date().toISOString() }, { logActivity: false });
       return { ok: true };
     } catch (err) {
       // A DB read failing here is an infrastructure hiccup, not a

@@ -10,6 +10,7 @@
  */
 
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/marker-db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
 jest.mock('../services/lead-consultation-link', () => ({
@@ -30,6 +31,7 @@ jest.mock('../services/sms-auto-send', () => ({
 jest.mock('../services/outbound-call-reason', () => ({ hasPriorContact: jest.fn() }));
 
 const db = require('../models/db');
+const markerDb = require('../models/marker-db');
 const { isEnabled } = require('../config/feature-gates');
 const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -1082,12 +1084,14 @@ describe('neverSendRecheck', () => {
         return undefined;
       });
       chain.pluck = jest.fn(async () => []);
-      // The handoff_started_at stamp (codex r8 P2) writes here, on this
-      // same dbi, as the LAST thing before neverSendRecheck returns ok.
       chain.update = jest.fn(async () => 1);
       return chain;
     });
     conn.raw = jest.fn(() => 'RAW');
+    // The handoff_started_at stamp (codex r8 P2) writes through markerDb()
+    // (codex #5018 r11 pre-push P1), never dbi itself — pointed at this
+    // SAME conn so it still lands somewhere these tests can observe.
+    markerDb.mockReturnValue(conn);
     return conn;
   }
 
@@ -1191,6 +1195,38 @@ describe('neverSendRecheck', () => {
       ok: false, retryable: true, code: 'never_send_recheck_failed', reason: 'connection reset',
     });
   });
+
+  // codex #5018 r11 pre-push P1: the final handoff_started_at stamp must
+  // write through markerDb(), NEVER dbi itself — dbi is the SAME
+  // transaction Twilio's own request runs on and rolls back with on a
+  // timeout, which would silently discard a stamp written there even
+  // though Twilio may already have the request. Proven here by making
+  // dbi's OWN update() throw if it's ever called at all: the check must
+  // still succeed, because the real write never touches dbi for this step.
+  test('the handoff_started_at stamp writes through markerDb(), never through dbi itself', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const readOnlyDbi = jest.fn((table) => {
+      const chain = {};
+      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify']
+        .forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.first = jest.fn(async () => (table === 'leads' ? OPEN : undefined));
+      chain.pluck = jest.fn(async () => []);
+      chain.update = jest.fn(() => { throw new Error('dbi must never be written to for this stamp'); });
+      return chain;
+    });
+    readOnlyDbi.raw = jest.fn(() => 'RAW');
+
+    const markerChain = {};
+    markerChain.where = jest.fn(() => markerChain);
+    markerChain.update = jest.fn(async () => 1);
+    const markerConn = jest.fn(() => markerChain);
+    markerConn.raw = jest.fn(() => 'RAW');
+    markerDb.mockReturnValue(markerConn);
+
+    await expect(check({ dbi: readOnlyDbi })).resolves.toEqual({ ok: true });
+    expect(markerConn).toHaveBeenCalledWith('call_log');
+    expect(markerChain.update).toHaveBeenCalled();
+  });
 });
 
 // ── claimForDispatch — atomic single-row claim ────────────────────────────
@@ -1266,6 +1302,12 @@ describe('dispatchClaimedCall', () => {
     // (calling the passed-in callback with the same connection as its
     // "trx") for lockSmsPhone's own trx.raw call above to work unmocked.
     conn.transaction = jest.fn(async (fn) => fn(conn));
+    // The handoff_started_at stamp (codex r8 P2) writes through markerDb()
+    // (codex #5018 r11 pre-push P1), never dbi/conn itself — pointed at
+    // this SAME conn by default so every ordinary test here still observes
+    // it via conn.raw. Tests that need to prove the marker's OWN
+    // independence from a rolled-back dbi override this explicitly.
+    markerDb.mockReturnValue(conn);
     return conn;
   }
 
@@ -1778,6 +1820,13 @@ describe('dispatchClaimedCall', () => {
       const call = [...conn.raw.mock.calls].reverse().find(([sql, bindings]) => sql.includes('jsonb') && Array.isArray(bindings) && typeof bindings[0] === 'string');
       return call ? JSON.parse(call[1][0]).call_booking_link_text : null;
     }
+    // codex #5018 r11 pre-push P1: the stamp write now goes through
+    // markerDb() (a connection OUTSIDE dbi's own transaction), never dbi
+    // itself — a timeout/throw from messages.create() rolls dbi's
+    // transaction back, and a stamp written ON that transaction would roll
+    // back with it even though Twilio may already have the request.
+    // makeDb() already points markerDb() at its own conn by default, so
+    // lastMetadataPatch(conn) below keeps observing the real write site.
 
     // codex r8 P2: the stamp used to land in dispatchClaimedCall's own body,
     // BEFORE sendCustomerMessage was ever called at all — but that function

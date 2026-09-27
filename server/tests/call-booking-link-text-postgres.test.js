@@ -36,6 +36,15 @@ jest.mock('../services/lead-consultation-link', () => ({
   ...jest.requireActual('../services/lead-consultation-link'),
   buildLeadConsultationSmsLine: jest.fn(),
 }));
+// codex #5018 r11 pre-push P1: neverSendRecheck's handoff_started_at stamp
+// now writes through markerDb() rather than dbi/mockPg's own withSmsHandoff
+// transaction — this dedicated connection would otherwise open against
+// whatever database this process's OWN config resolves to (never this
+// file's throwaway schema), so it must be redirected to mockPg like every
+// other write here. The inner function is evaluated lazily (mockPg is
+// assigned later, in beforeAll), matching visit-completion-summary-
+// postgres.test.js's own established pattern for this exact mock.
+jest.mock('../models/marker-db', () => () => mockPg);
 
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
@@ -329,6 +338,42 @@ postgres('call-booking-link-text against PostgreSQL', () => {
 
     expect(result).toEqual({ sent: true, providerMessageId: 'SMtest0000000000000000000000003' });
     expect(concurrentLockErrorCode).toBe('55P03'); // lock_timeout — the real advisory lock was held
+  });
+
+  // codex #5018 r11 pre-push P1: the real proof a mocked knex cannot give —
+  // the withSmsHandoff transaction (dbi) genuinely ROLLS BACK on a thrown
+  // error (simulating messages.create() timing out), yet the
+  // handoff_started_at stamp survives, because neverSendRecheck writes it
+  // through markerDb() (mocked to mockPg here, but via a call OUTSIDE the
+  // handoff's own trx, on its own committed statement) rather than through
+  // dbi/trx itself. Before this fix the stamp lived on dbi and the ROLLBACK
+  // would have discarded it right along with the throw.
+  test('a thrown error inside the real withSmsHandoff transaction rolls that transaction back, but the handoff_started_at stamp — written through markerDb(), never dbi — survives', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550444' });
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: '+15555550444',
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-4', line: 'Pick a time.\n\n', phone: '+15555550444' });
+    // Mirrors twilio.js's own real dispatch(): providerPreSendCheck runs
+    // INSIDE the held handoff transaction, then the (simulated) SDK request
+    // fails — a genuine post-stamp throw, exactly like a provider timeout.
+    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck }) => withSmsHandoff(async (trx) => {
+      const verdict = await providerPreSendCheck({ dbi: trx });
+      if (!verdict.ok) return verdict;
+      throw new Error('provider timeout, no result');
+    }));
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    await expect(callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW)).rejects.toThrow('provider timeout, no result');
+
+    const row = await mockPg('call_log').where({ id: callId }).first('metadata');
+    expect(row.metadata.call_booking_link_text.status).toBe('claimed');
+    expect(row.metadata.call_booking_link_text.handoff_started_at).toBeTruthy(); // survived the rollback
+
+    const outcome = await callBookingLinkText.recoverAbandonedClaim(mockPg, { ...call, metadata: row.metadata }, NOW);
+    expect(outcome).toEqual({ ambiguous: true }); // never resent, exactly the contract this stamp exists to prove
   });
 
   test('dispatchClaimedCall skips booked_since_call against a real scheduled_services row created after the call', async () => {
