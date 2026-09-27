@@ -366,6 +366,16 @@ const isCallRef = (v) => hasCallRefCore(v)
   && (v.after === undefined || isBaseCallRef(v.after));
 const regexPatterns = (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty regex list'
   : (v.find((re) => !compileRegex(re)) !== undefined ? `invalid regex ${JSON.stringify(v.find((re) => !compileRegex(re)))}` : null));
+const SPOKEN_POLICY_SCHEMA = Joi.object({
+  asserted: Joi.boolean(),
+  prospective: Joi.boolean(),
+  callerNames: Joi.array().items(Joi.string().trim().min(1)).min(1),
+}).unknown(true);
+const SPOKEN_POLICY_ERRORS = Object.freeze({
+  asserted: 'asserted must be boolean',
+  prospective: 'prospective must be boolean',
+  callerNames: 'callerNames must be a non-empty list of names',
+});
 // A regex list, or the same list graded over a caller-turn window —
 // { patterns: [...], fromTurn: 2 } skips what Sandy said before the caller's
 // second turn (a barge-in correction supersedes the read-back it cut);
@@ -374,14 +384,14 @@ const regexPatterns = (v) => (!Array.isArray(v) || !v.length ? 'value must be a 
 const regexList = (v) => {
   if (Array.isArray(v)) return regexPatterns(v);
   if (!isPlainObject(v)) return 'value must be a non-empty regex list or { patterns: [...], fromTurn | onTurn: <caller turn> }';
-  const unknown = Object.keys(v).find((k) => !['patterns', 'fromTurn', 'onTurn', 'afterTool', 'asserted', 'prospective'].includes(k));
-  if (unknown) return `unknown key "${unknown}" (patterns, fromTurn, onTurn, afterTool, asserted, prospective)`;
+  const unknown = Object.keys(v).find((k) => !['patterns', 'fromTurn', 'onTurn', 'afterTool', 'asserted', 'prospective', 'callerNames'].includes(k));
+  if (unknown) return `unknown key "${unknown}" (patterns, fromTurn, onTurn, afterTool, asserted, prospective, callerNames)`;
   if (v.afterTool !== undefined && !(typeof v.afterTool === 'string' && v.afterTool) && !isCallRef(v.afterTool)) {
     return 'afterTool must be a tool name or { tool, input?, after?: { tool, input? } }';
   }
   if ((v.fromTurn == null) === (v.onTurn == null)) return 'value must set exactly one of fromTurn or onTurn';
-  if (v.asserted !== undefined && typeof v.asserted !== 'boolean') return 'asserted must be boolean';
-  if (v.prospective !== undefined && typeof v.prospective !== 'boolean') return 'prospective must be boolean';
+  const policyError = SPOKEN_POLICY_SCHEMA.validate(v, { convert: false }).error?.details[0];
+  if (policyError) return SPOKEN_POLICY_ERRORS[policyError.path[0]];
   if (v.prospective === true && v.asserted !== true) return 'prospective requires asserted: true';
   const turn = v.onTurn != null ? v.onTurn : v.fromTurn;
   if (!Number.isInteger(turn) || turn < 1) return `${v.onTurn != null ? 'onTurn' : 'fromTurn'} must be a caller turn number (1 is the first)`;
@@ -1472,7 +1482,11 @@ const CHECK_RUNNERS = Object.freeze({
   },
   spoken_matches_any(value, record, view) {
     const { sources, spoken, scope } = spokenScope(value, view, record);
-    const policy = Array.isArray(value) ? {} : { asserted: value.asserted === true, prospective: value.prospective === true };
+    const policy = Array.isArray(value) ? {} : {
+      asserted: value.asserted === true,
+      prospective: value.prospective === true,
+      callerNames: value.callerNames || [],
+    };
     const hit = firstRegexHit(sources, spoken, policy);
     return hit ? ['pass', `/${hit.source}/i matched${scope}: "${clip(hit.text, 160)}"`] : ['fail', `none of ${sources.map((v) => `/${v}/i`).join(', ')} was spoken${scope}`];
   },
@@ -1587,10 +1601,10 @@ function spokenScope(value, { spoken, utterances }, record = null) {
   return { sources: value.patterns, spoken: pool.filter((u) => u.turn >= value.fromTurn).map((u) => u.text), scope: ` from caller turn ${value.fromTurn}${after}` };
 }
 
-function firstRegexHit(sources, spoken, { asserted = false, prospective = false } = {}) {
+function firstRegexHit(sources, spoken, { asserted = false, prospective = false, callerNames = [] } = {}) {
   for (const source of sources) {
     const re = compileRegex(source);
-    const text = spoken.find((t) => re && (asserted ? assertedSpokenMatch(t, re, { prospective }) : re.test(t)));
+    const text = spoken.find((t) => re && (asserted ? assertedSpokenMatch(t, re, { prospective, callerNames }) : re.test(t)));
     if (text) return { source, text };
   }
   return null;

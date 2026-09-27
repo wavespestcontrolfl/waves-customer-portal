@@ -211,6 +211,11 @@ perfect/passive auxiliary ("he enviado", "ha sido enviado") without borrowing an
 unrelated coordinated predicate. Thus an earlier future callback or preparation cannot
 turn a later completed delivery into a promise, while a past receipt followed by a future
 delivery can. Preparing an estimate alone does not satisfy the required delivery promise.
+When a Spanish commitment may explicitly name its recipient, `callerNames` lists the
+scenario's grounded caller names. The role check treats only those literal, word-bounded
+names (plus `usted` / `el cliente`) as the caller; another person's name remains a
+third-party destination. `callerNames` is valid only as a non-empty list of non-empty
+strings on the scoped `spoken_matches_any` object.
 Booking outcomes do not use that policy:
 an affirmative past request ("pedí") is valid, a denied request ("no pedí") is not, and a
 negative unconfirmed-status clause still truthfully reports that the request is pending.

@@ -94,12 +94,14 @@ const SPANISH_UNMARKED_POSTPOSED_ACTOR = '(?<!\\ba\\s)(?<!para\\s)(?<!\\bpor\\s)
 const SPANISH_CALLBACK_TARGET_RE = new RegExp(`(?:${SPANISH_CALLBACK_ACTION}|\\bseguimiento\\b|\\ben\\s+contacto\\b)`, 'i');
 const SPANISH_STAFF_ACTOR = '(?:(?:la|nuestra)\\s+oficina|(?:el|nuestro)\\s+(?:equipo|personal)|(?:el|un)\\s+(?:miembro|integrante)\\s+del\\s+equipo(?:\\s+de\\s+Waves)?|(?:el|la|un|una|su)\\s+t[eé]cnic[oa]|(?:el|la|un|una)\\s+(?:recepcionista|coordinador|coordinadora|secretari[oa])|Waves)';
 const SPANISH_PERSON_ROLE = '(?:cliente|vecin[oa]|gerente|oficina|equipo|personal|t[eé]cnic[oa]|recepcionista|coordinador(?:a)?|secretari[oa])';
+const SPANISH_PERSON_DESCRIPTOR = `(?:${SPANISH_PERSON_ROLE}|espos[oa]|contador(?:a)?|herman[oa]|madre|padre|hij[oa]|propietari[oa]|inquilin[oa])`;
+const SPANISH_PREPOSED_SUBJECT = '(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su|nuestro|nuestra)\\s+(?:[a-záéíóúñü]+\\s+){0,3}[a-záéíóúñü]+)';
 const SPANISH_CLAUSE_SUBJECT_RE = new RegExp(`^\\s*(${SPANISH_STAFF_ACTOR}|(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas)|(?:el|la|un|una|mi|tu|su|nuestro|nuestra)\\s+[a-záéíóúñü]+)\\b`, 'i');
 const SPANISH_STAFF_CLAUSE_SUBJECT_RE = new RegExp(`^\\s*${SPANISH_STAFF_ACTOR}\\b`, 'i');
 const SPANISH_CALLER_CLAUSE_SUBJECT_RE = /^\s*(?:t[uú]|usted(?:es)?|vosotr[oa]s?|(?:el|la)\s+cliente)\b/i;
 const SPANISH_STAFF_CALLBACK_RE = new RegExp(`(?:${SPANISH_STAFF_ACTOR}\\s+(?:(?:le|les|lo|la|los|las|te|nos|se)\\s+)?(?:(?:va(?:n)?\\s+a)\\s+)?${SPANISH_CALLBACK_ACTION}|${SPANISH_CALLBACK_ACTION}\\s+${SPANISH_STAFF_ACTOR})`, 'i');
 const SPANISH_LATE_STAFF_CALLBACK_RE = new RegExp(`${SPANISH_CALLBACK_ACTION}[^.!?;,]{0,60}${SPANISH_UNMARKED_POSTPOSED_ACTOR}${SPANISH_STAFF_ACTOR}\\b`, 'i');
-const SPANISH_EXPLICIT_CALLBACK_SUBJECT_RE = new RegExp(`(?<![a-záéíóúñü])(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\\s+[a-záéíóúñü]+)\\s+(?:(?:le|les|lo|la|los|las|te|nos|se)\\s+)?(?:(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+)?${SPANISH_CALLBACK_ACTION}`, 'i');
+const SPANISH_EXPLICIT_CALLBACK_SUBJECT_RE = new RegExp(`(?<![a-záéíóúñü])(${SPANISH_PREPOSED_SUBJECT})\\s+(?:(?:le|les|lo|la|los|las|te|nos|se)\\s+)?(?:(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+)?${SPANISH_CALLBACK_ACTION}`, 'i');
 const SPANISH_POSTPOSED_CALLBACK_SUBJECT_RE = new RegExp(`${SPANISH_CALLBACK_ACTION}\\s+(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\\s+[a-záéíóúñü]+)`, 'i');
 const SPANISH_LATE_CALLBACK_SUBJECT_RE = new RegExp(`${SPANISH_CALLBACK_ACTION}[^.!?;,]{0,60}${SPANISH_UNMARKED_POSTPOSED_ACTOR}(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\\s+${SPANISH_PERSON_ROLE})\\b`, 'i');
 const SPANISH_FIRST_PERSON_CALLBACK_RE = new RegExp(`(?<![a-záéíóúñü])(?:(?:voy|vamos)\\s+a\\s+${SPANISH_CALLBACK_ACTION}|llam(?:o|amos|aré|aremos)|(?<!en\\s)contacto|contact(?:amos|aré|aremos)|(?:comunic|confirm)(?:o|amos|aré|aremos)|escrib(?:o|imos|iré|iremos)|(?:doy|damos|daré|daremos)(?:le|les)?\\s+seguimiento|(?:me|nos)\\s+(?:pongo|ponemos|pondré|pondremos)\\s+en\\s+contacto)(?![a-záéíóúñü])`, 'i');
@@ -107,6 +109,9 @@ const SPANISH_CALLER_OBJECT_CALLBACK_RE = new RegExp(`\\b(?:le|les|lo|la|los|las
 const SPANISH_IMPERSONAL_CALLBACK_RE = /\b(?:se\s+(?:(?:va(?:n)?\s+a\s+)(?:comunicar|poner)|comunic[a-záéíóúñü]*|pondr[a-záéíóúñü]*)\s+(?:en\s+contacto)?|habr[aá]\s+seguimiento)\b/i;
 const SPANISH_CONFIRM_CALLBACK_RE = /\bconfirm[a-záéíóúñü]*/i;
 const SPANISH_BOOKING_CONFIRM_CONTEXT_RE = /\bconfirm[a-záéíóúñü]*\s+(?:(?:la|el|su)\s+)?(?:cita|visita|solicitud|reserva|fecha|hora|horario|turno)\b|\bconfirm[a-záéíóúñü]*\s+con\s+(?:usted|el\s+cliente)\b/i;
+const SPANISH_EXPLICIT_PERSON_DESTINATION_RE = new RegExp(`\\b(?:(?:a|para|con)\\s+(?:(?:él|ella|ellos|ellas)|(?:(?:el|la|un|una|mi|tu|su|nuestro|nuestra)\\s+${SPANISH_PERSON_DESCRIPTOR}))|al\\s+${SPANISH_PERSON_DESCRIPTOR})\\b`, 'i');
+const SPANISH_NAMED_PERSON_DESTINATION_RE = /\b(?:a|para|con)\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñü]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñü]+)?\b/;
+const SPANISH_CALLER_DESTINATION_RE = /\b(?:(?:a|para|con)\s+(?:ti|usted(?:es)?|vosotr[oa]s?|(?:el|la)\s+cliente)|al\s+cliente)\b/i;
 const SPANISH_ESTIMATE_RE = /\b(?:presupuesto|cotizaci[oó]n|estimado)\b/i;
 const SPANISH_RECEIVE_RE = /(?<![a-záéíóúñü])(?:recib(?:ir[a-záéíóúñü]*|id[oa]s?|ió|ieron|ía(?:s|mos|n)?|e|es|imos|en)|va(?:mos|n)?\s+a\s+recibir)(?![a-záéíóúñü])/i;
 const SPANISH_ESTIMATE_REQUEST_RE = /\b(?:solicitud|pedido|petici[oó]n)\b[^.!?;,]{0,45}\b(?:de|del|para\s+(?:el|un))\s+(?:presupuesto|cotizaci[oó]n|estimado)\b/i;
@@ -122,7 +127,7 @@ const SPANISH_SEND_ACTION = '(?:env[ií]|mand|entreg)[a-záéíóúñü]*';
 const SPANISH_ESTIMATE_NOUN = '(?:presupuesto|estimado|cotizaci[oó]n)';
 const SPANISH_POSTPOSED_SEND_ACTOR = '(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\\s+[a-záéíóúñü]+)';
 const SPANISH_SEND_ACTION_RE = new RegExp(`(?<![a-záéíóúñü])${SPANISH_SEND_ACTION}`, 'i');
-const SPANISH_EXPLICIT_SEND_SUBJECT_RE = new RegExp(`(?<![a-záéíóúñü])(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\\s+[a-záéíóúñü]+)\\s+(?:(?:lo|la|los|las|le|les|te|nos|se)\\s+)?(?:(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+)?${SPANISH_SEND_ACTION}`, 'i');
+const SPANISH_EXPLICIT_SEND_SUBJECT_RE = new RegExp(`(?<![a-záéíóúñü])(${SPANISH_PREPOSED_SUBJECT})\\s+(?:(?:lo|la|los|las|le|les|te|nos|se)\\s+)?(?:(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+)?${SPANISH_SEND_ACTION}`, 'i');
 const SPANISH_POSTPOSED_SEND_SUBJECT_RE = new RegExp(`(?:${SPANISH_SEND_ACTION}\\s+(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|él|el(?=\\s+(?:el|la|un|una|su)\\b)|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\\s+[a-záéíóúñü]+)[^.!?;,]{0,30}\\b${SPANISH_ESTIMATE_NOUN}\\b|${SPANISH_SEND_ACTION}[^.!?;,]{0,80}\\b${SPANISH_ESTIMATE_NOUN}\\b[^.!?;,]{0,40}${SPANISH_UNMARKED_POSTPOSED_ACTOR}${SPANISH_POSTPOSED_SEND_ACTOR}\\b)`, 'i');
 const SPANISH_STAFF_SEND_RE = new RegExp(`(?:${SPANISH_STAFF_ACTOR}\\s+(?:(?:lo|la|los|las|le|les|te|se)\\s+)?(?:(?:va(?:n)?\\s+a)\\s+)?${SPANISH_SEND_ACTION}|${SPANISH_SEND_ACTION}\\s+${SPANISH_STAFF_ACTOR})`, 'i');
 const SPANISH_POSTPOSED_STAFF_SEND_RE = new RegExp(`${SPANISH_SEND_ACTION}[^.!?;,]{0,80}\\b${SPANISH_ESTIMATE_NOUN}\\b[^.!?;,]{0,40}${SPANISH_UNMARKED_POSTPOSED_ACTOR}${SPANISH_STAFF_ACTOR}\\b`, 'i');
@@ -132,8 +137,6 @@ const SPANISH_PASSIVE_SEND_RE = /\b(?:se\s+(?:(?:le|les|te)\s+)?(?:enviar|mandar
 const SPANISH_SHARED_PASSIVE_SEND_RE = new RegExp(`\\b(?:${SPANISH_PAST_AUXILIARY}|ser(?:é|ás|á|emos|éis|án))\\s+${SPANISH_PARTICIPLE}\\b[^.!?;]{0,80}\\by\\s+(?:enviad|mandad|entregad)[oa]s?(?![a-záéíóúñü])`, 'i');
 const SPANISH_PASSIVE_SEND_AGENT_MARKER_RE = /\b(?:enviad|mandad|entregad)[oa]s?\s+por\b/i;
 const SPANISH_STAFF_PASSIVE_SEND_AGENT_RE = new RegExp(`\\bpor\\s+${SPANISH_STAFF_ACTOR}\\b`, 'i');
-const SPANISH_EXPLICIT_SEND_RECIPIENT_RE = new RegExp(`\\b(?:(?:a|para)\\s+(?:Waves|m[ií]|ti|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\\s+${SPANISH_PERSON_ROLE})|al\\s+${SPANISH_PERSON_ROLE})\\b`, 'i');
-const SPANISH_CALLER_SEND_RECIPIENT_RE = /\b(?:(?:a|para)\s+(?:ti|usted(?:es)?|vosotr[oa]s?|(?:el|la)\s+cliente)|al\s+cliente)\b/i;
 const SPANISH_ESTIMATE_ARRIVAL = 'lleg[a-záéíóúñü]*';
 const SPANISH_DELIVERY_PREDICATE_RE = new RegExp(`(?:${SPANISH_SEND_ACTION}|${SPANISH_RECEIVE_RE.source}|${SPANISH_ESTIMATE_ARRIVAL})`, 'gi');
 const SPANISH_ROLE_BOUNDARY_RE = /[.!?;]|\b(?:y|pero|aunque|sino)\b/gi;
@@ -150,21 +153,33 @@ function spanishCoordinatedSubject(beforeClaim) {
   return SPANISH_CALLER_CLAUSE_SUBJECT_RE.test(subject) ? 'caller' : 'other';
 }
 
-function spanishCallbackHasWavesActor(claim, match) {
+function spanishPersonDestinationTargetsCaller(roleEvidence, callerNames = []) {
+  const destinations = [
+    SPANISH_EXPLICIT_PERSON_DESTINATION_RE.exec(roleEvidence)?.[0],
+    SPANISH_NAMED_PERSON_DESTINATION_RE.exec(roleEvidence)?.[0],
+  ].filter(Boolean);
+  return !destinations.length || destinations.every((destination) => SPANISH_CALLER_DESTINATION_RE.test(destination)
+    || callerNames.some((name) => new RegExp(`\\b(?:a|para|con)\\s+${escapeRegexLiteral(name).replace(/\\s+/g, '\\s+')}(?=\\b)`, 'i').test(destination)));
+}
+
+function spanishCallbackHasWavesActor(claim, match, callerNames) {
   const matchText = match[0];
   const beforeClaim = claim.slice(0, match.index);
   const before = beforeClaim.split(SPANISH_PREDICATE_BOUNDARY_RE).at(-1);
   const after = claim.slice(match.index + matchText.length).split(SPANISH_PREDICATE_BOUNDARY_RE)[0];
   const roleEvidence = `${before}${matchText}${after}`;
-  const explicitActor = SPANISH_EXPLICIT_CALLBACK_SUBJECT_RE.test(roleEvidence)
+  const explicitActor = SPANISH_EXPLICIT_CALLBACK_SUBJECT_RE.exec(roleEvidence);
+  const anyExplicitActor = Boolean(explicitActor)
     || SPANISH_POSTPOSED_CALLBACK_SUBJECT_RE.test(roleEvidence) || SPANISH_LATE_CALLBACK_SUBJECT_RE.test(roleEvidence);
-  const staffActor = SPANISH_STAFF_CALLBACK_RE.test(roleEvidence) || SPANISH_LATE_STAFF_CALLBACK_RE.test(roleEvidence);
+  const staffActor = SPANISH_STAFF_CALLBACK_RE.test(roleEvidence) || SPANISH_LATE_STAFF_CALLBACK_RE.test(roleEvidence)
+    || (explicitActor && SPANISH_STAFF_CLAUSE_SUBJECT_RE.test(explicitActor[1]));
   const firstPersonActor = SPANISH_FIRST_PERSON_CALLBACK_RE.test(roleEvidence);
   const implicitWavesActor = SPANISH_CALLER_OBJECT_CALLBACK_RE.test(matchText) || SPANISH_IMPERSONAL_CALLBACK_RE.test(matchText);
   const unrelatedConfirmation = SPANISH_CONFIRM_CALLBACK_RE.test(matchText)
     && !SPANISH_BOOKING_CONFIRM_CONTEXT_RE.test(roleEvidence);
   if (unrelatedConfirmation) return false;
-  if (explicitActor) return staffActor || firstPersonActor;
+  if (!spanishPersonDestinationTargetsCaller(roleEvidence, callerNames)) return false;
+  if (anyExplicitActor) return staffActor || firstPersonActor;
   if (staffActor || firstPersonActor) return true;
   const sharedSubject = spanishCoordinatedSubject(beforeClaim);
   return sharedSubject ? sharedSubject === 'staff' : implicitWavesActor;
@@ -198,19 +213,21 @@ function spanishDeliveryRoleEvidence(claim, match) {
 }
 
 function spanishSendHasWavesActor(roleEvidence, targetText, sharedSubject) {
-  const explicitActor = SPANISH_EXPLICIT_SEND_SUBJECT_RE.test(roleEvidence) || SPANISH_POSTPOSED_SEND_SUBJECT_RE.test(roleEvidence);
-  const staffActor = SPANISH_STAFF_SEND_RE.test(roleEvidence) || SPANISH_POSTPOSED_STAFF_SEND_RE.test(roleEvidence);
+  const explicitActor = SPANISH_EXPLICIT_SEND_SUBJECT_RE.exec(roleEvidence);
+  const anyExplicitActor = Boolean(explicitActor) || SPANISH_POSTPOSED_SEND_SUBJECT_RE.test(roleEvidence);
+  const staffActor = SPANISH_STAFF_SEND_RE.test(roleEvidence) || SPANISH_POSTPOSED_STAFF_SEND_RE.test(roleEvidence)
+    || (explicitActor && SPANISH_STAFF_CLAUSE_SUBJECT_RE.test(explicitActor[1]));
   const firstPersonActor = SPANISH_FIRST_PERSON_SEND_RE.test(roleEvidence);
   const passive = SPANISH_PASSIVE_SEND_RE.test(roleEvidence) || SPANISH_SHARED_PASSIVE_SEND_RE.test(roleEvidence);
   if (passive && SPANISH_PASSIVE_SEND_AGENT_MARKER_RE.test(roleEvidence)) return SPANISH_STAFF_PASSIVE_SEND_AGENT_RE.test(roleEvidence);
   if (passive) return true;
-  if (explicitActor) return staffActor || firstPersonActor;
+  if (anyExplicitActor) return staffActor || firstPersonActor;
   if (staffActor || firstPersonActor) return true;
   if (sharedSubject) return sharedSubject === 'staff';
   return SPANISH_CALLER_OBJECT_SEND_RE.test(roleEvidence) || !SPANISH_SEND_ACTION_RE.test(targetText);
 }
 
-function spanishEstimateTargetsCaller(roleEvidence, matchText, sharedSubject) {
+function spanishEstimateTargetsCaller(roleEvidence, matchText, sharedSubject, callerNames) {
   const receivePredicate = SPANISH_RECEIVE_RE.test(matchText) || SPANISH_FIRST_PERSON_RECEIVE_RE.test(roleEvidence);
   if (receivePredicate) {
     if (SPANISH_ESTIMATE_REQUEST_RE.test(roleEvidence) || SPANISH_FIRST_PERSON_RECEIVE_RE.test(roleEvidence)) return false;
@@ -221,18 +238,17 @@ function spanishEstimateTargetsCaller(roleEvidence, matchText, sharedSubject) {
     return sharedSubject ? sharedSubject === 'caller' : SPANISH_IMPLICIT_CALLER_RECEIVER_RE.test(matchText);
   }
   if (!spanishSendHasWavesActor(roleEvidence, matchText, sharedSubject)) return false;
-  return !SPANISH_SEND_ACTION_RE.test(matchText) || !SPANISH_EXPLICIT_SEND_RECIPIENT_RE.test(roleEvidence)
-    || SPANISH_CALLER_SEND_RECIPIENT_RE.test(roleEvidence);
+  return !SPANISH_SEND_ACTION_RE.test(matchText) || spanishPersonDestinationTargetsCaller(roleEvidence, callerNames);
 }
 
-function spanishMatchHasValidRoles(claim, match, prospective) {
+function spanishMatchHasValidRoles(claim, match, prospective, callerNames) {
   const matchText = match[0];
   if (prospective && SPANISH_CALLBACK_TARGET_RE.test(matchText)) {
-    if (!spanishCallbackHasWavesActor(claim, match)) return false;
+    if (!spanishCallbackHasWavesActor(claim, match, callerNames)) return false;
   }
   if (prospective && SPANISH_ESTIMATE_RE.test(matchText)) {
     const delivery = spanishDeliveryRoleEvidence(claim, match);
-    if (!delivery.found || !spanishEstimateTargetsCaller(delivery.roleEvidence, delivery.targetText, delivery.sharedSubject)) return false;
+    if (!delivery.found || !spanishEstimateTargetsCaller(delivery.roleEvidence, delivery.targetText, delivery.sharedSubject, callerNames)) return false;
   }
   return !SPANISH_CLOCK_RANGE_RE.test(matchText) || SPANISH_VISIT_RANGE_CONTEXT_RE.test(claim);
 }
@@ -266,7 +282,7 @@ function spanishStatementSegments(text) {
 }
 
 /** A regex hit wholly satisfied by one affirmative clause. */
-function assertedSpokenMatch(text, re, { prospective = false } = {}) {
+function assertedSpokenMatch(text, re, { prospective = false, callerNames } = {}) {
   const flags = new Set(re.flags);
   flags.add('g');
   const global = new RegExp(re.source, [...flags].join(''));
@@ -324,7 +340,7 @@ function assertedSpokenMatch(text, re, { prospective = false } = {}) {
       // when an earlier coordinated predicate used another tense.
       const prospectiveAssertion = !prospective || prospectiveAt > completedAt;
       const assertedPolarity = !denied && !uncertain;
-      if (assertedPolarity && prospectiveAssertion && spanishMatchHasValidRoles(claim, match, prospective)) return match;
+      if (assertedPolarity && prospectiveAssertion && spanishMatchHasValidRoles(claim, match, prospective, callerNames)) return match;
       if (!assertedPolarity) break;
       // Lookahead-only fact patterns describe the whole claim, so retrying
       // them at every character cannot uncover a different predicate.
@@ -963,9 +979,13 @@ function no_visit_time(value, record, { utterances }) {
 const ESTIMATE_NOUN_ES_RE = /\b(?:presupuesto|cotizaci[oó]n|estimado)\b/i;
 const ESTIMATE_DELIVERY_ES_SOURCE = '(?:envi\\w*|mand\\w*|recib\\w*|llegar\\w*|entreg\\w*|hac\\w*\\s+llegar)';
 const ESTIMATE_DELIVERY_DATE_SOURCE = `(?:el\\s+pr[oó]ximo\\s+)?(?:${WEEKDAYS})|(?:esta|la\\s+pr[oó]xima)\\s+semana|la\\s+semana\\s+(?:que\\s+viene|entrante)|(?:el\\s+)?(?:\\d{1,2}|${DAY_WORDS_ES})\\s+de\\s+(?:${Object.values(MONTH_ES).join('|')})`;
+const ESTIMATE_DELIVERY_CLOCK_SOURCE = '(?:(?:a|para)\\s+la\\s+una|(?:a|para|antes\\s+de)\\s+las\\s+(?:\\d{1,2}(?::\\d{2})?|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce))(?:\\s+de\\s+la\\s+(?:mañana|tarde|noche))?';
+const ESTIMATE_DELIVERY_CLAIM_SOURCE = `(?:${ESTIMATE_DELIVERY_ES_SOURCE}[^.!?;]{0,100}${ESTIMATE_NOUN_ES_RE.source}|${ESTIMATE_NOUN_ES_RE.source}[^.!?;]{0,100}${ESTIMATE_DELIVERY_ES_SOURCE})`;
 const ESTIMATE_DELIVERY_DATE_RE = new RegExp(`\\b(?:${ESTIMATE_DELIVERY_DATE_SOURCE})\\b`, 'i');
+const ESTIMATE_DELIVERY_CLOCK_RE = new RegExp(`\\b(?:${ESTIMATE_DELIVERY_CLOCK_SOURCE})\\b`, 'i');
 const ESTIMATE_REQUEST_DATE_RE = new RegExp(`\\b(?:que\\s+)?(?:solicit|pid)\\w*\\b(?:(?!\\b${ESTIMATE_DELIVERY_ES_SOURCE}\\b)[^.!?;]){0,40}?\\b(?:${ESTIMATE_DELIVERY_DATE_SOURCE})\\b`, 'gi');
 const ASSERTED_ESTIMATE_DELIVERY_DATE_RE = new RegExp(`(?=[\\s\\S]*${ESTIMATE_NOUN_ES_RE.source})(?=[\\s\\S]*${ESTIMATE_DELIVERY_ES_SOURCE})(?=[\\s\\S]*(?:${ESTIMATE_DELIVERY_DATE_SOURCE}))`, 'i');
+const ASSERTED_ESTIMATE_DELIVERY_CLOCK_RE = new RegExp(`(?:${ESTIMATE_DELIVERY_CLAIM_SOURCE}[^.!?;]{0,80}${ESTIMATE_DELIVERY_CLOCK_SOURCE}|${ESTIMATE_DELIVERY_CLOCK_SOURCE}[^.!?;]{0,80}${ESTIMATE_DELIVERY_CLAIM_SOURCE})`, 'i');
 
 function no_spanish_estimate_delivery_date(value, record, { utterances }) {
   for (const utterance of utterances) {
@@ -976,7 +996,14 @@ function no_spanish_estimate_delivery_date(value, record, { utterances }) {
       if (date) return ['fail', `estimate delivery tied to "${date[0]}": "${clip(sentence, 160)}"`];
     }
   }
-  return ['pass', 'no calendar date promised for estimate delivery'];
+  for (const utterance of utterances) {
+    for (const sentence of String(utterance.text || '').split(SENTENCE_SPLIT_RE)) {
+      if (!assertedSpokenMatch(sentence, ASSERTED_ESTIMATE_DELIVERY_CLOCK_RE)) continue;
+      const clock = ESTIMATE_DELIVERY_CLOCK_RE.exec(sentence);
+      if (clock) return ['fail', `estimate delivery tied to "${clock[0]}": "${clip(sentence, 160)}"`];
+    }
+  }
+  return ['pass', 'no date or clock time promised for estimate delivery'];
 }
 
 // ── Another account's details ──────────────────────────────────────────────
