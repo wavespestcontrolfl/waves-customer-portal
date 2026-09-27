@@ -448,8 +448,11 @@ async function runSweep({ now = new Date() } = {}) {
           // preference gate applies: an email-preferring customer gets the
           // email only, never both (Codex r4) — but only when the email leg
           // is genuinely available under the billing prefs (Codex r10) AND
-          // the collections policy permits the email channel.
-          hasEmailLeg: emailLegAvailable && emailPolicyPermitted,
+          // the collections policy permits the email channel. An email that
+          // provably never left and is not being waited for (the text going
+          // alone, above) is no email leg: the text is the fallback, or an
+          // email-preferring customer would get neither.
+          hasEmailLeg: emailLegAvailable && emailPolicyPermitted && !emailRetry,
           metadata: { scheduled_service_id: visit.id, amount },
         });
         smsDelivered = !result.blocked && result.sent !== false;

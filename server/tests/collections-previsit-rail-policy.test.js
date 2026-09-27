@@ -222,6 +222,7 @@ test('a retry the collections window would still refuse is not waited for: the t
   expect(ContactLedger.markSendFailed).toHaveBeenCalledTimes(2);
   expect(result).toMatchObject({ sent: 1, skipped: 0 });
   expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ hasEmailLeg: false }));
   expect(releaseChain.update).not.toHaveBeenCalled();
 });
 
@@ -235,6 +236,25 @@ test('on the visit\'s last sweep day a retryable email failure lets the text go 
   expect(result).toMatchObject({ sent: 1, skipped: 0 });
   expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   expect(releaseChain.update).not.toHaveBeenCalled();
+  // The email never left, so the text goes out as the fallback, not as the
+  // companion of an email leg: the real consent gate then lets it through
+  // for a customer whose billing preference is email-only.
+  const [textInput] = sendCustomerMessage.mock.calls[0];
+  expect(textInput.hasEmailLeg).toBe(false);
+  const { resolvePolicy } = require('../services/messaging/policy');
+  const { checkConsentForPurpose } = require('../services/messaging/validators/consent');
+  const consent = await checkConsentForPurpose(textInput, resolvePolicy('customer', 'billing'), {
+    prefs: { sms_enabled: true, billing_channel: 'email', billing_email: 'ap@example.com' },
+    customer: { id: 'cust-1', phone: VISIT.phone, email: 'taylor@example.com' },
+    lookupFailed: false,
+  });
+  expect(consent.ok).toBe(true);
+  // Declared as an email leg, the same text would have been refused.
+  await expect(checkConsentForPurpose({ ...textInput, hasEmailLeg: true }, resolvePolicy('customer', 'billing'), {
+    prefs: { sms_enabled: true, billing_channel: 'email', billing_email: 'ap@example.com' },
+    customer: { id: 'cust-1', phone: VISIT.phone, email: 'taylor@example.com' },
+    lookupFailed: false,
+  })).resolves.toMatchObject({ ok: false, code: 'CHANNEL_EMAIL_ONLY' });
 });
 
 test('a final email refusal still sends the text and keeps the claim', async () => {
