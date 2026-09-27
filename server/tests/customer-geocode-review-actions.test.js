@@ -149,6 +149,12 @@ test.each(['outside_service_area', 'revoke'])('%s broadcasts cleared visits afte
 
   await resolveCustomerGeocodeReview(customer.id, inputForAction, 'actor-1', actionConn);
 
+  if (action === 'outside_service_area') {
+    expect(visits.clearMatchingPins).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), expect.anything(), expect.anything(), expect.anything(),
+      { clearMirrors: true },
+    );
+  }
   expect(dispatch.emitDispatchJobUpdate).toHaveBeenCalledWith(expect.objectContaining({
     jobId: 'visit-3', actorId: 'actor-1',
   }));
