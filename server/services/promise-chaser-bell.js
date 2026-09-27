@@ -40,7 +40,21 @@
  * it, so the EXISTING call-alert recovery sweep (scheduler.js's every-2-
  * minutes tick, the same one missed-call-bell / repeat-caller-bell use)
  * retries it — no new sweep. A stale lease (LEASE_MS) is reclaimable, same
- * idiom as those two bells' own claim.
+ * idiom as those two bells' own claim. A pre-connect screen still 'gated'
+ * past SCREEN_ABANDON_MS is settled 'skipped' rather than left pending
+ * forever, so an abandoned Gather never occupies every future sweep batch.
+ *
+ * Cross-call coordination (promiseDeliveryState): "once per promise per
+ * day, never re-buzz a device already reached" is a PROMISE-scoped fact,
+ * not a per-call one — a lead who hangs up and calls right back opens a
+ * SEPARATE call_log row that could otherwise dispatch a second, unaware
+ * attempt at the exact promise the first call already (partially)
+ * delivered. stampTarget stamps which promise a still-pending claim is
+ * targeting; every other row targeting the same promise (rung today, or
+ * a fresh lease actively mid-dispatch right now) is checked before this
+ * call ever dispatches, and any partial-push history those rows recorded
+ * is merged into this dispatch's own deliveredSubscriptionIds exclusion
+ * list.
  *
  * Gated by GATE_PROMISE_CHASER_BELL (needs GATE_CALL_COMMITMENTS too — no
  * commitment rows exist without it). Gate off: no claim is ever written and
@@ -71,6 +85,12 @@ const LEASE_MS = 10 * 60 * 1000;
 // between claim and settlement) — bounded, like every other call-alert
 // sweep's recency scope; past this, a stuck claim just ages out unretried.
 const SWEEP_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+// A pre-connect challenge normally resolves in seconds (a Gather timeout
+// plus its own retries); past this, a caller who hung up mid-Gather with
+// neither ?screened=1 nor ?screenfail=1 ever arriving is abandoned, not
+// still in progress. Deliberately well past any real Gather's own timeout
+// so a slow-but-genuine challenge is never mistaken for abandoned.
+const SCREEN_ABANDON_MS = 30 * 60 * 1000;
 
 function parseMeta(meta) {
   if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
@@ -142,10 +162,12 @@ function pendingClaimFragment(fromPhone) {
 
 // Settle a claim to a terminal outcome, fenced on the token: a stale owner
 // waking up late cannot overwrite what a newer attempt already decided.
-// `commitmentId` (stamped on a 'rung' settle) is what alreadyRungToday
-// checks — the cross-call "once per promise per day" decision, made here
-// rather than through notifyAdmin's own dedupe, so a retry of THIS call's
-// own failed push is never mistaken for a duplicate.
+// `commitmentId` (stamped here on a 'rung'/'skipped' settle, and by
+// stampTarget on a still-pending claim before dispatch) is what
+// promiseDeliveryState checks — the cross-call "once per promise per day,
+// never re-buzz a device already reached" decision, made here rather than
+// through notifyAdmin's own dedupe, so a retry of THIS call's own failed
+// push is never mistaken for a duplicate.
 async function settle(callId, token, status, reason = null, commitmentId = null) {
   await db('call_log').where({ id: callId })
     .whereRaw("metadata->'promise_chaser'->>'claimed_at' = ?", [token])
@@ -172,20 +194,60 @@ async function recordProgress(callId, token, extra) {
     });
 }
 
-// Has ANY call already rung for this exact promise today (ET)? The
-// cross-call half of "once per promise per day" — a genuinely separate
-// call on the same open promise must not re-buzz, but this call's OWN
-// retry of its own not-yet-rung attempt must never be blocked by it (it
-// checks OTHER calls' settled outcomes, never this one's still-pending
-// claim). Bounded to 48h so it stays a bounded index scan, not a table scan.
-async function alreadyRungToday(promiseId, now) {
+// Stamps which promise THIS pending claim is targeting, the moment
+// selectPromiseToRing picks one — before any cross-call check runs, so a
+// concurrent call's OWN check can see us. Merged into the sub-object
+// (jsonb_set on its own path), same as claimAttempt's own merge: a
+// wholesale replace here would re-wipe deliveredSubscriptionIds a PRIOR
+// attempt on this same row already persisted, the exact bug claimAttempt
+// itself was just fixed for.
+async function stampTarget(callId, token, promiseId) {
+  await db('call_log').where({ id: callId })
+    .whereRaw("metadata->'promise_chaser'->>'claimed_at' = ?", [token])
+    .update({
+      metadata: db.raw(
+        "jsonb_set(COALESCE(metadata,'{}'::jsonb), '{promise_chaser}', COALESCE(metadata->'promise_chaser', '{}'::jsonb) || ?::jsonb, true)",
+        [JSON.stringify({ commitmentId: promiseId })],
+      ),
+    });
+}
+
+// The cross-call half of "once per promise per day, never re-buzz a
+// device already reached": every OTHER call_log row (never this one —
+// this call's own retry of its own not-yet-rung attempt must never be
+// blocked by it) currently targeting this SAME promise (stampTarget's own
+// commitmentId, checked on both terminal AND still-pending claims, unlike
+// the old rung-only check this replaces). Reports three things at once:
+// alreadyRung — a genuinely separate call settled 'rung' for it today
+//   (ET); this call must settle 'skipped' rather than ring again.
+// activeElsewhere — another call is holding a FRESH lease on this exact
+//   promise RIGHT NOW (mid-dispatch); this call defers rather than racing
+//   it — the sweep retries on its own normal LEASE_MS cadence, by which
+//   point the other attempt has settled or its own lease has gone stale.
+// deliveredElsewhere — the union of deliveredSubscriptionIds any OTHER
+//   call's own partial push already persisted for this promise — merged
+//   into THIS call's own exclusion list before it ever dispatches, so a
+//   second call for the same promise (a lead who hangs up and immediately
+//   calls right back) never re-buzzes a device the first call already
+//   reached, even though that history lives on a different row.
+// Bounded to 48h so it stays a bounded index scan, not a table scan.
+async function promiseDeliveryState(promiseId, callId, now) {
   const rows = await db('call_log')
+    .where('id', '<>', callId)
     .where('created_at', '>', new Date(now.getTime() - 48 * 60 * 60 * 1000))
-    .whereRaw("metadata->'promise_chaser'->>'status' = 'rung'")
     .whereRaw("metadata->'promise_chaser'->>'commitmentId' = ?", [String(promiseId)])
-    .select(db.raw("metadata->'promise_chaser'->>'at' as rung_at"));
+    .select(db.raw("metadata->'promise_chaser' as pc"));
   const today = etDateString(now);
-  return rows.some((r) => r.rung_at && etDateString(new Date(r.rung_at)) === today);
+  const delivered = new Set();
+  let alreadyRung = false;
+  let activeElsewhere = false;
+  for (const { pc } of rows) {
+    if (!pc || typeof pc !== 'object') continue;
+    if (pc.status === 'rung' && pc.at && etDateString(new Date(pc.at)) === today) alreadyRung = true;
+    if (pc.status === 'pending' && pc.claimed_at && Date.now() - new Date(pc.claimed_at).getTime() < LEASE_MS) activeElsewhere = true;
+    if (Array.isArray(pc.deliveredSubscriptionIds)) pc.deliveredSubscriptionIds.forEach((id) => delivered.add(id));
+  }
+  return { alreadyRung, activeElsewhere, deliveredElsewhere: [...delivered] };
 }
 
 // Is there an earlier, unbooked call on this same number, inside the
@@ -428,7 +490,20 @@ async function ringPromiseChaserIfNeeded(callSid, { viaSweep = false } = {}) {
     // resolves could ring "calling in now" about someone not proven human
     // yet. Soft skip: no claim taken, nothing settled — the caller's own
     // screen resolution (or a later sweep tick, once it has) picks this up.
-    if (parseMeta(call.metadata).preconnect_screen === 'gated') return false;
+    // Past SCREEN_ABANDON_MS, though, "still gated" stops being a fresh
+    // in-progress challenge and starts being a caller who hung up mid-
+    // Gather with NEITHER ?screened=1 nor ?screenfail=1 ever arriving: a
+    // soft skip forever would leave the row 'pending' at every future
+    // sweep tick, up to LIMIT of them occupying a batch that could
+    // otherwise recover a genuinely actionable claim (Codex #5019 r10).
+    // Take the claim and settle it terminally so it converges instead.
+    if (parseMeta(call.metadata).preconnect_screen === 'gated') {
+      if (Date.now() - new Date(call.created_at).getTime() < SCREEN_ABANDON_MS) return false;
+      const abandonToken = await claimAttempt(call.id);
+      if (!abandonToken) return false;
+      await settle(call.id, abandonToken, 'skipped', 'screen_abandoned');
+      return false;
+    }
 
     const token = await claimAttempt(call.id);
     if (!token) return false; // a fresh attempt already owns this call right now
@@ -450,16 +525,29 @@ async function ringPromiseChaserIfNeeded(callSid, { viaSweep = false } = {}) {
     if (selection.outcome === 'skip') { await settle(call.id, token, 'skipped', selection.reason); return false; }
     const { promise, what, when } = selection;
 
-    // Cross-call half of "once per promise per day": a genuinely SEPARATE
-    // call for the same open promise, already rung today by another call,
-    // must not re-buzz. This never blocks THIS call's own retry of its own
-    // not-yet-rung attempt (it only sees OTHER calls' settled 'rung' rows).
-    if (await alreadyRungToday(promise.id, now)) {
+    // Stamp which promise this claim now targets BEFORE the cross-call
+    // check below, so a concurrent call checking the SAME promise can see
+    // us. Cross-call half of "once per promise per day, never re-buzz a
+    // device already reached": a genuinely SEPARATE call for the same
+    // open promise, already rung today by another call, must not re-buzz;
+    // one actively mid-dispatch for it RIGHT NOW is deferred rather than
+    // raced; either way, a PRIOR call's own partial-push history is
+    // merged into this dispatch's exclusion list. Never blocks THIS call's
+    // own retry of its own not-yet-rung attempt (it only ever looks at
+    // OTHER rows).
+    await stampTarget(call.id, token, promise.id);
+    const cross = await promiseDeliveryState(promise.id, call.id, now);
+    if (cross.alreadyRung) {
       await settle(call.id, token, 'skipped', 'already_rung_today', promise.id);
       return false;
     }
+    if (cross.activeElsewhere) return false; // another call owns this promise right now — defer, the sweep retries
 
-    const result = await dispatchPromiseNotification(call, promise, what, when, { viaSweep, existing });
+    const existingWithCrossDelivered = {
+      ...existing,
+      deliveredSubscriptionIds: [...new Set([...(existing?.deliveredSubscriptionIds || []), ...cross.deliveredElsewhere])],
+    };
+    const result = await dispatchPromiseNotification(call, promise, what, when, { viaSweep, existing: existingWithCrossDelivered });
     if (result.pending) { await recordProgress(call.id, token, result.pending); return false; }
     await settle(call.id, token, result.settle.status, result.settle.reason, result.settle.commitmentId);
     return result.delivered;
@@ -526,6 +614,17 @@ async function markScreenFailed(callSid) {
  * suspenders only now, since none of those paths can reach pendingClaim
  * Fragment in the first place, but cheap insurance against a future writer
  * of this same claim shape.
+ *
+ * Also excludes, BEFORE the LIMIT, two classes of 'pending' row that
+ * ringPromiseChaserIfNeeded would immediately turn back on anyway: a row
+ * whose lease is still FRESH (another attempt owns it right now — a live
+ * request or an overlapping sweep tick) and a row still mid an outstanding
+ * pre-connect screen that has not yet had time to abandon. Without this, a
+ * batch of either can occupy the whole LIMIT and starve genuinely
+ * recoverable claims behind them (Codex #5019 r10) — an abandoned screen
+ * past SCREEN_ABANDON_MS is deliberately left IN this query so
+ * ringPromiseChaserIfNeeded gets a chance to settle it terminally and it
+ * stops recurring in every future batch.
  */
 async function sweepPromiseChasers({ limit = 50 } = {}) {
   if (!isEnabled('promiseChaserBell') || !isEnabled('callCommitments')) return 0;
@@ -537,6 +636,8 @@ async function sweepPromiseChasers({ limit = 50 } = {}) {
     .whereRaw(`LENGTH(${PHONE_KEY_SQL}) BETWEEN 10 AND 15`)
     .where('created_at', '>', since)
     .whereRaw("metadata->'promise_chaser'->>'status' = 'pending'")
+    .whereRaw("(metadata->'promise_chaser'->>'claimed_at' IS NULL OR (metadata->'promise_chaser'->>'claimed_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
+    .whereRaw("(COALESCE(metadata->>'preconnect_screen', '') <> 'gated' OR created_at < ?)", [new Date(Date.now() - SCREEN_ABANDON_MS)])
     .orderBy('created_at', 'asc')
     .limit(limit)
     .select('twilio_call_sid');

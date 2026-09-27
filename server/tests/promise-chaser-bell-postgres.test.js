@@ -207,7 +207,7 @@ const OUR_NUMBER = '+19415550100';
 
     expect(await ringPromiseChaserIfNeeded(backA.twilio_call_sid)).toBe(true);
     // A genuinely separate call for the SAME promise, same ET day, must not
-    // re-buzz — caught by this call's own pre-check (alreadyRungToday),
+    // re-buzz — caught by this call's own pre-check (promiseDeliveryState),
     // never by notifyAdmin's dedupe (which would let a retry's push through).
     expect(await ringPromiseChaserIfNeeded(backB.twilio_call_sid)).toBe(false);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
@@ -698,5 +698,108 @@ const OUR_NUMBER = '+19415550100';
     expect(triggerNotification).toHaveBeenCalledTimes(1);
     const settled = await mockConn('call_log').where({ id: back.id }).first('metadata');
     expect(settled.metadata.promise_chaser).toMatchObject({ status: 'rung', commitmentId: commitment.id });
+  });
+
+  test('a pre-connect screen abandoned mid-Gather (neither postback ever arrives) settles skipped instead of blocking every future sweep batch', async () => {
+    // Past SCREEN_ABANDON_MS — a real Gather challenge resolves in seconds;
+    // this one never got ?screened=1 or ?screenfail=1 at all.
+    const back = callRow(45, { metadata: { promise_chaser: { status: 'pending', claimed_at: null }, preconnect_screen: 'gated' } });
+    await mockConn('call_log').insert(back);
+
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+    expect(triggerNotification).not.toHaveBeenCalled();
+    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(row.metadata.promise_chaser).toMatchObject({ status: 'skipped', reason: 'screen_abandoned' });
+  });
+
+  test('the sweep itself settles an abandoned screen (rather than a soft skip forever) so it stops recurring in every batch', async () => {
+    const back = callRow(45, { metadata: { promise_chaser: { status: 'pending', claimed_at: null }, preconnect_screen: 'gated' } });
+    await mockConn('call_log').insert(back);
+
+    expect(await sweepPromiseChasers()).toBe(0); // settled skipped, never "rings"
+    expect(triggerNotification).not.toHaveBeenCalled();
+    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(row.metadata.promise_chaser).toMatchObject({ status: 'skipped', reason: 'screen_abandoned' });
+  });
+
+  test('a freshly-leased claim never occupies a sweep batch slot a genuinely recoverable claim could use', async () => {
+    // Older than `recoverable` below — without excluding it BEFORE the
+    // LIMIT, it alone would fill limit:1 and starve the recoverable claim.
+    const activelyOwned = callRow(10, {
+      metadata: { promise_chaser: { status: 'pending', claimed_at: new Date(now - 5000).toISOString() } },
+    });
+    const earlier = callRow(241);
+    const commitment = commitmentRow(earlier.id);
+    const recoverable = callRow(5, { metadata: { promise_chaser: { status: 'pending', claimed_at: null } } });
+    await mockConn('call_log').insert([activelyOwned, earlier, recoverable]);
+    await mockConn('call_commitments').insert(commitment);
+
+    expect(await sweepPromiseChasers({ limit: 1 })).toBe(1);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    const recoveredRow = await mockConn('call_log').where({ id: recoverable.id }).first('metadata');
+    expect(recoveredRow.metadata.promise_chaser).toMatchObject({ status: 'rung' });
+    const stillOwnedRow = await mockConn('call_log').where({ id: activelyOwned.id }).first('metadata');
+    // Untouched — its lease is still fresh; excluded before LIMIT, never
+    // even attempted this tick.
+    expect(stillOwnedRow.metadata.promise_chaser).toMatchObject({
+      status: 'pending', claimed_at: activelyOwned.metadata.promise_chaser.claimed_at,
+    });
+  });
+
+  test('a call for a promise another call is actively dispatching right now defers rather than racing it', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    // A genuinely SEPARATE call (the lead hung up and called right back)
+    // already owns a fresh lease targeting this exact promise.
+    const activelyDispatching = callRow(1, {
+      metadata: { promise_chaser: { status: 'pending', claimed_at: new Date(now - 5000).toISOString(), commitmentId: commitment.id } },
+    });
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, activelyDispatching, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+    expect(triggerNotification).not.toHaveBeenCalled();
+
+    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    // Deferred, not settled — its OWN claim stays pending at the normal
+    // LEASE_MS retry cadence, by which point the other attempt has settled.
+    expect(row.metadata.promise_chaser).toMatchObject({ status: 'pending', commitmentId: commitment.id });
+
+    // The other call's own claim is untouched — this call never wrote to it.
+    const otherRow = await mockConn('call_log').where({ id: activelyDispatching.id }).first('metadata');
+    expect(otherRow.metadata.promise_chaser.claimed_at).toBe(activelyDispatching.metadata.promise_chaser.claimed_at);
+  });
+
+  test("a second call for the same promise inherits the first call's partial-push history and never re-buzzes those devices", async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    // A prior attempt (a genuinely separate call) already buzzed one
+    // device and left its own claim pending — its lease is stale (not
+    // "active"), but its delivery history is still the live cross-call fact.
+    const priorAttempt = callRow(20, {
+      metadata: {
+        promise_chaser: {
+          status: 'pending',
+          claimed_at: new Date(now - 20 * 60000).toISOString(),
+          commitmentId: commitment.id,
+          deliveredSubscriptionIds: ['sub-from-first-call'],
+        },
+      },
+    });
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, priorAttempt, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    triggerNotification.mockResolvedValueOnce({
+      bellWritten: true,
+      push: { sent: 1, failed: 0, deliveredSubscriptionIds: ['sub-from-first-call', 'sub-new'] },
+    });
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(true);
+    const [, , opts] = triggerNotification.mock.calls[0];
+    expect(opts.deliveredSubscriptionIds).toEqual(['sub-from-first-call']);
+
+    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(row.metadata.promise_chaser).toMatchObject({ status: 'rung', commitmentId: commitment.id });
   });
 });
