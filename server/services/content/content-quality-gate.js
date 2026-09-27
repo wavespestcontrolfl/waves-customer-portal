@@ -146,6 +146,12 @@ const PAGE_TYPE_CHECKS = {
     // soft, a refresh that guts >20% of prior content or has no prior
     // version to compare would still pass on common points alone.
     { name: 'improvement_over_prior', weight: 10, isHard: true, evaluate: checkImprovementOverPrior },
+    // Blog refreshes use this bundle too. These remain weight-zero signals;
+    // nonBlogTarget() makes them no-ops for ordinary service/city pages.
+    { name: 'citability_named_sources', weight: 0, evaluate: checkCitabilityNamedSources },
+    { name: 'citability_concrete_specifics', weight: 0, evaluate: checkCitabilityConcreteSpecifics },
+    { name: 'citability_comparison', weight: 0, evaluate: checkCitabilityComparison },
+    { name: 'citability_how_to_choose', weight: 0, evaluate: checkCitabilityHowToChoose },
   ],
   'supporting-blog': [
     // Hard: hub links are the point of a supporting blog (hub-and-spoke
@@ -1102,7 +1108,7 @@ function draftPostType(draft) {
 // ComparisonTable, so neither may count toward this nudge.
 // The county prefix is REQUIRED: a bare "Mosquito Control" is our own
 // service name and must not count as an external authority (fallback P2).
-const NAMED_AUTHORITY = String.raw`(?:UF\s*\/\s*IFAS|IFAS|University of Florida|USDA|NOAA|National Weather Service|(?:[A-Z][\w&.]+ )+(?:State )?University Extension|Cooperative Extension|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|Florida Statutes?|[A-Z][a-z]+ County Mosquito (?:Control|Management)|Mosquito Control District)`;
+const NAMED_AUTHORITY = String.raw`(?:UF\s*\/\s*IFAS|IFAS|University of Florida|USDA|NOAA|National Weather Service|Cooperative Extension|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|Florida Statutes?|[A-Z][a-z]+ County Mosquito (?:Control|Management)|Mosquito Control District)`;
 // Bare mentions are NOT attribution (Codex P2, 2026-09-26): "an
 // EPA-registered product" names EPA without citing it for any claim. A named
 // authority counts only in a citation frame — led by an attribution phrase,
@@ -1165,11 +1171,31 @@ const OWN_COMPANY_RE = /^(?:the\s+)?Waves\b/i;
 // the whole phrase look proper ("Leading Experts", "Trusted Research").
 const GENERIC_SOURCE_HEAD_RE = /\b(?:authorities|authority|experts?|officials?|professionals?|research|researchers?|scientists?|specialists?|studies|study)\s*$/i;
 const SPECIFIC_SOURCE_ORG_RE = /\b(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program)\b/i;
+const GENERIC_ORG_NAME_TOKEN_RE = /^(?:local|county|state|federal|national|regional|city|municipal|government|public|health|pest|control|industry|professional|professionals|management|community|trusted|leading|independent|official|recognized|respected|expert|research|science|scientific)$/i;
 const CREDENTIALED_PERSON_RE = /^(?:Dr|Prof|Professor)\.?\s+[A-Z][\w.'’-]+(?:\s+[A-Z][\w.'’-]+)+$/;
 const NAMED_PUBLICATION_RE = /^(?:Nature|Science|Consumer Reports|Scientific American|Journal of(?:\s+[A-Z][\w&.'’-]*){1,6}|(?:[A-Z][\w&.'’-]*\s+){0,5}(?:Journal|Review|Times|Tribune|Post|Herald|Magazine))$/;
 
 function genericAttributedSource(source) {
   return GENERIC_SOURCE_HEAD_RE.test(String(source || '').trim());
+}
+
+function hasSpecificOrganizationName(source) {
+  const words = String(source || '').trim().replace(/^the\s+/i, '').split(/\s+/)
+    .map((word) => word.replace(/^[^\w&]+|[^\w&]+$/g, ''))
+    .filter(Boolean);
+  const head = words.findIndex((word) => SPECIFIC_SOURCE_ORG_RE.test(word));
+  if (head < 0) return false;
+  const identifying = words.filter((word, index) => index !== head
+    && !SPECIFIC_SOURCE_ORG_RE.test(word)
+    && !/^(?:of|for|and|&)$/i.test(word)
+    && !GENERIC_ORG_NAME_TOKEN_RE.test(word));
+  // Universities, extension offices, services, and laboratories commonly
+  // have one distinctive name token (Cornell University, University of
+  // Miami, Florida Forest Service). Looser heads such as Program and
+  // Association need two, so locality-shaped filler like "Sarasota County
+  // Program" does not become evidence merely through capitalization.
+  const distinctiveHead = /^(?:University|Extension|Service|Laboratory)$/i.test(words[head]);
+  return identifying.length >= (distinctiveHead ? 1 : 2);
 }
 
 function hasAttributedSource(body) {
@@ -1178,12 +1204,13 @@ function hasAttributedSource(body) {
     const withoutArticle = source.replace(/^the\s+/i, '');
     if (!OWN_COMPANY_RE.test(source)
       && !genericAttributedSource(source)
-      && (SPECIFIC_SOURCE_ORG_RE.test(source) || CREDENTIALED_PERSON_RE.test(source)
+      && (hasSpecificOrganizationName(source) || CREDENTIALED_PERSON_RE.test(source)
         || NAMED_PUBLICATION_RE.test(withoutArticle))) return true;
   }
   for (const m of String(body || '').matchAll(DIRECT_INSTITUTION_SOURCE_RE)) {
     const source = m[1].trim();
-    if (!OWN_COMPANY_RE.test(source) && !genericAttributedSource(source)) return true;
+    if (!OWN_COMPANY_RE.test(source) && !genericAttributedSource(source)
+      && hasSpecificOrganizationName(source)) return true;
   }
   return false;
 }
@@ -1300,11 +1327,16 @@ function howToChooseSectionCriteria(body) {
       const m = lines[j].match(/^(\s*)[-*+]\s+(\S.*)$/);
       if (!m) continue;
       const indent = m[1].replace(/\t/g, '    ').length;
-      if (topIndent === null || indent < topIndent) { topIndent = indent; items = 0; }
+      // CommonMark permits up to three cosmetic leading spaces before a
+      // top-level marker. Lowering that baseline does not discard criteria
+      // already counted; deeper subsequent markers are still nested.
+      if (topIndent === null || indent < topIndent) topIndent = indent;
       const criterion = visibleInlineText(m[2]).trim();
       const hasCondition = /^(?:if|when|for|where|with|without|after|before|once)\b/i.test(criterion);
       const namesOption = /(?:→|->|\b(?:choose|pick|use|prefer|select|go with|call|hire|apply|install|schedule|start with|switch to)\b)/i.test(criterion);
-      if (indent === topIndent && hasCondition && namesOption) items += 1;
+      // A one-column shift is still a peer marker in CommonMark. Two or
+      // more columns beyond the current baseline form nested list content.
+      if (indent <= topIndent + 1 && hasCondition && namesOption) items += 1;
     }
     best = Math.max(best, items);
   }

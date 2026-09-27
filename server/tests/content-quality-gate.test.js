@@ -1377,6 +1377,22 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(MIN_TOTAL_SCORES['supporting-blog']).toBe(51);
   });
 
+  test('blog refreshes receive the same optional signals while page refreshes no-op', () => {
+    const names = ['citability_named_sources', 'citability_concrete_specifics', 'citability_comparison', 'citability_how_to_choose'];
+    for (const name of names) {
+      const check = PAGE_TYPE_CHECKS.refresh.find((entry) => entry.name === name);
+      expect(check).toMatchObject({ weight: 0 });
+      expect(check.isHard).toBeFalsy();
+      expect(check.evaluate({ body: 'During summer.' }, { target_page_type: 'page' }, {}))
+        .toEqual({ ok: true, reason: 'non_blog_target' });
+    }
+    expect(checkCitabilityConcreteSpecifics(
+      { body: 'During summer.' },
+      { target_page_type: 'supporting-blog' },
+      { previousVersion: { body: 'Wait 14 days.' } },
+    )).toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+  });
+
   test('named_sources passes on a specific authority, fails on "experts say"', () => {
     expect(checkCitabilityNamedSources({ body: 'Per UF/IFAS, chinch bugs peak in dry heat.' }).ok).toBe(true);
     expect(checkCitabilityNamedSources({ body: 'Read the product label before applying any bait.' }).ok).toBe(true);
@@ -1394,6 +1410,9 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityNamedSources({ body: 'Rainfall totals, per NOAA, ran above normal.' }).ok).toBe(true);
     expect(checkCitabilityNamedSources({ body: 'Data from Mote Marine Laboratory shows red tide peaks in fall.' }).ok).toBe(true);
     expect(checkCitabilityNamedSources({ body: 'The Texas A&M University Extension notes fire ants mound after rain.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to Cornell University, fire ants mound after rain.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'According to the University of Miami, rainfall was above normal.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Ohio State University Extension reports that ants mound after rain.' }).ok).toBe(true);
     expect(checkCitabilityNamedSources({ body: 'According to Waves Pest Control, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to WAVES PEST CONTROL, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to The Waves Pest Control, ants are common.' }).ok).toBe(false);
@@ -1405,6 +1424,12 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityNamedSources({ body: 'According to Trusted Industry Research, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to Local Pest Professionals, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to Local Pest Control Experts, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the Local Department, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'The Pest Control Association reports ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the County Program, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the Trusted Science Institute, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the Sarasota County Program, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'According to the Local University Extension, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to This Article, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to Our Guide, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to Local Homeowners, ants are common.' }).ok).toBe(false);
@@ -1585,6 +1610,10 @@ describe('citability rendered component and Markdown projection', () => {
     expect(checkCitabilityHowToChoose({ body: `${table}  ## How to choose\n- If A → choose A\n- When B → use B\n- For C → call C` }).ok).toBe(true);
     expect(checkCitabilityHowToChoose({ body: `${table}  ## How to choose\n- If A → choose A\n  ## Another section\n- When B → use B\n- For C → call C` }))
       .toEqual({ ok: false, reason: 'how_to_choose_has_1_criteria_need_3+' });
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n  - If A → choose A\n  - When B → use B\n- For C → call C\n- With D → pick D` }).ok).toBe(true);
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → choose A\n - When B → use B\n- For C → call C` }).ok).toBe(true);
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → choose A\n  - When B → use B\n- For C → call C` }))
+      .toEqual({ ok: false, reason: 'how_to_choose_has_2_criteria_need_3+' });
   });
 });
 

@@ -390,8 +390,7 @@ beyond pest identification or lawn care):
 
 CITABILITY — write so a search engine or AI answer engine can lift the
 answer cleanly (nudge codes in [brackets] are weight-0 quality-gate signals:
-they never block, but they ride every redraft's feedback and the review queue,
-so a miss costs the post a nudge on the next pass). Every rule below sits
+they never block or authorize unsupported claims). Every rule below sits
 INSIDE the evidence, product, price, and comparison rules above — none of them
 licenses an invented number, product, competitor, or source:
 - [CITABILITY_NAMED_SOURCES] Name the entity behind the claim. Attribute
