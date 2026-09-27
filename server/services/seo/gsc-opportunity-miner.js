@@ -850,6 +850,43 @@ function routeIdentity(url) {
   return `${host}::${path}`;
 }
 
+function citabilityBackfillLaneOpen() {
+  // Resolve lazily: the queue's content modules also load the miner.
+  return require('../content/opportunity-queue')._internals.citabilityBackfillLaneOpen();
+}
+
+function filterActiveCitabilityReservations(query) {
+  if (!citabilityBackfillLaneOpen()) return query.whereNot('bucket', 'citability_backfill');
+  const { _internals: { maxClaimAttempts } } = require('../content/opportunity-queue');
+  // Pending rows that can no longer be claimed must release both their
+  // page and companion; claimed/review rows still own their in-flight work.
+  query.where(function () {
+    this.where('bucket', '<>', 'citability_backfill')
+      .orWhere('status', '<>', 'pending')
+      .orWhere('attempt_count', '<', maxClaimAttempts());
+  }).where(function () {
+    this.where('bucket', '<>', 'citability_backfill')
+      .orWhereRaw("NOT jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')");
+  });
+  return query;
+}
+
+async function activeCitabilityPagesFor(trx) {
+  const { _internals: { maxClaimAttempts } } = require('../content/opportunity-queue');
+  if (!citabilityBackfillLaneOpen()) return new Set();
+  const claimBudget = maxClaimAttempts();
+  const rows = await trx('opportunity_queue')
+    .where({ bucket: 'citability_backfill' })
+    .whereIn('status', ['pending', 'claimed', 'pending_review'])
+    .whereNotNull('page_url')
+    .whereRaw("NOT jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')")
+    .select('page_url', 'status', 'attempt_count');
+  return new Set(rows
+    .filter((r) => r.status !== 'pending' || Number(r.attempt_count) < claimBudget)
+    .map((r) => routeIdentity(String(r.page_url).startsWith('/')
+      ? `https://${HUB_DOMAIN}${r.page_url}` : r.page_url)));
+}
+
 // seo_actions stores URLs scheme-less ("wavespestcontrol.com/path"), so
 // they need a scheme before routeIdentity can split host from path.
 function seoActionRouteIdentity(url) {
@@ -1701,11 +1738,12 @@ class GscOpportunityMiner {
         // same-batch arbitration cannot see it (pre-push audit r22).
         const inflightRefreshQueries = new Set();
         try {
-          const inflight = await db('opportunity_queue')
+          const inflightQuery = db('opportunity_queue')
             .whereIn('action_type', GscOpportunityMiner.PAGE_EDITING_ACTIONS)
             .whereNot('bucket', 'listicle_family')
             .whereIn('status', ['pending', 'claimed', 'pending_review'])
-            .whereNotNull('page_url')
+            .whereNotNull('page_url');
+          const inflight = await filterActiveCitabilityReservations(inflightQuery)
             .select('page_url', 'query', db.raw("signal_metadata->'unanswered_queries' as unanswered_queries"));
           for (const r of inflight) {
             answerGapPages.add(routeIdentity(r.page_url));
@@ -3849,7 +3887,18 @@ class GscOpportunityMiner {
       .where({ bucket: 'listicle_family' })
       .forUpdate()
       .select('dedupe_key', 'action_type', 'status', 'page_url', trx.raw("signal_metadata->'family_keys' as family_keys"));
-    if (!hasFamily) return opportunities; // lock taken (sweep / non-family page edits); nothing to filter
+    // Citability can seed the same Astro page before this miner reaches
+    // the persist transaction. Re-read that lane AFTER the shared lock so
+    // ordinary decay/answer-gap/CTR candidates cannot enqueue a competing
+    // edit. Keep the queue's exhausted-pending contract: an unclaimable
+    // pending row no longer owns the page, while claimed/review work does.
+    // A disabled lane cannot publish and must release these reservations.
+    const activeCitabilityPages = await activeCitabilityPagesFor(trx);
+    const citabilityChecked = opportunities.filter((o) => o.bucket === 'citability_backfill'
+      || !o.page_url
+      || !GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(o.action_type)
+      || !activeCitabilityPages.has(routeIdentity(o.page_url)));
+    if (!hasFamily) return citabilityChecked; // lock taken (sweep / non-family page edits); nothing else to filter
     // One-edit-per-page under the LOCK (Codex r25 audit): a concurrent
     // mine can insert a different-subgroup refresh for the same page after
     // the pre-mine state read — with the rows now locked and re-read, a
@@ -3879,6 +3928,7 @@ class GscOpportunityMiner {
     const nonFamily = await trx('opportunity_queue')
       .whereIn('action_type', GscOpportunityMiner.PAGE_EDITING_ACTIONS)
       .whereNot('bucket', 'listicle_family')
+      .whereNot('bucket', 'citability_backfill')
       .whereIn('status', ['pending', 'claimed', 'pending_review'])
       .whereNotNull('page_url')
       .select('page_url', 'query', trx.raw("signal_metadata->'unanswered_queries' as unanswered_queries"));
@@ -3890,7 +3940,7 @@ class GscOpportunityMiner {
         if (u && u.query) conflictQueries.add(String(u.query).toLowerCase());
       }
     }
-    return opportunities.filter((o) => {
+    return citabilityChecked.filter((o) => {
       if (o.bucket !== 'listicle_family') return true;
       if (o.action_type === 'refresh_existing_page') {
         if (conflictPages.has(routeIdentity(o.page_url))) return false;
@@ -4515,6 +4565,19 @@ class GscOpportunityMiner {
           row.mined_at, row.expires_at, row.dedupe_key,
         ]
       );
+      // mineAll passes the transaction that already holds the shared page-edit
+      // advisory lock. Direct persistAll calls are script/test entry points and
+      // do not arbitrate page ownership, so they must not mutate backfill rows.
+      if (trx && (result.rowCount ?? 0) > 0
+        && o.bucket !== 'citability_backfill'
+        && o.page_url
+        && GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(o.action_type)) {
+        const { supersedeCitabilityBackfillsForPage } = require('../content/opportunity-queue')._internals;
+        await supersedeCitabilityBackfillsForPage(runner, {
+          pageUrl: o.page_url,
+          ordinaryDedupeKey: o.dedupe_key,
+        });
+      }
       // ?? not || — a frozen-row conflict legitimately reports rowCount 0
       // (the WHERE guard skipped the update) and must not count as persisted.
       count += result.rowCount ?? 0;
@@ -4548,6 +4611,7 @@ class GscOpportunityMiner {
         .whereIn('status', ['pending', 'claimed', 'pending_review'])
         .whereIn('action_type', GscOpportunityMiner.PAGE_EDITING_ACTIONS)
         .whereNotNull('page_url');
+      liveQ = filterActiveCitabilityReservations(liveQ);
       if (retiringKeys.size) liveQ = liveQ.whereNotIn('dedupe_key', Array.from(retiringKeys));
       const live = await liveQ.select('page_url', 'service', 'city');
       for (const r of live) {
@@ -4831,6 +4895,7 @@ module.exports._internals = {
   materialServingPosition,
   queryDomainsCovered,
   buildListicleFamilyRefreshOpp,
+  filterActiveCitabilityReservations,
   // The page-edit conflict action set — shared with refresh-audit so every
   // producer's in-flight check covers the same actions (r34 follow-up).
   PAGE_EDITING_ACTIONS: GscOpportunityMiner.PAGE_EDITING_ACTIONS,

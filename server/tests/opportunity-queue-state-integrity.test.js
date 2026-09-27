@@ -146,12 +146,32 @@ describe('recoverStaleClaims vs named-competitor approval claims', () => {
 
     await queue.recoverStaleClaims();
 
-    const rawClause = q._filters.find(([kind]) => kind === 'raw');
+    const rawClause = q._filters.find(([kind, sql]) => kind === 'raw' && String(sql).includes('named_competitor_publishing'));
     expect(rawClause).toBeDefined();
     // IS DISTINCT FROM, not <>: runner claims carry NULL skip_reason and
     // NULL <> 'x' is NULL — a plain inequality would silently exclude every
     // normal claim from recovery.
     expect(rawClause[1]).toMatch(/skip_reason IS DISTINCT FROM 'named_competitor_publishing'/);
+  });
+
+  test('stale superseded backfill claims retire explicitly and keep the durable marker out of ordinary recovery', async () => {
+    const supersededUpdates = [];
+    const ordinaryUpdates = [];
+    const supersededQ = chain({ update: jest.fn((patch) => { supersededUpdates.push(patch); return Promise.resolve(1); }) });
+    const ordinaryQ = chain({ update: jest.fn((patch) => { ordinaryUpdates.push(patch); return Promise.resolve(0); }) });
+    db.mockImplementationOnce(() => supersededQ).mockImplementationOnce(() => ordinaryQ);
+
+    await expect(queue.recoverStaleClaims()).resolves.toBe(1);
+
+    expect(supersededUpdates[0]).toMatchObject({
+      status: 'skipped',
+      claimed_at: null,
+      skip_reason: 'superseded_by_ordinary_page_edit',
+    });
+    expect(ordinaryQ._filters).toEqual(expect.arrayContaining([
+      ['raw', expect.stringContaining("jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), ?)"), ['page_edit_superseded']],
+    ]));
+    expect(ordinaryUpdates[0]).toMatchObject({ status: 'pending', claimed_at: null });
   });
 });
 
@@ -394,6 +414,130 @@ describe('listicle_family lane fence (kill-switch contract)', () => {
   });
 });
 
+describe('citability_backfill lane fence (kill-switch contract, 2026-09-25)', () => {
+  // The seeder's gate check fences WRITES only; this fence makes
+  // GATE_CITABILITY_BACKFILL a real stop switch for rows already queued
+  // (Sonnet fallback P1 on edd0f96d32): while the gate is off, backfill
+  // rows are unclaimable and age out. Same mechanics as the listicle
+  // fence above (spy on isEnabled, gates required inside each test).
+  const peekChain = () => {
+    const q = {
+      _filters: [],
+      where: jest.fn(function (...args) { q._filters.push(args); return q; }),
+      whereNot: jest.fn(function (...args) { q._filters.push(['not', ...args]); return q; }),
+      whereRaw: jest.fn(function (...args) { q._filters.push(['raw', ...args]); return q; }),
+      orderBy: jest.fn(() => q),
+      limit: jest.fn(() => q),
+      select: jest.fn(() => Promise.resolve([])),
+    };
+    return q;
+  };
+
+  test('claimNext excludes citability_backfill rows while the gate is off', async () => {
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation((g) => g !== 'citabilityBackfill');
+    try {
+      db.mockImplementation(() => chain());
+      db.raw.mockResolvedValue({ rows: [] });
+
+      await queue.claimNext({});
+
+      const [sql] = db.raw.mock.calls[0];
+      expect(sql).toContain(`AND bucket <> 'citability_backfill'`);
+      // Only THIS lane is fenced — the listicle gates were left on.
+      expect(sql).not.toContain(`bucket <> 'listicle_family'`);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('with the gate on, claimNext does not fence the bucket', async () => {
+    db.mockImplementation(() => chain());
+    db.raw.mockResolvedValue({ rows: [] });
+
+    await queue.claimNext({}); // dev-open gates: lane open
+
+    const [sql] = db.raw.mock.calls[0];
+    expect(sql).not.toContain(`bucket <> 'citability_backfill'`);
+    expect(sql).toContain("jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')");
+  });
+
+  test('peek mirrors the fence', async () => {
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation((g) => g !== 'citabilityBackfill');
+    try {
+      const q = peekChain();
+      db.mockImplementation(() => q);
+
+      await queue.peek({});
+
+      expect(q._filters).toEqual(expect.arrayContaining([
+        ['not', 'bucket', 'citability_backfill'],
+      ]));
+      expect(q._filters).not.toEqual(expect.arrayContaining([
+        ['not', 'bucket', 'listicle_family'],
+      ]));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('the fence fails CLOSED — an unreadable gate shuts the lane', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/content/opportunity-queue'), 'utf8');
+    expect(src).toMatch(/isEnabled\('citabilityBackfill'\) === true/);
+    expect(src).toMatch(/function citabilityBackfillLaneOpen\(\) \{[\s\S]*?catch \(_\) \{\s*return false;/);
+    const { citabilityBackfillLaneOpen } = require('../services/content/opportunity-queue')._internals;
+    expect(typeof citabilityBackfillLaneOpen).toBe('function');
+  });
+});
+
+describe('citability page ownership after a gate-off ordinary refresh', () => {
+  test('retires pending work and durably marks claimed/review evidence for resumed claim/publish/merge fences', async () => {
+    const rows = [
+      { id: 'pending', bucket: 'citability_backfill', status: 'pending', page_url: '/blog/termite-guide/?seed=1', signal_metadata: { evidence: 'pending' } },
+      { id: 'claimed', bucket: 'citability_backfill', status: 'claimed', page_url: 'https://www.wavespestcontrol.com/blog/termite-guide/', signal_metadata: { evidence: 'claimed' } },
+      { id: 'review', bucket: 'citability_backfill', status: 'pending_review', page_url: 'https://wavespestcontrol.com/blog/termite-guide#faq', signal_metadata: { evidence: 'review' } },
+      { id: 'spoke', bucket: 'citability_backfill', status: 'pending', page_url: 'https://sarasota.wavespestcontrol.com/blog/termite-guide/', signal_metadata: {} },
+    ];
+    const trx = jest.fn(() => {
+      let id = null;
+      const q = {
+        where: jest.fn((a, b) => { if (a === 'id') id = b; return q; }),
+        whereIn: jest.fn(() => q),
+        whereNotNull: jest.fn(() => q),
+        forUpdate: jest.fn(() => q),
+        select: jest.fn(async () => rows),
+        update: jest.fn(async (patch) => {
+          Object.assign(rows.find((row) => row.id === id), patch);
+          return 1;
+        }),
+      };
+      return q;
+    });
+    const internals = require('../services/content/opportunity-queue')._internals;
+
+    const count = await internals.supersedeCitabilityBackfillsForPage(trx, {
+      pageUrl: 'https://wavespestcontrol.com/blog/termite-guide/',
+      ordinaryDedupeKey: 'refresh-audit:ordinary',
+      now: new Date('2026-09-26T16:00:00Z'),
+    });
+
+    expect(count).toBe(3);
+    expect(rows.find((row) => row.id === 'pending')).toMatchObject({
+      status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit',
+    });
+    expect(rows.find((row) => row.id === 'claimed').status).toBe('claimed');
+    expect(rows.find((row) => row.id === 'review').status).toBe('pending_review');
+    expect(internals.pageEditSuperseded(rows.find((row) => row.id === 'claimed'))).toBe(true);
+    expect(internals.pageEditSuperseded(rows.find((row) => row.id === 'review'))).toBe(true);
+    expect(internals.pageEditSuperseded(rows.find((row) => row.id === 'spoke'))).toBe(false);
+    expect(JSON.parse(rows.find((row) => row.id === 'claimed').signal_metadata)).toMatchObject({
+      evidence: 'claimed',
+      page_edit_superseded: { ordinary_dedupe_key: 'refresh-audit:ordinary' },
+    });
+  });
+});
 describe('defer() — cap/gate-retry deferral back to pending (exceptions-only review queue)', () => {
   test('claim-guarded update: pending, future available_at, cleared skip_reason, extended expires_at', async () => {
     const q = chain({ updateResult: 1 });

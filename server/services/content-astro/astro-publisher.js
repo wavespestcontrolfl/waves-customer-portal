@@ -3640,10 +3640,20 @@ async function publishMetadataRewrite(draft, brief = {}) {
 // programmatically, only when the body actually changed.
 const REFRESH_EDITABLE_META_FIELDS = ['title', 'metaTitle', 'meta_description', 'metaDescription'];
 
+function assertRefreshLaneEnabled(brief) {
+  if (brief.gsc_signal?.bucket === 'citability_backfill'
+    && !require('../content/opportunity-queue')._internals.citabilityBackfillLaneOpen()) {
+    const err = new Error('Citability backfill is disabled; refresh publication withheld');
+    err.code = 'CITABILITY_BACKFILL_DISABLED';
+    throw err;
+  }
+}
+
 async function publishRefresh(draft, brief = {}) {
   if (!canPublishRefresh(draft, brief)) {
     throw new Error(`unsupported refresh for Astro publish: ${brief.action_type || 'unknown'}`);
   }
+  assertRefreshLaneEnabled(brief);
 
   const targetUrl = brief.target_url || brief.page_url || draft.page_url;
   const target = draft.file_path || urlToAstroPath(targetUrl);
@@ -3848,6 +3858,7 @@ async function publishRefresh(draft, brief = {}) {
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/refresh-${branchSlug}-${shortId()}`;
+  assertRefreshLaneEnabled(brief);
   await gh.createBranch(branch);
   // Optimistic lock on the multi-file path: the tree write replaces paths
   // unconditionally (no per-file SHA like putFile), and image generation
@@ -3874,6 +3885,12 @@ async function publishRefresh(draft, brief = {}) {
   }
   // New image bytes ride the SAME commit as the post (atomic, like the
   // autonomous lane); with nothing to add the single-file put stays.
+  try {
+    assertRefreshLaneEnabled(brief);
+  } catch (err) {
+    await dropUnreferencedBranch(branch, 'a disabled citability backfill');
+    throw err;
+  }
   const fileCommit = (editorialFiles.length || refreshImages.files.length || (refreshImages.deletes || []).length)
     ? await gh.commitFiles({
       branch,
@@ -3889,6 +3906,12 @@ async function publishRefresh(draft, brief = {}) {
       sha: existing.sha,
     });
 
+  try {
+    assertRefreshLaneEnabled(brief);
+  } catch (err) {
+    await dropUnreferencedBranch(branch, 'a disabled citability backfill');
+    throw err;
+  }
   const pr = await gh.createPr({
     head: branch,
     title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),
@@ -3976,7 +3999,7 @@ async function loadExistingPageBody(targetUrlOrPath, { strictRegistryErrors = fa
   // without the -fl marker URL inference needs, but service_areas_tag
   // carries it authoritatively — the family miner derives refresh cities
   // from it (Codex #3255 r29).
-  return { body, word_count, frontmatter: parsed.data || {} };
+  return { body, word_count, frontmatter: parsed.data || {}, source_file: resolved.path };
 }
 
 function canPublishRefresh(draft, brief = {}) {

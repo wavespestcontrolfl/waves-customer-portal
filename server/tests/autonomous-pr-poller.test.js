@@ -207,7 +207,15 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
             brief_id: null,
           });
         }
-        if (table === 'autonomous_runs') return Promise.resolve(newerRun);
+        if (table === 'autonomous_runs') {
+          if (!newerRun) return Promise.resolve(null);
+          const candidateClaim = newerRun.queue_claim_id ?? null;
+          const requestedClaim = q._filters.queue_claim_id;
+          const matchesClaim = q._filters['null:queue_claim_id']
+            ? candidateClaim === null
+            : requestedClaim === undefined || candidateClaim === requestedClaim;
+          return Promise.resolve(matchesClaim ? newerRun : null);
+        }
         return Promise.resolve(null);
       }),
       update: jest.fn((u) => {
@@ -786,6 +794,107 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     return { number: 42, state: 'open', merged: false, merged_at: null, title: 'Blog: Test Post', head: { ref: 'content/autonomous-test', sha: 'headsha1' } };
   }
 
+  test.each(['disabled', 'disabled during checks', 'enabled'])('citability backfill merge: %s', async (state) => {
+    const gates = require('../config/feature-gates').gates;
+    const previous = gates.citabilityBackfill;
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    gates.citabilityBackfill = state !== 'disabled';
+    setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page' })],
+      queue: [{ id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null, bucket: 'citability_backfill' }],
+    });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockImplementationOnce(async () => {
+      if (state === 'disabled during checks') gates.citabilityBackfill = false;
+      return true;
+    });
+    gh.mergePr.mockResolvedValue({ merged: true, sha: 'mergesha' });
+    try {
+      const result = await poller.pollPending();
+      if (state === 'enabled') expect(gh.mergePr).toHaveBeenCalledTimes(1);
+      else {
+        expect(result.results[0]).toMatchObject({ pending: true, reason: 'citability_backfill_disabled' });
+        expect(gh.mergePr).not.toHaveBeenCalled();
+      }
+    } finally {
+      publisher.assertCodexReviewClear.mockReset();
+      gates.citabilityBackfill = previous;
+    }
+  });
+
+  test('a citability refresh superseded by an ordinary edit is closed, branch-retired, and leaves the poll set', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const updates = setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page' })],
+      queue: [{
+        id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null,
+        bucket: 'citability_backfill', signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+      }],
+    });
+    const open = openPr();
+    const closed = { ...open, state: 'closed' };
+    // Initial read + locked pre-close recheck, then every retirement
+    // verification sees the same closed head.
+    gh.getPr.mockResolvedValueOnce(open).mockResolvedValueOnce(open).mockResolvedValue(closed);
+
+    const result = await poller.pollPending();
+
+    expect(result.results[0]).toMatchObject({ skipped: true, retired: true, reason: 'citability_backfill_superseded' });
+    expect(gh.closePr).toHaveBeenCalledWith(42);
+    expect(gh.retireBranch).toHaveBeenCalledWith('content/autonomous-test');
+    expect(updates).toContainEqual(expect.objectContaining({
+      table: 'opportunity_queue',
+      updates: expect.objectContaining({ status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit' }),
+    }));
+    expect(runUpdates(updates)).toContainEqual(expect.objectContaining({
+      table: 'autonomous_runs',
+      updates: expect.objectContaining({ skip_reason: 'superseded_by_review_queue_action' }),
+    }));
+    expect(pagesPoll.latestDeploymentForBranch).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test.each(['locked read', 'close', 'branch retirement'])('a citability retirement failure during %s does not stop the remaining poll batch', async (failure) => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'false';
+    const first = makeRun({ action_type: 'refresh_existing_page' });
+    const second = makeRun({
+      id: 'run-2', opportunity_id: 'opp-2',
+      astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/43',
+    });
+    const updates = setupDb({
+      pending: [first, second],
+      queue: [
+        {
+          id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null,
+          bucket: 'citability_backfill', signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+        },
+        { id: 'opp-2', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null },
+      ],
+    });
+    const unavailable = new Error('GitHub 503 during retirement');
+    let firstPrReads = 0;
+    gh.getPr.mockImplementation(async (number) => {
+      if (number === 43) return { ...openPr(), number };
+      firstPrReads += 1;
+      if (failure === 'locked read' && firstPrReads === 2) throw unavailable;
+      return { ...openPr(), state: firstPrReads <= 2 ? 'open' : 'closed' };
+    });
+    if (failure === 'close') gh.closePr.mockRejectedValueOnce(unavailable);
+    if (failure === 'branch retirement') gh.retireBranch.mockRejectedValueOnce(unavailable);
+
+    const result = await poller.pollPending();
+
+    expect(result.count).toBe(2);
+    expect(result.results[0]).toMatchObject({ id: first.id, error: unavailable.message, transient: true });
+    expect(result.results[1]).toMatchObject({ id: second.id, pending: true, reason: 'auto_merge_disabled' });
+    expect(gh.getPr).toHaveBeenCalledWith(43);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('poll failed: GitHub 503 during retirement'));
+    expect(runUpdates(updates).filter((update) => update.filters.id === first.id)).toEqual([]);
+  });
+
   test.each(['verdict', 'throw'])('a transient body-image %s after 49 hours never retires the PR', async (failure) => {
     const updates = setupDb({ pending: [makeRun({ poll_pending_reason: 'body_images_required', poll_pending_since: new Date(Date.now() - 49 * 3600000) })] });
     gh.getPr.mockResolvedValue(openPr());
@@ -1248,12 +1357,31 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   });
 
   test('queueRowStillParkedLocked: the final pre-merge check locks the queue row on the merge transaction and fails closed (hook r31 P1)', async () => {
-    const run = makeRun({ created_at: '2026-08-28T04:00:00Z' });
-    const fakeTrx = ({ row, newer = null, throwOn = null }) => jest.fn((table) => {
-      const q = { where: jest.fn(() => q), whereNot: jest.fn(() => q), forUpdate: jest.fn(() => q), first: jest.fn(async () => { if (throwOn) throw new Error(throwOn); return table === 'opportunity_queue' ? row : newer; }) };
-      return q;
-    });
-    const parkedRow = { id: run.opportunity_id, status: 'pending_review', skip_reason: run.skip_reason };
+    const run = makeRun({ created_at: '2026-08-28T04:00:00Z', queue_claim_id: 'claim-b' });
+    const fakeTrx = ({ row, newer = null, throwOn = null }) => {
+      const trx = jest.fn((table) => {
+        const q = {
+          filters: {},
+          where: jest.fn(function (col, value) { if (arguments.length === 2) q.filters[col] = value; return q; }),
+          whereNull: jest.fn(function (col) { q.filters[`null:${col}`] = true; return q; }),
+          whereNot: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
+          first: jest.fn(async () => {
+            if (throwOn) throw new Error(throwOn);
+            if (table === 'opportunity_queue') return row;
+            if (!newer) return null;
+            const candidateClaim = newer.queue_claim_id ?? null;
+            return q.filters['null:queue_claim_id']
+              ? (candidateClaim === null ? newer : null)
+              : (candidateClaim === q.filters.queue_claim_id ? newer : null);
+          }),
+        };
+        return q;
+      });
+      trx.raw = jest.fn().mockResolvedValue({});
+      return trx;
+    };
+    const parkedRow = { id: run.opportunity_id, claim_id: 'claim-b', status: 'pending_review', skip_reason: run.skip_reason };
     // Still parked on this run → merge may proceed; the row was locked FOR UPDATE.
     let trx = fakeTrx({ row: parkedRow });
     expect(await poller._internals.queueRowStillParkedLocked(run, trx)).toBe(true);
@@ -1262,7 +1390,17 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: { ...parkedRow, skip_reason: 'dismissed' } }))).toBe(false);
     expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: null }))).toBe(false);
     // A newer sibling owns the opportunity → withheld.
-    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: parkedRow, newer: { id: 'run-newer' } }))).toBe(false);
+    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: parkedRow, newer: { id: 'run-newer', queue_claim_id: 'claim-b' } }))).toBe(false);
+    // Worker A lost claim-a, then finished after current owner B parked its
+    // PR under claim-b. A's later audit row is not a newer OWNER.
+    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({
+      row: parkedRow,
+      newer: { id: 'run-a-late-audit', queue_claim_id: 'claim-a' },
+    }))).toBe(true);
+    expect(await poller._internals.queueRowStillParkedLocked(
+      makeRun({ action_type: 'refresh_existing_page' }),
+      fakeTrx({ row: { ...parkedRow, bucket: 'citability_backfill', signal_metadata: { page_edit_superseded: {} } } }),
+    )).toBe(false);
     // Cannot verify (lock error, or a run without created_at) → fail closed.
     expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: parkedRow, throwOn: 'lock timeout' }))).toBe(false);
     expect(await poller._internals.queueRowStillParkedLocked(makeRun({ created_at: null }), fakeTrx({ row: parkedRow }))).toBe(false);
@@ -2323,6 +2461,42 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     expect(indexNow.submit).not.toHaveBeenCalled();
     // the queue row now belongs to the newer run — never touched here
     expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
+  });
+
+  test('stale worker A finishing after owner B parks cannot supersede B on a human-merged PR', async () => {
+    const owner = makeRun({
+      id: 'run-b-owner',
+      queue_claim_id: 'claim-b',
+      created_at: '2026-06-11T04:00:00Z',
+    });
+    const updates = setupDb({
+      pending: [owner],
+      // A started on claim-a, was recovered, and persisted its lost-claim
+      // audit after B had already opened and parked the PR on claim-b.
+      newerRun: {
+        id: 'run-a-late-audit',
+        opportunity_id: owner.opportunity_id,
+        queue_claim_id: 'claim-a',
+        created_at: '2026-06-11T04:05:00Z',
+      },
+    });
+    gh.getPr.mockResolvedValue({
+      number: 42,
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-06-11T05:00:00Z',
+      merge_commit_sha: 'merge-sha',
+    });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ merged: true });
+    expect(updates.find((u) => u.table === 'autonomous_runs'
+      && u.filters.id === owner.id
+      && u.updates.outcome === 'completed_published')).toBeDefined();
+    expect(updates.find((u) => u.updates?.skip_reason === 'superseded_by_review_queue_action')).toBeUndefined();
   });
 
   test('queue row parked under a DIFFERENT pending reason does not validate this run', async () => {

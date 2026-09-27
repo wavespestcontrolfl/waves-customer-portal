@@ -1759,6 +1759,7 @@ function loadRunnerWith({
   contentGuardrails = undefined,
   comparisonTableGate = undefined,
   claimsLedgerValidator = undefined,
+  dbTransaction = null,
 }) {
   queue.skip ||= jest.fn().mockResolvedValue(true);
   jest.resetModules();
@@ -1770,6 +1771,7 @@ function loadRunnerWith({
       insert: jest.fn(() => ({ returning, onConflict })),
     };
   });
+  if (dbTransaction) dbMock.transaction = jest.fn(dbTransaction);
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
   // The runner fires the owner email-approval notification via setImmediate
@@ -2472,6 +2474,139 @@ describe('runNext general shadow behavior', () => {
 });
 
 describe('runNext post-publish bookkeeping', () => {
+  test('rechecks citability page ownership before publisher side effects', async () => {
+    const publisher = { publishRefresh: jest.fn() };
+    const queue = {
+      getById: jest.fn().mockResolvedValue({
+        id: 'opp_backfill_1',
+        bucket: 'citability_backfill',
+        status: 'claimed',
+        claim_id: 'claim-a',
+        signal_metadata: {},
+      }),
+      _internals: {
+        pageEditSuperseded: (row) => Boolean(row?.signal_metadata?.page_edit_superseded),
+      },
+    };
+    const trx = jest.fn(() => {
+      const q = {
+        where: jest.fn(() => q),
+        whereNull: jest.fn(() => q),
+        forUpdate: jest.fn(() => q),
+        first: jest.fn().mockResolvedValue({
+          bucket: 'citability_backfill',
+          status: 'claimed',
+          claim_id: 'claim-a',
+          claimed_at: new Date('2026-09-26T13:00:00Z'),
+          signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+        }),
+      };
+      return q;
+    });
+    trx.raw = jest.fn().mockResolvedValue({});
+    const runner = loadRunnerWith({
+      queue,
+      briefBuilder: {},
+      publisher,
+      dbTransaction: (callback) => callback(trx),
+    });
+
+    await expect(runner._publishAndDistribute(
+      { body: 'stale draft' },
+      { action_type: 'refresh_existing_page' },
+      {
+        opportunity_id: 'opp_backfill_1',
+        queue_claim_id: 'claim-a',
+        queue_claimed_at: new Date('2026-09-26T13:00:00Z'),
+      },
+    )).rejects.toMatchObject({ code: 'PAGE_EDIT_SUPERSEDED' });
+    expect(trx.raw).toHaveBeenCalledWith("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+    expect(publisher.publishRefresh).not.toHaveBeenCalled();
+  });
+
+  test('refuses a recovered stale worker whose original queue claim no longer owns the backfill row', async () => {
+    const publisher = { publishRefresh: jest.fn() };
+    const queue = {
+      getById: jest.fn().mockResolvedValue({
+        id: 'opp_backfill_lost', bucket: 'citability_backfill', status: 'skipped', signal_metadata: {},
+      }),
+      _internals: { pageEditSuperseded: () => false },
+    };
+    const first = jest.fn().mockResolvedValue(null);
+    const trx = jest.fn(() => {
+      const q = {
+        where: jest.fn(() => q),
+        whereNull: jest.fn(() => q),
+        forUpdate: jest.fn(() => q),
+        first,
+      };
+      return q;
+    });
+    trx.raw = jest.fn().mockResolvedValue({});
+    const runner = loadRunnerWith({
+      queue,
+      briefBuilder: {},
+      publisher,
+      dbTransaction: (callback) => callback(trx),
+    });
+
+    await expect(runner._publishAndDistribute(
+      { body: 'stale recovered draft' },
+      { action_type: 'refresh_existing_page' },
+      {
+        opportunity_id: 'opp_backfill_lost',
+        queue_claim_id: 'claim-old',
+        queue_claimed_at: new Date('2026-09-26T12:00:00Z'),
+      },
+    )).rejects.toMatchObject({ code: 'PAGE_EDIT_OWNERSHIP_LOST' });
+    expect(first).toHaveBeenCalledWith('bucket', 'signal_metadata', 'status', 'claim_id', 'claimed_at');
+    expect(publisher.publishRefresh).not.toHaveBeenCalled();
+  });
+
+  test('accepts the preserved claim id with the fresh approval claim timestamp', async () => {
+    const approvalClaimedAt = new Date('2026-09-26T14:00:00Z');
+    const publisher = { publishRefresh: jest.fn().mockResolvedValue({ status: 'no_changes' }) };
+    const queue = {
+      getById: jest.fn().mockResolvedValue({
+        id: 'opp_backfill_approval', bucket: 'citability_backfill', status: 'claimed', signal_metadata: {},
+      }),
+      _internals: { pageEditSuperseded: () => false },
+    };
+    const wheres = [];
+    const trx = jest.fn(() => {
+      const q = {
+        where: jest.fn((...args) => { wheres.push(args); return q; }),
+        whereNull: jest.fn(() => q),
+        forUpdate: jest.fn(() => q),
+        first: jest.fn().mockResolvedValue({
+          bucket: 'citability_backfill', status: 'claimed', claim_id: 'claim-approval',
+          claimed_at: approvalClaimedAt, signal_metadata: {},
+        }),
+      };
+      return q;
+    });
+    trx.raw = jest.fn().mockResolvedValue({});
+    const runner = loadRunnerWith({
+      queue, briefBuilder: {}, publisher, dbTransaction: (callback) => callback(trx),
+    });
+
+    await expect(runner._publishAndDistribute(
+      { body: 'approved draft' },
+      { action_type: 'refresh_existing_page' },
+      {
+        opportunity_id: 'opp_backfill_approval',
+        queue_claim_id: 'claim-approval',
+        queue_claimed_at: approvalClaimedAt,
+      },
+    )).resolves.toMatchObject({ publish_status: 'no_changes' });
+    expect(wheres).toEqual(expect.arrayContaining([
+      ['status', 'claimed'],
+      ['claim_id', 'claim-approval'],
+      ['claimed_at', approvalClaimedAt],
+    ]));
+    expect(publisher.publishRefresh).toHaveBeenCalledTimes(1);
+  });
+
   // These tests exercise publish/queue bookkeeping, not blog dedup. Blog
   // uniqueness now defaults ON (and requires a loaded corpus), so disable it
   // here to isolate the bookkeeping paths; dedup has its own coverage.

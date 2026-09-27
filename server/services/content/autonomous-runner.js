@@ -216,11 +216,12 @@ class AutonomousRunner {
     run.claim_ms = Date.now() - t1;
     if (!opp) return finalize(run, t0, { outcome: 'skipped_no_opportunity' });
 
+    const claimToken = opp.claimed_at;
     run.opportunity_id = opp.id;
     run.queue_claim_id = opp.claim_id || null;
+    run.queue_claimed_at = claimToken;
     run.action_type = opp.effective_action_type || opp.action_type;
     run.shadow_mode = isShadow(run.action_type);
-    const claimToken = opp.claimed_at;
 
     // 1a. Protected-page guard. Money pages, high-traffic pages, and manually
     // protected URLs are never auto-optimized — regardless of facts. This runs
@@ -1329,6 +1330,22 @@ class AutonomousRunner {
     try {
       publishOutcome = await this._publishAndDistribute(draft, brief, run);
     } catch (err) {
+      if (err.code === 'PAGE_EDIT_OWNERSHIP_LOST') {
+        return finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'page_edit_ownership_lost',
+          reviewer_notes: err.message,
+        });
+      }
+      if (err.code === 'PAGE_EDIT_SUPERSEDED') {
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'superseded_by_ordinary_page_edit',
+          reviewer_notes: err.message,
+        });
+        await this._skipClaimOrThrow(queue, opp.id, 'superseded_by_ordinary_page_edit', { claimToken });
+        return finalized;
+      }
       if (['BLOG_EDITORIAL_REVIEW_FAILED', 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE'].includes(err.code)) {
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
           claimToken, skipReason: 'editorial_review_failed', notes: err.message, blocking: err.findings,
@@ -1958,15 +1975,25 @@ class AutonomousRunner {
       code: f.code,
       message: String(f.message || '').slice(0, 300),
     }));
-    const meta = {
-      ...(opp.signal_metadata || {}),
-      gate_retry: { at: new Date().toISOString(), skip_reason: skipReason, findings },
-    };
+    const gateRetry = { at: new Date().toISOString(), skip_reason: skipReason, findings };
     const updated = await db('opportunity_queue')
       .where('id', opp.id)
       .where('status', 'claimed')
       .where('claimed_at', claimToken)
-      .update({ signal_metadata: JSON.stringify(meta), updated_at: new Date() });
+      // An ordinary page edit can supersede a gate-off citability worker
+      // after claim. Never let that worker spend its retry or turn the row
+      // pending again. The predicate and update are one atomic statement.
+      .whereRaw("NOT jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')")
+      .update({
+        // Merge into CURRENT metadata. `opp` is the pre-claim snapshot and
+        // may be stale; replacing the column from it can erase ownership or
+        // evidence written while the worker was drafting.
+        signal_metadata: db.raw(
+          "jsonb_set(COALESCE(signal_metadata, '{}'::jsonb), '{gate_retry}', ?::jsonb, true)",
+          [JSON.stringify(gateRetry)]
+        ),
+        updated_at: new Date(),
+      });
     return updated > 0;
   }
 
@@ -2069,16 +2096,32 @@ class AutonomousRunner {
       }
       // Persist on the opportunity row so the snapshots survive even if the
       // run insert later fails. Best-effort.
-      await db('opportunity_queue')
-        .where('id', opp.id)
-        .update({
-          signal_metadata: JSON.stringify({
-            ...(opp.signal_metadata || {}),
+      // Snapshotting can take up to 90 seconds. A stale worker must not
+      // overwrite the replacement claim's evidence after that wait: fence
+      // the write to the exact claim that started this snapshot attempt.
+      if (!run?.queue_claimed_at) {
+        logger.warn(`[autonomous-runner] intercept snapshots discarded for ${opp.id}: claim timestamp unavailable`);
+        return;
+      }
+      let ownership = db('opportunity_queue')
+        .where({ id: opp.id, status: 'claimed' })
+        .where('claimed_at', run.queue_claimed_at);
+      ownership = run.queue_claim_id == null
+        ? ownership.whereNull('claim_id')
+        : ownership.where('claim_id', run.queue_claim_id);
+      const updated = await ownership.update({
+          // Merge only the snapshot fields into the current row; the claimed
+          // opportunity object may predate concurrent queue metadata writes.
+          signal_metadata: db.raw("COALESCE(signal_metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
             intercept_snapshots: result?.snapshots || [],
             intercept_snapshot_at: new Date().toISOString(),
-          }),
+          })]),
           updated_at: new Date(),
         });
+      if (!updated) {
+        logger.warn(`[autonomous-runner] intercept snapshots discarded for ${opp.id}: queue claim changed during capture`);
+        return;
+      }
       logger.info(`[autonomous-runner] intercept snapshots captured for ${opp.id}: ${result?.ok || 0}/${result?.attempted || 0}`);
     } catch (err) {
       logger.warn(`[autonomous-runner] intercept source snapshot failed (non-blocking): ${err.message}`);
@@ -3181,12 +3224,21 @@ class AutonomousRunner {
     // Operator-intercept posts must capture the publish-day Wayband/source
     // snapshot BEFORE publishing (same as the autonomous path) so competitor
     // claims stay verifiable. Fail-soft inside the helper.
-    try { await this._snapshotInterceptSources(opp, draft, run); }
+    try {
+      await this._snapshotInterceptSources(opp, draft, {
+        ...run,
+        queue_claimed_at: approvalClaimedAt,
+      });
+    }
     catch (err) { logger.warn(`[autonomous-runner] named-competitor source snapshot failed (non-blocking): ${err.message}`); }
 
     let patch;
     try {
-      patch = await this._publishAndDistribute(draft, brief, { ...run, opportunity_id: opportunityId });
+      patch = await this._publishAndDistribute(draft, brief, {
+        ...run,
+        opportunity_id: opportunityId,
+        queue_claimed_at: approvalClaimedAt,
+      });
     } catch (err) {
       await revertClaims(); // let the operator retry
       throw err;
@@ -3530,6 +3582,24 @@ class AutonomousRunner {
     const indexNow = getIndexNow();
     const planner = getLinkPlanner();
 
+    // A gate-off backfill can lose its page reservation to an ordinary
+    // refresh while this worker is drafting. Re-read durable ownership at the
+    // irreversible publisher boundary so the stale worker cannot create a
+    // branch/commit/PR after the ordinary producer has taken the page.
+    let latestOpportunity = null;
+    if (run?.opportunity_id) {
+      const queue = getQueue();
+      latestOpportunity = typeof queue?.getById === 'function' ? await queue.getById(run.opportunity_id) : null;
+      const pageEditSuperseded = latestOpportunity?.bucket === 'citability_backfill'
+        ? require('./opportunity-queue')._internals?.pageEditSuperseded
+        : null;
+      if (typeof pageEditSuperseded === 'function' && pageEditSuperseded(latestOpportunity)) {
+        const err = new Error('Citability backfill was superseded by an ordinary page edit before publishing');
+        err.code = 'PAGE_EDIT_SUPERSEDED';
+        throw err;
+      }
+    }
+
     // Publish via existing astro-publisher. We pass the draft + brief;
     // the publisher decides whether to open a PR or commit directly to
     // main based on its own configuration. The astro-publisher service
@@ -3542,7 +3612,39 @@ class AutonomousRunner {
       ? publisher.publishRefresh.bind(publisher)
       : publisher?.publishOrUpdatePage?.bind(publisher);
     if (usePublish) {
-      const r = await usePublish(draft, brief);
+      const publish = () => usePublish(draft, brief);
+      // Serialize the last ownership read with ordinary page-edit producers.
+      // If an ordinary enqueue won while the lane was off, its marker is
+      // visible here before any branch/commit/PR side effect. If this worker
+      // wins while the lane is open, producers re-read the active reservation
+      // after the lock and yield to it.
+      const r = latestOpportunity?.bucket === 'citability_backfill'
+        ? await db.transaction(async (trx) => {
+          await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+          let ownership = trx('opportunity_queue')
+            .where('id', run.opportunity_id)
+            .where('status', 'claimed')
+            .where('claimed_at', run.queue_claimed_at);
+          ownership = run.queue_claim_id == null
+            ? ownership.whereNull('claim_id')
+            : ownership.where('claim_id', run.queue_claim_id);
+          const locked = await ownership
+            .forUpdate()
+            .first('bucket', 'signal_metadata', 'status', 'claim_id', 'claimed_at');
+          const { pageEditSuperseded } = require('./opportunity-queue')._internals;
+          if (!locked || locked.bucket !== 'citability_backfill') {
+            const err = new Error('Citability backfill lost its queue claim before the publisher boundary');
+            err.code = 'PAGE_EDIT_OWNERSHIP_LOST';
+            throw err;
+          }
+          if (pageEditSuperseded(locked)) {
+            const err = new Error('Citability backfill no longer owns the page at the publisher boundary');
+            err.code = 'PAGE_EDIT_SUPERSEDED';
+            throw err;
+          }
+          return publish();
+        })
+        : await publish();
       // A refresh whose body + editable meta already match the live page is a
       // completed no-op: publishRefresh returns status:'no_changes' (no PR, no
       // commit, nothing republished). Leave published_url UNSET so the impact
