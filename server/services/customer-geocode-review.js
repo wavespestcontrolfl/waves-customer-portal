@@ -95,13 +95,14 @@ function excludeReviewedAddresses(query, alias = 'customers') {
 const SERVICE_FIELDS = ['service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip'];
 function serviceReviewDecision(service, review) {
   if (!review) return null;
-  const linkedPrimary = review.primary_address_matches_review === true
+  const linkedPrimaryBlock = ['needs_details', 'needs_pin', 'outside_area'].includes(review.status)
+    && review.primary_address_matches_review === true
     && service.property_id != null && review.primary_property_id != null
     && String(service.property_id) === String(review.primary_property_id);
   const snapshot = SERVICE_FIELDS.map(field => service[field] || null);
   const reference = Object.fromEntries(SERVICE_FIELDS.map((field, index) => [field, review.address_snapshot[index]]));
   const exact = JSON.stringify(snapshot) === JSON.stringify(review.address_snapshot.map(value => value || null));
-  if (!linkedPrimary && !exact) {
+  if (!linkedPrimaryBlock && !exact) {
     // Complete localities are required before treating alternative spellings
     // as the same property. An incomplete primary must not claim a secondary
     // address that happens to share its street name.
