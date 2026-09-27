@@ -10498,6 +10498,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
   // Rendered only while open — lock the page behind the modal.
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, onClose);
+  const narrowGrid = useIsMobile(900);
   const currentTier = TIER_ORDER.includes(currentTierName) ? currentTierName : 'Bronze';
   const currentIdx = Math.max(0, TIER_ORDER.indexOf(currentTier));
   const nextTier = TIER_ORDER[Math.min(TIER_ORDER.length - 1, currentIdx + 1)] || currentTier;
@@ -10674,7 +10675,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                   minHeight: 142,
                 }}
               >
-                <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
+                <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: narrowGrid ? 'wrap' : 'nowrap' }}>
                   <span style={{ fontSize: 16, color: B.glassNavy, fontWeight: 700 }}>WaveGuard {tierName}</span>
                   {isCurrent && <span style={{ color: B.glassNavy, fontSize: 14, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>Current</span>}
                 </span>

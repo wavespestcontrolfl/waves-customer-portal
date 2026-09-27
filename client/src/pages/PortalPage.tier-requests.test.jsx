@@ -41,6 +41,7 @@ it('keeps landscape-phone tier content inside horizontal safe areas', async () =
     expect(dialog.style.padding).toContain('safe-area-inset-left');
     expect(dialog.style.paddingTop).toBe('20px');
     expect(dialog.style.paddingBottom).toBe('20px');
+    expect(screen.getByRole('button', { name: /^WaveGuard Gold Current/ }).firstElementChild).toHaveStyle({ flexWrap: 'wrap' });
   } finally {
     window.innerWidth = originalWidth;
   }
