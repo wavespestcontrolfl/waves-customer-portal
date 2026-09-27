@@ -202,6 +202,38 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect((await readBell(trx, dedupeKey)).read_at).not.toBeNull();
   }));
 
+  // Codex round-1 P1 on the pre-push fix: a divergence the SWEEP ITSELF
+  // auto-cleared (realigned) that recurs on the EXACT SAME date must still
+  // reopen — its fingerprint and notification content match the pre-clear
+  // alert exactly, so plain fingerprint dedupe would otherwise leave it
+  // silently cleared even though the problem is back.
+  test('a divergence the sweep auto-cleared, recurring on the SAME date, reopens rather than staying cleared', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await sweepOnce(trx, ids.estimateId);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const firstBell = await readBell(trx, dedupeKey);
+    expect(firstBell.read_at).toBeNull();
+
+    // Realign — the SWEEP auto-clears it (not a human dismissal).
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: SAME_DATE });
+    const [clearResult] = await sweepOnce(trx, ids.estimateId);
+    expect(clearResult.action).toBe('cleared');
+    const autoCleared = await readBell(trx, dedupeKey);
+    expect(autoCleared.read_at).not.toBeNull();
+
+    // Diverge again onto the EXACT SAME date as the original alert.
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('alerted');
+
+    const reopened = await readBell(trx, dedupeKey);
+    expect(reopened.id).toBe(firstBell.id);
+    expect(reopened.read_at).toBeNull();
+    const metadata = typeof reopened.metadata === 'string' ? JSON.parse(reopened.metadata) : reopened.metadata;
+    expect(metadata.autoCleared).toBe(false);
+  }));
+
   test('recurrence reopens the bell — dismissed by the office while still-open, then a genuine new divergence reopens it unread', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
@@ -276,6 +308,27 @@ suite('first-application-sibling-split — periodic sweep', () => {
       id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
       token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
       status: 'void', title: 'Lawn Care', notes: 'Voided draft — never actually billed.',
+      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      subtotal: 42, total: 42,
+    });
+
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('alerted');
+    expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
+  }));
+
+  // Codex round-1 P1 on the pre-push fix: void alone was excluded, so a
+  // cancelled sibling invoice (no replacement charge ever billed) could
+  // falsely clear the alert.
+  test('a cancelled "split" invoice does not count either — still alerts', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await sweepOnce(trx, ids.estimateId);
+
+    await trx('invoices').insert({
+      id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'cancelled', title: 'Lawn Care', notes: 'Cancelled draft — no replacement charge.',
       line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
       subtotal: 42, total: 42,
     });

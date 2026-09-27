@@ -74,27 +74,36 @@
 // write, so a concurrent dismissal can never land between the decision and
 // the write.
 //
-// Dedupe version (pre-push P1 fix): dedupeVersion is a DETERMINISTIC
-// fingerprint of the live state — anchor date, each unresolved diverging
-// sibling's own id+date, and the invoice's id+total (divergenceStateFingerprint)
-// — never a fresh timestamp minted just because the standing alert happens
-// to be dismissed. A dismissed alert whose fingerprint is unchanged on the
-// next tick stays dismissed (notifyAdmin's own versionChanged/content check
-// sees no difference); only a fingerprint change re-opens it. This is what
-// lets a dismissed alert stay dismissed across ticks instead of reopening
-// on every sweep merely because the group is still open.
+// Dedupe version (pre-push P1 fix): dedupeVersion is built from a
+// DETERMINISTIC fingerprint of the live state — anchor date, each
+// unresolved diverging sibling's own id+date, and the invoice's id+total
+// (divergenceStateFingerprint) — never a fresh timestamp minted just
+// because the standing alert happens to be dismissed. A PLAIN human
+// dismissal (read_at set, no autoCleared stamp) whose fingerprint is
+// unchanged on the next tick stays dismissed; only a fingerprint change
+// (a different dates tuple, or a different invoice id/total) re-opens it.
+// A standing alert the SWEEP ITSELF auto-cleared (autoCleared:true —
+// dates realigned or the group resolved) is different: its return is
+// always a genuinely new recurrence, even when the fingerprint happens to
+// exactly match the pre-clear state (realign, then diverge back onto the
+// SAME date) — so raiseDivergenceAlert bumps a recurrenceGeneration
+// counter on every auto-cleared recurrence and folds it into
+// dedupeVersion, guaranteeing a fresh value each cycle without ever using
+// a non-deterministic timestamp (Codex round-1 P1 on this fix).
 //
 // Manual-split resolution (pre-push P1 fix): once the office completes the
 // instructed manual split, the sweep must stop alerting for the resolved
 // sibling(s) without relying on invoice text. Signal chosen: a diverging
-// sibling counts as split off once it has picked up its OWN live
-// (non-void) invoice linked to its own scheduled_service_id
-// (has_own_live_invoice, computed in loadGroupMembers) — the same
-// invoices.scheduled_service_id linkage every other caller in this area
-// (findFirstApplicationInvoiceForEstimateService) uses to resolve a
-// visit's invoice, so a hand-split invoice is found the same way a minted
-// one would be. This is more robust than comparing the shared invoice's
-// line items/total against the per-visit split amounts
+// sibling counts as split off once it has picked up its OWN LIVE invoice
+// linked to its own scheduled_service_id (has_own_live_invoice, computed
+// in loadGroupMembers) — the same invoices.scheduled_service_id linkage
+// every other caller in this area (findFirstApplicationInvoiceForEstimateService)
+// uses to resolve a visit's invoice, so a hand-split invoice is found the
+// same way a minted one would be. "Live" excludes the full canonical
+// canceled vocabulary (void, refunded, canceled, cancelled — Codex
+// round-1 P1: void alone let a canceled "split" invoice falsely clear the
+// alert), not just void. This is more robust than comparing the shared
+// invoice's line items/total against the per-visit split amounts
 // (reservedAcceptPerVisitSplit) — those amounts are derived only at
 // itemizeFirstApplication/closeout time (GATE_VISIT_CLOSEOUT-gated) and are
 // not a durable, always-available record to diff against for an arbitrary
@@ -261,10 +270,15 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
 }
 
 // Every member of the estimate group, each stamped with has_own_live_invoice:
-// true when a LIVE (non-void) invoice is linked to that member's OWN
+// true when a LIVE invoice is linked to that member's OWN
 // scheduled_service_id — the real-data signal that the office has already
 // hand-split that visit off the shared invoice (see the module header).
-// Cheap and bounded: one extra query keyed on this small group's own ids.
+// "Live" excludes the FULL canonical canceled vocabulary
+// (InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES: void, refunded,
+// canceled, cancelled — pre-push P1: void alone let a canceled "split"
+// invoice falsely clear the alert while the sibling still has no real
+// replacement charge), not just 'void'. Cheap and bounded: one extra query
+// keyed on this small group's own ids.
 async function loadGroupMembers(conn, { customerId, sourceEstimateId }) {
   const members = await conn('scheduled_services')
     .where({ customer_id: customerId, source_estimate_id: sourceEstimateId })
@@ -274,7 +288,7 @@ async function loadGroupMembers(conn, { customerId, sourceEstimateId }) {
   if (!members.length) return members;
   const ownInvoiceIds = await conn('invoices')
     .whereIn('scheduled_service_id', members.map((m) => m.id))
-    .whereNot('status', 'void')
+    .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
     .pluck('scheduled_service_id');
   const ownInvoiceSet = new Set(ownInvoiceIds.map(String));
   return members.map((m) => ({ ...m, has_own_live_invoice: ownInvoiceSet.has(String(m.id)) }));
@@ -305,16 +319,32 @@ async function raiseDivergenceAlert(conn, {
 }) {
   // Takes the SAME advisory lock notifyAdmin's own dedupe path takes, and
   // holds it (same connection/transaction) through notifyAdmin's write
-  // below — the fingerprint computed below and that write can never
-  // straddle a concurrent dismissal (Codex P2).
+  // below — the read and the write below can never straddle a concurrent
+  // dismissal (Codex P2).
   await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
-  // Deterministic — NOT a fresh timestamp (pre-push P1 fix): a dismissed
-  // alert whose fingerprint is unchanged on the next tick must stay
-  // dismissed, and only a materially different state (a different dates
-  // tuple, or a different invoice id/total) reopens it.
-  const dedupeVersion = divergenceStateFingerprint({
+  const baseFingerprint = divergenceStateFingerprint({
     anchor, diverging, invoiceId: invoice?.invoice_id, invoiceTotal: invoice?.total,
   });
+  // A standing alert the SWEEP ITSELF auto-cleared (the group looked
+  // resolved on a prior tick — clearStandingAlerts' autoCleared stamp) that
+  // is diverging again is a genuinely NEW recurrence even when its
+  // fingerprint happens to exactly match the pre-clear state (Codex P1:
+  // realign, then diverge back onto the SAME date — same fingerprint,
+  // same notification content, so plain fingerprint dedupe would silently
+  // stay cleared). The resolution stated the problem was gone; its return
+  // is new information, never a no-op re-alert. A PLAIN human dismissal
+  // (read_at set, never autoCleared) instead keeps the deterministic-
+  // fingerprint dedupe: unchanged state stays dismissed. recurrenceGeneration
+  // is bumped only on an auto-cleared recurrence, so repeated identical
+  // resolve/recur cycles each still produce a distinct dedupeVersion.
+  const existing = await conn('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('read_at', 'metadata');
+  let existingMeta = existing?.metadata;
+  if (typeof existingMeta === 'string') { try { existingMeta = JSON.parse(existingMeta); } catch { existingMeta = null; } }
+  const wasAutoCleared = Boolean(existing?.read_at) && existingMeta?.autoCleared === true;
+  const priorGeneration = Number(existingMeta?.recurrenceGeneration) || 0;
+  const generation = wasAutoCleared ? priorGeneration + 1 : priorGeneration;
+  const dedupeVersion = `${baseFingerprint}::g${generation}`;
   const anchorDate = dateOnly(anchor.scheduled_date);
   const detail = diverging.map((d) => `visit ${d.id} now on ${dateOnly(d.scheduled_date)} (was ${anchorDate})`).join('; ');
   const invoiceRef = invoice
@@ -335,6 +365,13 @@ async function raiseDivergenceAlert(conn, {
         // between sweep ticks (and so drops out of loadCandidates' own
         // non-settled scan) is still found and its alert auto-cleared.
         invoiceId: invoice ? String(invoice.invoice_id) : null,
+        // An alert we are (re)raising right now is by definition not in the
+        // auto-cleared state any more — explicitly cleared here since
+        // notifyAdmin's refresh merges onto the OLD metadata, which would
+        // otherwise leave a stale autoCleared:true sitting on a reopened
+        // alert forever.
+        autoCleared: false,
+        recurrenceGeneration: generation,
       },
       dedupeKey,
       dedupeVersion,
