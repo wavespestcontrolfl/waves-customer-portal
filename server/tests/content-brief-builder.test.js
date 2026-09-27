@@ -484,6 +484,7 @@ describe('_composeBrief related_posts (owner audit 2026-09-26)', () => {
     ];
     const brief = new ContentBriefBuilder()._composeBrief(baseArgs({ relatedPosts }));
     expect(brief.voice_constraints.related_posts).toEqual(relatedPosts);
+    expect(brief.voice_constraints.related_posts_target_sites).toEqual(['wavespestcontrol.com']);
   });
 
   test('an empty related_posts list adds no key (brief shape unchanged for topics with no candidates)', () => {
@@ -632,6 +633,32 @@ describe('_loadRelatedPosts gating', () => {
       expect(spy).toHaveBeenCalledWith(expect.objectContaining({
         domains: ['wavespestcontrol.com'],
       }));
+
+      const relatedPosts = [{ title: 'Hub guide', path: '/termite/a/', keyword: 'termite guide' }];
+      const frozen = new ContentBriefBuilder()._composeBrief({
+        opportunity,
+        signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+        decision: {
+          page_type: 'supporting-blog',
+          action_type: 'new_supporting_blog',
+          final_score: 80,
+          score_breakdown: {},
+          human_review_required: false,
+          human_review_reason: null,
+          router_notes: null,
+        },
+        existingBriefVersions: 0,
+        relatedPosts,
+        publishTargetSites: ['wavespestcontrol.com'],
+      });
+      expect(frozen.target_sites).toEqual(['wavespestcontrol.com']);
+      expect(frozen.voice_constraints.related_posts_target_sites).toEqual(['wavespestcontrol.com']);
+
+      // Re-enabling after composition cannot resurrect the stale queued
+      // spoke: the publisher resolves the frozen brief to the hub.
+      process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+      const { resolveSpokeTarget: resolveFinalTarget } = require('../services/content-astro/spoke-routing');
+      expect(resolveFinalTarget(frozen)).toBeNull();
     } finally {
       spy.mockRestore();
       if (previous === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;

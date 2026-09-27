@@ -85,6 +85,15 @@ function lazy(name, path) {
 const getSerpProfiler = lazy('serp-profiler', '../seo/serp-profiler');
 const getConversionMiner = lazy('conversion-feedback-miner', '../seo/conversion-feedback-miner');
 
+function resolvedPublishTargetSites(opportunity) {
+  const queuedTargets = spokeSeeder.targetSitesFor(opportunity);
+  const publishSpoke = resolveSpokeTarget({ target_sites: queuedTargets });
+  // Persist the explicit hub key rather than []: resolveSpokeTarget falls
+  // back to operator_brief when the top-level list is empty, which would
+  // resurrect a stale queued spoke after the flag is re-enabled.
+  return publishSpoke ? [publishSpoke] : [...HUB_SITE_KEYS];
+}
+
 // ── required-sections matrix (per page-type, per v3.1 brief schema) ─
 
 const REQUIRED_SECTIONS = {
@@ -456,14 +465,18 @@ class ContentBriefBuilder {
     // related-posts.js). Composition may continue after an infrastructure
     // error, but the brief must retain that failure so the publish gate can
     // distinguish it from a confirmed zero-candidate topic and fail closed.
+    // Freeze the current canonical routing decision on the persisted brief.
+    // In particular, a spoke queued while enabled but composed while the
+    // network is disabled must stay hub-only if the flag is later re-enabled.
+    const publishTargetSites = resolvedPublishTargetSites(opp);
     let relatedPostsStatus = 'complete';
-    const relatedPosts = await this._loadRelatedPosts(opp, decision).catch((err) => {
+    const relatedPosts = await this._loadRelatedPosts(opp, decision, publishTargetSites).catch((err) => {
       logger.warn(`[brief-builder] related posts lookup failed: ${err.message}`);
       relatedPostsStatus = 'lookup_failed';
       return [];
     });
 
-    const brief = this._composeBrief({ opportunity: opp, signals, decision, existingBriefVersions, factsPack, relatedPosts, relatedPostsStatus });
+    const brief = this._composeBrief({ opportunity: opp, signals, decision, existingBriefVersions, factsPack, relatedPosts, relatedPostsStatus, publishTargetSites });
     if (persist) brief.id = await this._persist(brief);
     return brief;
   }
@@ -662,10 +675,10 @@ class ContentBriefBuilder {
    * writer only). Returns [] on anything else, so every other lane's brief
    * shape is unchanged.
    */
-  async _loadRelatedPosts(opportunity, decision) {
+  async _loadRelatedPosts(opportunity, decision, publishTargetSites = null) {
     if (decision?.action_type !== 'new_supporting_blog') return [];
-    const queuedTargets = spokeSeeder.targetSitesFor(opportunity);
-    const publishSpoke = resolveSpokeTarget({ target_sites: queuedTargets });
+    const effectiveTargets = publishTargetSites || resolvedPublishTargetSites(opportunity);
+    const selectionDomains = effectiveTargets.length ? effectiveTargets : HUB_SITE_KEYS;
     return relatedPostsSelector.getRelatedPostsForBrief({
       keyword: opportunity.query || opportunity.signal_metadata?.representative_query || null,
       service: opportunity.service || null,
@@ -675,12 +688,12 @@ class ContentBriefBuilder {
       // spoke-network kill switch. A job queued for a spoke while the flag
       // was on can be composed after it turns off; that post publishes on
       // the hub, so its related targets must come from the hub too.
-      domains: publishSpoke ? [publishSpoke] : HUB_SITE_KEYS,
+      domains: selectionDomains,
       excludePath: opportunity.page_url || null,
     });
   }
 
-  _composeBrief({ opportunity, signals, decision, existingBriefVersions, factsPack = null, relatedPosts = [], relatedPostsStatus = 'complete' }) {
+  _composeBrief({ opportunity, signals, decision, existingBriefVersions, factsPack = null, relatedPosts = [], relatedPostsStatus = 'complete', publishTargetSites = null }) {
     const pageType = decision.page_type;
 
     // Overlay answer-engine extractability requirements for aeo_gap briefs.
@@ -828,7 +841,7 @@ class ContentBriefBuilder {
       // hub posts). Sourced from the seeded signal_metadata so it survives a
       // content_briefs round-trip; the Astro publisher reads it to stamp
       // frontmatter.domains + a self-canonical spoke URL.
-      target_sites: spokeSeeder.targetSitesFor(opportunity),
+      target_sites: publishTargetSites || spokeSeeder.targetSitesFor(opportunity),
 
       final_score: decision.final_score,
       score_breakdown: decision.score_breakdown,
@@ -963,7 +976,16 @@ class ContentBriefBuilder {
           return { ...withRetry, related_posts_status: 'lookup_failed' };
         }
         return (Array.isArray(relatedPosts) && relatedPosts.length)
-          ? { ...withRetry, related_posts: relatedPosts }
+          ? {
+              ...withRetry,
+              related_posts: relatedPosts,
+              // Domain set used to select these relative paths. The child
+              // publish gate compares it with the final routing decision so
+              // an enabled→disabled flip after composition fails closed.
+              related_posts_target_sites: (publishTargetSites && publishTargetSites.length)
+                ? publishTargetSites
+                : HUB_SITE_KEYS,
+            }
           : withRetry;
       })(),
 
