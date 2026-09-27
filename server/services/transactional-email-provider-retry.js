@@ -224,7 +224,27 @@ async function recoverStaleClaims(now = new Date(), database = db) {
       await alertExhausted(updated, updated.error_message);
     }
   }
-  return Number(requeued || 0) + uncertain + held;
+  // A stopped old quote can still own a completed visit claim, so the
+  // reminder sweep cannot reach it. Retry its atomic release here even if
+  // the original worker was lost after persisting the refusal.
+  const requotes = await retryEvidence(database('email_messages'), [HANDOFF_PHASE_PENDING, HANDOFF_PHASE_REJECTED])
+    .where({ status: 'failed' })
+    .whereIn('template_key', ['billing.notice', 'billing.receipt_notice'])
+    .whereNotNull('provider_retry_exhausted_at')
+    .whereNull('provider_retry_next_at')
+    .where('error_message', 'like', `${billingReservation.BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX}%`)
+    .orderBy('updated_at', 'asc').limit(CLAIM_LIMIT).select('*');
+  let reopened = 0;
+  for (const candidate of requotes) {
+    if (await billingReservation.releaseBillingEmailReservationForRequote(candidate, database)) reopened += 1;
+    else {
+      // A permanently invalid pin must not starve other bounded repairs.
+      await database('email_messages').where({ id: candidate.id,
+        send_attempt_token: candidate.send_attempt_token, error_message: candidate.error_message,
+      }).update({ updated_at: now });
+    }
+  }
+  return Number(requeued || 0) + uncertain + held + reopened;
 }
 
 // A summary whose retries ended without a delivery — the provider block
@@ -327,11 +347,13 @@ async function markRetryUncertain(message, err, now = new Date()) {
 
 // A row stopped before any provider request: terminal for the rail, and a
 // summary's aggregate is settled from the ledger since no webhook follows.
-async function stopRetry(message, { status, reason, exhaustedAlert = false, rejectedAfterStart = false }) {
+async function stopRetry(message, {
+  status, reason, exhaustedAlert = false, rejectedAfterStart = false, requote = false,
+}) {
   const isSummary = message.template_key === 'service.visit_summary';
   const terminalBillingRefusal = status === 'blocked' && billingReplay.isBillingEmailProviderReplay(message);
-  const storedReason = terminalBillingRefusal
-    ? `${billingReservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}${reason}` : reason;
+  const storedReason = requote ? `${billingReservation.BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX}${reason}`
+    : terminalBillingRefusal ? `${billingReservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}${reason}` : reason;
   const settle = async (trx) => {
     const expectedPhase = rejectedAfterStart ? HANDOFF_PHASE_STARTED : HANDOFF_PHASE_PENDING;
     const [row] = await trx('email_messages')
@@ -355,6 +377,10 @@ async function stopRetry(message, { status, reason, exhaustedAlert = false, reje
   if (updated && terminalBillingRefusal) {
     await billingReservation.resolveBillingEmailReservationRefusal(updated)
       .catch((err) => logger.warn(`[email-provider-retry] billing refusal not reconciled for ${message.id}: ${err.message}`));
+  }
+  if (updated && requote) {
+    await billingReservation.releaseBillingEmailReservationForRequote(updated)
+      .catch((err) => logger.warn(`[email-provider-retry] changed quote not reconciled for ${message.id}: ${err.message}`));
   }
   if (updated && exhaustedAlert) await alertExhausted(updated, reason);
   return { sent: false, stopped: true, reason };
@@ -625,6 +651,7 @@ async function retryOne(message) {
         if (handoff.code === 'BILLING_RETRY_CLAIM_LOST') {
           return { sent: false, stopped: true, reason: 'claim_lost' };
         }
+        const requote = handoff.code === 'BILLING_REPLAY_REQUOTE_REQUIRED';
         if (handoff.retryable) {
           const err = new Error(handoff.reason);
           err.code = handoff.code;
@@ -632,7 +659,8 @@ async function retryOne(message) {
           return { sent: false, error: err };
         }
         return await stopRetry(message, {
-          status: 'blocked', reason: handoff.reason, rejectedAfterStart: state.rejected,
+          status: requote ? 'failed' : 'blocked', reason: handoff.reason,
+          rejectedAfterStart: state.rejected, requote,
         });
       }
       if (state.acceptedMessage) {

@@ -3,6 +3,9 @@ const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-
 const { billingEmailReplayEligible } = require('./messaging/billing-email-replay-eligibility');
 
 const BILLING_REPLAY_TEMPLATES = new Set(['billing.notice', 'billing.receipt_notice']);
+const PREVISIT_SUPERSEDED_REASONS = new Set([
+  'previsit-quote-changed', 'balance-reminder-copy-stale', 'balance-reminder-visit-changed',
+]);
 
 function clean(value) {
   return String(value || '').trim();
@@ -62,11 +65,13 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch, { provide
     preSendCheck: async ({ database, providerBoundary }) => {
       const verdict = await billingEmailReplayEligible(context, database);
       if (verdict?.eligible !== true) {
+        const requote = context.source_entry_point === 'previsit_balance_reminder'
+          && PREVISIT_SUPERSEDED_REASONS.has(verdict?.reason);
         return {
           ok: false,
-          code: 'BILLING_REPLAY_INELIGIBLE',
+          code: requote ? 'BILLING_REPLAY_REQUOTE_REQUIRED' : 'BILLING_REPLAY_INELIGIBLE',
           reason: verdict?.reason || 'Billing replay is no longer eligible',
-          retryable: verdict?.retryable === true,
+          retryable: !requote && verdict?.retryable === true,
         };
       }
       return providerBoundary && typeof providerBoundaryCheck === 'function'

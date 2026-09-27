@@ -320,7 +320,10 @@ describe('transactional email provider retry classification', () => {
     expect(chain.update.mock.invocationCallOrder[marker]).toBeLessThan(sendgrid.sendOne.mock.invocationCallOrder[0]);
     // Recovery: a started handoff settles as uncertain; other stale claims requeue.
     chain.update.mockClear();
-    chain.select = jest.fn(async () => [{ id: 'message-1', send_attempt_token: 'attempt-8' }]);
+    chain.whereIn = chain.orderBy = chain.limit = jest.fn(() => chain);
+    chain.select = jest.fn().mockResolvedValue([])
+      .mockResolvedValueOnce([{ id: 'message-1', send_attempt_token: 'attempt-8' }])
+      .mockResolvedValueOnce([{ id: 'message-1', send_attempt_token: 'attempt-8' }]);
     await retry.recoverStaleClaims();
     expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ provider_retry_next_at: null, provider_retry_exhausted_at: expect.any(Date),
       error_message: expect.stringMatching(/^Provider outcome unknown/) }));
@@ -367,7 +370,10 @@ describe('transactional email provider retry classification', () => {
     chain.update = jest.fn(() => chain);
     chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
     // The uncertain settlement selects its claims and settles each in its own transaction.
-    chain.select = jest.fn(async () => [{ id: 'stale-summary', send_attempt_token: 'attempt-9' }]);
+    chain.whereIn = chain.orderBy = chain.limit = jest.fn(() => chain);
+    chain.select = jest.fn().mockResolvedValue([])
+      .mockResolvedValueOnce([{ id: 'stale-summary', send_attempt_token: 'attempt-9' }])
+      .mockResolvedValueOnce([{ id: 'stale-summary', send_attempt_token: 'attempt-9' }]);
     chain.returning = jest.fn(async () => [{ id: 'stale-summary', status: 'failed', template_key: 'service.visit_summary' }]);
     db.mockReturnValue(chain);
     const now = new Date('2026-07-16T12:30:00Z');
@@ -399,7 +405,8 @@ describe('transactional email provider retry classification', () => {
     chain.whereNotNull = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
     chain.returning = jest.fn(async () => []);
-    chain.select = jest.fn()
+    chain.whereIn = chain.orderBy = chain.limit = jest.fn(() => chain);
+    chain.select = jest.fn().mockResolvedValue([])
       .mockResolvedValueOnce([{ id: 'lost-claim', send_attempt_token: 'old-token' }])
       .mockResolvedValueOnce([]);
     chain.then = (resolve, reject) => Promise.resolve(0).then(resolve, reject);

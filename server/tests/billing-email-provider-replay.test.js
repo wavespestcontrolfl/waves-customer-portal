@@ -155,3 +155,12 @@ test('rejects a missing or mismatched stored context terminally before authority
   });
   expect(dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
 });
+
+test('fresh rendering is restricted to the previsit producer', async () => {
+  billingEmailReplayEligible.mockResolvedValueOnce({ eligible: false, reason: 'balance-reminder-copy-stale' });
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    options.state.boundaryBlock = await options.preSendCheck({ database: jest.fn() });
+  });
+  await expect(runBillingEmailProviderReplayHandoff(message(), jest.fn()))
+    .resolves.toMatchObject({ code: 'BILLING_REPLAY_INELIGIBLE', terminal: true });
+});
