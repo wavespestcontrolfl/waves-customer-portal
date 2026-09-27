@@ -295,7 +295,7 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - scheduling.agent_committed_booking (when true — the AGENT's commitment sentence; speaker must be "agent")
 - scheduling.caller_accepted_slot (when true — the CALLER's acceptance of the final slot; speaker must be "caller")
 - scheduling.moved_appointment_date (when set — the utterance naming the existing appointment's date)
-- For a reschedule, each of the scheduling quotes above is ONE speaker's words from ONE turn, copied verbatim: no "Agent:"/"Caller:" labels, never two turns stitched together. The /scheduling/confirmed_start_at quote states the agreed time; when the reschedule keeps the appointment's day and changes only the time ("can you make it noon instead of 9?"), a quote with the agreed time alone is enough.
+- For a reschedule, each of the scheduling quotes above is ONE speaker's words from ONE turn, copied verbatim: no "Agent:"/"Caller:" labels, never two turns stitched together. The /scheduling/confirmed_start_at quote states the agreed time: quote only the words that state the agreed day and time (a verbatim part of one turn, e.g. "Thursday at two"), not other times said around them ("I have an appointment at four"). When the reschedule keeps the appointment's day and changes only the time ("can you make it noon instead of 9?"), a quote with the agreed time alone is enough.
 - scheduling.follow_up_start_at (when set)
 - secondary_contact.wants_notifications (when true — quote the caller directing notifications to this person)
 - service_request.quoted_price_usd (when set — quote the agent's price and the caller's acceptance)

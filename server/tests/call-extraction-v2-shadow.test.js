@@ -114,6 +114,7 @@ describe('v2 extraction prompt', () => {
     expect(prompt).toContain('never infer it from the new slot');
     expect(prompt).toContain('scheduling.caller_accepted_slot (when true');
     expect(prompt).toContain('ONE speaker\'s words from ONE turn');
+    expect(prompt).toContain('quote only the words that state the agreed day and time');
   });
 
   test('includes the service_request.price capture rules (call-agent audit 2026-09-23)', () => {
