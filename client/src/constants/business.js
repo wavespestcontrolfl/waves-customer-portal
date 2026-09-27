@@ -15,6 +15,12 @@ export const WAVES_SUPPORT_PHONE_DISPLAY = '(941) 297-5749';
 export const WAVES_SUPPORT_PHONE_TEL = 'tel:+19412975749';
 export const WAVES_SUPPORT_SMS_TEL = 'sms:+19412975749';
 
+// National Poison Help line (America's Poison Centers) — free, confidential,
+// 24/7. Printed on every report that records a product application
+// (PoisonControlCopy); not a Florida/FDACS requirement, owner ask 2026-09-26.
+export const POISON_CONTROL_PHONE_DISPLAY = '1-800-222-1222';
+export const POISON_CONTROL_PHONE_TEL = 'tel:+18002221222';
+
 // Commercial account manager (owner 2026-08-08: proposals name Adam, not a
 // faceless "your Waves account manager"). Keep in sync with
 // ACCOUNT_MANAGER_FIRST_NAME in server/routes/estimate-public.js (SSR

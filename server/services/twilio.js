@@ -874,6 +874,17 @@ const TwilioService = {
       const providerSmsMetadata = () => ({
         pre_handoff_stamp: true,
         ...(options.notificationEventKey ? { notificationEventKey: options.notificationEventKey } : {}),
+        // Mirrors the same key on the primary sms_log insert below — a
+        // provider-handoff reservation this context captures is promoted
+        // in place (sms-suggest-mode.js's settleReplyHoldingReservation,
+        // metadata merged onto the SAME row) when the primary insert fails
+        // after Twilio already accepted. Without this here too, that
+        // promoted row would carry notificationEventKey but not
+        // billingDeliveryLeg, and a later replay's dedupe lookup
+        // (messaging/billing-text-leg-dedupe.js, scoped to
+        // billingDeliveryLeg==='sms') would never find it — reading a
+        // genuinely accepted send as unsent and re-texting the customer.
+        ...(options.billingDeliveryLeg ? { billingDeliveryLeg: options.billingDeliveryLeg } : {}),
         // Durable provenance: the operator typed (or edited) this body in the
         // Comms composer. message_type 'manual' alone is overloaded across
         // automated senders, so readers that need "a human wrote this"
@@ -1360,6 +1371,13 @@ const TwilioService = {
           metadata: JSON.stringify({
             pre_handoff_stamp: true,
             ...(options.notificationEventKey ? { notificationEventKey: options.notificationEventKey } : {}),
+            // Which explicit billing-channel leg this accepted send IS
+            // (billing-channel-routing.js's sendBillingLeg) — scopes a later
+            // replay's notificationEventKey dedupe lookup
+            // (messaging/billing-text-leg-dedupe.js) to an explicit billing
+            // Text leg, never a legacy send or another producer's own reuse
+            // of the same-shaped key.
+            ...(options.billingDeliveryLeg ? { billingDeliveryLeg: options.billingDeliveryLeg } : {}),
             ...(options.humanAuthored === true ? { human_authored: true } : {}),
             ...(sentToKnownOwnerPhone ? { to_owner_phone_at_send: true } : {}),
             ...(options.media ? { media: options.media } : (options.humanAuthored === true && !sendIsMms ? { media: [] } : {})),
