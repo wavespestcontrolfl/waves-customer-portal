@@ -1436,6 +1436,28 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         expect(result).toEqual({ productId: K_FLOW.id });
       });
 
+      // Codex round-12 P2: a deadline date is not an analysis.
+      test.each([
+        'We bought two bottles of K-Flow on 9/27/26',
+        'We bought two bottles of K-Flow by 10-1-26',
+      ])('"%s" grounds — a date word before a real month/day makes it a date', async (prompt) => {
+        setGroundingDb({ products: [K_FLOW, ALPINE], aliases: K_FLOW_ALIASES });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt,
+          preview: { product: { id: K_FLOW.id, name: K_FLOW.name } },
+        });
+        expect(result).toEqual({ productId: K_FLOW.id });
+      });
+
+      test('the finding\'s own order grounds: "Please buy two bottles of Taurus SC by 9/27/26"', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'create_restock_request', prompt: 'Please buy two bottles of Taurus SC by 9/27/26',
+          preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+        });
+        expect(result).toMatchObject({ productId: TAURUS.id });
+      });
+
       test('plain "K-Flow" with no analysis at all still grounds', async () => {
         setGroundingDb({ products: [K_FLOW, ALPINE], aliases: K_FLOW_ALIASES });
         const result = await resolveInventoryWriteTarget({
@@ -1449,6 +1471,11 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       test.each([
         'We bought two bottles of K-Flow 0-0-20',
         'We bought two bottles of K-Flow 0/0/20',
+        // Not next to the name, and no date word introduces it: still the
+        // product's grade.
+        'K-Flow, we bought two bottles of the 0-0-20',
+        // A date word, but no real month (0): still a grade.
+        'We bought two bottles of K-Flow by 0-0-20',
       ])('"%s" refuses — the analysis does not match the catalog row', async (prompt) => {
         setGroundingDb({ products: [K_FLOW, ALPINE], aliases: K_FLOW_ALIASES });
         const result = await resolveInventoryWriteTarget({

@@ -273,6 +273,9 @@ const { CONTINUATION_TURN } = IbThreads;
 // new card to replace the previous card") is still a claim, and the
 // notice's wording is true either way.
 const CARD_CLAIM_RE = /\bcards? below\b|\bconfirm(?:ation)? cards?\b|\bconfirm(?:ation)? buttons?\b|\b(?:click|press|tap|hit|use)\s+(?:the\s+)?confirm\b|\bconfirm(?:ation)? on the cards?\b/i;
+// A confirmation BUTTON claim ("two confirmation buttons below") is read
+// exactly like a card claim (Codex round-12 P2): each pending action is one
+// card with one Confirm button, so the two nouns count the same thing.
 // How many DISTINCT cards a reply claims: a lower bound, not a sum of every
 // numeral in the text (Codex round-11 P2: "I've prepared two confirmation
 // cards below; use both cards below to continue" summed 2 + 2 ("both") = 4
@@ -296,7 +299,7 @@ const CARD_INDEFINITE_SINGULAR_WORDS = new Set(['a', 'an', 'one', 'another']);
 const CARD_CARDINAL_WORDS = { two: 2, three: 3, four: 4, five: 5, six: 6, both: 2 };
 const CARD_DETERMINER_ALT = '\\d+|a|an|one|two|three|four|five|six|another|both|the|this|that|your';
 const CARD_PHRASE_RE = new RegExp(
-  `\\b(?:(${CARD_DETERMINER_ALT})\\s+(?:(?:new|separate)\\s+)?)?(?:confirm(?:ation)?\\s+(cards?)(?:\\s+below)?|(cards?)\\s+below)\\b`,
+  `\\b(?:(${CARD_DETERMINER_ALT})\\s+(?:(?:new|separate)\\s+)?)?(?:confirm(?:ation)?\\s+(cards?|buttons?)(?:\\s+below)?|(cards?|buttons?)\\s+below)\\b`,
   'gi',
 );
 function cardinalValue(determiner) {

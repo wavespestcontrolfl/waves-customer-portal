@@ -1131,8 +1131,20 @@ const ANALYSIS_RE = /\b\d{1,2}(?:\.\d)?\s*[-–—/]\s*\d{1,2}(?:\.\d)?\s*[-–�
 function normalizeAnalysis(raw) {
   return String(raw).replace(/\s+/g, '').replace(/[–—/]/g, '-');
 }
+// A deadline date is not an analysis (Codex round-12 P2: "Please buy two
+// bottles of Taurus SC by 9/27/26" refused as an 9-27-26 mismatch). A triple
+// counts as a date only when a date word introduces it AND it reads as a
+// real month/day — "10-10-10" is a common fertilizer grade, so a bare
+// date-shaped triple ("Lesco, the 10-10-10") stays an identity qualifier.
+const DATE_CUE_BEFORE_RE = /\b(?:by|on|for|before|after|until|till|due|from|since|dated)\s+$/i;
+function isCuedDate(text, match) {
+  const [month, day] = match[0].split(/\s*[-–—/]\s*/).map(Number);
+  const realMonthDay = Number.isInteger(month) && Number.isInteger(day) && month >= 1 && month <= 12 && day >= 1 && day <= 31;
+  return realMonthDay && DATE_CUE_BEFORE_RE.test(text.slice(0, match.index));
+}
 function analysesIn(text) {
-  return [...String(text).matchAll(ANALYSIS_RE)].map((m) => normalizeAnalysis(m[0]));
+  const raw = String(text);
+  return [...raw.matchAll(ANALYSIS_RE)].filter((m) => !isCuedDate(raw, m)).map((m) => normalizeAnalysis(m[0]));
 }
 function qualifierConflict(rawText, phrases, identityNames) {
   const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
