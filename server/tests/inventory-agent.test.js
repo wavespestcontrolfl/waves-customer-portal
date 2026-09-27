@@ -49,6 +49,17 @@ describe('validateReading — grounded vs invented numbers (complete title token
       .toMatchObject({ ok: true, sizeNumber: 25, unit: 'each' });
   });
 
+  test('removing the matched size keeps the word after it for the ambiguity checks', () => {
+    expect(validateReading({ size_number: 30, size_unit: 'g', pack_count: 1 }, { rawTitle: 'Granular Bait 30 g UOM:CS', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'leftover_pack_wording' });
+    expect(validateReading({ size_number: 30, size_unit: 'g', pack_count: 1 }, { rawTitle: 'Granular Bait 30 g tubes', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'plural_containers_without_pack_marker' });
+    expect(validateReading({ size_number: 78, size_unit: 'fl_oz', pack_count: 1 }, { rawTitle: 'Taurus SC 78 fl oz. Bottle UOM:EA', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, sizeNumber: 78, unit: 'fl_oz' });
+    expect(validateReading({ size_number: 12, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Victor Rat Trap 12 Count', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, sizeNumber: 12, unit: 'each' });
+  });
+
   test('a weight reading may not skip an item count the title states', () => {
     const title = 'Mosquito Dunks 6 Dunks 1.3 oz each';
     expect(validateReading({ size_number: 1.3, size_unit: 'oz', pack_count: 1 }, { rawTitle: title, lineQuantity: 1 }))
@@ -101,10 +112,16 @@ describe('validateReading — pack_count must come from recognized pack syntax, 
     expect(result).toMatchObject({ ok: true, sizeNumber: 78, packCount: 2, amount: 156 });
   });
 
-  test('"4 x 500 g Case" reads the per-unit size and the leading multiplier separately', () => {
-    const title = 'Advion Cockroach Gel Bait 4 x 500 g Case';
+  test('"4 x 500 g" reads the per-unit size and the leading multiplier separately', () => {
+    const title = 'Advion Cockroach Gel Bait 4 x 500 g';
     const result = validateReading({ size_number: 500, size_unit: 'g', pack_count: 4 }, { rawTitle: title, lineQuantity: 1 });
     expect(result).toMatchObject({ ok: true, sizeNumber: 500, unit: 'g', packCount: 4, amount: 2000 });
+  });
+
+  test('"4 x 500 g Case" holds: "Case" after the marker is more pack wording, as amountPerItem holds it', () => {
+    const title = 'Advion Cockroach Gel Bait 4 x 500 g Case';
+    expect(validateReading({ size_number: 500, size_unit: 'g', pack_count: 4 }, { rawTitle: title, lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'leftover_pack_wording' });
   });
 
   test('"Pack of 12" with pack_count claimed as 2 (a digit inside the title, not the marker\'s own count) -> unsure', () => {

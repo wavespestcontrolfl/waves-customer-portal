@@ -75,10 +75,19 @@ function extractEpaRegNumber(title) {
 
 // The title-size regex's unit word(s) resolved to an inventory-units token,
 // extending sizeUnit (measured units) with the count-item nouns above.
+// Returns { unit, usedSecond }: usedSecond says whether the unit needed the
+// regex's optional second word ("fl oz"), so callers know how much of the
+// match is really the size.
 function canonicalUnit(first, second) {
-  const measured = (second && sizeUnit(`${first} ${second}`)) || sizeUnit(first);
-  if (measured) return measured;
-  return COUNT_UNIT_WORD_RE.test(String(first || '').trim()) ? 'each' : null;
+  const twoWord = second && sizeUnit(`${first} ${second}`);
+  if (twoWord) return { unit: twoWord, usedSecond: true };
+  const measured = sizeUnit(first);
+  if (measured) return { unit: measured, usedSecond: false };
+  return COUNT_UNIT_WORD_RE.test(String(first || '').trim()) ? { unit: 'each', usedSecond: false } : null;
+}
+
+function escapeForRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // Every COMPLETE "<number> <unit>" claim inside `text` that resolves to a
@@ -92,11 +101,17 @@ function canonicalUnit(first, second) {
 function parsedSizeClaims(text) {
   const claims = [];
   for (const match of String(text || '').matchAll(TITLE_SIZE_RE)) {
-    const [matchText, number, first, second] = match;
-    const unit = canonicalUnit(first, second);
-    if (!unit) continue;
+    const [fullMatch, number, first, second] = match;
+    const resolved = canonicalUnit(first, second);
+    if (!resolved) continue;
+    // TITLE_SIZE_RE may swallow one extra word after the unit ("30 g tubes",
+    // "30 g UOM:CS"). Unless the unit needed it, keep that word out of
+    // matchText, so removing the claim leaves it for the ambiguity checks.
+    const unitOnly = !resolved.usedSecond
+      && fullMatch.match(new RegExp(`^${escapeForRegExp(number)}[\\s-]*${escapeForRegExp(first)}\\.?`, 'i'));
+    const matchText = unitOnly ? unitOnly[0] : fullMatch;
     const value = parseSizeNumber(number);
-    if (Number.isFinite(value) && value > 0) claims.push({ value, unit, matchText });
+    if (Number.isFinite(value) && value > 0) claims.push({ value, unit: resolved.unit, matchText });
   }
   return claims;
 }
