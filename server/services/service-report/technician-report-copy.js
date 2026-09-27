@@ -226,8 +226,12 @@ const REPORT_MEASUREMENT_AFTER_NUMBER_RE = new RegExp(String.raw`^\s*${REPORT_ME
 const REPORT_PAST_ACCESS_DEVICE_RE = /\b(?:opened|unlocked|accessed|entered)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b/gi;
 const REPORT_PAST_ACCESS_CONTEXT_RE = /\b(?:opened|unlocked|accessed|entered)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b/i;
 const REPORT_PAST_ACCESS_NUMBER_RE = /\b\d{3,8}\b(?!\.\d)/g;
-const REPORT_STRUCTURED_DATE_RE = /\b(?:\d{4}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{1,2}|\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*(?:\d{2}|\d{4}))\b/g;
+const REPORT_STRUCTURED_DATE_TEXT = String.raw`(?:\d{4}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{1,2}|\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*(?:\d{2}|\d{4}))`;
+const REPORT_STRUCTURED_DATE_RE = new RegExp(String.raw`\b${REPORT_STRUCTURED_DATE_TEXT}\b`, 'g');
 const REPORT_AFFIXED_OR_GROUPED_NUMBER_RE = /(?:\b[A-Za-z#*]+\d[A-Za-z0-9#*]*\b|\b\d[A-Za-z0-9#*]*[A-Za-z#*]\b|\b\d{1,2}(?:[\s–—-]+\d{1,2}){1,7}\b)/;
+const REPORT_PAST_ACCESS_WORK_ACTION_RE = /\b(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?|spray(?:s|ed|ing)?|dust(?:s|ed|ing)?|clean(?:s|ed|ing)?)\b/i;
+const REPORT_PEST_COUNT_RE = /\b(?:found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?)\s+\d{1,8}\s+(?:ants?|termites?|roaches?|cockroaches?|mosquitoes?|fleas?|ticks?|spiders?|rodents?|mice|rats?|wasps?|bees?|flies|beetles?|silverfish|earwigs?)\b/gi;
+const REPORT_SERVICE_IDENTIFIER_RE = /\b(?:treat(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?)\s+(?:bait\s+)?(?:station|trap|device|unit)\s*#?\s*\d{3,8}\b/gi;
 
 function isValidStructuredDate(value) {
   const parts = value.split(/\s*[/-]\s*/).map(Number);
@@ -246,22 +250,35 @@ function isValidStructuredDate(value) {
 function isStructuredDateNumber(value, index, length) {
   for (const match of value.matchAll(REPORT_STRUCTURED_DATE_RE)) {
     const end = match.index + match[0].length;
-    if (match.index <= index && index + length <= end && isValidStructuredDate(match[0])) return true;
+    const before = value.slice(Math.max(0, match.index - 12), match.index);
+    const dateContext = /\bon\s*:?\s*$/i.test(before);
+    if (match.index <= index && index + length <= end
+      && dateContext && isValidStructuredDate(match[0])) return true;
   }
   return false;
 }
 
 function maskStructuredDates(value) {
-  return value.replace(REPORT_STRUCTURED_DATE_RE, (date) => (
-    isValidStructuredDate(date) ? '[structured-date]' : date
+  return value.replace(REPORT_STRUCTURED_DATE_RE, (date, offset, source) => (
+    isValidStructuredDate(date)
+      && /\bon\s*:?\s*$/i.test(source.slice(Math.max(0, offset - 12), offset))
+      ? '[structured-date]' : date
   ));
+}
+
+function maskPastAccessWorkDetails(value) {
+  return value
+    .replace(REPORT_PEST_COUNT_RE, (detail) => detail.replace(/\d{1,8}/, '[work-detail]'))
+    .replace(REPORT_SERVICE_IDENTIFIER_RE, (detail) => detail.replace(/\d{3,8}/, '[work-detail]'));
 }
 
 function containsPastAccessCredential(text) {
   const value = String(text || '');
   for (const relationship of value.matchAll(REPORT_PAST_ACCESS_DEVICE_RE)) {
     const tailOffset = relationship.index + relationship[0].length;
-    const tail = value.slice(tailOffset).match(/^(?:\.(?=\d)|[^\n.!?])*/)?.[0] || '';
+    const relationshipTail = value.slice(tailOffset).match(/^(?:\.(?=\d)|[^\n.!?])*/)?.[0] || '';
+    const workAction = relationshipTail.search(REPORT_PAST_ACCESS_WORK_ACTION_RE);
+    const tail = workAction >= 0 ? relationshipTail.slice(0, workAction) : relationshipTail;
     for (const numeric of tail.matchAll(REPORT_PAST_ACCESS_NUMBER_RE)) {
       if (numeric.index > 20) break;
       const index = tailOffset + numeric.index;
@@ -394,6 +411,8 @@ function accessCodeDetectionText(text) {
 // "Opened rear gate, applied 100 ml around hinges" has no access connector.
 const REPORT_DIRECT_ACCESS_CODE_RES = [
   /\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,
+  new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*${REPORT_STRUCTURED_DATE_TEXT}\b`, 'i'),
+  /\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,12}\b(?:by|after)\s+(?:entering|typing|inputting|pressing|using)\s+\d{3,8}\b/i,
   new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b(?:\s+(?!(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|broadcast(?:ed|ing)?|spread(?:ing)?|distribut(?:e|ed|ing)|spray(?:ed|ing)?|dust(?:ed|ing)?|clean(?:ed|ing)?)\b)[a-z][a-z'’\-]*){1,5}\s+(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b`, 'i'),
   new RegExp(String.raw`\b\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:(?:to|for)\s+)?(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,20}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b`, 'i'),
   new RegExp(String.raw`\b(?:enter|entering|type|typing|press|pressing|punch(?:ing)?|input(?:ting)?|try|trying)\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b`, 'i'),
@@ -413,14 +432,14 @@ function containsReportAccessCode(text) {
   const originalRelationship = accessCodeDetectionText(raw);
   if (REPORT_DIRECT_ACCESS_CODE_RES.some((re) => re.test(raw) || re.test(originalRelationship))) return true;
   if (REPORT_PAST_ACCESS_CONTEXT_RE.test(raw)) {
-    const normalizedPastInput = maskFertilizerAnalyses(maskStructuredDates(raw))
+    const normalizedPastInput = maskPastAccessWorkDetails(maskFertilizerAnalyses(maskStructuredDates(raw)))
       .replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]');
     if (REPORT_AFFIXED_OR_GROUPED_NUMBER_RE.test(normalizedPastInput)) {
       const normalizedPastRelationships = accessCodeDetectionText(normalizedPastInput);
       if (containsPastAccessCredential(normalizedPastRelationships)) return true;
     }
   }
-  const fertilizerScreened = maskFertilizerAnalyses(raw);
+  const fertilizerScreened = maskPastAccessWorkDetails(maskFertilizerAnalyses(raw));
   const value = fertilizerScreened.replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]');
   const normalized = accessCodeDetectionText(value);
   if (REPORT_POSITIONAL_USE_CODE_RE.test(normalized)) return true;
