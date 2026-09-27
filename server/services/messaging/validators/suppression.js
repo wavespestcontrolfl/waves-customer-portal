@@ -10,8 +10,13 @@
  * gracefully — load_suppression_state catches a missing-table error and
  * returns null, and validators interpret null as "no suppression record".
  *
- * Suppression is HARD: an entry here blocks every purpose, every audience,
- * every channel, until the entry is explicitly cleared. The only escape
+ * Consent suppression is HARD across purposes, audiences, and channels,
+ * with two carve-outs. non_mobile is an SMS-capability fact and does not
+ * suppress Email or App. And a payment or billing EMAIL is stopped only by
+ * a staff do-not-contact (or an unknown reason): a STOP text and a
+ * wrong-number flag are facts about the phone, and payment emails cannot
+ * be turned off (owner ruling 2026-09-27; texts still honor STOP).
+ * A consent entry blocks until explicitly cleared. The only escape
  * hatch is a START keyword on the inbound channel, which is handled by
  * the twilio-webhook STOP/START flow and clears the suppression record.
  */
@@ -25,20 +30,32 @@ const { toE164 } = require('../../../utils/phone');
 // switch (sms_enabled on notification_prefs) that catches the common
 // opt-out case even when this phone-keyed messaging_suppression read comes
 // back UNKNOWN, so checkSuppression is allowed to fail OPEN for it. Push
-// (App) and billing Email have no such independent phone-suppression
-// signal of their own — the billing email authority's own suppression
-// recheck (billing-channel-email-authority.js) only consults the
-// email-template suppression store, never manual_dnc / opt_out, both of
-// which live ONLY here, keyed on phone. A transient read failure on either
-// non-SMS leg must therefore fail CLOSED exactly like push already does,
-// or a DB blip lets a manual_dnc / opt-out recipient through on the App or
-// Email leg while SMS stays protected. Every place this module (or a
-// caller) decides whether a leg may proceed on unverified suppression
-// state should route through this one predicate.
+// (App) and billing Email have no independent phone-suppression signal, so
+// their provider-boundary checks use this predicate and fail CLOSED on an
+// unknown read. Otherwise a DB blip could let a manual_dnc / opt-out
+// recipient through on either non-SMS leg while SMS stays protected.
 const SUPPRESSION_RETRY_MS = 5 * 60 * 1000;
 
 function requiresVerifiedSuppression(channel) {
   return channel === 'push' || channel === 'email';
+}
+
+// The one rule for which phone suppressions stop a payment or billing email
+// (owner ruling 2026-09-27): a staff do-not-contact and any reason not named
+// here do; a STOP text (keyword, natural-language, or the carrier-reported
+// 'opt_out' the Twilio callback and 21610 paths write), a wrong-number flag
+// and a landline fact do not. The collections contact policy reads the same
+// rule.
+const PHONE_FACT_REASONS = new Set(['opt_out', 'opt_out_keyword', 'opt_out_natural_language', 'wrong_number', 'non_mobile']);
+
+function suppressionBlocksPaymentEmail(reason) {
+  return !PHONE_FACT_REASONS.has(reason);
+}
+
+function isBillingEmail(input) {
+  if (input.channel !== 'email') return false;
+  if (input.metadata?.billingDeliveryLeg) return true;
+  return Boolean(require('../billing-channel-routing').billingDeliveryCategory(input));
 }
 
 /**
@@ -59,6 +76,7 @@ async function checkSuppression(input, _policy, contactState) {
   }
   const suppression = contactState && contactState.suppression;
   if (!suppression) return { ok: true };
+  if (isBillingEmail(input) && !suppressionBlocksPaymentEmail(suppression.reason)) return { ok: true };
 
   if (suppression.reason === 'opt_out_keyword' || suppression.reason === 'opt_out_natural_language') {
     return {
@@ -82,6 +100,7 @@ async function checkSuppression(input, _policy, contactState) {
     };
   }
   if (suppression.reason === 'non_mobile') {
+    if (input.channel === 'email' || input.channel === 'push') return { ok: true };
     return {
       ok: false,
       code: 'SUPPRESSED_NON_MOBILE',
@@ -196,7 +215,12 @@ async function recordSuppression({ phone, reason, source, capturedBody, dbh = db
         captured_body: capturedBody ? String(capturedBody).slice(0, 1000) : null,
         active: true,
         cleared_at: null,
-      });
+      })
+      // A standing staff do-not-contact is never replaced: it is the one
+      // suppression that also stops payment emails (owner ruling
+      // 2026-09-27), and a later STOP, wrong-number reply or carrier opt-out
+      // only restates that the phone is blocked.
+      .whereRaw("NOT (messaging_suppression.active AND messaging_suppression.reason = 'manual_dnc')");
     return { ok: true };
   } catch (err) {
     logger.warn(`[messaging:suppression] recordSuppression failed: ${err.message}`);
@@ -408,4 +432,5 @@ module.exports = {
   recordNonMobileSuppression,
   clearSuppression,
   requiresVerifiedSuppression,
+  suppressionBlocksPaymentEmail,
 };

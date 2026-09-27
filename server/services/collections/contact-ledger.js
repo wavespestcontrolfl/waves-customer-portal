@@ -124,11 +124,12 @@ async function markDelivered(target, { database = db, match = {} } = {}) {
 async function claimAttempt(entry) {
   if (!entry?.id) return { allowed: false, held: true };
   if (entry.metadata?.delivered === true) return { allowed: false, delivered: true };
+  if (entry.metadata?.resolved === true) return { allowed: false, resolved: true };
   if (!entry.reused) return { allowed: true };
   if (entry.metadata?.send_failed !== true) return { allowed: false, held: true };
   const changed = await db('collections_contact_ledger').where({ id: entry.id })
-    .whereRaw("metadata @> ?::jsonb AND NOT (metadata @> ?::jsonb)", [
-      JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }),
+    .whereRaw("metadata @> ?::jsonb AND NOT (metadata @> ?::jsonb) AND NOT (metadata @> ?::jsonb)", [
+      JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
     ])
     .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [
       JSON.stringify({ send_failed: false }),

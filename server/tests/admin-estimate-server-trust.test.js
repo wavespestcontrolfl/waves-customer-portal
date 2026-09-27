@@ -13,18 +13,20 @@ jest.mock('../models/db', () => jest.fn());
 const { serverRecomputeFromEstimateData, sanitizeClientIdentityFields } = require('../services/admin-estimate-persistence');
 
 describe('sanitizeClientIdentityFields', () => {
-  test('strips only the top-level identity/recurring fields, leaving everything else', () => {
+  test('strips top-level identity and server-owned catalog pricing, leaving customer inputs', () => {
     const input = {
       homeSqFt: 2000,
       services: { mosquito: { tier: 'monthly12' }, germanRoachInitial: { isRecurringCustomer: true } },
       priorQualifyingServices: ['pest_control'],
       recurringCustomer: true,
       isRecurringCustomer: true,
+      catalogPricing: { rodentAdditionalCheckPrice: 1 },
     };
     const out = sanitizeClientIdentityFields(input);
     expect(out.priorQualifyingServices).toBeUndefined();
     expect(out.recurringCustomer).toBeUndefined();
     expect(out.isRecurringCustomer).toBeUndefined();
+    expect(out.catalogPricing).toBeUndefined();
     // Non-identity fields and nested objects are untouched — the nested
     // germanRoachInitial flag is neutralized in the engine (it now reads the
     // canonical derived recurring status), not by this top-level sanitizer.
@@ -38,6 +40,37 @@ describe('sanitizeClientIdentityFields', () => {
     expect(sanitizeClientIdentityFields(undefined)).toBeUndefined();
     const arr = [1, 2];
     expect(sanitizeClientIdentityFields(arr)).toBe(arr);
+  });
+});
+
+describe('server-authoritative rodent catalog pricing', () => {
+  const trappingInput = (catalogPricing) => ({
+    homeSqFt: 2000,
+    stories: 1,
+    lotSqFt: 10000,
+    propertyType: 'single_family',
+    zone: 'A',
+    features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' },
+    services: { rodentTrapping: { plan: 'standard' } },
+    catalogPricing,
+  });
+
+  test('a forged $1 engineInputs override is replaced before the save recompute', async () => {
+    const readCatalog = jest.fn().mockResolvedValue(110.25);
+    const result = await serverRecomputeFromEstimateData(
+      { engineInputs: trappingInput({ rodentAdditionalCheckPrice: 1 }) },
+      {
+        priorQualifyingServices: [],
+        recurringCustomer: false,
+        readRodentAdditionalCheckPriceFromCatalog: readCatalog,
+      },
+    );
+
+    expect(result.recomputed).toBe(true);
+    const trapping = result.serverResult.oneTime.specItems.find((item) => item.service === 'rodent_trapping');
+    expect(trapping.pricingBasis.additionalCheckPrice).toBe(110.25);
+    expect(trapping.detail).toContain('$110.25');
+    expect(readCatalog).toHaveBeenCalledTimes(1);
   });
 });
 

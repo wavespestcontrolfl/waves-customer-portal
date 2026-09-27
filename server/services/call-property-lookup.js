@@ -916,7 +916,6 @@ async function reconcileCustomerMirrors() {
           (c.latitude IS NULL AND c.longitude IS NULL AND cp.latitude IS NOT NULL AND cp.longitude IS NOT NULL)
           OR (NULLIF(TRIM(c.property_type), '') IS NULL AND NULLIF(TRIM(cp.property_type), '') IS NOT NULL AND cp.property_type <> 'commercial')
         )`);
-      q = geocodeReview.excludePrimaryPropertyReviewBlocks(q, 'cp');
       q = q.select(
           'c.id as customer_id',
           db.raw('c.created_at::text as customer_created_key'),
@@ -962,17 +961,31 @@ async function reconcileCustomerMirrors() {
           mirror.property_type = db.raw("COALESCE(NULLIF(TRIM(property_type), ''), ?)", [cpType]);
         }
         if (!Object.keys(mirror).length) continue;
-        mirror.updated_at = db.fn.now();
         filled += (await withReviewWriteFence({
           propertyId: r.property_id, customerId: r.property_customer_id,
         }, async (conn) => {
-          let customerUpdate = conn('customers')
-            .where({ id: r.customer_id })
-            .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
-              r.c_line1 || '', r.c_line2 || '', r.c_city || '', r.c_zip || '',
-            ]);
-          if (mirror.latitude) customerUpdate = geocodeReview.excludePrimaryPropertyReviewForId(customerUpdate, r.property_id);
-          return customerUpdate.update(mirror);
+          let metadataRows = 0;
+          if (mirror.property_type) {
+            metadataRows = await conn('customers')
+              .where({ id: r.customer_id })
+              .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
+                r.c_line1 || '', r.c_line2 || '', r.c_city || '', r.c_zip || '',
+              ])
+              .update({ property_type: mirror.property_type, updated_at: db.fn.now() });
+          }
+          let coordinateRows = 0;
+          if (mirror.latitude) {
+            let coordinateUpdate = conn('customers')
+              .where({ id: r.customer_id })
+              .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
+                r.c_line1 || '', r.c_line2 || '', r.c_city || '', r.c_zip || '',
+              ]);
+            coordinateUpdate = geocodeReview.excludePrimaryPropertyReviewForId(coordinateUpdate, r.property_id);
+            coordinateRows = await coordinateUpdate.update({
+              latitude: mirror.latitude, longitude: mirror.longitude, updated_at: db.fn.now(),
+            });
+          }
+          return Math.max(Number(metadataRows) || 0, Number(coordinateRows) || 0);
         })) || 0;
       }
       if (rows.length < RECONCILE_VISIT_PAGE) {

@@ -60,7 +60,7 @@ function mockRowDb(row, updateBuilder, extra = {}) {
 
 function builder(result) {
   const b = {};
-  for (const m of ['where', 'first', 'update', 'join', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'orWhereNull', 'select', 'orderBy', 'limit', 'offset', 'insert', 'onConflict', 'merge']) b[m] = jest.fn(() => b);
+  for (const m of ['where', 'first', 'update', 'join', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotExists', 'orWhereNull', 'select', 'orderBy', 'limit', 'offset', 'insert', 'onConflict', 'merge', 'forUpdate']) b[m] = jest.fn(() => b);
   b.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   return b;
 }
@@ -1006,7 +1006,10 @@ describe('reconcileCustomerMirrors', () => {
     };
     const joined = builder([
       // Coords missing on the customer, present on the primary property.
-      { customer_id: 'c1', latitude: '27.5', longitude: '-82.4', cp_type: 'single_family', ...base },
+      {
+        customer_id: 'c1', property_id: 'p1', property_customer_id: 'c1',
+        latitude: '27.5', longitude: '-82.4', cp_type: 'single_family', ...base,
+      },
       // Commercial type must never reach customers (taxability ruling) and
       // this row has no coordinate gap → nothing to write, skipped.
       {
@@ -1031,14 +1034,56 @@ describe('reconcileCustomerMirrors', () => {
     });
     const filled = await _private.reconcileCustomerMirrors();
     expect(filled).toBe(1);
-    expect(upd.where).toHaveBeenCalledTimes(1);
+    expect(upd.where).toHaveBeenCalledTimes(2);
     expect(upd.where).toHaveBeenCalledWith({ id: 'c1' });
-    const mirror = upd.update.mock.calls[0][0];
-    expect(mirror.latitude).toMatchObject({ bindings: [27.5] });
-    expect(mirror.property_type).toMatchObject({ bindings: ['single_family'] });
+    const metadataMirror = upd.update.mock.calls[0][0];
+    const coordinateMirror = upd.update.mock.calls[1][0];
+    expect(metadataMirror.property_type).toMatchObject({ bindings: ['single_family'] });
+    expect(metadataMirror).not.toHaveProperty('latitude');
+    expect(coordinateMirror.latitude).toMatchObject({ bindings: [27.5] });
+    expect(coordinateMirror).not.toHaveProperty('property_type');
     // The captured address columns are re-asserted in the UPDATE predicate.
-    const reassert = upd.whereRaw.mock.calls[0];
-    expect(reassert[1]).toEqual(['123 Sample Cove', '', 'Bradenton', '34212']);
+    for (const reassert of upd.whereRaw.mock.calls) {
+      expect(reassert[1]).toEqual(['123 Sample Cove', '', 'Bradenton', '34212']);
+    }
+  });
+
+  test('review quarantine guards coordinates without suppressing property-type repair', async () => {
+    process.env.GATE_GEOCODE_REVIEW = 'true';
+    const joined = builder([{
+      customer_id: 'c1', property_id: 'p1', property_customer_id: 'c1',
+      c_line1: '123 Sample Cove', c_line2: null, c_city: 'Bradenton', c_zip: '34212',
+      address_line1: '123 Sample Cove', address_line2: null, city: 'Bradenton', zip: '34212',
+      latitude: '27.5', longitude: '-82.4', cp_type: 'single_family',
+    }]);
+    const customerLock = builder({ id: 'c1' });
+    const propertyLock = builder({ id: 'p1', customer_id: 'c1' });
+    const metadataUpdate = builder(1);
+    const coordinateUpdate = builder(0);
+    const settingsWrite = builder(1);
+    let customerCalls = 0;
+    db.transaction = jest.fn(async callback => callback(db));
+    db.mockImplementation((table) => {
+      if (String(table).startsWith('customers as c')) return joined;
+      if (table === 'customers') {
+        customerCalls += 1;
+        if (customerCalls === 1) return customerLock;
+        return customerCalls === 2 ? metadataUpdate : coordinateUpdate;
+      }
+      if (table === 'customer_properties') {
+        return propertyLock;
+      }
+      if (table === 'system_settings') return settingsWrite;
+      return builder(1);
+    });
+
+    expect(await _private.reconcileCustomerMirrors()).toBe(1);
+    expect(joined.whereNotExists).not.toHaveBeenCalled();
+    expect(metadataUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      property_type: expect.anything(),
+    }));
+    expect(metadataUpdate.whereNotExists).not.toHaveBeenCalled();
+    expect(coordinateUpdate.whereNotExists).toHaveBeenCalledTimes(1);
   });
 });
 

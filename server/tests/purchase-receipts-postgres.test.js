@@ -59,8 +59,9 @@ jest.setTimeout(30000);
     shipmentKey: 'ship-1', item: { title: TITLE, quantity: 2 }, lineNo: 1, ...overrides,
   });
   // A ledger row `hours` after the email's received_at (negative = before).
-  const movement = (type, hours, metadata) => mockConn('product_inventory_movements').insert({
-    product_id: taurus.id, movement_type: type, quantity: 10, unit: 'fl_oz',
+  // A correction's quantity is its signed change.
+  const movement = (type, hours, metadata, quantity) => mockConn('product_inventory_movements').insert({
+    product_id: taurus.id, movement_type: type, quantity, unit: 'fl_oz',
     metadata, created_at: new Date(RECEIVED_AT.getTime() + hours * HOUR),
   });
   const stock = async () => Number((await mockConn('products_catalog').where({ id: taurus.id }).first()).inventory_on_hand);
@@ -90,25 +91,30 @@ jest.setTimeout(30000);
   });
 
   test.each([
-    ['a manual restock 10h before the email', 'restock', -10, { source: 'intelligence_bar_adjust_stock' }],
-    ['an untagged restock (NULL metadata) 10h before', 'restock', -10, null],
-    ['a restock with no source key 47h before', 'restock', -47, {}],
-    ['a manual restock logged after the email arrived', 'restock', 1, { source: 'restock_request_receive' }],
-    ['a count (correction) after the email', 'correction', 2, { source: 'admin_manual_adjustment' }],
-  ])('%s holds the line: no movement, possible_duplicate, amount kept', async (_label, type, hours, metadata) => {
-    await movement(type, hours, metadata);
+    ['a manual restock 10h before the email', 'restock', -10, { source: 'intelligence_bar_adjust_stock' }, 10],
+    ['an untagged restock (NULL metadata) 10h before', 'restock', -10, null, 10],
+    ['a restock with no source key 47h before', 'restock', -47, {}, 10],
+    ['a manual restock logged after the email arrived', 'restock', 1, { source: 'restock_request_receive' }, 10],
+    ['a count (correction) after the email', 'correction', 2, { source: 'admin_manual_adjustment' }, 10],
+    ['a count lowered after the email', 'correction', 2, { source: 'admin_manual_adjustment' }, -4],
+    ['the bottle entered by hand at the counter, 10 minutes before the invoice email', 'correction', -1 / 6, { source: 'admin_inline_stock_edit' }, 78],
+    ['a count raised 47h before', 'correction', -47, { source: 'admin_manual_adjustment' }, 5],
+  ])('%s holds the line: no movement, possible_duplicate, amount kept', async (_label, type, hours, metadata, quantity) => {
+    await movement(type, hours, metadata, quantity);
     expect(await processReceiptLine(line())).toMatchObject({ status: 'possible_duplicate', receivedQty: 156 });
     expect(await stock()).toBe(0);
     expect(await savedLine()).toMatchObject({ status: 'possible_duplicate', received_qty: '156.0000', movement_id: null });
   });
 
   test.each([
-    ['the morning count before the delivery', 'correction', -9, { source: 'admin_manual_adjustment' }],
-    ['a manual restock 72h before (outside the window)', 'restock', -72, { source: 'intelligence_bar_adjust_stock' }],
-    ['another Amazon delivery restock 10h before', 'restock', -10, { source: 'amazon_delivery' }],
-    ['usage after the email', 'usage', 3, null],
-  ])('%s does not hold: the delivery logs', async (_label, type, hours, metadata) => {
-    await movement(type, hours, metadata);
+    ['the morning count that lowered stock before the delivery', 'correction', -9, { source: 'admin_manual_adjustment' }, -22],
+    ['a count with no change before the delivery', 'correction', -9, { source: 'inventory_unit_review' }, 0],
+    ['a count raised 49h before (outside the window)', 'correction', -49, { source: 'admin_manual_adjustment' }, 78],
+    ['a manual restock 72h before (outside the window)', 'restock', -72, { source: 'intelligence_bar_adjust_stock' }, 10],
+    ['another Amazon delivery restock 10h before', 'restock', -10, { source: 'amazon_delivery' }, 10],
+    ['usage after the email', 'usage', 3, null, 10],
+  ])('%s does not hold: the delivery logs', async (_label, type, hours, metadata, quantity) => {
+    await movement(type, hours, metadata, quantity);
     expect(await processReceiptLine(line())).toMatchObject({ status: 'logged' });
     expect(await stock()).toBe(156);
   });

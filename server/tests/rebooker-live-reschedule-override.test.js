@@ -239,15 +239,23 @@ describe('live-status reschedule override (allowLive)', () => {
   test('options.moveGuard runs on the move trx with the kept tech before the CAS write; a refusal aborts before any write', async () => {
     let { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
     const seen = [];
-    const moveGuard = jest.fn(async ({ trx, technicianId, service }) => {
-      seen.push({ trxIsFn: typeof trx === 'function', technicianId, serviceId: service.id, writesSoFar: updateQuery.update.mock.calls.length });
+    const moveGuard = jest.fn(async ({
+      trx, technicianId, service, destination,
+    }) => {
+      seen.push({
+        trxIsFn: typeof trx === 'function', technicianId, serviceId: service.id, destination, writesSoFar: updateQuery.update.mock.calls.length,
+      });
     });
     await SmartRebooker.reschedule(
       'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'auto_dispatch', 'auto_dispatch',
       { allowLive: true, moveGuard },
     );
     expect(moveGuard).toHaveBeenCalledTimes(1);
-    expect(seen[0]).toEqual({ trxIsFn: true, technicianId: 'tech-1', serviceId: 'svc-1', writesSoFar: 0 });
+    // `destination` is the placement this very write lands (the flex tier's
+    // destination freeze re-checks it here, not only at planning time).
+    expect(seen[0]).toEqual({
+      trxIsFn: true, technicianId: 'tech-1', serviceId: 'svc-1', destination: { date: TARGET, windowStart: '09:00' }, writesSoFar: 0,
+    });
     expect(updateQuery.update).toHaveBeenCalledTimes(1);
 
     // With a tech change the guard sees the RECEIVING tech; a throw stops the move.

@@ -11,6 +11,15 @@ const TERMINAL_EMAIL_REFUSAL_CODES = new Set([
   'BILLING_EMAIL_NOT_SELECTED',
   'BILLING_EMAIL_DISABLED',
   'EMAIL_SUPPRESSED',
+  // The billing Email authority's phone-keyed suppression recheck (#4962):
+  // the same hard stops the provider-retry path resolves terminally, so a
+  // fresh reminder settles the leg instead of re-claiming it until the
+  // suppression happens to clear. A STOP text or a wrong-number flag never
+  // stops a payment email (owner ruling 2026-09-27), so only these two can
+  // refuse one. An unreadable store (SUPPRESSION_LOOKUP_FAILED) stays
+  // retryable.
+  'SUPPRESSED_MANUAL_DNC',
+  'SUPPRESSED_OTHER',
 ]);
 
 // A permanent Email refusal (no address, Email not selected, template

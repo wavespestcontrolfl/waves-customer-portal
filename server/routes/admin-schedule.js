@@ -6028,6 +6028,19 @@ router.get('/', async (req, res, next) => {
       byTech[key].zones[s.zone] = (byTech[key].zones[s.zone] || 0) + 1;
     });
 
+    // Schedule tie-proximity display order (owner ruling 2026-09-26, dark by
+    // default): DISPLAY ONLY — attaches a `displayOrder` index to each of a
+    // tech's stops so the mobile day list and the desktop day board's route-
+    // order badge can break a window-start tie by drive-time proximity to
+    // the previous stop, instead of booking order. Nothing is written to the
+    // DB and no stop is physically reordered here — `enriched` (and every
+    // response field built from it) keeps its DB-query order; only the new
+    // `displayOrder` field is added, in place, on the SAME objects `enriched`
+    // holds. Off = no field, byte-identical to before this gate existed.
+    if (require('../config/feature-gates').gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY')) {
+      Object.values(byTech).forEach((tech) => require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(tech.services));
+    }
+
     // Calculate tech summaries
     Object.values(byTech).forEach(tech => {
       tech.totalServices = tech.services.length;
@@ -6189,6 +6202,10 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.weekend_shift',
           'scheduled_services.source_estimate_id',
           'scheduled_services.annual_prepay_term_id',
+          // Tie-proximity display order (GATE_SCHEDULE_TIE_PROXIMITY) needs
+          // each stop's point — same stamped-vs-customer rule as the day feed.
+          db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as visit_lat`),
+          db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as visit_lng`),
           'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
           'customers.monthly_rate', 'customers.autopay_enabled', 'customers.autopay_paused_until',
           'customers.autopay_payment_method_id',
@@ -6509,6 +6526,13 @@ router.get('/week', async (req, res, next) => {
           visitCloseoutPacket: s.closeout_packet_id ? { id: s.closeout_packet_id, status: s.closeout_packet_status } : null,
         };
       }));
+
+      // Same display-only tie-proximity order as the day feed, per tech per
+      // day, so week mode and day mode agree. Coordinates come from the raw
+      // rows; only `displayOrder` is added to the payload.
+      if (require('../config/feature-gates').gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY')) {
+        require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(servicePayloads, services);
+      }
 
       days.push({
         date: dateStr,
@@ -22120,46 +22144,97 @@ async function generateReportCopyWithFallback({
 // selected values are echoed; raw notes and product names are intentionally
 // excluded because they may contain customer-private details, brand names, or
 // unsafe claims that an AI validator would normally rewrite.
-function buildDeterministicReportCopy({ serviceType, areas, actions, observations, recommendations, ratingLabel } = {}) {
+function buildDeterministicReportCopy({
+  serviceType, areas, actions, observations, recommendations, ratingLabel, customerConcern,
+  applicationRecords,
+} = {}) {
   const cleanItems = (items) => (Array.isArray(items) ? items : [])
-    .map((item) => String(item || '').trim())
+    .map((item) => redactAccessCodes(String(item || '').trim()))
     .filter(Boolean)
+    .filter((item) => !containsReportAccessCode(item))
     .filter((item) => ActivityIndicators.findBannedCustomerCopy(item).length === 0)
     .slice(0, 4);
   const cleanAreas = cleanItems(areas);
   const cleanActions = cleanItems(actions);
   const cleanObservations = cleanItems(observations);
   const cleanRecommendations = cleanItems(recommendations);
-  const hasSafeVisitDetails = cleanAreas.length > 0
-    || cleanActions.length > 0
-    || cleanObservations.length > 0
-    || cleanRecommendations.length > 0
-    || Boolean(ratingLabel);
-  if (!hasSafeVisitDetails) return null;
-  const candidateType = String(serviceType || 'scheduled service').trim().slice(0, 120) || 'scheduled service';
-  const safeType = ActivityIndicators.findBannedCustomerCopy(candidateType).length === 0
-    ? candidateType
-    : 'scheduled service';
-
-  const did = [];
-  did.push(`We completed the ${safeType} visit${cleanAreas.length ? ` in ${cleanAreas.join(', ')}` : ''}.`);
-  did.push(cleanActions.length
-    ? `Completed work included ${cleanActions.join('; ')}.`
-    : 'The technician documented the work performed and the areas addressed during the visit.');
-
-  const found = [];
-  if (cleanObservations.length) found.push(`The technician noted ${cleanObservations.join('; ')}.`);
-  if (ratingLabel) found.push(`Recorded pest activity was ${ratingLabel}.`);
-  if (cleanRecommendations.length) found.push(`Recommended next steps include ${cleanRecommendations.join('; ')}.`);
-  if (!found.length) found.push('The visit details were documented for continued monitoring at the next scheduled service.');
-
+  const cleanConcern = cleanItems([customerConcern])[0];
+  const safeRoles = new Set([
+    'weed-control application', 'fertilizer application', 'insect-control application', 'bait application',
+    'disease-control application', 'moisture-support application', 'soil-support application',
+    'growth-regulator application',
+  ]);
+  const safeMethods = new Set([
+    'perimeter spray', 'broadcast spray', 'spot treatment', 'granular broadcast',
+    'soil drench', 'root injection', 'soil injection', 'bait placement', 'station check',
+    'fog/ULV application', 'foliar spray', 'trunk injection', 'pin stream application',
+  ]);
+  const cleanApplications = (Array.isArray(applicationRecords) ? applicationRecords : [])
+    .flatMap((record) => {
+      if (!safeRoles.has(record?.role)) return [];
+      const method = safeMethods.has(record?.method) ? record.method : null;
+      const area = cleanItems(record?.area ? [record.area] : [])[0] || null;
+      const areaValue = Number(record?.areaValue);
+      const areaUnit = record?.areaUnit === 'sqft' ? 'sq ft'
+        : record?.areaUnit === 'linear_ft' ? 'linear ft' : null;
+      return [{
+        role: record.role,
+        method,
+        area,
+        measurement: Number.isFinite(areaValue) && areaValue > 0 && areaUnit
+          ? `${areaValue} ${areaUnit}` : null,
+      }];
+    })
+    .slice(0, 6);
+  // A concern, observation, rating, area, or recommendation cannot establish
+  // completed work. WDO/pre-slab keep their existing separate document behavior.
+  const legacyDocument = /\bwdo\b|pre[- ]?slab|pre[- ]?treat/i.test(String(serviceType));
+  const evidence = legacyDocument
+    ? [cleanAreas.length, cleanActions.length, cleanObservations.length, cleanRecommendations.length, ratingLabel]
+    : [cleanActions.length, cleanApplications.length];
+  if (!evidence.some(Boolean)) return null;
+  const wording = legacyDocument ? {
+    work: 'Completed work included', finding: 'The technician noted',
+    advice: 'Recommended next steps include',
+    emptyFinding: 'The visit details were documented for continued monitoring at the next scheduled service.',
+  } : {
+    work: 'Recorded completed work:', finding: 'The technician recorded',
+    advice: 'The visit record includes this recommended next step:',
+    emptyFinding: 'No separate technician finding was supplied with the structured details used for this fallback.',
+  };
+  const did = cleanActions.length ? [`${wording.work} ${cleanActions.join('; ')}.`] : [];
+  if (legacyDocument) {
+    const candidateType = String(serviceType).trim().slice(0, 120);
+    const safeType = ActivityIndicators.findBannedCustomerCopy(candidateType).length === 0
+      ? candidateType : 'scheduled service';
+    did.unshift(`We completed the ${safeType} visit${cleanAreas.length ? ` in ${cleanAreas.join(', ')}` : ''}.`);
+    if (!cleanActions.length) did.push('The technician documented the work performed and the areas addressed during the visit.');
+  } else {
+    if (cleanApplications.length) {
+      const applications = cleanApplications.map((application) => {
+        const details = [
+          application.method ? `using ${application.method}` : null,
+          application.area ? `in ${application.area}` : null,
+          application.measurement ? `with ${application.measurement} recorded` : null,
+        ].filter(Boolean).join(' ');
+        return `${application.role}${details ? ` ${details}` : ''}`;
+      });
+      did.push(`Recorded applications: ${applications.join('; ')}.`);
+    }
+    if (cleanAreas.length) did.push(`Recorded service area: ${cleanAreas.join(', ')}.`);
+  }
+  const found = [
+    [cleanObservations.length, `${wording.finding} ${cleanObservations.join('; ')}.`],
+    [!legacyDocument && cleanConcern, `You reported: ${cleanConcern}.`],
+    [ratingLabel, `Recorded pest activity was ${ratingLabel}.`],
+    [cleanRecommendations.length, `${wording.advice} ${cleanRecommendations.join('; ')}.`],
+  ].filter(([present]) => present).map(([, sentence]) => sentence);
+  if (!found.length) found.push(wording.emptyFinding);
   const report = `WHAT WE DID\n\n${did.join(' ')}\n\nWHAT WE FOUND\n\n${found.join(' ')}`;
-  // Same egress rule as the AI path (codex r16): the completion parser must
-  // APPROVE the copy — echoed typed free text can carry parser-only terms
-  // (bare 'infestation'), and returning it would hand the tech a report that
-  // completion later discards for another template.
   if (!reportCopyRejection(report) && technicianReportCustomerCopy(report)?.body) return report;
-  return 'WHAT WE DID\n\nWe completed the scheduled service and documented the work performed.\n\nWHAT WE FOUND\n\nThe visit details were recorded for continued monitoring at the next scheduled service.';
+  return legacyDocument
+    ? 'WHAT WE DID\n\nWe completed the scheduled service and documented the work performed.\n\nWHAT WE FOUND\n\nThe visit details were recorded for continued monitoring at the next scheduled service.'
+    : null;
 }
 
 // Provenance classifier for typed findings fields (codex r2). Some fields
@@ -22171,7 +22246,8 @@ function buildDeterministicReportCopy({ serviceType, areas, actions, observation
 // customer copy).
 // target_animal is EXEMPT from the target rule: wildlife's "Suspected
 // species" is an observation, not what a treatment targets (codex r15).
-const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated|treatment_zones|source_reduction|sensitive_areas_avoided|entry_points_addressed|exclusion_materials|sanitation_areas|plant_groups|areas_inspected|structures_inspected)$|^target_(?!animal\b)|_target$|_performed$|_actions$|_replaced$|_placed$|_applied$|_installed$|_removed$|_sealed$|_cleaned$|_secured$|_treated$|_serviced$|^treated_|notice/;
+const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated|treatment_zones|source_reduction|sensitive_areas_avoided|entry_points_addressed|exclusion_materials|sanitation_areas|plant_groups|areas_inspected|structures_inspected)$|_performed$|_actions$|_replaced$|_placed$|_applied$|_installed$|_removed$|_sealed$|_cleaned$|_secured$|_treated$|_serviced$|^treated_|notice/;
+const TYPED_OBJECTIVE_FIELD_RE = /^target_(?!animal\b)|_target$/;
 const TYPED_PRODUCT_FIELD_RE = /product|epa|active_ingredient|concentration|gallon|dilution|_rate$|application|pesticide|^percent_|_solution$|linear_feet|square_footage|trench_depth/i;
 // Recommendation/prep/follow-up fields are FUTURE ADVICE, never findings —
 // presenting a proposed treatment as an observation would let the copy claim
@@ -22199,6 +22275,7 @@ const TYPED_WORK_SECTION_RE = /work completed/i;
 const TYPED_ADVICE_SECTION_RE = /recommendation/i;
 function typedFieldProvenance(field) {
   if (field.type === 'applications' || TYPED_PRODUCT_FIELD_RE.test(field.key)) return 'product';
+  if (TYPED_OBJECTIVE_FIELD_RE.test(field.key)) return 'objective';
   if (TYPED_CUSTOMER_FIELD_RE.test(field.key) || TYPED_CUSTOMER_SECTION_RE.test(field.section || '')) return 'customer';
   if (TYPED_ADVICE_FIELD_RE.test(field.key) || TYPED_ADVICE_SECTION_RE.test(field.section || '')) return 'advice';
   if (TYPED_WORK_FIELD_RE.test(field.key) || TYPED_WORK_SECTION_RE.test(field.section || '')) return 'work';
@@ -22218,7 +22295,7 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
   const schema = ActivityIndicators.findingsSchemaForType(findingsType, { companion });
   // productValues carries the RAW text of product-record fields so the
   // output validator can reject echoed trade names (codex r4).
-  const sections = { work: [], observations: [], products: [], advice: [], customer: [], productValues: [] };
+  const sections = { work: [], observations: [], objectives: [], products: [], advice: [], customer: [], productValues: [] };
   if (!schema) return sections;
   let total = 0;
   for (const field of schema.fields || []) {
@@ -22276,7 +22353,8 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
       } else {
         sections.advice.push(line);
       }
-    } else if (target === 'customer') sections.customer.push(line);
+    } else if (target === 'objective') sections.objectives.push(line);
+    else if (target === 'customer') sections.customer.push(line);
     else if (target === 'work') {
       // Work-classified CHIP fields can mix actions with observed status
       // ("Damaged or missing traps found"), recommendations ("Insulation
@@ -22375,6 +22453,7 @@ function renderTypedGroupLines(sections) {
   const parts = [];
   if (sections.work.length) parts.push(`Work recorded (completed work):\n${sections.work.join('\n')}`);
   if (sections.observations.length) parts.push(`Findings observed:\n${sections.observations.join('\n')}`);
+  if (sections.objectives?.length) parts.push(`Recorded treatment objectives (targets only — not proof of a sighting, inspection, or completed application):\n${sections.objectives.join('\n')}`);
   if (sections.products.length) parts.push(`Product application record (context only — describe the work plainly, NEVER name these products in customer copy):\n${sections.products.join('\n')}`);
   if (sections.advice.length) parts.push(`Recommendations recorded (future advice — never describe as completed work or observed findings):\n${sections.advice.join('\n')}`);
   if (sections.customer.length) parts.push(`Customer communication (the homeowner's words / what was discussed — attribute it, NEVER present as a technician-verified finding):\n${sections.customer.join('\n')}`);
@@ -22606,7 +22685,7 @@ router.post('/generate-report', async (req, res) => {
       return res.status(500).json({ error: 'AI model not configured' });
     }
 
-    const systemPrompt = `# SERVICE REPORT COPY — SYSTEM PROMPT v3
+    const systemPrompt = `# SERVICE REPORT COPY — SYSTEM PROMPT v4
 
 ## CONTEXT
 
@@ -22629,7 +22708,7 @@ A generic report is a failed report. Build both sections around the concrete det
 
 2. **No overpromising.** Never claim: elimination, eradication, impenetrable, guaranteed, 100%, total protection, pest-free, foolproof. Use language like: reduce activity, manage pressure, support long-term control, limit conducive conditions.
 
-3. **No invented observations.** Only reference conditions, pest types, or findings that appear in the service notes or in a STRUCTURED SERVICE FINDINGS block below (both are technician-recorded for THIS visit) — and a block line's own group decides HOW it may be used per constraint #7: only its "Findings observed" lines are observations. If the inputs say "general pest control" with no specifics, write generally. Do not fabricate sightings. Two narrowly scoped sources may also be used from GROUNDING CONTEXT: tech-confirmed LAWN ASSESSMENT scores are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS may describe reviewed visual appearances only, with their photo-signal provenance. Tree photo signals never establish a diagnosis, confirmed cause, observed pest species, or completed work. Omitted/hidden signals are unavailable, not healthy or absent.
+3. **No invented observations.** Only present conditions, pest types, or findings as observed on THIS visit when they appear in the service notes or in a STRUCTURED SERVICE FINDINGS block below (both are technician-recorded for THIS visit) — and a block line's own group decides HOW it may be used per constraint #7: only its "Findings observed" lines are observations. If the inputs say "general pest control" with no specifics, do not fabricate sightings. A PRODUCT LABELED COVERAGE block may support a separate product-capability statement under the grounding rules below, but those label examples are never observations, visit targets, or proof that every listed species was treated. Two narrowly scoped sources may also be used from GROUNDING CONTEXT: tech-confirmed LAWN ASSESSMENT scores are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS may describe reviewed visual appearances only, with their photo-signal provenance. Tree photo signals never establish a diagnosis, confirmed cause, observed pest species, or completed work. Omitted/hidden signals are unavailable, not healthy or absent.
 
 4. **No brand names for products.** Use active ingredient names (fipronil, bifenthrin, imidacloprid, prodiamine, etc.) or functional descriptions (non-repellent residual, insect growth regulator, pre-emergent herbicide, systemic drench). If the active ingredient is not provided in the inputs, use the functional description only. When the copy tells the homeowner to DO something with a product, lead with the plain-language role, not a bare chemical name — "water in today's grub treatment", never "water in the clothianidin".
 
@@ -22666,7 +22745,8 @@ Vary your opening. Rotate how WHAT WE DID begins — sometimes lead with the pes
 ## USING THE GROUNDING CONTEXT (when present)
 
 The GROUNDING CONTEXT block beneath the inputs holds real, customer-specific facts. Use them to make the copy specific — but still obey every hard constraint, and never assert anything the context or notes don't support:
-- **Targets tagged today**: when the context lists the specific targets the technician tagged per product, NAME them in the copy — "ghost ants and big-headed ants along the foundation," "brown patch in the front turf" — instead of generic categories ("ants," "pests," "disease"). For fertilization goals ("iron chlorosis," "nitrogen green-up"), state the nutritional objective in plain words. Use only the tagged names; never invent a species or condition that isn't tagged or noted. A tagged target is what the product was applied to CONTROL — if the observations do not record that pest or condition as seen, frame the application as protection ("targeting chinch bugs ahead of their peak season"), never as activity that was found. Do not write "no concerns were observed" and "the activity we found" about the same visit.
+- **Targets tagged today**: when the context lists the specific targets the technician tagged per product, NAME them in the copy — "ghost ants and big-headed ants along the foundation," "brown patch in the front turf" — instead of generic categories ("ants," "pests," "disease"). For fertilization goals ("iron chlorosis," "nitrogen green-up"), state the nutritional objective in plain words. Use only the tagged names when describing today's targets or findings; never invent a visit target or observed species. A tagged target is what the product was applied to CONTROL — if the observations do not record that pest or condition as seen, frame the application as protection ("targeting chinch bugs ahead of their peak season"), never as activity that was found. Do not write "no concerns were observed" and "the activity we found" about the same visit.
+- **Product labeled coverage**: for a recurring or general pest report, when the separate PRODUCT LABELED COVERAGE block contains approved facts for products selected on this visit, add one concise broader-capability sentence using the phrase "also helps control other labeled crawling pests in the treated areas." You may add only a few examples that appear in that block. Keep them separate from today's tagged targets and observations: they are product capabilities, not pests found or proof each species was treated. Treat the city as context only, never as proof a pest is endemic or present. Never sum overlapping product lists, state a numeric coverage total, or imply termite, rodent, or mosquito service is included merely because a product label names one of those pests.
 - **Prior visits**: do NOT repeat the prior wording — say something fresh, and note what has CHANGED since (an improvement, a recurring pest, a previously-noted concern that has eased). If the same pest recurs across visits, acknowledge it honestly rather than implying it is brand new.
 - **Pest pressure trend**: if it shows real movement, reflect it ("pest pressure has trended down across recent visits") instead of a vague statement. Claim only what the grounding states — do not invent a "first visit" or all-time baseline it doesn't provide.
 - **Weather (at service + recent rain)**: use it to explain a method choice, timing, or rainfast guidance — not as small talk.
@@ -22828,7 +22908,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // anyone else degrades to a notes-only report (no cross-customer data).
     let groundingCustomerId = null;
     let groundingServiceType = serviceType;
+    let fallbackServiceType = serviceType;
     let groundingServiceDate = serviceDate;
+    let reportPromptContext = { requireCanonical: Boolean(scheduledServiceId) };
     let groundingSuppressPressure = false;
     let typedFindingsBlock = '';
     let authorizedCompanionTypes = [];
@@ -22850,7 +22932,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         // in the projection the flag reads undefined and callback visits on
         // one-time keys would ground differently than /complete scores them
         // (codex P2 r2).
-        .first('id', 'service_id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
+        .first('id', 'service_id', 'service_key_snapshot', 'is_recurring', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
         .catch(() => 'lookup_failed');
       // A transient service-row lookup failure on a typed request would leave
       // typedFindingsBlock empty while primaryTypedInput still opens the
@@ -22902,6 +22984,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
             retryable: true,
           });
         }
+        // Notes-only generation remains useful during a transient appointment
+        // lookup outage. The canonical identity is unavailable in this branch,
+        // so preserve the established label fallback instead of treating the
+        // unresolved service id as a canonical mismatch.
+        reportPromptContext = { requireCanonical: false };
       } else if (!svc && substantiveTypedFacts) {
         // The row is GONE (deleted concurrently — admins pass the ownership
         // check without an existence check). Typed facts can't be
@@ -22918,6 +23005,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
           // report in the wrong service line and pull unrelated prior-visit context.
           // The service line is derived from this type inside buildReportCopyContext.
           groundingServiceType = svc.service_type || serviceType;
+          fallbackServiceType = groundingServiceType;
           // The scheduled service is the source of truth for the date, so season
           // and trailing-rainfall grounding match the visit, not "today" (the
           // client builds serviceDate from new Date()). Fall back to the client
@@ -22934,6 +23022,27 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
           let profileResolutionFailed = false;
           const completionProfile = await resolveCompletionProfileForScheduledService(svc)
             .catch(() => { profileResolutionFailed = true; return null; });
+          const {
+            serviceKey = null,
+            serviceName = null,
+            findingsType = null,
+            billingType: serviceModel = null,
+            companions = [],
+          } = completionProfile || {};
+          const synthesizedGeneric = completionProfile?.synthesized === true && !serviceKey;
+          reportPromptContext = profileResolutionFailed
+            ? { requireCanonical: false }
+            : {
+              requireCanonical: !synthesizedGeneric,
+              serviceKey,
+              findingsType,
+              serviceModel,
+              isCallback: svc.is_callback === true,
+              isBundled: customerFacingCompanionTypes(companions).length > 0,
+            };
+          if (completionProfile) {
+            fallbackServiceType = serviceName || (serviceKey ? 'scheduled service' : groundingServiceType);
+          }
           // A transient profile-resolution failure must not silently drop
           // the typed/companion facts (empty allowlist -> prose from the
           // primary lane alone) or 409 a legitimate typed request — fail
@@ -23084,6 +23193,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       : [];
     let contextText = '';
     let contextSignals = {};
+    let deterministicApplications = [];
     try {
       const ctx = await buildReportCopyContext({
         customerId: groundingCustomerId,
@@ -23105,6 +23215,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       });
       contextText = ctx.contextText || '';
       contextSignals = ctx.signals || {};
+      deterministicApplications = Array.isArray(ctx.deterministicApplications)
+        ? ctx.deterministicApplications : [];
     } catch (ctxErr) {
       logger.warn(`[generate-report] grounding context failed: ${ctxErr.message}`);
     }
@@ -23161,10 +23273,21 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       }
     }
 
+    const { selectReportCopyPrompt } = require('../services/service-report/lawn-report-copy-prompt');
+    const effectiveSystemPrompt = selectReportCopyPrompt(systemPrompt, groundingServiceType, reportPromptContext);
+    if (!effectiveSystemPrompt) {
+      return res.status(503).json({
+        error: 'A report writer could not be matched to this service. Your notes were preserved; review the service profile before generating again.',
+        code: 'report_writer_unavailable',
+        retryable: true,
+      });
+    }
     const fullUserMessage = `${userMessage}${typedFindingsBlock}${contextText}${commsBlock}`;
-    // v6: typed structured findings joined the prompt payload (2026-08-15).
+    // v9: canonical remaining-service modules join the dedicated writers.
+    // Both the selected system
+    // prompt and all visit facts participate in the cache identity.
     const cacheKey = crypto.createHash('sha256')
-      .update(`v6|openai:${primaryModel}|anthropic:${backupModel}|${fullUserMessage}`)
+      .update(`v9|openai:${primaryModel}|anthropic:${backupModel}|${effectiveSystemPrompt}|${fullUserMessage}`)
       .digest('hex');
     const cached = reportCopyCacheGet(cacheKey);
     if (cached) return res.json({ report: cached, cached: true });
@@ -23194,7 +23317,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       });
     }
     const generated = await generateReportCopyWithFallback({
-      systemPrompt,
+      systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,
       extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null),
     });
@@ -23212,7 +23335,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         });
       }
       const report = buildDeterministicReportCopy({
-        serviceType: groundingServiceType,
+        serviceType: fallbackServiceType,
         areas: promptAreas,
         actions: [...promptActions, ...typedFallbackActions],
         // Typed structured findings ride the fallback as technician work /
@@ -23223,6 +23346,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         observations: [...promptObs, ...typedFallbackObservations],
         recommendations: [...promptRecs, ...typedFallbackNextSteps],
         ratingLabel: ratingNum !== null ? PEST_ACTIVITY_LABELS[ratingNum] : null,
+        customerConcern: promptConcern,
+        applicationRecords: deterministicApplications,
       });
       // Same request-specific trade-name guard as the AI path (codex r19):
       // typed free text ("Reapply Termidor HE next visit") can carry names
@@ -24706,6 +24831,10 @@ module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
 // cancel so a 'following' / 'series' cancel refuses prepaid visits the same
 // way the trim does instead of silently dropping paid visits off the books.
 module.exports.findBillingCoveredVisits = findBillingCoveredVisits;
+// The billable-amount booking gate — also consumed lazily by the IB
+// create_appointment executor for its one unpriced visit (ADMIN-BUG-R12),
+// same avoid-a-route-load-cycle reason as above.
+module.exports.recurringWithoutBillableAmount = recurringWithoutBillableAmount;
 // Completion reruns the visit-scoped trade-name screen with the SAME typed
 // product-field classification generation used (codex r49 #3420).
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
