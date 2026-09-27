@@ -238,6 +238,35 @@ function invoiceHasDepositCreditLine(invoice) {
   );
 }
 
+// A stored invoice.discount_amount that exceeds what the invoice's negative
+// line items actually back is (at least partly) a document-level discount
+// (InvoiceService.create's `discountIds` picks — see the "manual discount"
+// math elsewhere in this file) that calculateUpdateFinancials cannot
+// reconstruct: it derives discount_amount ENTIRELY from negative line items
+// in the submitted array (manualDiscountRows is always [] on the edit
+// path), so retotaling such an invoice from its line items alone would
+// silently zero (or shrink) the discount and increase the total. Compared
+// in CENTS, and as a SUM — not "any negative line exists" (Codex P0, this
+// branch's own second push): create() can combine a line-item discount
+// with a document-level discountIds pick on the SAME invoice (e.g. a $5
+// negative line plus a $10 document pick stores discount_amount=15), and a
+// single backed dollar must never green-light the whole stored figure. A
+// discount FULLY backed by negative lines (the common case) compares equal
+// and is unaffected — those lines ride through the retotal and
+// calculateUpdateFinancials prices them fresh.
+function invoiceHasUnbackedDocumentDiscount(invoice, lineItems) {
+  const storedCents = Math.round(parseFloat(invoice?.discount_amount || 0) * 100);
+  if (!(storedCents > 0)) return false;
+  const items = Array.isArray(lineItems) ? lineItems : parseInvoiceLineItems(lineItems);
+  const backedCents = items.reduce((sum, li) => {
+    const qty = li?.quantity != null ? Number(li.quantity) : 1;
+    const rawAmt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+    if (!Number.isFinite(rawAmt) || rawAmt >= 0) return sum;
+    return sum + Math.round(-rawAmt * 100);
+  }, 0);
+  return backedCents < storedCents;
+}
+
 // Linked-visit guards for unvoidInvoice (Codex #3493 r2/r3). Runs TWICE:
 // pre-transaction as a fast fail, and again INSIDE the restore transaction
 // on the freshly-locked invoice row — a cancellation, free re-service
@@ -7443,6 +7472,26 @@ const InvoiceService = {
           "This invoice has account credit applied (prepaid) — reverse the applied credit before editing line items",
         );
       }
+      // Document-level discount with no line-item backing (see
+      // invoiceHasUnbackedDocumentDiscount above): calculateUpdateFinancials
+      // derives discount_amount ENTIRELY from negative lines in the
+      // submitted array, so it cannot reconstruct a manual discountIds pick
+      // that never became a line. Decline rather than silently zero the
+      // discount.
+      //
+      // Checked against the invoice's STORED (pre-edit) line items, never
+      // the submitted ones (Codex pre-push P1): an edit that intentionally
+      // REMOVES an existing, already line-item-backed discount is legitimate
+      // — the stored discount_amount was backed at save time, so the new
+      // submission correctly recomputes it down to whatever remains,
+      // including zero. Checking the submitted array instead would treat
+      // "the discount line staff just deleted" as evidence the discount was
+      // never reconstructable and refuse the edit outright.
+      if (invoiceHasUnbackedDocumentDiscount(invoice, invoice.line_items)) {
+        throw new Error(
+          "This invoice carries a document-level discount with no backing line item — void it and create a replacement instead of editing line items",
+        );
+      }
       const customer = await db("customers")
         .where({ id: invoice.customer_id })
         .first();
@@ -7492,6 +7541,18 @@ const InvoiceService = {
       if (parseFloat(invoice.credit_applied || 0) > 0) {
         throw new Error(
           "This invoice has account credit applied (prepaid) — reverse the applied credit before changing the tax rate",
+        );
+      }
+      // Same unbacked-document-discount fence as the line-item retotal
+      // branch above (Codex P0): this branch ALSO calls
+      // calculateUpdateFinancials, which derives discount_amount entirely
+      // from negative line items — a tax_rate-only body with no line_items
+      // at all would otherwise silently zero a document-level discount that
+      // was never backed by a line, increasing the total on a request that
+      // never touched the discount.
+      if (invoiceHasUnbackedDocumentDiscount(invoice, invoice.line_items)) {
+        throw new Error(
+          "This invoice carries a document-level discount with no backing line item — void it and create a replacement instead of changing the tax rate",
         );
       }
       const existingLineItems =
@@ -10288,6 +10349,7 @@ module.exports.prepaySwitchRestoreAssertDate = prepaySwitchRestoreAssertDate;
 // Exposed for unit tests (pure helpers).
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
+module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
 module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
