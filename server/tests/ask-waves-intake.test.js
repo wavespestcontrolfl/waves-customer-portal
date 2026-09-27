@@ -2319,6 +2319,7 @@ describe('looksLikeEmergency', () => {
     'The ants choked on the bait',
     'I put out bait, the rats found it and ate the bait',
     'My son says the rats ran and ate the bait',
+    'My child saw ants and choking on the bait is how they die',
     'Something got into it and ate the bait',
     'When the rats came out, it ran and ate the bait',
     'The rats were poisoned by spray',

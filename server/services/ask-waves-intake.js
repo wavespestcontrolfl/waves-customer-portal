@@ -189,7 +189,9 @@ function anyPatientExposure(turn) {
   const patientAt = (clause, m) => {
     if (patient(before(clause, m))) return true;
     const prefix = clause.slice(0, m.index);
-    if (!COORDINATED_VERB_RE.test(prefix)) return false;
+    // Only a finite verb shares the subject: "choking on the bait is how they
+    // die" after "My child saw ants and" is a gerund phrase, not the child.
+    if (!COORDINATED_VERB_RE.test(prefix) || /^\w+ing\b/i.test(m[0].trim())) return false;
     const conjuncts = prefix.split(CONJUNCT_SPLIT_RE).map((c) => c.trim()).filter(Boolean);
     return PATIENT_VERB_PEST_OBJECT_RE.test(conjuncts[conjuncts.length - 1] || '');
   };
