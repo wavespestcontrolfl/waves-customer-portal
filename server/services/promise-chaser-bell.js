@@ -102,13 +102,33 @@ async function claimAttempt(callId) {
 
 // Settle a claim to a terminal outcome, fenced on the token: a stale owner
 // waking up late cannot overwrite what a newer attempt already decided.
-async function settle(callId, token, status, reason = null) {
+// `commitmentId` (stamped on a 'rung' settle) is what alreadyRungToday
+// checks — the cross-call "once per promise per day" decision, made here
+// rather than through notifyAdmin's own dedupe, so a retry of THIS call's
+// own failed push is never mistaken for a duplicate.
+async function settle(callId, token, status, reason = null, commitmentId = null) {
   await db('call_log').where({ id: callId })
     .whereRaw("metadata->'promise_chaser'->>'claimed_at' = ?", [token])
     .update({
       metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('promise_chaser', ?::jsonb)",
-        [JSON.stringify({ status, reason, claimed_at: token, at: new Date().toISOString() })]),
+        [JSON.stringify({ status, reason, commitmentId, claimed_at: token, at: new Date().toISOString() })]),
     });
+}
+
+// Has ANY call already rung for this exact promise today (ET)? The
+// cross-call half of "once per promise per day" — a genuinely separate
+// call on the same open promise must not re-buzz, but this call's OWN
+// retry of its own not-yet-rung attempt must never be blocked by it (it
+// checks OTHER calls' settled outcomes, never this one's still-pending
+// claim). Bounded to 48h so it stays a bounded index scan, not a table scan.
+async function alreadyRungToday(promiseId, now) {
+  const rows = await db('call_log')
+    .where('created_at', '>', new Date(now.getTime() - 48 * 60 * 60 * 1000))
+    .whereRaw("metadata->'promise_chaser'->>'status' = 'rung'")
+    .whereRaw("metadata->'promise_chaser'->>'commitmentId' = ?", [String(promiseId)])
+    .select(db.raw("metadata->'promise_chaser'->>'at' as rung_at"));
+  const today = etDateString(now);
+  return rows.some((r) => r.rung_at && etDateString(new Date(r.rung_at)) === today);
 }
 
 // Which open Waves promise (if any) this call should ring for, or why not:
@@ -224,6 +244,15 @@ async function ringPromiseChaserIfNeeded(callSid, { viaSweep = false } = {}) {
     if (selection.outcome === 'skip') { await settle(call.id, token, 'skipped', selection.reason); return false; }
     const { promise, what, when } = selection;
 
+    // Cross-call half of "once per promise per day": a genuinely SEPARATE
+    // call for the same open promise, already rung today by another call,
+    // must not re-buzz. This never blocks THIS call's own retry of its own
+    // not-yet-rung attempt (it only sees OTHER calls' settled 'rung' rows).
+    if (await alreadyRungToday(promise.id, now)) {
+      await settle(call.id, token, 'skipped', 'already_rung_today', promise.id);
+      return false;
+    }
+
     const customer = call.customer_id
       ? await db('customers').where('id', call.customer_id).first('first_name', 'last_name')
       : null;
@@ -265,7 +294,7 @@ async function ringPromiseChaserIfNeeded(callSid, { viaSweep = false } = {}) {
     // retryable outcome, but it never counts as "rang".
     const delivered = Boolean(stats && (stats.bellWritten || Number(stats.push?.sent || 0) > 0));
     const skipReason = stats?.suppressed ? 'suppressed' : (stats?.policySilenced ? 'policy_silenced' : 'not_delivered');
-    await settle(call.id, token, delivered ? 'rung' : 'skipped', delivered ? null : skipReason);
+    await settle(call.id, token, delivered ? 'rung' : 'skipped', delivered ? null : skipReason, delivered ? promise.id : null);
     return delivered;
   } catch (err) {
     logger.warn(`[promise-chaser-bell] failed for call ${String(callSid).slice(-6)}: ${err.message}`);

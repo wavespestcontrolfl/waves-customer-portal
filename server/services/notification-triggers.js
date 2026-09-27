@@ -1037,11 +1037,13 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     let bellWritten = false;
     // A dedupe HIT on a trigger whose identity is the dedupeKey itself (not
     // the bell row) means this event already delivered — the push must not
-    // repeat either. sms_reply: a concurrent lease winner reaching this
-    // dispatcher after the canonical send. promise_chaser: a second
-    // same-day callback on the SAME open promise (the dedupeKey is
-    // per-promise-per-day, so a repeat callback must not re-buzz the phone
-    // even though it is a genuinely new call).
+    // repeat either — sms_reply only: a concurrent lease winner reaching
+    // this dispatcher after the canonical send already delivered. Not used
+    // for any dedupeKey-only caller (e.g. promise_chaser): a dedupe HIT
+    // there can mean the SAME attempt retrying after ITS OWN push failed,
+    // and suppressing that retry's push would lose the alert for good —
+    // those callers keep their own de-ring decision upstream, before ever
+    // reaching this dispatcher, and let a dedupe hit push normally here.
     let dedupedNoPush = false;
     let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
@@ -1086,7 +1088,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }
           );
           if (created && !created.suppressed) bellWritten = true;
-          if (created?.deduped && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser')) dedupedNoPush = true;
+          if (created?.deduped && triggerKey === 'sms_reply' && dedupeKey) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);

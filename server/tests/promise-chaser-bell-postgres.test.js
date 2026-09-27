@@ -170,7 +170,7 @@ const OUR_NUMBER = '+19415550100';
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 
-  test('the same open promise dedupes to one key across repeat callbacks the same day', async () => {
+  test('the same open promise rings once across repeat callbacks the same day — the second call is intercepted before it ever reaches notifyAdmin', async () => {
     const earlier = callRow(240);
     const commitment = commitmentRow(earlier.id);
     const backA = callRow(30);
@@ -179,11 +179,14 @@ const OUR_NUMBER = '+19415550100';
     await mockConn('call_commitments').insert(commitment);
 
     expect(await ringPromiseChaserIfNeeded(backA.twilio_call_sid)).toBe(true);
-    expect(await ringPromiseChaserIfNeeded(backB.twilio_call_sid)).toBe(true);
-    expect(triggerNotification).toHaveBeenCalledTimes(2);
-    const keyA = triggerNotification.mock.calls[0][2].dedupeKey;
-    const keyB = triggerNotification.mock.calls[1][2].dedupeKey;
-    expect(keyA).toBe(keyB);
+    // A genuinely separate call for the SAME promise, same ET day, must not
+    // re-buzz — caught by this call's own pre-check (alreadyRungToday),
+    // never by notifyAdmin's dedupe (which would let a retry's push through).
+    expect(await ringPromiseChaserIfNeeded(backB.twilio_call_sid)).toBe(false);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+
+    const rowB = await mockConn('call_log').where({ id: backB.id }).first('metadata');
+    expect(rowB.metadata.promise_chaser).toMatchObject({ status: 'skipped', reason: 'already_rung_today' });
   });
 
   test('a blocked number never rings even with an open promise', async () => {
@@ -264,6 +267,35 @@ const OUR_NUMBER = '+19415550100';
 
     const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
     expect(row.metadata.promise_chaser).toMatchObject({ status: 'pending' });
+  });
+
+  test('a bell that succeeded but whose push failed retries the push (never re-inserts the bell, never loses the push)', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    // Attempt 1: the bell inserted successfully, but the push failed.
+    triggerNotification.mockResolvedValueOnce({ bellWritten: true, push: { sent: 0, failed: 1 }, retryable: true });
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    const pending = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(pending.metadata.promise_chaser.status).toBe('pending');
+
+    // Age the lease so a retry (the sweep) can reclaim it.
+    const meta = pending.metadata;
+    meta.promise_chaser.claimed_at = new Date(now - 20 * 60000).toISOString();
+    await mockConn('call_log').where({ id: back.id }).update({ metadata: JSON.stringify(meta) });
+
+    // Attempt 2: notifyAdmin reuses the existing bell row (deduped) but the
+    // push retry succeeds this time — must not be treated as a duplicate
+    // and dropped.
+    triggerNotification.mockResolvedValueOnce({ bellWritten: true, deduped: true, push: { sent: 1, failed: 0 } });
+    expect(await sweepPromiseChasers()).toBe(1);
+    expect(triggerNotification).toHaveBeenCalledTimes(2);
+    const settled = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(settled.metadata.promise_chaser).toMatchObject({ status: 'rung', commitmentId: commitment.id });
   });
 
   test('a failed attempt leaves the claim pending; the durable sweep retries it with past-tense copy', async () => {
