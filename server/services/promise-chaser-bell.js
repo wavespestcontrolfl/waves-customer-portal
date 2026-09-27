@@ -89,6 +89,7 @@ const commitments = require('./call-commitments');
 const { whereNotBlockedCall, PHONE_KEY_SQL } = require('../middleware/spam-block');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { isSentinelPhone } = require('./external-phone');
+const { TERMINAL_STATUSES } = require('./missed-call-bell');
 const { SLA_KINDS, followedUpIds, WHAT } = require('./followup-sla-watcher');
 
 // The rule's own scope: "an earlier call ... ended UNBOOKED". Same live
@@ -117,9 +118,17 @@ const LOOKBACK_MS = 30 * 60 * 1000;
 const RENEWAL_LOOKUP_FAILED = Symbol('renewal_lookup_failed');
 
 // What we promised, and when — the two facts the alert body must carry.
+// A HUMAN-typed commitment (source 'human') wasn't necessarily made ON the
+// linked call at all — a staff member can log one after the fact, backed
+// by any earlier call as its anchor — so its own created_at is the actual
+// moment the promise was made (Codex #5019 r8 P2: the SAME boundary
+// findPromiseToRing's own precedence check already treats as that
+// commitment's origin). An AI-extracted row (the default) keeps the
+// originating call's own time — that IS when the promise was spoken.
 function describePromise(row) {
   const what = WHAT[row.kind] || 'follow-up';
-  const at = row.call_started_at ? new Date(row.call_started_at) : null;
+  const source = row.source === 'human' ? row.created_at : row.call_started_at;
+  const at = source ? new Date(source) : null;
   const when = at && !Number.isNaN(at.getTime()) ? `${formatETDate(at)} ${formatETTime(at)}` : 'an earlier call';
   return { what, when };
 }
@@ -462,6 +471,15 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
       .modify(whereNotBlockedCall)
       .modify((q) => whereNotSandboxCall(q))
       .whereRaw(`LENGTH(${PHONE_KEY_SQL}) BETWEEN 10 AND 15`)
+      // TERMINAL ONLY (Codex #5019 r8 P2, reused from missed-call-bell.js —
+      // the same set repeat-caller-bell.js also imports from there): /voice
+      // stamps promise_chaser_eligible the instant the call arrives, well
+      // before it ends, so a still-ringing or in-progress callback would
+      // otherwise be swept in and get the past-tense "we still owe them a
+      // <what>" alert BEFORE the conversation itself has a chance to keep
+      // the promise. The 30-minute window is unchanged — this is an
+      // additional filter, not a replacement for it.
+      .whereIn('status', TERMINAL_STATUSES)
       .where('created_at', '>', since)
       // Eligibility, not the window, is what keeps a dark-period call from
       // ringing (see module docstring) — a call the /voice webhook did not

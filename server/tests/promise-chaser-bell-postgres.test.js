@@ -17,7 +17,7 @@ jest.mock('../services/notification-triggers', () => ({ triggerNotification: jes
 const { triggerNotification } = require('../services/notification-triggers');
 const logger = require('../services/logger');
 const { gates } = require('../config/feature-gates');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, formatETDate, formatETTime } = require('../utils/datetime-et');
 const {
   sweepPromiseChasers, ringForCall,
 } = require('../services/promise-chaser-bell');
@@ -362,6 +362,63 @@ const OUR_NUMBER = '+19415550100';
     // The screen resolves PASSED — now eligible, rings on this later tick.
     await mockConn('call_log').where({ id: back.id }).update({ metadata: { promise_chaser_eligible: true, preconnect_screen: 'passed' } });
     expect(await sweepPromiseChasers()).toBe(1);
+  });
+
+  test('a callback still RINGING or IN-PROGRESS never rings — the conversation itself may still keep the promise; the same call rings on the next tick once it ends (Codex #5019 r8 P2)', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    // /voice stamps promise_chaser_eligible the INSTANT the call arrives —
+    // well before Twilio ever reports a terminal status — so a call still
+    // mid-conversation must not be swept in and alerted on before the
+    // conversation itself has a chance to fulfill the promise.
+    const ringing = callRow(0, { status: 'ringing' });
+    await mockConn('call_log').insert([earlier, ringing]);
+    await mockConn('call_commitments').insert(commitment);
+
+    expect(await sweepPromiseChasers()).toBe(0);
+    expect(triggerNotification).not.toHaveBeenCalled();
+
+    // Still in progress — still excluded.
+    await mockConn('call_log').where({ id: ringing.id }).update({ status: 'in-progress' });
+    expect(await sweepPromiseChasers()).toBe(0);
+    expect(triggerNotification).not.toHaveBeenCalled();
+
+    // The call ends (terminal status) — now eligible, rings on this later tick.
+    await mockConn('call_log').where({ id: ringing.id }).update({ status: 'completed' });
+    expect(await sweepPromiseChasers()).toBe(1);
+  });
+
+  test("a human-typed commitment's alert reports its OWN created_at as when the promise was made, never the linked call's time; an AI-extracted one still uses the call time (Codex #5019 r8 P2)", async () => {
+    const earlier = callRow(240); // call_started_at — an hour+ before the human note
+    const loggedAt = new Date(now - 30 * 60000); // staff logged the promise 30 minutes ago
+    const humanCommitment = commitmentRow(earlier.id, {
+      source: 'human', kind: 'send_estimate', description: 'Send the quote',
+      created_at: loggedAt, updated_at: loggedAt,
+    });
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(humanCommitment);
+
+    expect(await sweepPromiseChasers()).toBe(1);
+    const [, payload] = triggerNotification.mock.calls[0];
+    expect(payload.when).toBe(`${formatETDate(loggedAt)} ${formatETTime(loggedAt)}`);
+    expect(payload.when).not.toBe(`${formatETDate(earlier.created_at)} ${formatETTime(earlier.created_at)}`);
+  });
+
+  test("an AI-extracted commitment's alert reports the ORIGINATING call's time, not its own (later) extraction insert time (Codex #5019 r8 P2)", async () => {
+    const earlier = callRow(240);
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    // source: 'ai' (the default) — its own row lands well after the call,
+    // exactly like a slow extraction pass; the promise was still made AT
+    // the call, so that (call_started_at), not this row's own created_at,
+    // is what the alert must report.
+    const aiCommitment = commitmentRow(earlier.id, { created_at: new Date(now + 1000), updated_at: new Date(now + 1000) });
+    await mockConn('call_commitments').insert(aiCommitment);
+
+    expect(await sweepPromiseChasers()).toBe(1);
+    const [, payload] = triggerNotification.mock.calls[0];
+    expect(payload.when).toBe(`${formatETDate(earlier.created_at)} ${formatETTime(earlier.created_at)}`);
   });
 
   test("a promise on another customer's call on the same number is excluded; an unlinked one is kept", async () => {
