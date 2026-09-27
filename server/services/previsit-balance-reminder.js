@@ -28,6 +28,9 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
+const { toE164 } = require('../utils/phone');
+const { withSmsConsentLock } = require('../utils/customer-comms-lock');
 const { resolveBillingLane, monthlyDuesCollected } = require('./billing-lane');
 const { invoiceAmountDue, isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -142,13 +145,13 @@ const OVERDUE_AFTER_DAYS = 7;
 // Past-due invoices that belong to the recurring relationship: linked to a
 // recurring scheduled visit, homeowner-billed (payer AR excluded). One-time
 // invoice debt deliberately never counts here.
-async function overdueRecurringInvoices(customerId, now = new Date()) {
+async function overdueRecurringInvoices(customerId, now = new Date(), database = db) {
   const dueCutoff = new Date(now.getTime() - OVERDUE_AFTER_DAYS * 86400000);
   // The follow-up engine records its sends on
   // invoice_followup_sequences.last_touch_at, NOT invoices.last_reminder_at
   // — the recent-touch guard must read the real timestamp or the 10:00
   // dun and this 10:05 sweep double-text the same invoice (Codex r4).
-  return db('invoices')
+  return database('invoices')
     .join('scheduled_services as ss', 'invoices.scheduled_service_id', 'ss.id')
     .leftJoin('invoice_followup_sequences as ifs', 'ifs.invoice_id', 'invoices.id')
     .where('invoices.customer_id', customerId)
@@ -173,10 +176,10 @@ async function overdueRecurringInvoices(customerId, now = new Date()) {
 
 // Keep the live sweep's eligibility and recent-contact filtering in one
 // selector so every candidate is screened by the same evidence reads.
-async function freshOverdueRecurringInvoices(customerId, now = new Date()) {
-  const overdue = await overdueRecurringInvoices(customerId, now);
+async function freshOverdueRecurringInvoices(customerId, now = new Date(), database = db) {
+  const overdue = await overdueRecurringInvoices(customerId, now, database);
   const cutoff = new Date(now.getTime() - RECENT_TOUCH_HOURS * 3600 * 1000);
-  const legacyTouches = await db('activity_log')
+  const legacyTouches = await database('activity_log')
     .where({ customer_id: customerId, action: 'late_payment_reminder' })
     .where('created_at', '>=', cutoff)
     .select('metadata');
@@ -260,7 +263,13 @@ async function prepareVisitReminder(visit, { now, todayEt }) {
     ? (Number(visit.monthly_rate) || 0) + verdict.overdueDue
     : verdict.overdueDue;
   if (!(amount > 0)) return null;
-  return { smsPolicyPermitted: smsVerdict.permitted, emailPolicyPermitted: emailVerdict.permitted, amount, fresh };
+  return {
+    smsPolicyPermitted: smsVerdict.permitted,
+    emailPolicyPermitted: emailVerdict.permitted,
+    amount,
+    duesCents,
+    fresh,
+  };
 }
 
 async function claimVisitReminder(visitId) {
@@ -298,7 +307,155 @@ function legacyLedgerInput(visit, amount, fresh, channel) {
   };
 }
 
-async function deliverLegacySms({ visit, amount, fresh, smsPolicyPermitted, emailLegAvailable }) {
+const PREVISIT_AUTHORITY_BUSY = {
+  ok: false,
+  code: 'PREVISIT_AUTHORITY_UNAVAILABLE',
+  reason: 'Previsit balance authority is busy; retry with a fresh quote',
+  retryable: true,
+};
+
+function advisoryLockAcquired(result) {
+  const row = result?.rows?.[0] || (Array.isArray(result) ? result[0] : null);
+  return row?.locked === true || row?.locked === 't';
+}
+
+function frozenInvoiceQuote(invoices) {
+  return invoices.map((invoice) => ({
+    id: String(invoice.id),
+    dueCents: Math.round(invoiceAmountDue(invoice) * 100),
+  })).sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function quoteMatches(current, quoted) {
+  if (current.length !== quoted.length) return false;
+  return current.every((invoice, index) => invoice.id === quoted[index].id
+    && invoice.dueCents === quoted[index].dueCents);
+}
+
+async function lockPrevisitBillingRows(trx, visit) {
+  const customer = await trx('customers').where({ id: visit.customer_id }).forUpdate().first();
+  if (!customer || customer.deleted_at || toE164(customer.phone) !== toE164(visit.phone)) return null;
+
+  const billingLock = await trx.raw(
+    'SELECT pg_try_advisory_xact_lock(hashtext(?)) AS locked',
+    [`cron:billing-customer:${visit.customer_id}`],
+  );
+  if (!advisoryLockAcquired(billingLock)) return null;
+
+  return trx.transaction(async (savepoint) => {
+    await savepoint.raw("SET LOCAL lock_timeout = '500ms'");
+    const invoices = await savepoint('invoices').where({ customer_id: visit.customer_id })
+      .orderBy('id').forUpdate().noWait().select('*');
+    await savepoint('payments').where({ customer_id: visit.customer_id })
+      .orderBy('id').forUpdate().noWait().select('id');
+
+    const visitIds = [...new Set([visit.id, ...invoices.map((row) => row.scheduled_service_id)]
+      .filter(Boolean).map(String))].sort();
+    const visits = await savepoint('scheduled_services').whereIn('id', visitIds)
+      .orderBy('id').forUpdate().noWait().select('*');
+    const payerIds = [...new Set([customer.payer_id, ...visits.map((row) => row.payer_id)]
+      .filter(Boolean).map(String))].sort();
+    if (payerIds.length) {
+      await savepoint('payers').whereIn('id', payerIds).orderBy('id').forShare().noWait().select('id');
+    }
+    for (const invoice of invoices) {
+      if (isInvoiceCollectibleStatus(invoice.status) && invoiceAmountDue(invoice) > 0) {
+        await require('./estimate-deposits').assertInvoiceDepositSettlementReady(savepoint, invoice);
+      }
+    }
+    await savepoint.raw('SET LOCAL lock_timeout = DEFAULT');
+    return { customer, visits };
+  });
+}
+
+function currentDuesCents(customer, database, now) {
+  const todayEt = etDateString(now);
+  const lane = resolveBillingLane(customer);
+  const obligation = duesObligation(todayEt, customer.billing_day);
+  return Promise.resolve(lane.mode === 'monthly_membership'
+    ? monthlyDuesCollected(database, customer.id, new Date(`${obligation.dueDateEt}T12:00:00Z`))
+    : null).then((collected) => (lane.mode === 'monthly_membership' && collected === false
+      && todayEt >= obligation.graceDateEt
+      ? Math.round((Number(customer.monthly_rate) || 0) * 100) : 0));
+}
+
+function previsitQuoteAuthority({ visit, quotedInvoices, quotedDuesCents, ledgerId }) {
+  const quoted = frozenInvoiceQuote(quotedInvoices);
+  const changed = (reason) => ({
+    ok: false, code: 'PREVISIT_QUOTE_CHANGED', reason, retryable: true,
+  });
+  let locked;
+  return {
+    withSmsHandoff: (dispatch) => withSmsConsentLock(
+      db,
+      { phone: visit.phone, customerId: visit.customer_id },
+      async (trx) => {
+        try {
+          locked = await lockPrevisitBillingRows(trx, visit);
+        } catch (err) {
+          if (!['55P03', '57014', 'DEPOSIT_RECONCILIATION_REQUIRED'].includes(err?.code)) throw err;
+          return PREVISIT_AUTHORITY_BUSY;
+        }
+        if (!locked) return PREVISIT_AUTHORITY_BUSY;
+        return dispatch(trx);
+      },
+    ),
+    providerPreSendCheck: async ({ dbi } = {}) => {
+      if (!dbi?.isTransaction || !locked) return PREVISIT_AUTHORITY_BUSY;
+      try {
+        return await dbi.transaction(async (savepoint) => {
+          const currentVisit = locked.visits.find((row) => String(row.id) === String(visit.id));
+          if (!currentVisit || String(currentVisit.customer_id) !== String(visit.customer_id)
+            || !['pending', 'confirmed'].includes(currentVisit.status)
+            || currentVisit.is_recurring !== true
+            || !currentVisit.balance_reminder_sent_at
+            || dateOnlyString(currentVisit.scheduled_date) !== dateOnlyString(visit.scheduled_date)
+            || String(currentVisit.service_type || 'service') !== String(visit.service_type || 'service')) {
+            return changed('visit changed before Text dispatch');
+          }
+          const payer = await require('./payer').resolveForInvoice({
+            database: savepoint,
+            customerId: visit.customer_id,
+            customer: locked.customer,
+            scheduledServiceId: visit.id,
+            throwOnError: true,
+          });
+          if (payer?.payerId) return changed('visit became payer-billed before Text dispatch');
+
+          const now = new Date();
+          const duesCents = await currentDuesCents({ ...locked.customer, id: visit.customer_id }, savepoint, now);
+          const policy = await collectionsChannelVerdict({
+            customerId: visit.customer_id,
+            channel: 'sms',
+            purpose: 'balance_reminder',
+            offLedgerBalanceCents: duesCents,
+            excludeLedgerIds: ledgerId ? [ledgerId] : [],
+            logTag: 'previsit-balance',
+            database: savepoint,
+            now,
+          });
+          if (policy.balanceIncomplete) {
+            return { ...PREVISIT_AUTHORITY_BUSY, reason: `Previsit balance snapshot incomplete: ${policy.balanceIncomplete}` };
+          }
+          if (!policy.permitted) return changed('collections policy denied Text before dispatch');
+          const invoices = await freshOverdueRecurringInvoices(visit.customer_id, now, savepoint);
+          const eligible = policy.eligibleInvoiceIds == null ? invoices
+            : invoices.filter((invoice) => policy.eligibleInvoiceIds.map(String).includes(String(invoice.id)));
+          if (!quoteMatches(frozenInvoiceQuote(eligible), quoted)) {
+            return changed('eligible balance changed before Text dispatch');
+          }
+          return duesCents === quotedDuesCents
+            ? { ok: true }
+            : changed('monthly dues changed before Text dispatch');
+        });
+      } catch (err) {
+        return { ...PREVISIT_AUTHORITY_BUSY, reason: `Previsit balance recheck failed: ${err.message}` };
+      }
+    },
+  };
+}
+
+async function deliverLegacySms({ visit, amount, duesCents, fresh, smsPolicyPermitted, emailLegAvailable }) {
   if (!smsPolicyPermitted) return false;
   try {
     const body = await renderSmsTemplate(TEMPLATE_KEY, {
@@ -310,6 +467,12 @@ async function deliverLegacySms({ visit, amount, fresh, smsPolicyPermitted, emai
     });
     if (!body) throw new Error('template rendered empty (inactive or missing)');
     const smsLedger = await ContactLedger.recordContact(legacyLedgerInput(visit, amount, fresh, 'sms'));
+    const authority = previsitQuoteAuthority({
+      visit,
+      quotedInvoices: fresh,
+      quotedDuesCents: duesCents,
+      ledgerId: smsLedger?.id,
+    });
     const result = await sendCustomerMessage({
       to: visit.phone,
       body,
@@ -319,6 +482,8 @@ async function deliverLegacySms({ visit, amount, fresh, smsPolicyPermitted, emai
       customerId: visit.customer_id,
       entryPoint: 'previsit_balance_reminder',
       hasEmailLeg: emailLegAvailable,
+      withSmsHandoff: authority.withSmsHandoff,
+      providerPreSendCheck: authority.providerPreSendCheck,
       metadata: { scheduled_service_id: visit.id, amount },
     });
     const delivered = !result.blocked && result.sent !== false;
@@ -353,12 +518,12 @@ async function deliverLegacyEmail({ visit, amount, fresh, emailLegAvailable }) {
   }
 }
 
-async function deliverLegacyPrevisitReminder({ visit, amount, fresh, smsPolicyPermitted, emailPolicyPermitted }) {
+async function deliverLegacyPrevisitReminder({ visit, amount, duesCents, fresh, smsPolicyPermitted, emailPolicyPermitted }) {
   // Declare the Email sidecar to the SMS gate only when it can actually send;
   // otherwise an Email-preferring customer could lose both legs.
   const emailLegAvailable = emailPolicyPermitted && await legacyEmailAvailable(visit.customer_id);
   const smsDelivered = await deliverLegacySms({
-    visit, amount, fresh, smsPolicyPermitted, emailLegAvailable,
+    visit, amount, duesCents, fresh, smsPolicyPermitted, emailLegAvailable,
   });
   const emailDelivered = await deliverLegacyEmail({ visit, amount, fresh, emailLegAvailable });
   if (smsDelivered || emailDelivered) return 'sent';
@@ -404,6 +569,8 @@ async function runSweep({ now = new Date() } = {}) {
       'scheduled_services.service_type',
       'scheduled_services.scheduled_date',
       'scheduled_services.payer_id',
+      'scheduled_services.status',
+      'scheduled_services.is_recurring',
       'customers.first_name',
       'customers.phone',
       'customers.billing_mode',
@@ -438,4 +605,5 @@ module.exports = {
   LEAD_DAYS,
   DUES_GRACE_DAYS,
   OVERDUE_AFTER_DAYS,
+  _test: { previsitQuoteAuthority },
 };
