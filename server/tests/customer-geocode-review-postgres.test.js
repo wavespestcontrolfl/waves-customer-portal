@@ -98,6 +98,28 @@ postgres('durable customer geocode review in PostgreSQL', () => {
     expect(Number(primary.longitude)).toBe(PIN.lng);
     expect((await listReviewQueue({}, mockConnection)).total).toBe(0);
   });
+  test('primary-only pins are displayed and participate in the review revision', async () => {
+    const before = await getReviewDetail(CUSTOMER, mockConnection);
+    await mockConnection('customer_properties').where({ customer_id: CUSTOMER }).update({
+      latitude: PIN.lat, longitude: PIN.lng,
+    });
+
+    const after = await getReviewDetail(CUSTOMER, mockConnection);
+    expect(after.revision).not.toBe(before.revision);
+    expect(Number(after.customer.latitude)).toBe(PIN.lat);
+    expect(Number(after.customer.longitude)).toBe(PIN.lng);
+    expect(after.review.status).toBe('geocoded');
+    expect((await listReviewQueue({}, mockConnection)).records[0].revision).toBe(after.revision);
+    const queued = (await listReviewQueue({}, mockConnection)).records[0].customer;
+    expect(Number(queued.latitude)).toBe(PIN.lat);
+    expect(Number(queued.longitude)).toBe(PIN.lng);
+
+    await saveReview(mockConnection, await customer(), {
+      status: 'verified', reason: 'staff_verified', reviewed_by: ACTOR,
+      source: 'county_records', evidence: 'Synthetic parcel check', latitude: PIN.lat, longitude: PIN.lng,
+    });
+    expect((await getReviewDetail(CUSTOMER, mockConnection)).review.status).toBe('verified');
+  });
   test('provider outside-area results stay visible until staff confirms disposition', async () => {
     geocodeAddressWithStatus.mockResolvedValueOnce({ location: null, permanent: true, reason: 'outside_service_area' });
     await attemptReviewedGeocode(CUSTOMER, mockConnection);
