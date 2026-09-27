@@ -2198,6 +2198,37 @@ postgres('SMS commitments on PostgreSQL', () => {
       .toEqual([70, 71, 72].map((seconds) => at(seconds).getTime()));
   });
 
+  test('Codex #4996 r2 pre-push: a prepayment applied at completion is dated when the visit was prepaid — money prepaid before the question is not new, money prepaid after it is, and an unstamped visit is never evidence', async () => {
+    const before = new Date(message.created_at.getTime() - 3600000);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const completedAt = new Date(message.created_at.getTime() + 2 * 3600000);
+    const now = new Date(completedAt.getTime() + 1000);
+    const visitRow = (prepaidAt) => ({ customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(completedAt), window_start: '09:00:00', status: 'completed', prepaid_amount: 125, prepaid_method: 'cash',
+      prepaid_at: prepaidAt, created_at: new Date(message.created_at.getTime() - 86400000) });
+    const [prepaidEarlier, prepaidLater, unstamped] = await mockPg('scheduled_services')
+      .insert([visitRow(before), visitRow(after), visitRow(null)]).returning('id');
+    const settleAtCompletion = async (visit, number) => {
+      const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: number,
+        title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: completedAt,
+        scheduled_service_id: visit.id }).returning('id');
+      // What complete-scheduled-service.js books when it applies the prepayment.
+      await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(completedAt),
+        description: `Prepaid credit applied to invoice ${number}`, created_at: completedAt,
+        metadata: JSON.stringify({ invoice_id: invoice.id, scheduled_service_id: visit.id, source: 'scheduled_service_prepaid', method: 'cash' }) });
+      return invoice.id;
+    };
+    await settleAtCompletion(prepaidEarlier, 'WPC-2026-0951');
+    const laterInvoice = await settleAtCompletion(prepaidLater, 'WPC-2026-0952');
+    await settleAtCompletion(unstamped, 'WPC-2026-0953');
+    const commitment = { kind: 'other', description: 'Did you get my cash payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const payments = evidence.records.filter((r) => r.type === 'payment');
+    expect(payments.map((r) => r.id)).toEqual([laterInvoice]);
+    expect(new Date(payments[0].settled_at).getTime()).toBe(after.getTime());
+    expect(payments[0].text).toContain(`paid ${etDateString(after)}`);
+  });
+
   test('Codex #4996 r2: a customer-level Stripe charge such as the monthly autopay is payment evidence; one an invoice claims by its PaymentIntent, or names through a dispute, counts once, on the invoice', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);

@@ -254,7 +254,16 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // When the money actually landed: an async (ACH) row is inserted
       // 'processing' and stamped with its Stripe settlement moment when it
       // clears (stripe-webhook.js), so created_at is the wrong clock there.
-      const settledAt = (alias) => `COALESCE((${alias}.metadata::jsonb ->> 'settled_event_at')::timestamptz, ${alias}.created_at)`;
+      // A scheduled_service_prepaid row is booked when an EARLIER prepayment
+      // is applied at completion (complete-scheduled-service.js,
+      // admin-schedule.js): its money landed when the visit was stamped
+      // prepaid, and a row whose visit carries no stamp has no known
+      // settlement time, so it is never evidence (pre-push audit).
+      const settledAt = (alias) => `CASE WHEN ${alias}.metadata::jsonb ->> 'source' = 'scheduled_service_prepaid'
+        THEN (SELECT pv.prepaid_at FROM scheduled_services pv WHERE pv.id = CASE
+          WHEN ${alias}.metadata::jsonb ->> 'scheduled_service_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          THEN (${alias}.metadata::jsonb ->> 'scheduled_service_id')::uuid END)
+        ELSE COALESCE((${alias}.metadata::jsonb ->> 'settled_event_at')::timestamptz, ${alias}.created_at) END`;
       const settledAtSql = settledAt('p');
       return Promise.all([
         // Account-credit coverage (invoice paid_at stamped with no payments
