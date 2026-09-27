@@ -180,7 +180,10 @@ async function markOutside({ trx, customerId, input, actorId, customer, primary,
     source, evidence: input.evidence,
     reviewed_by: actorId, latitude: pin?.latitude, longitude: pin?.longitude,
   });
-  const cleared = await clearMatchingPins(trx, customer, primary, pin, visitContext, { clearMirrors: true });
+  const cleared = await clearMatchingPins(trx, customer, primary, pin, visitContext, {
+    clearMirrors: true,
+    additionalPins: [customer, primary],
+  });
   await auditResolution(trx, customerId, actorId, input.action, { cleared });
   return { addressBriefIds: cleared.visitIds };
 }
