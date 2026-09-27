@@ -1288,6 +1288,14 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
       "A refund isn't needed, did my payment go through?", 'No refund needed. Did you get my check?']) {
       expect(admissibleWitness(invoicePaid, { kind: 'other', description: 'Did the payment go through?', evidence: [{ quote }] })).toBe(true);
     }
+    // The ask itself decides: a clause that only narrates a change beside the question does not stop money
+    // answering it, while the ask's own words still do (Codex #4996 review before r10).
+    for (const [description, quote] of [['Did the first payment go through?', 'I set up autopay on Friday. Did the first payment go through?'],
+      ['Did the payment go through?', 'I had to update my card yesterday. Did the payment go through?']]) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description, evidence: [{ quote }] })).toBe(true);
+    }
+    expect(admissibleWitness(invoicePaid, { kind: 'other', description: 'Please refund the double charge',
+      evidence: [{ quote: 'You charged me twice. Please refund the double charge' }] })).toBe(false);
     // A negation elsewhere in the sentence, "can't", or "haven't" leaves the request standing.
     for (const quote of ['I did not authorize this charge, please refund it', 'No, I want a refund',
       "I can't update my card online, can you do it?", "You haven't refunded me yet", 'Refund the extra charge not the whole invoice']) {

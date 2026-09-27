@@ -55,10 +55,11 @@ and the row carries no settlement time of its own. Account credit, third-party p
 refunds and disputes are never money landing, nor is a payment while a refund of it is
 in flight (a partial refund is shown beside the payment it reduces); a payment never
 answers a request to change how the customer pays, though a term the customer negates
-("don't refund it") is not such a request; money tied to another property never answers
+("don't refund it") is not such a request, and only the request itself counts, not a
+clause beside it that narrates ("I set up autopay on Friday"); money tied to another property never answers
 a question about this one; and a staff "received" text never closes it. The model must
 cite the payment, which shows how it was paid (card brand and last four, bank account,
-or the recorded tender); the close locks it, the invoice or estimate it depends on, and
+or the tender staff recorded, including on the invoice a payment settled); the close locks it, the invoice or estimate it depends on, and
 for a question about one property the rows that tie the payment to it, and rechecks it.
 Staff payment notes never reach the model.
 

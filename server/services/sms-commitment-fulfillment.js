@@ -134,9 +134,18 @@ function negatedIn(clause, match) {
   const after = clause.slice(match.index + match[0].length).trim().split(/\s+/).slice(0, 3).join(' ');
   return NEGATION.test(before) || NEGATION.test(after);
 }
+// The ask itself decides. The extractor grounds a description as a verbatim
+// phrase of its quote naming the requested action (groundExtraction), so
+// when it is found there the rest of the quote is context: a clause that
+// only narrates ("I set up autopay on Friday. Did the first payment go
+// through?") must not make money unable to answer the question (Codex #4996
+// review before r10). A description not found in its quote is read with the
+// quotes, as before.
 function askText(commitment) {
+  const description = String(commitment.description || '');
   const quotes = (Array.isArray(commitment.evidence) ? commitment.evidence : []).map((item) => item?.quote || '');
-  return [commitment.description || '', ...quotes].join('\n');
+  if (normalized(description) && quotes.some((quote) => normalized(quote).includes(normalized(description)))) return description;
+  return [description, ...quotes].join('\n');
 }
 function paymentCanAnswer(commitment) {
   return askText(commitment).replace(/[‘’]/g, "'").split(/[.,;:!?\n–—]+/)
@@ -184,7 +193,7 @@ const refundNote = (refunded) => (Number(refunded) > 0 ? `; $${Number(refunded).
 // payment's own snapshot columns come first and its saved method only fills
 // a gap; deleting that method copies it into the same columns
 // (20260924000032), so the text never moves under a close.
-const TENDERS = { cash: 'cash', check: 'check', zelle: 'Zelle', venmo: 'Venmo', paypal: 'PayPal', card: 'card',
+const TENDERS = { cash: 'cash', check: 'check', zelle: 'Zelle', venmo: 'Venmo', paypal: 'PayPal', card: 'card', card_present: 'card',
   ach: 'bank account (ACH)', us_bank_account: 'bank account (ACH)', apple_pay: 'Apple Pay', google_pay: 'Google Pay', link: 'Link' };
 const CARD_BRANDS = { visa: 'Visa', mastercard: 'Mastercard', amex: 'American Express', american_express: 'American Express',
   discover: 'Discover', diners: 'Diners Club', jcb: 'JCB', unionpay: 'UnionPay' };
@@ -197,11 +206,12 @@ function tenderText(row) {
   if (!kind) return '';
   return ` by ${kind}${kind === TENDERS.card ? lastFour : ''}`;
 }
-// The tender columns both payment legs select for tenderText.
-const tenderColumns = (conn, t) => [
-  conn.raw(`COALESCE(${t}.payment_method_type, ${t}_method.method_type, ${t}.metadata::jsonb ->> 'payment_method') AS method_type`),
-  conn.raw(`COALESCE(${t}.card_brand, ${t}_method.card_brand) AS card_brand`),
-  conn.raw(`COALESCE(${t}.card_last_four, ${t}_method.last_four) AS last_four`),
+// The tender columns both payment legs select for tenderText; `fallback`
+// adds a last source for a column (the invoice leg's staff-recorded link).
+const tenderColumns = (conn, t, fallback = () => '') => [
+  conn.raw(`COALESCE(${t}.payment_method_type, ${t}_method.method_type, ${t}.metadata::jsonb ->> 'payment_method'${fallback('payment_method')}) AS method_type`),
+  conn.raw(`COALESCE(${t}.card_brand, ${t}_method.card_brand${fallback('card_brand')}) AS card_brand`),
+  conn.raw(`COALESCE(${t}.card_last_four, ${t}_method.last_four${fallback('card_last_four')}) AS last_four`),
   conn.raw(`${t}.metadata::jsonb ->> 'method' AS method`)];
 // A card payment's amount includes its surcharge (stripe.js); the invoice
 // amount it paid rides beside it, so either figure can be matched (Codex
@@ -297,6 +307,13 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // created_at read the identical value.
       const manualMatchSql = '(pinv.payment_recorded_at IS NOT NULL AND p.created_at = pinv.payment_recorded_at)';
       const sharedPiSql = `(p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = pinv.stripe_payment_intent_id AND ${namesNoInvoice('p')})`;
+      // A payment staff record against an invoice (recordManualPayment, the
+      // reconcile route) carries no tender of its own: the tender is on the
+      // invoice, written in the same transaction as this very payment, and
+      // the invoice is held at close. Any other payment on the invoice (an
+      // earlier installment) never borrows it.
+      const staffRecordedSql = `(${manualMatchSql} OR (COALESCE(p.metadata::jsonb ->> 'source', '') = 'admin_payment_reconcile' AND ${exactMatchSql}))`;
+      const invoiceTender = (column) => `, CASE WHEN ${staffRecordedSql} THEN pinv.${column} END`;
       // When the money actually landed: an async (ACH) row is inserted
       // 'processing' and stamped with its Stripe settlement moment when it
       // clears (stripe-webhook.js), so created_at is the wrong clock there.
@@ -317,8 +334,10 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         // the visit's property is the payment's even if the visit later
         // moved — invoices carry no property of their own to snapshot (unlike
         // a delivered notice, #4816 r49). A row matching two invoices (a
-        // PaymentIntent naming none, shared by both) counts once, exact or
-        // manual links first.
+        // PaymentIntent naming none, shared by both) counts once: an invoice
+        // the row names first, then the manual stamp, then a shared
+        // PaymentIntent. A metadata key the row lacks compares as NULL, which
+        // DESC would sort first, so each link ranks as true or false.
         // A combined-balance charge books one row per invoice it covers
         // (pay-combined.js); each carries the whole charge's total, so a
         // question about the full amount has one record to quote (Codex
@@ -347,9 +366,9 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           // link above.
           .whereRaw(paymentEvidenceRow('p'))
           .whereRaw(`${settledAtSql} > ? AND ${settledAtSql} <= ?`, [after, now])
-          .distinctOn('p.id').orderBy('p.id').orderByRaw(`(${exactMatchSql} OR ${manualMatchSql}) DESC, pinv.id`)
+          .distinctOn('p.id').orderBy('p.id').orderByRaw(`COALESCE(${exactMatchSql}, false) DESC, COALESCE(${manualMatchSql}, false) DESC, pinv.id`)
           .select('p.id', 'p.amount as payment_amount', 'p.base_amount_cents', 'p.surcharge_amount_cents', 'p.refund_amount',
-            ...tenderColumns(conn, 'p'),
+            ...tenderColumns(conn, 'p', invoiceTender),
             conn.raw(`${settledAtSql} AS settled_at`), 'pinv.id as invoice_id', 'pinv.title', 'pinv.service_type', 'pinv.invoice_number',
             conn.raw('COALESCE(pinv_visit.property_id, sfc_estimate.property_id) AS property_id'),
             conn.raw('COALESCE(p.stripe_payment_intent_id, p.id::text) AS charge_key'),

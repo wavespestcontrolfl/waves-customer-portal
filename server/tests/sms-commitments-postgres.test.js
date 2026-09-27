@@ -1985,6 +1985,8 @@ postgres('SMS commitments on PostgreSQL', () => {
     const payments = evidence.records.filter((r) => r.type === 'payment');
     const linked = payments.find((r) => r.payment_source === 'invoice');
     expect(linked).toMatchObject({ id: manual.id, invoice_id: invoice.id, property_id: context.properties[0].id });
+    // The tender rides on the invoice this payment settled.
+    expect(linked.text).toContain('Payment of $125.00 by check toward invoice WPC-2026-0901');
     expect(admissibleWitness(linked, commitment)).toBe(true);
     expect(payments.filter((r) => r.payment_source === 'ledger').map((r) => r.id)).toEqual([prepayment.id]);
   });
@@ -2272,6 +2274,45 @@ postgres('SMS commitments on PostgreSQL', () => {
     for (const record of evidence.records.filter((r) => r.type === 'payment')) {
       for (const field of ['method', 'method_type', 'card_brand', 'last_four']) expect(record).not.toHaveProperty(field);
     }
+  });
+
+  test('Codex #4996 r9 review: a reconciled payment reads its tender from the invoice it settled; an earlier installment on an invoice never borrows the invoice\'s tender', async () => {
+    const at = (seconds) => new Date(message.created_at.getTime() + seconds * 1000);
+    const now = at(10);
+    const invoiceRow = (number, extra) => ({ customer_id: message.customer_id, token: randomUUID(), invoice_number: number,
+      title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: at(3), ...extra });
+    // Staff settled one invoice after the fact through the reconcile route (admin-payments-reconcile.js), and the
+    // other with a check (recordManualPayment) after a Stripe installment that left no tender on its own row.
+    const [reconciled, installments] = await mockPg('invoices').insert([invoiceRow('WPC-2026-0997', { payment_method: 'zelle' }),
+      invoiceRow('WPC-2026-0998', { payment_method: 'check', payment_recorded_at: at(3) })]).returning('id');
+    const row = (amount, createdAt, metadata) => ({ customer_id: message.customer_id, amount, status: 'paid', payment_date: etDateString(createdAt),
+      created_at: createdAt, metadata: JSON.stringify(metadata) });
+    const [reconciledPaid, installment, settling] = await mockPg('payments').insert([
+      row(125, at(2), { invoice_id: reconciled.id, source: 'admin_payment_reconcile' }),
+      row(50, at(1), { invoice_id: installments.id }),
+      row(75, at(3), {})]).returning('id');
+    const commitment = { kind: 'other', description: 'Did you get my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const text = Object.fromEntries(evidence.records.filter((r) => r.type === 'payment').map((r) => [r.id, r.text]));
+    expect(text[reconciledPaid.id]).toContain('Payment of $125.00 by Zelle toward invoice WPC-2026-0997');
+    expect(text[settling.id]).toContain('Payment of $75.00 by check toward invoice WPC-2026-0998');
+    expect(text[installment.id]).toContain('Payment of $50.00 toward invoice WPC-2026-0998');
+  });
+
+  test('Codex #4996 r9 review: a payment naming its invoice stays on it even when another invoice\'s manual stamp shares its instant', async () => {
+    const at = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(at.getTime() + 1000);
+    // Fixed ids put the stamped invoice first in id order, so only the link ranking can pick the named one.
+    const stamped = 'aaaaaaaa-0000-4000-8000-000000000001';
+    const named = 'ffffffff-0000-4000-8000-000000000002';
+    const invoiceRow = (id, number, extra) => ({ id, customer_id: message.customer_id, token: randomUUID(), invoice_number: number,
+      title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: at, ...extra });
+    await mockPg('invoices').insert([invoiceRow(stamped, 'WPC-2026-0999', { payment_recorded_at: at }), invoiceRow(named, 'WPC-2026-1000', {})]);
+    const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(at),
+      created_at: at, metadata: JSON.stringify({ invoice_id: named, source: 'admin_payment_reconcile' }) }).returning('id');
+    const commitment = { kind: 'other', description: 'Did you get my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    expect(evidence.records.filter((r) => r.type === 'payment').map((r) => [r.id, r.invoice_id])).toEqual([[payment.id, named]]);
   });
 
   test('Codex #4996 r9: a no-show or late-cancellation fee is not payment evidence — the webhook books it when it runs, with no settlement time of its own', async () => {
