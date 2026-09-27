@@ -643,7 +643,10 @@ async function dispatchOrThrown(row, phone, body, fromNumber, attempt) {
 }
 
 // providerBoundaryCheck's terminal refusals: nothing reached the provider.
-// (A claim is held only for the post-claim clock refusals; released below.)
+// The ones after the claim insert (the voicemail lane texted, the send slot
+// closed) hold this lane's claim; classifySendOutcome matches them here,
+// by code, BEFORE its terminal branch, and releases the claim — a refusal
+// of this lane's own is never kept as a BLOCKED number.
 const BOUNDARY_SETTLES = {
   [BOUNDARY.NOT_MISSED]: 'not_missed',
   [BOUNDARY.CONTACTED]: 'already_contacted',

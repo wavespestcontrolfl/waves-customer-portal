@@ -554,7 +554,7 @@ jest.setTimeout(30000);
       expect(await claimRow()).toBeUndefined();
     });
 
-    test('a voicemail claim consumed between the early check and the boundary settles the call at the boundary', async () => {
+    test('a voicemail claim consumed between the early check and the boundary settles the call at the boundary — this lane\'s claim released, never kept blocked', async () => {
       sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, { before: () => voicemailClaim('sent') }));
       const row = call(READY_MINUTES_AGO);
       await database('call_log').insert(row);
