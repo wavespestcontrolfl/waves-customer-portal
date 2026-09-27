@@ -149,6 +149,15 @@ function classifyDepositReplayFallback(fb = {}) {
   return 'retry';
 }
 
+// Whether the inventory agent's own summary line is worth logging: any
+// outcome for a person to see, INCLUDING a run where every line is still
+// retrying (2026-09-27 review — a run that only bumped attempt counts, e.g.
+// every line hit a transient LLM failure, used to log nothing at all). A
+// truly silent tick is one where nothing happened in any of these buckets.
+function shouldLogInventoryAgentSummary(agentResult) {
+  return Boolean(agentResult.logged || agentResult.held || agentResult.ignored || agentResult.stillPending || agentResult.errors);
+}
+
 function scheduledSmsAttemptSql() {
   return `
     CASE
@@ -2487,10 +2496,34 @@ function initScheduledJobs() {
       await runExclusive('purchase-receipt-restock', async () => {
         const { runPurchaseReceiptRestockSweep, summarize } = require('./purchase-receipts/sweep');
         const result = await runPurchaseReceiptRestockSweep();
+        // A skipped sweep (no valid PURCHASE_RECEIPT_SINCE) stops the agent
+        // too: clearing the cutoff is a kill switch for every receipt write.
         if (result.skipped) return;
         const { logged, held, errors } = summarize(result);
         if (logged || held || errors) {
           logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s)`);
+        }
+        // Inventory agent (GATE_INVENTORY_AGENT): resolves lines the sweep
+        // above just handed off as agent_pending (unmatched/needs_size/
+        // size_mismatch, see receipt-processor.js). Same runExclusive lock,
+        // right after the sweep, so it never races another tick over the
+        // same lines. Self-gated (also cheap to check twice).
+        if (gateEnvValue('GATE_INVENTORY_AGENT')) {
+          const { runInventoryAgent } = require('./purchase-receipts/inventory-agent');
+          const agentResult = await runInventoryAgent();
+          if (!agentResult.skipped && shouldLogInventoryAgentSummary(agentResult)) {
+            logger.info(`[inventory-agent] ${agentResult.logged} logged, ${agentResult.held} held for a person, `
+              + `${agentResult.ignored} ignored, ${agentResult.stillPending} still pending, ${agentResult.errors} error(s)`);
+          }
+        } else {
+          // The gate is off: drain anything already sitting agent_pending
+          // from before it flipped, so a queued line is never stranded
+          // (nothing else ever looks at that status while the gate is off).
+          const { drainAgentQueue } = require('./purchase-receipts/inventory-agent');
+          const drainResult = await drainAgentQueue({});
+          if (drainResult.drained || drainResult.errors) {
+            logger.info(`[inventory-agent] gate off: drained ${drainResult.drained} queued line(s), ${drainResult.errors} error(s)`);
+          }
         }
       });
     } catch (err) {
@@ -7313,6 +7346,7 @@ module.exports = {
   scheduledDepositReceiptAllowed,
   classifyDepositReplayFallback,
   holdFinalReviewUncertainty,
+  shouldLogInventoryAgentSummary,
   recoverStaleScheduledSmsClaims,
   runContentRegistryMaintenance,
   runAutonomousOpportunityMining,
