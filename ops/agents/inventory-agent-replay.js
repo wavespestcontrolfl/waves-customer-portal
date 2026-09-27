@@ -50,12 +50,17 @@ if (process.env.DATABASE_PUBLIC_URL) {
   process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
   if (!/sslmode=/.test(process.env.DATABASE_URL) && !process.env.PGSSLMODE) process.env.PGSSLMODE = 'no-verify';
 }
-delete process.env.GATE_LLM_CALL_LEDGER;
-delete process.env.GATE_LLM_CALL_TRACES;
-delete process.env.GATE_LLM_DISPATCH_METRICS;
+// Explicit 'false', never delete: the server modules load the checkout's
+// .env (dotenv) as they are required, and dotenv fills in an ABSENT
+// variable but never replaces one already set.
+process.env.GATE_LLM_CALL_LEDGER = 'false';
+process.env.GATE_LLM_CALL_TRACES = 'false';
+process.env.GATE_LLM_DISPATCH_METRICS = 'false';
 //
 // The LLM leg costs real money/time per unresolved title, so --limit caps
-// how many get a live call; everything past that is listed with its
+// how many model DECISIONS are made (each one is a primary provider call
+// plus, only when that answer is unusable, one fallback call — so at most
+// twice --limit provider calls); everything past that is listed with its
 // classifier status only.
 //
 //   railway run --service Postgres -- node ops/agents/inventory-agent-replay.js
@@ -76,12 +81,13 @@ function arg(name, fallback = null) {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
   return hit ? hit.slice(name.length + 3) : fallback;
 }
-// --limit caps paid LLM calls: a whole number, 0 allowed (list every line
-// with its disposition, no calls), 50 when absent. A mistyped value
-// ("5O", "-1") refuses to run rather than falling back to 50 real calls.
+// --limit caps model decisions (see the header: up to two paid provider
+// calls each): a whole number, 0 allowed (list every line with its
+// disposition, no calls), 50 when absent. A mistyped value ("5O", "-1")
+// refuses to run rather than falling back to 50 real decisions.
 function parseLimit(raw) {
   if (raw == null) return 50;
-  if (!/^\d+$/.test(raw)) throw new Error(`--limit=${raw} is not a whole number of LLM calls (0 lists every line with no calls)`);
+  if (!/^\d+$/.test(raw)) throw new Error(`--limit=${raw} is not a whole number of model decisions (0 lists every line with no calls)`);
   return Number(raw);
 }
 
@@ -164,8 +170,26 @@ function readOnlyConn() {
   });
 }
 
-function byReceivedAt(a, b) {
-  return (new Date(a.email.received_at) - new Date(b.email.received_at)) || String(a.email.id).localeCompare(String(b.email.id));
+// The live agent works its queue in purchase_receipt_lines.created_at
+// order — the order the sweep actually recorded the lines (in one backfill
+// sweep: every Amazon line, then the undelivered holds, then SiteOne), not
+// the order the emails arrived. So a line the live lane recorded replays at
+// its recorded time; one it never recorded (nothing to key it by) at its
+// email's time. Ties keep email, then line order.
+async function recordedTimes(conn, since) {
+  const rows = await conn('purchase_receipt_lines').where('created_at', '>=', since)
+    .select('vendor', 'order_number', 'shipment_key', 'line_no', 'created_at');
+  return new Map(rows.map((row) => [
+    lineKey({ vendor: row.vendor, orderNumber: row.order_number, shipmentKey: row.shipment_key, lineNo: row.line_no }),
+    new Date(row.created_at).getTime(),
+  ]));
+}
+
+function inQueueOrder(lines, recorded) {
+  const at = (line) => recorded.get(lineKey(line)) ?? new Date(line.email.received_at).getTime();
+  return lines.map((line, index) => ({ line, at: at(line), index }))
+    .sort((a, b) => (a.at - b.at) || String(a.line.email.id).localeCompare(String(b.line.email.id)) || (a.index - b.index))
+    .map(({ line }) => line);
 }
 
 // Every line the live Amazon lane (sweep.js processReceiptEmail) records: an
@@ -397,7 +421,7 @@ function printReport(rows, state, siteOneFailures) {
   console.log('');
   const counts = Object.entries(state.tally).sort(([a], [b]) => a.localeCompare(b)).map(([status, n]) => `${status} ${n}`).join(', ');
   console.log(`Without the agent: ${counts || 'nothing'}.`);
-  console.log(`${state.handedToAgent} line(s) the agent would take; ${state.llmCalls} real LLM decision(s) (--limit=${state.limit}).`);
+  console.log(`${state.handedToAgent} line(s) the agent would take; ${state.llmCalls} model decision(s), each at most two paid provider calls (--limit=${state.limit} decisions).`);
   console.log('Proposals are what the agent would PROPOSE; the live apply step can still hold one under its own checks '
     + '(a nearby manual restock or count, the catalog changing underneath, an application unit already in use).');
   console.log('Each line is matched and decided against the catalog plus the changes earlier proposals would make.');
@@ -422,11 +446,13 @@ async function main() {
   await assertReadOnly(sharedDb);
   const conn = readOnlyConn();
   try {
-    const [amazon, siteOneRead, undelivered] = await Promise.all([amazonLines(conn, since), siteOneLines(since), undeliveredLines(conn, since)]);
-    // Oldest first, as the live lane recorded them and the live agent works
-    // its queue: hand-offs and proposed catalog changes apply to what comes
-    // after, and --limit caps the same lines the live agent would reach first.
-    const lines = dedupe([...amazon, ...siteOneRead.lines, ...undelivered].sort(byReceivedAt));
+    const [amazon, siteOneRead, undelivered, recorded] = await Promise.all([
+      amazonLines(conn, since), siteOneLines(since), undeliveredLines(conn, since), recordedTimes(conn, since),
+    ]);
+    // In the live queue's order (see recordedTimes): hand-offs and proposed
+    // catalog changes apply to what comes after, and --limit caps the same
+    // lines the live agent would reach first.
+    const lines = dedupe(inQueueOrder([...amazon, ...siteOneRead.lines, ...undelivered], recorded));
     console.log(`${lines.length} distinct purchase line(s) since ${since.toISOString()} `
       + `(${amazon.length} Amazon, ${siteOneRead.lines.length} SiteOne, `
       + `${undelivered.length} undelivered-shipment line(s) the live lane held for a person, before dedupe).`);
@@ -458,5 +484,5 @@ if (require.main === module) {
 }
 
 module.exports = {
-  assertReadOnly, parseSince, parseLimit, lineKey, emptyProposals, recordProposal, catalogWithProposals, replayLine,
+  assertReadOnly, parseSince, parseLimit, lineKey, inQueueOrder, emptyProposals, recordProposal, catalogWithProposals, replayLine,
 };

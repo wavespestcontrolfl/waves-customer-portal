@@ -10,7 +10,7 @@
  * script does anything else) is for.
  */
 const {
-  assertReadOnly, parseSince, parseLimit, lineKey, emptyProposals, recordProposal, catalogWithProposals, replayLine,
+  assertReadOnly, parseSince, parseLimit, lineKey, inQueueOrder, emptyProposals, recordProposal, catalogWithProposals, replayLine,
 } = require('../../ops/agents/inventory-agent-replay');
 const { classifyItem } = require('../services/purchase-receipts/receipt-processor');
 const { decideForTitle } = require('../services/purchase-receipts/inventory-agent');
@@ -171,6 +171,39 @@ describe('decideForTitle on a catalog snapshot', () => {
     expect(outcome.reClassified).toMatchObject({ status: 'size_mismatch', product: { container_size: '78 fl oz' } });
     expect(JSON.stringify(dispatch.mock.calls[0])).toContain('78 fl oz');
   });
+});
+
+// Codex round 6: the live agent works its queue in the order the sweep
+// recorded the lines (a backfill sweep records all Amazon lines before any
+// SiteOne line), not the order the emails arrived.
+describe('inQueueOrder', () => {
+  const line = (vendor, emailId, receivedAt, lineNo = 1) => ({
+    vendor, orderNumber: 'o', shipmentKey: emailId, lineNo, email: { id: emailId, received_at: receivedAt },
+  });
+
+  test('a recorded line replays at its recorded time; an unrecorded one at its email time', () => {
+    const siteOne = line('siteone', 's1', '2026-09-01T10:00:00Z');
+    const amazon = line('amazon', 'a1', '2026-09-02T10:00:00Z');
+    const neverRecorded = line('amazon', 'a2', '2026-09-03T09:00:00Z');
+    const recorded = new Map([
+      [lineKey(amazon), Date.parse('2026-09-03T08:00:00Z')],
+      [lineKey(siteOne), Date.parse('2026-09-03T08:00:05Z')],
+    ]);
+    expect(inQueueOrder([siteOne, neverRecorded, amazon], recorded)).toEqual([amazon, siteOne, neverRecorded]);
+  });
+
+  test('ties keep email, then line order', () => {
+    const second = line('amazon', 'a1', '2026-09-01T10:00:00Z', 2);
+    const first = line('amazon', 'a1', '2026-09-01T10:00:00Z', 1);
+    expect(inQueueOrder([first, second], new Map())).toEqual([first, second]);
+  });
+});
+
+// Codex round 6: explicit 'false' — dotenv (loaded as server modules are
+// required) only fills in variables that are absent.
+test('the telemetry gates stay set to false once the server modules have loaded', () => {
+  expect([process.env.GATE_LLM_CALL_LEDGER, process.env.GATE_LLM_CALL_TRACES, process.env.GATE_LLM_DISPATCH_METRICS])
+    .toEqual(['false', 'false', 'false']);
 });
 
 // Codex round 5: the hand-off rule applies to the lines the replay has
