@@ -1639,7 +1639,8 @@
        "(?<!\\bno\\s+)\\b(?:llamar|contactar|comunicar)(?:[a\u00e1]n?|emos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])"
       ],
       "fromTurn": 1,
-      "afterTool": "capture_lead"
+      "afterTool": "capture_lead",
+      "asserted": true
      },
      "severity": "critical"
     },
@@ -2023,7 +2024,8 @@
        "\\b(?:todav[i\u00ed]a\\s+)?no\\s+(?:est[a\u00e1]\\s+)?confirmad[ao]\\b|\\bpendiente\\b|\\bpara\\s+confirmar\\b"
       ],
       "fromTurn": 1,
-      "afterTool": "request_booking"
+      "afterTool": "request_booking",
+      "asserted": true
      },
      "severity": "critical"
     },
@@ -2408,7 +2410,8 @@
        "input": {
         "slot_ref": "S3"
        }
-      }
+      },
+      "asserted": true
      },
      "severity": "critical"
     }
@@ -2557,7 +2560,8 @@
        "(?<!\\bno\\s+)\\b(?:llamar|contactar|comunicar)(?:[a\u00e1]n?|emos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])"
       ],
       "fromTurn": 1,
-      "afterTool": "request_reservice"
+      "afterTool": "request_reservice",
+      "asserted": true
      },
      "severity": "critical"
     },
@@ -2855,7 +2859,8 @@
       "patterns": [
        "(?<!(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))[\\s,.()-]*)(?:9|nueve)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:1|uno)[\\s,.()-]*(?:(?:5|cinco)[\\s,.()-]*(?:5|cinco)[\\s,.()-]*(?:5|cinco)|triple[\\s-]?(?:5|cinco))[\\s,.()-]*(?:(?:0|cero)[\\s,.()-]*(?:2|dos)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:6|seis))(?![\\s,.()-]*(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))\\b)"
       ],
-      "onTurn": 1
+      "onTurn": 1,
+      "asserted": true
      },
      "severity": "critical"
     },

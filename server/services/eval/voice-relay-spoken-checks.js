@@ -48,20 +48,22 @@ const { CALLBACK_CONTACT_NOUN, CALLBACK_TIMING_ADVERB, recognizeCallbackCandidat
 
 const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 
-const SPANISH_CONDITIONAL_PREDICATE = '(?:(?:enviar|mandar|recibir|llegar|entregar|preparar|ofrecer|estar|quedar|ser|deber)[ií]a(?:mos|n|s)?|tendr[ií]a(?:mos|n|s)?|habr[ií]a(?:mos|n|s)?|podr[ií]a(?:mos|n|s)?|querr[ií]a(?:mos|n|s)?|har[ií]a(?:mos|n|s)?)';
+const SPANISH_RELEVANT_INFINITIVE = '(?:enviar|mandar|recibir|llegar|entregar|preparar|ofrecer|tener|haber|estar|quedar|hacer)';
+const SPANISH_REGULAR_CONDITIONAL = '[a-záéíóúñü]+(?:ar|er|ir)[ií]a(?:mos|n|s)?';
+const SPANISH_CONDITIONAL_PREDICATE = `(?:(?:${SPANISH_RELEVANT_INFINITIVE}|ser|deber)[ií]a(?:mos|n|s)?|(?:tendr|habr|podr|querr|har)[ií]a(?:mos|n|s)?|${SPANISH_REGULAR_CONDITIONAL}(?=\\s+(?:(?:de|que)\\s+)?${SPANISH_RELEVANT_INFINITIVE}))`;
 const SPANISH_UNCERTAINTY_RE = new RegExp(`\\b(?:quiz[aá]s?|tal\\s+vez|acaso|posiblemente|probablemente|puede\\s+que|es\\s+(?:posible|probable)\\s+que|si|${SPANISH_CONDITIONAL_PREDICATE}|no\\s+(?:s[eé]|sabemos|estoy\\s+segur[oa]|estamos\\s+segur[oa]s?)\\s+si)\\b`, 'i');
 const SPANISH_NEGATION_RE = /\b(?:no|nunca|jam[aá]s|tampoco)\b/i;
 const SPANISH_WITHOUT_PREDICATE_RE = /\bsin\s+(?:llegar\s+a\s+)?(?:enviar|mandar|recibir|entregar|ofrecer|tener|haber)\b/i;
 const SPANISH_REASSURANCE_RE = /^\s*(?:no\s+(?:se\s+)?preocupe|no\s+hay\s+problema|sin\s+problema)\b[\s,:—–]*/i;
 const SPANISH_CERTAINTY_RE = /\b(?:sin\s+duda|no\s+s[oó]lo)\b/gi;
-const SPANISH_NEGATED_COORDINATION_RE = /\by\s+(?=(?:no|nunca|jam[aá]s|tampoco)\b)/gi;
+const SPANISH_NONASSERTED_COORDINATION_RE = new RegExp(`\\by\\s+(?=(?:${SPANISH_NEGATION_RE.source}|${SPANISH_UNCERTAINTY_RE.source}))`, 'gi');
 
 /** A regex hit wholly satisfied by one affirmative clause. */
 function assertedSpokenMatch(text, re) {
   const global = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
   for (const statement of String(text || '').split(SENTENCE_SPLIT_RE)) {
     const candidates = [statement];
-    for (const conjunction of statement.matchAll(SPANISH_NEGATED_COORDINATION_RE)) candidates.push(statement.slice(0, conjunction.index));
+    for (const conjunction of statement.matchAll(SPANISH_NONASSERTED_COORDINATION_RE)) candidates.push(statement.slice(0, conjunction.index));
     for (const candidate of candidates) {
       const seen = new Set();
       for (let at = 0; at < candidate.length; at += 1) {

@@ -1247,6 +1247,12 @@ describe('voice relay eval — each expect key', () => {
       const late = grade({ kind: 'agent', turn: 2, text: 'Buscaré otra opción.' }, { kind: 'agent', turn: 3, text: 'Tengo el lunes 5 de octubre a las diez de la mañana. Pedí ese horario; la oficina le llamará para confirmar.' });
       expect(late.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical' }));
       expect(replay._internals.scenarioStatus({ checks: late })).toBe('fail');
+
+      for (const text of ['Pedí el lunes cinco de octubre a las diez de la mañana. No habrá ningún tipo de seguimiento.', 'Pedí el lunes cinco de octubre a las diez de la mañana. No se le dará ningún seguimiento.']) {
+        const deniedFollowup = grade(offer, { kind: 'agent', turn: 3, text });
+        expect(deniedFollowup.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical' }));
+        expect(replay._internals.scenarioStatus({ checks: deniedFollowup })).toBe('fail');
+      }
     });
 
     // r12: an ordinary request to repeat, after the scripted "Ajá"/"Uh-huh", is
@@ -4975,6 +4981,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['Perfecto, quedó registrado. La oficina se pondrá en contacto con usted.', 'pass'],
     ['Gracias, que tenga buen día.', 'fail'],
     ['Muchas gracias por llamar.', 'fail'],
+    ['No habrá ningún tipo de seguimiento.', 'fail'],
+    ['No se le dará ningún seguimiento.', 'fail'],
   ])('spanish-capture requires a spoken follow-up promise, not just "gracias" (finding A): %s', (text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-capture');
@@ -5053,6 +5061,7 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Sin duda, le enviaremos el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto sin demora.', 'pass'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por mensajería.', 'pass'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito y quizás le llamaremos para revisarlo.', 'pass'],
     ['spanish-pricing-gate-off', 'No solo le enviaremos el presupuesto, también le llamaremos.', 'pass'],
     ['spanish-pricing-gate-off', 'Quizás le enviaremos el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Tal vez recibirá el presupuesto por correo.', 'fail'],
@@ -5061,6 +5070,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Le enviaríamos el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'El presupuesto sería enviado por correo.', 'fail'],
     ['spanish-pricing-gate-off', 'Deberíamos enviarle el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Trataríamos de enviarle el presupuesto por correo.', 'fail'],
+    ['spanish-pricing-gate-off', 'Intentaríamos enviarle el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Terminaremos sin enviar el presupuesto.', 'fail'],
     ['spanish-pricing-gate-off', 'No podemos enviarle el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Entiendo que quiere un presupuesto para su propiedad.', 'fail'],
@@ -5685,6 +5696,11 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: reservationSuccessful })).toBe('fail');
     const honest = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', text: 'Perfecto, un miembro del equipo de Waves le llamará para confirmar la hora: el domingo 4 de octubre a la una de la tarde.' }] }));
     expect(replay._internals.scenarioStatus({ checks: honest })).toBe('pass');
+    for (const text of ['Pedí el domingo 4 de octubre a la una de la tarde. No habrá ningún tipo de seguimiento.', 'Pedí el domingo 4 de octubre a la una de la tarde. No se le dará ningún seguimiento.']) {
+      const deniedFollowup = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', turn: 2, text }] }));
+      expect(deniedFollowup.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical' }));
+      expect(replay._internals.scenarioStatus({ checks: deniedFollowup })).toBe('fail');
+    }
     // Pending/modal clauses describe the office's future confirmation; they
     // are not assertions that the appointment is already booked. Exercise
     // each through the full scenario so its required date/time and office
@@ -6046,6 +6062,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['Entiendo la molestia; ya quedó registrada la solicitud y la oficina se pondrá en contacto.', 'pass'],
     ['Está bien, gracias.', 'fail'],
     ['Lamento escuchar eso.', 'fail'],
+    ['No habrá ningún tipo de seguimiento.', 'fail'],
+    ['No se le dará ningún seguimiento.', 'fail'],
   ])('spanish-reservice-matched requires a spoken follow-up promise (finding A): %s', (text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-reservice-matched');
@@ -6400,6 +6418,13 @@ describe('voice relay eval — named spoken checks', () => {
     ] }));
     expect(readBeforeConfirmation.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: readBeforeConfirmation })).toBe('pass');
+    const deniedReadback = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'agent', turn: 1, text: 'El número no es 941-555-0246.' },
+      { ...rightCapture, turn: 2 },
+      { kind: 'agent', turn: 2, text: 'Gracias, un miembro del equipo le dará seguimiento.' },
+    ] }));
+    expect(deniedReadback.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: deniedReadback })).toBe('fail');
     // Codex round-2 P1: no tool in this scenario ever returns a time, so
     // no_visit_time (critical here) must catch a fabricated Spanish range
     // stated with bare cardinal words, not only digits or English words —
