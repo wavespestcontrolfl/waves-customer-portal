@@ -1090,10 +1090,17 @@ async function chargeFollowThroughOwed(conn, successor) {
 // settled void refusal, or a lost bell — the caller writes no exclusion).
 async function withdrawRenewalSuccessor(successor, reason, conn = db, { lapseOwnsPresented = false } = {}) {
   if (!successor.renewed_from_term_id) return withdrawSuccessorUnderGate(successor, reason, conn, lapseOwnsPresented);
-  return require('./annual-prepay-renewals').withParentDecisionLock(
-    successor.renewed_from_term_id,
-    () => withdrawSuccessorUnderGate(successor, reason, conn, lapseOwnsPresented),
-  );
+  return withRenewalGate(successor, () => withdrawSuccessorUnderGate(successor, reason, conn, lapseOwnsPresented));
+}
+
+// Codex #4971 r5 P2 (lock order): every renewal action on a successor holds
+// the PARENT's decision gate AND the successor's own key — taken together,
+// sorted, on one session (withParentDecisionLock's alsoTermIds) — because
+// its nested writers (voidInvoice, cancelTermWithRestorations) gate on the
+// successor while any customer-keyed writer takes both keys in sorted
+// order. Re-entrant on either key.
+function withRenewalGate(successor, fn) {
+  return require('./annual-prepay-renewals').withParentDecisionLock(successor.renewed_from_term_id, fn, { alsoTermIds: [successor.id] });
 }
 
 async function withdrawSuccessorUnderGate(successor, reason, conn, lapseOwnsPresented) {
@@ -1175,6 +1182,18 @@ async function renewalMoneyInMotionForParent(conn, parentTermId) {
   return null;
 }
 
+// Codex #4971 r5 P1 — the portal decline's question for one termite term:
+// renewal money in motion on the term's OWN renewal invoice (it is a
+// payment_pending renewal successor — the live decline case, its card
+// declinable after the prior year ended) or on a pending successor of it.
+async function renewalMoneyInMotionForTerm(conn, term) {
+  if (term.renewed_from_term_id && term.status === PAYMENT_PENDING_STATUS) {
+    const own = await renewalMoneyInMotion(conn, term);
+    if (own) return own;
+  }
+  return renewalMoneyInMotionForParent(conn, term.id);
+}
+
 // Codex #4971 r4 P1 — the paid sync's hook for a termite renewal successor
 // that just activated (annual-prepay-renewals.js syncTermForInvoicePayment,
 // pending -> active, after its own transaction). Best-effort: the
@@ -1198,13 +1217,18 @@ async function onRenewalSuccessorPaid(successor, conn = db) {
   }
 }
 
-// Returns the bell result when one rang (fresh or deduped), 'eligible' when
-// the parent still authorizes the renewal (nothing to say), or null when
-// the bell did not persist (retried by leg 7e).
+// Returns the bell result when one rang (fresh or deduped), 'not_owed' when
+// there is nothing to say, or null when the bell did not persist (retried
+// by leg 7e). Owed only when (Codex #4971 r5 P2) the parent's refusal is
+// DURABLE (a decision, a cancel, a revoked invoice — never a dispute
+// demotion that can still come back) AND the renewal was paid AFTER that
+// change: a renewal paid in October whose prior year is refunded or
+// disputed the next March was a legitimate payment, not a late one.
 async function bellLatePaidRenewal(successor, conn) {
   const parent = await conn('annual_prepay_terms').where({ id: successor.renewed_from_term_id }).first();
   const refusal = await parentRefusalForSuccessor(conn, successor, parent);
-  if (refusal.eligible) return 'eligible';
+  if (refusal.eligible || !refusal.durable) return 'not_owed';
+  if (!(await paidAfterParentChanged(conn, successor, parent))) return 'not_owed';
   const bell = await ringRenewalBell(successor, 'paid_after_parent_ended', refusal.reason);
   // The marker is written only where the row shows the column exists
   // (20260927040000) — a missing column must never fail the activation.
@@ -1216,11 +1240,21 @@ async function bellLatePaidRenewal(successor, conn) {
   return bell;
 }
 
+// The parent's disqualifying change is dated by its decision time, else its
+// last row update (the cancel / refund sync that moved it); JS twin of leg
+// 7e's paidAfterParentChange SQL.
+async function paidAfterParentChanged(conn, successor, parent) {
+  const invoice = await conn('invoices').where({ id: successor.prepay_invoice_id }).first('paid_at');
+  const changedAt = parent?.renewal_decision_at || parent?.updated_at;
+  return Boolean(invoice?.paid_at && changedAt) && new Date(invoice.paid_at) > new Date(changedAt);
+}
+
 // Leg 7e (Codex #4971 r4 P1, item 4b backstop): an ACTIVE, settled renewal
-// whose parent never took its 'renewed' stamp and whose late-paid alert has
-// not persisted — the paid sync's own alert was lost, or never ran. Rings
-// it (bellLatePaidRenewal); a parent that still authorizes the renewal is
-// left to reconcileParentRenewedStamps. Excluded once the alert persisted.
+// paid after its parent changed, whose parent never took its 'renewed'
+// stamp and whose late-paid alert has not persisted — the paid sync's own
+// alert was lost, or never ran. Rings it (bellLatePaidRenewal); a parent
+// that still authorizes the renewal is left to reconcileParentRenewedStamps.
+// Excluded once the alert persisted.
 async function bellLatePaidRenewals({ conn = db, limit = 200, counts }) {
   try {
     const candidates = await whereInvoiceSettledNotRevoked(
@@ -1232,7 +1266,11 @@ async function bellLatePaidRenewals({ conn = db, limit = 200, counts }) {
         .whereNull('t.renewal_late_paid_belled_at')
         .where(function parentNotRenewed() {
           this.whereNot('p.status', 'renewed').orWhereRaw("p.renewal_decision is distinct from 'renew'");
-        }),
+        })
+        // Paid AFTER the parent changed (twin of paidAfterParentChanged) —
+        // an old legitimate renewal behind a later refund or dispute is
+        // never selected, so it can never pin this page either.
+        .whereRaw('i.paid_at > coalesce(p.renewal_decision_at, p.updated_at)'),
       'i',
     )
       .orderByRaw('t.renewal_sweep_deferred_at asc nulls first')
@@ -1243,7 +1281,7 @@ async function bellLatePaidRenewals({ conn = db, limit = 200, counts }) {
     for (const successor of candidates) {
       try {
         const outcome = await bellLatePaidRenewal(successor, conn);
-        if (outcome && outcome !== 'eligible') counts.latePaidBelled += 1;
+        if (outcome && outcome !== 'not_owed') counts.latePaidBelled += 1;
         else await stampSweepDeferred(successor, conn);
       } catch (err) {
         logger.error(`[termite-annual-renewal] late-paid renewal bell failed for term ${successor.id}: ${err.message}`);
@@ -1492,8 +1530,7 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
     // first (and this re-check sees it) or waits behind this whole
     // submission (and only then gets to decide).
     if (successor.renewed_from_term_id) {
-      const AnnualPrepayRenewals = require('./annual-prepay-renewals');
-      const outcome = await AnnualPrepayRenewals.withParentDecisionLock(successor.renewed_from_term_id, async () => {
+      const outcome = await withRenewalGate(successor, async () => {
         const freshParent = await conn('annual_prepay_terms').where({ id: successor.renewed_from_term_id }).first();
         const parentEligibility = await parentRefusalForSuccessor(conn, successor, freshParent);
         if (!parentEligibility.eligible) return { blocked: true, ...parentEligibility };
@@ -1879,7 +1916,7 @@ async function withPayLinkClearance(successor, conn, context, send) {
     return send();
   };
   if (!successor.renewed_from_term_id) return cleared();
-  return require('./annual-prepay-renewals').withParentDecisionLock(successor.renewed_from_term_id, cleared);
+  return withRenewalGate(successor, cleared);
 }
 
 // null when the pay link may go out; otherwise 'handled' / 'deferred' (see
@@ -2397,11 +2434,7 @@ async function processGraceLapseForTerm(term, conn = db) {
   if (!term.renewed_from_term_id) {
     return processGraceLapseSequence(term, conn);
   }
-  const AnnualPrepayRenewals = require('./annual-prepay-renewals');
-  return AnnualPrepayRenewals.withParentDecisionLock(
-    term.renewed_from_term_id,
-    () => processGraceLapseSequence(term, conn),
-  );
+  return withRenewalGate(term, () => processGraceLapseSequence(term, conn));
 }
 
 // Extracted from processGraceLapseSequence (Codex #4971 post-push audit
@@ -2701,6 +2734,10 @@ async function stampNeverReachedStripeHandled(successor, conn) {
   await conn('annual_prepay_terms').where({ id: successor.id })
     .whereNull('renewal_charge_never_reached_stripe_belled_at')
     .update({ renewal_charge_never_reached_stripe_belled_at: new Date() });
+  // Codex #4971 r5 P2: a claim that never reached Stripe has no outcome —
+  // once leg 7b handled it, the write-ahead marker goes too, so
+  // renewal_charge_failure_kind keeps meaning "a known outcome, or nothing".
+  if (successor.renewal_charge_failure_kind === CHARGE_OUTCOME_PENDING) await clearChargeOutcomePending(successor, conn);
 }
 
 async function bellAndVerifyDeliveryForNeverReachedStripe(successor, conn) {
@@ -3120,6 +3157,7 @@ module.exports = {
   runTermiteAnnualRenewalSweep,
   termiteAnnualRenewalChargeLive,
   renewalMoneyInMotionForParent,
+  renewalMoneyInMotionForTerm,
   onRenewalSuccessorPaid,
   _private: {
     mintRenewalSuccessor,

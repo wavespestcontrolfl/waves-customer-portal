@@ -475,6 +475,67 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
       expect(Date.now() - startedAt).toBeLessThan(4000); // never the 5s lock_timeout
     });
 
+    // Codex #4971 r5 P2 — lock order across the PARENT and SUCCESSOR keys.
+    // A withdrawal (or pay link / charge / grace lapse) guards the parent's
+    // decision while its nested voidInvoice / cancel gate on the successor;
+    // a refund keyed by customer takes every termite key of that customer in
+    // sorted order. With successor < parent, holding only the parent let the
+    // refund take the successor and then wait on the parent while the
+    // withdrawal waited on the successor.
+    const parentAndLowerSuccessor = async () => {
+      const { randomUUID } = require('crypto');
+      const parentId = await insertTerm({ annualPlanVersion: 'v3', status: 'active' });
+      const { customer_id: customerId } = await db('annual_prepay_terms').where({ id: parentId }).first('customer_id');
+      let successorId = randomUUID();
+      while (successorId >= String(parentId)) successorId = randomUUID();
+      await db('annual_prepay_terms').insert({
+        id: successorId, customer_id: customerId, term_start: '2027-01-01', term_end: '2027-12-31',
+        status: 'payment_pending', annual_plan_version: 'v3', renewed_from_term_id: parentId,
+      });
+      return { parentId: String(parentId), successorId, customerId };
+    };
+    const withdrawalShape = (parentId, successorId, order, lockOptions) => withParentDecisionLock(parentId, async () => {
+      order.push('withdrawal-gate');
+      await sleep(150);
+      // voidInvoice / cancelTermWithRestorations: their own transaction's
+      // gate, keyed on the successor.
+      await db.transaction(async (t) => {
+        await acquireTermiteGateAtEntry(t, { termIds: [successorId] });
+        order.push('withdrawal-successor-gate');
+      });
+      order.push('withdrawal-done');
+    }, lockOptions);
+
+    test('a customer-keyed refund gate arriving mid-withdrawal WAITS, then proceeds — no lock_timeout (parent + successor held together, sorted)', async () => {
+      const { parentId, successorId, customerId } = await parentAndLowerSuccessor();
+      const order = [];
+      const withdrawal = withdrawalShape(parentId, successorId, order, { alsoTermIds: [successorId] });
+      await sleep(40);
+      const startedAt = Date.now();
+      const refund = writerDb.transaction(async (trx) => {
+        const keys = await acquireTermiteGateAtEntry(trx, { customerIds: [customerId] });
+        order.push('refund-gate');
+        return keys;
+      });
+      const [keys] = await Promise.all([refund, withdrawal]);
+      expect(keys).toEqual([successorId, parentId]);
+      expect(order).toEqual(['withdrawal-gate', 'withdrawal-successor-gate', 'withdrawal-done', 'refund-gate']);
+      expect(Date.now() - startedAt).toBeLessThan(4000);
+      expect(await advisoryLockCount(parentId)).toBe(0);
+      expect(await advisoryLockCount(successorId)).toBe(0);
+      expect(db.client.pool.numUsed()).toBe(0);
+    }, 20000);
+
+    test('control: holding only the PARENT key, the same refund and withdrawal wait on each other until a lock_timeout aborts one', async () => {
+      const { parentId, successorId, customerId } = await parentAndLowerSuccessor();
+      const order = [];
+      const withdrawal = withdrawalShape(parentId, successorId, order, {}).catch((err) => err);
+      await sleep(40);
+      const refund = writerDb.transaction(async (trx) => acquireTermiteGateAtEntry(trx, { customerIds: [customerId] })).catch((err) => err);
+      const outcomes = await Promise.all([refund, withdrawal]);
+      expect(outcomes.some((o) => o instanceof Error && /could not acquire the parent-decision lock/.test(o.message))).toBe(true);
+    }, 20000);
+
     test('control: the OLD order (customer row first, gate second) stalls both until the writer\'s lock_timeout aborts it', async () => {
       const { termId, invoiceId } = await insertTerm({ annualPlanVersion: 'v3', status: 'active', withInvoice: true });
       const { customer_id: customerId } = await db('annual_prepay_terms').where({ id: termId }).first('customer_id');
@@ -580,6 +641,15 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
       expect(sawAdvisoryWait).toBe(false);
       expect(elapsed).toBeLessThan(250);
       expect(await db.transaction((trx) => acquireTermiteGateForCharge(trx, {}))).toEqual([]);
+    });
+
+    test('malformed ids are ignored, never thrown (the key lookup compares uuid columns to a filtered uuid[] — index-friendly)', async () => {
+      const { termId, invoiceId } = await insertTerm({ annualPlanVersion: 'v3', status: 'active', withInvoice: true });
+      const keys = await db.transaction((trx) => acquireTermiteGateAtEntry(trx, {
+        termIds: ["x') OR true --", 'term-1'], invoiceIds: ['not-a-uuid', invoiceId], customerIds: ['cust-1'],
+      }));
+      expect(keys).toEqual([String(termId)]);
+      expect(await db.transaction((trx) => acquireTermiteGateAtEntry(trx, { customerIds: ['cust-1'], invoiceIds: ['inv-1'] }))).toEqual([]);
     });
 
     test('a payer statement whose child is the termite parent\'s prepay invoice gates its refund / chargeback reversal', async () => {

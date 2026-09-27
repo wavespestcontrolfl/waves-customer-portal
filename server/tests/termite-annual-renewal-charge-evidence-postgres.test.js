@@ -304,6 +304,7 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       const bareInvoice = await insertInvoice({ status: 'draft' });
       const bare = await insertSuccessor(parent, bareInvoice, {
         term_start: daysFromToday(-2), created_at: new Date(), renewal_charge_attempted_at: new Date(Date.now() - 3600000),
+        renewal_charge_failure_kind: 'outcome_pending', // the write-ahead marker the fence claim wrote
       });
       await db('stripe_invoice_charge_attempts').insert({ invoice_id: bareInvoice.id, status: 'failed' });
 
@@ -332,6 +333,9 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       const stamped = await db('annual_prepay_terms').whereNotNull('renewal_charge_never_reached_stripe_belled_at').pluck('id');
       expect(stamped).toEqual([bare.id]);
       expect(stamped).not.toContain(submitted.id);
+      // Codex #4971 r5 P2: handled by 7b, the never-submitted claim carries
+      // no outcome — the write-ahead marker is cleared.
+      expect((await db('annual_prepay_terms').where({ id: bare.id }).first('renewal_charge_failure_kind')).renewal_charge_failure_kind).toBeNull();
     });
 
     test('pre-push P1: a scheduled or stale-sending renewal invoice with no delivery stamp is never "presented" — no lapse, no retrieval', async () => {
@@ -474,8 +478,9 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
   // excluded; a parent that still authorizes it is left alone.
   describe('r4 item 4b: leg 7e late-paid renewal alert', () => {
     test('rings once for a renewal paid behind a cancelled or refunded parent, never for a renewed one, and excludes it once the alert persisted', async () => {
+      // The parent changed a minute before the renewal was paid.
       const paidRenewal = async (parentFields) => {
-        const parent = await insertParent(parentFields);
+        const parent = await insertParent({ updated_at: new Date(Date.now() - 60000), ...parentFields });
         const invoice = await insertInvoice({ status: 'paid', paid_at: new Date() });
         return insertSuccessor(parent, invoice, { status: 'active', term_start: daysFromToday(-34) });
       };
@@ -504,6 +509,38 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       await Charge._private.bellLatePaidRenewals({ conn: db, limit: 50, counts: again });
       expect(again.latePaidScanned).toBe(0);
       expect(mockNotifyAdmin).toHaveBeenCalledTimes(2);
+    });
+
+    // Codex #4971 r5 P2: a renewal paid in October whose prior year is later
+    // refunded (durable) or disputed (move 10 demotion, transient) the next
+    // March was a LEGITIMATE payment — never a "paid after the prior plan
+    // ended" alert, and never selected (so it cannot pin the page), while a
+    // renewal genuinely paid after the parent was cancelled still rings.
+    test('an October-paid renewal whose parent is refunded or disputed in March never rings; one paid after the cancel does', async () => {
+      const DAY = 86400000;
+      const renewalPaid = async (parentFields, paidDaysAgo, changedDaysAgo) => {
+        const parent = await insertParent({ ...parentFields, updated_at: new Date(Date.now() - changedDaysAgo * DAY) });
+        const invoice = await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - paidDaysAgo * DAY) });
+        return insertSuccessor(parent, invoice, { status: 'active' });
+      };
+      const refundedInMarch = await renewalPaid({ status: 'cancelled' }, 150, 10);
+      const disputedInMarch = await renewalPaid({ status: 'payment_pending' }, 150, 10);
+      const decidedBeforePaying = await renewalPaid({ status: 'cancelled', renewal_decision: 'cancel', renewal_decision_at: new Date(Date.now() - 20 * DAY) }, 5, 1);
+
+      const counts = { latePaidScanned: 0, latePaidBelled: 0 };
+      await Charge._private.bellLatePaidRenewals({ conn: db, limit: 50, counts });
+
+      expect(counts.latePaidScanned).toBe(1);
+      expect(mockNotifyAdmin.mock.calls.map(([, , , opts]) => opts.dedupeKey)).toEqual([
+        `termite-renewal-charge:${decidedBeforePaying.id}:paid_after_parent_ended`,
+      ]);
+      // The per-row check agrees even when handed the old rows directly.
+      for (const row of [refundedInMarch, disputedInMarch]) {
+        const fresh = await db('annual_prepay_terms').where({ id: row.id }).first();
+        expect(await Charge._private.bellLatePaidRenewal(fresh, db)).toBe('not_owed');
+      }
+      expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+      expect(await db('annual_prepay_terms').whereNotNull('renewal_late_paid_belled_at').pluck('id')).toEqual([decidedBeforePaying.id]);
     });
   });
 

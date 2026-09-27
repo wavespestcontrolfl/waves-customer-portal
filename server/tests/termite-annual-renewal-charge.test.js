@@ -1300,7 +1300,7 @@ describe('termite annual renewal charge', () => {
       expect(outcome.status).toBe(kind);
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
       expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
-      expect(gate).toHaveBeenCalledWith('parent-1', expect.any(Function));
+      expect(gate).toHaveBeenCalledWith('parent-1', expect.any(Function), { alsoTermIds: ['succ-term-1'] });
       expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1', { requireUnsettled: true });
       expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/withdrawn/i), expect.stringContaining('parent_decided_cancel'), expect.objectContaining({
         dedupeKey: 'termite-renewal-charge:succ-term-1:renewal_withdrawn',
@@ -3629,7 +3629,7 @@ describe('termite annual renewal charge', () => {
       const sendViaSMSAndEmail = jest.fn();
       jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail, voidInvoice: jest.fn() }));
       const { onRenewalSuccessorPaid } = require('../services/termite-annual-renewal-charge');
-      const { conn, updates } = hookConn({ parent: { id: 'parent-1', status: 'cancelled', renewal_decision: 'cancel', term_end: '2026-09-26' } });
+      const { conn, updates } = hookConn({ parent: { id: 'parent-1', status: 'cancelled', renewal_decision: 'cancel', renewal_decision_at: '2026-09-01T12:00:00Z', term_end: '2026-09-26' } });
 
       await onRenewalSuccessorPaid(paidSuccessor(), conn);
 
@@ -3655,7 +3655,7 @@ describe('termite annual renewal charge', () => {
       expect(notifyAdmin).not.toHaveBeenCalled();
       expect(renewed.updates).toEqual([]);
 
-      const cancelled = hookConn({ parent: { id: 'parent-1', status: 'cancelled', renewal_decision: 'cancel', term_end: '2026-09-26' } });
+      const cancelled = hookConn({ parent: { id: 'parent-1', status: 'cancelled', renewal_decision: 'cancel', renewal_decision_at: '2026-09-01T12:00:00Z', term_end: '2026-09-26' } });
       await onRenewalSuccessorPaid(paidSuccessor({ renewal_charge_failure_kind: null }), cancelled.conn);
       expect(notifyAdmin).toHaveBeenCalledTimes(1);
       expect(cancelled.updates.some(({ payload }) => 'renewal_late_paid_belled_at' in payload)).toBe(false);

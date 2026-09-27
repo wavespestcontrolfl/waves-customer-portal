@@ -4780,7 +4780,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     });
     // Codex #4971 pre-push lock order: the gate lookup for the customer's
     // termite terms ran FIRST — before the term row lock.
-    expect(gateLookups.at(-1).whereRaw).toHaveBeenCalledWith(expect.stringContaining('customer_id::text = ANY'), ['{}', '{}', '{}', '{cust-1}']);
+    expect(gateLookups.at(-1).whereRaw).toHaveBeenCalledWith(expect.stringContaining('customer_id = ANY('), ['{}', '{}', '{}', '{cust-1}']);
     expect(gateLookups.at(-1).whereRaw.mock.invocationCallOrder[0]).toBeLessThan(termSelectQuery.forUpdate.mock.invocationCallOrder[0]);
     // The SAME status/decision transition recordDecision('cancel') always
     // writes (statusAfterDecision('cancel') === 'cancelled') — this is what
@@ -4821,29 +4821,31 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
   // ORIGINAL term's installation_anchored_at being NULL no longer blocks
   // the decline. termite-annual-activation.js's anchor now tolerates the
   // resulting decided-lapse shape (its own suite covers that half).
-  // Codex #4971 r4 P1: no parent decision while an ACH renewal is clearing —
-  // the decline is refused under the gate, nothing is written, and the
-  // portal gets a reason it can explain.
-  test('refused while the renewal payment is still clearing — nothing written, a clear reason', async () => {
-    db.raw = jest.fn().mockResolvedValue({ rows: [{ previous: '0' }] });
-    const termRow = {
-      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
-      status: 'active', renewal_decision: null, term_end: '2027-05-20', prepay_amount: '450.00',
+  // Codex #4971 r4/r5 P1: no decline while a renewal payment is clearing.
+  // The reachable case is the renewal SUCCESSOR's own card: past the prior
+  // year's term_end the parent is refused as term_ended, while the
+  // payment_pending successor stays declinable. Refused under the gate,
+  // nothing written, and the portal gets a reason it can explain.
+  test('a renewal successor declined while its own renewal payment clears is refused — nothing written, a clear reason', async () => {
+    const successorRow = {
+      id: 'succ-1', customer_id: 'cust-1', annual_plan_version: 'v3', renewed_from_term_id: 'term-0',
+      prepay_invoice_id: 'inv-succ', status: 'payment_pending', renewal_decision: null,
+      term_start: '2026-09-20', term_end: '2027-09-19', prepay_amount: '450.00',
     };
-    const termUpdateQuery = query({ returning: [] });
-    const successorLookup = query({ rows: [{ id: 'succ-1', prepay_invoice_id: 'inv-succ' }] });
+    const write = query({ returning: [] });
+    const renewalInvoiceRead = query({ first: { status: 'processing' } }); // its own ACH debit
     const activityInsert = query();
     setDeclineQueues({
-      annual_prepay_terms: [query({ first: termRow }), successorLookup, termUpdateQuery],
-      invoices: [query({ first: { status: 'processing' } })], // the renewal's ACH debit
+      annual_prepay_terms: [query({ first: successorRow }), write],
+      invoices: [renewalInvoiceRead],
       activity_log: [activityInsert],
     });
 
-    const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', today: '2026-09-26' });
+    const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', termId: 'succ-1', today: '2026-09-26' });
 
-    expect(result).toEqual({ ok: false, reason: 'renewal_payment_clearing', termId: 'term-1' });
-    expect(successorLookup.where).toHaveBeenCalledWith({ renewed_from_term_id: 'term-1', status: 'payment_pending' });
-    expect(termUpdateQuery.update).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: false, reason: 'renewal_payment_clearing', termId: 'succ-1' });
+    expect(renewalInvoiceRead.where).toHaveBeenCalledWith({ id: 'inv-succ' });
+    expect(write.update).not.toHaveBeenCalled();
     expect(activityInsert.insert).not.toHaveBeenCalled();
     const NotificationService = require('../services/notification-service');
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();

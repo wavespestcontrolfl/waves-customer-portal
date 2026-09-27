@@ -8768,7 +8768,21 @@ const PARENT_DECISION_LOCK_TIMEOUT_MS = 5000;
 // skips straight to the write — the outer session lock already provides
 // all the serialization anyone needs, so a second lock from the SAME
 // logical flow would only ever contend with itself.
+//
+// Codex #4971 r5 P2 (lock order): the store holds a SET of term keys. A
+// renewal action (charge, withdrawal, pay link, grace lapse) acts on the
+// SUCCESSOR while it guards the PARENT's decision, and its nested writers
+// (voidInvoice, cancelTermWithRestorations) take xact gates keyed on the
+// successor. Holding only the parent key let a customer-keyed gate (a
+// refund, which keys every termite term of the customer, sorted) take the
+// successor key and then wait on the parent while the withdrawal held the
+// parent and waited on the successor — a cross-session cycle Postgres
+// cannot see, broken only by lock_timeout. withParentDecisionLock now takes
+// the parent AND successor keys (alsoTermIds) in sorted order on its one
+// lock connection, so every writer takes any pair in the one global order,
+// and nested gates on either key are skipped as held.
 const heldParentDecisionLockStore = new AsyncLocalStorage();
+const heldDecisionKeys = () => heldParentDecisionLockStore.getStore() || new Set();
 
 // Extracted from recordDecision (Codex round-7 P2 self-review, AGENTS.md
 // L412-418): the transaction-scoped lock acquisition is a genuinely
@@ -8841,9 +8855,9 @@ async function acquireParentDecisionXactLock(trx, termId) {
 //     chargebacks). syncTermForRefundedPayment already gates (move 9).
 async function acquireTermiteGateAtEntry(trx, { termIds = [], invoiceIds = [], customerIds = [] } = {}) {
   const ids = await termiteGateKeys(trx, { termIds, invoiceIds, customerIds });
-  const held = heldParentDecisionLockStore.getStore();
+  const held = heldDecisionKeys();
   for (const termId of ids) {
-    if (termId !== held) await acquireParentDecisionXactLock(trx, termId);
+    if (!held.has(termId)) await acquireParentDecisionXactLock(trx, termId);
   }
   return ids;
 }
@@ -8927,24 +8941,33 @@ async function acquireTermiteGateForStatement(trx, statementId) {
   return acquireTermiteGateAtEntry(trx, { invoiceIds: invoiceIds || [] });
 }
 
+// A text[] parameter as a uuid[] of its well-formed members only.
+const GATE_UUID_ARRAY = "ARRAY(SELECT v::uuid FROM unnest(?::text[]) v WHERE v ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')";
+
 async function termiteGateKeys(trx, { termIds, invoiceIds, customerIds }) {
   const terms = termIds.filter(Boolean).map(String);
   const invoices = invoiceIds.filter(Boolean).map(String);
   const customers = customerIds.filter(Boolean).map(String);
   if (!terms.length && !invoices.length && !customers.length) return [];
-  // Postgres array literals ('{a,b}'::text[]) — ids are uuids, and an
-  // empty list is simply '{}' (matches nothing), so the one statement shape
-  // holds for every combination. invoices.annual_prepay_term_id is read
-  // column-tolerantly (to_jsonb) — this runs at the entry of writers far
-  // outside this lane, some against schemas without that column.
+  // Postgres array literals ('{a,b}'::text[]) — an empty list is simply
+  // '{}' (matches nothing), so the one statement shape holds for every
+  // combination. Codex #4971 r5 P2 (index use): this runs at the entry of
+  // every refund, statement money op and void, termite customer or not, so
+  // each arm compares the uuid COLUMN to a uuid[] (GATE_UUID_ARRAY: only
+  // well-formed ids survive, so a malformed one never throws) — the primary
+  // key, the prepay_invoice_id / customer_id indexes and the invoices
+  // primary key are all usable (a BitmapOr), where the old column::text
+  // casts forced a scan. invoices.annual_prepay_term_id is still read
+  // column-tolerantly (to_jsonb) — some writers run against schemas without
+  // that column.
   const pgArray = (values) => `{${values.join(',')}}`;
   const rows = await trx('annual_prepay_terms')
     .whereNotNull('annual_plan_version')
     .whereRaw(
-      `(id::text = ANY(?::text[])
-        OR prepay_invoice_id::text = ANY(?::text[])
-        OR id::text IN (SELECT to_jsonb(gi) ->> 'annual_prepay_term_id' FROM invoices gi WHERE gi.id::text = ANY(?::text[]))
-        OR customer_id::text = ANY(?::text[]))`,
+      `(id = ANY(${GATE_UUID_ARRAY})
+        OR prepay_invoice_id = ANY(${GATE_UUID_ARRAY})
+        OR id = ANY(ARRAY(SELECT NULLIF(to_jsonb(gi) ->> 'annual_prepay_term_id', '')::uuid FROM invoices gi WHERE gi.id = ANY(${GATE_UUID_ARRAY})))
+        OR customer_id = ANY(${GATE_UUID_ARRAY}))`,
       [pgArray(terms), pgArray(invoices), pgArray(invoices), pgArray(customers)],
     )
     .select('id');
@@ -8972,60 +8995,72 @@ async function isTermiteTerm(conn, termId) {
 // runUpdate receives { termite } — the one peek answers both questions.
 async function writeDecisionUnderTermiteLock(conn, termId, runUpdate) {
   const termite = await isTermiteTerm(conn, termId);
-  if (!termite || heldParentDecisionLockStore.getStore() === String(termId)) return runUpdate(conn, { termite });
+  if (!termite || heldDecisionKeys().has(String(termId))) return runUpdate(conn, { termite });
   return conn.transaction(async (trx) => {
     await acquireParentDecisionXactLock(trx, termId);
     return runUpdate(trx, { termite });
   });
 }
-async function withParentDecisionLock(termId, fn, { timeoutMs = PARENT_DECISION_LOCK_TIMEOUT_MS } = {}) {
-  // Re-entrant: this async tree already holds the session lock on THIS term
-  // (e.g. a withdrawal reached from inside the charge's own locked section)
-  // — a second session lock from a second connection would only wait on
-  // itself until lock_timeout.
-  if (heldParentDecisionLockStore.getStore() === String(termId)) return fn();
+// `alsoTermIds` (Codex #4971 r5 P2): the renewal successor the caller acts
+// on — locked with the parent, sorted, on the same connection (see
+// heldParentDecisionLockStore). Keys this async tree already holds are
+// skipped; all held → fn() runs directly (re-entrant).
+async function withParentDecisionLock(termId, fn, { timeoutMs = PARENT_DECISION_LOCK_TIMEOUT_MS, alsoTermIds = [] } = {}) {
+  const held = heldDecisionKeys();
+  const keys = [...new Set([termId, ...alsoTermIds].filter(Boolean).map(String))].filter((key) => !held.has(key)).sort();
+  if (!keys.length) return fn();
   // Internal, code-controlled only (never request-derived) — still clamp
   // defensively before it ever reaches a query, parameterized or not.
   const boundedTimeoutMs = Number.isInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : PARENT_DECISION_LOCK_TIMEOUT_MS;
   let lockConn = null;
-  let locked = false;
+  const locked = [];
   try {
     lockConn = await db.client.acquireConnection();
-    try {
-      await lockConn.query('SELECT set_config(\'lock_timeout\', $1, false)', [`${boundedTimeoutMs}ms`]);
-      await lockConn.query('SELECT pg_advisory_lock(hashtext($1), hashtext($2::text))', [PARENT_DECISION_LOCK_NS, String(termId)]);
-      locked = true;
-    } catch (err) {
-      if (err && err.code === '55P03') {
-        throw new Error(`could not acquire the parent-decision lock for term ${termId} within ${boundedTimeoutMs}ms — a decision or charge is already in progress for this term`);
-      }
-      throw err;
-    } finally {
-      // Always clear the session-level timeout on THIS connection before
-      // it's used for anything else — including fn() below and the unlock
-      // statement, both of which run on the SAME session either way.
-      try { await lockConn.query('RESET lock_timeout'); } catch { /* connection likely already broken; the outer catch/finally handles it */ }
-    }
-    // Mark this term as session-lock-held for the lifetime of fn()'s own
+    await takeSessionDecisionLocks(lockConn, keys, locked, boundedTimeoutMs);
+    // Mark these terms as session-lock-held for the lifetime of fn()'s own
     // async tree — see heldParentDecisionLockStore's doc above.
-    return await heldParentDecisionLockStore.run(String(termId), () => fn());
+    return await heldParentDecisionLockStore.run(new Set([...held, ...keys]), () => fn());
   } finally {
-    if (lockConn) {
-      if (locked) {
-        try {
-          await lockConn.query('SELECT pg_advisory_unlock(hashtext($1), hashtext($2::text))', [PARENT_DECISION_LOCK_NS, String(termId)]);
-        } catch (err) {
-          // A failed unlock on a still-usable session would return the
-          // connection to the pool WITH the lock held — poison it instead
-          // (mirrors acquireCancelCommitLock's own comment) so the pool
-          // destroys it; ending the session is what actually releases it.
-          lockConn.__knex__disposed = err;
-          logger.warn(`[annual-prepay] parent-decision lock release failed for term ${termId} — connection poisoned so the pool destroys it: ${err.message}`);
-        }
-      }
-      try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ }
+    if (lockConn) await releaseSessionDecisionLocks(lockConn, locked);
+  }
+}
+
+// Takes each key's session lock in order, recording what it holds in
+// `locked` (so the caller's finally releases exactly those, even on a
+// failure part-way). The session-level lock_timeout is always cleared
+// before the connection is used for anything else.
+async function takeSessionDecisionLocks(lockConn, keys, locked, timeoutMs) {
+  try {
+    await lockConn.query('SELECT set_config(\'lock_timeout\', $1, false)', [`${timeoutMs}ms`]);
+    for (const key of keys) {
+      await lockConn.query('SELECT pg_advisory_lock(hashtext($1), hashtext($2::text))', [PARENT_DECISION_LOCK_NS, key]);
+      locked.push(key);
+    }
+  } catch (err) {
+    if (err && err.code === '55P03') {
+      throw new Error(`could not acquire the parent-decision lock for term ${keys[locked.length]} within ${timeoutMs}ms — a decision or charge is already in progress for this term`);
+    }
+    throw err;
+  } finally {
+    try { await lockConn.query('RESET lock_timeout'); } catch { /* connection likely already broken; the caller's finally handles it */ }
+  }
+}
+
+async function releaseSessionDecisionLocks(lockConn, locked) {
+  for (const key of [...locked].reverse()) {
+    try {
+      await lockConn.query('SELECT pg_advisory_unlock(hashtext($1), hashtext($2::text))', [PARENT_DECISION_LOCK_NS, key]);
+    } catch (err) {
+      // A failed unlock on a still-usable session would return the
+      // connection to the pool WITH the lock held — poison it instead
+      // (mirrors acquireCancelCommitLock's own comment) so the pool
+      // destroys it; ending the session is what actually releases it.
+      lockConn.__knex__disposed = err;
+      logger.warn(`[annual-prepay] parent-decision lock release failed for term ${key} — connection poisoned so the pool destroys it: ${err.message}`);
+      break;
     }
   }
+  try { await db.client.releaseConnection(lockConn); } catch { /* pool reaps */ }
 }
 
 async function recordDecision({ termId, action, adminUserId = null, notes = null, disposition = null, conn = db } = {}) {
@@ -9111,10 +9146,17 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
 //     renewal invoice), the grace lapse's decideParentLapse (after the
 //     successor's invoice was voided — nothing left in motion); throws an
 //     operational 409 (err.code 'renewal_money_in_motion') that the admin
-//     routes surface as-is;
-//   - the portal decline (every branch — live, unpaid, superseded renew):
-//     declineRefusalReason refuses up front, as 'renewal_payment_clearing',
-//     inside the decline's own gated transaction.
+//     routes surface as-is. Parent side only: recordDecision moves only
+//     ACTIVE_STATUSES terms, and a renewal successor whose own payment is
+//     clearing is payment_pending — out of its reach;
+//   - the portal decline: declineRefusalReason refuses up front, as
+//     'renewal_payment_clearing', inside the decline's own gated
+//     transaction. Its live case is the renewal SUCCESSOR's own card (Codex
+//     #4971 r5 P1): past the prior year's term_end the parent's card is
+//     refused as term_ended before this check, while the payment_pending
+//     successor stays declinable — so the question covers the term's OWN
+//     renewal payment as well as any pending successor of it
+//     (renewalMoneyInMotionForTerm).
 const DECISIONS_REFUSED_WHILE_RENEWAL_CLEARING = new Set(['cancel', 'switch_plan']);
 // Termite terms only (recordDecision's gate peek decides).
 async function refuseWhileRenewalClearing(conn, termId) {
@@ -9839,20 +9881,22 @@ async function declineReplayResult(term, trx) {
   return null;
 }
 
-// The refusal shape for each termiteDeclineBlockedReason.
 // The decline's refusal ladder: the term's own shape and dates
-// (termiteDeclineBlockedReason), then — Codex #4971 r4 P1 — a renewal
-// payment still clearing on this term's successor ('renewal_payment_
-// clearing': the decline waits until it settles). Read inside the
+// (termiteDeclineBlockedReason), then — Codex #4971 r4/r5 P1 — renewal
+// money still clearing on this term ('renewal_payment_clearing': the
+// decline waits until it settles). The live case is a renewal successor
+// declined while its OWN renewal payment clears; a pending successor of
+// this term is checked too (renewalMoneyInMotionForTerm). Read inside the
 // decline's transaction, which already holds the gate for the customer's
 // termite terms, so no renewal charge can start in between.
 async function declineRefusalReason(term, today, options, trx) {
   const blocked = termiteDeclineBlockedReason(term, today, options);
   if (blocked) return blocked;
-  const clearing = await require('./termite-annual-renewal-charge').renewalMoneyInMotionForParent(trx, term.id);
+  const clearing = await require('./termite-annual-renewal-charge').renewalMoneyInMotionForTerm(trx, term);
   return clearing ? 'renewal_payment_clearing' : null;
 }
 
+// The refusal shape for each termiteDeclineBlockedReason.
 function declineRefusal(term, reason) {
   const detail = {
     already_decided: { decision: term.renewal_decision },

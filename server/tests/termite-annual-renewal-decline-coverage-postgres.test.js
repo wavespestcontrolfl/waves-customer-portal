@@ -1082,6 +1082,37 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect((await db('annual_prepay_terms').where({ id: current.term.id }).first()).status).toBe('active');
     expect(await billingModeOf(db, current.customerId)).toBe('annual_prepay');
   });
+  // Codex #4971 r5 P1: the reachable "decline while the renewal payment
+  // clears" case, on the REAL decline: past the prior year's term_end the
+  // parent's card is refused as term_ended, and the payment_pending renewal
+  // SUCCESSOR — its own ACH debit still processing — is refused as
+  // renewal_payment_clearing, with nothing written.
+  test('declining a renewal successor whose own renewal payment is clearing is refused; the ended parent is term_ended', async () => {
+    const { db, Renewals, notifyAdmin } = await load();
+    await db.raw('ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sent_at timestamptz, ADD COLUMN IF NOT EXISTS sms_sent_at timestamptz, ADD COLUMN IF NOT EXISTS email_sent_at timestamptz');
+    const customerId = randomUUID();
+    const today = etToday();
+    await db('customers').insert({ id: customerId, first_name: 'Jane', last_name: 'Doe' });
+    const [parentInvoice] = await db('invoices').insert({ customer_id: customerId, status: 'paid', paid_at: new Date() }).returning('*');
+    const [parent] = await db('annual_prepay_terms').insert({
+      customer_id: customerId, prepay_invoice_id: parentInvoice.id, prepay_amount: 450, term_start: addMonths(today, -12),
+      term_end: addMonths(today, -1), status: 'active', annual_plan_version: 'v3', installation_anchored_at: new Date(),
+    }).returning('*');
+    const [renewalInvoice] = await db('invoices').insert({ customer_id: customerId, status: 'processing' }).returning('*');
+    const [successor] = await db('annual_prepay_terms').insert({
+      customer_id: customerId, prepay_invoice_id: renewalInvoice.id, prepay_amount: 450, term_start: addMonths(today, -1),
+      term_end: addMonths(today, 11), status: 'payment_pending', annual_plan_version: 'v3', renewed_from_term_id: parent.id,
+    }).returning('*');
+
+    expect(await Renewals.declineTermiteAnnualRenewal({ customerId, termId: parent.id, today })).toMatchObject({ ok: false, reason: 'term_ended' });
+    expect(await Renewals.declineTermiteAnnualRenewal({ customerId, termId: successor.id, today }))
+      .toEqual({ ok: false, reason: 'renewal_payment_clearing', termId: successor.id });
+    expect(await db('annual_prepay_terms').where({ id: successor.id }).first('status', 'renewal_decision'))
+      .toEqual({ status: 'payment_pending', renewal_decision: null });
+    expect(await db('activity_log').where({ customer_id: customerId }).count('* as n').first()).toMatchObject({ n: '0' });
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
   // Codex #4971 r4 P1: the REAL paid sync (pending -> active) of a termite
   // renewal successor ends its write-ahead charge outcome, and — its parent
   // cancelled while the payment cleared — leaves it ACTIVE with ONE staff
@@ -1097,6 +1128,7 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     const [parent] = await db('annual_prepay_terms').insert({
       customer_id: fx.customerId, term_start: addMonths(fx.today, -26), term_end: addMonths(fx.today, -14),
       status: 'cancelled', renewal_decision: 'cancel', annual_plan_version: 'v3',
+      renewal_decision_at: new Date(Date.now() - 3600000), updated_at: new Date(Date.now() - 3600000),
     }).returning('*');
     await db('annual_prepay_terms').where({ id: fx.term.id }).update({
       status: 'payment_pending', renewed_from_term_id: parent.id, renewal_charge_failure_kind: 'outcome_pending',
