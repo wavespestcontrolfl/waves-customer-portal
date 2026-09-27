@@ -24,7 +24,9 @@ let flagResolvers;
 let completionActions;
 let actionsGate;
 let failActions;
+let propertyAreas;
 beforeEach(async () => {
+  propertyAreas = null;
   delayFlags = false;
   flagResolvers = [];
   completionActions = { actions: [] };
@@ -52,6 +54,7 @@ beforeEach(async () => {
       if (delayFlags) await new Promise((resolve) => { flagResolvers.push(resolve); });
       data = { flags: { 'lawn-completion-improvements': improvementsEnabled } };
     }
+    if (url.includes('property-areas')) data = propertyAreas || { enabled: false };
     if (url.includes('turf-profile')) data = { profile: { lawn_sqft: 5000 } };
     if (url.includes('lawn-assessment/service')) data = { assessment: { id: 'assessment-current', confirmed_by_tech: true, turf_density: 82, weed_suppression: 85, color_health: 85, stress_damage: 80 } };
     if (url.includes('lawn-assessment/history')) data = { history };
@@ -1566,4 +1569,34 @@ it('changing visits after a partial-zone edit gives the next visit its own full 
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
   expect(submit.mock.calls[0][1].products.map(row => row.applicationArea)).toEqual(['Front yard, Back yard, Side yards', 'Front yard, Back yard, Side yards']);
+});
+
+
+it('shared reviewed area drives lawn defaults while a partial visit and manual total stay separate', async () => {
+  enableDefaults();
+  propertyAreas = { enabled: true, propertyId: 'property-a', version: 'a'.repeat(64), areas: {
+    lawn: { sqft: 4200, source: 'field', reviewedAt: '2026-09-27' }, beds: null, mosquito: null,
+  } };
+  mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['12.6', '8.4']));
+  expect(screen.queryByLabelText('Area for this visit (sq ft)')).toBeNull();
+  fireEvent.change(totals()[0], { target: { value: '8' } });
+  fireEvent.change(screen.getByLabelText('Area treated today (sq ft)'), { target: { value: '2000' } });
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['8', '4']));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].propertyServiceArea).toEqual({ propertyId: 'property-a', version: 'a'.repeat(64), kind: 'lawn', treatedSqft: 2000 });
+  expect(submit.mock.calls[0][1].lawnProtocolCompletion.treatedSqft).toBe(2000);
+  expect(fetch.mock.calls.some(([url, opts]) => url.includes('property-areas') && opts.method === 'PUT')).toBe(false);
+});
+
+it('an unreviewed shared area does not seed amounts from the legacy profile', async () => {
+  enableDefaults();
+  propertyAreas = { enabled: true, propertyId: 'property-a', version: 'a'.repeat(64), areas: {
+    lawn: { sqft: 4200, source: 'imagery', reviewedAt: null }, beds: null, mosquito: null,
+  } };
+  mount();
+  await screen.findByText('Satellite estimate · Not reviewed');
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['', '']));
+  expect(screen.getByLabelText('Area treated today (sq ft)').value).toBe('');
 });

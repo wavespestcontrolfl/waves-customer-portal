@@ -239,9 +239,10 @@ describe('CustomerPropertiesPanelV2 — review-round behaviours', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { rerender } = render(<CustomerPropertiesPanelV2 customerId="c1" contactRole="owner" canEdit refreshToken="a" />);
     await screen.findByText(/10 Palm Ave/);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const propertyReads = () => fetchMock.mock.calls.filter(([url]) => url.endsWith('/properties'));
+    expect(propertyReads()).toHaveLength(1);
     rerender(<CustomerPropertiesPanelV2 customerId="c1" contactRole="owner" canEdit refreshToken="b" />);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(propertyReads()).toHaveLength(2));
   });
 
   it('edits a label inline and PATCHes it (Enter commits; unchanged label is a no-op)', async () => {

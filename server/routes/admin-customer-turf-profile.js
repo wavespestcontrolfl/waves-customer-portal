@@ -202,12 +202,20 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
       // weekly plan after a move; the form re-sends every loaded field, so
       // an unchanged value proves nothing (same lesson as the county —
       // codex #3565 gh-r32/r41).
-      const priorRow = await trx('customer_turf_profiles').where({ customer_id: customerId }).first('grass_type');
+      const priorRow = await trx('customer_turf_profiles').where({ customer_id: customerId }).first('grass_type', 'lawn_sqft');
       const rows = await trx('customer_turf_profiles')
         .insert(insertRow)
         .onConflict('customer_id')
         .merge({ ...fields, updated_at: new Date() })
         .returning('*');
+      if (Object.hasOwn(fields, 'lawn_sqft') && fields.lawn_sqft !== priorRow?.lawn_sqft) {
+        // This older editor does not review service areas. A changed turf
+        // amount withdraws the old review instead of keeping its stamp on
+        // a different number. Same customer fence as the shared editor.
+        await trx('customer_properties').where({ customer_id: customerId, is_primary: true })
+          .whereRaw("service_area_measurements->'areas' ? 'lawn'")
+          .update({ service_area_measurements: trx.raw("service_area_measurements #- '{areas,lawn}'"), updated_at: trx.fn.now() });
+      }
       // The fence already holds the prefs advisory lock, so this read is
       // serialized against the address fan-out's stamp write (gh-r44).
       const prefsRow = await trx('property_preferences').where({ customer_id: customerId }).first('irrigation_home_changed_at');

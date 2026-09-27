@@ -2485,6 +2485,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
       lawnAssessmentId = null,
       lawnProtocolCompletion = null,
+      propertyServiceArea = null,
       treeShrubCompletion = null,
       completionPhotos = [],
       manualHeightIn = null,        // turf height-of-cut gauge reading (lawn) — OPTIONAL
@@ -5731,7 +5732,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
               catalogServiceId: (lockedSvcRow || svc).service_id || null,
               serviceType: (lockedSvcRow || svc).service_type || null,
             });
+          const propertyAreaSnapshot = await require('./property-service-areas')
+            .snapshotVisitArea(propertyServiceArea, lockedSvcRow || svc, completionInput.actor, trx);
           const structuredNotes = {
+            ...(propertyAreaSnapshot ? { propertyServiceArea: propertyAreaSnapshot } : {}),
             visitOutcome,
             // Internal-only consultations never request a customer review —
             // freeze the opt-out so the Stripe paid-invoice webhook

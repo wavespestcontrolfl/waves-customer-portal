@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import PropertyServiceAreas from "../tech/PropertyServiceAreas";
 import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomplete";
 import { Input, inputStyles, useUiDensity, Select, Button, Card, CardBody, Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter } from "../ui";
 import { OCCUPANCY_OPTIONS, RELATIONSHIP_OPTIONS } from "../../lib/contact-roles";
@@ -269,9 +270,10 @@ export default function CustomerPropertiesPanelV2({
             {properties.map((p) => (
               <div
                 key={p.id}
-                className="py-2 flex flex-col sm:flex-row sm:items-center gap-2"
+                className="py-2"
                 data-testid="customer-property-row"
               >
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2">
                 <div className="flex-1 min-w-0">
                   <div className="text-ui-body text-zinc-900 break-words">
                     {p.is_primary && (
@@ -361,6 +363,8 @@ export default function CustomerPropertiesPanelV2({
                     {p.primary_change_unavailable && <p className="mt-1 text-14 text-ink-secondary">{p.primary_change_unavailable}</p>}
                   </div>
                 )}
+                </div>
+                {canEdit && <PropertyServiceAreas customerId={customerId} propertyId={p.id} refreshToken={refreshToken} disabled={writeBusy} />}
               </div>
             ))}
             {properties.length === 0 && (
