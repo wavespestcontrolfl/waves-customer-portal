@@ -62,6 +62,7 @@ postgres('billing Email ownership assignments (PostgreSQL)', () => {
     });
     await app.schema.createTable('email_messages', table => {
       table.uuid('id').primary(); table.text('status'); table.text('error_message'); table.text('provider_message_id');
+      table.text('html_snapshot'); table.text('text_snapshot');
       table.timestamp('sent_at'); table.timestamp('updated_at');
     });
     db.mockImplementation(table => app(table));
