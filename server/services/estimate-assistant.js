@@ -1572,7 +1572,9 @@ function purchasedServiceScopeForQuestion(question, rows = []) {
     /\$\s*([\d,]+(?:\.\d{1,2})?)|\b([\d,]+(?:\.\d{1,2})?)\s*(?:-|\s)?dollars?\b|\b(?:priced?\s+at|costs?)\s+\$?\s*([\d,]+(?:\.\d{1,2})?)\b/g,
   )].map((match) => Number((match[1] || match[2] || match[3]).replace(/,/g, '')))
     .filter(Number.isFinite);
-  const statedPrice = amounts.length > 0 || /\$|\bdollars?\b|\bpriced?\s+at\b/.test(question);
+  const statedPrice = amounts.length > 0
+    || /\$|\bdollars?\b|\bpriced?\s+at\b/.test(question)
+    || /\bcosts?\s+(?:(?:about|around|approximately)\s+)?(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b/.test(question);
   if (selectedLabels.length || statedPrice) {
     return {
       named: true,

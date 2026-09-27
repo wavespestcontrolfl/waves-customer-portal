@@ -486,6 +486,8 @@ describe('estimate assistant no-guarantee context', () => {
     }
     expect(answerEstimateQuestionFallback('Does the trenching priced at seven hundred include a guarantee?', context))
       .toMatch(/do not see an estimate-wide callback or money-back guarantee/i);
+    expect(answerEstimateQuestionFallback('Does the trenching that costs seven hundred include a guarantee?', context))
+      .toMatch(/do not see an estimate-wide callback or money-back guarantee/i);
     expect(answerEstimateQuestionFallback('Does the 3-year trenching include a guarantee?', context))
       .toContain('Annual inspection during the warranty period');
   });
