@@ -60,7 +60,7 @@
 //      annual-prepay-renewals.js's termiteRenewalGraceDeadlineFor, the SAME
 //      formula coveredTermsAsOf's grace-coverage branch reads, P2-4) whose
 //      renewal invoice was actually presented to the customer (a charge
-//      was attempted, or the invoice was sent / is not still a draft):
+//      reached Stripe, or the invoice carries a delivery stamp):
 //      runs processGraceLapseForTerm's full state machine (below) —
 //      stamp renewal_lapse_started_at, Codex round-5 P0 settlement
 //      re-check (resolveLapseVoidEligibility — retire instead of void if
@@ -342,8 +342,18 @@ async function stampRenewalExceptionBelled(term, kind, conn = db) {
 //                   dispute) lands there before, or without, any status sync
 //                   (the SAME ledger shape coveredTermsAsOf reads)
 //   processing      an ACH debit still clearing — neither paid nor unpaid
-//   delivered       not a never-sent draft: status past 'draft', or a
-//                   sent_at/sms_sent_at/email_sent_at stamp
+//   delivered       PERSISTED delivery evidence only: a sent_at /
+//                   sms_sent_at / email_sent_at stamp, which the send path
+//                   writes the moment a provider ACCEPTS the message
+//                   (invoice.js alreadyDeliveredForFirstSend reads the same
+//                   stamps). Never the status alone (Codex #4971 pre-push
+//                   P1): 'scheduled' has not been sent yet, 'sending' is a
+//                   claim that may have crashed before any provider call,
+//                   and processScheduledSends parks a stale 'sending' claim
+//                   back as 'scheduled' either way — reading those as
+//                   delivered stopped the delivery retry and let the grace
+//                   lapse void the renewal and pull stations against a
+//                   customer who was never told.
 //   reached Stripe  a stripe_invoice_charge_attempts row WITH durable
 //                   submission evidence (submitted_at, or a PaymentIntent
 //                   id). The attempt row itself is committed BEFORE the
@@ -366,8 +376,7 @@ function classifyRenewalInvoice(invoice) {
     cancelled: INVOICE_CANCELLED_STATUSES.has(status),
     paidEvidence: PAID_INVOICE_STATUSES.includes(status) || Boolean(invoice.paid_at),
     processing: status === 'processing',
-    delivered: (status !== null && status !== 'draft')
-      || Boolean(invoice.sent_at || invoice.sms_sent_at || invoice.email_sent_at),
+    delivered: Boolean(invoice.sent_at || invoice.sms_sent_at || invoice.email_sent_at),
   };
 }
 
@@ -415,8 +424,7 @@ function whereInvoiceSettledNotRevoked(builder, alias) {
 // SQL form of "delivered". JS twin: classifyRenewalInvoice(...).delivered.
 function whereInvoiceDelivered(builder, alias) {
   return builder.where(function delivered() {
-    this.whereNot(`${alias}.status`, 'draft')
-      .orWhereNotNull(`${alias}.sent_at`)
+    this.whereNotNull(`${alias}.sent_at`)
       .orWhereNotNull(`${alias}.sms_sent_at`)
       .orWhereNotNull(`${alias}.email_sent_at`);
   });
@@ -996,13 +1004,19 @@ async function renewalWasPresented(conn, successor) {
 // parent's state is exactly why this ran. Staff get one bell.
 // A PRESENTED renewal is never retired here: the grace-lapse pass owns it
 // (void + retrieval + the parent's decided lapse, or a manual-review hold).
-// Returns 'retired', 'presented', 'deferred' (transient refusal, rotated),
-// 'settled' or 'manual_review' (belled — staff decide).
+// Returns 'retired', 'presented', 'settled' or 'manual_review' (each only
+// once its staff bell is confirmed — see bellOrRotate), or 'deferred'
+// (rotated for a later tick: a transient void refusal, or a bell that did
+// not persist — the caller writes no exclusion marker for it).
 async function retireUnpresentedSuccessor(successor, reason, conn = db) {
   if (await renewalWasPresented(conn, successor)) {
-    await ringRenewalBell(successor, 'ineligible', `${reason} — the renewal was already presented to the customer, so the grace-lapse pass will resolve it`);
-    return 'presented';
+    const told = await bellOrRotate(successor, 'ineligible', `${reason} — the renewal was already presented to the customer, so the grace-lapse pass will resolve it`, conn);
+    return told ? 'presented' : 'deferred';
   }
+  // Staff are told BEFORE the withdrawal (Codex #4971 pre-push P1: no
+  // exclusion without a confirmed bell) — a withdrawn successor leaves every
+  // scan, so a bell lost after the void could never be retried.
+  if (!(await bellOrRotate(successor, 'retired_unpresented', reason, conn))) return 'deferred';
   if (successor.prepay_invoice_id) {
     try {
       await require('./invoice').voidInvoice(successor.prepay_invoice_id, { requireUnsettled: true });
@@ -1013,16 +1027,29 @@ async function retireUnpresentedSuccessor(successor, reason, conn = db) {
         await stampSweepDeferred(successor, conn);
         return 'deferred';
       }
-      await ringRenewalBell(successor, 'retire_refused', `${reason}; its renewal invoice could not be voided (${err.message})`);
-      return refusal;
+      const told = await bellOrRotate(successor, 'retire_refused', `${reason}; its renewal invoice could not be voided (${err.message})`, conn);
+      return told ? refusal : 'deferred';
     }
   }
   const fresh = await conn('annual_prepay_terms').where({ id: successor.id }).first('status');
   if (fresh?.status === PAYMENT_PENDING_STATUS) {
     await require('./annual-prepay-renewals').cancelTermWithRestorations(successor.id, conn);
   }
-  await ringRenewalBell(successor, 'retired_unpresented', reason);
   return 'retired';
+}
+
+// Codex #4971 pre-push P1 — the module's one rule for an exclusion that
+// follows a staff bell: exclude only after a TRUTHY bell (a fresh or
+// deduplicated notification — either way staff have been told; the same
+// rule the exception-bell scans already follow). ringRenewalBell returns
+// null when the notification did not persist; the row is then rotated for
+// a later tick (stampSweepDeferred) instead of being marked handled, so
+// nothing is silently dropped. Returns the bell result, or null.
+async function bellOrRotate(term, kind, reason, conn) {
+  const bell = await ringRenewalBell(term, kind, reason);
+  if (bell) return bell;
+  await stampSweepDeferred(term, conn);
+  return null;
 }
 
 // decideAndCharge's single answer to a refusal from successorActionBlocker
@@ -1035,15 +1062,18 @@ async function handleChargeRefusal(successor, refusal, conn) {
     if (retired !== 'deferred' && retired !== 'retired') await stampRenewalChargeSkip(successor, `ineligible:${refusal.reason}`, conn);
     return { status: 'ineligible', reason: refusal.reason, retired };
   }
-  await ringRenewalBell(successor, 'ineligible', refusal.reason);
   if (refusal.defer) {
     // Not stamped skipped: leg 7a re-runs decideAndCharge on a later tick
     // (rotated to the back of its page) until the parent's dispute
     // resolves either way, or the grace window closes and it retires.
+    await ringRenewalBell(successor, 'ineligible', refusal.reason);
     await stampSweepDeferred(successor, conn);
     return { status: 'deferred', reason: refusal.reason };
   }
-  await stampRenewalChargeSkip(successor, `ineligible:${refusal.reason}`, conn);
+  // The skip stamp excludes the row from leg 7a — only once staff were told.
+  if (await bellOrRotate(successor, 'ineligible', refusal.reason, conn)) {
+    await stampRenewalChargeSkip(successor, `ineligible:${refusal.reason}`, conn);
+  }
   return { status: 'ineligible', reason: refusal.reason };
 }
 
@@ -1087,19 +1117,31 @@ async function stampRenewalChargeSkip(successor, reason, conn = db) {
 // later tick and retries decideAndCharge from scratch, which retries
 // delivery too. The bell's own wording reflects whichever actually
 // happened, never a blanket "it was sent".
+// Codex #4971 pre-push P1: the skip stamp (leg 7a's exclusion) also needs a
+// CONFIRMED staff bell. A retry after a lost bell must not text the customer
+// a second time, so an invoice that already carries delivery evidence
+// (chokepoint A) is not re-sent — only the bell is retried.
 async function deliverInvoiceAndStampSkip(successor, kind, explanation, conn) {
-  const delivered = await deliverRenewalInvoice(successor);
+  const delivered = await renewalInvoiceAlreadyDelivered(successor, conn)
+    ? { ok: true }
+    : await deliverRenewalInvoice(successor);
   const deliveryNote = delivered?.ok
     ? 'The renewal invoice was sent with its pay link.'
     : `The renewal invoice could NOT be delivered (${delivered?.error || 'unknown error'}) — it will be retried automatically.`;
-  await ringRenewalBell(successor, kind, `${explanation} ${deliveryNote}`);
-  if (delivered?.ok) {
+  const told = await ringRenewalBell(successor, kind, `${explanation} ${deliveryNote}`);
+  if (delivered?.ok && told) {
     await stampRenewalChargeSkip(successor, kind, conn);
   } else {
     // Retried by leg 7a — rotated behind rows it has not tried yet (D).
     await stampSweepDeferred(successor, conn);
   }
   return delivered;
+}
+
+async function renewalInvoiceAlreadyDelivered(successor, conn) {
+  if (!successor.prepay_invoice_id) return false;
+  const invoice = await conn('invoices').where({ id: successor.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS);
+  return classifyRenewalInvoice(invoice).delivered === true;
 }
 
 // Codex round-7 P1: a READ-ONLY twin of resolveChargeEligibility's own
@@ -1380,7 +1422,7 @@ const RENEWAL_BELL_COPY = {
   // cancelled; no station retrieval and no decision on the prior term.
   retired_unpresented: (successor, reason) => ({
     title: 'Termite annual renewal — withdrawn before it was charged or sent',
-    body: `The renewal for customer ${successor.customer_id} (invoice for $${Number(successor.prepay_amount).toFixed(2)}) was withdrawn without charging the card or sending the invoice: ${reason}. Its renewal invoice was voided and the renewal term cancelled. No station retrieval was requested and the prior term was left as it is — review the account and renew or cancel it by hand.`,
+    body: `The renewal for customer ${successor.customer_id} (invoice for $${Number(successor.prepay_amount).toFixed(2)}) is being withdrawn without charging the card or sending the invoice: ${reason}. Its renewal invoice is voided and the renewal term cancelled (a separate alert follows if the invoice cannot be voided). No station retrieval was requested and the prior term was left as it is — review the account and renew or cancel it by hand.`,
   }),
   // The same withdrawal, refused at the void: money is already committed
   // against the renewal invoice (settled, or partially covered by account
@@ -1586,9 +1628,9 @@ async function processRenewalCandidates({ conn = db, limit = 200, today = etDate
 // stripe_invoice_charge_attempts row exists for the invoice — Codex
 // round-7 P1: attempted_at alone is claimed BEFORE the Stripe call, so it
 // is not by itself evidence of anything reaching the customer; see leg 7b)
-// OR its invoice is not still a draft that was never sent (some delivery
-// evidence: not 'draft' status, or a sent_at/sms_sent_at/email_sent_at
-// stamp). Without this, a successor that fell through every notification
+// OR its invoice carries persisted delivery evidence (a sent_at /
+// sms_sent_at / email_sent_at stamp — chokepoint A's "delivered"; a
+// 'scheduled' or 'sending' status alone is not). Without this, a successor that fell through every notification
 // path (a crash before decideAndCharge ever ran — pass 7a — or one whose
 // claimed attempt never reached Stripe — pass 7b) would lapse and trigger
 // station retrieval against a customer who was never told anything was
@@ -2008,22 +2050,31 @@ async function raiseGraceLapseRetrievalTask(term, conn, today = etDateString()) 
 // Anything that clears on its own (a charge reconciliation, an ACH still
 // clearing, a retrieval task not yet confirmed, a parent write that failed)
 // stays in the recovery scan, rotated to the back (stampSweepDeferred).
+// Codex #4971 pre-push P1: manual_review is persisted ONLY after its staff
+// bell is confirmed (bellOrRotate) — the recovery scan excludes it, so a
+// hold whose bell was lost would leave the renewal unprocessed with nobody
+// told. A lost bell leaves the row in rotation to ring again next tick.
 async function holdLapse(term, conn, { manualReview, kind, reason }) {
   logger.warn(`[termite-annual-renewal] grace lapse for term ${term.id} deferred (${kind}) — ${reason}`);
-  if (kind) await ringRenewalBell(term, kind, reason);
-  if (manualReview) {
+  if (manualReview && (await bellOrRotate(term, kind, reason, conn))) {
     await conn('annual_prepay_terms').where({ id: term.id }).whereNull('renewal_lapse_completed_at')
       .update({ renewal_lapse_outcome: 'manual_review' });
-  } else {
+    return 'deferred';
+  }
+  if (!manualReview) {
+    if (kind) await ringRenewalBell(term, kind, reason);
     await stampSweepDeferred(term, conn);
   }
   return 'deferred';
 }
 
+// The completion stamp excludes the lapse from every scan — written only
+// after its (informational) bell is confirmed; otherwise it stays in
+// rotation and the retire is re-derived next tick.
 async function retireSettledLapse(term, conn, reason) {
+  if (!(await bellOrRotate(term, 'lapse_retired_settled', reason, conn))) return 'deferred';
   await conn('annual_prepay_terms').where({ id: term.id })
     .update({ renewal_lapse_completed_at: new Date(), renewal_lapse_outcome: 'retired_settled' });
-  await ringRenewalBell(term, 'lapse_retired_settled', reason);
   return 'retired';
 }
 
@@ -2224,9 +2275,9 @@ async function bellAndVerifyDeliveryForNeverReachedStripe(successor, conn) {
   // stopped retrying the instant the NEXT tick deduped the same bell
   // (the dedupe key is unconditional on the kind, not on delivery
   // success). Decoupled: delivery is checked and retried on PERSISTED
-  // evidence alone, independent of bell dedup — the SAME "invoice status
-  // not draft, or a sent_at/sms_sent_at/email_sent_at stamp" proof
-  // processGraceLapses' own presented-evidence check already uses.
+  // evidence alone, independent of bell dedup — chokepoint A's "delivered"
+  // (a sent_at/sms_sent_at/email_sent_at stamp), the SAME proof
+  // processGraceLapses' own presented-evidence check uses.
   const invoice = classifyRenewalInvoice(await conn('invoices').where({ id: successor.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS));
   if (invoice.delivered) return true;
   const delivery = await deliverRenewalInvoice(successor);

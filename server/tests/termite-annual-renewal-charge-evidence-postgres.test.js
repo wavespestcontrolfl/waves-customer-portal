@@ -195,13 +195,20 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
 
     test('"delivered": JS and SQL agree', async () => {
       const { classifyRenewalInvoice, whereInvoiceDelivered } = Charge._private;
+      // Codex #4971 pre-push P1: only a persisted delivery stamp counts —
+      // 'scheduled' was never sent, and 'sending' is a claim that may have
+      // crashed before any provider call (processScheduledSends parks a
+      // stale one back as 'scheduled' either way).
       const shapes = [
         [{ status: 'draft' }, false],
-        [{ status: 'draft', sms_sent_at: new Date() }, true],
-        [{ status: 'draft', email_sent_at: new Date() }, true],
+        [{ status: 'scheduled' }, false],
+        [{ status: 'sending' }, false],
+        [{ status: 'sent' }, false],
+        [{ status: 'overdue' }, false],
+        [{ status: 'scheduled', sms_sent_at: new Date() }, true],
+        [{ status: 'sending', email_sent_at: new Date() }, true],
         [{ status: 'draft', sent_at: new Date() }, true],
-        [{ status: 'sent' }, true],
-        [{ status: 'overdue' }, true],
+        [{ status: 'sent', sent_at: new Date() }, true],
       ];
       for (const [fields, expected] of shapes) {
         const invoice = await insertInvoice(fields);
@@ -306,6 +313,32 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       const stamped = await db('annual_prepay_terms').whereNotNull('renewal_charge_never_reached_stripe_belled_at').pluck('id');
       expect(stamped).toEqual([bare.id]);
       expect(stamped).not.toContain(submitted.id);
+    });
+
+    test('pre-push P1: a scheduled or stale-sending renewal invoice with no delivery stamp is never "presented" — no lapse, no retrieval', async () => {
+      const Renewals2 = require('../services/annual-prepay-renewals');
+      const originalLock = Renewals2.withParentDecisionLock;
+      Renewals2.withParentDecisionLock = (_termId, fn) => fn();
+      try {
+        const make = async (invoiceFields) => {
+          const parent = await insertParent();
+          const invoice = await insertInvoice(invoiceFields);
+          return insertSuccessor(parent, invoice);
+        };
+        const scheduled = await make({ status: 'scheduled' });
+        const sending = await make({ status: 'sending' });
+        const stamped = await make({ status: 'sent', sms_sent_at: new Date() });
+
+        const counts = freshCounts();
+        await Charge._private.processGraceLapses({ conn: db, limit: 50, counts });
+
+        const started = await db('annual_prepay_terms').whereNotNull('renewal_lapse_started_at').pluck('id');
+        expect(started).toEqual([stamped.id]);
+        expect(started).not.toContain(scheduled.id);
+        expect(started).not.toContain(sending.id);
+      } finally {
+        Renewals2.withParentDecisionLock = originalLock;
+      }
     });
 
     test('renewalWasPresented (the retire guard) reads the SAME submission evidence', async () => {

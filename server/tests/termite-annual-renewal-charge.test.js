@@ -677,9 +677,11 @@ describe('termite annual renewal charge', () => {
     claimResult = 1,
     successor = baseSuccessor(),
     parent = baseParent(),
+    successorInvoice = { status: 'sent' },
   } = {}) {
     const claimUpdate = jest.fn().mockResolvedValue(claimResult);
     const skipStampUpdate = jest.fn().mockResolvedValue(1);
+    const deferredUpdate = jest.fn().mockResolvedValue(1);
     const conn = jest.fn((table) => {
       if (table === 'invoices') {
         // ID-aware: the PARENT's invoice (resolveParentEligibility's own
@@ -691,7 +693,7 @@ describe('termite annual renewal charge', () => {
             first: jest.fn().mockResolvedValue(
               parent && filter?.id === parent.prepay_invoice_id
                 ? { status: 'paid', paid_at: new Date('2025-09-01T00:00:00Z') }
-                : { status: 'sent' },
+                : successorInvoice,
             ),
           })),
         };
@@ -712,10 +714,11 @@ describe('termite annual renewal charge', () => {
             if (col === 'renewal_charge_skipped_at') return { update: skipStampUpdate };
             throw new Error(`unexpected whereNull(${col})`);
           }),
+          update: deferredUpdate,
         })),
       };
     });
-    return { conn, claimUpdate, skipStampUpdate };
+    return { conn, claimUpdate, skipStampUpdate, deferredUpdate };
   }
 
   function baseSuccessor(overrides = {}) {
@@ -740,7 +743,9 @@ describe('termite annual renewal charge', () => {
     // matches the real, still-undecided shape every one of this suite's
     // default-parent tests models.
     parent = { id: 'parent-1', status: 'active', renewal_decision: null },
-    eligibilityInvoice = { status: 'sent' },
+    // Delivered (chokepoint A: a persisted delivery stamp) — the pay link
+    // already went out, so a durable refusal leaves it to the grace lapse.
+    eligibilityInvoice = { status: 'sent', sent_at: new Date('2026-09-27T12:00:00Z') },
     claimResult = 1,
     freshInvoice = { status: 'paid', payment_method: 'card' },
     freshInvoiceError = null,
@@ -884,6 +889,32 @@ describe('termite annual renewal charge', () => {
       expect(skipStampUpdate).toHaveBeenCalledWith(expect.objectContaining({
         renewal_charge_skipped_at: expect.any(Date), renewal_charge_skip_reason: 'no_consent',
       }));
+    });
+
+    // Codex #4971 pre-push P1: the no_consent skip stamp excludes the row
+    // from leg 7a, so it needs a CONFIRMED bell too — and the retry after a
+    // lost bell must not text the customer the invoice a second time.
+    test('no consent: the pay link went out but the bell did not persist — NOT skipped; the retry re-rings without re-sending', async () => {
+      mockCommon();
+      const sendViaSMSAndEmail = jest.fn(async () => ({ ok: true }));
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      const notifyAdmin = jest.fn().mockResolvedValueOnce(null).mockResolvedValue({ id: 'n2', deduped: false });
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      jest.doMock('../services/recurring-card-on-file', () => ({ resolvePrepayChargeMethod: jest.fn() }));
+      jest.doMock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn(), quoteInvoiceSavedCardCharge: jest.fn() }));
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const parent = baseParent({ renewal_charge_consent_at: null });
+      const first = makeClaimConn();
+      await _private.decideAndCharge(baseSuccessor(), parent, first.conn);
+      expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1);
+      expect(first.skipStampUpdate).not.toHaveBeenCalled();
+
+      // Next tick: the invoice now carries its delivery stamp.
+      const retry = makeClaimConn({ successorInvoice: { status: 'sent', sms_sent_at: new Date('2026-09-27T12:00:00Z') } });
+      await _private.decideAndCharge(baseSuccessor(), parent, retry.conn);
+      expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1); // never re-sent
+      expect(retry.skipStampUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_charge_skip_reason: 'no_consent' }));
     });
 
     test('consent present but no chargeable saved method -> invoice + bell, no Stripe call', async () => {
@@ -1425,6 +1456,45 @@ describe('termite annual renewal charge', () => {
         expect(outcome).toEqual({ status: 'ineligible', reason: 'parent_status_cancelled', retired: 'retired' });
         expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1', { requireUnsettled: true });
       });
+
+      // Codex #4971 pre-push P1: no exclusion without a confirmed bell. A
+      // withdrawn successor leaves every scan, so the staff bell rings FIRST;
+      // if it does not persist, nothing is voided and the row is rotated to
+      // ring again on a later tick.
+      test('the withdrawal bell does not persist: nothing voided, nothing skipped — rotated for a retry', async () => {
+        mockCommon();
+        const { voidInvoice } = mockRetireDeps();
+        jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
+        const { _private } = require('../services/termite-annual-renewal-charge');
+        const successor = baseSuccessor();
+        const { conn, skipStampUpdate, deferredUpdate } = makeDecideConn({
+          successor, parent: { id: 'parent-1', status: 'cancelled', renewal_decision: 'cancel' }, eligibilityInvoice: { status: 'draft' },
+        });
+
+        const outcome = await _private.decideAndCharge(successor, baseParent(), conn);
+
+        expect(outcome.retired).toBe('deferred');
+        expect(voidInvoice).not.toHaveBeenCalled();
+        expect(skipStampUpdate).not.toHaveBeenCalled();
+        expect(deferredUpdate).toHaveBeenCalledWith({ renewal_sweep_deferred_at: expect.any(Date) });
+      });
+
+      test('an already-resolved refusal (invoice voided elsewhere) is marked skipped only once its bell persisted', async () => {
+        mockCommon();
+        mockRetireDeps();
+        const notifyAdmin = jest.fn(async () => null);
+        jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+        const { _private } = require('../services/termite-annual-renewal-charge');
+        const successor = baseSuccessor();
+        const { conn, skipStampUpdate, deferredUpdate } = makeDecideConn({ successor, eligibilityInvoice: { status: 'void' } });
+
+        const outcome = await _private.decideAndCharge(successor, baseParent(), conn);
+
+        expect(outcome).toEqual({ status: 'ineligible', reason: 'invoice_void' });
+        expect(notifyAdmin).toHaveBeenCalled();
+        expect(skipStampUpdate).not.toHaveBeenCalled();
+        expect(deferredUpdate).toHaveBeenCalledTimes(1);
+      });
     });
 
     test('a parent already decided "renew" (the theoretical race after this successor pays) is accepted, not refused', async () => {
@@ -1949,6 +2019,49 @@ describe('termite annual renewal charge', () => {
       // these can never pin its bounded page. Not a rotation deferral.
       expect(manualReviewUpdate).toHaveBeenCalledWith({ renewal_lapse_outcome: 'manual_review' });
       expect(deferredUpdate).not.toHaveBeenCalled();
+    });
+
+    // Codex #4971 pre-push P1: manual_review is persisted only after its
+    // staff bell is confirmed — the recovery scan excludes it, so a hold
+    // whose bell was lost would leave the renewal unprocessed and nobody
+    // told. A lost bell keeps the row in rotation to ring again.
+    test('manual review whose staff bell does NOT persist is never marked manual_review — rotated to ring again', async () => {
+      mockCommon();
+      mockLapseDeps();
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
+      const { conn, manualReviewUpdate, deferredUpdate, completedUpdate } = makeLapseConn({
+        freshSuccessor: { status: 'payment_pending', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1' },
+        freshInvoice: { status: 'sent', paid_at: null },
+        freshParent: { status: 'renewed', renewal_decision: 'renew' },
+      });
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const outcome = await _private.processGraceLapseForTerm({
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1', prepay_amount: 249,
+      }, conn);
+
+      expect(outcome).toBe('deferred');
+      expect(manualReviewUpdate).not.toHaveBeenCalled();
+      expect(completedUpdate).not.toHaveBeenCalled();
+      expect(deferredUpdate).toHaveBeenCalledWith({ renewal_sweep_deferred_at: expect.any(Date) });
+    });
+
+    test('a settled lapse is completed (excluded from every scan) only once its bell persisted', async () => {
+      mockCommon();
+      const { voidInvoice } = mockLapseDeps();
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
+      const { conn, completedUpdate, deferredUpdate } = makeLapseConn({
+        freshSuccessor: { status: 'payment_pending', prepay_invoice_id: 'succ-invoice-1' },
+        freshInvoice: { status: 'paid', paid_at: new Date() },
+      });
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const outcome = await _private.processGraceLapseForTerm({
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1', prepay_amount: 249,
+      }, conn);
+
+      expect(outcome).toBe('deferred');
+      expect(voidInvoice).not.toHaveBeenCalled();
+      expect(completedUpdate).not.toHaveBeenCalled();
+      expect(deferredUpdate).toHaveBeenCalledTimes(1);
     });
 
     // Codex round-2 P0.

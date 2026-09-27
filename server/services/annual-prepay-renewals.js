@@ -719,6 +719,56 @@ function isInstallationAnchorRow(term, row) {
     && String(row.id) === String(term.installation_anchor_visit_id);
 }
 
+// Codex #4971 pre-push P0 — THE property scope of a termite renewal
+// SUCCESSOR's coverage. An original term's visits are its own by estimate
+// provenance and its installation anchor; a successor carries neither (it
+// never copies source_estimate_id — see termiteRenewalScope), so a
+// customer + dates + service-type selection would let a separately billable
+// visit at ANOTHER property consume this plan's allowance and take a
+// prepaid stamp that suppresses its invoice. Every coverage selection,
+// seeding and stamp check therefore resolves a successor's plan identity
+// through the ONE lineage resolver the grace path and the renewal notice
+// use. Returns null for a non-successor (every caller keeps its exact prior
+// behavior), { resolved: false } when the lineage is malformed (cycle,
+// another customer's hop, conflicting estimates) or names neither an
+// estimate nor a property — callers then select, seed and stamp NOTHING,
+// never customer-wide — else { resolved: true, termIds, estimateId,
+// propertyId }.
+async function successorCoverageScope(term, conn = db) {
+  if (!term?.renewed_from_term_id) return null;
+  const scope = await termiteRenewalScope(term, term.customer_id, conn);
+  if (!scope || (!scope.estimateId && !scope.propertyId)) return { resolved: false };
+  return { resolved: true, ...scope };
+}
+
+// A visit belongs to a resolved successor scope only on POSITIVE linkage —
+// a term in the plan's lineage, the plan's root estimate, or the plan's
+// property — and never when it names a DIFFERENT estimate or property. An
+// unlinked visit (no term, estimate or property) is never adopted.
+function rowInRenewalScope(row, scope) {
+  const rowProperty = row.property_id == null ? null : String(row.property_id);
+  const rowEstimate = row.source_estimate_id == null ? null : String(row.source_estimate_id);
+  if (scope.propertyId && rowProperty && rowProperty !== scope.propertyId) return false;
+  if (scope.estimateId && rowEstimate && rowEstimate !== scope.estimateId) return false;
+  return (row.annual_prepay_term_id != null && scope.termIds.has(String(row.annual_prepay_term_id)))
+    || (!!scope.estimateId && rowEstimate === scope.estimateId)
+    || (!!scope.propertyId && rowProperty === scope.propertyId);
+}
+
+// The in-window candidate visits coverage selection starts from: every
+// customer visit in the window for an ordinary term (unchanged), only the
+// plan's own visits for a renewal successor, none for an unresolved one.
+async function coverageCandidateRows(term, conn, termStart, termEnd) {
+  const scope = await successorCoverageScope(term, conn);
+  if (scope && !scope.resolved) return [];
+  const rows = await conn('scheduled_services')
+    .where({ customer_id: term.customer_id })
+    .whereBetween('scheduled_date', [termStart, termEnd])
+    .orderBy(['scheduled_date', 'window_start', 'id'])
+    .select('*');
+  return scope ? rows.filter((row) => rowInRenewalScope(row, scope)) : rows;
+}
+
 async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = false } = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
@@ -728,11 +778,7 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
     return [];
   }
 
-  const rows = await conn('scheduled_services')
-    .where({ customer_id: term.customer_id })
-    .whereBetween('scheduled_date', [termStart, termEnd])
-    .orderBy(['scheduled_date', 'window_start', 'id'])
-    .select('*');
+  const rows = await coverageCandidateRows(term, conn, termStart, termEnd);
 
   // A callback / re-service is never a SOLD visit: it is free by definition
   // and completion never bills it, but its service_type reads as the covered
@@ -835,6 +881,28 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
   return matching.filter((row) => selectedIds.has(row.id));
 }
 
+// Codex #4971 pre-push P0: a renewal successor whose plan lineage cannot be
+// resolved seeds nothing (coverageRowsForTerm already selects and stamps
+// nothing for it) and tells staff — never a customer-wide fallback.
+async function renewalLineageRefusal(term, conn, termEnd) {
+  const scope = await successorCoverageScope(term, conn);
+  if (!scope || scope.resolved) return null;
+  logger.warn(`[annual-prepay] term ${term.id} is a renewal whose plan lineage cannot be resolved — coverage visits not seeded or stamped`);
+  await fileCoverageExceptionAfterCommit(conn, term, 'renewal_lineage_unresolved',
+    'This renewed termite plan cannot be traced back to its original estimate and property (its renewal chain is broken, loops, or crosses to another customer). No coverage visits were scheduled or marked prepaid — confirm which property this plan covers and set its visits up by hand.');
+  return { createdCount: 0, targetDates: [], effectiveTermEnd: termEnd, reason: 'renewal_lineage_unresolved' };
+}
+
+// The property a seeded coverage visit is booked at: a renewal successor's
+// plan property (its resolved lineage — never guessed); otherwise the
+// customer's SOLE active property, unchanged (GH codex #3699 r8 P2).
+async function coverageSeedPropertyId(term, cols, conn) {
+  if (!cols.property_id) return null;
+  const scope = await successorCoverageScope(term, conn);
+  if (scope) return scope.propertyId || null;
+  return require('./customer-properties').soleActivePropertyId(term.customer_id, conn);
+}
+
 // A promise made on the phone must never change silently: whenever seeding
 // drops a promised arrival window or moves a promised date, park a durable
 // admin notification (dedupe-keyed per term+reason) alongside the log line so
@@ -924,6 +992,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
       createdCount: 0, targetDates: [], effectiveTermEnd: termEnd, reason: 'awaiting_installation',
     };
   }
+  const lineageRefusal = await renewalLineageRefusal(term, conn, termEnd);
+  if (lineageRefusal) return lineageRefusal;
   const cols = await scheduledServiceColumns();
   if (!cols.scheduled_date || !cols.service_type) {
     return { createdCount: 0, targetDates: [], reason: 'scheduled_columns_missing' };
@@ -1337,9 +1407,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // customer's SOLE active property is unambiguous (same rule as the
   // manual admin-schedule / admin-leads / availability bookings);
   // multi-property customers stay office-placed. Resolved once per term.
-  const seedPropertyId = cols.property_id
-    ? await require('./customer-properties').soleActivePropertyId(term.customer_id, conn)
-    : null;
+  const seedPropertyId = await coverageSeedPropertyId(term, cols, conn);
   const buildInsert = (scheduledDate, windowStart) => {
     const insertData = {
       customer_id: term.customer_id,
@@ -2168,6 +2236,22 @@ async function findLastScheduledServiceForTerm(customerId, termStart, termEnd, c
     .first('id', 'scheduled_date', 'service_type', 'status');
 }
 
+// A legacy term with no coverage config links every customer visit in its
+// window. Codex #4971 pre-push P0: never for a renewal successor, whose
+// visits are only ever its own plan's (successorCoverageScope) — it links
+// nothing here rather than going customer-wide.
+async function linkWindowVisitsWithoutCoverageConfig(term, conn) {
+  if (term.renewed_from_term_id) return;
+  await conn('scheduled_services')
+    .where({ customer_id: term.customer_id })
+    .whereBetween('scheduled_date', [dateOnly(term.term_start), dateOnly(term.term_end)])
+    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    .where(function () {
+      this.whereNull('annual_prepay_term_id').orWhere('annual_prepay_term_id', term.id);
+    })
+    .update({ annual_prepay_term_id: term.id, updated_at: new Date() });
+}
+
 async function attachScheduledServices(term, conn = db) {
   const cols = await scheduledServiceColumns();
   if (!cols.annual_prepay_term_id || !term?.id) return;
@@ -2186,15 +2270,7 @@ async function attachScheduledServices(term, conn = db) {
         .update({ annual_prepay_term_id: term.id, updated_at: new Date() });
       return;
     }
-
-    await conn('scheduled_services')
-      .where({ customer_id: term.customer_id })
-      .whereBetween('scheduled_date', [dateOnly(term.term_start), dateOnly(term.term_end)])
-      .whereNotIn('status', ['cancelled', 'rescheduled'])
-      .where(function () {
-        this.whereNull('annual_prepay_term_id').orWhere('annual_prepay_term_id', term.id);
-      })
-      .update({ annual_prepay_term_id: term.id, updated_at: new Date() });
+    await linkWindowVisitsWithoutCoverageConfig(term, conn);
   } catch (err) {
     logger.warn(`[annual-prepay] scheduled service attach skipped: ${err.message}`);
   }
@@ -3467,6 +3543,26 @@ async function successorLineageLabel(row, customerId, conn) {
 // paid-coverage checks, which is what the window was actually guarding.
 // Absence/ambiguity => false; the caller then falls back to the numeric
 // prepaid_amount >= amount comparison for other (cash/Zelle) methods.
+// Defense-in-depth for a STAMPED visit, against the term its stamp names:
+// when the term declares a coverage service, the stamped visit must still be
+// that service (coverage-selection cleanup is best-effort, so a stale stamp
+// left on a dropped/re-typed service must not suppress). The same matcher
+// that APPLIED the stamp gates it here. Legacy no-config terms (no
+// coverage_service_type) never had a service to match, so skip the check.
+// Codex #4971 pre-push P0: a renewal SUCCESSOR's stamp must also sit on a
+// visit inside the successor's own plan scope (the same
+// successorCoverageScope/rowInRenewalScope selection applied it) — an
+// unresolved lineage never suppresses.
+async function stampedTermStillCoversVisit(term, scheduledService, conn) {
+  if (term.coverage_service_type
+    && scheduledService.service_type
+    && !serviceMatchesCoverage(scheduledService, normalizeCoverageServiceType(term.coverage_service_type))) {
+    return false;
+  }
+  const scope = await successorCoverageScope(term, conn);
+  return !scope || (scope.resolved && rowInRenewalScope(scheduledService, scope));
+}
+
 async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnError = false } = {}) {
   if (!scheduledService) return false;
 
@@ -3527,19 +3623,9 @@ async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnErr
       .modify((q) => {
         if (scheduledService.customer_id != null) q.where('t.customer_id', scheduledService.customer_id);
       })
-      .first('t.id', 't.coverage_service_type');
+      .first('t.id', 't.customer_id', 't.coverage_service_type', 't.source_estimate_id', 't.renewed_from_term_id');
     if (!term) return false;
-    // Defense-in-depth: when the term declares a coverage service, the stamped
-    // visit must still be that service (coverage-selection cleanup is best-effort,
-    // so a stale stamp left on a dropped/re-typed service must not suppress). The
-    // same matcher that APPLIED the stamp gates it here. Legacy no-config terms
-    // (no coverage_service_type) never had a service to match, so skip the check.
-    if (term.coverage_service_type
-      && scheduledService.service_type
-      && !serviceMatchesCoverage(scheduledService, normalizeCoverageServiceType(term.coverage_service_type))) {
-      return false;
-    }
-    return true;
+    return stampedTermStillCoversVisit(term, scheduledService, conn);
   } catch (err) {
     // Fail-closed: if the term/invoice can't be validated, DON'T suppress billing.
     // Callers on the CHARGING side have the opposite fail-closed direction —
@@ -9813,6 +9899,8 @@ module.exports = {
     termiteLateEscalationColumnForDaysOut,
     planPropertyForTerm,
     termNoticeAddress,
+    successorCoverageScope,
+    rowInRenewalScope,
     annualPrepayTableExists,
     TERMITE_EXTRA_NOTICE_DAYS,
     TERMITE_COPY_NOTICE_DAYS,

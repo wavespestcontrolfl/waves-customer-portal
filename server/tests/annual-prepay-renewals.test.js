@@ -3989,16 +3989,68 @@ describe('annual prepay renewal helpers', () => {
     expect(termInsert.insert).toHaveBeenCalledWith(expect.objectContaining({ renewal_charge_consent_at: consentAt }));
   });
 
+  // A renewal successor carries no source_estimate_id of its own — its
+  // plan identity is its lineage (Codex #4971 pre-push P0,
+  // successorCoverageScope). Each ensureCoverageRowsForTerm pass resolves it
+  // twice (the seeding refusal check, then the candidate-row selection):
+  // one parent hop + one root-estimate read per resolution.
+  const successorLineageQueues = (resolutions = 2) => ({
+    annual_prepay_terms: Array.from({ length: resolutions }, () => query({
+      first: { id: 'term-prior', customer_id: 'customer-termite', source_estimate_id: 'est-termite', renewed_from_term_id: null },
+    })),
+    estimates: Array.from({ length: resolutions }, () => query({ first: { property_id: 'prop-termite' } })),
+  });
+
   test('renewal successors and unstamped terms are never deferred — they reach the seeding path', async () => {
     const run = (t) => _private.ensureCoverageRowsForTerm(t, undefined, { today: '2026-01-01' });
-    for (const term of [termiteTerm({ renewed_from_term_id: 'term-prior' }), termiteTerm({ annual_plan_version: null })]) {
+    for (const term of [termiteTerm({ renewed_from_term_id: 'term-prior', source_estimate_id: null }), termiteTerm({ annual_plan_version: null })]) {
       _private.resetCachesForTests();
       const insertQuery = query({ returning: [{ id: 'svc-seeded', scheduled_date: term.term_start }] });
       setDbQueues({
         scheduled_services: [query({ columnInfo: TERMITE_COVERAGE_COLUMNS }), query({ rows: [] }), query({ first: undefined }), insertQuery],
+        ...(term.renewed_from_term_id ? successorLineageQueues() : {}),
       });
       await expect(run(term)).resolves.toMatchObject({ createdCount: 1 });
     }
+  });
+
+  // Codex #4971 pre-push P0 (seeding): a renewal successor's seeded visit is
+  // booked at its PLAN's property (the resolved lineage), never at a guessed
+  // "sole active property" of a multi-property customer.
+  test('a renewal successor seeds its coverage visit at the plan\'s own property', async () => {
+    _private.resetCachesForTests();
+    const insertQuery = query({ returning: [{ id: 'svc-seeded', scheduled_date: '2026-10-01' }] });
+    setDbQueues({
+      scheduled_services: [
+        query({ columnInfo: { ...TERMITE_COVERAGE_COLUMNS, property_id: {} } }), query({ rows: [] }), query({ first: undefined }), insertQuery,
+      ],
+      ...successorLineageQueues(3),
+    });
+    await expect(_private.ensureCoverageRowsForTerm(
+      termiteTerm({ renewed_from_term_id: 'term-prior', source_estimate_id: null, term_start: '2026-10-01', term_end: '2027-10-01' }),
+      undefined, { today: '2026-10-01' },
+    )).resolves.toMatchObject({ createdCount: 1 });
+    expect(insertQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ property_id: 'prop-termite', annual_prepay_term_id: 'term-termite' }));
+  });
+
+  // Codex #4971 pre-push P0: a successor whose lineage cannot be resolved
+  // (here: its parent row is gone) seeds nothing, selects nothing, and
+  // files a staff exception — never a customer-wide fallback.
+  test('a renewal successor with an unresolvable lineage seeds nothing and tells staff', async () => {
+    _private.resetCachesForTests();
+    const insertQuery = query({ returning: [{ id: 'svc-never' }] });
+    setDbQueues({
+      // No scheduled_services read at all: nothing selected, nothing seeded.
+      scheduled_services: [insertQuery],
+      annual_prepay_terms: [query({ first: undefined })], // the parent hop finds nothing
+      notifications: [query({ first: undefined })],
+    });
+    const result = await _private.ensureCoverageRowsForTerm(
+      termiteTerm({ renewed_from_term_id: 'term-gone', source_estimate_id: null }), undefined, { today: '2026-10-01' },
+    );
+    expect(result).toMatchObject({ createdCount: 0, reason: 'renewal_lineage_unresolved' });
+    expect(insertQuery.insert).not.toHaveBeenCalled();
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('plan lineage cannot be resolved'));
   });
 
   test('once anchored, the installation visit itself is the coverage year\'s visit — even under an installation label — and the anchored window never slides', async () => {
@@ -4064,6 +4116,7 @@ describe('annual prepay renewal helpers', () => {
     // The slide's own queries, queued so a regression would actually slide
     // (term_end column present, no later term to cap it) — and be caught.
     const termSlideUpdate = query({});
+    const lineage = successorLineageQueues();
     setDbQueues({
       scheduled_services: [
         query({ columnInfo: TERMITE_COVERAGE_COLUMNS }),
@@ -4071,13 +4124,18 @@ describe('annual prepay renewal helpers', () => {
         query({ first: undefined }),
         insertQuery,
       ],
-      annual_prepay_terms: [query({ columnInfo: { term_end: {}, first_visit_date: {} } }), query({ first: undefined }), termSlideUpdate],
+      annual_prepay_terms: [
+        ...lineage.annual_prepay_terms,
+        query({ columnInfo: { term_end: {}, first_visit_date: {} } }), query({ first: undefined }), termSlideUpdate,
+      ],
+      estimates: lineage.estimates,
     });
     const result = await _private.ensureCoverageRowsForTerm(termiteTerm({
       id: 'term-renewal',
+      source_estimate_id: null,
       term_start: '2026-09-30',
       term_end: '2027-09-30',
-      renewed_from_term_id: 'term-parent',
+      renewed_from_term_id: 'term-prior',
       installation_anchored_at: null,
     }), undefined, { today: '2026-10-20' });
 
