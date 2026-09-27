@@ -5226,8 +5226,25 @@ async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, comple
   // prepaid pot against it and settles at $0 due is exactly the
   // preview-vs-actual divergence this lookup exists to prevent.
   const hasOwnPrice = svc?.estimated_price != null && Number(svc.estimated_price) > 0;
-  const feeFallbackPrediction = !hasOwnPrice
-    && ['invoice', 'auto_charge', 'prepaid'].includes(billingLane?.prediction?.kind)
+  // Codex round-6 pre-push P1: a lane-changed customer's naive prediction
+  // can ALSO land on 'covered_membership' — monthly dues cover an unpriced
+  // per_application-shaped visit, with `grossAmount` set to the monthlyRate
+  // (billing-lane.js predictCompletionBilling). That kind was never in this
+  // OR-list, so the sheet kept showing "covered by dues, $X" untouched even
+  // though resolveScheduledServiceCharge (this file, the shape-based P1 fix
+  // above) now asks the SAME sibling question unconditionally and can
+  // return a $0 base or refuse with needs_review — a preview that no
+  // longer matches what Charge Now actually mints. Reuse the ONE shared
+  // shape predicate (isSiblingCoverageEligibleVisit, billing-lane.js) that
+  // resolver already gates on, so enrichment and the mint can never
+  // disagree about whether a sibling COULD be covering this trip, for
+  // every kind that shape can produce — not just the three hand-picked
+  // ones this list used to name. Attached-invoice precedence is preserved
+  // (the RESERVED row's own combined-total prediction is never overridden).
+  const feeFallbackPrediction = isSiblingCoverageEligibleVisit({
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
+  })
+    && ['invoice', 'auto_charge', 'prepaid', 'covered_membership'].includes(billingLane?.prediction?.kind)
     && billingLane?.prediction?.source !== 'attached_invoice';
   if (((moneyGapReason && UNBILLED_MONEY_GAP_REASONS.has(moneyGapReason)) || feeFallbackPrediction) && svc?.source_estimate_id) {
     try {
@@ -15805,7 +15822,18 @@ function siblingCoverageRecheckInTrx(svc, priorStatus) {
   return async (trx) => {
     let recheck;
     try {
-      recheck = await siblingInvoiceCoverageVerdict(svc, trx, { lockRows: true });
+      // noWait (codex round-6 P1): this recheck runs AFTER
+      // mintScheduledServiceInvoiceWithDeposit has already taken the
+      // estimate.deposit.ledger advisory lock — see that helper's own
+      // header for why the lock moved earlier. Blocking here on an invoice
+      // row a payment/refund transaction already holds (which locks that
+      // row FIRST and only then requests this SAME ledger lock — see
+      // acquireEstimateDepositLedgerLock's header) would cycle into a
+      // deadlock. NOWAIT fails fast instead: a busy row reads as
+      // `{ status: 'error' }` below, same as any other lookup failure,
+      // and refuses this mint with a retryable 409 rather than risking
+      // either a hung transaction or a double mint.
+      recheck = await siblingInvoiceCoverageVerdict(svc, trx, { lockRows: true, noWait: true });
     } catch {
       recheck = { status: 'error' };
     }

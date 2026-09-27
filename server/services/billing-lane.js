@@ -868,16 +868,20 @@ function isSiblingCoverageEligibleVisit({ sourceEstimateId, hasOwnPrice, isCallb
 // non-transactional caller leave it false (unchanged, a plain snapshot
 // read; passing it there would take a lock this function never releases
 // outside a transaction).
-async function siblingInvoiceCoverageVerdict(svc, dbConn, { lockRows = false } = {}) {
+async function siblingInvoiceCoverageVerdict(svc, dbConn, { lockRows = false, noWait = false } = {}) {
   let result;
   try {
     const { findFirstApplicationInvoiceForEstimateService } = require('./estimate-first-application-invoice');
     // Every existing (non-transactional) caller keeps the exact byte-identical
     // 2-arg call — only a `lockRows: true` recheck passes the 3rd argument at
     // all, so a call-shape assertion in an existing test never has to know
-    // about this option.
+    // about this option. `noWait` (codex round-6 P1) rides along ONLY when
+    // the caller itself already took the estimate ledger lock first (the
+    // schedule mint's own recheck) — see findFirstApplicationInvoiceForEstimateService's
+    // header for why that ordering needs it. A NOWAIT lock-busy failure
+    // lands in the catch below exactly like any other lookup failure.
     result = lockRows
-      ? await findFirstApplicationInvoiceForEstimateService(svc, dbConn, { lockRows: true })
+      ? await findFirstApplicationInvoiceForEstimateService(svc, dbConn, { lockRows: true, noWait })
       : await findFirstApplicationInvoiceForEstimateService(svc, dbConn);
   } catch {
     return { status: 'error' };

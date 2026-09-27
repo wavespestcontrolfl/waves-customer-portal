@@ -286,6 +286,29 @@ describe('siblingInvoiceCoverageVerdict', () => {
     expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, {})).toEqual({ status: 'error' });
   });
 
+  // Codex round-6 P1 (pre-push): `noWait` rides through to the shared
+  // lookup ONLY when the caller passes it (the schedule mint's own recheck,
+  // which already holds the estimate.deposit.ledger lock and must fail
+  // fast rather than block into a deadlock against
+  // withInvoiceDepositSettlement's invoice-row-then-ledger-lock order). A
+  // NOWAIT lock-busy failure is just another lookup failure here.
+  test('passes lockRows/noWait through to the shared lookup exactly as given', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+    const trx = {};
+    await siblingInvoiceCoverageVerdict(LAWN_SVC, trx, { lockRows: true, noWait: true });
+    expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalledWith(
+      LAWN_SVC, trx, { lockRows: true, noWait: true },
+    );
+  });
+
+  test('a NOWAIT lock-busy failure reads as a plain lookup error, not a crash', async () => {
+    const busy = new Error('could not obtain lock on row');
+    busy.code = '55P03';
+    findFirstApplicationInvoiceForEstimateService.mockRejectedValue(busy);
+    expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, {}, { lockRows: true, noWait: true }))
+      .toEqual({ status: 'error' });
+  });
+
   // Codex pre-push P0 (round 2): the lookup's null-invoice return is NOT
   // always "no relevant match" — it also carries canceledSetupFee when a
   // canceled acceptance invoice included the one-time setup fee with no

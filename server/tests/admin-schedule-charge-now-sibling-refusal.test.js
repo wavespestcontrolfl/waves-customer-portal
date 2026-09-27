@@ -250,7 +250,7 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
       const fakeTrx = {};
       await expect(recheckInTrx(fakeTrx)).resolves.toBeUndefined();
       expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'svc-lawn' }), fakeTrx, { lockRows: true },
+        expect.objectContaining({ id: 'svc-lawn' }), fakeTrx, { lockRows: true, noWait: true },
       );
     });
 
@@ -361,6 +361,6 @@ describe('mintOrReuseScheduledServiceInvoice — sibling-lookup refusal', () => 
       liveBeside: null,
     });
     await expect(recheckInTrx({})).rejects.toMatchObject({ code: 'SIBLING_COVERAGE_CHANGED' });
-    expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalledWith(SVC, {}, { lockRows: true });
+    expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalledWith(SVC, {}, { lockRows: true, noWait: true });
   });
 });
