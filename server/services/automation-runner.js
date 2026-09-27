@@ -168,7 +168,8 @@ async function sendPaymentFailedThroughBillingAuthority({ enrollment, template, 
     context = { error: blocked('BILLING_EMAIL_RECHECK_FAILED', 'Billing email authority could not be verified', { retryable: true }) };
   }
   if (context.error) return settlePaymentFailedRefusal({ enrollment, sendId, block: context.error });
-  if (context.recipientEmail !== String(recipient || '').trim().toLowerCase()) {
+  const normalizedEmail = (value) => String(value || '').trim().toLowerCase();
+  if (normalizedEmail(context.recipientEmail) !== normalizedEmail(recipient)) {
     return repointPaymentFailedEnrollment({ enrollment, sendId, current: context.recipient, email: context.recipientEmail });
   }
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
