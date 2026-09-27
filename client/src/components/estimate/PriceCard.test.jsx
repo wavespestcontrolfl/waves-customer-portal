@@ -1,12 +1,51 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import PriceCard from './PriceCard';
 import { setGlassDefault } from '../../lib/estimate-glass-copy';
 
 afterEach(() => cleanup());
+
+describe('PriceCard — estimate-wide no-guarantee policy', () => {
+  afterEach(() => setGlassDefault(false));
+
+  it('filters guarantee and callback inclusions from expanded and print rows while preserving service scope', () => {
+    setGlassDefault(true);
+    const frequency = {
+      key: 'quarterly',
+      monthly: 50,
+      perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', displayPrice: 100, visitsPerYear: 4 },
+        { service: 'mosquito', label: 'Mosquito Control', displayPrice: 50, visitsPerYear: 4 },
+      ],
+    };
+    const { rerender } = render(<PriceCard frequency={frequency} />);
+
+    fireEvent(window, new Event('beforeprint'));
+    expect(screen.getByText(/unlimited free callbacks/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/money-back guarantee/i)).toHaveLength(2);
+
+    rerender(<PriceCard frequency={frequency} noGuarantee />);
+    expect(screen.queryByText(/guarantee|callbacks/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Premium non-repellent/i)).toBeInTheDocument();
+    expect(screen.getByText(/Weather-aware timing/i)).toBeInTheDocument();
+  });
+
+  it('filters the baseline free re-service assurance while retaining ordinary pest scope', () => {
+    render(<PriceCard noGuarantee frequency={{
+      key: 'quarterly', monthly: 25,
+      perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', displayPrice: 100, visitsPerYear: 4 },
+      ],
+    }} />);
+
+    expect(screen.queryByText(/Free re-service between recurring visits/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Exterior perimeter protection/i)).toBeInTheDocument();
+    expect(screen.getByText(/Interior service support/i)).toBeInTheDocument();
+  });
+});
 
 describe('PriceCard — narrow low-confidence commercial range', () => {
   it('renders a ±20% "confirmed on site" range for a single all-LOW line', () => {

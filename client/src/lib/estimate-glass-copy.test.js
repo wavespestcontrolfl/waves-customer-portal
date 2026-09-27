@@ -4,6 +4,7 @@ import {
   glassPackWithoutGuarantee,
   applyCommercialExteriorScope,
   commercialGlassActive,
+  copyHasGuaranteeClaim,
   glassCopyActive,
   glassCtaMicroFor,
   glassCtaMicroForKeys,
@@ -178,6 +179,22 @@ describe('termite work never carries a guarantee (owner ruling; server estimateM
 });
 
 describe('glassPackWithoutGuarantee (server noGuaranteeClaims on a recurring estimate)', () => {
+  it.each([
+    'Rain re-spray guarantee',
+    'Retreat warranty applies',
+    'Warranties apply to covered work',
+    'Unlimited free callbacks',
+    'Re-service between visits at no charge',
+    'Between-visit service calls at no charge',
+    'Free re-service between recurring visits',
+  ])('recognizes guarantee-bearing customer copy: %s', (claim) => {
+    expect(copyHasGuaranteeClaim(claim)).toBe(true);
+  });
+
+  it('leaves neutral scope detail alone', () => {
+    expect(copyHasGuaranteeClaim('Targets shaded foliage and standing water')).toBe(false);
+  });
+
   it('replaces a hero subline that promises a guarantee and keeps the rest of the pack', () => {
     setGlassDefault(true);
     const pest = glassEstimateCopyFor('pest_control');

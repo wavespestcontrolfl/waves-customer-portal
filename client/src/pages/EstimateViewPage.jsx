@@ -43,7 +43,7 @@ import Icon from '../components/Icon';
 import PublicLoadError from '../components/PublicLoadError';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { flushSync } from 'react-dom';
 import { useParams } from 'react-router-dom';
 import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
@@ -75,6 +75,7 @@ import EstimateProposalDocument from './EstimateProposalDocument';
 import { estimateCopyFor } from '../lib/estimate-copy';
 import {
   commercialGlassActive,
+  copyHasGuaranteeClaim,
   glassCopyActive,
   glassCtaMicroForKeys,
   glassDayLinesFor,
@@ -1964,8 +1965,6 @@ export function OneTimePriceCard({ oneTimePrice, breakdown, noGuarantee = false 
 // shape the recurring PriceCard rows carry, so a one-time service reads
 // like a plan card (owner 2026-09-03). Shared by the standalone
 // OneTimeBreakdownCard and the rows embedded in a service section.
-const ONE_TIME_GUARANTEE_CLAIM = /guarantee|warrant(?:y|ies)|callbacks?|re[- ]?treat(?:ment|s|ed|ing)?|risk[- ]free/i;
-
 function oneTimeOutcomeWithoutGuarantee(text) {
   if (!text) return null;
   // The shipped German-roach outcome appends its guarantee to otherwise
@@ -1977,7 +1976,7 @@ function oneTimeOutcomeWithoutGuarantee(text) {
   const sentences = withoutSuffix.match(/[^.!?]+[.!?]?/g) || [];
   return sentences
     .map((sentence) => sentence.trim())
-    .filter((sentence) => sentence && !ONE_TIME_GUARANTEE_CLAIM.test(sentence))
+    .filter((sentence) => sentence && !copyHasGuaranteeClaim(sentence))
     .join(' ')
     .trim() || null;
 }
@@ -1988,10 +1987,10 @@ function oneTimeCopyWithoutGuarantee(copy) {
     ...copy,
     outcome: oneTimeOutcomeWithoutGuarantee(copy.outcome),
     includes: Array.isArray(copy.includes)
-      ? copy.includes.filter((line) => !ONE_TIME_GUARANTEE_CLAIM.test(String(line || '')))
+      ? copy.includes.filter((line) => !copyHasGuaranteeClaim(line))
       : [],
     assurance: null,
-    terms: ONE_TIME_GUARANTEE_CLAIM.test(String(copy.terms || '')) ? null : copy.terms,
+    terms: copyHasGuaranteeClaim(copy.terms) ? null : copy.terms,
   };
 }
 
@@ -2080,6 +2079,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
           const isIncluded = !isQuoteRequired && item.kind === 'included';
           const showPrepayWaiverNote = !isQuoteRequired && !isDiscount && !isIncluded && isPrepayWaivedRow(item);
           const quoteNote = isQuoteRequired ? quoteRequiredReasonNote(item, item.detail || '') : '';
+          const visibleDetail = noGuarantee && copyHasGuaranteeClaim(item.detail) ? null : item.detail;
           return (
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{
               display: 'grid', gridTemplateColumns: '1fr auto', gap: 12,
@@ -2090,9 +2090,9 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                 <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>
                   {customerOneTimeLabel(item)}
                 </div>
-                {item.detail ? (
+                {visibleDetail ? (
                   <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>
-                    {item.detail}
+                    {visibleDetail}
                   </div>
                 ) : null}
                 <OneTimeRowCopy copy={item.copy} noGuarantee={noGuarantee} />
@@ -4623,12 +4623,13 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee =
       <div style={{ display: 'grid', gap: 10 }}>
         {items.map((item, i) => {
           const amount = fmtMoney(Math.abs(Number(item.amount) || 0));
+          const visibleDetail = noGuarantee && copyHasGuaranteeClaim(item.detail) ? null : item.detail;
           if (lead && isTermiteInstall(item)) {
             return (
               <div key={`${item.service || item.label || 'item'}-${i}`}>
                 <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.navy }}>{customerOneTimeLabel(item)}</div>
-                {item.detail ? (
-                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
+                {visibleDetail ? (
+                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{visibleDetail}</div>
                 ) : null}
                 <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.navy, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
                   {amount} gets every station in the ground.
@@ -4641,8 +4642,8 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee =
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, alignItems: 'start' }}>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>{customerOneTimeLabel(item)}</div>
-                {item.detail ? (
-                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
+                {visibleDetail ? (
+                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{visibleDetail}</div>
                 ) : null}
                 <OneTimeRowCopy copy={item.copy} noGuarantee={noGuarantee} />
               </div>
@@ -5101,6 +5102,7 @@ export function ServiceSection({
             // (anchor−cadence delta misattributed to the tier; owner
             // directive to remove).
             showSavings={servicesLength === 1 || section?.waveGuardTierEligible !== false}
+            noGuarantee={noGuarantee}
             // Guarantee line off under glass (owner 2026-07-23) — the approve
             // CTA's glass micro line states the same money-back guarantee
             // immediately below, so the in-card line read twice. Non-glass
@@ -5446,11 +5448,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // slugs) need the identical torn-paint guarantee.
   useCommercialGlassActive();
   const [data, setData] = useState(null);
-  const estimateNoGuaranteeClaims = data?.estimate?.noGuaranteeClaims === true;
-  useEffect(() => {
+  const estimateNoGuaranteeClaims = data === null ? null : data?.estimate?.noGuaranteeClaims === true;
+  useLayoutEffect(() => {
     setFooterNoGuarantee?.(estimateNoGuaranteeClaims);
+    return () => setFooterNoGuarantee?.(false);
   }, [estimateNoGuaranteeClaims, setFooterNoGuarantee]);
-  useEffect(() => () => setFooterNoGuarantee?.(false), [setFooterNoGuarantee]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [loadError, setLoadError] = useState(false);

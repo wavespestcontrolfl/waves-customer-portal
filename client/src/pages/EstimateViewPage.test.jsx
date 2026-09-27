@@ -12,11 +12,13 @@ import oneTimeCopyModule from '../../../server/services/estimate-one-time-copy.j
 
 const { oneTimeOnlyIntelligenceCopy, resolveOneTimeServiceCopy } = oneTimeCopyModule;
 
-vi.mock('react-router-dom', () => ({ useParams: () => ({ token: 'mixed-termite-token' }) }));
+const routerState = vi.hoisted(() => ({ token: 'mixed-termite-token' }));
+vi.mock('react-router-dom', () => ({ useParams: () => ({ token: routerState.token }) }));
 vi.mock('../lib/stripeLoader', () => ({ loadStripeSdk: vi.fn(async () => null) }));
 
 afterEach(() => {
   cleanup();
+  routerState.token = 'mixed-termite-token';
   setGlassDefault(false);
   vi.unstubAllGlobals();
 });
@@ -488,7 +490,10 @@ describe('mixed-estimate approval microcopy', () => {
           askChips: [],
           oneTimeBreakdown: {
             total: 1200,
-            items: [{ service: 'termite_trenching', label: 'Termite Trenching', amount: 1200, kind: 'charge' }],
+            items: [
+              { service: 'termite_trenching', label: 'Termite Trenching', detail: 'Linear-foot trench treatment', amount: 1200, kind: 'charge' },
+              { service: 'mosquito', label: 'Mosquito follow-up', detail: 'Rain re-spray guarantee', amount: 0, kind: 'included' },
+            ],
           },
           defaultServiceMode: 'recurring',
           renderFlags: {},
@@ -514,6 +519,9 @@ describe('mixed-estimate approval microcopy', () => {
     expect(screen.getByText('Licensed & insured · No pressure — approve when you’re ready')).toBeInTheDocument();
     expect(screen.queryByText(/Satisfaction guaranteed/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/money-back guarantee/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Mosquito follow-up')).toBeInTheDocument();
+    expect(screen.queryByText(/Rain re-spray guarantee/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Linear-foot trench treatment')).toBeInTheDocument();
     const estimateShell = within(screen.getByTestId('estimate-shell'));
     await waitFor(() => {
       expect(estimateShell.queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
@@ -572,6 +580,54 @@ describe('mixed-estimate approval microcopy', () => {
     await screen.findByText('1 Recurring Service Way');
     expect(await screen.findByText(/Backed by the Waves Guarantee/i)).toBeInTheDocument();
     expect(screen.queryByText(/Written estimate scope and terms apply/i)).not.toBeInTheDocument();
+  });
+
+  it('keeps the footer neutral during initial and next-token loads, then restores ordinary shell copy on unmount', async () => {
+    const deferred = [];
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/data')
+      ? new Promise((resolve) => deferred.push(resolve))
+      : Promise.resolve({ ok: true, status: 200, json: async () => ({}) })));
+    const payload = (noGuaranteeClaims) => ({
+      glassDefault: false,
+      estimate: {
+        customerFirstName: 'Casey', address: '1 Policy Way', serviceCategory: 'pest_control',
+        acceptance: { mode: 'standard_slot_pick' }, defaultServiceMode: 'recurring',
+        isOneTimeOnly: false, showOneTimeOption: false, billByInvoice: false,
+        membership: null, intelligence: null, noGuaranteeClaims,
+      },
+      pricing: { services: [], askChips: [], defaultServiceMode: 'recurring', renderFlags: {} },
+      cta: { canAccept: true, terminalState: null, quoteRequired: false, reviewBeforeBooking: false },
+    });
+    const resolveLoad = (index, noGuaranteeClaims) => deferred[index]({
+      ok: true, status: 200, json: async () => payload(noGuaranteeClaims),
+    });
+    const { rerender } = render(<WavesShell><EstimateViewPage /></WavesShell>);
+    const footer = () => within(screen.getByRole('contentinfo'));
+
+    expect(footer().queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
+    expect(footer().queryByText(/Written estimate scope and terms apply/i)).not.toBeInTheDocument();
+    expect(footer().getByText(/Licensed & insured/i)).toBeInTheDocument();
+
+    resolveLoad(0, true);
+    expect(await footer().findByText(/Written estimate scope and terms apply/i)).toBeInTheDocument();
+
+    routerState.token = 'ordinary-estimate-token';
+    rerender(<WavesShell><EstimateViewPage /></WavesShell>);
+    await waitFor(() => expect(deferred).toHaveLength(2));
+    expect(footer().queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
+    expect(footer().queryByText(/Written estimate scope and terms apply/i)).not.toBeInTheDocument();
+
+    resolveLoad(1, false);
+    expect(await footer().findByText(/Backed by the Waves Guarantee/i)).toBeInTheDocument();
+
+    routerState.token = 'second-no-guarantee-token';
+    rerender(<WavesShell><EstimateViewPage /></WavesShell>);
+    await waitFor(() => expect(deferred).toHaveLength(3));
+    resolveLoad(2, true);
+    expect(await footer().findByText(/Written estimate scope and terms apply/i)).toBeInTheDocument();
+
+    rerender(<WavesShell><div>Ordinary customer route</div></WavesShell>);
+    expect(await footer().findByText(/Backed by the Waves Guarantee/i)).toBeInTheDocument();
   });
 
   it('strips stale server-resolved German-roach hero and row guarantees while preserving priced scope', async () => {

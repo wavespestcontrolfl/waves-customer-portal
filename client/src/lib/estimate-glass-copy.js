@@ -440,8 +440,14 @@ const GLASS_ONE_TIME_HERO_REVIEW_NO_GUARANTEE = {
 // our money-back guarantee", or a one-time service's callback/re-treatment
 // promise) falls back to the bundle pack's subline, which claims only that
 // the plan was priced from the property.
+const GUARANTEE_CLAIM_RE = /guarantee|warrant(?:y|ies)|callbacks?|re[- ]?(?:treat(?:ment|s|ed|ing)?|spray(?:s|ed|ing)?)|money[- ]?back|risk[- ]?free|satisfaction|(?:free[^.!?]*(?:re[- ]?service|service calls?)|(?:re[- ]?service|service calls?)[^.!?]*(?:free|no charge))/i;
+
+export function copyHasGuaranteeClaim(text) {
+  return GUARANTEE_CLAIM_RE.test(String(text || ''));
+}
+
 export function glassPackWithoutGuarantee(pack) {
-  if (!pack || !/guarantee|callbacks?|re[- ]?treat(?:ment|s|ed|ing)?|risk[- ]free/i.test(pack.heroSub || '')) return pack;
+  if (!pack || !copyHasGuaranteeClaim(pack.heroSub)) return pack;
   return { ...pack, heroSub: GLASS_PACKS.bundle.heroSub };
 }
 
