@@ -11,8 +11,9 @@
  *
  * Step 1 (always): generated entries whose current flag came from the AI audit
  * go back to status='active'. Their audit rows are kept.
- * Step 2 (--reaudit N): re-run the fixed audit on up to N entries still
- * flagged (hand-written entries); a pass restores them. Costs one DEEP model
+ * Step 2 (--reaudit N): re-run the fixed audit on up to N entries the AI
+ * audit still hides (hand-written entries); an explicit pass restores them.
+ * Entries a person flagged are never touched. Costs one DEEP model
  * call per entry.
  *
  * Usage:
@@ -35,6 +36,7 @@ async function generatedAiFlagged() {
     .whereRaw(`(
       SELECT a.audit_type FROM knowledge_base_audits a
       WHERE a.kb_entry_id = k.id AND a.audit_type IN ('ai-review', 'manual-flag')
+        AND a.result = 'flagged'
       ORDER BY a.created_at DESC LIMIT 1
     ) = 'ai-review'`)
     .orderBy('k.slug');
@@ -63,7 +65,7 @@ async function main() {
     } else {
       const KBService = require('../services/knowledge-base');
       const result = await KBService.runAIAudit({ flaggedOnly: true, maxEntries: REAUDIT });
-      console.log(`re-audited ${result.audited}: ${result.audited - result.flagged} passed (restored), ${result.flagged} still flagged`);
+      console.log(`re-audited ${result.audited}: ${result.passed} passed (restored), ${result.flagged} still flagged, ${result.audited - result.passed - result.flagged} no verdict (unchanged)`);
       for (const r of result.results) console.log(`  ${r.status}\t${r.title}\t${String(r.summary || '').slice(0, 140)}`);
     }
   }

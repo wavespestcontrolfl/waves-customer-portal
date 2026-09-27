@@ -109,20 +109,26 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
 
 const AUDIT_CONFIDENCE = new Set(['high', 'medium', 'low']);
 
-// Decide what one AI verdict does to its entry. A flagged verdict never
-// stamps last_verified_at (a flag is not a verification) and never hides a
-// generated row; a pass restores an entry the audit had hidden.
+// Decide what one AI verdict does to its entry. Only an explicit pass
+// verifies; an unparsed or unknown verdict changes nothing. A flagged verdict
+// never stamps last_verified_at (a flag is not a verification) and never hides
+// a generated row. A pass restores an entry only when the AI audit hid it — a
+// person's flag stays until a person clears it.
 function planAuditOutcome(entry, parsed, now = new Date()) {
-  const flagged = parsed.status === 'flag' || parsed.status === 'update-needed';
+  const verdict = parsed && parsed.status;
   const source = auditSourceFor(entry);
+  if (verdict !== 'pass' && verdict !== 'flag' && verdict !== 'update-needed') {
+    return { auditResult: 'error', updates: {}, findings: parsed || {}, source };
+  }
+  const flagged = verdict !== 'pass';
   const updates = {};
   if (flagged) {
-    if (!source) updates.status = 'flagged';
+    if (!source && entry.status !== 'flagged') updates.status = 'flagged';
   } else {
     updates.last_verified_at = now;
     updates.verified_by = 'ai-cron';
     if (AUDIT_CONFIDENCE.has(parsed.confidence)) updates.confidence = parsed.confidence;
-    if (entry.status === 'flagged') updates.status = 'active';
+    if (entry.status === 'flagged' && entry.flag_owner === 'ai-review') updates.status = 'active';
   }
   const findings = source && flagged
     ? { ...parsed, fix_in: source.fixIn, fix_link: source.link }
@@ -130,12 +136,19 @@ function planAuditOutcome(entry, parsed, now = new Date()) {
   return { auditResult: flagged ? 'flagged' : 'passed', updates, findings, source };
 }
 
+// Latest flag provenance for an entry: 'ai-review' or 'manual-flag'.
+const FLAG_OWNER_SQL = `(SELECT a.audit_type FROM knowledge_base_audits a
+  WHERE a.kb_entry_id = knowledge_base.id AND a.audit_type IN ('ai-review', 'manual-flag')
+    AND a.result = 'flagged'
+  ORDER BY a.created_at DESC LIMIT 1)`;
+
 // True when an entry's current flag came from the AI audit (not a person), so
 // a content change — the fix — should put it back in search.
 async function flagIsFromAIAudit(entryId) {
   const latest = await db('knowledge_base_audits')
     .where({ kb_entry_id: entryId })
     .whereIn('audit_type', ['ai-review', 'manual-flag'])
+    .where({ result: 'flagged' })
     .orderBy('created_at', 'desc')
     .first();
   return !!latest && latest.audit_type === 'ai-review';
@@ -298,9 +311,10 @@ const KnowledgeBaseService = {
       .select('knowledge_base.*', db.raw(
         '(SELECT MAX(a.created_at) FROM knowledge_base_audits a WHERE a.kb_entry_id = knowledge_base.id AND a.audit_type = ?) AS last_ai_review_at',
         ['ai-review'],
-      ));
+      ), db.raw(`${FLAG_OWNER_SQL} AS flag_owner`));
     if (flaggedOnly) {
-      query = query.where({ status: 'flagged' });
+      // Only entries the AI audit hid — a person's flag is a person's call.
+      query = query.where({ status: 'flagged' }).whereRaw(`${FLAG_OWNER_SQL} = 'ai-review'`);
     } else {
       query = query.where({ status: 'active' });
       if (!forceAll) {
@@ -324,6 +338,7 @@ const KnowledgeBaseService = {
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const results = [];
     let flagged = 0;
+    let passed = 0;
 
     for (const entry of entries) {
       try {
@@ -342,11 +357,12 @@ const KnowledgeBaseService = {
         try {
           parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
         } catch {
-          parsed = { status: 'pass', confidence: 'medium', issues: [], summary: 'Could not parse AI response' };
+          parsed = { status: 'unparsed', issues: [], summary: 'Could not parse AI response' };
         }
 
         const { auditResult, updates, findings, source } = planAuditOutcome(entry, parsed);
         if (auditResult === 'flagged') flagged++;
+        if (auditResult === 'passed') passed++;
 
         await db('knowledge_base_audits').insert({
           kb_entry_id: entry.id,
@@ -373,7 +389,7 @@ const KnowledgeBaseService = {
       }
     }
 
-    return { audited: entries.length, flagged, results };
+    return { audited: entries.length, flagged, passed, results };
   },
 
   // ── Get audits for an entry ──

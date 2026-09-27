@@ -64,9 +64,25 @@ describe('KB AI audit', () => {
   });
 
   test('a pass verifies the entry and restores one the audit had hidden', () => {
-    const out = planAuditOutcome({ ...manualEntry, status: 'flagged' }, { status: 'pass', confidence: 'medium' }, NOW);
+    const out = planAuditOutcome({ ...manualEntry, status: 'flagged', flag_owner: 'ai-review' }, { status: 'pass', confidence: 'medium' }, NOW);
     expect(out.auditResult).toBe('passed');
     expect(out.updates).toEqual({ last_verified_at: NOW, verified_by: 'ai-cron', confidence: 'medium', status: 'active' });
+  });
+
+  test('a pass never clears a flag a person set', () => {
+    const out = planAuditOutcome({ ...manualEntry, status: 'flagged', flag_owner: 'manual-flag' }, { status: 'pass', confidence: 'high' }, NOW);
+    expect(out.updates.status).toBeUndefined();
+  });
+
+  test.each([
+    [{}],
+    [{ status: 'unparsed', summary: 'Could not parse AI response' }],
+    [{ status: 'looks fine' }],
+    [null],
+  ])('no explicit verdict changes nothing (%j)', (parsed) => {
+    const out = planAuditOutcome({ ...manualEntry, status: 'flagged', flag_owner: 'ai-review' }, parsed, NOW);
+    expect(out.auditResult).toBe('error');
+    expect(out.updates).toEqual({});
   });
 
   test('an unknown confidence value is not written', () => {
