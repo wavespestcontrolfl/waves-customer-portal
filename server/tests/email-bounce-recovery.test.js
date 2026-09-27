@@ -919,7 +919,7 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
       expect(original.id).toBe('orig-billing-recovery');
       expect(options).toMatchObject({
         recipientEmail: 'jane@gmail.com', authorityRecipientEmail: 'jane@gmial.com',
-        preSendCheck: expect.any(Function), forwardProviderBoundary: true,
+        providerBoundaryCheck: expect.any(Function),
       });
       await dispatch(heldDatabase, providerBoundaryCheck);
       return { handled: true, allowed: true };

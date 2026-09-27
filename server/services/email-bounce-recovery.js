@@ -593,8 +593,7 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
         {
           recipientEmail: correctedEmail,
           authorityRecipientEmail: bouncedMessage.recipient_email_snapshot,
-          forwardProviderBoundary: true,
-          preSendCheck: async ({ database }) => (await correctedAddressOwnedByOther(
+          providerBoundaryCheck: async ({ database }) => (await correctedAddressOwnedByOther(
             correctedEmail, ownCustomerId, database || db,
           ) ? {
               ok: false,

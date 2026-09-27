@@ -38,8 +38,7 @@ function refusal(block) {
 async function runBillingEmailProviderReplayHandoff(message, dispatch, {
   recipientEmail = clean(message?.recipient_email_snapshot).toLowerCase(),
   authorityRecipientEmail = clean(message?.recipient_email_snapshot).toLowerCase(),
-  preSendCheck: additionalCheck = null,
-  forwardProviderBoundary = false,
+  providerBoundaryCheck = null,
 } = {}) {
   if (!isBillingEmailProviderReplay(message)) return { handled: false };
   const context = readStoredBillingReplayContext(message);
@@ -75,12 +74,10 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch, {
           retryable: verdict?.retryable === true,
         };
       }
-      return typeof additionalCheck === 'function'
-        ? additionalCheck({ database, providerBoundary }) : { ok: true };
+      return providerBoundary && typeof providerBoundaryCheck === 'function'
+        ? providerBoundaryCheck({ database }) : { ok: true };
     },
-    dispatch: (database, providerBoundaryCheck) => (forwardProviderBoundary
-      ? dispatch(database, providerBoundaryCheck)
-      : dispatch(database)),
+    dispatch: (database, providerBoundaryCheck) => dispatch(database, providerBoundaryCheck),
     state,
   });
 
