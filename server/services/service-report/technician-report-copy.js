@@ -226,14 +226,35 @@ const REPORT_MEASUREMENT_AFTER_NUMBER_RE = new RegExp(String.raw`^\s*${REPORT_ME
 const REPORT_PAST_ACCESS_DEVICE_RE = /\b(?:opened|unlocked|accessed|entered)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b/gi;
 const REPORT_PAST_ACCESS_CONTEXT_RE = /\b(?:opened|unlocked|accessed|entered)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b/i;
 const REPORT_PAST_ACCESS_NUMBER_RE = /\b\d{3,8}\b(?!\.\d)/g;
-const REPORT_STRUCTURED_DATE_RE = /\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b/g;
+const REPORT_STRUCTURED_DATE_RE = /\b(?:\d{4}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{1,2}|\d{1,2}\s*[/-]\s*\d{1,2}\s*[/-]\s*(?:\d{2}|\d{4}))\b/g;
 const REPORT_AFFIXED_OR_GROUPED_NUMBER_RE = /(?:\b[A-Za-z#*]+\d[A-Za-z0-9#*]*\b|\b\d[A-Za-z0-9#*]*[A-Za-z#*]\b|\b\d{1,2}(?:[\s–—-]+\d{1,2}){1,7}\b)/;
 
+function isValidStructuredDate(value) {
+  const parts = value.split(/\s*[/-]\s*/).map(Number);
+  const yearFirst = /^\d{4}\s*[/-]/.test(value);
+  const [year, month, day] = yearFirst
+    ? parts
+    : [parts[2] < 100 ? 2000 + parts[2] : parts[2], parts[0], parts[1]];
+  const candidate = new Date(Date.UTC(year, month - 1, day));
+  return month >= 1 && month <= 12
+    && day >= 1 && day <= 31
+    && candidate.getUTCFullYear() === year
+    && candidate.getUTCMonth() === month - 1
+    && candidate.getUTCDate() === day;
+}
+
 function isStructuredDateNumber(value, index, length) {
-  const before = value.slice(Math.max(0, index - 14), index);
-  const after = value.slice(index + length, index + length + 14);
-  return /(?:^|\b)\d{1,4}\s*[/-]\s*\d{1,2}\s*[/-]\s*$/.test(before)
-    || /^\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{1,4}\b/.test(after);
+  for (const match of value.matchAll(REPORT_STRUCTURED_DATE_RE)) {
+    const end = match.index + match[0].length;
+    if (match.index <= index && index + length <= end && isValidStructuredDate(match[0])) return true;
+  }
+  return false;
+}
+
+function maskStructuredDates(value) {
+  return value.replace(REPORT_STRUCTURED_DATE_RE, (date) => (
+    isValidStructuredDate(date) ? '[structured-date]' : date
+  ));
 }
 
 function containsPastAccessCredential(text) {
@@ -386,20 +407,19 @@ function containsReportAccessCode(text) {
   const raw = String(text || '');
   if (containsExplicitNumericCredential(raw)) return true;
   if (containsPastAccessCredential(raw)) return true;
+  // Direct token-to-device relationships outrank fertilizer context. Check the
+  // original copy before an application qualifier can mask an N-P-K-shaped
+  // credential ("Applied override 24-0-11 to open the rear gate").
+  const originalRelationship = accessCodeDetectionText(raw);
+  if (REPORT_DIRECT_ACCESS_CODE_RES.some((re) => re.test(raw) || re.test(originalRelationship))) return true;
   if (REPORT_PAST_ACCESS_CONTEXT_RE.test(raw)) {
-    const normalizedPastInput = raw
-      .replace(REPORT_STRUCTURED_DATE_RE, '[structured-date]')
+    const normalizedPastInput = maskFertilizerAnalyses(maskStructuredDates(raw))
       .replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]');
     if (REPORT_AFFIXED_OR_GROUPED_NUMBER_RE.test(normalizedPastInput)) {
       const normalizedPastRelationships = accessCodeDetectionText(normalizedPastInput);
       if (containsPastAccessCredential(normalizedPastRelationships)) return true;
     }
   }
-  // Direct token-to-device relationships outrank fertilizer context. Check the
-  // original copy before an application qualifier can mask an N-P-K-shaped
-  // credential ("Applied override 24-0-11 to open the rear gate").
-  const originalRelationship = accessCodeDetectionText(raw);
-  if (REPORT_DIRECT_ACCESS_CODE_RES.some((re) => re.test(raw) || re.test(originalRelationship))) return true;
   const fertilizerScreened = maskFertilizerAnalyses(raw);
   const value = fertilizerScreened.replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]');
   const normalized = accessCodeDetectionText(value);
