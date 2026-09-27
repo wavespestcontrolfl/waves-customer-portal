@@ -5916,16 +5916,14 @@ const StripeService = {
           // attempt in flight — or an ACH that settled days after it began
           // would read as settled when it started, payer money as the
           // homeowner's own, and a refund in flight as untouched money
-          // (Codex #4996 r11/r12).
-          let priorMeta = {};
-          try {
-            priorMeta = existingPayment.metadata
-              ? (typeof existingPayment.metadata === 'string' ? JSON.parse(existingPayment.metadata) : existingPayment.metadata) : {};
-          } catch { priorMeta = {}; }
+          // (Codex #4996 r11/r12). The merge runs in the UPDATE itself, on
+          // the row as it stands then: the row was read without a lock, and a
+          // refund that resolved since must not have its cleared markers
+          // written back (pre-push audit).
           const [record] = await trx('payments')
             .where({ id: existingPayment.id })
             .whereNotIn('status', ['refunded', 'disputed'])
-            .update({ ...paymentPayload, metadata: JSON.stringify({ ...priorMeta, ...JSON.parse(paymentPayload.metadata) }) })
+            .update({ ...paymentPayload, metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [paymentPayload.metadata]) })
             .returning('*');
           if (!record) {
             throw new Error('Payment record changed while confirming — refresh the invoice and try again');

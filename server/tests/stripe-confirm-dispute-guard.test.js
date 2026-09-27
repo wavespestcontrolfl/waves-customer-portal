@@ -135,7 +135,8 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
         }
         throw new Error(`Unexpected trx table: ${table}`);
       });
-      trx.raw = jest.fn(async () => undefined);
+      // Returns what it was given, so a raw column expression can be inspected.
+      trx.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
       trx.isTransaction = true; // completeActivePlansForInvoice reuses a caller trx as-is
       return cb(trx);
     });
@@ -221,29 +222,21 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
     expect(paymentsInsert).not.toHaveBeenCalled();
   });
 
-  test('repairing after the webhook merges into the row: its settlement moment, payer and a refund in flight stay (Codex #4996 r11/r12)', async () => {
+  test('repairing after the webhook merges into the row as it stands at the update, never a stale copy (Codex #4996 r11/r12)', async () => {
     existingPaymentRow = { id: 'pay_existing', status: 'paid',
       metadata: { payment_state: 'processing', settled_event_at: '2026-09-20T14:00:00.000Z', payer_id: '7',
-        pending_refund_key: 'refund_pay_existing_rest_0', pending_refund_at: '2026-09-21T10:00:00.000Z' } };
+        pending_refund_key: 'refund_pay_existing_rest_0' } };
     const StripeService = require('../services/stripe');
     await StripeService.confirmInvoicePayment('inv_123', PI_ID);
 
     expect(paymentsUpdate).toHaveBeenCalledTimes(1);
-    const metadata = JSON.parse(paymentsUpdate.mock.calls[0][0].metadata);
-    expect(metadata).toMatchObject({ invoice_id: 'inv_123', settled_event_at: '2026-09-20T14:00:00.000Z', payer_id: '7',
-      pending_refund_key: 'refund_pay_existing_rest_0', pending_refund_at: '2026-09-21T10:00:00.000Z' });
-    // What /confirm knows wins over what the row said.
-    expect(metadata.payment_state).toBe('paid');
-  });
-
-  test('a row with no settlement stamp gets none from a confirm that saw no card charge', async () => {
-    existingPaymentRow = { id: 'pay_existing', status: 'processing', metadata: JSON.stringify({ payment_state: 'processing' }) };
-    const StripeService = require('../services/stripe');
-    await StripeService.confirmInvoicePayment('inv_123', PI_ID);
-
-    const metadata = JSON.parse(paymentsUpdate.mock.calls[0][0].metadata);
-    expect(metadata).not.toHaveProperty('settled_event_at');
-    expect(metadata).not.toHaveProperty('payer_id');
+    // The merge is SQL on the live row: a settlement stamp, payer or refund in flight
+    // the row carries then stays, and a refund marker cleared since is not written back.
+    const { metadata } = paymentsUpdate.mock.calls[0][0];
+    expect(metadata.__raw).toBe("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
+    const merged = JSON.parse(metadata.bindings[0]);
+    expect(merged).toMatchObject({ invoice_id: 'inv_123', payment_state: 'paid' });
+    for (const key of ['settled_event_at', 'payer_id', 'pending_refund_key']) expect(merged).not.toHaveProperty(key);
   });
 
   test('a card payment carries the charge\'s own time as its settlement moment, not the confirm time (Codex #4996 r12)', async () => {
