@@ -323,9 +323,11 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         // prepaid stamp until completion books it against the invoice, so
         // the stamp is the evidence (Codex #4996 r5). A series prepayment
         // stamps each visit with its share at one instant; the total rides
-        // along. Annual prepay coverage is an earlier invoice's money.
+        // along. Annual prepay coverage (its own method) is an earlier
+        // invoice's money; a cash or Zelle stamp on a visit an annual term
+        // later linked stays real money (annual-prepay-renewals.js keeps it).
         conn('scheduled_services as pv').where({ 'pv.customer_id': customerId }).where('pv.prepaid_amount', '>', 0)
-          .whereNull('pv.annual_prepay_term_id').whereRaw("COALESCE(pv.prepaid_method, '') <> 'annual_prepay_invoice'")
+          .whereRaw("COALESCE(pv.prepaid_method, '') <> 'annual_prepay_invoice'")
           .where('pv.prepaid_at', '>', after).where('pv.prepaid_at', '<=', now)
           .orderBy('pv.prepaid_at', 'desc').limit(LIMIT + 1)
           .select('pv.id', 'pv.prepaid_amount', 'pv.prepaid_method', 'pv.prepaid_at', 'pv.service_type', 'pv.scheduled_date', 'pv.property_id',

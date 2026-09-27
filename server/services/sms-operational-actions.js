@@ -751,7 +751,7 @@ const UNSEEN_EVENT_ACTIVITY = `(SELECT MAX(a.at) FROM (
       WHERE ${MONEY_KIND} AND ed.status IN ('received', 'credited') AND ${unseen('GREATEST(ed.updated_at, ed.received_at)')}
         AND ${ESTIMATE_MAY_BELONG}
     UNION ALL SELECT pv.prepaid_at FROM scheduled_services pv
-      WHERE ${MONEY_KIND} AND pv.customer_id = s.customer_id AND pv.prepaid_amount > 0 AND pv.annual_prepay_term_id IS NULL
+      WHERE ${MONEY_KIND} AND pv.customer_id = s.customer_id AND pv.prepaid_amount > 0
         AND COALESCE(pv.prepaid_method, '') <> 'annual_prepay_invoice' AND ${unseen('pv.prepaid_at')}
   ) a)`;
 

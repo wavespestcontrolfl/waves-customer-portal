@@ -2220,8 +2220,11 @@ postgres('SMS commitments on PostgreSQL', () => {
     const visitRow = (prepaidAt, extra = {}) => ({ customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
       scheduled_date: etDateString(completedAt), window_start: '09:00:00', status: 'completed', prepaid_amount: 125, prepaid_method: 'cash',
       prepaid_at: prepaidAt, created_at: new Date(message.created_at.getTime() - 86400000), ...extra });
+    // An annual term links visits without touching a cash stamp already on them (annual-prepay-renewals.js):
+    // only the annual method's own coverage is excluded.
     const [prepaidEarlier, prepaidLater, unstamped, annual] = await mockPg('scheduled_services')
-      .insert([visitRow(before), visitRow(after), visitRow(null), visitRow(after, { prepaid_method: 'annual_prepay_invoice' })]).returning('id');
+      .insert([visitRow(before), visitRow(after, { annual_prepay_term_id: randomUUID() }), visitRow(null),
+        visitRow(after, { prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: randomUUID() })]).returning('id');
     const commitment = { kind: 'other', description: 'Did you get my cash payment?', sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
     const expectOnlyTheLaterStamp = (evidence) => {
       const payments = evidence.records.filter((r) => r.type === 'payment');
