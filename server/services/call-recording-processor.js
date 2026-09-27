@@ -35,6 +35,15 @@ const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
 
+// The processing_status values that mean THIS call's own pipeline pass has
+// genuinely finished — the retry states (extraction_failed, no_transcription)
+// are deliberately excluded: they are unfinished work a later pass may still
+// complete (see the SLA-clamp comment at its own use below), so a caller
+// asking "has processing settled" must not treat them as done either.
+// Exported so other callers (promise-chaser-bell.js, Codex #5019 r11 P2)
+// reuse the SAME set rather than re-deriving their own notion of "terminal".
+const COMPLETED_STATUSES = new Set(['processed', 'voicemail', 'spam']);
+
 /**
  * PR 2A: the RECORDED part of a stored transcript. A composite a prior pass
  * wrote is "[AI segment]\n…\n\n[Staff|Voicemail segment]\n<recorded>"; a
@@ -7839,6 +7848,9 @@ async function finalizeTechFollowUpCall({ call, callSid, procToken, procGenerati
 }
 
 const CallRecordingProcessor = {
+  // Re-used by promise-chaser-bell.js (Codex #5019 r11 P2) to gate its own
+  // "has this call's pipeline pass genuinely finished" check.
+  COMPLETED_STATUSES,
   // Re-used by the bounce audio-reverify lane (email-bounce-reverify.js) —
   // full pipeline incl. the letter-fidelity contact-dictation second pass,
   // plus the same hallucination guard the live pipeline applies.
@@ -7874,7 +7886,7 @@ const CallRecordingProcessor = {
     // re-run and newly read as a lead must not inject its original call
     // time into the SLA analytics. The retry states (extraction_failed,
     // no_transcription) are unfinished work and keep the real wait.
-    const COMPLETED_STATUSES = new Set(['processed', 'voicemail', 'spam']);
+    // (COMPLETED_STATUSES is now the module-scope export above.)
     // …or the ROW says so: an operator adoption swaps the recording and puts
     // processing_status back to NULL (so the sweep owns the row) and stamps
     // the pre-swap state on metadata.adopted_recording — read here by EVERY
