@@ -269,16 +269,27 @@ const CONTINUATION_TURN = 'Continue the saved request using its recorded step ou
 const CARD_CLAIM_RE = /\bcard below\b|\bconfirm(?:ation)? card\b|\bclick confirm\b|\bconfirm(?:ation)? on the card\b/i;
 // A reply can truthfully mention an EARLIER card (already sent, still open
 // from a prior turn) without this turn creating a new one — never flag that.
-const EARLIER_CARD_REFERENCE_RE = /\b(?:earlier|already|previous(?:ly)?|above|prior)\b[^.?!]{0,40}\bcard\b|\bcard\b[^.?!]{0,40}\b(?:earlier|already|previous(?:ly)?|above|prior)\b/i;
+// Narrow to phrases that explicitly identify a PRIOR card (Codex round-2 P2:
+// the old "already ... card" trigger let "I've already prepared the
+// confirmation card below." — a genuine new-card claim — slip through on
+// the word "already" alone, which says nothing about WHICH card). Explicit
+// prior-card language only: "(earlier|previous|prior|last|old|existing|
+// original) card", "card (I|you) (sent|showed|prepared|made) (earlier|
+// before)", or "card (from|in) (my|the) (earlier|previous|last) (message|
+// reply)".
+const EARLIER_CARD_REFERENCE_RE = /\b(?:earlier|previous|prior|last|old|existing|original)\s+(?:confirmation\s+)?card\b|\bcard\b\s+(?:i|you)\s+(?:sent|showed|prepared|made)\s+(?:earlier|before)\b|\bcard\b\s+(?:from|in)\s+(?:my|the)\s+(?:earlier|previous|last)\s+(?:message|reply)\b/i;
 // Evaluated per SENTENCE, not over the whole reply: "The earlier card
 // expired. I've prepared a new confirmation card below." must still flag —
 // the earlier-card exclusion in one sentence must never cover a genuine new
-// claim in another.
+// claim in another. A sentence naming "below" is always a CURRENT-card
+// claim regardless — the earlier-card exclusion never applies to it, even
+// when the same sentence also happens to mention an earlier one.
 function splitIntoSentences(text) {
   return String(text).split(/(?<=[.!?])\s+/).filter(Boolean);
 }
 function claimsCardWithoutEarlierReference(text) {
-  return splitIntoSentences(text).some((sentence) => CARD_CLAIM_RE.test(sentence) && !EARLIER_CARD_REFERENCE_RE.test(sentence));
+  return splitIntoSentences(text).some((sentence) => CARD_CLAIM_RE.test(sentence)
+    && (/\bbelow\b/i.test(sentence) || !EARLIER_CARD_REFERENCE_RE.test(sentence)));
 }
 
 function hasImageTaintedHistory(conversationHistory) {
@@ -1231,6 +1242,10 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     const target = await require('../services/intelligence-bar/procurement-tools').resolveInventoryWriteTarget({
       toolName: toolUse.name, prompt: req.body.prompt, pageData: req.body.pageData, preview,
       actorId: getAdminActorId(req), threadId: req.body.thread_id,
+      // The requesting tab's OWN observed thread tail (Codex round-2 P2) —
+      // same parse as the optimistic-append check below — so a stale tab
+      // never grounds off turns appended by another tab it never saw.
+      threadSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
     });
     if (target.error) return { failed: true, modelResult: target };
     if (toolUse.name !== 'update_restock_request') {

@@ -35,6 +35,9 @@ function makeThreadsDb({ threads = [], turns = [] }) {
           } else if (arguments.length === 3 && op === '>=' && val && val.__minAgeMinutes != null) {
             const cutoff = Date.now() - val.__minAgeMinutes * 60000;
             rows = rows.filter((r) => new Date(r.created_at).getTime() >= cutoff);
+          } else if (arguments.length === 3 && op === '<=' && typeof val === 'number') {
+            // where('seq', '<=', maxSeq) — the stale-tab bound.
+            rows = rows.filter((r) => r[colOrFn] <= val);
           }
           return api;
         },
@@ -119,5 +122,34 @@ describe('IbThreads.recentOperatorTurns', () => {
     expect(await IbThreads.recentOperatorTurns(ACTOR, 'no-such-thread', {})).toEqual([]);
     expect(await IbThreads.recentOperatorTurns(null, THREAD_ID, {})).toEqual([]);
     expect(await IbThreads.recentOperatorTurns(ACTOR, null, {})).toEqual([]);
+  });
+
+  // Codex round-2 P2: with the same thread open in two tabs, a stale tab's
+  // request must not read turns appended by the OTHER tab after the one it
+  // actually observed. `maxSeq` bounds the read to that tab's own tail.
+  test('maxSeq excludes turns appended after the caller\'s observed tail (stale-tab case)', async () => {
+    const IbThreads = withThreadsModule({
+      threads: [{ id: THREAD_ID, admin_actor_id: ACTOR }],
+      turns: [
+        { thread_id: THREAD_ID, seq: 1, role: 'user', content: 'this tab\'s own turn', created_at: minutesAgo(5) },
+        { thread_id: THREAD_ID, seq: 2, role: 'assistant', content: 'reply to that turn', created_at: minutesAgo(5) },
+        // Appended by ANOTHER tab after this tab's last observed seq (2).
+        { thread_id: THREAD_ID, seq: 3, role: 'user', content: 'the other tab\'s turn', created_at: minutesAgo(1) },
+      ],
+    });
+    const result = await IbThreads.recentOperatorTurns(ACTOR, THREAD_ID, { limit: 3, maxAgeMinutes: 30, maxSeq: 2 });
+    expect(result).toEqual(['this tab\'s own turn']);
+  });
+
+  test('an absent maxSeq (the default) reads the full unbounded tail', async () => {
+    const IbThreads = withThreadsModule({
+      threads: [{ id: THREAD_ID, admin_actor_id: ACTOR }],
+      turns: [
+        { thread_id: THREAD_ID, seq: 1, role: 'user', content: 'older turn', created_at: minutesAgo(5) },
+        { thread_id: THREAD_ID, seq: 3, role: 'user', content: 'newest turn', created_at: minutesAgo(1) },
+      ],
+    });
+    const result = await IbThreads.recentOperatorTurns(ACTOR, THREAD_ID, { limit: 3, maxAgeMinutes: 30 });
+    expect(result).toEqual(['newest turn', 'older turn']);
   });
 });

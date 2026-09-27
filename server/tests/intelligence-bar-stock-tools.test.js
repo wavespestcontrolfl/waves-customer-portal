@@ -528,7 +528,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     const corrected = await resolveInventoryWriteTarget({
       toolName: 'adjust_stock', prompt: '1 bottle',
       preview: { product: { id: ALPINE.id, name: ALPINE.name } },
-      actorId: 'actor-1', threadId: THREAD_ID,
+      actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 4,
     });
     expect(corrected).toMatchObject({ code: 'target_clarification_required' });
 
@@ -537,7 +537,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     const confirmed = await resolveInventoryWriteTarget({
       toolName: 'adjust_stock', prompt: '1 bottle',
       preview: { product: { id: ALPINE.id, name: ALPINE.name } },
-      actorId: 'actor-1', threadId: THREAD_ID,
+      actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 4,
     });
     expect(confirmed).toEqual({ productId: ALPINE.id });
   });
@@ -551,10 +551,10 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     const result = await resolveInventoryWriteTarget({
       toolName: 'adjust_stock', prompt: '1 bottle',
       preview: { product: { id: ALPINE.id, name: ALPINE.name } },
-      actorId: 'actor-1', threadId: THREAD_ID,
+      actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 2,
     });
     expect(result).toEqual({ productId: ALPINE.id });
-    expect(IbThreadsMock.recentOperatorTurns).toHaveBeenCalledWith('actor-1', THREAD_ID, { limit: 3, maxAgeMinutes: 30 });
+    expect(IbThreadsMock.recentOperatorTurns).toHaveBeenCalledWith('actor-1', THREAD_ID, { limit: 3, maxAgeMinutes: 30, maxSeq: 2 });
   });
 
   test('a prior turn that only exists as ASSISTANT text never grounds (recentOperatorTurns already excludes it)', async () => {
@@ -567,9 +567,55 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     const result = await resolveInventoryWriteTarget({
       toolName: 'adjust_stock', prompt: '1 bottle',
       preview: { product: { id: ALPINE.id, name: ALPINE.name } },
-      actorId: 'actor-1', threadId: THREAD_ID,
+      actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 2,
     });
     expect(result).toMatchObject({ code: 'target_clarification_required' });
+  });
+
+  // Codex round-2 P2: with the same thread open in two tabs, prior-turn
+  // grounding must never read turns the REQUESTING tab never saw. The
+  // requesting tab's own observed tail (threadSeq) bounds the look-back; a
+  // missing or invalid one refuses prior-turn grounding entirely rather than
+  // trusting the newest server turns blind.
+  describe('thread_seq bound (stale-tab grounding refusal)', () => {
+    test('a missing threadSeq refuses prior-turn grounding even though a matching turn exists', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+      IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We bought Alpine WSG']);
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock', prompt: '1 bottle',
+        preview: { product: { id: ALPINE.id, name: ALPINE.name } },
+        actorId: 'actor-1', threadId: THREAD_ID, // no threadSeq
+      });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
+      expect(IbThreadsMock.recentOperatorTurns).not.toHaveBeenCalled();
+    });
+
+    test('a non-integer threadSeq (a stale/malformed client value) also refuses', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+      IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We bought Alpine WSG']);
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock', prompt: '1 bottle',
+        preview: { product: { id: ALPINE.id, name: ALPINE.name } },
+        actorId: 'actor-1', threadId: THREAD_ID, threadSeq: null,
+      });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
+      expect(IbThreadsMock.recentOperatorTurns).not.toHaveBeenCalled();
+    });
+
+    test('a valid threadSeq is passed through as the look-back bound', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+      IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We bought Alpine WSG']);
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock', prompt: '1 bottle',
+        preview: { product: { id: ALPINE.id, name: ALPINE.name } },
+        actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 7,
+      });
+      expect(result).toEqual({ productId: ALPINE.id });
+      expect(IbThreadsMock.recentOperatorTurns).toHaveBeenCalledWith('actor-1', THREAD_ID, { limit: 3, maxAgeMinutes: 30, maxSeq: 7 });
+    });
   });
 
   test('the current prompt naming a DIFFERENT product than the preview refuses as a mismatch', async () => {
@@ -689,7 +735,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     const result = await resolveInventoryWriteTarget({
       toolName: 'adjust_stock', prompt: 'Yes',
       preview: { product: { id: ALPINE.id, name: ALPINE.name } },
-      actorId: 'actor-1', threadId: THREAD_ID,
+      actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 2,
     });
     expect(result).toEqual({ productId: ALPINE.id });
   });
@@ -905,7 +951,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       const result = await resolveInventoryWriteTarget({
         toolName: 'adjust_stock', prompt: '1 bottle',
         preview: { product: { id: TAURUS.id, name: TAURUS.name } },
-        actorId: 'actor-1', threadId: THREAD_ID,
+        actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 2,
       });
       expect(result).toMatchObject({ code: 'target_clarification_required' });
     });
@@ -930,11 +976,20 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         expect(result).toEqual({ productId: TAURUS.id });
       });
 
-      test('a one-word alias on ordinary English refuses ("can you dispatch this inventory adjustment?")', async () => {
+      // Codex round-2 P2: proximity/capitalization alone ("2" sitting within
+      // 3 words of "dispatch") used to ground this one-word alias on
+      // ordinary English with no product in mind at all. Single-word
+      // evidence now needs a grammatical tie (hasGrammaticalTie) — a
+      // purchase/stock cue word or an adjacent quantity, not just a nearby
+      // number.
+      test.each([
+        'can you dispatch this inventory adjustment?',
+        'Can you dispatch 2 inventory adjustments?',
+      ])('a one-word alias on ordinary English refuses (%s)', async (prompt) => {
         setGroundingDb({ products: [DISPATCH, ALPINE], aliases: [{ product_id: DISPATCH.id, alias_name: 'Dispatch' }] });
         const result = await resolveInventoryWriteTarget({
           toolName: 'adjust_stock',
-          prompt: 'can you dispatch this inventory adjustment?',
+          prompt,
           preview: { product: { id: DISPATCH.id, name: DISPATCH.name } },
         });
         expect(result).toMatchObject({ code: 'target_clarification_required' });
@@ -948,6 +1003,38 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
           preview: { product: { id: DISPATCH.id, name: DISPATCH.name } },
         });
         expect(result).toEqual({ productId: DISPATCH.id });
+      });
+    });
+
+    // Codex round-2 P2: targetClause splits at ANY colon or quote, so it
+    // used to strip a real catalog identity's own punctuation — a seeded
+    // alias that literally contains a colon (migration 20260528000041), or a
+    // quoted product name. The fallback no longer uses targetClause at all;
+    // only an actual note/message body region is excluded (bodyRegionStart).
+    describe('identity punctuation (colons/quotes that are part of the name itself)', () => {
+      const DISPATCH = { id: 'p-dispatch', name: 'Dispatch Sprayable Wetting Agent', active: true };
+
+      test('a multi-word alias that itself contains a colon still grounds ("Premium: Dispatch wetting agent")', async () => {
+        setGroundingDb({
+          products: [DISPATCH, ALPINE],
+          aliases: [{ product_id: DISPATCH.id, alias_name: 'Premium: Dispatch wetting agent' }],
+        });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock',
+          prompt: 'We bought Premium: Dispatch wetting agent, two jugs',
+          preview: { product: { id: DISPATCH.id, name: DISPATCH.name } },
+        });
+        expect(result).toEqual({ productId: DISPATCH.id });
+      });
+
+      test('a quoted full catalog name still grounds (\'We bought "Taurus SC"\')', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock',
+          prompt: 'We bought "Taurus SC"',
+          preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+        });
+        expect(result).toEqual({ productId: TAURUS.id });
       });
     });
 
@@ -965,7 +1052,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         const result = await resolveInventoryWriteTarget({
           toolName: 'adjust_stock', prompt: '1 bottle',
           preview: { product: { id: TAURUS.id, name: TAURUS.name } },
-          actorId: 'actor-1', threadId: THREAD_ID,
+          actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 2,
         });
         expect(result).toEqual({ productId: TAURUS.id });
       });
@@ -981,7 +1068,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         const result = await resolveInventoryWriteTarget({
           toolName: 'adjust_stock', prompt: '1 bottle',
           preview: { product: { id: DEMAND.id, name: DEMAND.name } },
-          actorId: 'actor-1', threadId: THREAD_ID,
+          actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 2,
         });
         expect(result).toEqual({ productId: DEMAND.id });
       });
@@ -1011,6 +1098,33 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
           preview: { product: { id: ARMADA_50.id, name: ARMADA_50.name } },
         });
         expect(result).toEqual({ productId: ARMADA_50.id });
+      });
+    });
+
+    // Codex round-2 P2: "20 percent" (spoken) is the same concentration
+    // qualifier as "20%" — a voice-typed prompt must not skip the check just
+    // because the operator said the word instead of the symbol.
+    describe('spoken percent is a concentration qualifier too', () => {
+      const COPPER = { id: 'p-copper', name: 'Southern Ag Copper Fungicide 27.15%', active: true };
+
+      test('"Southern Ag Copper 20 percent" refuses against a "27.15%" catalog row', async () => {
+        setGroundingDb({ products: [COPPER, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock',
+          prompt: 'We bought Southern Ag Copper 20 percent',
+          preview: { product: { id: COPPER.id, name: COPPER.name } },
+        });
+        expect(result).toMatchObject({ code: 'target_clarification_required' });
+      });
+
+      test('"Southern Ag Copper 27.15 percent" grounds — the spoken concentration matches exactly', async () => {
+        setGroundingDb({ products: [COPPER, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock',
+          prompt: 'We bought Southern Ag Copper 27.15 percent',
+          preview: { product: { id: COPPER.id, name: COPPER.name } },
+        });
+        expect(result).toEqual({ productId: COPPER.id });
       });
     });
   });

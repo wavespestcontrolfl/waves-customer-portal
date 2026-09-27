@@ -162,18 +162,24 @@ async function getThread(actorId, threadId) {
  * actor (or one that doesn't exist) returns []. The CURRENT, in-flight prompt
  * is never in this table yet (persistence happens after the reply), so this
  * only ever returns PRIOR turns.
+ *
+ * `maxSeq`, when an integer, bounds the read to turns at or before that seq
+ * (Codex round-2 P2): with the same thread open in two tabs, this stops a
+ * stale tab's request from grounding off turns appended by the OTHER tab
+ * after the one it actually saw. The caller (resolveByOperatorGrounding)
+ * refuses prior-turn grounding entirely when it has no valid bound to pass —
+ * this only enforces whatever bound it IS given.
  */
-async function recentOperatorTurns(actorId, threadId, { limit = 3, maxAgeMinutes = 30 } = {}) {
+async function recentOperatorTurns(actorId, threadId, { limit = 3, maxAgeMinutes = 30, maxSeq = null } = {}) {
   if (!actorId || !threadId) return [];
   const thread = await db('ib_threads').where({ id: threadId, admin_actor_id: actorId }).first();
   if (!thread) return [];
-  const rows = await db('ib_thread_turns')
+  let query = db('ib_thread_turns')
     .where('thread_id', threadId)
     .where('role', 'user')
-    .where('created_at', '>=', db.raw("NOW() - (? || ' minutes')::interval", [maxAgeMinutes]))
-    .orderBy('seq', 'desc')
-    .limit(limit)
-    .select('content');
+    .where('created_at', '>=', db.raw("NOW() - (? || ' minutes')::interval", [maxAgeMinutes]));
+  if (Number.isInteger(maxSeq)) query = query.where('seq', '<=', maxSeq);
+  const rows = await query.orderBy('seq', 'desc').limit(limit).select('content');
   return rows.map((r) => r.content);
 }
 

@@ -161,11 +161,52 @@ test('a reply with ordinary text and no card claim is untouched', async () => {
 });
 
 test('a reply that only references an EARLIER, already-sent card is left alone', async () => {
-  scriptModelTurns([[{ type: 'text', text: 'That confirmation card was already sent earlier in this conversation — use that card to proceed.' }]]);
+  scriptModelTurns([[{ type: 'text', text: 'Please use the earlier confirmation card to proceed.' }]]);
   await withServer(async (baseUrl) => {
     const { status, body } = await postQuery(baseUrl, { prompt: 'anything', context: 'customers' });
     expect(status).toBe(200);
     expect(body.response).not.toContain(NOTICE);
+  });
+});
+
+test('"card I sent earlier" is also a genuine prior-card reference and is left alone', async () => {
+  scriptModelTurns([[{ type: 'text', text: 'Please use the confirmation card I sent earlier.' }]]);
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'anything', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.response).not.toContain(NOTICE);
+  });
+});
+
+test('a bare mention of "the earlier card" with no card claim at all is untouched', async () => {
+  scriptModelTurns([[{ type: 'text', text: 'The earlier card expired.' }]]);
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'anything', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.response).not.toContain(NOTICE);
+  });
+});
+
+test('ordinary prose that never claims a card at all is untouched', async () => {
+  scriptModelTurns([[{ type: 'text', text: 'Please use the card I sent earlier.' }]]);
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'anything', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.response).not.toContain(NOTICE);
+  });
+});
+
+// Codex round-2 P2: the old EARLIER_CARD_REFERENCE_RE keyed off the bare word
+// "already" anywhere near "card" — which excluded a genuine NEW-card claim
+// just because the model also said "already" ("I've already prepared the
+// confirmation card below."). The narrowed regex only excludes phrasing that
+// explicitly identifies a PRIOR card, so this now correctly gets flagged.
+test('"I\'ve already prepared the confirmation card below" is a genuine new-card claim and gets flagged', async () => {
+  scriptModelTurns([[{ type: 'text', text: "I've already prepared the confirmation card below." }]]);
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'anything', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.response).toContain(NOTICE);
   });
 });
 
