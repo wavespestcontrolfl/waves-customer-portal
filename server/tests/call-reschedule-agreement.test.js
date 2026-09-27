@@ -85,13 +85,19 @@ describe('groundRescheduleAgreement', () => {
     const slotQuote = (text) => agreedAt(THURSDAY_2PM, text);
     expect(slotQuote('We will see you Thursday at one.')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     expect(slotQuote('We will see you Friday at two.')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
-    for (const said of ['Thursday at two or four', 'Thursday at 2:30', 'Thursday before two', 'Thursday at two or later']) {
+    for (const said of [
+      'Thursday at two or four', 'Thursday at 2:30', 'Thursday before two', 'Thursday at two or later',
+      // Codex #5092 r1: an unmarked correction, a decimal clock time, and a
+      // period said before the hour that isn't the slot's.
+      'Thursday at two, actually three', 'Thursday at 2.30 PM', 'Thursday AM at 2', 'Thursday morning at 2 pm',
+    ]) {
       expect(slotQuote(`We will see you ${said}.`)).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     }
     // An hour is required, and a day unless the slot keeps the moved visit's day.
     expect(slotQuote('We will see you Thursday.')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     expect(slotQuote('We will see you at two.')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
     expect(slotQuote('We will see you September 24th at 2 PM.').ok).toBe(true);
+    expect(slotQuote('We will see you Thursday PM at 2.').ok).toBe(true);
   });
 
   test('a weekday beside an explicit date describes that date', () => {

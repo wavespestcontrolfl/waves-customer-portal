@@ -1,5 +1,5 @@
 // Day references in labelled call transcripts. Fixtures are fictitious.
-const { parseDayMentions, extractHourMentions } = require('../services/call-time-mentions');
+const { parseDayMentions, extractHourMentions, hasUnexplainedNumber } = require('../services/call-time-mentions');
 
 // Sat Sep 26, 2026, 11:51 AM ET.
 const STARTED = new Date('2026-09-26T15:51:18Z');
@@ -67,7 +67,17 @@ describe('extractHourMentions', () => {
   });
 
   test('a part of the day in the sentence sets an hour\'s am/pm', () => {
-    expect(hours('We will see you Thursday evening at eight. Tomorrow morning at 6. Morning or afternoon, at two?')).toEqual([[20, false], [6, false], [14, false]]);
+    expect(hours('We will see you Thursday evening at eight. Tomorrow morning at 6.')).toEqual([[20, false], [6, false]]);
+  });
+
+  test('an am/pm that follows no hour is the sentence\'s period, and periods that disagree make its hours inexact', () => {
+    expect(hours('We will see you Thursday PM at 10.')).toEqual([[22, false]]);
+    expect(hours('Thursday AM at noon. Morning or afternoon, at two? This morning at 2 pm. AM or PM, at ten.'))
+      .toEqual([[12, true], [14, true], [14, true], [10, true]]);
+  });
+
+  test('a clock time written with a dot keeps its minutes across the sentence split', () => {
+    expect(hours('We will see you Thursday at 2.30 PM.')).toEqual([[14, true]]);
   });
 
   test('a part of the day marks only the number it follows, and a day\'s own number is never an hour', () => {
@@ -93,6 +103,15 @@ describe('extractHourMentions', () => {
   test('an hour mention spans its am/pm and o\'clock', () => {
     expect(extractHourMentions('We will see you at 2 pm sharp, or at two o clock.', STARTED).map((m) => [m.pos, m.end])).toEqual([[5, 7], [10, 13]]);
     expect(extractHourMentions('See you at two in the afternoon or later.', STARTED).map((m) => [m.pos, m.end, m.offHour])).toEqual([[3, 7, true]]);
+  });
+
+  test('a number that is neither a day, an hour nor a length is unexplained', () => {
+    const loose = (text) => hasUnexplainedNumber(text, STARTED);
+    expect(loose('We can see you Thursday at two, actually three.')).toBe(true);
+    expect(loose('Thursday at 2, 45 minutes early is fine, 123 Main.')).toBe(true);
+    expect(loose('We will see you Thursday, October 2 at 2 pm for about two hours, at two properties.')).toBe(false);
+    expect(loose('That one works, Thursday at two.')).toBe(false);
+    expect(loose('Thursday at two, the tech needs 45 minutes, thirty minutes to spray.')).toBe(false);
   });
 
   test('a length of time is not a clock time', () => {

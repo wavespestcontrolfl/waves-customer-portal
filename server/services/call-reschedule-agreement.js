@@ -33,7 +33,9 @@
 'use strict';
 
 const { etWallClockOfConfirmedStart } = require('./call-triage-flags');
-const { normalize, parseTurns, parseDayMentions, extractHourMentions } = require('./call-time-mentions');
+const {
+  normalize, parseTurns, parseDayMentions, extractHourMentions, hasUnexplainedNumber,
+} = require('./call-time-mentions');
 
 const MIN_FRAGMENT_WORDS = 3;
 
@@ -59,11 +61,12 @@ function everyDayIs(days, date) {
 
 // Does this quote name exactly this slot: at least one hour, every hour the
 // slot's and on the hour, every day the slot's date — no day at all only
-// when the slot keeps `sameDayAs`?
+// when the slot keeps `sameDayAs` — and no other number it can't place?
 function namesSlot(quote, slot, started, sameDayAs) {
   const hours = extractHourMentions(quote, started);
   const days = parseDayMentions(quote, started);
   return hours.length > 0 && hours.every((h) => h.hour24 === slot.hour24 && !h.offHour)
+    && !hasUnexplainedNumber(quote, started)
     && everyDayIs(days, slot.date) && (days.length > 0 || slot.date === sameDayAs);
 }
 

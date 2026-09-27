@@ -35,8 +35,11 @@ const ORDINAL_DAY = /^(\d{1,2})(?:st|nd|rd|th)$/;
 // "a.m." / "p.m." as single tokens, so neither the sentence splitter nor
 // punctuation stripping can break "9 a.m." apart; "2pm" written together
 // keeps its hour as a token of its own.
+// A clock time written with a dot ("2.30") keeps its minutes: read as
+// "2:30", so the sentence splitter cannot cut it into "at 2" and "30".
 function joinMeridiem(s) {
   return String(s || '')
+    .replace(/\b(\d{1,2})\.(\d{2})\b/g, '$1:$2')
     .replace(/\b([ap])\.\s?m\b\.?/gi, '$1m')
     .replace(/(\d)([ap]m)\b/gi, '$1 $2');
 }
@@ -317,58 +320,125 @@ function rangeStartHour(toks, n, rangeEnd) {
   return (clockHour(end, endPeriod) - ((end - n + 12) % 12) + 24) % 24;
 }
 
+// Words before "one" that make it a pronoun ("that one"), not a number.
+const ONE_PRONOUN_LEADS = new Set(['that', 'this', 'the', 'which', 'each', 'any', 'every', 'no', 'another', 'other', 'first', 'last', 'next']);
+// Tokens right after an hour that carry no period of their own.
+const PERIOD_ATTACHED_PREV = new Set(['00', 'o', 'clock', 'oclock']);
+
+// The am/pm a sentence states apart from any one hour: a part of the day
+// ("Thursday evening at eight") or an am/pm that follows no hour ("Thursday
+// PM at 10"). Returns the set of periods said.
+function sentencePeriods(toks) {
+  return new Set(toks.flatMap((t, i) => {
+    if (Object.hasOwn(DAY_PART_PERIODS, t)) return [DAY_PART_PERIODS[t]];
+    const prev = toks[i - 1] || '';
+    const attached = hourNumber(prev) != null || /^\d+$/.test(prev) || PERIOD_ATTACHED_PREV.has(prev) || isMinuteToken(prev);
+    return (t === 'am' || t === 'pm') && !attached ? [t] : [];
+  }));
+}
+
+// Is this token a number said on its own, outside any day or hour: a digit
+// run, a spelled number or a minute word ("that one" is a pronoun)?
+function isLooseNumber(toks, i) {
+  const t = toks[i];
+  if (t === 'one' && ONE_PRONOUN_LEADS.has(toks[i - 1])) return false;
+  return /^\d+$/.test(t) || Object.hasOwn(SPELLED_NUMBERS, t) || MINUTE_WORDS.has(t);
+}
+
+// The number at `i` read as a clock time: { hour24, offHour, end } with
+// `end` the token after its minutes, range end and am/pm; 'length' when it
+// runs into a unit of time; null when nothing marks it as a time. `said` is
+// the sentence's stated period (see sentencePeriods): { period, disagrees }.
+function hourAt(toks, i, n, said) {
+  const after = i + 1 + minuteTokensAfter(toks, i);
+  if (runsIntoDuration(toks, after)) return 'length';
+  const rangeEnd = rangeEndAfter(toks, i, after);
+  let end = Math.max(after, rangeEnd + 1);
+  while (CLOCK_TAIL.has(toks[end])) end += 1;
+  end += dayPartAt(toks, end).len;
+  const ownPeriod = periodAfter(toks, after);
+  const offHour = after > i + 1 || inexactAt(toks, i, end) || said.disagrees(ownPeriod);
+  const marked = offHour || rangeEnd > 0 || ownPeriod || OCLOCK.has(toks[after]) || HOUR_LEADS.has(toks[i - 1]) || toks[i + 1] === 'ish';
+  if (!marked) return null;
+  const period = ownPeriod || said.period;
+  return { hour24: period ? clockHour(n, period) : rangeStartHour(toks, n, rangeEnd), offHour, end };
+}
+
+// One pass over a turn's sentences: the hour mentions (see
+// extractHourMentions) and the numbers that are neither a day, an hour nor a
+// length ("at two, actually three": the three).
+function scanHours(turnText, started) {
+  const dateTokens = new Set(parseDayMentions(turnText, started)
+    .flatMap((d) => Array.from({ length: d.end - d.pos }, (_, k) => d.pos + k)));
+  const mentions = [];
+  const unexplained = [];
+  let offset = 0; // token offset of this sentence within the whole turn
+  for (const sentence of splitTurnSentences(turnText)) {
+    const toks = normalize(sentence).split(' ').filter(Boolean);
+    const periods = sentencePeriods(toks);
+    const said = {
+      period: periods.size === 1 ? [...periods][0] : null,
+      // Two periods said ("morning or afternoon", "AM ... PM") state none, and
+      // an hour whose own am/pm disagrees with the sentence's is inexact.
+      disagrees: (own) => periods.size > 1 || (own != null && periods.size === 1 && !periods.has(own)),
+    };
+    for (let i = 0; i < toks.length; i += 1) {
+      if (dateTokens.has(offset + i)) continue;
+      if (Object.hasOwn(NAMED_HOURS, toks[i])) {
+        const hour24 = NAMED_HOURS[toks[i]];
+        mentions.push({ hour24, offHour: inexactAt(toks, i, i + 1) || said.disagrees(hour24 === 12 ? 'pm' : 'am'), pos: offset + i, end: offset + i + 1 });
+        continue;
+      }
+      const n = hourNumber(toks[i]);
+      const hit = n == null ? null : hourAt(toks, i, n, said);
+      if (hit && hit !== 'length') {
+        mentions.push({ hour24: hit.hour24, offHour: hit.offHour, pos: offset + i, end: offset + hit.end });
+        // Past the whole mention: its minutes, a range's end, its am/pm.
+        i = hit.end - 1;
+      } else if (!hit && isLooseNumber(toks, i) && !runsIntoDuration(toks, i + 1)) {
+        unexplained.push(offset + i);
+      }
+    }
+    offset += toks.length;
+  }
+  return { mentions, unexplained };
+}
+
 /**
  * Hour mentions in one turn, in spoken order: { hour24, offHour, pos, end },
  * the turn-level token span of the number, its minutes and am/pm (a range's
  * whole span). `started` is the call's start (a Date), for the turn's day
  * mentions: a day's own number ("October 2", "10/2") is never an hour. A
- * number is a clock time
- * only when something marks it as one: "at", "around" or "about" before it;
- * "ish", am/pm, o'clock or a part of the day ("in the afternoon", "this
- * morning", "tonight") after it; being a range's start ("two to four",
- * "between eight and nine" — the end belongs to the range); or minutes
- * ("two ten", "2:30", "two oh five") or a half/quarter lead-in ("half past
- * two"), both of which put it off the hour — a slot is always on the hour,
- * so such a mention can only disagree with one. A number running into a unit
- * of time is a length ("about two hours"). With no am/pm said with it, an
- * hour takes a part of the day said in its sentence ("Thursday evening at
- * eight"), else a range's start its end's am/pm, else business hours (7-11
- * morning; 12 and 1-6 afternoon): a period said about another time ("my 9
- * AM visit") says nothing about it.
+ * number is a clock time only when something marks it as one: "at",
+ * "around" or "about" before it; "ish", am/pm, o'clock or a part of the day
+ * ("in the afternoon", "this morning", "tonight") after it; being a range's
+ * start ("two to four", "between eight and nine" — the end belongs to the
+ * range); or minutes ("two ten", "2:30", "2.30", "two oh five") or a
+ * half/quarter lead-in ("half past two"), both of which put it off the hour
+ * — a slot is always on the hour, so such a mention can only disagree with
+ * one. A number running into a unit of time is a length ("about two
+ * hours"). With no am/pm said with it, an hour takes the period its sentence
+ * states — a part of the day ("Thursday evening at eight") or an am/pm that
+ * follows no hour ("Thursday PM at 10") — else a range's start its end's
+ * am/pm, else business hours (7-11 morning; 12 and 1-6 afternoon): a period
+ * said about another time ("my 9 AM visit") says nothing about it. Periods
+ * that disagree ("morning or afternoon", "AM at noon", "this morning at 2
+ * pm") make the sentence's hours inexact.
  */
 function extractHourMentions(turnText, started) {
-  const dateTokens = new Set(parseDayMentions(turnText, started)
-    .flatMap((d) => Array.from({ length: d.end - d.pos }, (_, k) => d.pos + k)));
-  const mentions = [];
-  let offset = 0; // token offset of this sentence within the whole turn
-  for (const sentence of splitTurnSentences(turnText)) {
-    const toks = normalize(sentence).split(' ').filter(Boolean);
-    const dayParts = new Set(toks.filter((t) => Object.hasOwn(DAY_PART_PERIODS, t)).map((t) => DAY_PART_PERIODS[t]));
-    const sentencePeriod = dayParts.size === 1 ? [...dayParts][0] : null;
-    for (let i = 0; i < toks.length; i += 1) {
-      if (dateTokens.has(offset + i)) continue;
-      if (Object.hasOwn(NAMED_HOURS, toks[i])) mentions.push({ hour24: NAMED_HOURS[toks[i]], offHour: inexactAt(toks, i, i + 1), pos: offset + i, end: offset + i + 1 });
-      const n = hourNumber(toks[i]);
-      if (n == null) continue;
-      const after = i + 1 + minuteTokensAfter(toks, i);
-      const rangeEnd = rangeEndAfter(toks, i, after);
-      let end = Math.max(after, rangeEnd + 1);
-      while (CLOCK_TAIL.has(toks[end])) end += 1;
-      end += dayPartAt(toks, end).len;
-      const offHour = after > i + 1 || inexactAt(toks, i, end);
-      const ownPeriod = periodAfter(toks, after);
-      const marked = offHour || rangeEnd > 0 || ownPeriod || OCLOCK.has(toks[after]) || HOUR_LEADS.has(toks[i - 1]) || toks[i + 1] === 'ish';
-      if (!marked || runsIntoDuration(toks, after)) continue;
-      const period = ownPeriod || sentencePeriod;
-      mentions.push({ hour24: period ? clockHour(n, period) : rangeStartHour(toks, n, rangeEnd), offHour, pos: offset + i, end: offset + end });
-      // Past the whole mention: its minutes, a range's end, its am/pm.
-      i = end - 1;
-    }
-    offset += toks.length;
-  }
-  return mentions;
+  return scanHours(turnText, started).mentions;
+}
+
+/**
+ * Does this text say a number that is neither a day, an hour nor a length
+ * of time? A corrected hour said without a marker ("at two, actually
+ * three") is one, and so is any stray figure; a quote that must name
+ * exactly one slot fails on it rather than guess what the number meant.
+ */
+function hasUnexplainedNumber(turnText, started) {
+  return scanHours(turnText, started).unexplained.length > 0;
 }
 
 module.exports = {
-  normalize, parseTurns, parseDayMentions, extractHourMentions,
+  normalize, parseTurns, parseDayMentions, extractHourMentions, hasUnexplainedNumber,
 };
