@@ -563,6 +563,7 @@ function answerWateringAftercare({ data, weekPlan, aftercare }) {
 }
 
 function answerConditionalWateringPlan({ weekPlan, aftercare }) {
+  if (!weekPlan?.title) return aftercare.watering;
   const condition = aftercare.needsReview === true
     ? 'Confirm the product watering directions with your technician before applying the plan below. Any recorded restriction must also have ended; use only the plan’s listed days and watering windows.'
     : 'The recorded product watering restriction comes first. Use the plan below only after that restriction has ended, and only within the plan’s listed days and watering windows.';
@@ -580,11 +581,12 @@ function questionRoutingRules({
   data, nextAppointment, weekPlan, aftercare, wateringIntent,
 }) {
   return [
-    // Aftercare/watering answers first — never re-entry or generic copy
-    // under the plan shown on the same page (codex #3565 gh-r29).
+    // Aftercare/watering answers first — never re-entry or generic copy.
+    // Append the current plan when present (codex #3565 gh-r29).
     {
-      test: () => wateringIntent && Boolean(weekPlan?.title)
-        && (aftercare?.wateringHold === true || aftercare?.needsReview === true),
+      test: () => wateringIntent
+        && Boolean(aftercare?.watering)
+        && (aftercare.wateringHold === true || aftercare.needsReview === true),
       answer: () => answerConditionalWateringPlan({ weekPlan, aftercare }),
     },
     {

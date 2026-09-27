@@ -204,9 +204,22 @@ describe('watering questions answer with the weekly plan when the report carries
     expect(answerServiceReportQuestion({ question: 'How many minutes did the visit take?', data })).not.toMatch(/check the rain/);
   });
 
-  test('no plan → existing routing (irrigation → re-entry) is unchanged', () => {
+  test('no plan without aftercare → existing routing (irrigation → re-entry) is unchanged', () => {
     const data = { pressureIndex: null, dynamicContext: {}, reportV2: { water: { weekPlan: null } } };
     expect(answerServiceReportQuestion({ question: 'What is my irrigation plan?', data })).not.toMatch(/This week:/);
+  });
+
+  test.each([
+    [{ watering: 'Turn irrigation off for 24 hours after application.', wateringHold: true, needsReview: false }, /Turn irrigation off for 24 hours/],
+    [{ watering: 'These directions conflict. Confirm the directions with your technician before changing irrigation.', wateringHold: true, needsReview: true }, /Confirm the directions with your technician/],
+  ])('no plan preserves the recorded aftercare restriction for watering questions', (aftercare, expected) => {
+    const data = { pressureIndex: null, dynamicContext: {}, reportV2: { aftercare, water: { weekPlan: null } } };
+    for (const question of ['How should I water?', 'What is my irrigation plan?']) {
+      const answer = answerServiceReportQuestion({ question, data });
+      expect(answer).toMatch(expected);
+      expect(answer).not.toMatch(/This week:/);
+      expect(answer).not.toMatch(/re-entry guidance|No special repair or prep/);
+    }
   });
 });
 

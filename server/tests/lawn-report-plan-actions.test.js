@@ -86,9 +86,15 @@ describe('combined report gives product aftercare priority over water insights',
     expect(combinedWaterCard(report).customerAction).toBe(confirmFirst);
   });
 
-  test('an explicit hold controls the water card even when water-in is not required', () => {
+  test.each([
+    'Do not water for 24 hours after service.',
+    'Turn irrigation off for 24 hours after application.',
+    'Turn off the irrigation for 24 hours after application.',
+    'Wait 24 hours before watering.',
+    'Please wait for 1 day before irrigating.',
+  ])('an explicit hold controls the water card even when water-in is not required: %s', (irrigationNotes) => {
     const report = combinedWaterReport([{
-      product: { irrigation_required: false, irrigation_notes: 'Do not water for 24 hours after service.' },
+      product: { irrigation_required: false, irrigation_notes: irrigationNotes },
     }]);
     expect(report.aftercare).toMatchObject({
       wateringHold: true,
@@ -296,6 +302,10 @@ describe('multi-product aftercare keeps compatible catalog constraints (codex PR
     'Watering needs to be postponed until tomorrow.',
     'Irrigation is not permitted for 24 hours.',
     'Watering must not be allowed for 24 hours.',
+    'Turn irrigation off for 24 hours after application.',
+    'Turn off the irrigation for 24 hours after application.',
+    'Wait 24 hours before watering.',
+    'Please wait for 1 day before irrigating.',
   ])('recorded restriction is a hold and cannot earn water-in credit: %s', (irrigationNotes) => {
     const aftercare = buildAftercare([{ product: { irrigation_required: true, irrigation_notes: irrigationNotes } }]);
     expect(aftercare).toMatchObject({
@@ -312,6 +322,9 @@ describe('multi-product aftercare keeps compatible catalog constraints (codex PR
   test.each([
     'No irrigation is required after application.',
     'No watering is needed after application.',
+    'No additional watering should be needed after application.',
+    'No further watering may be required after application.',
+    'No irrigation will be necessary.',
     'Watering must not be delayed after application.',
     'Irrigation should be applied within 24 hours.',
   ])('absence-of-requirement copy is not misread as a watering hold: %s', (irrigationNotes) => {

@@ -442,12 +442,14 @@ function isDeferredWateringInstruction(note) {
 function isWateringHoldInstruction(note) {
   const text = String(note || '').trim();
   return /\b(?:do not|don['’]t|avoid|delay|hold)\b[^.]{0,48}\b(?:water|watering|irrigat\w*)\b/i.test(text)
-    || /\bno\s+(?:(?:additional|further)\s+)?(?:water(?:ing)?|irrigation)\b(?!\s+(?:is\s+)?(?:required|needed|necessary)\b)/i.test(text)
+    || /\bno\s+(?:(?:additional|further)\s+)?(?:water(?:ing)?|irrigation)\b(?!\s+(?:(?:is|are|was|were|will|would|should|may|might)\s+)?(?:be\s+)?(?:required|needed|necessary)\b)/i.test(text)
     || /\brefrain\s+from\s+(?:water(?:ing)?|irrigat\w*)\b/i.test(text)
     // Passive restrictions keep the same hold authority as imperative notes.
     // A negated restriction (must not be delayed) is not a watering hold.
     || /\b(?:water(?:ing)?|irrigation)\s+(?:(?:should|must|shall|needs?\s+to|has\s+to)\s+be|(?:is|are|was|were)(?:\s+to\s+be)?)\s+(?:temporarily\s+)?(?:delayed|avoided|withheld|restricted|prohibited|suspended|postponed)\b/i.test(text)
     || /\b(?:water(?:ing)?|irrigation)\s+(?:(?:is|are|was|were)\s+|(?:should|must|shall)\s+)?not\s+(?:be\s+)?(?:allowed|permitted|recommended)\b/i.test(text)
+    || /^(?:please\s+)?turn\s+(?:(?:the\s+)?(?:water(?:ing)?|irrigation)\s+off|off\s+(?:the\s+)?(?:water(?:ing)?|irrigation))\b/i.test(text)
+    || /^(?:please\s+)?wait\s+(?:for\s+)?(?:\d+(?:\.\d+)?\s*(?:hours?|days?)|until\s+(?:tomorrow|the\s+next\s+day))\s+before\s+(?:water(?:ing)?|irrigat\w*)\b/i.test(text)
     || /\bkeep\s+(?:the\s+)?(?:water|irrigation)\s+off\b/i.test(text)
     || /\bkeep\s+(?:off|from)\s+(?:watering|irrigating)\b/i.test(text);
 }
