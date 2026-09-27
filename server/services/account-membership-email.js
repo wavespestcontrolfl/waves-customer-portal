@@ -246,15 +246,24 @@ async function sendTemplate({
   // customer-comms lock the preferences writer takes (the late-payment and
   // bank-verification emails do the same), so a Text/App-only switch or a
   // new billing address saved after the caller resolved the recipient wins.
+  // Admin contact edits lock the customers row and billing-address edits
+  // the notification_prefs row rather than taking that lock, so both rows
+  // are locked too, in billing-channel-email-authority.js's order, and held
+  // through dispatch: an edit either commits before this read or waits for
+  // the provider request to return.
   let billingHandoffRefusal = null;
   const withProviderHandoff = billingCategory
     ? async (dispatch) => withCustomerCommsLock(db, recipientCustomer.id, async (trx) => {
-      const freshPrefs = await trx('notification_prefs').where({ customer_id: recipientCustomer.id }).first();
+      const freshCustomer = await trx('customers').where({ id: recipientCustomer.id }).forUpdate().first();
+      const freshPrefs = await trx('notification_prefs').where({ customer_id: recipientCustomer.id }).forUpdate().first();
+      if (!freshCustomer || freshCustomer.deleted_at) {
+        billingHandoffRefusal = 'customer_not_found';
+        return { ok: false };
+      }
       if (billingChannelAllowed(freshPrefs || {}, billingCategory, 'email') === false) {
         billingHandoffRefusal = 'billing_email_not_selected';
         return { ok: false };
       }
-      const freshCustomer = await trx('customers').where({ id: recipientCustomer.id }).first();
       const [freshRecipient] = getInvoiceEmailRecipients(freshCustomer, freshPrefs || {})
         .filter((entry) => isEmailLike(entry.email));
       if (cleanEmail(freshRecipient?.email) !== cleanEmail(contact.email)) {
@@ -285,13 +294,13 @@ async function sendTemplate({
     });
 
     // A billing send the handoff stopped before dispatch. A deselected
-    // Email is final, like the resolver's own refusal. A changed billing
-    // address, or a recheck that could not run, leaves the email owed: a
-    // retryable no-send, and the aborted attempt stays resendable under the
-    // same idempotency key.
+    // Email, or a customer since deleted, is final, like the resolver's own
+    // refusals. A changed billing address, or a recheck that could not run,
+    // leaves the email owed: a retryable no-send, and the aborted attempt
+    // stays resendable under the same idempotency key.
     if (billingCategory && result.aborted) {
       const reason = billingHandoffRefusal || 'billing_email_recheck_failed';
-      const final = reason === 'billing_email_not_selected';
+      const final = ['billing_email_not_selected', 'customer_not_found'].includes(reason);
       await logLifecycleEmailAttempt({
         customerId: recipientCustomer.id,
         templateKey,

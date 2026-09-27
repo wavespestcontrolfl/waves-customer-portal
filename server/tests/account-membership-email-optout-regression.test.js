@@ -29,7 +29,7 @@ const AccountMembershipEmail = require('../services/account-membership-email');
 
 function chain({ result = [], first } = {}) {
   const q = {};
-  ['where', 'whereIn', 'whereNotNull', 'whereNotIn', 'whereNull', 'select', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereIn', 'whereNotNull', 'whereNotIn', 'whereNull', 'select', 'orderBy', 'forUpdate'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.insert = jest.fn(() => q);
   q.update = jest.fn(() => q);
   q.first = jest.fn(async () => first);
@@ -158,7 +158,7 @@ describe('billing notices ignore the portal-wide email switch', () => {
 
   // First notification_prefs read = the recipient resolver, second = the
   // locked re-read at the provider handoff. Third customers read = the
-  // handoff's fresh recipient. An Error stands in for a failed read.
+  // handoff's locked recipient row. An Error stands in for a failed read.
   const prefsRead = (prefs) => {
     if (!(prefs instanceof Error)) return chain({ first: prefs });
     const q = chain();
@@ -166,16 +166,18 @@ describe('billing notices ignore the portal-wide email switch', () => {
     return q;
   };
   function previsitDb(prefs, handoffPrefs = prefs, handoffCustomer = customer()) {
+    const handoff = { customers: chain({ first: handoffCustomer }), prefs: prefsRead(handoffPrefs) };
     const queues = {
-      customers: [chain({ first: customer() }), chain({ first: customer() }), chain({ first: handoffCustomer })],
+      customers: [chain({ first: customer() }), chain({ first: customer() }), handoff.customers],
       customer_interactions: [chain(), chain(), chain()],
-      notification_prefs: [prefsRead(prefs), prefsRead(handoffPrefs)],
+      notification_prefs: [prefsRead(prefs), handoff.prefs],
     };
     db.mockImplementation((table) => {
       const q = queues[table];
       if (!q || !q.length) throw new Error(`Unexpected db table ${table}`);
       return q.shift();
     });
+    return handoff;
   }
 
   const sendPrevisit = () => AccountMembershipEmail.sendPrevisitBalanceReminder({
@@ -191,11 +193,17 @@ describe('billing notices ignore the portal-wide email switch', () => {
     { customer_id: 'cust-1', email_enabled: false },
     { customer_id: 'cust-1', email_enabled: false, billing_channels: ['email', 'sms'] },
   ])('billing.previsit_balance is emailed with the email switch off: %j', async (prefs) => {
-    previsitDb(prefs);
+    const handoff = previsitDb(prefs);
     const result = await sendPrevisit();
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'billing.previsit_balance' }));
     expect(withCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
+    // Both recipient rows are locked through dispatch, customer first (the
+    // billing-channel email authority's order).
+    expect(handoff.customers.forUpdate).toHaveBeenCalled();
+    expect(handoff.prefs.forUpdate).toHaveBeenCalled();
+    expect(handoff.customers.forUpdate.mock.invocationCallOrder[0])
+      .toBeLessThan(handoff.prefs.forUpdate.mock.invocationCallOrder[0]);
     expect(dispatched).toBe(true);
     expect(result).toMatchObject({ ok: true, messageId: 'sg-123' });
   });
@@ -240,6 +248,14 @@ describe('billing notices ignore the portal-wide email switch', () => {
     const result = await sendPrevisit();
     expect(dispatched).toBe(false);
     expect(result).toEqual({ ok: false, sent: false, transient: true, reason: 'billing_recipient_changed' });
+  });
+
+  test('a customer deleted after the recipient was resolved gets no email', async () => {
+    const prefs = { customer_id: 'cust-1', billing_channels: ['email'] };
+    previsitDb(prefs, prefs, customer({ deleted_at: '2026-09-26T12:00:00.000Z' }));
+    const result = await sendPrevisit();
+    expect(dispatched).toBe(false);
+    expect(result).toEqual({ ok: false, skipped: true, reason: 'customer_not_found' });
   });
 
   test('an unreadable choice at the handoff fails closed as a retryable no-send', async () => {

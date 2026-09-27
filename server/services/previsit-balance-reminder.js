@@ -362,10 +362,12 @@ async function runSweep({ now = new Date() } = {}) {
       const laterSweepDay = visitDateKey(visit.scheduled_date) > windowStartDate;
       let emailDelivered = false;
       let emailRetry = emailPolicyPermitted && emailResolution.transient === true;
+      let emailLedger = null;
+      let emailFailure = null;
       if (emailLegAvailable && emailPolicyPermitted) try {
         // RECORD-THEN-SEND, same discipline as the SMS leg: ledger insert
         // failure throws into this catch and the email is skipped.
-        const emailLedger = await ContactLedger.recordContact({
+        emailLedger = await ContactLedger.recordContact({
           customerId: visit.customer_id,
           channel: 'email',
           purpose: 'balance_reminder',
@@ -385,16 +387,34 @@ async function runSweep({ now = new Date() } = {}) {
         emailDelivered = emailResult?.ok === true;
         if (!emailDelivered) {
           emailRetry = emailResult?.transient === true;
-          await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
+          emailFailure = emailResult?.reason || 'email_not_sent';
         }
       } catch (emailErr) {
+        // sendPrevisitBalanceReminder catches the provider call itself, so a
+        // throw here came before any email left.
         logger.warn(`[previsit-balance] email failed for visit ${visit.id}: ${emailErr.message}`);
         emailRetry = true;
+        emailFailure = 'email_leg_failed';
+      }
+      // A retryable email failure never left: the resolver or the hand-off
+      // recheck stopped it before the provider. Its ledger row is stamped
+      // never_contacted, the collections doctrine for a pre-send rejection
+      // (outbound-voice/origination.js), so it stops counting toward the
+      // policy's 24-hour window, which would otherwise refuse the very retry
+      // the text is held for. The stamp is checked with one retry; if it
+      // cannot be made durable that retry is not viable and the text is not
+      // held for it.
+      let emailRetryViable = true;
+      if (emailLedger && emailFailure) {
+        const stamp = { reason: emailFailure, ...(emailRetry ? { never_contacted: true } : {}) };
+        let stamped = await ContactLedger.markSendFailed(emailLedger, stamp);
+        if (!stamped && emailRetry) stamped = await ContactLedger.markSendFailed(emailLedger, stamp);
+        if (emailRetry) emailRetryViable = stamped;
       }
 
       // For an email-preferring customer the text is suppressed by the
       // channel gate and the email above is the reminder.
-      const holdForEmail = emailRetry && laterSweepDay;
+      const holdForEmail = emailRetry && emailRetryViable && laterSweepDay;
       let smsDelivered = false;
       if (smsPolicyPermitted && !holdForEmail) try {
         const body = await renderSmsTemplate(TEMPLATE_KEY, {

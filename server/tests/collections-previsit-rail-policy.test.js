@@ -189,20 +189,40 @@ test('both legs permitted ⇒ the email goes before the text, and the claim is k
   expect(releaseChain.update).not.toHaveBeenCalled();
 });
 
+// The held attempt's ledger row is stamped never_contacted (it never left),
+// so the collections policy's 24-hour window does not refuse the retry.
 test.each([
   ['a retryable no-send', () => AccountMembershipEmail.sendPrevisitBalanceReminder
-    .mockResolvedValueOnce({ ok: false, sent: false, transient: true, reason: 'billing_recipient_changed' })],
+    .mockResolvedValueOnce({ ok: false, sent: false, transient: true, reason: 'billing_recipient_changed' }),
+  { reason: 'billing_recipient_changed', never_contacted: true }],
   ['a thrown email leg', () => AccountMembershipEmail.sendPrevisitBalanceReminder
-    .mockRejectedValueOnce(new Error('connection terminated'))],
+    .mockRejectedValueOnce(new Error('connection terminated')),
+  { reason: 'email_leg_failed', never_contacted: true }],
   ['an unreadable billing choice', () => AccountMembershipEmail.resolvePrevisitBalanceEmailRecipient
-    .mockResolvedValueOnce({ recipient: null, reason: 'prefs_unavailable', transient: true })],
-])('%s on the email leg holds the text and releases the claim for a later sweep day', async (_label, arm) => {
+    .mockResolvedValueOnce({ recipient: null, reason: 'prefs_unavailable', transient: true }),
+  null],
+])('%s on the email leg holds the text and releases the claim for a later sweep day', async (_label, arm, stamp) => {
   const { releaseChain } = armOneVisit();
   arm();
   const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
   expect(result).toMatchObject({ sent: 0, skipped: 1 });
   expect(sendCustomerMessage).not.toHaveBeenCalled();
   expect(releaseChain.update).toHaveBeenCalledWith({ balance_reminder_sent_at: null });
+  if (stamp) expect(ContactLedger.markSendFailed).toHaveBeenCalledWith({ id: 'led-1', metadata: {} }, stamp);
+  else expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+});
+
+test('a retry the collections window would still refuse is not waited for: the text goes now', async () => {
+  const { releaseChain } = armOneVisit();
+  AccountMembershipEmail.sendPrevisitBalanceReminder
+    .mockResolvedValueOnce({ ok: false, sent: false, transient: true, reason: 'billing_recipient_changed' });
+  // The never_contacted stamp fails, and fails its one retry.
+  ContactLedger.markSendFailed.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(ContactLedger.markSendFailed).toHaveBeenCalledTimes(2);
+  expect(result).toMatchObject({ sent: 1, skipped: 0 });
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  expect(releaseChain.update).not.toHaveBeenCalled();
 });
 
 test('on the visit\'s last sweep day a retryable email failure lets the text go alone', async () => {
