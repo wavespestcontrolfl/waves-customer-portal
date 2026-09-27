@@ -37,7 +37,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const commitments = require('./call-commitments');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etCalendarDayOf } = require('../utils/datetime-et');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 
 // Same trigger as the overdue watchdog: registered tech-visible, so the
@@ -168,26 +168,31 @@ function evidenceFrom(r) {
   return stated && !Number.isNaN(stated.getTime()) && (!at || stated > at) ? stated : at;
 }
 
-// Where a booking may start. On a scheduling promise the booking IS the
-// promised work, and the time said with it is usually the appointment
-// itself ("I'll put you on the schedule for around 3"), which the booking
-// always precedes — so any booking after the call counts. Every other
-// promise keeps its stated time: booking Thursday's inspection does not
-// send the quote promised after it.
-function bookingsFrom(r) {
-  return r.kind === 'schedule_visit' ? (promisedAt(r) || evidenceFrom(r)) : evidenceFrom(r);
+// The stated time of a scheduling promise is usually the appointment itself
+// ("I'll put you on the schedule for around 3"), and its booking always
+// comes before it: a visit booked after the call FOR that day keeps the
+// promise before the stated time. Every other early booking waits for it —
+// an unrelated visit on another day, or any booking on another kind of
+// promise (booking Thursday's inspection does not send the quote promised
+// after it). The stated time's ET day, or null when there is none to wait for.
+function appointmentDay(r) {
+  if (r.kind !== 'schedule_visit') return null;
+  const since = evidenceFrom(r);
+  const at = promisedAt(r);
+  return since && at && since.getTime() > at.getTime() ? etDateString(since) : null;
 }
 
 async function followedUpIds(conn, rows) {
   // A caller with no customer record is matched by a USABLE number only —
   // an 'anonymous' or client: caller ID normalizes to nothing and gives the
   // row no contact to match on (never a match between two unusable values).
-  const scoped = (rows || []).map((r) => ({ r, since: evidenceFrom(r), booked: bookingsFrom(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)) }))
+  const scoped = (rows || []).map((r) => ({ r, since: evidenceFrom(r), day: appointmentDay(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)) }))
     .filter((x) => x.since && (x.r.customer_id || x.phone));
   const done = new Set();
   if (!scoped.length) return done;
   const floor = new Date(Math.min(...scoped.map((x) => x.since.getTime())));
-  const bookedFloor = new Date(Math.min(...scoped.map((x) => x.booked.getTime())));
+  // A booking for a scheduling promise's own day counts from the call's end.
+  const bookedFloor = new Date(Math.min(...scoped.map((x) => (x.day ? promisedAt(x.r) : x.since).getTime())));
   const customerIds = [...new Set(scoped.filter((x) => x.r.customer_id).map((x) => x.r.customer_id))];
   // Numbers match however they were written (9415550123, +19415550123,
   // (941) 555-0123) — call-commitments' phoneWhere rule, batched.
@@ -213,7 +218,7 @@ async function followedUpIds(conn, rows) {
   // later cancelled (the proof's own rule).
   const visits = visitCustomerIds.length ? await conn('scheduled_services').whereIn('customer_id', visitCustomerIds)
     .where('created_at', '>', bookedFloor).whereNull('recurring_parent_id').whereNull('parent_service_id')
-    .whereNotIn('status', ['cancelled', 'canceled']).select('customer_id', 'created_at') : [];
+    .whereNotIn('status', ['cancelled', 'canceled']).select('customer_id', 'created_at', 'scheduled_date') : [];
   // A call that reached the customer — the proof's bar for a returned
   // callback (completed customer leg of 60 s or more, affirmatively not
   // voicemail), applied to every SLA kind; never a voice-relay sandbox call.
@@ -262,8 +267,10 @@ async function followedUpIds(conn, rows) {
     : phoneKey(rec.to_phone) === x.phone);
   const visitFor = (v, x) => (x.r.customer_id ? String(v.customer_id) === String(x.r.customer_id)
     : (customersByPhone.get(x.phone) || []).includes(String(v.customer_id)));
+  const booked = (v, x) => after(v, x.since)
+    || (!!x.day && !!v.scheduled_date && after(v, promisedAt(x.r)) && etCalendarDayOf(v.scheduled_date) === x.day);
   for (const x of scoped) {
-    if (visits.some((v) => visitFor(v, x) && after(v, x.booked))
+    if (visits.some((v) => visitFor(v, x) && booked(v, x))
       || calls.some((c) => c.id !== x.r.call_log_id && mine(c, x) && after(c, x.since))
       || texts.some((t) => mine(t, x) && after(t, x.since))) done.add(x.r.id);
   }
