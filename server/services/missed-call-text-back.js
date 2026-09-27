@@ -41,7 +41,7 @@
  * against the provider, and otherwise treated as possibly delivered — at
  * most once, never twice. Released only when the pipeline proves nothing
  * was sent and the failure can clear (a hold, a non-terminal provider
- * failure).
+ * failure, a terminal rejection of our own sender or account).
  *
  * Timing: every call gets one send slot (SEND_SLOT_MS) from the first
  * moment it may be texted — after the voicemail-landing grace, or at the
@@ -64,6 +64,8 @@ const {
 const { isWithinSendWindowET, nextSendWindowOpenET } = require('./messaging/send-window');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
+const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
 const { isRealProviderSend, isAmbiguousProviderOutcome } = require('./sms-auto-send');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { knownCallerPhoneExists } = require('../utils/known-caller-phone');
@@ -332,22 +334,32 @@ async function contactState(phone, row, dbi = db) {
 // prep-guide-sender.js runs on its stale claims) for THIS lane's text — the
 // exact body the attempt stamped on its call before sending, so a staff
 // text to the same number never passes for it. That text since the claim →
-// stamp it sent; none → release the orphan; no answer, or no stamped body
-// to match → leave it (possibly delivered, at most once). Returns the claim
-// row that stands afterwards, or null.
+// stamp it sent; none → release the orphan; no answer → leave it for the
+// next pass (possibly delivered, at most once). No stamped body to match
+// (the stamp write failed, or the call row is gone) → it can never be
+// resolved, and the attempt may have sent: keep the one-shot as uncertain,
+// so the bounded orphan pass stops re-reading it (enough of them at the
+// head of its batch would starve every newer orphan) and later calls
+// settle instead of waiting on it. Returns the claim row that stands
+// afterwards, or null.
 async function reconcileStaleClaim(phone, claim) {
   if (claim.outcome !== CLAIM.DISPATCHING) return claim;
   const claimedAt = new Date(claim.created_at).getTime();
   if (!Number.isFinite(claimedAt) || Date.now() - claimedAt < STALE_CLAIM_MS) return claim; // still in flight
+  const stillStale = () => ownInFlightClaim(phone).where('created_at', '<', new Date(Date.now() - STALE_CLAIM_MS));
   const origin = claim.call_log_id ? await db('call_log').where({ id: claim.call_log_id }).first('metadata') : null;
   const body = parseMeta(origin?.metadata).missed_call_text_body;
-  if (!body) return claim;
-  const provider = await require('./twilio').findOutboundMessageSince({ to: phone, sentAfter: claim.created_at, bodyFragment: body });
-  if (provider?.found) {
-    await ownInFlightClaim(phone).update({ outcome: CLAIM.SENT });
-  } else if (provider?.found === false && !provider.unavailable) {
-    await ownInFlightClaim(phone).where('created_at', '<', new Date(Date.now() - STALE_CLAIM_MS)).del();
-    logger.info(`[missed-call-text-back] Released an orphaned claim for ${maskPhone(phone)} — the provider has no message since it`);
+  if (!body) {
+    await stillStale().update({ outcome: CLAIM.UNCERTAIN });
+    logger.warn(`[missed-call-text-back] An orphaned claim for ${maskPhone(phone)} has no stamped text to match — kept as uncertain`);
+  } else {
+    const provider = await require('./twilio').findOutboundMessageSince({ to: phone, sentAfter: claim.created_at, bodyFragment: body });
+    if (provider?.found) {
+      await ownInFlightClaim(phone).update({ outcome: CLAIM.SENT });
+    } else if (provider?.found === false && !provider.unavailable) {
+      await stillStale().del();
+      logger.info(`[missed-call-text-back] Released an orphaned claim for ${maskPhone(phone)} — the provider has no message since it`);
+    }
   }
   return (await db('missed_call_text_claims').where({ phone }).first('outcome', 'created_at', 'call_log_id')) || null;
 }
@@ -489,18 +501,24 @@ async function sendWithLease(row, { fromNumber, phone }, releaseLease, settleFen
   // requiredVars: an admin edit or a weighted variant that drops the
   // callback number never renders (the same list guards template edits).
   const { REQUIRED_TEMPLATE_PLACEHOLDERS } = require('../routes/admin-sms-templates');
-  const body = await renderSmsTemplate(MESSAGE_TYPE, {
+  const rendered = await renderSmsTemplate(MESSAGE_TYPE, {
     callback_clause: callbackClause(fromNumber),
   }, {
     workflow: MESSAGE_TYPE,
     entity_type: 'call_log',
     entity_id: row.id,
   }, { requiredVars: REQUIRED_TEMPLATE_PLACEHOLDERS[MESSAGE_TYPE] });
-  if (!body) {
+  if (!rendered) {
     await releaseLease();
     logger.info(`[missed-call-text-back] Template ${MESSAGE_TYPE} missing/disabled — skipped for ${maskPhone(phone)}`);
     return { outcome: 'skipped', reason: 'template_disabled' };
   }
+  // The text exactly as Twilio will hold it: sendCustomerMessage strips
+  // link schemes and GSM-normalizes a lead text before the provider (both
+  // idempotent), so sending this form changes nothing and the stamp below
+  // matches the provider's own record whatever an admin edit put in the
+  // template.
+  const body = normalizeGsmPunctuation(stripSmsUrlScheme(rendered));
 
   // The exact text, on the call, before anything can reach the provider —
   // what reconcileStaleClaim matches if this attempt dies past the boundary.
@@ -530,9 +548,10 @@ async function sendWithLease(row, { fromNumber, phone }, releaseLease, settleFen
  * can change between the lease and the handoff is decided again here — the
  * call itself (a voicemail recording that landed late makes it the
  * voicemail lane's), still uncontacted, then the one-shot claim (taken here
- * and nowhere earlier), then, as the last step after the last await, a
- * fresh clock against the 8am-8pm window and the call's send slot. A
- * refusal after the claim leaves it to classifySendOutcome to release.
+ * and nowhere earlier), then the voicemail lane's claim, then, as the last
+ * step after the last await, a fresh clock against the 8am-8pm window and
+ * the call's send slot. A refusal after the claim leaves it to
+ * classifySendOutcome to release.
  */
 function providerBoundaryCheck(row, phone, attempt) {
   return async ({ dbi = db } = {}) => {
@@ -548,16 +567,6 @@ function providerBoundaryCheck(row, phone, attempt) {
       if (contact === 'in_flight') {
         return { ok: false, code: BOUNDARY.CONTACT_IN_FLIGHT, reason: 'another text or a staff call to this number is mid-handoff', retryable: true };
       }
-      // Yield to the voicemail lane at the boundary too: a delayed voicemail
-      // it claimed after the early check is caught here, right before this
-      // lane takes its own claim — wait while that claim is provisional,
-      // settle once it is consumed.
-      const voicemailClaim = await dbi('voicemail_sms_claims').where({ phone }).first('outcome');
-      if (voicemailClaim) {
-        return voicemailClaim.outcome === VOICEMAIL_CLAIM_IN_FLIGHT
-          ? { ok: false, code: BOUNDARY.CLAIM_BUSY, reason: 'the voicemail lane holds this number', retryable: true }
-          : { ok: false, code: BOUNDARY.VOICEMAIL_TEXTED, reason: 'the voicemail lane texted this number' };
-      }
       const claimed = await dbi('missed_call_text_claims')
         .insert({ phone, outcome: CLAIM.DISPATCHING, call_log_id: row.id })
         .onConflict('phone')
@@ -570,6 +579,21 @@ function providerBoundaryCheck(row, phone, attempt) {
           : { ok: false, code: BOUNDARY.CLAIMED, reason: 'this number was already texted' };
       }
       attempt.claimed = true;
+      // Yield to the voicemail lane at the boundary too — read AFTER this
+      // lane's claim is in, never before: the two lanes' claims sit in
+      // different tables, so reading first left a gap in which that lane
+      // could claim unseen and both would send. A voicemail claim committed
+      // before this read is seen (back off — wait while it is provisional,
+      // settle once it is consumed; classifySendOutcome releases this lane's
+      // claim either way); one committed after it came second, the voicemail
+      // lane answering a voicemail left after this text, which the owner's
+      // separate-lanes ruling lets through.
+      const voicemailClaim = await dbi('voicemail_sms_claims').where({ phone }).first('outcome');
+      if (voicemailClaim) {
+        return voicemailClaim.outcome === VOICEMAIL_CLAIM_IN_FLIGHT
+          ? { ok: false, code: BOUNDARY.CLAIM_BUSY, reason: 'the voicemail lane holds this number', retryable: true }
+          : { ok: false, code: BOUNDARY.VOICEMAIL_TEXTED, reason: 'the voicemail lane texted this number' };
+      }
       const now = Date.now();
       if (!isWithinSendWindowET(new Date(now))) {
         return { ok: false, code: BOUNDARY.WINDOW, reason: 'outside 8am-8pm ET', retryable: true };
@@ -648,10 +672,21 @@ async function classifySendOutcome(result, phone, attempt, row, { releaseLease, 
   if (!result.sent && (result.terminal === true || (result.blocked && !result.retryable && !result.deferred))) {
     // Terminal: a policy refusal (STOP/suppression, no consent, the
     // landline validator) or a permanent provider rejection. Nothing was
-    // sent. A claim this attempt took is kept as BLOCKED — a number that
-    // can never take a text is not retried by either lane.
-    const reason = result.code || (result.terminal === true ? 'provider_rejected' : 'policy_block');
-    if (attempt.claimed) await keepClaim(phone, CLAIM.BLOCKED, true);
+    // sent, and this call settles. A claim this attempt took is kept as
+    // BLOCKED when the refusal is about the recipient — a number that can
+    // never take a text is not retried — and released when it is our own
+    // sender's or account's (the From cannot send, no permission for the
+    // region, a trial restriction): fixing that makes a later missed call's
+    // text viable, so it must not use up the number's one text.
+    const { SENDER_SIDE_TERMINAL_TWILIO_CODES } = require('./messaging/providers/twilio-sms');
+    const senderCode = SENDER_SIDE_TERMINAL_TWILIO_CODES.find((code) => code === String(result.providerErrorCode || ''));
+    const reason = senderCode
+      ? `sender_rejected_${senderCode}`
+      : result.code || (result.terminal === true ? 'provider_rejected' : 'policy_block');
+    if (attempt.claimed) {
+      if (senderCode) await releaseClaim(phone);
+      else await keepClaim(phone, CLAIM.BLOCKED, true);
+    }
     await settleFenced(`skipped:${reason}`);
     return { outcome: 'skipped', reason };
   }
