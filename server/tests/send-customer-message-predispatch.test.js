@@ -568,6 +568,21 @@ test('promised reschedule link can use the locked SMS handoff only with its deli
   expect(sendViaTwilio).not.toHaveBeenCalled();
 });
 
+test('the deferred voicemail quote-link replay can use the locked SMS handoff, and only as that scheduled replay', async () => {
+  const replay = { ...BASE_INPUT, purpose: 'missed_call_followup', entryPoint: 'scheduled_sms_cron',
+    consentBasis: { status: 'transactional_allowed', source: 'voicemail_text_back' },
+    metadata: { original_message_type: 'voicemail_quote_link' }, withSmsHandoff: jest.fn() };
+  expect((await sendCustomerMessage(replay)).sent).toBe(true);
+  expect(sendViaTwilio.mock.calls[0][1].withSmsHandoff).toEqual(expect.any(Function));
+  sendViaTwilio.mockClear();
+  // Not the immediate send, and not another missed-call follow-up type.
+  for (const other of [{ entryPoint: 'voicemail_lead_sms' }, { metadata: { original_message_type: 'missed_call_text_back' } }]) {
+    expect(await sendCustomerMessage({ ...replay, ...other }))
+      .toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF' });
+  }
+  expect(sendViaTwilio).not.toHaveBeenCalled();
+});
+
 test.each([
   [{ prefs: { sms_enabled: false }, suppressionLoaded: true }, 'SMS_OPTED_OUT'],
   [{ prefs: { sms_enabled: true }, suppressionLoaded: true, suppression: { reason: 'opt_out_keyword' } }, 'SUPPRESSED_OPT_OUT'],
