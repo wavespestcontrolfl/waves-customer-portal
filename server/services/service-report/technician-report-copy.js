@@ -230,7 +230,7 @@ const REPORT_STRUCTURED_DATE_TEXT = String.raw`(?:\d{4}\s*[/-]\s*\d{1,2}\s*[/-]\
 const REPORT_STRUCTURED_DATE_RE = new RegExp(String.raw`\b${REPORT_STRUCTURED_DATE_TEXT}\b`, 'g');
 const REPORT_AFFIXED_OR_GROUPED_NUMBER_RE = /(?:\b[A-Za-z#*]+\d[A-Za-z0-9#*]*\b|\b\d[A-Za-z0-9#*]*[A-Za-z#*]\b|\b\d{1,2}(?:[\s–—-]+\d{1,2}){1,7}\b)/;
 const REPORT_PAST_ACCESS_WORK_ACTION_RE = /\b(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?|spray(?:s|ed|ing)?|dust(?:s|ed|ing)?|clean(?:s|ed|ing)?)\b/i;
-const REPORT_PEST_COUNT_RE = /\b(?:found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?)\s+\d{1,8}\s+(?:ants?|termites?|roaches?|cockroaches?|mosquitoes?|fleas?|ticks?|spiders?|rodents?|mice|rats?|wasps?|bees?|flies|beetles?|silverfish|earwigs?)\b/gi;
+const REPORT_PEST_COUNT_RE = /\b(?:found|observ(?:e|es|ed|ing)|count(?:s|ed|ing)?|not(?:e|es|ed|ing)|record(?:s|ed|ing)?)\s+\d{1,8}\s+(?:(?:dead|live|living|active|inactive|winged|worker|adult|juvenile|small|large|young)\s+){0,2}(?:ants?|termites?|roaches?|cockroaches?|mosquitoes?|fleas?|ticks?|spiders?|rodents?|mice|rats?|wasps?|bees?|flies|beetles?|silverfish|earwigs?)\b/gi;
 const REPORT_SERVICE_IDENTIFIER_RE = /\b(?:treat(?:s|ed|ing)?|servic(?:e|es|ed|ing)|inspect(?:s|ed|ing)?|check(?:s|ed|ing)?)\s+(?:bait\s+)?(?:station|trap|device|unit)\s*#?\s*\d{3,8}\b/gi;
 
 function isValidStructuredDate(value) {
@@ -423,6 +423,7 @@ function containsSubordinateAccessCredential(text) {
 }
 
 const REPORT_DIRECT_ACCESS_CODE_RES = [
+  /\b(?:gate|door|garage|entry|keypad|lock\s?box|lock|alarm)\b\s*(?:is|:|=|was|were|reads?)\s*\d{3,8}\s*(?:gallons?|gal|ml|millilit(?:er|re)s?|lit(?:er|re)s?|fl\.?\s*oz|oz|ounces?|pounds?|lbs?|grams?|kg)\b/i,
   /\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,
   new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*${REPORT_STRUCTURED_DATE_TEXT}\b`, 'i'),
   new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b(?:\s+(?!(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|broadcast(?:ed|ing)?|spread(?:ing)?|distribut(?:e|ed|ing)|spray(?:ed|ing)?|dust(?:ed|ing)?|clean(?:ed|ing)?)\b)[a-z][a-z'’\-]*){1,5}\s+(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b`, 'i'),

@@ -152,6 +152,8 @@ describe('custom action credential screening', () => {
     'Opened rear gate using 2026-09-27',
     'Opened rear gate with 09/27/26',
     'Opened rear gate and found 100 ants, then entered 8842 at the keypad',
+    'The rear gate is 2468 ml',
+    'Opened rear gate and found 100 dead ants, then entered 8842 at the keypad',
   ])('rejects recorded access credentials: %s', (action) => {
     expect(customerCopyViolations(action)).toContain('access_code');
   });
@@ -214,6 +216,8 @@ describe('custom action credential screening', () => {
     'Unlocked side door after servicing station 8842',
     'Opened rear gate by using 2 hands',
     'Opened rear gate after using 2 oz around the hinge',
+    'Opened rear gate and found 100 dead ants',
+    'The rear gate is 100 feet from the lanai',
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
   });
@@ -269,6 +273,8 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Opened rear gate using 2026-09-27',
     'Opened rear gate with 09/27/26',
     'Opened rear gate and found 100 ants, then entered 8842 at the keypad',
+    'The rear gate is 2468 ml',
+    'Opened rear gate and found 100 dead ants, then entered 8842 at the keypad',
   ])('does not publish disguised access instructions: %s', (instruction) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${instruction}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toBeNull();
@@ -324,6 +330,8 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Unlocked side door after servicing station 8842',
     'Opened rear gate by using 2 hands',
     'Opened rear gate after using 2 oz around the hinge',
+    'Opened rear gate and found 100 dead ants',
+    'The rear gate is 100 feet from the lanai',
   ])('publishes bounded material, date, unit-id, and fertilizer details: %s', (action) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${action}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toContain(action);
