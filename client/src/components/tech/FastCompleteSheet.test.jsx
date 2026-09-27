@@ -259,6 +259,30 @@ describe('FastCompleteSheet', () => {
     expect(await screen.findByText('Re-service complete')).toBeTruthy();
   });
 
+  test('closing after an unresolved attempt asks for a schedule refresh (it may have saved)', async () => {
+    const request = makeRequest();
+    const base = request.getMockImplementation();
+    request.mockImplementation(async (path, options) => {
+      if (path.endsWith('/complete')) {
+        request.calls.push({ path, options });
+        throw Object.assign(new Error('Completion failed.'), { status: 503 });
+      }
+      return base(path, options);
+    });
+    const onClose = vi.fn();
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={onClose} />);
+
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledWith({ refresh: true });
+  });
+
   test('a 409 service_already_completed is treated as saved, not retried', async () => {
     const request = makeRequest();
     const base = request.getMockImplementation();

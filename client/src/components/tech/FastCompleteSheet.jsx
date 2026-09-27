@@ -366,13 +366,15 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
 
   // Dismissing a saved sheet refreshes the schedule like "Next stop" does,
   // so a missed socket update can't leave the visit showing as open.
-  // A sheet blocked on a stale or changed visit asks the parent to refresh,
-  // so reopening routes from the live schedule, not the same old row.
+  // Any dismissal the schedule may be stale for asks the parent to refresh:
+  // a sheet blocked on a stale or changed visit, or an attempt whose outcome
+  // is unknown or refused (it may have saved), so reopening routes from the
+  // live schedule rather than the same old row.
   const close = useCallback(() => {
     if (submitting) return;
     if (done) onCompleted?.();
-    else onClose?.(ctx.blockedReason ? { refresh: true } : undefined);
-  }, [submitting, done, ctx.blockedReason, onClose, onCompleted]);
+    else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
+  }, [submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved, or refused
   // for good; the recap modal (Full form) can't resume a /complete attempt,
