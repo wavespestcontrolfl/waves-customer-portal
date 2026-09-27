@@ -120,7 +120,7 @@
     "scientific_name": "Picidae (sign)",
     "rank": "group",
     "group": "birds",
-    "subgroup": null,
+    "subgroup": "protected-bird-damage",
     "site_category": "Wildlife neighbors",
     "stages": [],
     "sign_of": [],
@@ -234,7 +234,7 @@
     "scientific_name": "Athene cunicularia floridana",
     "rank": "subspecies",
     "group": "birds",
-    "subgroup": null,
+    "subgroup": "protected-ground-birds",
     "site_category": "Wildlife neighbors",
     "stages": [
       "juvenile",

@@ -202,6 +202,108 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     });
   });
 
+  test.each([
+    ['giant-african-land-snail', 'regulated-land-snails', 'report_fdacs', 'none', 'high', { disease_vector: true }, /giant|african/i],
+    ['raccoon', 'rabies-risk-wild-mammals', 'wildlife_trapper', 'none', 'high', { disease_vector: true }, /raccoon/i],
+    ['burrowing-owl', 'protected-ground-birds', 'protected_leave_alone', 'none', 'moderate', {}, /burrowing|owl/i],
+  ])('a high-confidence draft %s keeps its special generic safety and routing contract',
+    (slug, nodeId, referral, serviceLine, urgency, safety, forbiddenIdentity) => {
+      const built = answerFor(slug, { approved: false });
+      expect(built).toMatchObject({
+        answer: { level: 'subgroup', node_id: nodeId, wording: 'group_only' },
+        entry: null, topEntrySlug: null, referral: { kind: referral },
+      });
+      expect(built.answer.headline).not.toMatch(forbiddenIdentity);
+      expect(mapToV1(built)).toMatchObject({
+        species_slug: null, category: slug === 'giant-african-land-snail' ? 'other' : 'wildlife',
+        service_line: serviceLine, urgency,
+        report_contract: { safety },
+      });
+    });
+
+  test('regulated-snail and rabies-risk fallbacks retain source-backed exposure instructions', () => {
+    const snail = answerFor('giant-african-land-snail', { approved: false });
+    expect(snail.referral).toMatchObject({ kind: 'report_fdacs' });
+    expect(snail.referral.text).toMatch(/parasite.*meningitis|never touch it bare-handed/i);
+    expect(snail.referral.text).toMatch(/report it.*FDACS/i);
+
+    const mammal = answerFor('raccoon', { approved: false });
+    expect(mammal.referral).toMatchObject({ kind: 'wildlife_trapper' });
+    expect(mammal.referral.text).toMatch(/bitten or scratched.*healthcare professional|health department/i);
+    expect(mammal.referral.text).not.toMatch(/raccoon/i);
+  });
+
+  test('mixed and low-confidence results do not borrow special snail, mammal, or protected-bird guidance', () => {
+    const base = {
+      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
+      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+    };
+    for (const slug of ['giant-african-land-snail', 'raccoon', 'burrowing-owl']) {
+      const built = buildAnswer({
+        ...base, candidates: [{ ...candidate(slug, { approved: false }), confidence: 0.5 }],
+      });
+      expect({ slug, level: built.answer.level, referral: built.referral })
+        .toEqual({ slug, level: 'unknown', referral: null });
+    }
+
+    const mixedCases = [
+      ['giant-african-land-snail', 'garden-snails', 'snails-slugs-worms'],
+      ['raccoon', 'virginia-opossum', 'wild-mammals'],
+      ['burrowing-owl', 'muscovy-duck', 'birds'],
+    ];
+    for (const [special, other, nodeId] of mixedCases) {
+      const built = buildAnswer({
+        ...base,
+        candidates: [
+          { ...candidate(special, { approved: false }), confidence: 0.55 },
+          { ...candidate(other, { approved: false }), confidence: 0.3 },
+        ],
+      });
+      expect({ special, answer: built.answer, referral: built.referral }).toMatchObject({
+        special, answer: { node_id: nodeId }, referral: null,
+      });
+      expect(mapToV1(built).report_contract.safety).toMatchObject({
+        disease_vector: false, structural_threat: false,
+      });
+    }
+  });
+
+  test('every audited draft special fallback retains its referral, no-service, urgency, and mapped medical hazards', () => {
+    const safetyFields = { stinging: 'stings', venomous: 'venomous', disease_vector: 'disease_vector' };
+    const audited = catalog.listEntries().filter((entry) => entry.review.status === 'draft'
+      && (entry.service.referral || entry.safety.protected || entry.risk === 'medical'));
+    expect(audited).toHaveLength(55);
+
+    for (const entry of audited) {
+      const built = answerFor(entry.slug, { approved: false });
+      const mapped = mapToV1(built);
+      expect({ slug: entry.slug, entry: built.entry, topEntrySlug: built.topEntrySlug })
+        .toEqual({ slug: entry.slug, entry: null, topEntrySlug: null });
+      if (entry.service.referral) {
+        expect({ slug: entry.slug, referral: built.referral?.kind })
+          .toEqual({ slug: entry.slug, referral: entry.service.referral });
+      }
+      if (entry.safety.protected) {
+        expect({ slug: entry.slug, referral: built.referral?.kind || null })
+          .toEqual({ slug: entry.slug, referral: expect.any(String) });
+      }
+      if (entry.service.line === 'none') {
+        expect({ slug: entry.slug, line: mapped.service_line })
+          .toEqual({ slug: entry.slug, line: 'none' });
+      }
+      if (entry.urgency === 'high') {
+        expect({ slug: entry.slug, urgency: mapped.urgency })
+          .toEqual({ slug: entry.slug, urgency: 'high' });
+      }
+      for (const [mappedFlag, authoredFlag] of Object.entries(safetyFields)) {
+        if (entry.safety[authoredFlag]) {
+          expect({ slug: entry.slug, flag: mappedFlag, value: mapped.report_contract.safety[mappedFlag] })
+            .toEqual({ slug: entry.slug, flag: mappedFlag, value: true });
+        }
+      }
+    }
+  });
+
   test('low-confidence and mixed-wildlife results do not receive bat-specific guidance', () => {
     const base = {
       disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
@@ -276,21 +378,22 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     expect(mixed.answer).toMatchObject({ level: 'group', node_id: 'snakes' });
     expect(mixed.referral).toBeNull();
     expect(mapToV1(mixed).report_contract).toMatchObject({
-      urgency: 'low', safety: { venomous: false }, service: { line: 'pest' },
+      urgency: 'low', safety: { venomous: false }, service: { line: 'none' },
     });
   });
 
   test.each([
-    ['fire-ant', 'fire-ants', { stinging: true, venomous: true }, 'pest', 'pest', 'high'],
-    ['paper-wasp', 'social-wasps', { stinging: true, venomous: true }, 'pest', 'pest', 'moderate'],
-    ['puss-caterpillar', 'stinging-caterpillars', { stinging: true, venomous: false }, 'pest', null, 'low'],
-    ['green-iguana', 'large-lizards', { disease_vector: true }, 'none', null, 'moderate'],
+    ['fire-ant', 'fire-ants', { stinging: true, venomous: true }, 'pest', 'pest', 'high', null],
+    ['paper-wasp', 'social-wasps', { stinging: true, venomous: true }, 'pest', 'pest', 'moderate', null],
+    ['puss-caterpillar', 'venomous-caterpillars', { stinging: true, venomous: true }, 'pest', null, 'low', null],
+    ['green-iguana', 'large-lizards', { disease_vector: true }, 'none', null, 'moderate', 'wildlife_trapper'],
   ])('an audited draft %s climb retains shared generic hazards without a species identity',
-    (slug, nodeId, safety, line, key, urgency) => {
+    (slug, nodeId, safety, line, key, urgency, referral) => {
       const built = answerFor(slug, { approved: false });
       expect(built).toMatchObject({
-        answer: { level: 'subgroup', node_id: nodeId }, entry: null, topEntrySlug: null, referral: null,
+        answer: { level: 'subgroup', node_id: nodeId }, entry: null, topEntrySlug: null,
       });
+      expect(built.referral?.kind || null).toBe(referral);
       const mapped = mapToV1(built);
       expect(mapped).toMatchObject({ species_slug: null, service_line: line, urgency });
       expect(mapped.report_contract).toMatchObject({ safety, service: { line, key } });

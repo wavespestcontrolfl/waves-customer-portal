@@ -298,6 +298,15 @@
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the whole insect and any markings already visible. Do not approach, disturb, or handle it.",
         "why": "A full-body view from two angles is what a generic ID needs to narrow further."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        }
       }
     },
     {
@@ -328,6 +337,15 @@
       "next_photo": {
         "ask": "Use zoom from a safe distance for the animal and any digging or damage already visible. Never approach, handle, or disturb the animal or its shelter.",
         "why": "Body shape and the damage pattern point to which animal it is."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": true,
+          "urgency": "low"
+        }
       }
     },
     {
@@ -338,6 +356,15 @@
       "next_photo": {
         "ask": "A close-up of the head and throat from a few feet away, plus the whole body for size.",
         "why": "Throat color (dewlap) and overall size separate native anoles from the larger invasive lizards."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": false,
+          "urgency": "low"
+        }
       }
     },
     {
@@ -354,6 +381,15 @@
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the whole snake and body pattern only if already visible. Never approach, disturb, or handle it.",
         "why": "Head shape and body pattern are what separate a harmless snake from a venomous one."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": false,
+          "urgency": "low"
+        }
       }
     },
     {
@@ -387,6 +423,15 @@
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the skin texture and area behind the eyes only if already visible. Do not approach, touch, or handle the animal.",
         "why": "Skin texture and the glands behind the eyes separate toxic toads from harmless frogs."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        }
       }
     },
     {
@@ -397,6 +442,15 @@
       "next_photo": {
         "ask": "Use zoom from a safe distance for the bird and any nest, burrow, or damage already visible. Never approach, handle, or disturb the bird, nest, or burrow.",
         "why": "Body shape plus where it's nesting narrows which bird and whether it's protected."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": false,
+          "urgency": "low"
+        }
       }
     }
   ],
@@ -421,7 +475,7 @@
           "serviceLine": "pest",
           "serviceKey": "pest",
           "serviceLabel": "General Pest Control",
-          "inspectionRequired": false,
+          "inspectionRequired": true,
           "urgency": "high"
         }
       }
@@ -548,6 +602,18 @@
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show body shape and color already visible, and tell us where it was found. Do not touch or handle it or delay care to get a photo.",
         "why": "Body shape and where it was found (pet, person, indoors) separate tick species."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": null,
+          "serviceLabel": "Pest Consultation",
+          "inspectionRequired": true,
+          "urgency": "high"
+        }
       }
     },
     {
@@ -660,10 +726,16 @@
       "generic_guidance": {
         "compatibility": {
           "safety": {
-            "stinging": true
+            "stinging": true,
+            "venomous": true
           }
         }
-      }
+      },
+      "aliases": [
+        "honey bee",
+        "honey bees",
+        "apis mellifera"
+      ]
     },
     {
       "id": "stinging-caterpillars",
@@ -888,14 +960,16 @@
       "generic_guidance": {
         "compatibility": {
           "safety": {
-            "disease_vector": true
+            "disease_vector": true,
+            "structural_threat": true
           },
           "serviceLine": "none",
           "serviceKey": null,
           "serviceLabel": "Wildlife Referral",
-          "inspectionRequired": true,
+          "inspectionRequired": false,
           "urgency": "moderate"
-        }
+        },
+        "referral": "wildlife_trapper"
       }
     },
     {
@@ -998,6 +1072,520 @@
       "next_photo": {
         "ask": "Use zoom from a safe distance for a side view showing the legs and body segments. Do not handle it or place objects beside it.",
         "why": "Body shape, color, and leg count per segment help separate common millipedes."
+      }
+    },
+    {
+      "id": "stinging-ants",
+      "group": "ants",
+      "label": "Stinging Ants",
+      "generic": "a stinging ant",
+      "scientific": "several genera",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the whole ant and any mound or trail. Do not disturb or handle it.",
+        "why": "Body shape and the nesting pattern narrow the ant group while keeping you away from a possible sting."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        }
+      }
+    },
+    {
+      "id": "venomous-caterpillars",
+      "group": "caterpillars-moths",
+      "label": "Caterpillars with Venomous Spines",
+      "generic": "a caterpillar with venomous spines",
+      "scientific": "several families",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the spines and color pattern. Do not touch or handle the caterpillar.",
+        "why": "The spine pattern separates caterpillars with venomous spines from harmless fuzzy species."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "urgency": "low"
+        }
+      }
+    },
+    {
+      "id": "filth-flies",
+      "group": "flies-gnats",
+      "label": "Health-Relevant Flies",
+      "generic": "a common fly",
+      "scientific": "Muscidae / Calliphoridae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance for the body, wings, and the surface where it landed. Do not touch or handle it.",
+        "why": "Body shape and location separate health-relevant flies from harmless outdoor look-alikes."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        }
+      }
+    },
+    {
+      "id": "non-biting-outdoor-flies",
+      "group": "flies-gnats",
+      "label": "Non-Biting Outdoor Flies",
+      "generic": "a non-biting outdoor fly",
+      "scientific": "several families",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance for the body, wings, and the surface where it landed. Do not touch or handle it.",
+        "why": "Body shape and location separate health-relevant flies from harmless outdoor look-alikes."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        }
+      }
+    },
+    {
+      "id": "toxic-toads",
+      "group": "frogs-toads",
+      "label": "Potentially Toxic Toads",
+      "generic": "a toad that may be toxic to pets",
+      "scientific": "Bufonidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the area behind the eyes. Do not touch or handle the toad, and keep pets away.",
+        "why": "The glands behind the eyes help separate a potentially toxic toad from a harmless native species."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "high"
+        }
+      }
+    },
+    {
+      "id": "reportable-large-lizards",
+      "group": "lizards",
+      "label": "Reportable Large Lizards",
+      "generic": "a large lizard",
+      "scientific": "several families",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the whole lizard, including its head and tail. Do not approach, corner, or handle it.",
+        "why": "Overall size, coloring, and tail shape narrow the type of large lizard and the right wildlife response."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Report to FWC",
+          "inspectionRequired": false,
+          "urgency": "high"
+        },
+        "referral": "report_fwc"
+      }
+    },
+    {
+      "id": "culex-mosquitoes",
+      "group": "mosquitoes",
+      "label": "Culex Mosquitoes",
+      "generic": "a Culex mosquito",
+      "scientific": "Culex",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance for legs and back on a wall or another non-contact surface. Do not use your skin as a perch or allow it to bite for a photo.",
+        "why": "Leg and back markings narrow the mosquito group and its health-risk guidance."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "mosquito",
+          "serviceKey": "mosquito",
+          "serviceLabel": "Mosquito Control",
+          "inspectionRequired": false,
+          "urgency": "high"
+        }
+      }
+    },
+    {
+      "id": "high-risk-indoor-roaches",
+      "group": "roaches",
+      "label": "Higher-Risk Indoor Roaches",
+      "generic": "an indoor cockroach",
+      "scientific": "Blattodea",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the roach or signs and where they were found. Do not touch the insect or signs.",
+        "why": "Body markings or the exact sign help distinguish an established indoor infestation."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": null,
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": true,
+          "urgency": "high"
+        }
+      }
+    },
+    {
+      "id": "roach-signs",
+      "group": "roaches",
+      "label": "Cockroach Activity Signs",
+      "generic": "signs of cockroach activity",
+      "scientific": "Blattodea (sign)",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the roach or signs and where they were found. Do not touch the insect or signs.",
+        "why": "Body markings or the exact sign help distinguish an established indoor infestation."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "high"
+        }
+      }
+    },
+    {
+      "id": "stinging-scorpions",
+      "group": "scorpions-arachnids",
+      "label": "Stinging Scorpions",
+      "generic": "a stinging scorpion",
+      "scientific": "Buthidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the pincers and tail. Do not approach, disturb, or handle it.",
+        "why": "Pincer and tail shape distinguish a stinging scorpion from harmless arachnids."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        }
+      }
+    },
+    {
+      "id": "regulated-land-snails",
+      "group": "snails-slugs-worms",
+      "label": "Regulated Large Land Snails",
+      "generic": "a large land snail",
+      "scientific": "Achatinidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the whole shell and nearby surface. Do not touch or move the snail.",
+        "why": "Shell size and shape distinguish a regulated large land snail from common garden snails."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "high"
+        },
+        "referral": "report_fdacs",
+        "referral_template": "report_fdacs_snail_exposure",
+        "sources": [
+          "https://www.fdacs.gov/Agriculture-Industry/Pests-and-Diseases/Plant-Pests-and-Diseases/Giant-African-Land-Snail",
+          "https://www.cdc.gov/dpdx/angiostrongyliasis/index.html"
+        ]
+      }
+    },
+    {
+      "id": "medically-significant-spiders",
+      "group": "spiders",
+      "label": "Medically Significant Spiders",
+      "generic": "a spider that may be venomous",
+      "scientific": "Araneae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the body markings only if already visible. Do not approach, disturb, or handle it.",
+        "why": "Body markings help separate a medically significant spider from common harmless spiders."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        }
+      }
+    },
+    {
+      "id": "disease-vector-assassin-bugs",
+      "group": "true-bugs",
+      "label": "Disease-Vector Assassin Bugs",
+      "generic": "a biting true bug",
+      "scientific": "Reduviidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the head, beak, and side markings. Do not touch or handle it.",
+        "why": "Head shape and side markings separate a disease-vector assassin bug from defensive look-alikes."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": null,
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": true,
+          "urgency": "high"
+        }
+      }
+    },
+    {
+      "id": "high-risk-social-wasps",
+      "group": "wasps-bees",
+      "label": "Higher-Risk Social Wasps",
+      "generic": "a social wasp",
+      "scientific": "Vespidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the wasp and nest location. Do not approach or disturb the nest.",
+        "why": "Nest type and body markings narrow the social wasp group while keeping you away from stings."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "high"
+        }
+      }
+    },
+    {
+      "id": "structure-bee-colonies",
+      "group": "wasps-bees",
+      "label": "Bee Colonies in Structures",
+      "generic": "a bee colony in a structure",
+      "scientific": "Apidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the bee activity and occupied opening. Do not approach, disturb, or seal the opening.",
+        "why": "The activity pattern and nest location distinguish a structural colony from solitary or foraging bees."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": null,
+          "serviceLabel": "Bee Assessment & Referral",
+          "inspectionRequired": true,
+          "urgency": "high"
+        },
+        "referral": "bee_relocation"
+      }
+    },
+    {
+      "id": "beneficial-bees",
+      "group": "wasps-bees",
+      "label": "Beneficial Solitary and Ground Bees",
+      "generic": "a solitary or ground-nesting bee",
+      "scientific": "Apidae / Megachilidae",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the bee activity and occupied opening. Do not approach, disturb, or seal the opening.",
+        "why": "The activity pattern and nest location distinguish a structural colony from solitary or foraging bees."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        }
+      }
+    },
+    {
+      "id": "contact-risk-wild-mammals",
+      "group": "wild-mammals",
+      "label": "Wild Mammals with Contact Risk",
+      "generic": "a wild mammal",
+      "scientific": "Mammalia",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the whole animal or signs and their location. Never approach, corner, touch, or handle it.",
+        "why": "Body shape and the activity location narrow the wildlife group and the safest referral."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "referral": "wildlife_trapper"
+      }
+    },
+    {
+      "id": "wildlife-removal-mammals",
+      "group": "wild-mammals",
+      "label": "Wild Mammals Needing Removal",
+      "generic": "a wild mammal",
+      "scientific": "Mammalia",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the whole animal or signs and their location. Never approach, corner, touch, or handle it.",
+        "why": "Body shape and the activity location narrow the wildlife group and the safest referral."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "referral": "wildlife_trapper"
+      }
+    },
+    {
+      "id": "rabies-risk-wild-mammals",
+      "group": "wild-mammals",
+      "label": "Wild Mammals with Rabies Exposure Risk",
+      "generic": "a wild mammal",
+      "scientific": "Mammalia",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the whole animal or signs and their location. Never approach, corner, touch, or handle it.",
+        "why": "Body shape and the activity location narrow the wildlife group and the safest referral."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "disease_vector": true,
+            "structural_threat": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral",
+          "inspectionRequired": false,
+          "urgency": "high"
+        },
+        "referral": "wildlife_trapper",
+        "referral_template": "rabies_exposure_wildlife_trapper",
+        "sources": [
+          "https://www.cdc.gov/rabies/prevention/index.html",
+          "https://ask.ifas.ufl.edu/uw033"
+        ]
+      }
+    },
+    {
+      "id": "protected-bird-damage",
+      "group": "birds",
+      "label": "Protected Bird Damage",
+      "generic": "damage from a bird",
+      "scientific": "Aves (sign)",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the bird, burrow, or damage already visible. Never approach or disturb the bird or shelter.",
+        "why": "The setting and activity distinguish protected ground nesting from protected bird damage."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "structural_threat": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Repair & Deterrence",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "referral": "protected_leave_alone",
+        "sources": [
+          "https://www.fws.gov/law/migratory-bird-treaty-act-1918",
+          "https://www.fws.gov/media/list-birds-protected-migratory-bird-treaty-act-2023"
+        ],
+        "referral_template": "protected_bird_deterrence"
+      }
+    },
+    {
+      "id": "protected-ground-birds",
+      "group": "birds",
+      "label": "Protected Ground-Nesting Birds",
+      "generic": "a ground-nesting bird",
+      "scientific": "Aves",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the bird, burrow, or damage already visible. Never approach or disturb the bird or shelter.",
+        "why": "The setting and activity distinguish protected ground nesting from protected bird damage."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Protected Species - Leave Alone",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "referral": "protected_leave_alone"
       }
     }
   ],

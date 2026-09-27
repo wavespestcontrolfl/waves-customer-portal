@@ -247,7 +247,7 @@
     "scientific_name": "Megalopyge opercularis",
     "rank": "species",
     "group": "caterpillars-moths",
-    "subgroup": "stinging-caterpillars",
+    "subgroup": "venomous-caterpillars",
     "site_category": "Stingers",
     "traits": [
       "Looks like a tiny blonde toupee — completely furry, teardrop-shaped, about 2.5 cm",
@@ -349,7 +349,7 @@
     "scientific_name": "Automeris io",
     "rank": "species",
     "group": "caterpillars-moths",
-    "subgroup": "stinging-caterpillars",
+    "subgroup": "venomous-caterpillars",
     "site_category": "Stingers",
     "traits": [
       "Bright green with a red-and-white racing stripe down each side",
@@ -438,7 +438,7 @@
     "scientific_name": "Acharia stimulea",
     "rank": "species",
     "group": "caterpillars-moths",
-    "subgroup": "stinging-caterpillars",
+    "subgroup": "venomous-caterpillars",
     "site_category": "Stingers",
     "stages": [
       "larva"
@@ -541,7 +541,7 @@
     "scientific_name": "Phobetron pithecium",
     "rank": "species",
     "group": "caterpillars-moths",
-    "subgroup": "stinging-caterpillars",
+    "subgroup": "venomous-caterpillars",
     "site_category": "Stingers",
     "stages": [
       "larva"
@@ -639,7 +639,7 @@
     "scientific_name": "Hemileuca maia",
     "rank": "species",
     "group": "caterpillars-moths",
-    "subgroup": "stinging-caterpillars",
+    "subgroup": "venomous-caterpillars",
     "site_category": "Stingers",
     "stages": [
       "larva"

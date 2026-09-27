@@ -358,7 +358,7 @@ describe('owner approval content binding', () => {
 
 describe('index.json — groups, subgroups, next_photo', () => {
   test('every group and subgroup has an ask/why next_photo within its length caps', () => {
-    expect(index.subgroups).toHaveLength(38);
+    expect(index.subgroups).toHaveLength(59);
     for (const g of index.groups) {
       expect(g.next_photo.ask.length).toBeLessThanOrEqual(180);
       expect(g.next_photo.why.length).toBeLessThanOrEqual(160);
@@ -392,7 +392,7 @@ describe('index.json — groups, subgroups, next_photo', () => {
     for (const [nodeId, contract] of Object.entries(expected)) {
       const node = catalog.getSubgroup(nodeId);
       const descendants = allEntries.filter((entry) => entry.subgroup === nodeId);
-      expect(descendants.length).toBeGreaterThan(1);
+      expect(descendants.length).toBeGreaterThan(0);
       expect(node.generic_guidance).toBeTruthy();
       if (contract.safetyOnly) {
         expect(node.generic_guidance.compatibility).toEqual({ safety: { stinging: true } });
@@ -472,9 +472,9 @@ describe('name collisions', () => {
     expect(new Set(unresolved.map((collision) => collision.name))).toEqual(new Set(['daddy longlegs', 'daddy long legs']));
   });
 
-  test('Apis mellifera names the bees subgroup, not one honey bee situation', () => {
+  test('Apis mellifera stays above the two different honey-bee situations', () => {
     const result = catalog.resolveName('Apis mellifera');
-    expect(result.node).toMatchObject({ level: 'subgroup', id: 'bees' });
+    expect(result.node).toMatchObject({ level: 'group', id: 'wasps-bees' });
   });
 
   test('bare rat-snake names stay generic while qualified species names remain specific', () => {
@@ -758,7 +758,7 @@ describe('loader API surface', () => {
 
   test('listEntries filters by group, subgroup, and kind', () => {
     expect(catalog.listEntries({ group: 'ants' }).length).toBe(19);
-    expect(catalog.listEntries({ group: 'ants', subgroup: 'fire-ants' }).length).toBe(3);
+    expect(catalog.listEntries({ group: 'ants', subgroup: 'fire-ants' }).length).toBe(4);
     expect(catalog.listEntries({ kind: 'organism' }).length).toBe(allEntries.length - 12);
     expect(catalog.listEntries({ kind: 'sign' }).length).toBe(12);
   });
@@ -818,17 +818,17 @@ describe('loader API surface', () => {
   });
 
   test.each([
-    ['little-fire-ant', 'group', 'ants', /Do not approach, disturb, handle/i],
-    ['honey-bee-wall-colony', 'subgroup', 'bees', /without approaching or disturbing/i],
-    ['puss-caterpillar', 'subgroup', 'stinging-caterpillars', /Do not approach, touch, or handle/i],
-    ['io-moth-caterpillar', 'subgroup', 'stinging-caterpillars', /Do not approach, touch, or handle/i],
-    ['saddleback-caterpillar', 'subgroup', 'stinging-caterpillars', /Do not approach, touch, or handle/i],
+    ['little-fire-ant', 'subgroup', 'fire-ants', /without approaching or disturbing/i],
+    ['honey-bee-wall-colony', 'subgroup', 'structure-bee-colonies', /Do not approach, disturb, or seal/i],
+    ['puss-caterpillar', 'subgroup', 'venomous-caterpillars', /Do not touch or handle/i],
+    ['io-moth-caterpillar', 'subgroup', 'venomous-caterpillars', /Do not touch or handle/i],
+    ['saddleback-caterpillar', 'subgroup', 'venomous-caterpillars', /Do not touch or handle/i],
     ['black-widow', 'subgroup', 'widow-spiders', /Do not approach, disturb, or handle/i],
     ['mud-dauber', 'subgroup', 'solitary-wasps', /without approaching or disturbing/i],
-    ['yellowjacket', 'subgroup', 'social-wasps', /without approaching or disturbing/i],
+    ['yellowjacket', 'subgroup', 'high-risk-social-wasps', /Do not approach or disturb/i],
     ['paper-wasp', 'subgroup', 'social-wasps', /without approaching or disturbing/i],
-    ['brown-recluse', 'group', 'spiders', /only surfaces already visible.*do not approach, disturb, turn over, or handle/i],
-    ['cane-toad', 'subgroup', 'toads', /do not approach, touch, or handle/i],
+    ['brown-recluse', 'subgroup', 'medically-significant-spiders', /Do not approach, disturb, or handle/i],
+    ['cane-toad', 'subgroup', 'toxic-toads', /Do not touch or handle/i],
     ['cuban-treefrog', 'subgroup', 'treefrogs', /do not approach, touch, or handle/i],
   ])('the actual draft %s fallback never asks the customer to approach or handle it', (slug, level, nodeId, distanceRule) => {
     const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');

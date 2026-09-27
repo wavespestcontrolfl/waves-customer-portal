@@ -21,7 +21,7 @@
     "scientific_name": "Dasypus novemcinctus",
     "rank": "species",
     "group": "wild-mammals",
-    "subgroup": null,
+    "subgroup": "contact-risk-wild-mammals",
     "site_category": "Wildlife neighbors",
     "traits": [
       "Shallow, cone-shaped holes dug overnight, 1-3 inches deep",
@@ -226,7 +226,7 @@
     "scientific_name": "Glaucomys volans",
     "rank": "species",
     "group": "wild-mammals",
-    "subgroup": null,
+    "subgroup": "wildlife-removal-mammals",
     "site_category": "Wildlife neighbors",
     "stages": [
       "juvenile",
@@ -342,7 +342,7 @@
     "scientific_name": "Procyon lotor",
     "rank": "species",
     "group": "wild-mammals",
-    "subgroup": null,
+    "subgroup": "rabies-risk-wild-mammals",
     "site_category": "Wildlife neighbors",
     "stages": [
       "juvenile",
@@ -902,7 +902,7 @@
     "scientific_name": "Sus scrofa (sign)",
     "rank": "group",
     "group": "wild-mammals",
-    "subgroup": null,
+    "subgroup": "wildlife-removal-mammals",
     "site_category": "Lawn",
     "stages": [],
     "sign_of": [],

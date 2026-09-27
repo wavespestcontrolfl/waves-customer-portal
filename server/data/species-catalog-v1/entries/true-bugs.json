@@ -664,7 +664,7 @@
     "scientific_name": "Triatoma sanguisuga",
     "rank": "species",
     "group": "true-bugs",
-    "subgroup": "assassin-bugs",
+    "subgroup": "disease-vector-assassin-bugs",
     "site_category": "Biting",
     "stages": [
       "nymph",

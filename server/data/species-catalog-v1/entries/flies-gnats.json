@@ -330,7 +330,7 @@
     "scientific_name": "Musca domestica",
     "rank": "species",
     "group": "flies-gnats",
-    "subgroup": null,
+    "subgroup": "filth-flies",
     "site_category": "Flies & gnats",
     "stages": [
       "adult"
@@ -442,7 +442,7 @@
     "scientific_name": "Calliphoridae",
     "rank": "family",
     "group": "flies-gnats",
-    "subgroup": null,
+    "subgroup": "filth-flies",
     "site_category": "Flies & gnats",
     "stages": [
       "adult"
@@ -1019,7 +1019,7 @@
     "scientific_name": "Chironomidae",
     "rank": "family",
     "group": "flies-gnats",
-    "subgroup": null,
+    "subgroup": "non-biting-outdoor-flies",
     "site_category": "Flies & gnats",
     "stages": [
       "adult"

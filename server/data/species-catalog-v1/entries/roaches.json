@@ -256,7 +256,7 @@
     "scientific_name": "Blattella germanica",
     "rank": "species",
     "group": "roaches",
-    "subgroup": "small-roaches",
+    "subgroup": "high-risk-indoor-roaches",
     "site_category": "Roaches",
     "traits": [
       "Small, tan, with two dark parallel racing stripes behind the head",
@@ -1155,7 +1155,7 @@
     "scientific_name": "Blattodea (sign)",
     "rank": "group",
     "group": "roaches",
-    "subgroup": null,
+    "subgroup": "roach-signs",
     "site_category": "Roaches",
     "stages": [
       "sign"

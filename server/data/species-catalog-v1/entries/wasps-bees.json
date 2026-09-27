@@ -142,7 +142,7 @@
     "scientific_name": "Vespula squamosa",
     "rank": "species",
     "group": "wasps-bees",
-    "subgroup": "social-wasps",
+    "subgroup": "high-risk-social-wasps",
     "site_category": "Stingers",
     "traits": [
       "Ground nest — steady insect traffic in and out of a hole in the yard (some nests are aerial)",
@@ -459,7 +459,7 @@
     "scientific_name": "Apis mellifera",
     "rank": "species",
     "group": "wasps-bees",
-    "subgroup": "bees",
+    "subgroup": "structure-bee-colonies",
     "site_category": "Stingers",
     "traits": [
       "Steady bee traffic in and out of one gap in soffit, wall, or meter box",
@@ -1270,7 +1270,7 @@
     "scientific_name": "Bombus spp.",
     "rank": "genus",
     "group": "wasps-bees",
-    "subgroup": "bees",
+    "subgroup": "beneficial-bees",
     "site_category": "Stingers",
     "stages": [
       "worker",
@@ -1377,7 +1377,7 @@
     "scientific_name": "Megachile spp.",
     "rank": "genus",
     "group": "wasps-bees",
-    "subgroup": "bees",
+    "subgroup": "beneficial-bees",
     "site_category": "Stingers",
     "stages": [
       "adult"

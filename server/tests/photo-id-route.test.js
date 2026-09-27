@@ -1521,6 +1521,40 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
     });
   });
 
+  test.each([
+    ['giant-african-land-snail', 'regulated-land-snails', 'report_fdacs', 'other', 'high', /giant|african/i],
+    ['raccoon', 'rabies-risk-wild-mammals', 'wildlife_trapper', 'wildlife', 'high', /raccoon/i],
+    ['burrowing-owl', 'protected-ground-birds', 'protected_leave_alone', 'wildlife', 'moderate', /burrowing|owl/i],
+  ])('gate on: a real draft %s climb stores its special generic referral contract', async (
+    slug, nodeId, referralKind, category, urgency, forbiddenIdentity,
+  ) => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultFor(slug);
+    expect(engineResult).toMatchObject({
+      v2: {
+        tier: 'needs_more_evidence', answer: { level: 'subgroup', node_id: nodeId },
+        entry: null, referral: { kind: referralKind },
+      },
+      v1: { species_slug: null, category, service_line: 'none', urgency },
+    });
+    expect(engineResult.v2.answer.headline).not.toMatch(forbiddenIdentity);
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.next_step.kind).toBe('referral');
+      expect(body.result.label).toBeNull();
+      expect(body.v2.referral.kind).toBe(referralKind);
+      expect(body.v2.answer.headline).not.toMatch(forbiddenIdentity);
+
+      const row = TABLES.pest_identifications[0];
+      expect(row).toMatchObject({ species_slug: null, category, service_line: 'none', urgency });
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.next_step.kind).toBe('referral');
+      expect(detail.v2.referral.kind).toBe(referralKind);
+    });
+  });
+
   test.each(['subterranean-termite', 'drywood-termite'])('gate on: a draft %s result preserves termite inspection and structural-risk data', async (slug) => {
     mockGateState.photoIdV2 = true;
     const engineResult = realCatalogV2ResultFor(slug);

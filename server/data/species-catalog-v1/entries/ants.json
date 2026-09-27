@@ -814,7 +814,7 @@
     "scientific_name": "Wasmannia auropunctata",
     "rank": "species",
     "group": "ants",
-    "subgroup": null,
+    "subgroup": "fire-ants",
     "site_category": "Ants",
     "stages": [
       "worker"
@@ -1620,7 +1620,7 @@
     "scientific_name": "Pogonomyrmex badius",
     "rank": "species",
     "group": "ants",
-    "subgroup": null,
+    "subgroup": "stinging-ants",
     "site_category": "Ants",
     "stages": [
       "worker",

@@ -24,7 +24,7 @@ ant; we can't yet tell you which kind"):
 - **Group** (`ants`, `termites`, `spiders`, `snakes`, 29 total) — "we're sure
   it's an ant". Every group has a `generic` label and a `next_photo`: the one
   photo that would narrow it further.
-- **Subgroup** (`fire-ants`, `widow-spiders`, `venomous-snakes`, 38 total,
+- **Subgroup** (`fire-ants`, `widow-spiders`, `venomous-snakes`, 59 total,
   optional) — a narrower "we're sure it's a fire ant" stop between group and
   entry, for groups where that middle rung matters. Also has its own
   `generic` label and `next_photo`.
@@ -49,13 +49,21 @@ high-urgency termite inspection contracts; an answer at the broader termite
 group keeps the shared termite service and moderate urgency without borrowing
 a narrower structural-risk claim. Wasp and bee fallbacks keep their shared
 stinging hazard without borrowing a species-specific treatment or referral.
+Dedicated neutral subgroups retain special draft-only contracts when a
+broader node has incompatible descendants. They cover regulated reporting,
+protected-wildlife handling, exposure guidance, medically significant safety
+flags, and no-service routing. Mixed or lower-confidence results stop above
+those nodes and do not inherit the narrower referral, urgency, or hazard.
+Benign draft entries that share a broader node with treatable descendants
+keep the conservative Pest Consultation fallback until the photo supports an
+entry-level name; a no-treatment contract is not inferred from one candidate.
 
 ## Files
 
 - `index.json` — `catalog_version`, `section` ("pest" — this catalog does not
   yet cover the lawn or tree & shrub photo ID sections), the five
-  `categories`, the 29 `groups` and 38 `subgroups` (ids are fixed by the
-  shared build brief), `look_alike_groups` (group-level look-alike notes,
+  `categories`, the 29 `groups` and 59 `subgroups`, `look_alike_groups`
+  (group-level look-alike notes,
   e.g. ants vs. termites), `legacy_slug_map` (every v1 `PEST_LIBRARY` slug →
   a v2 catalog node — see below), and `planned_slugs` (see "Cross-worker
   slugs" below).

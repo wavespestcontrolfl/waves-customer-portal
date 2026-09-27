@@ -238,7 +238,7 @@
     "scientific_name": "Culex quinquefasciatus",
     "rank": "species",
     "group": "mosquitoes",
-    "subgroup": null,
+    "subgroup": "culex-mosquitoes",
     "site_category": "Mosquitoes & biters",
     "stages": [
       "larva",

@@ -98,7 +98,10 @@ const REFERRAL_TEMPLATES = {
   wildlife_trapper: 'This is a wildlife visitor, not something pest control treats. We refer you to a licensed nuisance wildlife trapper for safe removal.',
   report_fwc: 'Please report this sighting to the Florida Fish and Wildlife Conservation Commission (FWC) rather than handling it yourself.',
   report_fdacs: 'This may be a regulated pest of concern. Please report it to the Florida Department of Agriculture and Consumer Services (FDACS).',
+  report_fdacs_snail_exposure: 'This snail can carry a parasite that causes a rare form of meningitis in people; never touch it bare-handed, wash hands well if you do, and keep kids and pets away. This may be a regulated pest of concern. Please report it to the Florida Department of Agriculture and Consumer Services (FDACS).',
   protected_leave_alone: 'This animal and its burrow are protected by Florida law. Please leave it undisturbed — no treatment is needed here.',
+  protected_bird_deterrence: 'This bird is protected by federal law and cannot be trapped or killed. Use repair and deterrence rather than removing the bird.',
+  rabies_exposure_wildlife_trapper: 'Wild mammals can carry rabies. If you are bitten or scratched, contact a healthcare professional or local health department right away. Do not try to touch, trap, or handle the animal yourself. We refer you to a licensed nuisance wildlife trapper for safe removal.',
   // CDC: bites, scratches, or waking with a bat in the room need prompt
   // medical/public-health assessment. FWC: exclusion is Florida's only legal
   // removal method and is restricted during maternity season.
@@ -820,10 +823,11 @@ function nextPhotoFor(wording, candidates, level, nodeId, shownKind = null) {
   return np ? { ask: np.ask || null, why: np.why || null, photo_can_confirm: true } : null;
 }
 
-function referralFor(entry, fallbackKind = null) {
+function referralFor(entry, fallbackKind = null, fallbackTemplate = null) {
   const kind = entry?.service?.referral || fallbackKind;
-  if (!kind || !REFERRAL_TEMPLATES[kind]) return null;
-  return { kind, text: REFERRAL_TEMPLATES[kind] };
+  const template = entry?.service?.referral || fallbackTemplate || fallbackKind;
+  if (!kind || !REFERRAL_TEMPLATES[template]) return null;
+  return { kind, text: REFERRAL_TEMPLATES[template] };
 }
 
 // One of the three entry-level naming rules (pretty_sure/pretty_sure via the
@@ -976,7 +980,7 @@ function buildAnswer(ctx) {
     evidence,
     candidatesBlock,
     nextPhoto,
-    referral: referralFor(entry, genericGuidance?.referral),
+    referral: referralFor(entry, genericGuidance?.referral, genericGuidance?.referral_template),
     genericCompatibility: Object.assign({ safety: {} }, genericGuidance?.compatibility),
     tier,
     topEntrySlug: entry?.slug || null,
@@ -1070,6 +1074,7 @@ function mapToV1(built) {
   const namedServiceIdentity = inheritIdentityOnly
     ? { serviceKey: namedService.key, serviceLabel: namedService.label }
     : { serviceKey: null, serviceLabel: 'Pest Consultation' };
+  const genericCompatibility = Object(built.genericCompatibility);
 
   const category = legacyItem.category || categoryForV2Slug(selectedNodeId);
   const wordingConfidence = { pretty_sure: 'high', likely: 'moderate' }[built.answer.wording] || 'low';
@@ -1083,12 +1088,13 @@ function mapToV1(built) {
   const compatibilityKind = v1Item && !inheritIdentityOnly ? 'legacy' : (v2Entry ? 'named' : 'generic');
   const compatibility = {
     legacy: {
-      safety: legacyItem.safety,
       serviceLine: legacyItem.service_line,
       serviceKey: legacyItem.service_key,
       serviceLabel: legacyItem.service_label,
       inspectionRequired: legacyItem.inspection_required,
       urgency: legacyItem.urgency,
+      ...genericCompatibility,
+      safety: { ...legacyItem.safety, ...genericCompatibility.safety },
     },
     named: {
       safety: v1SafetyFallback(namedEntry),
@@ -1099,8 +1105,8 @@ function mapToV1(built) {
     },
     generic: {
       ...DEFAULT_GENERIC_COMPATIBILITY,
-      ...built.genericCompatibility,
-      safety: { ...DEFAULT_GENERIC_COMPATIBILITY.safety, ...Object(built.genericCompatibility).safety },
+      ...genericCompatibility,
+      safety: { ...DEFAULT_GENERIC_COMPATIBILITY.safety, ...genericCompatibility.safety },
     },
   }[compatibilityKind];
   const {

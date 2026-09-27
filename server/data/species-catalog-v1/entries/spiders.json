@@ -1316,7 +1316,7 @@
     "scientific_name": "Loxosceles reclusa",
     "rank": "species",
     "group": "spiders",
-    "subgroup": null,
+    "subgroup": "medically-significant-spiders",
     "site_category": "Spiders",
     "stages": [
       "adult"

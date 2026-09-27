@@ -458,7 +458,7 @@
     "scientific_name": "Ctenosaura similis",
     "rank": "species",
     "group": "lizards",
-    "subgroup": "large-lizards",
+    "subgroup": "reportable-large-lizards",
     "site_category": "Wildlife neighbors",
     "stages": [
       "juvenile",
@@ -570,7 +570,7 @@
     "scientific_name": "Varanus niloticus",
     "rank": "species",
     "group": "lizards",
-    "subgroup": "large-lizards",
+    "subgroup": "reportable-large-lizards",
     "site_category": "Wildlife neighbors",
     "stages": [
       "juvenile",
@@ -686,7 +686,7 @@
     "scientific_name": "Salvator merianae",
     "rank": "species",
     "group": "lizards",
-    "subgroup": "large-lizards",
+    "subgroup": "reportable-large-lizards",
     "site_category": "Wildlife neighbors",
     "stages": [
       "juvenile",
