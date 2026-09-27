@@ -294,19 +294,28 @@ async function loadGroupMembers(conn, { customerId, sourceEstimateId }) {
   return members.map((m) => ({ ...m, has_own_live_invoice: ownInvoiceSet.has(String(m.id)) }));
 }
 
-// Marks read (with an autoCleared stamp) every UNREAD standing alert for
-// this estimate whose dedupeKey carries the given prefix — optionally
-// excluding one key that is about to be raised/refreshed instead. Same
-// "plain update, best-effort" shape as supplies-consumption.js's
+// Marks read (with an autoCleared stamp) every standing alert for this
+// estimate whose dedupeKey carries the given prefix — optionally excluding
+// one key that is about to be raised/refreshed instead. Same "plain
+// update, best-effort" shape as supplies-consumption.js's
 // clearMissedDeductionBells / ops-digest.js's resolved stamp — the closest
 // existing "resolve a dedupe-keyed notification" convention; there is no
 // larger resolve mechanism to build here.
+//
+// Deliberately NOT scoped to whereNull('read_at') (Codex round-1 P1 on the
+// pre-push fix): an alert a human already DISMISSED while the group was
+// still diverging must ALSO get the autoCleared stamp once the group
+// genuinely resolves — otherwise raiseDivergenceAlert's wasAutoCleared
+// check never sees the resolution, and an identical-dates recurrence after
+// a plain dismissal + real realignment stays silently dismissed forever.
+// COALESCE(read_at, NOW()) never disturbs an existing dismissal timestamp;
+// it only sets read_at on a row that was still unread.
 async function clearStandingAlerts(conn, prefix, { exceptKey = null } = {}) {
-  let q = conn('notifications').where({ recipient_type: 'admin' }).whereNull('read_at')
+  let q = conn('notifications').where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${prefix}%`]);
   if (exceptKey) q = q.whereRaw("metadata->>'dedupeKey' <> ?", [exceptKey]);
   return q.update({
-    read_at: conn.fn.now(),
+    read_at: conn.raw('COALESCE(read_at, NOW())'),
     metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ autoCleared: true })]),
   });
 }

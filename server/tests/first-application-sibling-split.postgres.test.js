@@ -380,6 +380,44 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(reopened.read_at).toBeNull();
   }));
 
+  // Codex round-2 P1 on the pre-push fix: a PLAIN human dismissal (read_at
+  // set, no autoCleared) followed by a GENUINE realignment must still
+  // record the resolution (clearStandingAlerts previously skipped an
+  // already-read row entirely), so a later recurrence onto the EXACT SAME
+  // original date is recognized as a real recurrence and reopens — not
+  // silently left dismissed forever.
+  test('dismissed while diverging, then a genuine realignment, then recurrence onto the SAME original date reopens', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await sweepOnce(trx, ids.estimateId);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const firstBell = await readBell(trx, dedupeKey);
+    expect(firstBell.read_at).toBeNull();
+
+    // Office dismisses it by hand while the divergence is still open.
+    await trx('notifications').where({ id: firstBell.id }).update({ read_at: new Date() });
+
+    // The visits GENUINELY realign — the sweep must record this resolution
+    // even though the alert row is already marked read.
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: SAME_DATE });
+    const [clearResult] = await sweepOnce(trx, ids.estimateId);
+    expect(clearResult.action).toBe('cleared');
+    expect(clearResult.reason).toBe('realigned');
+    const afterRealign = await readBell(trx, dedupeKey);
+    const afterRealignMeta = typeof afterRealign.metadata === 'string' ? JSON.parse(afterRealign.metadata) : afterRealign.metadata;
+    expect(afterRealignMeta.autoCleared).toBe(true);
+    expect(afterRealign.read_at).not.toBeNull();
+
+    // Diverges again onto the EXACT SAME original date.
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('alerted');
+
+    const reopened = await readBell(trx, dedupeKey);
+    expect(reopened.id).toBe(firstBell.id);
+    expect(reopened.read_at).toBeNull();
+  }));
+
   test('invoice text unrecognizable — never a sweep candidate, no alert', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx, { matchInvoiceText: false });
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
