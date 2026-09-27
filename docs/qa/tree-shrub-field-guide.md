@@ -35,7 +35,10 @@ Normal completion records actual use. The shared reviewed-area calculation is
 in PR #5050; palm counts/individual canopy measurements and calibrated scoops
 must never be substituted with bed area or tank capacity.
 
-Dependencies: draft child of #5049; the unchanged `mix-amount.js` is the exact
+Dependencies: draft child of #5049 at `13daf654364553a8e5991c491379487cc882d963`;
+its latest removal of speculative seasonal/rate configuration is preserved.
+Only the consumed T&S identity metadata extends its name entries.
+The unchanged `mix-amount.js` is the exact
 canonical formatter from #5015 (415340c8242b945e7f35d9317cd8b5858b441da3).
 Reconcile #5015 and retarget this child to main before #5049 is squash-merged.
 The owner merges; this lane stops before merge.
@@ -49,9 +52,18 @@ The owner merges; this lane stops before merge.
   Merit expansion: soil kit only. Talus hold and label link verified in place.
 - Screenshots reviewed in-session. Native attachment unavailable with installed
   gh 2.90.0; no screenshot attachments are claimed.
-- Focused client/server tests, production build and brand/domain checks run.
-  Final counts and PostgreSQL migration/integration results are recorded in the
-  PR after the checks complete.
+- 220 focused server tests passed after reconciling #5049's latest changes.
+- A temporary merge with #5050 at `f856e4c5eca7e7c3876ec66b170c177567275d18`
+  passed 94 client checks and the production build, including brand/domain
+  checks. Two combined-flow cases exercised automatic Snapshot suggestions
+  with early/late reviewed bed measurements, blank initial doses, rate-driven
+  totals, partial coverage and preserved manual actuals. No request wrote data.
+  The temporary merge was aborted; this PR does not duplicate #5050's diff.
+- All 1,602 pending migrations applied to this worktree's isolated Railway
+  staging QA database. Four real PostgreSQL cases passed (and passed again
+  after reconciliation): idempotent equipment/product seeds, dark/on behavior,
+  property-scoped treatment history with retractions, and unavailable-history
+  failure. Fixtures roll back. No production database was accessed.
 
 ## Open content inputs
 
