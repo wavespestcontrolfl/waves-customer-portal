@@ -177,9 +177,6 @@ function holdOptions(call) {
 
 // The provider-boundary hold refusal's code, read back off the send result.
 const HELD_AT_BOUNDARY = 'VOICEMAIL_TEXT_HELD';
-// sms_log statuses of a quote-link row that never reached the provider
-// (the scheduled-SMS executor's terminal block, or a staff cancel).
-const PROVEN_UNSENT_STATUSES = ['blocked', 'cancelled', 'canceled'];
 
 async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone: rawPhone, doNotContactRequested = false } = {}) {
   if (!isEnabled('voicemailLeadSms')) {
@@ -191,17 +188,15 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
 
   // Belt-and-suspenders history check: pre-claim-table sends (or hand-sent
   // rows tagged with the message_type) also consume the one-shot. Advisory
-  // only for ordering — the ATOMIC gate is the claim insert below. A row
-  // proven never sent does not count: a queued replay the executor blocked
-  // (a hold or a stale lead at replay, a policy block, a definitive
-  // provider rejection) or one staff cancelled. Its onTerminal already
-  // released both claims so a later voicemail can re-arm, and counting it
-  // here would silence that number forever. Anything that may have gone
-  // out (scheduled, sending, sent, failed, undelivered) still counts.
+  // only for ordering — the ATOMIC gate is the claim insert below. Every
+  // quote-link row counts, whatever its status: a queued replay that ended
+  // 'blocked' cannot be proven never sent from the row (a retry-exhausted
+  // provider timeout ends 'blocked' too), so a replay held or refused at
+  // 8 AM uses up the number's one automated quote link just like a sent
+  // one. A hold on the immediate path writes no row and consumes nothing.
   try {
     const prior = await db('sms_log')
       .where({ to_phone: phone, message_type: MESSAGE_TYPE })
-      .where((q) => q.whereNull('status').orWhereNotIn('status', PROVEN_UNSENT_STATUSES))
       .first('id');
     if (prior) {
       return { sent: false, skipped: 'already_sent_to_phone' };

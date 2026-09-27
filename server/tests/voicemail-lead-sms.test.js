@@ -173,15 +173,14 @@ describe('voicemail lead text-back gates', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('a prior quote-link row proven never sent (the replay blocked it, or staff cancelled it) does not use up the one text — its claims were released so a later voicemail re-arms', async () => {
-    expect(await sendVoicemailQuoteLink(args())).toEqual({ sent: true });
+  test('every prior quote-link row counts, whatever its status — a replay that ended blocked cannot be proven unsent (a retry-exhausted timeout ends blocked too)', async () => {
+    state.firstResults.sms_log = [{ id: 'blocked-replay' }];
+    expect(await sendVoicemailQuoteLink(args())).toEqual({ sent: false, skipped: 'already_sent_to_phone' });
     const history = db.mock.results[db.mock.calls.findIndex(([table]) => table === 'sms_log')].value;
-    const statusFilter = history.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
-    const q = { whereNull: jest.fn(() => q), orWhereNotIn: jest.fn(() => q) };
-    statusFilter(q);
-    // Unknown status still counts; only blocked/cancelled rows are proven unsent.
-    expect(q.whereNull).toHaveBeenCalledWith('status');
-    expect(q.orWhereNotIn).toHaveBeenCalledWith('status', ['blocked', 'cancelled', 'canceled']);
+    // The history read filters on the phone and the type only, never on status.
+    expect(history.where).toHaveBeenCalledTimes(1);
+    expect(history.where).toHaveBeenCalledWith({ to_phone: PHONE, message_type: MESSAGE_TYPE });
+    expect(history.whereNotIn).not.toHaveBeenCalled();
   });
 
   test('dedupe read failure fails CLOSED — never risk a duplicate automated text', async () => {
