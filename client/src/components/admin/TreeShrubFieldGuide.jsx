@@ -25,7 +25,7 @@ function ProductDetails({ product, equipment, mode }) {
     <div><h4 className={labelClass}>Label rates</h4><dl className="space-y-2 mt-1">{product.rates.map(([rate, target]) => <div key={rate}><dt className="font-medium">{rate}</dt><dd className="text-ink-secondary">{target}</dd></div>)}</dl></div>
     {product.limits?.length > 0 && <div><h4 className={labelClass}>Restrictions</h4><ul className="list-disc pl-5 space-y-1">{product.limits.map(limit => <li key={limit}>{limit}</li>)}</ul></div>}
     {product.program && <p className="text-ink-secondary">{product.program}</p>}
-    {product.url ? <a href={product.url} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-11 items-center underline underline-offset-4">{product.source} ↗</a> : <p className="text-ink-secondary">{product.source}</p>}
+    {product.url ? <a href={product.url} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-11 items-center text-ink-primary underline underline-offset-4">{product.source} ↗</a> : <p className="text-ink-secondary">{product.source}</p>}
   </div>;
 }
 
