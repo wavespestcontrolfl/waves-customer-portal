@@ -414,8 +414,9 @@ async function resolveProjectReportPreviewFields(project, judgmentDate, knex = d
   // The applicator line names the PRIMARY visit's technician, judged at the
   // primary visit's date — so it prints only when that visit itself applied
   // product. A bed-bug follow-up application alone keeps Poison Control but
-  // names no applicator: the follow-up's technician and date aren't stored
-  // (codex r3 on #5032).
+  // names no applicator (the follow-up's technician and date aren't stored,
+  // codex r3), and a rodent bait-station check keeps it but applied nothing,
+  // so it names none either (codex r4 on #5032).
   if (!projectPrimaryApplication(project?.project_type, project?.findings)) {
     return { applicatorFdacsId: null, applicatorName: null, poisonControl };
   }

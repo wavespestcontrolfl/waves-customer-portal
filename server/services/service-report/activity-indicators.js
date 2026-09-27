@@ -1181,39 +1181,27 @@ function parseFindingsValues(value) {
 }
 
 // Poison Control line eligibility for PROJECT reports (owner ruling
-// 2026-09-26). The canonical typed application verdict (typedTreatmentEvidence)
-// over the project's own findings or its bed-bug follow-up findings, plus two
-// owner-ruled additions that verdict deliberately leaves out (adding them to
-// TYPED_TREATMENT_OPTIONS would switch on re-entry timers):
-// - rodent_bait_station: the stations hold rodenticide, though servicing one
-//   is monitoring, not an application;
-// - rodent_sanitation: only when the tech recorded disinfecting (codex r3) —
-//   a mechanical-only cleanup stays out.
-// Device-only termite work ("Bait station setup" / "Cartridge replacement")
-// is noWork in the canonical map, whatever EPA number the send gate demands.
-// A type with no entry (WDO, certificate, inspections, exclusion) never
-// qualifies.
-const POISON_CONTROL_EXTRA_EVIDENCE = Object.freeze({
-  rodent_sanitation: { sanitation_work_completed: ['Disinfected / sanitized affected areas'] },
-});
+// 2026-09-26): the canonical typed application verdict
+// (typedTreatmentEvidence — the same one behind a service report's
+// applicationMade) over the project's own findings or its bed-bug follow-up
+// findings, plus rodent bait stations: the stations hold rodenticide though
+// servicing one is monitoring, not an application. Nothing else: device-only
+// termite work ("Bait station setup" / "Cartridge replacement") is noWork
+// whatever EPA number the send gate demands, and types the canonical map
+// leaves out (WDO, certificate, inspections, exclusion, sanitation) never
+// qualify — widening that map would change applicationMade and re-entry for
+// every report of the type, which is its own decision.
 
-function poisonControlExtraEvidence(type, values) {
-  const fields = POISON_CONTROL_EXTRA_EVIDENCE[type];
-  if (!fields || !values) return false;
-  return Object.entries(fields).some(([key, options]) => String(values[key] ?? '')
-    .split(',').map((part) => part.trim()).some((part) => options.includes(part)));
-}
-
-// The PRIMARY visit itself left product behind — the one whose technician
-// the applicator line names.
+// The PRIMARY visit itself applied product — the only case that names an
+// applicator (a bait-station check applied nothing; a follow-up's
+// technician isn't stored).
 function projectPrimaryApplication(type, findings) {
-  if (type === 'rodent_bait_station') return true;
-  const values = parseFindingsValues(findings);
-  return typedTreatmentEvidence(type, values).applied || poisonControlExtraEvidence(type, values);
+  return typedTreatmentEvidence(type, parseFindingsValues(findings)).applied;
 }
 
 function projectPoisonControl(type, findings, followupFindings) {
-  return projectPrimaryApplication(type, findings)
+  return type === 'rodent_bait_station'
+    || projectPrimaryApplication(type, findings)
     || typedTreatmentEvidence(type, parseFindingsValues(followupFindings)).applied;
 }
 
@@ -4560,7 +4548,6 @@ module.exports = {
   typedTreatmentEvidenceForRecord,
   projectPoisonControl,
   projectPrimaryApplication,
-  POISON_CONTROL_EXTRA_EVIDENCE,
   SCHEMA_VERSION,
   BANNED_CUSTOMER_COPY,
   findBannedCustomerCopy,

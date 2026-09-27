@@ -3492,15 +3492,17 @@ function AppliedProductsSection({ data, mode = 'live' }) {
   if (!applications.length) {
     // No product rows, yet something went down: the server's applicationMade
     // verdict from typed / specialty treatment evidence (product rows are
-    // optional there — Codex r1 #5032), or rodenticide in bait stations,
-    // which servicing does not count as an application (owner 2026-09-26).
-    // Poison Control prints on its own; this mount is the one slot both
-    // layouts share.
-    if (data.applicationMade !== true && !reportHasRodenticide(data)) return null;
+    // optional there — Codex r1 #5032), an UNKNOWN verdict (null: the product
+    // read failed, so fail toward the safety line — Codex r4), or rodenticide
+    // in bait stations, which servicing does not count as an application
+    // (owner 2026-09-26). Poison Control prints on its own; this mount is the
+    // one slot both layouts share. The applicator is named only on real
+    // application evidence — a station check applied nothing (Codex r4).
+    if (data.applicationMade !== true && data.applicationMade !== null && !reportHasRodenticide(data)) return null;
     return (
       <section data-glass="card" className="sr-section applied-products-section" id="poison-control">
         <h2>Poison Control</h2>
-        <PoisonControlNote data={data} titled />
+        <PoisonControlNote data={data} titled showApplicator={data.applicationMade === true} />
       </section>
     );
   }
@@ -3641,14 +3643,15 @@ function AppliedProductsSection({ data, mode = 'live' }) {
       {/* Poison Control rides the product list: this section only mounts
           when something was actually applied, so WDO, assessment and
           monitoring-only visits never carry it (owner 2026-09-26). */}
-      <PoisonControlNote data={data} listsProducts />
+      <PoisonControlNote data={data} listsProducts showApplicator />
     </section>
   );
 }
 
 // titled: the standalone section already heads it "Poison Control".
-function PoisonControlNote({ data, listsProducts = false, titled = false }) {
-  const applicator = applicatorIdLine(data.technicianName, data.applicatorFdacsId);
+// showApplicator: the visit recorded an actual application.
+function PoisonControlNote({ data, listsProducts = false, titled = false, showApplicator = false }) {
+  const applicator = showApplicator ? applicatorIdLine(data.technicianName, data.applicatorFdacsId) : null;
   return (
     <div className="manufacturer-guideline-note poison-control-note" data-testid="poison-control-note">
       {!titled && <><strong>Poison Control.</strong>{' '}</>}<PoisonControlCopy listsProducts={listsProducts} />

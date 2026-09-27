@@ -723,6 +723,21 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     expect(note.textContent).toMatch(/FDACS ID card #JE000001/);
   });
 
+  it('a bait-station check or an unknown verdict gets Poison Control but names no applicator', async () => {
+    const rodentBait = { id: 'rb-2', method: 'station_check', product: { name: 'Protecta Rodent Bait Station' } };
+    for (const payload of [
+      { ...legacyLawnReport, applications: [rodentBait], applicationMade: false, applicatorFdacsId: 'JE000001' },
+      { ...legacyLawnReport, applications: [], applicationMade: null, applicatorFdacsId: 'JE000001' },
+    ]) {
+      const { container, unmount } = renderReport(payload);
+      await screen.findByText('Visit Summary');
+      const section = container.querySelector('#poison-control');
+      expect(section).not.toBeNull();
+      expect(section.textContent).not.toMatch(/FDACS ID/);
+      unmount();
+    }
+  });
+
   it('a productless treatment or rodent bait visit gets Poison Control on its own', async () => {
     const rodentBait = { id: 'rb-1', method: 'station_check', product: { name: 'Protecta Rodent Bait Station' } };
     for (const payload of [

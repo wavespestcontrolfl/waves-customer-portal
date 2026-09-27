@@ -314,8 +314,9 @@ function InfoRow({ label, children }) {
 }
 
 // titled: the standalone block already heads it "Poison Control".
-function DocPoisonControl({ data, listsProducts = false, titled = false }) {
-  const applicator = applicatorIdLine(data.technicianName, data.applicatorFdacsId);
+// showApplicator: the visit recorded an actual application.
+function DocPoisonControl({ data, listsProducts = false, titled = false, showApplicator = false }) {
+  const applicator = showApplicator ? applicatorIdLine(data.technicianName, data.applicatorFdacsId) : null;
   return (
     <div className="doc-keep" data-testid="doc-poison-control" style={{ margin: '8px 0 0', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
       <p style={{ margin: 0 }}>
@@ -1275,17 +1276,19 @@ export default function ServiceReportDocument({ data, token }) {
             {/* Same gate as the web section: only a visit that applied a
                 product prints Poison Control. The tel: link stays tappable
                 in the PDF. */}
-            <DocPoisonControl data={data} listsProducts />
+            <DocPoisonControl data={data} listsProducts showApplicator />
           </div>
         )}
 
         {/* No product rows, yet something went down (the server's
-            applicationMade verdict, or rodenticide in bait stations) —
-            Poison Control prints on its own, mirroring the web report. */}
-        {appliedProducts.length === 0 && (data.applicationMade === true || reportHasRodenticide(data)) && (
+            applicationMade verdict, an unknown verdict — null, fail toward
+            the safety line — or rodenticide in bait stations): Poison
+            Control prints on its own, mirroring the web report. The
+            applicator is named only on real application evidence. */}
+        {appliedProducts.length === 0 && (data.applicationMade === true || data.applicationMade === null || reportHasRodenticide(data)) && (
           <div className="doc-keep">
             <SectionHeader>Poison Control</SectionHeader>
-            <DocPoisonControl data={data} titled />
+            <DocPoisonControl data={data} titled showApplicator={data.applicationMade === true} />
           </div>
         )}
 

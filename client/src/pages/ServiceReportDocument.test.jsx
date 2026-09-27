@@ -246,6 +246,23 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     }
   });
 
+  it('names the applicator only on application evidence, never on a bait-station check', () => {
+    const rodentCheck = { id: 'st-3', method: 'station_check', product: { name: 'Protecta Rodent Bait Station' } };
+    const withId = { ...BASE_DATA, applicatorFdacsId: 'JE000001' };
+    const { unmount } = render(<ServiceReportDocument data={{ ...withId, applications: [rodentCheck], applicationMade: false }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).not.toContain('FDACS ID');
+    unmount();
+    render(<ServiceReportDocument data={{ ...withId, applications: [], applicationMade: true }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).toContain('FDACS ID card #JE000001');
+  });
+
+  it('prints Poison Control when the application verdict is unknown (product read failed)', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [], applicationMade: null, applicatorFdacsId: 'JE000001' }} token="tok123" />);
+    const block = screen.getByTestId('doc-poison-control');
+    expect(block.querySelector('a[href="tel:+18002221222"]')).not.toBeNull();
+    expect(block.textContent).not.toContain('FDACS ID');
+  });
+
   it('prints the applicator FDACS ID card number beside Poison Control when the server sends one', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, applicatorFdacsId: 'JE000001' }} token="tok123" />);
     expect(screen.getByTestId('doc-poison-control').textContent).toContain('Applicator: Adam · FDACS ID card #JE000001');
