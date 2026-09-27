@@ -12,10 +12,12 @@
 //   - a signer set off by a dash: "— Adam" (not after "is"/"as" and the like:
 //     "Your technician is - Adam" is an answer)
 //   - a signer on its own line under a FINISHED sentence (ends in . or ! or an
-//     emoji) or under a question that does not ask who: "Talk soon!\nAdam",
-//     "When works best for you?\nAdam". After a who-question, a colon or an
-//     unfinished sentence the name is the answer ("Who will be coming?\nAdam",
-//     "Your technician will be\nAdam", "Your technician is:\nAdam").
+//     emoji) or under a question a name cannot answer: "Talk soon!\nAdam",
+//     "When works best for you?\nAdam". After a question that asks for a
+//     person, company or name, a colon or an unfinished sentence the name is
+//     the answer ("Who will be coming?\nAdam", "Which company is this?\nWaves
+//     Pest Control", "Your technician will be\nAdam", "Your technician
+//     is:\nAdam").
 //   - a full name-and-company block that is its own final sentence:
 //     "Talk soon. Adam, Waves Pest Control", or the whole text (a lone name or company there may
 //     answer the sentence before it: "Who will be coming? Adam.")
@@ -47,13 +49,17 @@ const EMOJI_PART = '\\p{Extended_Pictographic}|\\p{Emoji_Modifier}|\\p{Regional_
 // Keyboard emoticons: :) :-) ;) :D :P =) <3 ^^ and the like.
 const EMOTICON = "[:;=8]['\\-^]?[)(\\]\\[DPp3*|/]+|<3+|\\^_?\\^";
 const TAIL = `\\s*[.!]?(?:[\\s"'\\u201C\\u201D\\u2018\\u2019]|${EMOJI_PART}|${EMOTICON})*$`;
+// A name answers a question only when the question asks for a person, a
+// company or a name: "Who will be coming?", "Which technician is coming?",
+// "Which company is this?", "What is your name?". A name cannot answer "When
+// works best for you?", "Would you like to schedule?" or "Any questions?".
+const NAME_QUESTION = '[^.!?\\n]*\\b(?:(?:who|whom|whose)\\b|(?:which|what)\\b[^.!?\\n]*\\b(?:technicians?|techs?|company|name)\\b)[^.!?\\n]*\\?';
 // A line break under a finished sentence: the line above ends in . or ! (a
-// quote mark may close it) or an emoji, or in a question that does not ask
-// who. A name cannot answer "When works best for you?" or "Would you like to
-// schedule?", so under one it signs the text. A bare name after anything else
-// (a who-question, a colon, an unfinished sentence) answers that line instead.
-const NON_WHO_QUESTION = '(?:^|[.!?\\n])(?![^.!?\\n]*\\b(?:who|whom|whose)\\b)[^.!?\\n]*\\?';
-const AFTER_SENTENCE_LINE = `(?<=(?:(?:[.!]|${NON_WHO_QUESTION})["'\\u201D\\u2019]?|${EMOJI_PART}))[ \\t]*\\n\\s*`;
+// quote mark may close it) or an emoji, or in a question a name cannot
+// answer, so a name under it signs the text. A bare name after anything else
+// (a question asking for a name, a colon, an unfinished sentence) answers that
+// line instead.
+const AFTER_SENTENCE_LINE = `(?<=(?:(?:[.!]|(?:^|[.!?\\n])(?!${NAME_QUESTION})[^.!?\\n]*\\?)["'\\u201D\\u2019]?|${EMOJI_PART}))[ \\t]*\\n\\s*`;
 
 // A dash right after a word that introduces a value ("Your technician is -
 // Adam", "The charge appears as - Waves Pest Control") sets off the answer.
@@ -143,18 +149,17 @@ const ANY_SIGNER_RES = [
 // question ("Who will be coming?\n— Sarah", "Where are you located?\n—
 // Lakewood Ranch") or as the next item of a dashed or bulleted list. Such a
 // text keeps its tail through both passes. A Waves signer (Adam, Virginia,
-// the company) answers only a who-question: under any other question it signs
-// the text ("When works best for you?\n— Adam"), as a bare signer line does
-// (AFTER_SENTENCE_LINE). A yes/no closing question ("Would you like to
-// schedule?\n— Sarah") takes no dashed answer, and a dashed line set off by a
-// blank line or carrying a company ("— Adam, Waves Pest Control") is never
-// one.
-const WHO_QUESTION = anyCase('(?:who|whom|whose)');
+// the company) there answers only a question that asks for a name
+// (NAME_QUESTION): under any other question it signs the text ("When works
+// best for you?\n— Adam"), as a bare signer line does (AFTER_SENTENCE_LINE).
+// A yes/no closing question ("Would you like to schedule?\n— Sarah") takes no
+// dashed answer, and a dashed line set off by a blank line or carrying a
+// company ("— Adam, Waves Pest Control") is never one.
 const INFO_QUESTION = anyCase('(?:what|which|where|when|why|how)');
 const WAVES_SIGNER = anyCase(SIGNER);
 const DASHED_LINE = `\\n[ \\t]*${DASH}[ \\t]*`;
 const DASH_VALUE_TAIL_RE = new RegExp(
-  `(?:^|\\n)(?:(?:[^\\n]*:[ \\t]*|[^\\n]*\\b${WHO_QUESTION}\\b[^.!?\\n]*\\?[ \\t]*|[ \\t]*(?:${DASH}|[\\u2022*])[^\\n]*)${DASHED_LINE}`
+  `(?:^|\\n)(?:(?:[^\\n]*:[ \\t]*|[^\\n]*?${anyCase(NAME_QUESTION)}[ \\t]*|[ \\t]*(?:${DASH}|[\\u2022*])[^\\n]*)${DASHED_LINE}`
   + `|[^\\n]*\\b${INFO_QUESTION}\\b[^.!?\\n]*\\?[ \\t]*${DASHED_LINE}(?!${WAVES_SIGNER}${TAIL}))`
   + `(?:${CAP_TOKEN}[ \\t]+${CAP_TOKEN}|${ANY_TOKEN})${TAIL}`,
   'u',

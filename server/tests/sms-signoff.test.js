@@ -67,12 +67,13 @@ describe('stripTrailingSignature', () => {
     // A bare full signature block is a sign-off even as the whole text.
     ['Adam, Waves Pest Control', ''],
     ['Adam from Waves', ''],
-    // A name cannot answer a question that does not ask who, so a signer on
-    // its own line under one signs the text (most suggested replies end on a
-    // question like these).
+    // A name cannot answer a question that does not ask for a person, company
+    // or name, so a signer on its own line under one signs the text (most
+    // suggested replies end on a question like these).
     ['Would you like to schedule?\nAdam', 'Would you like to schedule?'],
     ['Happy to help. When works best for you?\nWaves Pest Control', 'Happy to help. When works best for you?'],
     ['What day works best for you?\nAdam B.', 'What day works best for you?'],
+    ['Any questions?\nAdam', 'Any questions?'],
   ])('strips the trailing sign-off from %j', (input, expected) => {
     expect(stripTrailingSignature(input)).toBe(expected);
   });
@@ -107,6 +108,9 @@ describe('stripTrailingSignature', () => {
     'Who will be coming?\nAdam',
     'Who is your technician?\nAdam',
     "Who's coming Tuesday?\nAdam",
+    'Which technician is coming?\nAdam',
+    'Which company is this?\nWaves Pest Control',
+    'What is your name?\nAdam',
     'Your technician will be\nAdam',
     'The charge will appear as\nWaves Pest Control',
     // A smiley in content is content.
@@ -214,10 +218,12 @@ describe('stripTrailingSignature — anySigner', () => {
     'Who will be coming?\n— Sarah',
     'Your technician is:\n— Adam',
     'Options:\n- Lawn Care\n- Pest Control',
-    // #4975 follow-up: a who-question's dashed answer, a Waves signer
-    // included; a dashed answer to an information question. An unknown name
-    // there has an answer's shape too, so it stays.
+    // #4975 follow-up: a dashed answer to a question asking for a name, a
+    // Waves signer included; a dashed answer to an information question. An
+    // unknown name there has an answer's shape too, so it stays.
     'Who will be coming?\n— Adam',
+    'Which technician is coming?\n— Adam',
+    'What is your name?\n— Adam',
     'Which service?\n— Lawn Care',
     'Where are you located?\n— Lakewood Ranch',
     'When works for you?\n— Sarah',
