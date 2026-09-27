@@ -2245,7 +2245,7 @@ async function restoreConsumedQueuedSend(consumedRows, database = db, claimToken
 // line. Runs under `database` (the caller's own transaction) so the
 // enqueue commits or fails together with the delivery stamp.
 async function queuePendingChannelReplay({
-  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, database = db,
+  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, hasEmailLeg = false, database = db,
 }) {
   // Adopting ANY live invoice_send_deferred row for this invoice is safe, even
   // though sendViaSMSAndEmail's held-SMS leg uses the same rail: this runs in
@@ -2285,6 +2285,11 @@ async function queuePendingChannelReplay({
       // which keep finalizeDeferredCompletionSend's SMS-only stamp).
       partial_fanout_retry: true,
       original_block_code: originalBlockCode,
+      // sendViaSMSAndEmail's nested leg: the wrapper's own sendInvoiceEmail
+      // already owns (and sent) this notice's Email, so the replay must keep
+      // Email out of its fan-out exactly like the nested call did; the
+      // scheduler forwards the marker to the router.
+      ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
       replay_purpose: "payment_link",
       refresh_customer_phone: true,
       resolve_from_by_customer: true,
@@ -5618,7 +5623,9 @@ const InvoiceService = {
             ? Math.max(0, representativeRetryableLeg.retryAfterMs) : PENDING_CHANNEL_RETRY_DELAY_MS;
           const scheduledFor = explicitNextAllowedAt && !Number.isNaN(explicitNextAllowedAt.getTime())
             ? explicitNextAllowedAt : new Date(Date.now() + retryDelayMs);
-          pendingChannelToQueue = { scheduledFor, originalBlockCode: representativeRetryableLeg.code };
+          pendingChannelToQueue = {
+            scheduledFor, originalBlockCode: representativeRetryableLeg.code, ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
+          };
         }
       }
 

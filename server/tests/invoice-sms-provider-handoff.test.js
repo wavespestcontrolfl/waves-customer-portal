@@ -716,6 +716,45 @@ describe('invoice SMS provider handoff', () => {
       expect(new Date(smsLogInserts[0].scheduled_for).toISOString()).toBe(nextAllowedAt);
     });
 
+    // Codex #4963 r1 P2: sendViaSMSAndEmail's nested call (hasEmailLeg) owns
+    // the Email itself, so its partial retry must keep Email out of the
+    // replay's fan-out, or the replay sends a second, differently-keyed Email.
+    test('a partial retry queued by the wrapper\'s nested call carries hasEmailLeg', async () => {
+      const smsLogInserts = [];
+      const { mock } = invoiceQueryDb({ smsLogInserts });
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'BILLING_CHANNEL_FAILED', retryable: true,
+        channelResults: {
+          push: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'BILLING_CHANNEL_FAILED', retryable: true },
+        },
+      }));
+
+      await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1', hasEmailLeg: true });
+
+      expect(smsLogInserts).toHaveLength(1);
+      expect(JSON.parse(smsLogInserts[0].metadata)).toMatchObject({ partial_fanout_retry: true, hasEmailLeg: true });
+    });
+
+    test('a direct send\'s partial retry never carries hasEmailLeg (its replay owns Email)', async () => {
+      const smsLogInserts = [];
+      const { mock } = invoiceQueryDb({ smsLogInserts });
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'BILLING_CHANNEL_FAILED', retryable: true,
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'BILLING_CHANNEL_FAILED', retryable: true },
+        },
+      }));
+
+      await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+
+      expect(smsLogInserts).toHaveLength(1);
+      expect(JSON.parse(smsLogInserts[0].metadata).hasEmailLeg).toBeUndefined();
+    });
+
     test('a retryable pending Text leg queues the WHOLE notice once; invoice finalized; no claim restore', async () => {
       const smsLogInserts = [];
       const { mock } = invoiceQueryDb({ smsLogInserts });
