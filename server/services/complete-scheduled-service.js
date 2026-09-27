@@ -9082,7 +9082,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
           //    so the classification reads locked statuses, never a
           //    snapshot a concurrent refund/cancel/restore invalidates.
           let siblingLiveNow = null;
-          if (!terminalRestored && !freshLiveOnVisit && svc.source_estimate_id) {
+          // Same DATE-only caveat as the mint check above: a row already
+          // split off its own price must never have that OTHER member's
+          // (already-reduced) shared invoice offered here as "collect this
+          // instead" — it is not a substitute for this row's own billing.
+          // (Recomputed here rather than reusing the outer block-scoped
+          // const: this runs inside a SEPARATE db.transaction callback.)
+          const splitFromSharedInvoiceHere = require('./first-application-sibling-split').splitFromSharedInvoiceId(svc);
+          if (!terminalRestored && !freshLiveOnVisit && svc.source_estimate_id && !splitFromSharedInvoiceHere) {
             const siblingNow = await findFirstApplicationInvoiceForEstimateService(svc, trx, { lockRows: true });
             const siblingCandidate = siblingNow.invoice && siblingNow.invoice.status === 'refunded'
               ? (siblingNow.liveBeside || null)

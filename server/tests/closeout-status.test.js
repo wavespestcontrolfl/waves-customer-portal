@@ -56,6 +56,7 @@ const {
   deriveBillingExpectation,
   summarizeCloseout,
   getCloseoutStatus,
+  loadCloseoutInputs,
   FACT_STATES,
   FACT_NAMES,
 } = require('../services/closeout-status');
@@ -63,6 +64,7 @@ const {
 // Captured BEFORE any jest.resetModules() so it is the same instance the
 // service under test destructured at load.
 const followupMock = require('../services/typed-followup-obligation').typedFollowupObligationForCompletedSource;
+const siblingLookupMock = require('../services/estimate-first-application-invoice').findFirstApplicationInvoiceForEstimateService;
 
 const NOW = new Date('2026-08-31T15:00:00Z');
 const SVC = 'svc-1';
@@ -1062,6 +1064,33 @@ describe('closeout-status: loader against a fake knex', () => {
     expect(result.requirements.unevaluated).toEqual([]);
     expect(result.visit).toMatchObject({ status: 'completed', serviceType: 'Quarterly Pest Control', isCallback: false });
     expect(result.record).toMatchObject({ id: REC, backfill: false, posture: 'auto_send' });
+  });
+
+  test('sibling first-application lookup: runs for an unstamped estimate-anchor visit with no invoice of its own', async () => {
+    siblingLookupMock.mockClear();
+    const tables = healthyTables();
+    tables.scheduled_services = [{ ...visitRow, source_estimate_id: 'est-1' }];
+    tables.invoices = [];
+    siblingLookupMock.mockResolvedValueOnce({ invoice: { id: 'inv-sib', status: 'sent' }, liveBeside: null });
+    const inputs = await loadCloseoutInputs(SVC, { knex: makeFakeKnex(tables), now: NOW });
+    expect(siblingLookupMock).toHaveBeenCalledTimes(1);
+    expect(inputs.siblingInvoice).toMatchObject({ invoice: { id: 'inv-sib' } });
+  });
+
+  test('sibling first-application lookup: SKIPPED once the visit carries first-application-sibling-split.js\'s provenance stamp — a date-only match must never re-cover an already-split visit', async () => {
+    siblingLookupMock.mockClear();
+    const tables = healthyTables();
+    tables.scheduled_services = [{
+      ...visitRow,
+      source_estimate_id: 'est-1',
+      recurring_template_overrides: { first_application_split_invoice_id: 'inv-shared' },
+    }];
+    tables.invoices = [];
+    // Even if the lookup WOULD find something, it must never be called.
+    siblingLookupMock.mockResolvedValueOnce({ invoice: { id: 'inv-shared', status: 'sent' }, liveBeside: null });
+    const inputs = await loadCloseoutInputs(SVC, { knex: makeFakeKnex(tables), now: NOW });
+    expect(siblingLookupMock).not.toHaveBeenCalled();
+    expect(inputs.siblingInvoice).toBeFalsy();
   });
 
   test('a failing table lands in `unavailable` and its fact reads unknown — the loader never throws and never says "missing"', async () => {

@@ -448,8 +448,16 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   inputs.terminalInvoiceLookupFailed = Boolean(terminalInvoiceProbe.error || inputs.packetInvoiceLookupFailed);
   // Same fallback /complete uses when the visit carries no invoice of its
   // own: the accepted estimate's first-application invoice may hang off a
-  // SIBLING visit (same estimate + date).
-  if (!inputs.liveInvoice && !inputs.terminalInvoice && !liveInvoiceProbe.error && !terminalInvoiceProbe.error && visit.source_estimate_id) {
+  // SIBLING visit (same estimate + date). Skipped once this visit carries
+  // first-application-sibling-split.js's explicit split-provenance stamp
+  // (recurring_template_overrides.first_application_split_invoice_id) — the
+  // lookup below is a DATE match only, so a visit already split off that
+  // shared invoice (own price, own billing) would otherwise be reported as
+  // "covered" by it again the moment a later move lands it back on the
+  // same date, masking a genuinely unbilled visit as settled.
+  const splitFromSharedInvoice = require('./first-application-sibling-split').splitFromSharedInvoiceId(visit);
+  if (!inputs.liveInvoice && !inputs.terminalInvoice && !liveInvoiceProbe.error && !terminalInvoiceProbe.error
+      && visit.source_estimate_id && !splitFromSharedInvoice) {
     const siblingProbe = await probe('invoices (sibling first-application)', unavailable, () => {
       const { findFirstApplicationInvoiceForEstimateService } = require('./estimate-first-application-invoice');
       return findFirstApplicationInvoiceForEstimateService(visit, knex);

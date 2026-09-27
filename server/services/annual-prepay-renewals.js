@@ -5129,7 +5129,14 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
       const recordLinked = (visitInvoices || []).filter((inv) => inv.service_record_id != null && attemptRecordIds.has(String(inv.service_record_id)));
       let reused = recordLinked.find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)))
         || (visitInvoices || []).find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)));
-      if (!reused) {
+      // Same DATE-only caveat as completion's own lookup: a visit already
+      // split off its own price by first-application-sibling-split.js bills
+      // through its OWN estimated_price/line items (fed into `prediction`
+      // above) — it must never be predicted as "reused" off the OTHER
+      // member's (already-reduced) shared invoice just because a later move
+      // landed it back on that invoice's date.
+      const splitFromSharedInvoice = require('./first-application-sibling-split').splitFromSharedInvoiceId(v);
+      if (!reused && !splitFromSharedInvoice) {
         // No direct invoice on the visit → completion consults the SIBLING
         // first-application invoice of the same estimate/date
         // (findFirstApplicationInvoiceForEstimateService, the shared

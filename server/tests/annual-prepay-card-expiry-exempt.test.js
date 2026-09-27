@@ -727,6 +727,23 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
   });
 
+  test('a visit already split off its own price (first-application-sibling-split.js provenance stamp) never re-triggers the DATE-only sibling lookup', async () => {
+    // Even with a LIVE sibling invoice sitting right there for the same
+    // estimate/date, the stamp alone must suppress the lookup entirely —
+    // this visit bills through its own estimated_price/line items, never
+    // through the OTHER member's (already-reduced) shared invoice.
+    const calls = route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({
+        source_estimate_id: 'est-1', estimated_price: '56.40',
+        recurring_template_overrides: { first_application_split_invoice_id: 'inv-shared' },
+      })],
+      invoices: (own) => (isSiblingInvoiceLookup(own) ? [siblingInvoice('sent', { scheduled_service_id: 'v-other' })] : []),
+    });
+    await getCardExpiryExemptCustomerIds(HORIZON);
+    expect(calls.invoices.some((call) => call[0] === 'join')).toBe(false);
+  });
+
   test('a hold row closes the EXTENDED lane even under auto_charge — the hold rail alone decides', async () => {
     // live hold, Auto Pay active (auto_charge prediction), bill above the
     // frozen amount → the extended lane is hold-excluded and the rail

@@ -3272,6 +3272,54 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }
   });
 
+  test('a member already split off a same-date stamped application (first-application-sibling-split.js) bills its own share instead of being blocked as a duplicate', async () => {
+    const estimateId = await linkFixtureEstimate();
+    // A separate visit holds the shared first-application invoice, already
+    // REDUCED by a resplit (same shape money-wise as the real chokepoint's
+    // write) — its notes/service_date stay pinned to the original accept,
+    // exactly as first-application-sibling-split.js leaves them (it only
+    // ever rewrites the invoice's money, never its notes).
+    const target = await createUnownedInvoiceLink({ scheduledDate: etDateString() });
+    const manual = await InvoiceService.create({
+      customerId: fixture.customerId,
+      scheduledServiceId: target.scheduledServiceId,
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 56.40 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Reduced by a same-trip resplit.`,
+    });
+    // Both fixture members carry the exact provenance stamp
+    // first-application-sibling-split.js writes — proof each one's own
+    // price already excludes that invoice's remaining share.
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({
+      recurring_template_overrides: JSON.stringify({ first_application_split_invoice_id: manual.id }),
+    });
+
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', total: 240 });
+    expect(saved.body.billing.invoiceId).not.toBe(manual.id);
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(2);
+  });
+
+  test('a same-date stamped application still blocks when only SOME of this estimate\'s billed members were split off it', async () => {
+    const estimateId = await linkFixtureEstimate();
+    const target = await createUnownedInvoiceLink({ scheduledDate: etDateString() });
+    const manual = await InvoiceService.create({
+      customerId: fixture.customerId,
+      scheduledServiceId: target.scheduledServiceId,
+      lineItems: [{ description: 'First service application', quantity: 1, unit_price: 56.40 }],
+      notes: `Auto-generated from accepted estimate #${estimateId}. Reduced by a same-trip resplit.`,
+    });
+    // Only ONE of the two fixture members carries the stamp — the other is
+    // an unrelated billable member of the same estimate, so the invoice is
+    // still a genuine duplicate-billing risk and must keep blocking.
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({
+      recurring_template_overrides: JSON.stringify({ first_application_split_invoice_id: manual.id }),
+    });
+
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'office_required', reason: 'existing_member_invoice' });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
   test.each([['prior', -2], ['later', 2]])(
     'a packet invoice allows an unlinked accepted-estimate application for a %s explicit date', async (_label, days) => {
       const estimateId = await linkFixtureEstimate();
