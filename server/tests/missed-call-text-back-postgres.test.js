@@ -56,12 +56,13 @@ const REAL_SEND = { sent: true, providerMessageId: 'SM_real_sid', deliveryOutcom
 
 // sendCustomerMessage stand-in: optional work in flight before the handoff
 // (`before` — a staff text landing, the clock moving), then the lane's own
-// providerPreSendCheck where Twilio runs it, then the provider `outcome`
-// (a value, or a function that may throw).
-function pipeline(outcome = REAL_SEND, { before } = {}) {
+// providerPreSendCheck where Twilio runs it (on `checkDb` when given, as
+// Twilio passes its own connection), then the provider `outcome` (a value,
+// or a function that may throw).
+function pipeline(outcome = REAL_SEND, { before, checkDb } = {}) {
   return async (input) => {
     if (before) await before(input);
-    const verdict = await input.providerPreSendCheck({ channel: 'sms' });
+    const verdict = await input.providerPreSendCheck({ channel: 'sms', ...(checkDb ? { dbi: checkDb } : {}) });
     if (!verdict || verdict.ok !== true) {
       return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: verdict?.code, retryable: verdict?.retryable === true };
     }
@@ -553,12 +554,35 @@ jest.setTimeout(30000);
       expect(await claimRow()).toBeUndefined();
     });
 
-    test('a voicemail claim consumed between the early check and the boundary settles the call at the boundary', async () => {
+    test('a voicemail claim consumed between the early check and the boundary settles the call at the boundary — this lane\'s claim released, never kept blocked', async () => {
       sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, { before: () => voicemailClaim('sent') }));
       const row = call(READY_MINUTES_AGO);
       await database('call_log').insert(row);
       expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'voicemail_lead_texted' });
       expect(await claimRow()).toBeUndefined();
+    });
+
+    test('a voicemail claim that lands the instant this lane takes its own (separate tables) is still seen — this lane backs off, never both sending', async () => {
+      // The voicemail lane commits its claim just as this lane's claim
+      // insert runs — the gap a check-then-insert order would miss.
+      let raced = false;
+      const racingDb = new Proxy(database, {
+        apply(target, thisArg, [table, ...rest]) {
+          const query = target(table, ...rest);
+          if (table !== 'missed_call_text_claims' || raced) return query;
+          raced = true;
+          const run = query.then.bind(query);
+          query.then = (resolve, reject) => voicemailClaim('claimed').then(() => run(resolve, reject), reject);
+          return query;
+        },
+      });
+      sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, { checkDb: racingDb }));
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'error', reason: 'MISSED_CALL_CLAIM_IN_FLIGHT' });
+      expect(raced).toBe(true);
+      expect(await claimRow()).toBeUndefined();
+      expect((await stored(row)).metadata.missed_call_text_settled_at).toBeUndefined();
     });
 
     test('a concurrent attempt mid-handoff holds the number: this call stays unsettled for a retry and leaves that claim alone', async () => {
@@ -605,13 +629,43 @@ jest.setTimeout(30000);
         expect(await claimRow()).toMatchObject({ outcome: CLAIM.SENT });
       });
 
-      test('an orphan whose attempt stamped no body can\'t be matched to its text — never recycled (possibly delivered, at most once)', async () => {
+      test('an orphan whose attempt stamped no body can\'t be matched to its text — kept as uncertain (possibly delivered, at most once), and this call settles', async () => {
         await orphan(25 * 60, { body: null });
         const row = call(READY_MINUTES_AGO);
         await database('call_log').insert(row);
-        expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'pending', reason: 'claim_in_flight' });
+        expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'already_sent_to_phone' });
         expect(TwilioService.findOutboundMessageSince).not.toHaveBeenCalled();
-        expect(await claimRow()).toMatchObject({ outcome: CLAIM.DISPATCHING });
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+        expect(await claimRow()).toMatchObject({ outcome: CLAIM.UNCERTAIN });
+      });
+
+      test('orphans that can never be matched (no stamped body, or their call row gone) stop heading the bounded pass — a newer orphan still gets settled', async () => {
+        await orphan(28 * 60, { phone: '+19415550105', body: null });
+        await database('missed_call_text_claims').insert({
+          phone: '+19415550106', outcome: CLAIM.DISPATCHING, call_log_id: randomUUID(), created_at: new Date(NOW - 27 * 60 * 60 * 1000),
+        });
+        await orphan(25 * 60);
+        TwilioService.findOutboundMessageSince.mockResolvedValue({ found: false });
+        expect(await reconcileOrphanedClaims({ limit: 2 })).toBe(2);
+        expect(await claimRow('+19415550105')).toMatchObject({ outcome: CLAIM.UNCERTAIN });
+        expect(await claimRow('+19415550106')).toMatchObject({ outcome: CLAIM.UNCERTAIN });
+        expect(await reconcileOrphanedClaims({ limit: 2 })).toBe(1);
+        expect(await claimRow()).toBeUndefined(); // the provider proved it unsent: released
+        expect(TwilioService.findOutboundMessageSince).toHaveBeenCalledTimes(1);
+      });
+
+      test('the stamped body is the text exactly as Twilio receives it — smart punctuation and link schemes normalized, and that same body is sent', async () => {
+        const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
+        const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
+        const edited = 'Hi there, it\u2019s Waves \u2014 sorry we missed you. Get a quote at https://www.wavespestcontrol.com/quote or call back anytime.';
+        const asSent = normalizeGsmPunctuation(stripSmsUrlScheme(edited));
+        expect(asSent).not.toBe(edited);
+        renderSmsTemplate.mockResolvedValueOnce(edited);
+        const row = call(READY_MINUTES_AGO);
+        await database('call_log').insert(row);
+        expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+        expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ body: asSent }));
+        expect((await stored(row)).metadata.missed_call_text_body).toBe(asSent);
       });
 
       test('the provider shows a message since the claim → it was delivered; stamped sent, never texted twice', async () => {
@@ -729,9 +783,9 @@ jest.setTimeout(30000);
       expect((await stored(row)).metadata.missed_call_text_outcome).toBe('skipped:provider_uncertain');
     });
 
-    test('a permanent provider rejection keeps the claim as blocked and settles — the number is not retried', async () => {
+    test('a permanent provider rejection about the recipient keeps the claim as blocked and settles — the number is not retried', async () => {
       sendCustomerMessage.mockImplementationOnce(pipeline({
-        sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'PROVIDER_FAILURE', retryable: false, terminal: true,
+        sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'PROVIDER_FAILURE', retryable: false, terminal: true, providerErrorCode: '21614',
       }));
       const row = call(READY_MINUTES_AGO);
       await database('call_log').insert(row);
@@ -739,6 +793,24 @@ jest.setTimeout(30000);
       expect(await claimRow()).toMatchObject({ outcome: CLAIM.BLOCKED });
       expect((await stored(row)).metadata.missed_call_text_outcome).toBe('skipped:PROVIDER_FAILURE');
     });
+
+    test.each(['21606', '21408', '21608'])(
+      'a permanent rejection of our own sender or account (%s) settles this call but releases the claim — a later missed call is texted once it is fixed',
+      async (providerErrorCode) => {
+        sendCustomerMessage.mockImplementationOnce(pipeline({
+          sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'PROVIDER_FAILURE', retryable: false, terminal: true, providerErrorCode,
+        }));
+        const row = call(READY_MINUTES_AGO);
+        await database('call_log').insert(row);
+        expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: `sender_rejected_${providerErrorCode}` });
+        expect(await claimRow()).toBeUndefined();
+        expect((await stored(row)).metadata.missed_call_text_outcome).toBe(`skipped:sender_rejected_${providerErrorCode}`);
+        const next = call(READY_MINUTES_AGO);
+        await database('call_log').insert(next);
+        expect(await textBackIfMissed(next.twilio_call_sid)).toEqual({ outcome: 'sent' });
+        expect(await claimRow()).toMatchObject({ outcome: CLAIM.SENT });
+      },
+    );
 
     test('a non-terminal provider failure releases the claim and the lease for a retry', async () => {
       sendCustomerMessage.mockImplementationOnce(pipeline({
