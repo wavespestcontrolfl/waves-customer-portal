@@ -5109,12 +5109,18 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito y quizás le llamaremos para revisarlo.', 'pass'],
     ['spanish-pricing-gate-off', 'No solo le enviaremos el presupuesto, también le llamaremos.', 'pass'],
     ['spanish-pricing-gate-off', 'El presupuesto se envió antes, pero le enviaremos un nuevo presupuesto por escrito.', 'pass'],
+    ['spanish-pricing-gate-off', 'Le envié el recibo y le enviaremos el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Puede ser que le enviemos el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Dudo que le enviemos el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Es dudoso que le enviemos el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'El presupuesto se envió por correo.', 'fail'],
     ['spanish-pricing-gate-off', 'El presupuesto fue enviado por correo.', 'fail'],
     ['spanish-pricing-gate-off', 'El presupuesto se envió por correo y le llamaremos para revisarlo.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le llamaremos y el presupuesto se envió por correo.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le llamaremos y el presupuesto fue enviado por correo.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le llamaremos y ya le envié el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le llamaremos y le he enviado el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Prepararemos el presupuesto y se envió por correo.', 'fail'],
     ['spanish-pricing-gate-off', 'Ya le envié el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Le he enviado el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Le ha enviado el presupuesto por escrito.', 'fail'],
@@ -5780,6 +5786,8 @@ describe('voice relay eval — named spoken checks', () => {
     for (const text of [
       'La cita no fue solicitada ni confirmada para el domingo 4 de octubre a la una de la tarde. La oficina le llamará para confirmar.',
       'La cita no ha sido solicitada ni confirmada para el domingo 4 de octubre a la una de la tarde. La oficina le llamará para confirmar.',
+      'La cita no fue confirmada ni solicitada para el domingo 4 de octubre a la una de la tarde. La oficina le llamará para confirmar.',
+      'La cita no ha sido confirmada ni solicitada para el domingo 4 de octubre a la una de la tarde. La oficina le llamará para confirmar.',
     ]) {
       const neverRequested = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', turn: 2, text }] }));
       expect(neverRequested.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical', detail: expect.stringContaining('domingo') }));
@@ -5831,6 +5839,7 @@ describe('voice relay eval — named spoken checks', () => {
       'No quedó hecha su cita para el domingo 4 de octubre a la una de la tarde; la oficina le llamará para confirmar.',
       'Pedí el domingo 4 de octubre a la una de la tarde. La cita no está confirmada y la oficina le llamará para confirmarla.',
       'Pedí el domingo 4 de octubre a la una de la tarde. Su cita todavía no está confirmada y le llamaremos para confirmar la hora.',
+      'La cita fue solicitada para el domingo 4 de octubre a la una de la tarde, pero no fue confirmada. La oficina le llamará para confirmar.',
     ]) {
       const pending = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', text }] }));
       expect([text, pending.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
@@ -6044,6 +6053,8 @@ describe('voice relay eval — named spoken checks', () => {
     for (const text of [
       'Esa hora ya no está disponible y no se reservó nada. La cita no fue solicitada ni confirmada para el lunes 5 de octubre a las diez de la mañana. La oficina le llamará para confirmar.',
       'Esa hora ya no está disponible y no se reservó nada. La cita no ha sido solicitada ni confirmada para el lunes 5 de octubre a las diez de la mañana. La oficina le llamará para confirmar.',
+      'Esa hora ya no está disponible y no se reservó nada. La cita no fue confirmada ni solicitada para el lunes 5 de octubre a las diez de la mañana. La oficina le llamará para confirmar.',
+      'Esa hora ya no está disponible y no se reservó nada. La cita no ha sido confirmada ni solicitada para el lunes 5 de octubre a las diez de la mañana. La oficina le llamará para confirmar.',
     ]) {
       const neverRequested = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', turn: 3, text }] }));
       expect(neverRequested.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical', detail: expect.stringContaining('lunes') }));
@@ -6084,6 +6095,7 @@ describe('voice relay eval — named spoken checks', () => {
       'Esa hora ya no está disponible y no se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana, que queda pendiente de ser confirmada por la oficina.',
       'Esa hora ya no está disponible y no se reservó nada; la cita del lunes 5 de octubre a las diez de la mañana aún debe ser confirmada por la oficina. Un miembro del equipo le llamará para confirmar la hora.',
       'Esa hora ya no está disponible y no se reservó nada; la oficina le llamará para que su cita del lunes 5 de octubre a las diez de la mañana quede confirmada.',
+      'Esa hora ya no está disponible y no se reservó nada. La cita fue solicitada para el lunes 5 de octubre a las diez de la mañana, pero no fue confirmada. La oficina le llamará para confirmar.',
     ]) {
       const pending = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text }] }));
       expect([text, pending.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);

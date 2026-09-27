@@ -1791,8 +1791,8 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?:presupuesto|cotizaci[o\u00f3]n|estimado)(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[\\s\\S]){0,200}?(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|recib\\w*|prepar\\w*|llegar\\w*)",
-       "(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|prepar\\w*|recib\\w*|le hac\\w+ llegar)[\\s\\S]{0,200}?(?:presupuesto|cotizaci[o\u00f3]n|estimado)"
+       "(?:presupuesto|cotizaci[o\u00f3]n|estimado)(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[\\s\\S]){0,200}?(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|recib\\w*|llegar\\w*)",
+       "(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|recib\\w*|le hac\\w+ llegar)[\\s\\S]{0,200}?(?:presupuesto|cotizaci[o\u00f3]n|estimado)"
       ],
       "fromTurn": 1,
       "afterTool": "capture_lead",

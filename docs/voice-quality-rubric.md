@@ -208,11 +208,15 @@ predicate rather than appear in a noun such as "mensajería". `prospective: true
 accepting present, future and `ir a` commitments, including attached clitics such as
 "vamos a darle seguimiento". Completed evidence includes the predicate's adjacent
 perfect/passive auxiliary ("he enviado", "ha sido enviado") without borrowing an
-unrelated predicate later in the clause. Booking outcomes do not use that policy:
+unrelated coordinated predicate. Thus an earlier future callback or preparation cannot
+turn a later completed delivery into a promise, while a past receipt followed by a future
+delivery can. Preparing an estimate alone does not satisfy the required delivery promise.
+Booking outcomes do not use that policy:
 an affirmative past request ("pedí") is valid, a denied request ("no pedí") is not, and a
 negative unconfirmed-status clause still truthfully reports that the request is pending.
-That pending exception binds directly to the negated status predicate; "no fue solicitada
-ni confirmada" remains a denial of the requested appointment. A required Spanish "today"
+That pending exception binds directly to the negated status predicate; coordinated request
+denials remain denied whether they say "no fue solicitada ni confirmada" or reverse those
+two predicates. A required Spanish "today"
 ETA must govern the technician or visit; an omitted subject is accepted only as a grounded
 continuation of a technician clause, never from an unrelated package or neighbor claim.
 `no_spanish_estimate_delivery_date`
