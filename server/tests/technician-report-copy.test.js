@@ -178,6 +178,11 @@ const CREDENTIAL_CASES = {
     'Provide 2468 ft when accessing the garage',
     'Give 8842 grams after opening the rear gate',
     'Say 2468 ml, then enter the garage',
+    'Use 2468ft at the keypad to get inside',
+    'Using 8842 ml on the lockbox to gain entry',
+    'Used 2468 oz at the keypad',
+    'Use 2468ft at the keypad to get inside, then treated the hinge',
+    'Use 2468 ft at the keypad to treat the mounting plate, then gain entry',
   ],
 };
 
@@ -268,6 +273,9 @@ const LEGITIMATE_CASES = {
     'Use 100 ml, and then treat the hinge near the rear gate',
     'Provide 100 ml before treating around the side door',
     'Say 100 ml, then record the application near the garage door',
+    'Use 100 ml at the keypad to treat the surrounding turf',
+    'Using 100 ml near the keypad, treated the mounting plate',
+    'Used 100 ml by the lockbox to treat the hinge',
   ],
 };
 

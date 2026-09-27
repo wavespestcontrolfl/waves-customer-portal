@@ -471,6 +471,29 @@ const REPORT_INPUT_ACTION_TEXT = String.raw`(?:enter(?:s|ed|ing)?|typ(?:e|es|ed|
 const REPORT_ACCESS_INSTRUCTION_ACTION_TEXT = String.raw`(?:us(?:e|es|ed|ing)|${REPORT_INPUT_ACTION_TEXT}|provid(?:e|es|ed|ing)|giv(?:e|es|ing)|gave|sa(?:y|ys|id|ying))`;
 const REPORT_INPUT_ACCESS_LINK_TEXT = String.raw`(?:before|after|when|(?:and\s+)?then)`;
 const REPORT_DIRECT_ACCESS_ACTION_TEXT = String.raw`(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)`;
+const REPORT_POSITIONAL_CREDENTIAL_INTERFACE_RE = new RegExp(
+  String.raw`\bus(?:e|es|ed|ing)\s+\d{3,8}\s*${REPORT_MEASUREMENT_UNIT_TEXT}\s+(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:keypad|lock\s?box)\b`,
+  'gi',
+);
+const REPORT_POSITIONAL_INTERFACE_WORK_TAIL_RE = new RegExp(
+  String.raw`^\s*(?:,\s*)?(?:(?:to|for)\s+)?(?:(?:we|they|the\s+technician)\s+)?(?:${REPORT_WORK_ACTION_TEXT}|treatment|application)\b`,
+  'i',
+);
+const REPORT_POSITIONAL_INTERFACE_ACCESS_TAIL_RE = new RegExp(
+  String.raw`\b(?:(?:get(?:s|ting)?|got)\s+inside|gain(?:s|ed|ing)?\s+(?:access|entry)|(?:for|to)\s+access|${REPORT_DIRECT_ACCESS_ACTION_TEXT}\s+${REPORT_DIRECT_ACCESS_DEVICE_TARGET_TEXT})\b`,
+  'i',
+);
+
+function containsPositionalCredentialInterface(text) {
+  const value = String(text || '');
+  for (const match of value.matchAll(REPORT_POSITIONAL_CREDENTIAL_INTERFACE_RE)) {
+    const tail = value.slice(match.index + match[0].length).match(/^[^\n.!?]*/)?.[0] || '';
+    const treatmentEvidence = REPORT_POSITIONAL_INTERFACE_WORK_TAIL_RE.test(tail);
+    if (REPORT_POSITIONAL_INTERFACE_ACCESS_TAIL_RE.test(tail) || !treatmentEvidence) return true;
+  }
+  return false;
+}
+
 const REPORT_DIRECT_ACCESS_CODE_RES = [
   /\b(?:gate|door|garage|entry|keypad|lock\s?box|lock|alarm)\b\s*(?:is|:|=|was|were|reads?)\s*\d{3,8}\s*(?:gallons?|gal|ml|millilit(?:er|re)s?|lit(?:er|re)s?|fl\.?\s*oz|oz|ounces?|pounds?|lbs?|grams?|kg)\b/i,
   /\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,
@@ -489,6 +512,7 @@ function containsReportAccessCode(text) {
   const raw = String(text || '');
   if (containsExplicitNumericCredential(raw)) return true;
   if (containsAsLinkedMeasurementCredential(raw)) return true;
+  if (containsPositionalCredentialInterface(raw)) return true;
   if (containsPastAccessCredential(raw)) return true;
   // Direct token-to-device relationships outrank fertilizer context. Check the
   // original copy before an application qualifier can mask an N-P-K-shaped
