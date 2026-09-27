@@ -322,18 +322,25 @@ function inventoryUnitForNewProduct(unit) {
 }
 
 // True when `proposedName` collides with an active catalog product's own
-// name (either direction of containment) OR `rawTitle` itself contains an
-// active product's name as whole words — the one check shared by
-// validateNewProduct (pure) and applyDecision's own in-transaction re-check
-// (item 1 of the 2026-09-27 review: two lines for the same new item in one
-// run must not both create it — see applyDecision's new_product branch).
-function collidesWithActiveProduct(proposedName, rawTitle, activeProducts) {
+// name OR any of its ALIASES (either direction of containment), OR `rawTitle`
+// itself contains the product's name or an alias as whole words — the one
+// check shared by validateNewProduct (pure) and applyDecision's own
+// in-transaction re-check (item 1 of the 2026-09-27 review: two lines for
+// the same new item in one run must not both create it — see applyDecision's
+// new_product branch). `activeProductAliases` is `{ productId: [aliasName] }`
+// (candidateAliases' own shape) — checking aliases too closes the gap where
+// an active product's NAME doesn't match the title at all but an alias saved
+// from a PAST listing does ("Bifenthrin 7.9" aliased "Bifen XTS" — a title
+// reading "Bifen XTS" proposing new_product "Bifen XTS" would otherwise fork
+// the catalog; item 4, 2026-09-27 round 9 review).
+function collidesWithActiveProduct(proposedName, rawTitle, activeProducts, activeProductAliases = {}) {
   const normName = normalizeForMatch(proposedName);
   const normTitle = normalizeForMatch(rawTitle);
-  return activeProducts.some((p) => {
-    const n = normalizeForMatch(p.name);
-    return n === normName || n.includes(normName) || normName.includes(n) || containsWholeWords(normTitle, n);
-  });
+  const collides = (candidate) => {
+    const n = normalizeForMatch(candidate);
+    return Boolean(n) && (n === normName || n.includes(normName) || normName.includes(n) || containsWholeWords(normTitle, n));
+  };
+  return activeProducts.some((p) => collides(p.name) || (activeProductAliases[p.id] || []).some(collides));
 }
 
 function unsureResult(reason) {
@@ -353,13 +360,43 @@ const GENERIC_NAME_FIRST_WORDS = new Set([
   'professional', 'pro', 'plus', 'the', 'a', 'and', 'for', 'with', 'of',
 ]);
 
+// EPA/registration boilerplate: never part of a product's own identity, even
+// though it can be a contiguous run lifted from the title ("EPA Reg").
+const REG_TOKEN_WORDS = new Set(['epa', 'reg', 'no', 'registration']);
+// Pack/container nouns (singular AND plural — normalizeForMatch never
+// stems): a bare unit-of-sale word never names a specific product either
+// ("96 oz Bottle", "12 Count", "2 Pack").
+const PACK_CONTAINER_WORDS = new Set([
+  'pack', 'packs', 'pk', 'pks', 'count', 'counts', 'ct',
+  'case', 'cases', 'box', 'boxes', 'bag', 'bags', 'bottle', 'bottles',
+  'jug', 'jugs', 'pail', 'pails', 'tube', 'tubes', 'can', 'cans', 'each', 'ea',
+]);
+
+// One word of a proposed new-product name that could plausibly be (part of)
+// a product's OWN identity — never a bare number (or a fraction like "1/2",
+// which carries no letter either), a size/count/pack/container unit word
+// (reusing the exact unit knowledge receipt-processor.js's own title-size
+// parsing already models — SIZE_UNITS/sizeUnit, COUNT_UNIT_WORD_RE — plus the
+// pack/container nouns above), an EPA/registration token, or a generic
+// catalog word (item 1, 2026-09-27 round 9 review: "96 oz", "96 oz Bottle",
+// "12 Count", "2 Pack" and "EPA Reg" are each a contiguous run of the
+// title's own words, but none of them NAMES anything).
+function isIdentityWord(word) {
+  if (!/[a-z]/.test(word)) return false;
+  if (GENERIC_NAME_FIRST_WORDS.has(word) || REG_TOKEN_WORDS.has(word) || PACK_CONTAINER_WORDS.has(word)) return false;
+  return !COUNT_UNIT_WORD_RE.test(word) && !sizeUnit(word);
+}
+
 // True when `nameWords` (normalizeForMatch'd) is a CONTIGUOUS run of at
-// least 2 of `titleWords`, in that exact order, whose first word is not a
-// generic catalog word — a real product phrase lifted whole from the
-// listing ("Bifen XTS"), never a subset scattered across it ("XTS Bifen" out
-// of order, or a single generic word like "Insecticide").
+// least 2 of `titleWords`, in that exact order, whose first word — and at
+// least one word overall (the first word already being one is enough, but
+// this is checked as its own condition rather than assumed) — is an
+// identity word: a real product phrase lifted whole from the listing
+// ("Bifen XTS"), never a subset scattered across it ("XTS Bifen" out of
+// order), a single generic word ("Insecticide"), or a phrase built entirely
+// from sizes/counts/packs/EPA boilerplate ("96 oz", "12 Count", "EPA Reg").
 function isContiguousTitlePhrase(nameWords, titleWords) {
-  if (nameWords.length < 2 || GENERIC_NAME_FIRST_WORDS.has(nameWords[0])) return false;
+  if (nameWords.length < 2 || !isIdentityWord(nameWords[0]) || !nameWords.some(isIdentityWord)) return false;
   for (let start = 0; start + nameWords.length <= titleWords.length; start += 1) {
     if (nameWords.every((word, offset) => titleWords[start + offset] === word)) return true;
   }
@@ -472,7 +509,7 @@ function validateExisting(raw, ctx) {
 
 // A validated 'new_product' decision, or 'agent_unsure' with why.
 function validateNewProduct(raw, ctx) {
-  const { rawTitle, lineQuantity, allActiveProducts, allowedCategories, matchedProductId } = ctx;
+  const { rawTitle, lineQuantity, allActiveProducts, activeProductAliases = {}, allowedCategories, matchedProductId } = ctx;
   // The deterministic matcher already tied this title to a real catalog
   // product (needs_size/size_mismatch): proposing a brand-new one instead
   // would fork the catalog rather than fix that product's size — refuse.
@@ -496,7 +533,7 @@ function validateNewProduct(raw, ctx) {
   if (!isContiguousTitlePhrase(nameWords, titleWords)) {
     return { kind: 'unsure', status: 'agent_unsure', reason: `the proposed name ("${name}") isn't a specific product phrase from the title` };
   }
-  if (collidesWithActiveProduct(name, rawTitle, allActiveProducts)) {
+  if (collidesWithActiveProduct(name, rawTitle, allActiveProducts, activeProductAliases)) {
     return { kind: 'unsure', status: 'agent_unsure', reason: `looks like an existing product ("${name}")` };
   }
 
@@ -950,10 +987,15 @@ async function resolveNewProduct(trx, { line, vendor, decision }) {
     trx,
     source: 'inventory_agent_create',
     // Checked under createCatalogProduct's catalog lock, which the admin
-    // "add product" screen takes too, so a product added a moment ago by
-    // hand or by another run is seen here.
-    guard: async (lockedTrx) => collidesWithActiveProduct(decision.newProduct.name, line.raw_title,
-      await lockedTrx('products_catalog').where({ active: true }).select('id', 'name')),
+    // "add product" screen takes too, so a product added — or an alias
+    // saved — a moment ago by hand or by another run is seen here (item 4,
+    // 2026-09-27 round 9 review: the pure validation above can only ever see
+    // a snapshot; this is the re-check that actually guards the write).
+    guard: async (lockedTrx) => {
+      const active = await lockedTrx('products_catalog').where({ active: true }).select('id', 'name');
+      const aliases = await candidateAliases(lockedTrx, active.map((p) => p.id));
+      return collidesWithActiveProduct(decision.newProduct.name, line.raw_title, active, aliases);
+    },
   });
   if (!created) return { ok: false, stop: { outcome: { applied: false, reason: 'name_collision_retry' } } };
   return {
@@ -1141,17 +1183,32 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
     const handedOff = await settleIfShipmentHandedOff(trx, { lineId, vendor, shipmentKey, email, decision });
     if (handedOff) return handedOff;
 
-    const terminal = await settleTerminalKind(trx, { lineId, line, email, decision }, notifyAdmin);
-    if (terminal) return terminal;
-
     // Lock order is catalog BEFORE product, for every writer. The admin
     // alias endpoint (createProductAlias) holds the catalog lock while its
     // insert's foreign-key check takes KEY SHARE on the product row; locking
     // the product FOR UPDATE first (resolveTargetProduct) and the catalog
     // second (createAgentAlias) deadlocked against it (2026-09-27 pre-push
-    // audit). The later lockCatalogCreate calls in this transaction re-enter
-    // this same lock.
+    // audit). Taken here — BEFORE the rules re-check below, whose
+    // classifyUnderLock locks the product row — rather than after
+    // settleTerminalKind as before (item 2b, 2026-09-27 round 9 review); the
+    // later lockCatalogCreate calls in this transaction re-enter this same
+    // lock.
     await inventoryOperations.lockCatalogCreate(trx);
+
+    // Chokepoint (item 2b, 2026-09-27 round 9 review): the catalog may have
+    // changed since decideForTitle's own classification (another line's
+    // transaction committed a matching product/alias/container-size in the
+    // gap between there and the LLM call returning, or between there and
+    // this transaction acquiring its locks) — re-check under these SAME
+    // locks whether the deterministic rules now resolve this title. If they
+    // do, the rules win and post it themselves, for EVERY decision kind
+    // INCLUDING a terminal one (not_stock/equipment/unsure): a stale model
+    // answer must never override what the catalog actually resolves to now.
+    const byRules = await postThroughRules(trx, { locked: line, email, notifyAdmin });
+    if (byRules) return { applied: true, status: byRules.status };
+
+    const terminal = await settleTerminalKind(trx, { lineId, line, email, decision }, notifyAdmin);
+    if (terminal) return terminal;
 
     // The catalog changes (a container size, the count unit, an alias, a new
     // product) are made in a savepoint. A decision that ends in a hold or a
@@ -1318,16 +1375,47 @@ async function recordAttemptFailure(conn, lineId, notifyAdmin, reason = 'unknown
   });
 }
 
-// A queued line the receipt lane's own rules now resolve (staff filled its
-// container size, or an earlier line created the product or alias it names)
-// posts through that lane's path, receipt-processor's logQueuedLine: the
-// model is never asked to second-guess a verified match, where an unsure or
-// not_stock answer could hold or drop a purchase the rules can post (Codex
-// round 8). Returns the outcome, or null to let the agent decide (the
-// classifier doesn't log it, or no longer does under the locks).
-async function postIfDeterministic(conn, line, email, notifyAdmin) {
-  const first = await classifyItem({ title: line.raw_title, quantity: Number(line.quantity) }, conn);
-  if (first.status !== 'logged') return null;
+// The CORE of "post through the receipt lane's own rules": given a trx that
+// ALREADY holds the line lock and the shipment lock (and, for a caller that
+// might also lock a product row afterward in the SAME transaction, the
+// catalog-create lock too — see applyDecision's chokepoint), tries
+// logQueuedLine and, on success, writes the line's agent_decision and bell.
+// Returns { status } when the rules resolve it, or null when they don't (yet)
+// — the classifier doesn't log it, or no longer does under the locks — so
+// the caller falls through to its own next step. Shared by
+// postLineThroughRules below (which takes its own locks first) AND
+// applyDecision's in-transaction chokepoint (item 2, 2026-09-27 round 9
+// review), which already holds them.
+async function postThroughRules(trx, { locked, email, notifyAdmin }) {
+  const decision = { kind: 'receipt_rules', reason: "the receipt lane's own rules now resolve this title" };
+  const outcome = await logQueuedLine(trx, { line: locked, email });
+  if (!outcome) return null;
+  await trx('purchase_receipt_lines').where({ id: locked.id }).update({
+    agent_decision: { ...decisionRecord(decision), handoffFrom: locked.agent_decision?.handoffFrom || null }, agent_decided_at: new Date(),
+  });
+  const { HELD_REASONS, openRestockRequestNote } = require('./sweep');
+  const logged = outcome.status === 'logged';
+  await ringBell(notifyAdmin, {
+    lineId: locked.id, emailId: email.id, status: outcome.status,
+    title: logged ? 'Purchase logged' : 'Purchase not added',
+    body: logged
+      ? `${outcome.product.name} +${outcome.receivedQty} ${displayUnit(outcome.receivedUnit)} by the receipt rules (line ${String(locked.id).slice(0, 8)}).`
+        + `${outcome.hasOpenRestockRequest ? ` ${openRestockRequestNote(outcome.product.name)}` : ''}`
+      : `"${locked.raw_title}" wasn't added. ${HELD_REASONS[outcome.status]}`,
+    trx,
+  });
+  return { status: outcome.status };
+}
+
+// Takes the line + shipment locks itself, checks for a shipment hand-off,
+// then hands off to postThroughRules — the WHOLE "post a queued line the
+// receipt lane's own rules now resolve" transaction, factored out so both
+// postIfDeterministic (below, before the model is even asked) and
+// processOneLine's handling of decideForTitle's 'rulesResolve' sentinel (the
+// catalog changed AGAIN between there and here) run the exact same locked
+// attempt (item 2a, 2026-09-27 round 9 review). Returns { status }, or null
+// when the rules don't resolve it under the lock.
+async function postLineThroughRules(conn, { line, email, notifyAdmin }) {
   return conn.transaction(async (trx) => {
     const locked = await trx('purchase_receipt_lines').where({ id: line.id }).forUpdate().first();
     if (!locked || locked.status !== 'agent_pending') return { status: 'no_longer_pending' };
@@ -1335,24 +1423,22 @@ async function postIfDeterministic(conn, line, email, notifyAdmin) {
     const decision = { kind: 'receipt_rules', reason: "the receipt lane's own rules now resolve this title" };
     const handedOff = await settleIfShipmentHandedOff(trx, { lineId: locked.id, vendor: locked.vendor, shipmentKey: locked.shipment_key, email, decision });
     if (handedOff) return { status: handedOff.status };
-    const outcome = await logQueuedLine(trx, { line: locked, email });
-    if (!outcome) return null;
-    await trx('purchase_receipt_lines').where({ id: locked.id }).update({
-      agent_decision: { ...decisionRecord(decision), handoffFrom: locked.agent_decision?.handoffFrom || null }, agent_decided_at: new Date(),
-    });
-    const { HELD_REASONS, openRestockRequestNote } = require('./sweep');
-    const logged = outcome.status === 'logged';
-    await ringBell(notifyAdmin, {
-      lineId: locked.id, emailId: email.id, status: outcome.status,
-      title: logged ? 'Purchase logged' : 'Purchase not added',
-      body: logged
-        ? `${outcome.product.name} +${outcome.receivedQty} ${displayUnit(outcome.receivedUnit)} by the receipt rules (line ${String(locked.id).slice(0, 8)}).`
-          + `${outcome.hasOpenRestockRequest ? ` ${openRestockRequestNote(outcome.product.name)}` : ''}`
-        : `"${locked.raw_title}" wasn't added. ${HELD_REASONS[outcome.status]}`,
-      trx,
-    });
-    return { status: outcome.status };
+    return postThroughRules(trx, { locked, email, notifyAdmin });
   });
+}
+
+// A queued line the receipt lane's own rules now resolve (staff filled its
+// container size, or an earlier line created the product or alias it names)
+// posts through that lane's path, receipt-processor's logQueuedLine: the
+// model is never asked to second-guess a verified match, where an unsure or
+// not_stock answer could hold or drop a purchase the rules can post (Codex
+// round 8). A cheap, UNLOCKED classifyItem check first, so the common case
+// (nothing the rules can already resolve) never opens a transaction at all.
+// Returns the outcome, or null to let the agent decide.
+async function postIfDeterministic(conn, line, email, notifyAdmin) {
+  const first = await classifyItem({ title: line.raw_title, quantity: Number(line.quantity) }, conn);
+  if (first.status !== 'logged') return null;
+  return postLineThroughRules(conn, { line, email, notifyAdmin });
 }
 
 /**
@@ -1363,9 +1449,20 @@ async function postIfDeterministic(conn, line, email, notifyAdmin) {
  * purchase_receipt_lines row); not exported — a future replay tool that
  * needs this same pipeline adds its own export in its own PR rather than
  * this module speculating on its shape ahead of time.
+ *
+ * Re-classifies FIRST (item 2a, 2026-09-27 round 9 review): postIfDeterministic
+ * already checked once, unlocked, before the model was even considered —
+ * but the catalog can change again in the gap between that check and this
+ * one (another line's transaction committing a matching product/alias/
+ * container-size). If THIS classification already says 'logged', the model
+ * is never asked at all — a sentinel ({ rulesResolve: true }) tells
+ * processOneLine to post it through the same locked rules path instead
+ * (postLineThroughRules), never trusting a model answer for a title the
+ * rules can already resolve.
  */
-async function decideForTitle(conn, dispatch, { rawTitle, quantity, vendor, siteOneFields }, { allowedCategories, activeProducts }) {
+async function decideForTitle(conn, dispatch, { rawTitle, quantity, vendor, siteOneFields }, { allowedCategories, activeProducts, activeProductAliases }) {
   const reClassified = await classifyItem({ title: rawTitle, quantity }, conn);
+  if (reClassified.status === 'logged') return { rulesResolve: true, reClassified };
   const matchedProduct = reClassified.product || null;
   const candidates = await candidateProducts(conn, rawTitle, matchedProduct);
   const aliasesByProduct = await candidateAliases(conn, candidates.map((c) => c.id));
@@ -1377,7 +1474,7 @@ async function decideForTitle(conn, dispatch, { rawTitle, quantity, vendor, site
   if (!res.ok || !res.json) return { llmFailed: true, reClassified, reason: res.reason || null };
 
   const decision = classifyDecision(res.json, {
-    rawTitle, lineQuantity: quantity, candidates, aliasesByProduct, allActiveProducts: activeProducts, allowedCategories,
+    rawTitle, lineQuantity: quantity, candidates, aliasesByProduct, allActiveProducts: activeProducts, activeProductAliases, allowedCategories,
     // The deterministic matcher's OWN pick for this title, right now — the
     // agent may only confirm it (or propose new_product when there's none),
     // never substitute or duplicate it. See validateExisting/validateNewProduct.
@@ -1397,7 +1494,7 @@ async function closeBeforeCutoff(conn, lineId) {
   });
 }
 
-async function processOneLine(conn, line, { dispatch, notifyAdmin, allowedCategories, activeProducts, since }) {
+async function processOneLine(conn, line, { dispatch, notifyAdmin, allowedCategories, activeProducts, activeProductAliases, since }) {
   // Every pass over a pending line either resolves it or spends an attempt,
   // so no line can sit at the head of the oldest-first queue forever. A line
   // whose email row is gone can never be checked for duplicates: hand it to
@@ -1412,8 +1509,17 @@ async function processOneLine(conn, line, { dispatch, notifyAdmin, allowedCatego
   if (deterministic) return deterministic;
 
   const siteOneFields = line.vendor === 'siteone' ? await siteOneLineFields(conn, line) : null;
-  const outcome = await decideForTitle(conn, dispatch, { rawTitle: line.raw_title, quantity: Number(line.quantity), vendor: line.vendor, siteOneFields }, { allowedCategories, activeProducts });
+  const outcome = await decideForTitle(conn, dispatch, { rawTitle: line.raw_title, quantity: Number(line.quantity), vendor: line.vendor, siteOneFields }, { allowedCategories, activeProducts, activeProductAliases });
   if (outcome.llmFailed) return recordAttemptFailure(conn, line.id, notifyAdmin, outcome.reason || 'llm_unavailable');
+  // decideForTitle's own re-classification already resolved it — the model
+  // was never asked (item 2a, 2026-09-27 round 9 review). Post it through
+  // the same locked rules path; a further race that un-resolves it between
+  // there and this lock counts as an attempt like any other failure.
+  if (outcome.rulesResolve) {
+    const resolved = await postLineThroughRules(conn, { line, email, notifyAdmin });
+    if (resolved) return resolved;
+    return recordAttemptFailure(conn, line.id, notifyAdmin, 'the receipt rules no longer resolve this title under lock');
+  }
 
   const applied = await applyDecision(conn, { lineId: line.id, vendor: line.vendor, shipmentKey: line.shipment_key, email, decision: outcome.decision }, notifyAdmin);
   if (applied.applied) return { status: applied.status };
@@ -1447,11 +1553,13 @@ async function runInventoryAgent({ conn = db, llm, notifyAdmin, limit = BATCH_LI
     try {
       // Reloaded fresh for EVERY line (not once for the whole run): an
       // earlier line in this same batch may have just created the product
-      // a later line's new_product proposal would otherwise collide with
-      // (item 1 of the 2026-09-27 review) — validateNewProduct's collision
-      // check must see it.
+      // — or the alias — a later line's new_product proposal would
+      // otherwise collide with (item 1 of the 2026-09-27 review; aliases
+      // added by item 4, 2026-09-27 round 9 review) — validateNewProduct's
+      // collision check must see it.
       const activeProducts = await conn('products_catalog').where({ active: true }).select('id', 'name');
-      const outcome = await processOneLine(conn, line, { dispatch, notifyAdmin: notify, allowedCategories, activeProducts, since });
+      const activeProductAliases = await candidateAliases(conn, activeProducts.map((p) => p.id));
+      const outcome = await processOneLine(conn, line, { dispatch, notifyAdmin: notify, allowedCategories, activeProducts, activeProductAliases, since });
       if (outcome.status === 'logged') totals.logged += 1;
       else if (outcome.status === 'still_pending' || outcome.status === 'no_longer_pending') totals.stillPending += 1;
       // Never person-facing (no bell): a personal-purchase read (not_stock)
@@ -1573,4 +1681,10 @@ module.exports = {
   // carry the untrusted title/vendor/invoice text, which only ever lands
   // in the user message, inside <purchase_line>.
   DECISION_SYSTEM_PROMPT, buildUserMessage,
+  // decideForTitle needs a real DB (classifyItem/candidateProducts/
+  // candidateAliases) — exported so inventory-agent-postgres.test.js can
+  // call it directly and prove the model is never called when its own
+  // re-classification already resolves the title (item 2a, 2026-09-27 round
+  // 9 review).
+  decideForTitle,
 };

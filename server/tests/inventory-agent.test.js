@@ -450,6 +450,51 @@ describe('classifyDecision — new_product', () => {
       .toMatchObject({ kind: 'new_product', status: 'logged' });
   });
 
+  // Item 1, 2026-09-27 round 9 review: a size/count/pack/EPA phrase CAN be a
+  // contiguous run of the title's own words (unlike the round 7 cases above,
+  // which fail the contiguous-phrase check itself) — this is a SEPARATE gate
+  // that a contiguous phrase must also clear, because none of these actually
+  // names a product.
+  test('a name built only from a size, count, pack or EPA phrase is held even though it IS a contiguous title phrase (item 1, 2026-09-27 round 9)', () => {
+    const title = 'Bifen XTS Insecticide 96 oz Bottle EPA Reg. No. 279-3206';
+    const nameFor = (name) => ({
+      kind: 'new_product', reason: 'not in the catalog',
+      new_product: { name, category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_count: 1 },
+    });
+    for (const name of ['96 oz', '96 oz Bottle', 'EPA Reg']) {
+      expect(classifyDecision(nameFor(name), ctx({ rawTitle: title, allowedCategories })))
+        .toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+    }
+    // A real product phrase from the SAME title still passes.
+    expect(classifyDecision(nameFor('Bifen XTS'), ctx({ rawTitle: title, allowedCategories })))
+      .toMatchObject({ kind: 'new_product', status: 'logged' });
+  });
+
+  // These two use a reading that DOES validate (proven elsewhere in this
+  // file for the same title/reading shape), so the 'unsure' outcome below
+  // can only come from the identity-word gate — never a reading mismatch
+  // masking the regression.
+  test('"12 Count" names nothing on its own, even with a validating reading (item 1, 2026-09-27 round 9)', () => {
+    const raw = {
+      kind: 'new_product', reason: 'not in the catalog',
+      new_product: { name: '12 Count', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_count: 1 },
+    };
+    const decision = classifyDecision(raw, ctx({ rawTitle: 'Victor M326 Rat Trap 12 Count', allowedCategories }));
+    expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+  });
+
+  test('"2 Pack" names nothing on its own, even with a validating reading (item 1, 2026-09-27 round 9)', () => {
+    const raw = {
+      kind: 'new_product', reason: 'not in the catalog',
+      new_product: { name: '2 Pack', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_count: 2 },
+    };
+    const decision = classifyDecision(raw, ctx({ rawTitle: 'Taurus SC Termiticide 78 oz 2 Pack', allowedCategories }));
+    expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+  });
+
   test('a validated new-product proposal computes the container size, inventory unit and amount', () => {
     const raw = {
       kind: 'new_product', reason: 'not in the catalog',
@@ -501,6 +546,24 @@ describe('classifyDecision — new_product', () => {
       rawTitle: 'Ortho Bug-B-Gon Ready Spray 32 oz', allowedCategories, allActiveProducts: [{ id: 'p-ortho', name: 'Ortho' }],
     }));
     expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+  });
+
+  // Item 4, 2026-09-27 round 9 review: an active product's own NAME
+  // ("Bifenthrin 7.9") may not collide with the proposed name at all — the
+  // collision is with one of its ALIASES ("Bifen XTS", saved from a past
+  // listing) — the gap the pure name-only check missed.
+  test('a proposed name matching an active product\'s ALIAS (not its own name) -> unsure — never forks the catalog against a known alias', () => {
+    const raw = {
+      kind: 'new_product', new_product: { name: 'Bifen XTS', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_count: 1 },
+    };
+    const decision = classifyDecision(raw, ctx({
+      rawTitle: 'Control Solutions Bifen XTS Insecticide 96 oz', allowedCategories,
+      allActiveProducts: [{ id: 'p-bifenthrin', name: 'Bifenthrin 7.9' }],
+      activeProductAliases: { 'p-bifenthrin': ['Bifen XTS'] },
+    }));
+    expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+    expect(decision.reason).toMatch(/looks like an existing product/);
   });
 
   test('a category outside the allowed set -> unsure', () => {
@@ -719,4 +782,88 @@ describe('recordAttemptFailure — attempts, then hands off to a person (LLM fai
     expect(getLine().status).toBe('logged');
     expect(notify).not.toHaveBeenCalled();
   });
+});
+
+describe('ops/agents/inventory-agent-undo.js CLI — DATABASE_PUBLIC_URL enables TLS before any server module loads (item 5, 2026-09-27 round 9)', () => {
+  // The require.main === module TLS-setup block only ever runs when this
+  // file is the real process entry point (see its own header comment) — so
+  // the only faithful way to test it is to spawn the real CLI, never a
+  // require() from inside this suite. It's proven at the wire level, not by
+  // reading an env var back: a raw TCP listener stands in for Postgres and
+  // captures the FIRST bytes the driver sends — an 8-byte SSLRequest packet
+  // (length 8, magic code 80877103) when TLS is negotiated first, or the
+  // (longer) plain startup packet straight away when it isn't.
+  const net = require('net');
+  const { spawn } = require('child_process');
+  const path = require('path');
+  const undoScript = path.join(__dirname, '..', '..', 'ops', 'agents', 'inventory-agent-undo.js');
+  const SSL_REQUEST_CODE = 80877103;
+  const FAKE_LINE_ID = '00000000-0000-0000-0000-000000000000'; // a valid UUID shape — enough to reach a real DB query
+
+  // Kills the child and waits for it to actually exit (bounded), so a test
+  // never leaves a lingering process — or an open Jest handle — behind.
+  async function killAndWait(child) {
+    if (child.exitCode !== null || child.signalCode) return;
+    const exited = new Promise((resolve) => child.once('exit', resolve));
+    let timer;
+    try { child.kill('SIGKILL'); } catch { /* already exited */ }
+    await Promise.race([exited, new Promise((resolve) => { timer = setTimeout(resolve, 2000); })]);
+    clearTimeout(timer);
+  }
+
+  // A bounded race whose LOSING timer is always cleared — an uncleared
+  // setTimeout keeps Node's event loop (and Jest's own process) alive well
+  // past the test, even once the race is decided.
+  function withTimeout(promise, ms, message) {
+    let timer;
+    const bound = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); });
+    return Promise.race([promise, bound]).finally(() => clearTimeout(timer));
+  }
+
+  async function firstBytesSent(extraEnv, urlSuffix = '') {
+    const server = net.createServer();
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    const dataPromise = new Promise((resolve) => {
+      server.on('connection', (socket) => {
+        socket.once('data', (chunk) => { resolve(chunk); socket.destroy(); });
+      });
+    });
+    const child = spawn(process.execPath, [undoScript, `--line=${FAKE_LINE_ID}`], {
+      env: {
+        ...process.env,
+        DATABASE_PUBLIC_URL: `postgres://user:pass@127.0.0.1:${port}/fakedb${urlSuffix}`,
+        DATABASE_URL: '',
+        PGSSLMODE: '',
+        ...extraEnv,
+      },
+      stdio: 'ignore',
+    });
+    try {
+      return await withTimeout(dataPromise, 5000, 'no connection attempt within 5s');
+    } finally {
+      await killAndWait(child);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
+
+  test('no sslmode in the URL and no PGSSLMODE preset: the SSL negotiation packet is sent first', async () => {
+    const chunk = await firstBytesSent({});
+    expect(chunk.length).toBe(8);
+    expect(chunk.readInt32BE(4)).toBe(SSL_REQUEST_CODE);
+  }, 10000);
+
+  test('a PGSSLMODE already set in the environment is left alone — never overwritten to no-verify', async () => {
+    // 'disable' never negotiates TLS at all: the plain startup packet (no
+    // 8-byte SSLRequest) goes first, proving the preset value won this.
+    const chunk = await firstBytesSent({ PGSSLMODE: 'disable' });
+    expect(chunk.length).not.toBe(8);
+  }, 10000);
+
+  test('an explicit sslmode in the URL is left alone too', async () => {
+    // sslmode=disable in the URL itself never negotiates TLS either — this
+    // just proves the script didn't force PGSSLMODE=no-verify on top of it.
+    const chunk = await firstBytesSent({}, '?sslmode=disable');
+    expect(chunk.length).not.toBe(8);
+  }, 10000);
 });

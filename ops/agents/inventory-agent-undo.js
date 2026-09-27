@@ -71,6 +71,15 @@ if (require.main === module) {
     process.exit(2);
   }
   process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
+  // The public proxy needs TLS, and railway run's own DATABASE_URL (the
+  // internal host) is unreachable from outside the service network — knex's
+  // own ssl config only applies when NODE_ENV=production (server/knexfile.js),
+  // so without this a `railway run --service Postgres` invocation (this
+  // script's own advertised command) never negotiates TLS at all and the
+  // connection just hangs/refuses. Same pattern as
+  // archive-catalog-service.js: enable it unless the URL already states a
+  // mode or PGSSLMODE is already set (2026-09-27 round 9 review, item 5).
+  if (!/sslmode=/.test(process.env.DATABASE_URL) && !process.env.PGSSLMODE) process.env.PGSSLMODE = 'no-verify';
 }
 
 const path = require('path');
@@ -84,6 +93,32 @@ function arg(name, argv) {
 
 function usageError(message, exitCode = 2) {
   return Object.assign(new Error(message), { exitCode });
+}
+
+// One field's exact CURRENT db value, formatted for the dry-run print: null
+// rendered as the bare word `null`, anything else JSON-quoted (a string
+// prints as `"each"`, a number as `60`, matching how Postgres actually
+// returned it — numeric columns come back as strings through this driver,
+// same as the fixture assertions elsewhere in this lane check them).
+function fieldDisplay(value) {
+  return value === null || value === undefined ? 'null' : JSON.stringify(value);
+}
+
+// Prints exactly what an existing product's restore would change (item 3,
+// 2026-09-27 round 9 review; ops/agents/README.md requires a mutating
+// script to print exactly what would change) — every field's CURRENT value
+// -> the exact ORIGINAL value recorded at the agent's own write.
+function logRestoredFields(log, product, originalFields) {
+  log(`  restore "${product?.name}"'s fields to what they were before the agent's restock:`);
+  const restoredFields = [
+    ['container_size', product?.container_size, originalFields.containerSize],
+    ['inventory_unit', product?.inventory_unit, originalFields.inventoryUnit],
+    ['inventory_on_hand', product?.inventory_on_hand, originalFields.inventoryOnHand],
+    ['default_unit', product?.default_unit, originalFields.defaultUnit],
+  ];
+  for (const [field, current, original] of restoredFields) {
+    log(`    ${field}: ${fieldDisplay(current)} → ${fieldDisplay(original)}`);
+  }
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -161,9 +196,7 @@ async function undoLine(conn, { lineArg, execute = false, log = console.log }) {
 
   log(`Line ${line.id} ("${line.raw_title}"):`);
   log(`  reverse ${line.received_qty} ${line.received_unit} on "${product?.name || line.product_id}" (a correction of -${line.received_qty} ${line.received_unit})`);
-  if (originalFields && !isAgentCreatedProduct) {
-    log(`  restore "${product?.name}"'s container_size/inventory_unit/inventory_on_hand/default_unit to what they were before the agent's restock`);
-  }
+  if (originalFields && !isAgentCreatedProduct) logRestoredFields(log, product, originalFields);
   if (alias) log(`  delete product_aliases row ${alias.id} ("${alias.alias_name}")`);
   // Never deactivated (2026-09-27 review) — staff may have linked this row
   // somewhere the undo can't see since the agent created it.

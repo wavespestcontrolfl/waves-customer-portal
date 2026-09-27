@@ -20,7 +20,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { runInventoryAgent, drainAgentQueue, productUnchangedSinceAgent, DOWNSTREAM_ADOPTION_TABLES } = require('../services/purchase-receipts/inventory-agent');
+const { runInventoryAgent, drainAgentQueue, productUnchangedSinceAgent, DOWNSTREAM_ADOPTION_TABLES, decideForTitle } = require('../services/purchase-receipts/inventory-agent');
 const inventoryOperations = require('../services/inventory-operations');
 const notifications = require('../services/notification-service');
 const { undoLine } = require('../../ops/agents/inventory-agent-undo');
@@ -203,7 +203,13 @@ jest.setTimeout(30000);
     expect(await productUnchangedSinceAgent(mockConn, saved, movement)).toMatchObject({ ok: false });
   });
 
-  test('a correcting alias added while the model decides rolls the apply back; the line stays pending with one attempt', async () => {
+  // Superseded by item 2b, 2026-09-27 round 9 review: the OLD behavior here
+  // was to roll the whole apply back and spend an attempt when the catalog
+  // moved under the model's decision. Now applyDecision's own chokepoint
+  // re-checks the rules under the SAME locks first — since this new alias
+  // makes the title deterministically resolvable, the rules win and post it
+  // directly, never wasting an attempt on a now-answerable line.
+  test('a correcting alias added while the model "decides" is resolved by the rules, not rolled back (item 2b, 2026-09-27 round 9)', async () => {
     const [bifenXts] = await mockConn('products_catalog').insert({
       name: 'Bifen XTS', active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', inventory_on_hand: 0,
     }).returning('*');
@@ -222,12 +228,15 @@ jest.setTimeout(30000);
       return { ok: true, json: decision };
     };
     const result = await runInventoryAgent({ conn: mockConn, llm, notifyAdmin });
-    expect(result).toMatchObject({ logged: 0 });
+    expect(result).toMatchObject({ logged: 1 });
 
     const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
-    expect(saved).toMatchObject({ status: 'agent_pending', agent_attempts: 1 });
-    expect(await mockConn('product_inventory_movements').whereIn('product_id', [bifenXts.id, bifenIt.id])).toHaveLength(0);
-    expect(await mockConn('product_aliases').where({ product_id: bifenXts.id })).toHaveLength(0);
+    expect(saved).toMatchObject({ status: 'logged', product_id: bifenIt.id });
+    expect(saved.agent_decision).toMatchObject({ kind: 'receipt_rules' });
+    // Posted to Bifen IT (the rules' own resolution), never the model's
+    // stale Bifen XTS proposal.
+    expect(await stockOf(bifenIt.id)).toBe(96);
+    expect(await stockOf(bifenXts.id)).toBe(0);
   });
 
   test('a pending line whose email row is gone goes to a person on the first pass instead of blocking the queue', async () => {
@@ -268,7 +277,13 @@ jest.setTimeout(30000);
     expect(await bellsFor(line.id)).toHaveLength(0);
   });
 
-  test('a product added by hand while the agent creates the same item is never duplicated', async () => {
+  // Superseded by item 2b, 2026-09-27 round 9 review: the admin's own
+  // product name ("Bifen XTS") CONTAINS the pending line's title
+  // ("Bifen XTS Insecticide 96 oz") as whole words, so once the agent's
+  // transaction gets the catalog lock, the chokepoint's rules re-check
+  // matches it deterministically and posts stock directly — never a
+  // duplicate product, and never a wasted retry either.
+  test('a product added by hand while the agent decides is resolved by the rules onto the admin\'s product — never duplicated, never a wasted retry', async () => {
     const line = await pendingLine();
     const decision = {
       kind: 'new_product', reason: 'not in the catalog', product_id: null,
@@ -292,9 +307,12 @@ jest.setTimeout(30000);
     await manual;
     await agent;
 
-    expect(await mockConn('products_catalog').where({ name: 'Bifen XTS' })).toHaveLength(1);
+    const created = await mockConn('products_catalog').where({ name: 'Bifen XTS' });
+    expect(created).toHaveLength(1); // never duplicated
     const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
-    expect(saved).toMatchObject({ status: 'agent_pending', agent_attempts: 1 });
+    expect(saved).toMatchObject({ status: 'logged', product_id: created[0].id });
+    expect(saved.agent_decision).toMatchObject({ kind: 'receipt_rules' });
+    expect(await stockOf(created[0].id)).toBe(192); // 2 ordered x 96 oz — the line's own default quantity
   });
 
   test('an admin add that waits on the agent\'s create never duplicates the item (agent first)', async () => {
@@ -507,6 +525,61 @@ jest.setTimeout(30000);
     const movements = await mockConn('product_inventory_movements').where({ product_id: trapProduct.id }).orderBy('created_at', 'asc');
     expect(movements).toHaveLength(2); // the original restock + the undo's correction
     expect(movements[1]).toMatchObject({ movement_type: 'correction' });
+  });
+
+  // Item 3, 2026-09-27 round 9 review: ops/agents/README.md requires a
+  // mutating script to print EXACTLY what would change — the old dry run
+  // named the four fields in one generic sentence but never their values.
+  test('undo dry run prints each restored field\'s exact current value -> original value before offering --execute (item 3, 2026-09-27 round 9)', async () => {
+    const [trapProduct] = await mockConn('products_catalog').insert({
+      name: 'Victor Rat Trap', active: true, category: 'supplies', container_size: '12 count', inventory_unit: null, default_unit: 'oz', inventory_on_hand: 0,
+    }).returning('*');
+    const line = await pendingLine({ raw_title: 'Victor Rat Trap 12 Count', product_id: trapProduct.id, quantity: 5, shipment_key: 'ship-dryrun-fields' });
+    const decision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: trapProduct.id, new_product: null,
+      reading: { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_text: null, pack_count: 1 },
+    };
+    await run({ ok: true, json: decision });
+    const afterAgent = await mockConn('products_catalog').where({ id: trapProduct.id }).first();
+    const savedLine = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    const original = savedLine.agent_decision.originalProductFields;
+    // Not a vacuous fixture: at least one field genuinely changed, so a
+    // match below is proof of restoration values, not an unchanged echo.
+    expect(afterAgent.inventory_unit).not.toBe(original.inventoryUnit);
+
+    const logged = [];
+    const outcome = await undoLine(mockConn, { lineArg: line.id, execute: false, log: (msg) => logged.push(msg) });
+    expect(outcome).toEqual({ executed: false });
+
+    const fmt = (v) => (v === null || v === undefined ? 'null' : JSON.stringify(v));
+    const text = logged.join('\n');
+    expect(text).toContain(`container_size: ${fmt(afterAgent.container_size)} → ${fmt(original.containerSize)}`);
+    expect(text).toContain(`inventory_unit: ${fmt(afterAgent.inventory_unit)} → ${fmt(original.inventoryUnit)}`);
+    expect(text).toContain(`inventory_on_hand: ${fmt(afterAgent.inventory_on_hand)} → ${fmt(original.inventoryOnHand)}`);
+    expect(text).toContain(`default_unit: ${fmt(afterAgent.default_unit)} → ${fmt(original.defaultUnit)}`);
+    // The old generic one-line sentence (field names, no values) is gone.
+    expect(text).not.toMatch(/container_size\/inventory_unit\/inventory_on_hand\/default_unit to what they were/);
+  });
+
+  // An originally-untracked product (a null on-hand) restores to the bare
+  // word `null`, never the string "null" or a stray "0".
+  test('undo dry run prints null (not a stray 0 or a quoted string) for a field that was originally untracked (item 3, 2026-09-27 round 9)', async () => {
+    const [bare] = await mockConn('products_catalog').insert({
+      name: 'Granular Bait Untracked', active: true, category: 'bait', container_size: null, inventory_unit: null, default_unit: 'oz', inventory_on_hand: null,
+    }).returning('*');
+    const line = await pendingLine({ raw_title: 'Granular Bait Untracked 16 oz Bag', product_id: bare.id, quantity: 2, shipment_key: 'ship-dryrun-null' });
+    const decision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: bare.id, new_product: null,
+      reading: { size_text: '16 oz', size_number: 16, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    await run({ ok: true, json: decision });
+
+    const logged = [];
+    await undoLine(mockConn, { lineArg: line.id, execute: false, log: (msg) => logged.push(msg) });
+    const text = logged.join('\n');
+    expect(text).toMatch(/inventory_on_hand: "32\.0000" → null/);
+    expect(text).toMatch(/inventory_unit: "oz" → null/);
+    expect(text).toMatch(/container_size: "16 oz" → null/);
   });
 
   test('undo returns an originally-UNTRACKED product to null (not 0) — inventory_on_hand and its unit both revert (review item 2)', async () => {
@@ -728,12 +801,17 @@ jest.setTimeout(30000);
     const aliases = await mockConn('product_aliases').where({ alias_name: title });
     expect(aliases).toHaveLength(1);
     expect(aliases[0].product_id).toBe(productB.id);
-    // The agent's own attempt saw the now-existing alias for a DIFFERENT
-    // product and rolled its whole apply back rather than write against a
-    // stale choice.
+    // Superseded by item 2b, 2026-09-27 round 9 review: the OLD behavior
+    // rolled the whole apply back on seeing the now-existing alias for a
+    // DIFFERENT product. Now the chokepoint's rules re-check (same locks)
+    // resolves the title deterministically via that very alias and posts
+    // stock straight to productB — never the model's stale productA
+    // proposal, and never a wasted retry.
     expect(await stockOf(productA.id)).toBe(0);
+    expect(await stockOf(productB.id)).toBe(96);
     const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
-    expect(saved).toMatchObject({ status: 'agent_pending', agent_attempts: 1 });
+    expect(saved).toMatchObject({ status: 'logged', product_id: productB.id });
+    expect(saved.agent_decision).toMatchObject({ kind: 'receipt_rules' });
   });
 
   // 2026-09-27 pre-push audit: the agent used to lock an existing product
@@ -1071,7 +1149,10 @@ jest.setTimeout(30000);
     expect(await bellsFor(line.id)).toHaveLength(0);
   });
 
-  test('a product added meanwhile that now matches an unmatched title wins: no alias for the stale choice', async () => {
+  // Superseded by item 2b, 2026-09-27 round 9 review: the OLD behavior
+  // rolled the apply back on seeing a new deterministic match. Now the
+  // chokepoint's rules re-check catches it and posts directly.
+  test('a product added meanwhile that now matches an unmatched title is resolved by the rules, never the model\'s stale choice', async () => {
     const [bifenXts] = await mockConn('products_catalog').insert({
       name: 'Bifen XTS', active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', inventory_on_hand: 0,
     }).returning('*');
@@ -1089,10 +1170,14 @@ jest.setTimeout(30000);
       return { ok: true, json: decision };
     };
     await runInventoryAgent({ conn: mockConn, llm, notifyAdmin });
+    const newProduct = await mockConn('products_catalog').where({ name: 'Bifen Insecticide Concentrate' }).first();
     const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
-    expect(saved).toMatchObject({ status: 'agent_pending', agent_attempts: 1 });
+    expect(saved).toMatchObject({ status: 'logged', product_id: newProduct.id });
+    expect(saved.agent_decision).toMatchObject({ kind: 'receipt_rules' });
+    // Matched by containment (the product's own name), not an alias.
     expect(await mockConn('product_aliases').where({ alias_name: title })).toHaveLength(0);
-    expect(await stockOf(bifenXts.id)).toBe(0);
+    expect(await stockOf(bifenXts.id)).toBe(0); // never the model's stale proposal
+    expect(await stockOf(newProduct.id)).toBe(96);
   });
 
   test('draining a line received before the current cutoff closes it quietly (a count since then includes it)', async () => {
@@ -1204,6 +1289,120 @@ jest.setTimeout(30000);
       if (line.status === 'logged') expect(line.product_id).toBe(products[0].id);
       else expect(['agent_pending', 'agent_unsure']).toContain(line.status);
     }
+  });
+
+  // Item 4, 2026-09-27 round 9 review: an active product's ALIAS collides
+  // with the proposed new-product name, not the product's own catalog name
+  // — the gap the pure-name-only check missed.
+  test('an active product\'s alias colliding with a proposed new-product name is refused before any write (item 4a, 2026-09-27 round 9)', async () => {
+    const [bifenthrin] = await mockConn('products_catalog').insert({
+      name: 'Bifenthrin 7.9', active: true, category: 'insecticide', container_size: '7.9 gal', inventory_unit: 'fl_oz', inventory_on_hand: 0,
+    }).returning('*');
+    await mockConn('product_aliases').insert({ product_id: bifenthrin.id, alias_name: 'Bifen XTS' });
+    const title = 'Control Solutions Bifen XTS Insecticide 96 oz';
+    const line = await pendingLine({ raw_title: title, quantity: 1, shipment_key: 'ship-alias-collision' });
+    const decision = {
+      kind: 'new_product', reason: 'not in the catalog', product_id: null,
+      new_product: { name: 'Bifen XTS', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    const result = await run({ ok: true, json: decision });
+    expect(result).toMatchObject({ logged: 0, held: 1 });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved.status).toBe('agent_unsure');
+    expect(saved.agent_decision.reason).toMatch(/looks like an existing product/);
+    expect(await mockConn('products_catalog').where({ name: 'Bifen XTS' })).toHaveLength(0);
+  });
+
+  // The apply-time re-check (the locked guard inside createCatalogProduct)
+  // is what actually protects the write: an alias saved AFTER the pure
+  // validation above already passed makes the apply a retry, never a
+  // duplicate product (item 4b, 2026-09-27 round 9 review).
+  test('an alias colliding with the proposed name, added while the model "decides", makes the apply a retry — no product created (item 4b, 2026-09-27 round 9)', async () => {
+    const [bifenthrin] = await mockConn('products_catalog').insert({
+      name: 'Bifenthrin 7.9', active: true, category: 'insecticide', container_size: '7.9 gal', inventory_unit: 'fl_oz', inventory_on_hand: 0,
+    }).returning('*');
+    const title = 'Control Solutions Bifen XTS Insecticide 96 oz';
+    const line = await pendingLine({ raw_title: title, quantity: 1, shipment_key: 'ship-alias-race' });
+    const decision = {
+      kind: 'new_product', reason: 'not in the catalog', product_id: null,
+      new_product: { name: 'Bifen XTS', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    const llm = async () => {
+      // A different admin action ties "Bifen XTS" to the existing active
+      // product as an alias while the model is "thinking" — AFTER the pure
+      // validation above (which ran against the pre-alias snapshot) already
+      // let the proposal through.
+      await mockConn('product_aliases').insert({ product_id: bifenthrin.id, alias_name: 'Bifen XTS' });
+      return { ok: true, json: decision };
+    };
+    const result = await runInventoryAgent({ conn: mockConn, llm, notifyAdmin });
+    expect(result).toMatchObject({ logged: 0 });
+    // agent_decision itself is only written on the 3rd, final attempt
+    // (recordAttemptFailure) — the first two just bump agent_attempts — so
+    // the retry (never a duplicate product) is what's checked here.
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'agent_pending', agent_attempts: 1 });
+    expect(await mockConn('products_catalog').where({ name: 'Bifen XTS' })).toHaveLength(0);
+  });
+
+  // Item 2, 2026-09-27 round 9 review — decideForTitle's own re-classification.
+  test('decideForTitle never calls the model when its own re-classification already resolves the title (item 2a, 2026-09-27 round 9)', async () => {
+    const dispatch = jest.fn(async () => ({ ok: true, json: { kind: 'not_stock', reason: 'unused' } }));
+    const result = await decideForTitle(mockConn, dispatch, {
+      rawTitle: 'Control Solutions Taurus SC Termiticide 78 oz', quantity: 2, vendor: 'amazon', siteOneFields: null,
+    }, { allowedCategories: new Set(['insecticide']), activeProducts: [], activeProductAliases: {} });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ rulesResolve: true });
+  });
+
+  test('processOneLine posts a rulesResolve sentinel through the same locked rules path — no bare product_id needed, the model was never asked', async () => {
+    // Unmatched at first (no product yet), so postIfDeterministic's OWN
+    // cheap pre-check does NOT catch it — the title only becomes resolvable
+    // once the alias below exists.
+    const [bifenXts] = await mockConn('products_catalog').insert({
+      name: 'Bifen XTS', active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', inventory_on_hand: 0,
+    }).returning('*');
+    const title = 'Bifen Insecticide Concentrate 96 oz';
+    const line = await pendingLine({ raw_title: title, quantity: 2, shipment_key: 'ship-rules-resolve' });
+    // The alias exists BEFORE the run starts this time (unlike the
+    // chokepoint test below, which adds it mid-flight) — so
+    // postIfDeterministic's pre-check itself would already catch this.
+    // decideForTitle's OWN check is exercised instead by the assertion that
+    // the model is never called, proven directly above; this test proves
+    // the END-TO-END posting path (postLineThroughRules) actually applies
+    // the rules and logs stock, not just that dispatch was skipped.
+    await mockConn('product_aliases').insert({ product_id: bifenXts.id, alias_name: title });
+    const dispatch = jest.fn();
+    const result = await runInventoryAgent({ conn: mockConn, llm: dispatch, notifyAdmin });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ logged: 1 });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'logged', product_id: bifenXts.id });
+    expect(saved.agent_decision).toMatchObject({ kind: 'receipt_rules' });
+    expect(await stockOf(bifenXts.id)).toBe(192); // 2 x 96 oz
+  });
+
+  // The chokepoint INSIDE applyDecision's own transaction: the catalog
+  // becomes resolvable WHILE the (real, async) LLM call is in flight — after
+  // decideForTitle's own check already ran and found it unresolved, so the
+  // model really is asked — and a terminal not_stock answer must still lose
+  // to what the rules now resolve (item 2b, 2026-09-27 round 9 review).
+  test('the apply-time chokepoint: the rules win over a not_stock answer when the catalog resolves while the model "decides" (item 2b, 2026-09-27 round 9)', async () => {
+    const line = await pendingLine({ raw_title: AGENT_ONLY_TAURUS_TITLE, product_id: null, quantity: 2, shipment_key: 'ship-chokepoint' });
+    const llm = async () => {
+      // Simulates a concurrent transaction committing while the LLM call is
+      // in flight: an exact-title alias now ties this line to Taurus SC.
+      await mockConn('product_aliases').insert({ product_id: taurus.id, alias_name: AGENT_ONLY_TAURUS_TITLE });
+      return { ok: true, json: { kind: 'not_stock', reason: 'looks personal' } };
+    };
+    const result = await runInventoryAgent({ conn: mockConn, llm, notifyAdmin });
+    expect(result).toMatchObject({ logged: 1, held: 0, ignored: 0 });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'logged', product_id: taurus.id });
+    expect(saved.agent_decision).toMatchObject({ kind: 'receipt_rules' });
+    expect(await stockOf(taurus.id)).toBe(156); // 2 x 78 fl oz — never the not_stock answer
   });
 
   test('an apply-time throw (e.g. a bell that fails to save) counts toward agent_attempts like an LLM failure; the 3rd hands off to a person', async () => {
