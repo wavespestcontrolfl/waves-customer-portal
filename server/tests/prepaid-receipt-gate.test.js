@@ -211,7 +211,17 @@ describe('resolveScheduledServiceCharge', () => {
   // that unrelated fee for a trip the sibling's invoice already covers.
   describe('sibling-covered same-trip visit', () => {
     const SVC = { id: 'svc-lawn', customer_id: 'cust-1', source_estimate_id: 'est-1', scheduled_date: '2026-09-27' };
-    const DB_CONN = {};
+    // Codex pre-push P0 (round 9): a null-invoice verdict now also runs
+    // billing-lane.js's sameTripSiblingHasUnrecognizedLiveInvoice fail-closed
+    // guard (its own `invoices` query) — a bare `{}` is no longer a valid
+    // stand-in for every branch here. This resolves it to "no unrecognized
+    // sibling invoice" (undefined), preserving every EXISTING verdict below.
+    const DB_CONN = () => {
+      const q = {};
+      ['join', 'where', 'whereNot', 'whereNull', 'whereNotIn', 'forUpdate', 'noWait'].forEach((m) => { q[m] = () => q; });
+      q.first = async () => undefined;
+      return q;
+    };
 
     // Owner decision (round-8 P1, narrow + fail closed): a definitive
     // 'covered' verdict is now a flat structured refusal, not a $0 that a

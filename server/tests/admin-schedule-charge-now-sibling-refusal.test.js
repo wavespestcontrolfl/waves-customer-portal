@@ -22,22 +22,38 @@ jest.mock('../services/estimate-first-application-invoice', () => ({
 }));
 
 const mockDb = jest.fn((table) => {
-  const q = {};
+  const q = { _joined: false };
   q.where = jest.fn(() => q);
   q.whereNot = jest.fn(() => q);
   q.whereNotIn = jest.fn(() => q);
+  q.whereNull = jest.fn(() => q);
   q.orderBy = jest.fn(() => q);
   q.modify = jest.fn((fn) => { fn(q); return q; });
   q.leftJoin = jest.fn(() => q);
+  // Distinguishes THIS visit's own-invoice reuse query (admin-schedule.js:
+  // plain `where({scheduled_service_id})`, no join) from billing-lane.js's
+  // sameTripSiblingHasUnrecognizedLiveInvoice guard (codex pre-push P0,
+  // round 9), which joins to scheduled_services to ask about a SIBLING's
+  // invoice — both hit the same 'invoices' table on this mock.
+  q.join = jest.fn(() => { q._joined = true; return q; });
+  q.forUpdate = jest.fn(() => q);
+  q.noWait = jest.fn(() => q);
   q.select = jest.fn(() => q);
   q.first = jest.fn(async () => {
     if (table === 'scheduled_services') return mockDb.__svcRow;
-    // Codex round-9 P1: a legacy invoice already attached to THIS visit's
-    // own scheduled_service_id (e.g. an extras-only invoice minted before
-    // the sibling-coverage lookup existed) — set only by the tests below
-    // that prove the reuse block never bypasses a 'covered'/'needs_review'
-    // verdict.
-    if (table === 'invoices') return mockDb.__existingInvoiceRow;
+    if (table === 'invoices') {
+      // The joined shape is the NEW fail-closed guard's own query — kept
+      // independently controllable (default: no unrecognized sibling
+      // invoice) so every existing 'none'-verdict test stays byte-identical
+      // unless a test opts in.
+      if (q._joined) return mockDb.__unrecognizedSiblingInvoiceRow;
+      // Codex round-9 P1: a legacy invoice already attached to THIS visit's
+      // own scheduled_service_id (e.g. an extras-only invoice minted before
+      // the sibling-coverage lookup existed) — set only by the tests below
+      // that prove the reuse block never bypasses a 'covered'/'needs_review'
+      // verdict.
+      return mockDb.__existingInvoiceRow;
+    }
     return undefined;
   });
   return q;
@@ -96,6 +112,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockDb.__svcRow = SVC_ROW;
   mockDb.__existingInvoiceRow = undefined;
+  mockDb.__unrecognizedSiblingInvoiceRow = undefined;
   mockResolveForInvoice.mockResolvedValue({ payerId: null });
   mockBuildLineItems.mockResolvedValue({ lineItems: [], discountIds: [] });
 });
@@ -187,6 +204,47 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
     expect(next).toHaveBeenCalledTimes(1);
   });
 
+  // Codex pre-push P0 (round 9): the voided-combined + Charge-Now-replacement
+  // scenario. The reserved (pest) sibling's original combined acceptance
+  // invoice was voided, and Charge Now recreated a plain replacement on it —
+  // one with no acceptance-flow provenance notes, so the shared lookup
+  // reports 'none' for the promoted (lawn) sibling exactly as it did before
+  // this fix. The fail-closed guard (sameTripSiblingHasUnrecognizedLiveInvoice)
+  // must catch the live replacement invoice sitting on the same-trip sibling
+  // and refuse the WHOLE mint with a 409 — never silently charge the
+  // per-application fee on top of an already-billed combined trip.
+  test('a same-trip sibling carrying an unrecognized live invoice (voided-combined + Charge-Now-replacement) refuses with a 409, never a double charge', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+    // The replacement invoice Charge Now minted on the reserved (pest)
+    // sibling after the original combined invoice was voided — a live,
+    // ordinary invoice with none of the acceptance flow's notes.
+    mockDb.__unrecognizedSiblingInvoiceRow = { id: 'inv-replacement' };
+    const { req, res, next } = makeReqRes({});
+    await handler(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.body.error).toMatch(/manual review/i);
+    expect(mockMint).not.toHaveBeenCalled();
+  });
+
+  // The normal, unaffected case: no voided combined invoice anywhere, and
+  // the sibling group has genuinely nothing minted yet — the guard must
+  // not invent a review state out of nothing.
+  test('a normal "none" verdict with no unrecognized sibling invoice anywhere still mints normally', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+    mockDb.__unrecognizedSiblingInvoiceRow = undefined;
+    mockMint.mockImplementation(async ({ buildCreateParams }) => {
+      buildCreateParams();
+      throw new Error('stop-after-capture');
+    });
+    const { req, res, next } = makeReqRes({});
+    await handler(req, res, next);
+
+    expect(res.status).not.toHaveBeenCalledWith(409);
+    expect(mockMint).toHaveBeenCalledTimes(1);
+    expect(next).toHaveBeenCalledTimes(1);
+  });
+
   // Codex round-6 P1: this gate used to be `perApplicationBilling &&
   // !isCallback && !hasOwnPrice` — the CUSTOMER'S CURRENT billing mode. A
   // combined pay-per-application accept leaves the PROMOTED row unpriced
@@ -258,7 +316,17 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
       findFirstApplicationInvoiceForEstimateService.mockClear();
       // Unchanged verdict ('none' again) — the recheck proceeds silently.
       findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
-      const fakeTrx = {};
+      // A working query-builder stand-in (codex pre-push P0, round 9): the
+      // 'none' branch now also runs sameTripSiblingHasUnrecognizedLiveInvoice's
+      // own `invoices` query, so a bare `{}` trx is no longer sufficient —
+      // this resolves it to "no unrecognized sibling invoice" (undefined),
+      // preserving the exact 'none' verdict the recheck expects.
+      const fakeTrx = (_table) => {
+        const q = {};
+        ['join', 'where', 'whereNot', 'whereNull', 'whereNotIn', 'forUpdate', 'noWait'].forEach((m) => { q[m] = () => q; });
+        q.first = async () => undefined;
+        return q;
+      };
       await expect(recheckInTrx(fakeTrx)).resolves.toBeUndefined();
       expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalledWith(
         expect.objectContaining({ id: 'svc-lawn' }), fakeTrx, { lockRows: true, noWait: true },
@@ -424,6 +492,18 @@ describe('mintOrReuseScheduledServiceInvoice — sibling-lookup refusal', () => 
     });
     const result = await mintOrReuseScheduledServiceInvoice(SVC);
     expect(result).toEqual({ invoice: null, reason: 'sibling_invoice_covered' });
+    expect(mockMint).not.toHaveBeenCalled();
+  });
+
+  // Codex pre-push P0 (round 9): the same voided-combined +
+  // Charge-Now-replacement scenario, through the Mark-prepaid mint path —
+  // a same-trip sibling's unrecognized live invoice must refuse here too,
+  // never mint the acceptance fee on top of it.
+  test('a same-trip sibling carrying an unrecognized live invoice refuses to mint with a structured reason', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+    mockDb.__unrecognizedSiblingInvoiceRow = { id: 'inv-replacement' };
+    const result = await mintOrReuseScheduledServiceInvoice(SVC);
+    expect(result).toEqual({ invoice: null, reason: 'sibling_invoice_needs_review' });
     expect(mockMint).not.toHaveBeenCalled();
   });
 

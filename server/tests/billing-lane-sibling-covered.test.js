@@ -32,21 +32,45 @@ const { siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, coveringSibli
 // Minimal knex-like stand-in: distinguishes the two 'scheduled_services'
 // queries the function issues by their `where` shape — a lookup by id
 // (the invoice's owning visit) vs. the same-day/estimate members scan.
-function fakeDbConn({ byId = {}, members = [] } = {}) {
+// `unrecognizedSiblingInvoice` (codex pre-push P0, round 9) backs
+// sameTripSiblingHasUnrecognizedLiveInvoice's own `invoices`-table query
+// (the fail-closed guard for a same-trip sibling's invoice the notes-based
+// lookup can't recognize) — every call site that doesn't pass it defaults
+// to "no such invoice", keeping every EXISTING test's verdict unchanged.
+// `invoiceQueryCalls` (optional, out param) collects each `.where*` call
+// made against the `invoices` query so a test can assert the query is
+// correctly SCOPED (same estimate + same trip, excluding svc's own row)
+// without a real database.
+function fakeDbConn({ byId = {}, members = [], unrecognizedSiblingInvoice = false, invoiceQueryCalls = null } = {}) {
   return (table) => {
-    if (table !== 'scheduled_services') throw new Error(`unexpected table: ${table}`);
-    return {
-      where(cond) {
-        if (cond && cond.id !== undefined) {
-          return { first: async () => byId[cond.id] || null };
-        }
-        return {
-          whereNull: () => ({
-            select: async () => members,
-          }),
-        };
-      },
-    };
+    if (table === 'scheduled_services') {
+      return {
+        where(cond) {
+          if (cond && cond.id !== undefined) {
+            return { first: async () => byId[cond.id] || null };
+          }
+          return {
+            whereNull: () => ({
+              select: async () => members,
+            }),
+          };
+        },
+      };
+    }
+    if (table === 'invoices') {
+      const q = {};
+      const record = (method) => (...args) => { invoiceQueryCalls?.push([method, ...args]); return q; };
+      q.join = record('join');
+      q.where = record('where');
+      q.whereNot = record('whereNot');
+      q.whereNull = record('whereNull');
+      q.whereNotIn = record('whereNotIn');
+      q.forUpdate = record('forUpdate');
+      q.noWait = record('noWait');
+      q.first = async () => (unrecognizedSiblingInvoice ? { id: 'unrecognized-inv' } : undefined);
+      return q;
+    }
+    throw new Error(`unexpected table: ${table}`);
   };
 }
 
@@ -320,6 +344,52 @@ describe('siblingCoverageForSchedule', () => {
     expect(prediction).toBeNull();
   });
 
+  // Codex pre-push P0 (round 9): after the combined acceptance invoice on
+  // the RESERVED sibling (svc-pest) is voided, Charge Now can recreate a
+  // plain replacement invoice on it — one with no acceptance-flow notes,
+  // so findFirstApplicationInvoiceForEstimateService's own notes-based
+  // match reports 'none' for it. Without the fail-closed guard, the
+  // unpriced PROMOTED sibling (LAWN_SVC) would read 'none' too and mint
+  // its own per-application fee ON TOP of the reserved row's invoice,
+  // which already billed the combined total — a real double charge. The
+  // guard (sameTripSiblingHasUnrecognizedLiveInvoice) must catch this and
+  // surface 'review' instead, so Charge Now refuses with its 409 and the
+  // schedule sheet shows the review state — never a silent mint.
+  test('surfaces review — never a false "none" — when a same-trip sibling carries a live invoice the lookup cannot recognize', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+    const dbConn = fakeDbConn({ unrecognizedSiblingInvoice: true });
+
+    const { coverage, prediction } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
+    expect(coverage).toEqual({
+      state: 'review', invoiceId: null, invoiceNumber: null, amountDue: null, reason: 'sibling_unrecognized_invoice',
+    });
+    expect(prediction).toMatchObject({ kind: 'sibling_needs_review', amount: null, invoiceId: null, invoiceNumber: null });
+  });
+
+  // Scope proof: the guard's OWN query must only ever ask about the SAME
+  // estimate + SAME trip (customer + source_estimate_id + scheduled_date),
+  // excluding svc's own row and any recurring child — never a sibling's
+  // unrelated invoice from a different estimate or a different day. This
+  // inspects the query calls directly (no real database) so the scoping
+  // can't silently drift into a broader, false-positive-prone match.
+  test('the unrecognized-sibling guard query is scoped to the same estimate + same trip only', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+    const invoiceQueryCalls = [];
+    const dbConn = fakeDbConn({ unrecognizedSiblingInvoice: false, invoiceQueryCalls });
+
+    await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
+
+    const whereCalls = invoiceQueryCalls.filter(([method]) => method === 'where' || method === 'whereNot');
+    expect(whereCalls).toEqual(expect.arrayContaining([
+      ['where', 'scheduled_services.customer_id', LAWN_SVC.customer_id],
+      ['where', 'scheduled_services.source_estimate_id', LAWN_SVC.source_estimate_id],
+      ['where', 'scheduled_services.scheduled_date', LAWN_SVC.scheduled_date],
+      ['whereNot', 'scheduled_services.id', LAWN_SVC.id],
+    ]));
+    expect(invoiceQueryCalls.some(([method, ...args]) => method === 'whereNull' && args[0] === 'scheduled_services.recurring_parent_id')).toBe(true);
+    expect(invoiceQueryCalls.some(([method, ...args]) => method === 'whereNotIn' && args[0] === 'invoices.status')).toBe(true);
+  });
+
   // Codex round 5 P2 (mechanism retained): a refunded/terminal match is NOT
   // collapsed to 'none' — resolveScheduledServiceCharge (the mint-side
   // resolver sharing this same lookup) always refuses this exact shape with
@@ -441,9 +511,14 @@ describe('siblingInvoiceCoverageVerdict', () => {
     });
   });
 
+  // A working dbConn is required from here on (codex pre-push P0, round
+  // 9): a null-invoice verdict now also runs the fail-closed
+  // sameTripSiblingHasUnrecognizedLiveInvoice guard, so `{}` is no longer
+  // a valid stand-in for the `!inv` branch specifically — fakeDbConn()'s
+  // default (no unrecognized invoice) preserves this exact 'none' verdict.
   test('none — no match at all', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
-    expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, {})).toEqual({ status: 'none' });
+    expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, fakeDbConn())).toEqual({ status: 'none' });
   });
 
   test('none — a match naming this visit\'s OWN row (not a sibling)', async () => {
@@ -536,7 +611,7 @@ describe('siblingInvoiceCoverageVerdict', () => {
 
   test('none — a null invoice with no canceledSetupFee either', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
-    expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, {})).toEqual({ status: 'none' });
+    expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, fakeDbConn())).toEqual({ status: 'none' });
   });
 
   test('coveringSiblingInvoice (the display-safe wrapper) still collapses needs_review/error to null', async () => {
@@ -547,5 +622,81 @@ describe('siblingInvoiceCoverageVerdict', () => {
     expect(await coveringSiblingInvoice(LAWN_SVC, {})).toBeNull();
     findFirstApplicationInvoiceForEstimateService.mockRejectedValue(new Error('db down'));
     expect(await coveringSiblingInvoice(LAWN_SVC, {})).toBeNull();
+  });
+
+  // Codex pre-push P0 (round 9) — the fail-closed guard itself: a null
+  // invoice from the shared lookup is 'needs_review' (never 'none') when a
+  // same-trip sibling carries a live invoice the lookup can't recognize
+  // (e.g. a Charge Now remint on the reserved sibling after its original
+  // combined invoice was voided). Scoped to unpriced/estimate-linked svc
+  // shapes only — the reserved (priced) row itself never reaches this
+  // function at all (isSiblingCoverageEligibleVisit gates every caller).
+  describe('the fail-closed unrecognized-live-sibling-invoice guard', () => {
+    test('needs_review with reason sibling_unrecognized_invoice when a same-trip sibling has a live unrecognized invoice', async () => {
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+      const dbConn = fakeDbConn({ unrecognizedSiblingInvoice: true });
+      expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, dbConn)).toEqual({
+        status: 'needs_review', invoice: null, reason: 'sibling_unrecognized_invoice',
+      });
+    });
+
+    // canceledSetupFee still wins (checked first) — this fix never
+    // reclassifies that existing, already fail-closed verdict shape.
+    test('canceledSetupFee still takes precedence over the new guard', async () => {
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+        invoice: null, liveBeside: null,
+        canceledSetupFee: { id: 'inv-3', invoice_number: 'WPC-2026-0400', status: 'canceled' },
+      });
+      const dbConn = fakeDbConn({ unrecognizedSiblingInvoice: true });
+      expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, dbConn)).toEqual({
+        status: 'needs_review', invoice: null, canceledSetupFee: { id: 'inv-3', invoice_number: 'WPC-2026-0400', status: 'canceled' },
+      });
+    });
+
+    // A recognized 'covered' verdict is untouched — the guard only ever
+    // runs inside the `!inv` branch, never re-litigating an already-live
+    // recognized match.
+    test('never overrides an already-recognized "covered" verdict', async () => {
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+        invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+        liveBeside: null,
+      });
+      const dbConn = fakeDbConn({ unrecognizedSiblingInvoice: true });
+      expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, dbConn)).toEqual({
+        status: 'covered', invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+      });
+    });
+
+    // A query failure inside the guard fails CLOSED — the same way any
+    // other lookup failure does — never silently as "no live invoice".
+    test('a guard-query failure reads as a plain lookup error, not a silent "none"', async () => {
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+      const brokenDbConn = () => { throw new Error('connection lost'); };
+      expect(await siblingInvoiceCoverageVerdict(LAWN_SVC, brokenDbConn)).toEqual({ status: 'error' });
+    });
+
+    // Owner ruling: "use the in-transaction recheck (lockRows) path too" —
+    // the guard's own query takes the SAME forUpdate/noWait it's given,
+    // so a concurrent void+remint between the pre-lock check and the
+    // locked recheck is caught the same way.
+    test('lockRows/noWait ride through to the guard\'s own query', async () => {
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+      const invoiceQueryCalls = [];
+      const dbConn = fakeDbConn({ unrecognizedSiblingInvoice: true, invoiceQueryCalls });
+      const verdict = await siblingInvoiceCoverageVerdict(LAWN_SVC, dbConn, { lockRows: true, noWait: true });
+      expect(verdict).toEqual({ status: 'needs_review', invoice: null, reason: 'sibling_unrecognized_invoice' });
+      expect(invoiceQueryCalls.some(([method]) => method === 'forUpdate')).toBe(true);
+      expect(invoiceQueryCalls.some(([method]) => method === 'noWait')).toBe(true);
+    });
+
+    // Without lockRows, the guard's query must NOT take a row lock — a
+    // plain read-only schedule-sheet prediction never holds rows.
+    test('no forUpdate/noWait on the guard\'s query when lockRows is not requested', async () => {
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+      const invoiceQueryCalls = [];
+      const dbConn = fakeDbConn({ unrecognizedSiblingInvoice: true, invoiceQueryCalls });
+      await siblingInvoiceCoverageVerdict(LAWN_SVC, dbConn);
+      expect(invoiceQueryCalls.some(([method]) => method === 'forUpdate')).toBe(false);
+    });
   });
 });
