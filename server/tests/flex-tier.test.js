@@ -22,6 +22,7 @@ const {
   seriesPosition,
   loadSeriesNeighbors,
   flexTierMoveWindow,
+  flexWindowAdmits,
   ownScheduleFrozen,
   destinationFrozen,
 } = require('../services/auto-dispatch/flex-tier');
@@ -66,6 +67,24 @@ describe('flexTierMoveWindow — ±5 days ∩ destination floor ∩ occurrence g
     const w = flexTierMoveWindow({ origDate: '2026-09-05', anchorDate: '2026-09-05', today, neighbors: {} });
     expect(w.dateFrom).toBe('2026-09-05'); // clamped down to orig, not the floor (09-06)
     expect(w.dateTo).toBe('2026-09-10'); // orig+5, unaffected
+  });
+
+  test('below the floor, ONLY the current date is exempt — never the dates between it and the floor (Codex #4995 r3 P1)', () => {
+    // 3 days out (a late appointment just past the 73h freeze): the floor is
+    // 09-06, so 09-05 must not be a legal day move.
+    const w = flexTierMoveWindow({ origDate: '2026-09-04', anchorDate: '2026-09-04', today, neighbors: {} });
+    expect(w).toEqual({ dateFrom: '2026-09-04', dateTo: '2026-09-09', dayMoveFrom: '2026-09-06' });
+    expect(flexWindowAdmits(w, '2026-09-04', '2026-09-04')).toBe(true); // same-day re-time
+    expect(flexWindowAdmits(w, '2026-09-04', '2026-09-05')).toBe(false); // below the floor
+    expect(flexWindowAdmits(w, '2026-09-04', '2026-09-06')).toBe(true);
+    expect(flexWindowAdmits(w, '2026-09-04', '2026-09-09')).toBe(true);
+    expect(flexWindowAdmits(w, '2026-09-04', '2026-09-10')).toBe(false);
+    expect(flexWindowAdmits(null, '2026-09-04', '2026-09-04')).toBe(false);
+  });
+
+  test('when the next occurrence sits before the floor, the window is same-day only', () => {
+    const w = flexTierMoveWindow({ origDate: '2026-09-04', anchorDate: '2026-09-04', today, neighbors: { next: '2026-09-06' } });
+    expect(w).toEqual({ dateFrom: '2026-09-04', dateTo: '2026-09-04' });
   });
 
   test('destination floor still applies on the forward side when it does not conflict with orig', () => {

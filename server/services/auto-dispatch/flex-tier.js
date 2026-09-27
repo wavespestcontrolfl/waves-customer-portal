@@ -165,40 +165,59 @@ async function loadSeriesNeighbors(db, services, { lock = false } = {}) {
  * takes, so the allowance is never reset by a previous night's move. Then
  * clamped so it
  *   - never reaches or crosses the series' adjacent occurrence (`neighbors`),
- *   - never goes below MIN_DESTINATION_DAYS_OUT of today EXCEPT that the
- *     visit's own current date always stays reachable (same-day re-time is
+ *   - never lands a DAY move below MIN_DESTINATION_DAYS_OUT of today. The
+ *     visit's own current date is the one exception (same-day re-time is
  *     owner-mandated right up to the freeze, and the freeze alone already
  *     keeps the current date safely in the future — see FLEX_TIER_FREEZE_HOURS
- *     vs MIN_DESTINATION_DAYS_OUT above). Widening to the current date never
- *     adds drift: every date between the anchor band's edge and the current
- *     date sits no further from the anchor than the visit already does,
+ *     vs MIN_DESTINATION_DAYS_OUT above): it is added back on its own, never
+ *     the dates between it and the floor (Codex #4995 r3 P1). When that
+ *     leaves a gap, `dayMoveFrom` names the first date a day move may land
+ *     on, and flexWindowAdmits is the one check of a destination,
  *   - never extends the upper bound past the lookahead horizon (the caller,
  *     candidate-slots.js, already applies that cap to any ctx.tierWindow).
- * Returns {dateFrom, dateTo} or null when the intersection is empty (e.g.
- * the previous and next occurrence both sit inside the radius) or the anchor
- * is unknown (fail closed — never guess a budget).
+ * Returns {dateFrom, dateTo[, dayMoveFrom]} or null when the intersection is
+ * empty (e.g. the previous and next occurrence both sit inside the radius) or
+ * the anchor is unknown (fail closed — never guess a budget).
  */
 function flexTierMoveWindow({ origDate, anchorDate, today, neighbors }) {
   const orig = toDateStr(origDate);
   const anchor = toDateStr(anchorDate);
   if (!orig || !anchor || !today) return null;
-  const floor = shiftDateStr(today, MIN_DESTINATION_DAYS_OUT);
-  let dateFrom = shiftDateStr(orig, -FLEX_TIER_RADIUS_DAYS);
-  const anchorFrom = shiftDateStr(anchor, -FLEX_TIER_RADIUS_DAYS);
-  if (anchorFrom > dateFrom) dateFrom = anchorFrom;
-  if (floor > dateFrom) dateFrom = floor;
-  let dateTo = shiftDateStr(orig, FLEX_TIER_RADIUS_DAYS);
-  const anchorTo = shiftDateStr(anchor, FLEX_TIER_RADIUS_DAYS);
-  if (anchorTo < dateTo) dateTo = anchorTo;
-  if (dateFrom > orig) dateFrom = orig; // same-day re-time must always stay reachable
-  if (dateTo < orig) dateTo = orig;
-  const prevFloor = neighbors && neighbors.prev ? shiftDateStr(neighbors.prev, 1) : null;
-  if (prevFloor && prevFloor > dateFrom) dateFrom = prevFloor;
-  const nextCeil = neighbors && neighbors.next ? shiftDateStr(neighbors.next, -1) : null;
-  if (nextCeil && nextCeil < dateTo) dateTo = nextCeil;
+  const { prev, next } = neighbors || {};
+  const prevFloor = prev ? shiftDateStr(prev, 1) : null;
+  const dayMoveFrom = latestDate(shiftDateStr(orig, -FLEX_TIER_RADIUS_DAYS), shiftDateStr(anchor, -FLEX_TIER_RADIUS_DAYS),
+    shiftDateStr(today, MIN_DESTINATION_DAYS_OUT), prevFloor);
+  // The current date always stays inside the radius band's upper edge
+  // (same-day re-time); only the next occurrence can cut below it.
+  const dateTo = earliestDate(latestDate(earliestDate(shiftDateStr(orig, FLEX_TIER_RADIUS_DAYS),
+    shiftDateStr(anchor, FLEX_TIER_RADIUS_DAYS)), orig), next ? shiftDateStr(next, -1) : null);
+  // The current date comes back on its own when only the floor (never the
+  // previous occurrence) sits past it.
+  const sameDayOnly = dayMoveFrom > orig && !(prevFloor && prevFloor > orig);
+  if (!sameDayOnly) return dayMoveFrom > dateTo ? null : { dateFrom: dayMoveFrom, dateTo };
+  if (orig > dateTo) return null;
+  if (dayMoveFrom > dateTo) return { dateFrom: orig, dateTo: orig };
+  return dayMoveFrom > shiftDateStr(orig, 1) ? { dateFrom: orig, dateTo, dayMoveFrom } : { dateFrom: orig, dateTo };
+}
 
-  if (dateFrom > dateTo) return null;
-  return { dateFrom, dateTo };
+// The latest / earliest of some 'YYYY-MM-DD' dates, ignoring absent ones.
+function latestDate(...dates) {
+  return dates.filter(Boolean).reduce((a, b) => (b > a ? b : a));
+}
+function earliestDate(...dates) {
+  return dates.filter(Boolean).reduce((a, b) => (b < a ? b : a));
+}
+
+/**
+ * Whether `date` is a legal flex destination for a visit now on `origDate`,
+ * under its flexTierMoveWindow: inside [dateFrom, dateTo], and — when the
+ * window carries `dayMoveFrom` — either the current date itself (same-day
+ * re-time) or on/after it. Used by candidate filtering and the apply-time
+ * guards alike.
+ */
+function flexWindowAdmits(window, origDate, date) {
+  if (!window || !date || date < window.dateFrom || date > window.dateTo) return false;
+  return !window.dayMoveFrom || date >= window.dayMoveFrom || date === toDateStr(origDate);
 }
 
 /**
@@ -288,6 +307,7 @@ module.exports = {
   seriesPosition,
   loadSeriesNeighbors,
   flexTierMoveWindow,
+  flexWindowAdmits,
   ownScheduleFrozen,
   destinationFrozen,
   freezeBoundaryFloor,

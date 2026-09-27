@@ -403,6 +403,14 @@ describe('destination freeze — the DESTINATION instant must clear 73h, not jus
     await expect(checkFlexOwnBounds(trx, row, { date: '2026-10-10', start_time: '08:00' }, 'flex', refuseFactory(), 's1')).resolves.toBeUndefined();
   });
 
+  test('a day move below the 5-day destination floor is refused; only the current date is exempt (Codex #4995 r3 P1)', async () => {
+    // Today is 10-05, so the floor is 10-10: Fri 10-09 sits between the
+    // visit's own date (10-08) and the floor.
+    const trx = seriesTrx({ p1: [{ id: 's1', scheduled_date: '2026-10-08' }] });
+    await expect(checkFlexOwnBounds(trx, row, { date: '2026-10-09', start_time: '09:00' }, 'flex', refuseFactory(), 's1'))
+      .rejects.toMatchObject({ id: 's1', why: expect.stringContaining('destination floor') });
+  });
+
   test('makeMoveGuard applies it to the tapped row only — a forwarded member lands on its own start, checked by the member guard', async () => {
     const best = { date: '2026-10-08', start_time: '09:00', technician_id: null };
     const guard = makeMoveGuard({ service: row, best, config: { guardMode: 'flex' } });

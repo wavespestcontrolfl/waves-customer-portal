@@ -217,8 +217,8 @@ async function assertFlexWindows(trx, rows, best, today, refuse) {
     const window = flexTier.flexTierMoveWindow({
       origDate: r.scheduled_date, anchorDate: anchor, today, neighbors,
     });
-    if (!window || best.date < window.dateFrom || best.date > window.dateTo) {
-      throw refuse(r.id, `cannot legally move to ${best.date} (outside its ±${flexTier.FLEX_TIER_RADIUS_DAYS}-day flex window of its current and original date ${anchor}, clamped by its series' adjacent occurrence)`);
+    if (!flexTier.flexWindowAdmits(window, r.scheduled_date, best.date)) {
+      throw refuse(r.id, `cannot legally move to ${best.date} (outside its ±${flexTier.FLEX_TIER_RADIUS_DAYS}-day flex window of its current and original date ${anchor}, the ${routeTiers.MIN_DESTINATION_DAYS_OUT}-day destination floor, clamped by its series' adjacent occurrence)`);
     }
   }
 }
