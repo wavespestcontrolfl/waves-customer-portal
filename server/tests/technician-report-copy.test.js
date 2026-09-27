@@ -96,6 +96,8 @@ describe('custom action credential screening', () => {
     'USE AB-24-68-XY AT THE SIDE GATE',
     'USE AB-24-68-XY TO OPEN THE GATE',
     'Use 24-68-ab at the side gate',
+    'Use 24-68-in at the side gate',
+    'Use 24-68-to at the side gate',
     'Use 24-68-xy to open the side gate',
     'Opened side gate with 2468ml',
     'Unlocked rear door using 2468ft',
@@ -151,6 +153,8 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'USE AB-24-68-XY AT THE SIDE GATE',
     'USE AB-24-68-XY TO OPEN THE GATE',
     'Use 24-68-ab at the side gate',
+    'Use 24-68-in at the side gate',
+    'Use 24-68-to at the side gate',
     'Opened side gate with 2468ml',
     'Use 2468ft to open the gate',
   ])('does not publish disguised access instructions: %s', (instruction) => {

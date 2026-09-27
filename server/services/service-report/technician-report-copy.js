@@ -188,7 +188,7 @@ const REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP = String.raw`(?!(?:AT|FOR|TO|ON|IN|
 // A suffix joined by a hyphen is part of the credential token even when it
 // is lowercase ("24-68-ab"). Keep the uppercase-only rule for whitespace:
 // lowercase words separated by spaces are ordinary surrounding prose.
-const REPORT_CREDENTIAL_HYPHEN_TRAILING_AFFIX_GROUP = String.raw`(?!(?:at|for|to|on|in|into|near|by|as|with|using|via|is|was|were|remains?|stays?|becomes?|open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b)(?=[A-Za-z0-9#*]{1,12}(?![A-Za-z0-9#*]))(?=[A-Za-z0-9#*]*[A-Za-z#*])[A-Za-z0-9#*]{1,12}`;
+const REPORT_CREDENTIAL_HYPHEN_TRAILING_AFFIX_GROUP = String.raw`(?=[A-Za-z0-9#*]{1,12}(?![A-Za-z0-9#*]))(?=[A-Za-z0-9#*]*[A-Za-z#*])[A-Za-z0-9#*]{1,12}`;
 const REPORT_CREDENTIAL_TRAILING_AFFIX_RE = new RegExp(String.raw`^${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}$`);
 const REPORT_NUMERIC_CREDENTIAL_TOKEN = String.raw`(?:${REPORT_CREDENTIAL_LEADING_AFFIX_GROUP}[\s–—-]+){0,3}${REPORT_NUMERIC_CREDENTIAL_GROUP}(?:[\s–—-]+${REPORT_NUMERIC_CREDENTIAL_GROUP})*(?:(?:\s+${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}|\s*[–—-]\s*${REPORT_CREDENTIAL_HYPHEN_TRAILING_AFFIX_GROUP})){0,3}`;
 const REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE = new RegExp(

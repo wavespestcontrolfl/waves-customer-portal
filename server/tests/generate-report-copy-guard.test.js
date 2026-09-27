@@ -159,6 +159,8 @@ describe('generate-report provider fallback', () => {
 
   test.each([
     'Use 24-68-ab at the side gate.',
+    'Use 24-68-in at the side gate.',
+    'Use 24-68-to at the side gate.',
     'Opened side gate with 2468ml.',
     'Use 2468ft to open the gate.',
   ])('retries a shaped response carrying a disguised access credential: %s', async (instruction) => {
