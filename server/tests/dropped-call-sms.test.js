@@ -374,6 +374,19 @@ describe('outboundWavesCallerId (owner ruling 2026-09-26: never the customer or 
       metadata: { bridgeCallerId: '+19415550199' },
     })).toBeNull();
   });
+
+  it('never the AI toll-free line, even though findByNumber reports it as a valid location (codex pre-push r2 P1)', () => {
+    const TN = require('../config/twilio-numbers');
+    TN.tollFree = { number: '+18559260203' };
+    TN.findByNumber.mockReturnValueOnce({ id: 'bradenton', type: 'location' });
+    expect(outboundWavesCallerId({ direction: 'outbound', from_phone: '+18559260203' })).toBeNull();
+    TN.findByNumber.mockReturnValueOnce({ id: 'bradenton', type: 'location' });
+    expect(outboundWavesCallerId({
+      direction: 'outbound',
+      source: 'lead-webhook-auto-bridge',
+      metadata: { bridgeCallerId: '+18559260203' },
+    })).toBeNull();
+  });
 });
 
 describe('sendDroppedCallAddressRequest gate ladder', () => {

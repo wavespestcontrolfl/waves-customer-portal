@@ -2127,12 +2127,12 @@ describe('outboundImpliedConsentEligible (owner ruling 2026-09-26, shared by eve
 describe('hasRealTwoWayConversation (owner ruling 2026-09-26: never on a call that dropped before a real conversation)', () => {
   const { hasRealTwoWayConversation, speakerTurns } = CallRecordingProcessor._test;
 
-  test('speakerTurns: labels a turn caller/other and folds unlabeled continuation lines in', () => {
+  test('speakerTurns: labels a turn with both its normalized role and its RAW label, and folds unlabeled continuation lines in', () => {
     const t = speakerTurns('Agent: Hi there\nCaller: Hi\nthis is Sam\nAgent: Great, Sam');
     expect(t).toEqual([
-      { speaker: 'other', text: 'Agent: Hi there' },
-      { speaker: 'caller', text: 'Caller: Hi\nthis is Sam' },
-      { speaker: 'other', text: 'Agent: Great, Sam' },
+      { speaker: 'other', label: 'Agent', text: 'Agent: Hi there' },
+      { speaker: 'caller', label: 'Caller', text: 'Caller: Hi\nthis is Sam' },
+      { speaker: 'other', label: 'Agent', text: 'Agent: Great, Sam' },
     ]);
   });
 
@@ -2170,6 +2170,81 @@ describe('hasRealTwoWayConversation (owner ruling 2026-09-26: never on a call th
       'Caller: Great — what is your service address?',
       'Agent: Sure, it is one two three.',
     ].join('\n'))).toBe(true);
+  });
+
+  // Codex pre-push r2 P2: when BOTH the OpenAI labeling pass and the Gemini
+  // fallback miss, the kept raw transcript carries raw diarization
+  // ("Speaker 1:"/"Speaker 2:") instead of Caller/Agent — speakerTurns
+  // normalizes BOTH of those to the 'other' ROLE (neither matches
+  // caller/customer), so the OLD role-based check never saw two parties.
+  // The RAW label text itself must decide this instead.
+  test('raw diarization ("Speaker 1:"/"Speaker 2:", both labeling passes missed) with a genuine multi-turn exchange IS a real conversation', () => {
+    expect(hasRealTwoWayConversation([
+      'Speaker 1: Hi, this is Waves calling about your quote request.',
+      'Speaker 2: Oh yes, thanks for calling back.',
+      'Speaker 1: Great — what is your service address?',
+      'Speaker 2: Sure, it is one two three.',
+    ].join('\n'))).toBe(true);
+  });
+
+  test('a single speaker throughout (only one raw label, however many turns) is NOT a real conversation', () => {
+    expect(hasRealTwoWayConversation([
+      'Speaker 1: Hi, this is Waves.',
+      'Speaker 1: Just calling to follow up.',
+      'Speaker 1: Ok, I will try again later.',
+      'Speaker 1: Goodbye.',
+    ].join('\n'))).toBe(false);
+  });
+
+  test('a short exchange (two distinct speakers, but under 4 turns) is NOT a real conversation', () => {
+    expect(hasRealTwoWayConversation('Speaker 1: Hello?\nSpeaker 2: Wrong number.')).toBe(false);
+  });
+});
+
+// Codex pre-push r2 P2 on PR #5012: an outbound row that was never
+// prelinked (call.customer_id null) but whose dialed number matches an
+// existing customer (knownCaller, the phone pre-lookup) reached
+// hasPriorContact with NO customer evidence at all — only the phone-based
+// call/text/lead probes, missing the "existing customer" signal the owner
+// ruling names outright.
+describe('outboundPriorContactCustomerId (owner ruling 2026-09-26: knownCaller.id counts too, never a same-call creation)', () => {
+  const { outboundPriorContactCustomerId } = CallRecordingProcessor._test;
+
+  test('prelinked call.customer_id is used when present', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: 'cust-1' }, knownCaller: null, callMeta: {},
+    })).toBe('cust-1');
+  });
+
+  test('a not-prelinked call falls back to knownCaller.id (the phone pre-lookup)', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: null }, knownCaller: { id: 'cust-2' }, callMeta: {},
+    })).toBe('cust-2');
+  });
+
+  test('neither source present → null (falls through to the phone-based probes)', () => {
+    expect(outboundPriorContactCustomerId({ call: { customer_id: null }, knownCaller: null, callMeta: {} })).toBeNull();
+  });
+
+  test('a customer THIS call itself created (call.customer_id matches the created_customer_id stamp) never counts', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: 'cust-new' }, knownCaller: null, callMeta: { created_customer_id: 'cust-new' },
+    })).toBeNull();
+  });
+
+  test('a customer THIS call itself created still never counts even when it also surfaces as knownCaller (a reprocess rediscovering its own creation)', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: null }, knownCaller: { id: 'cust-new' }, callMeta: { created_customer_id: 'cust-new' },
+    })).toBeNull();
+  });
+
+  test('a DIFFERENT customer than the one this call created still counts on either source', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: 'cust-old' }, knownCaller: null, callMeta: { created_customer_id: 'cust-new' },
+    })).toBe('cust-old');
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: null }, knownCaller: { id: 'cust-old' }, callMeta: { created_customer_id: 'cust-new' },
+    })).toBe('cust-old');
   });
 });
 

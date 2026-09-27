@@ -205,10 +205,14 @@ function callbackClause(dialedLine) {
 // `metadata.bridgeCallerId` (server/routes/lead-webhook.js — the SAME main
 // line the customer-facing lead leg actually dials) for the bridge source.
 // Validated against the number registry — a real managed line, never a
-// tech line or a staff-forward cell — so a malformed/unregistered candidate
-// (or an inbound call, where this is never called) returns null: the
-// caller then omits the clause / skips the fromNumber override rather than
-// expose or invent a number.
+// tech line, a staff-forward cell, or the AI-assistant toll-free line
+// (findByNumber reports it as a location, the SAME exclusion the fromNumber
+// selection below already applies — codex pre-push r2 P1: this predicate
+// had omitted it, so callback_clause could still point the customer at the
+// AI line even though fromNumber would have refused it) — so a
+// malformed/unregistered/toll-free candidate (or an inbound call, where
+// this is never called) returns null: the caller then omits the clause /
+// skips the fromNumber override rather than expose or invent a number.
 function outboundWavesCallerId(call = {}) {
   let metadata = call?.metadata;
   if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = {}; } }
@@ -216,6 +220,7 @@ function outboundWavesCallerId(call = {}) {
     ? (metadata && typeof metadata === 'object' ? metadata.bridgeCallerId : null)
     : (call?.from_phone || null);
   return (candidate
+    && candidate !== TWILIO_NUMBERS.tollFree?.number
     && !!TWILIO_NUMBERS.findByNumber(candidate)
     && !TWILIO_NUMBERS.isTechLine(candidate)
     && !TWILIO_NUMBERS.isStaffForwardNumber(candidate))

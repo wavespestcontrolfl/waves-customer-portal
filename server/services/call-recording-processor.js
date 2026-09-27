@@ -950,17 +950,45 @@ function outboundImpliedConsentEligible(call, outboundEligible) {
 // "too short to judge" for it (never flagged dropped) — exactly the early
 // drop this predicate must exclude, not admit. Reuses speakerTurns (already
 // shared with the recurring-intent/plan-offer scanners above) rather than a
-// new transcript parser: requires several exchanged turns with at least one
-// turn on EACH of the transcript's own speaker labels. Never reads WHICH
-// label means "caller" vs "agent" — outbound diarization can swap that (the
-// same reason agent-commit/recurring-intent stay inbound-only elsewhere in
-// this file); counting genuine back-and-forth needs no attribution. No
-// labels at all (a raw, unlabeled transcript) fails closed.
+// new transcript parser: requires several exchanged turns across at least
+// TWO distinct RAW speaker labels — never speakerTurns' own normalized
+// caller/other ROLE (codex pre-push r2 P2): when both the OpenAI labeling
+// pass and the Gemini fallback miss, the kept raw transcript is diarized as
+// "Speaker 1:"/"Speaker 2:", which speakerTurns normalizes to 'other' for
+// BOTH (neither matches caller/customer), so a real two-speaker call would
+// never register as two parties on the ROLE alone — the raw label text
+// itself already proves two distinct people regardless. Never reads WHICH
+// label MEANS "caller" vs "agent" either way — outbound diarization can
+// swap that (the same reason agent-commit/recurring-intent stay inbound-
+// only elsewhere in this file); counting genuine back-and-forth needs no
+// attribution. No labels at all (a raw, unlabeled transcript) fails closed.
 function hasRealTwoWayConversation(transcription) {
   const turns = speakerTurns(transcription);
-  return turns.length >= 4
-    && turns.some((t) => t.speaker === 'caller')
-    && turns.some((t) => t.speaker === 'other');
+  if (turns.length < 4) return false;
+  const distinctLabels = new Set(turns.map((t) => t.label.toLowerCase()));
+  return distinctLabels.size >= 2;
+}
+
+// Which customer id (if any) counts as "an existing customer" prior-contact
+// evidence for hasPriorContact (owner ruling 2026-09-26). Prefers
+// call.customer_id (a pre-link at call creation); falls back to
+// knownCaller.id — the phone pre-lookup findCustomerForCallContact(contactPhone)
+// resolves near the top of processRecording — for an outbound row that was
+// never prelinked but whose dialed number still matches an existing
+// customer (codex pre-push r2 P2: that case reached hasPriorContact with
+// NO customer evidence at all, missing the "existing customer" signal the
+// owner ruling names outright). Either source is excluded when it is a
+// customer THIS call's own earlier pass created (call_log.metadata's
+// created_customer_id stamp, Step 3's creation branch) — a cold call must
+// not qualify itself as "an existing customer" on reprocess (codex pre-push
+// r1 P1, the same provenance question the newsletter-rebuild guard applies
+// elsewhere in this file), and a fresh phone lookup on the SAME reprocess
+// pass would just as easily rediscover that same just-created row.
+function outboundPriorContactCustomerId({ call, knownCaller, callMeta } = {}) {
+  const createdByThisCall = (id) => !!id && String(callMeta?.created_customer_id || '') === String(id);
+  if (call?.customer_id && !createdByThisCall(call.customer_id)) return call.customer_id;
+  if (knownCaller?.id && !createdByThisCall(knownCaller.id)) return knownCaller.id;
+  return null;
 }
 
 function phoneDigits(value) {
@@ -6721,7 +6749,15 @@ function speakerTurns(transcription) {
   for (const line of lines) {
     const label = line.match(/^\s*([A-Za-z][A-Za-z0-9 ]{0,20}?)\s*:/);
     if (label) {
-      turns.push({ speaker: /^(caller|customer)$/i.test(label[1].trim()) ? 'caller' : 'other', text: line });
+      // `label` (the RAW label text, e.g. "Speaker 1", "Agent", "Caller") is
+      // additive — existing consumers (callerOnlyText, acceptedPlanOffer)
+      // only read `.speaker`/`.text`; hasRealTwoWayConversation below reads
+      // `.label` directly, since raw diarization ("Speaker 1:"/"Speaker 2:",
+      // when both the labeling pass and its fallback miss) never matches
+      // caller/customer/agent and would otherwise normalize BOTH speakers to
+      // the same 'other' role (codex pre-push r2 P2).
+      const rawLabel = label[1].trim();
+      turns.push({ speaker: /^(caller|customer)$/i.test(rawLabel) ? 'caller' : 'other', label: rawLabel, text: line });
     } else if (turns.length) {
       turns[turns.length - 1].text += `\n${line}`;
     }
@@ -9391,20 +9427,15 @@ const CallRecordingProcessor = {
     let outboundReturnMessagesEligible = false;
     if (isOutboundCall(call) && isEnabled('callOutboundReturnMessages') && hasRealTwoWayConversation(transcription)) {
       try {
-        // ACTUAL call-creation provenance, not the mere presence of
-        // call.customer_id (codex pre-push P1): a cold outbound call whose
-        // FIRST pass minted a customer stamps created_customer_id into
-        // call_log.metadata (Step 3's creation branch, above) — a
-        // reprocess of that SAME call must not then read its own creation
-        // as "an existing customer" prior-contact evidence, or one cold
-        // call qualifies itself on retry. Same pattern the newsletter
-        // rebuild guard above uses for the identical provenance question.
+        // outboundPriorContactCustomerId (above): call.customer_id, or
+        // knownCaller.id (the phone pre-lookup) as a fallback for a row
+        // that was never prelinked but whose number still matches an
+        // existing customer — either excluded when it's a customer THIS
+        // call's own earlier pass created (codex pre-push r1 P1 + r2 P2).
         let callMeta = call.metadata;
         if (typeof callMeta === 'string') { try { callMeta = JSON.parse(callMeta); } catch { callMeta = {}; } }
-        const customerPredatesThisCall = !!call.customer_id
-          && String(callMeta?.created_customer_id || '') !== String(call.customer_id);
         outboundReturnMessagesEligible = await require('./outbound-call-reason').hasPriorContact({
-          customerId: customerPredatesThisCall ? call.customer_id : null,
+          customerId: outboundPriorContactCustomerId({ call, knownCaller, callMeta }),
           phone: contactPhone,
           before: call.created_at || new Date(),
         });
@@ -20577,6 +20608,7 @@ CallRecordingProcessor._test = {
   isOutboundCall,
   outboundImpliedConsentEligible,
   hasRealTwoWayConversation,
+  outboundPriorContactCustomerId,
   speakerTurns,
   legacyDisputeServiceIntent,
   backfillLinkedCustomerFromExtraction,
