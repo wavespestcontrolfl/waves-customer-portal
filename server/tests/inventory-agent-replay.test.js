@@ -10,7 +10,7 @@
  * script does anything else) is for.
  */
 const {
-  assertReadOnly, parseSince, parseLimit, lineKey, inQueueOrder, emptyProposals, recordProposal, catalogWithProposals, replayLine,
+  assertReadOnly, parseSince, parseLimit, lineKey, dedupe, inQueueOrder, emptyProposals, recordProposal, catalogWithProposals, replayLine,
 } = require('../../ops/agents/inventory-agent-replay');
 const { classifyItem } = require('../services/purchase-receipts/receipt-processor');
 const { decideForTitle } = require('../services/purchase-receipts/inventory-agent');
@@ -196,6 +196,19 @@ describe('inQueueOrder', () => {
     const second = line('amazon', 'a1', '2026-09-01T10:00:00Z', 2);
     const first = line('amazon', 'a1', '2026-09-01T10:00:00Z', 1);
     expect(inQueueOrder([first, second], new Map())).toEqual([first, second]);
+  });
+});
+
+// 2026-09-27 pre-push P1: a recorded undelivered hold and a late Delivered
+// email for the same line share a key; the recorded hold always wins,
+// whichever email id sorts first.
+describe('dedupe', () => {
+  const key = { vendor: 'amazon', orderNumber: 'o', shipmentKey: 'S1', lineNo: 1 };
+  test.each([['a-hold', 'z-delivered'], ['z-hold', 'a-delivered']])('hold email %s vs Delivered email %s', (holdId, deliveredId) => {
+    const hold = { ...key, email: { id: holdId, received_at: '2026-09-01T00:00:00Z' }, recordedStatus: 'no_delivery_email' };
+    const delivered = { ...key, email: { id: deliveredId, received_at: '2026-09-01T00:00:00Z' } };
+    const ordered = inQueueOrder([delivered, hold], new Map([[lineKey(key), Date.parse('2026-09-01T00:00:00Z')]]));
+    expect(dedupe(ordered)).toEqual([hold]);
   });
 });
 

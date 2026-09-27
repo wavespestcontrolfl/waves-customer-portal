@@ -264,9 +264,14 @@ function lineKey(line) {
   return [line.vendor, line.orderNumber || 'unknown', line.shipmentKey, line.lineNo].join('|');
 }
 
+// A line the live lane actually recorded as a hold (an undelivered-shipment
+// line) owns its identity outright: the table holds exactly one row per
+// line, so a later Delivered email for that same line was never recorded
+// live, whichever email sorts first.
 function dedupe(lines) {
-  const seen = new Set();
+  const seen = new Set(lines.filter((line) => line.recordedStatus).map(lineKey));
   return lines.filter((line) => {
+    if (line.recordedStatus) return true;
     const key = lineKey(line);
     if (seen.has(key)) return false;
     seen.add(key);
@@ -484,5 +489,5 @@ if (require.main === module) {
 }
 
 module.exports = {
-  assertReadOnly, parseSince, parseLimit, lineKey, inQueueOrder, emptyProposals, recordProposal, catalogWithProposals, replayLine,
+  assertReadOnly, parseSince, parseLimit, lineKey, dedupe, inQueueOrder, emptyProposals, recordProposal, catalogWithProposals, replayLine,
 };
