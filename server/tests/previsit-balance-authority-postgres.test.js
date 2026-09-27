@@ -1,5 +1,5 @@
-// Opt-in PostgreSQL proof for the legacy previsit Text authority. The suite
-// uses real canonical/Twilio code, a disposable schema, and a mocked SDK transport.
+// Opt-in PostgreSQL proof for previsit quote authority. The suite uses real
+// Text/Email authority code, a disposable schema, and mocked provider transports.
 let mockPg;
 let mockProbeParent = false;
 const mockCreate = jest.fn();
@@ -86,7 +86,7 @@ async function runAtProviderBoundary(guard = authority(), metadata = {}) {
   });
 }
 
-postgres('previsit Text billing authority (PostgreSQL)', () => {
+postgres('previsit billing quote authority (PostgreSQL)', () => {
   beforeAll(async () => {
     const target = new URL(connection);
     const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(target.pathname);
@@ -372,7 +372,7 @@ postgres('previsit Text billing authority (PostgreSQL)', () => {
       channel: 'email', purpose: 'balance_reminder', source: 'previsit_balance_reminder',
       invoice_ids: JSON.stringify([invoiceId]), metadata: { pending: true, notificationEventKey: context.notificationEventKey } });
     await mockPg('notification_prefs').insert({ customer_id: customerId, billing_channels: ['email', 'push'] });
-    await mockPg('customers').where({ id: customerId }).update({ phone: null });
+    await mockPg('customers').where({ id: customerId }).update({ phone: '' });
     return context;
   }
 
@@ -401,20 +401,27 @@ postgres('previsit Text billing authority (PostgreSQL)', () => {
     }
     // A refused send must fail this race promptly rather than leave the provider-pause fixture hanging.
     await Promise.race([atProvider, sending.then((result) => { throw new Error(`Email refused: ${JSON.stringify(result)}`); })]);
+    let proofError;
     try {
       for (const mutate of [
         (trx) => trx('invoices').where({ id: invoiceId }).update({ credit_applied: 20 }),
         (trx) => trx('payments').where({ id: failedPaymentId }).update({ status: 'paid' }),
         (trx) => trx('invoices').insert({ ...quotedInvoice, id: randomUUID(), token: randomUUID(),
-          invoice_number: `QA-${randomUUID()}`, line_items: JSON.stringify([]) }),
+          invoice_number: `QA-${randomUUID().slice(0, 8)}`, line_items: JSON.stringify([]) }),
       ]) {
         await expect(writer.transaction(async (trx) => {
           await trx.raw("SET LOCAL lock_timeout = '100ms'"); await mutate(trx);
         })).rejects.toMatchObject({ code: '55P03' });
       }
-    } finally { release(); }
-    expect(await sending).toMatchObject(attempt === 'fresh' ? { sent: true } : { handled: true, allowed: true });
+    } catch (err) { proofError = err; } finally { release(); }
+    const outcome = await sending;
+    if (proofError) throw proofError;
+    expect(outcome).toMatchObject(attempt === 'fresh' ? { sent: true } : { handled: true, allowed: true });
     expect(provider).toHaveBeenCalledTimes(1);
+    if (attempt === 'fresh') {
+      const template = require('../services/email-template-library').sendTemplate;
+      expect(template.mock.calls.at(-1)[0].billingReplayContext).toEqual(context);
+    }
     await writer('invoices').where({ id: invoiceId }).update({ credit_applied: 1 });
     await mockPg('scheduled_services').where({ id: visitId }).update({ balance_reminder_sent_at: new Date() });
   }, 15000);

@@ -147,7 +147,7 @@ async function invoiceRefusal(meta, database) {
   if (!meta.invoice_id) return null;
   if (INVOICE_GUARDS.has(meta.source_entry_point)) {
     const verdict = await require('./deferred-replay-registry').invoiceStillCollectible(meta, database);
-    if (verdict.eligible !== true) return refused(verdict.supersessionReason || verdict.reason, verdict.retryable === true);
+    if (verdict.eligible !== true) return refused(verdict.reason, verdict.retryable === true);
   }
   const ownership = await require('../invoice-helpers').selfPayAtDispatch(meta.invoice_id, database)();
   if (ownership.ok === true) return null;
