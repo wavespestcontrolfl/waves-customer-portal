@@ -42,6 +42,22 @@ jest.mock('../services/email-template-library', () => ({
 jest.mock('../services/customer-contact', () => ({
   getInvoiceEmailRecipients: jest.fn(() => [{ email: 'billing@example.com', name: 'Taylor' }]),
 }));
+// The follow-up email rides the shared billing email authority (owner ruling
+// 2026-09-27); its locks and rechecks are pinned in its own suites. Here it
+// authorizes the same billing recipient the customer-contact mock returns.
+jest.mock('../services/billing-channel-email-authority', () => ({
+  loadBillingEmailContext: jest.fn(async () => ({
+    category: 'invoice',
+    recipient: { email: 'billing@example.com', name: 'Taylor' },
+    recipientEmail: 'billing@example.com',
+  })),
+  dispatchUnderBillingEmailAuthority: jest.fn(async ({ dispatch, state }) => {
+    state.handoffStarted = true;
+    await dispatch();
+    state.providerAccepted = true;
+    return { ok: true };
+  }),
+}));
 jest.mock('../services/stripe', () => ({ isInvoiceAwaitingMicrodepositVerification: jest.fn(async () => false) }));
 jest.mock('../services/microdeposit-verification-email', () => ({ sendMicrodepositVerificationEmail: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/collections/contact-policy', () => ({
@@ -885,6 +901,62 @@ describe('invoice-followups rail', () => {
     expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       resolved: true, resolution: 'email_terminal_refusal',
     }));
+  });
+
+  test('resolved terminal Email plus a retried accepted Text advances on the second attempt without resending Email', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-d3`, metadata: {} }));
+    let secondRun = false;
+    ContactLedger.claimAttempt.mockImplementation(async (ledger) => (
+      secondRun && ledger.id === 'email-d3'
+        ? { allowed: false, resolved: true }
+        : { allowed: true }
+    ));
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({
+      sent: false,
+      blocked: true,
+      reason: 'Suppressed: bounce',
+    });
+    sendCustomerMessage
+      .mockResolvedValueOnce({
+        sent: false,
+        blocked: false,
+        deliveryOutcome: 'not_sent',
+        code: 'PROVIDER_FAILURE',
+        retryable: true,
+        deferred: true,
+      })
+      .mockResolvedValueOnce({ sent: true, blocked: false, deliveryOutcome: 'accepted' });
+
+    const firstUpdate = armFollowupHappyPath({ prefs: { invoice_channels: ['email', 'sms'] } });
+    await InvoiceFollowUps.runPending();
+    expect(firstUpdate.update.mock.calls[0][0]).not.toHaveProperty('step_index');
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'email-d3' }),
+      expect.objectContaining({ resolved: true, resolution: 'email_terminal_refusal' }),
+    );
+
+    secondRun = true;
+    const finalInteraction = chain();
+    const secondUpdate = armFollowupHappyPath({
+      prefs: { invoice_channels: ['email', 'sms'] },
+      ledgerRows: [
+        { id: 'email-d3', idempotency_key: 'invoice_followups:seq-1:d3_friendly:email' },
+        { id: 'sms-d3', idempotency_key: 'invoice_followups:seq-1:d3_friendly:sms' },
+      ],
+      finalInteraction,
+    });
+    await InvoiceFollowUps.runPending();
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+    expect(secondUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
+    const audit = JSON.parse(finalInteraction.insert.mock.calls[0][0].metadata);
+    expect(audit).toMatchObject({
+      email_sent: false,
+      email_reason: 'prior_email_terminally_settled',
+      sms_sent: true,
+    });
   });
 
   test('a global hold still defers an App-only touch before credit or ledger work', async () => {

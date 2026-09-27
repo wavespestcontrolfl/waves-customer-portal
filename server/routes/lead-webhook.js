@@ -829,7 +829,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         if (duplicateBlock) {
           logger.info(`[lead-webhook] Estimate creation blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for customer ${customer.id}`);
         } else {
-          automatedDraftEstimate = buildAutomatedLeadDraftEstimate({
+          automatedDraftEstimate = await buildAutomatedLeadDraftEstimate({
             intake,
             customer,
             body,
@@ -1132,7 +1132,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
                 phone: phoneFormatted,
                 serviceInterest: triageServiceInterestUpdate,
               }));
-              const triageDraftEstimate = buildAutomatedLeadDraftEstimate({
+              const triageDraftEstimate = await buildAutomatedLeadDraftEstimate({
                 intake: {
                   ...intake,
                   serviceInterest: triageServiceInterestUpdate,

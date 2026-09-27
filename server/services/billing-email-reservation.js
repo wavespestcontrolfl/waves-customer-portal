@@ -5,6 +5,9 @@ const logger = require('./logger');
 const ContactLedger = require('./collections/contact-ledger');
 const { readStoredBillingReplayContext } = require('./email-template-library');
 const BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX = 'Billing email terminal refusal: ';
+const LEDGER_SOURCE_BY_ENTRY_POINT = Object.freeze({
+  invoice_followup_sequence: 'invoice_followups',
+});
 
 function replayContext(message) {
   try {
@@ -20,7 +23,7 @@ function reservationMatch(context) {
   return {
     customerId: context.customer_id,
     channel: 'email',
-    source: context.source_entry_point,
+    source: LEDGER_SOURCE_BY_ENTRY_POINT[context.source_entry_point] || context.source_entry_point,
     notificationEventKey: context.notificationEventKey,
     ...(context.invoice_id ? { invoiceId: context.invoice_id } : {}),
   };
@@ -102,11 +105,8 @@ async function repairAcceptedBillingEmailReservations(rows, database = db) {
       if (accepted) {
         if (await markBillingEmailReservationDelivered(message, database)) repaired.add(String(candidate.id));
       } else if (await resolveBillingEmailReservationRefusal(message, database)) {
-        // Reflect the repair in the rows this pass already loaded, so the
-        // current progress read treats the leg as resolved and never reuses
-        // its reservation for another send.
-        candidate.metadata = { ...metadataOf(candidate), send_failed: true, resolved: true,
-          resolution: 'email_terminal_refusal' };
+        candidate.metadata = { ...metadataOf(candidate), send_failed: true,
+          resolved: true, resolution: 'email_terminal_refusal' };
       }
     }
     return repaired;

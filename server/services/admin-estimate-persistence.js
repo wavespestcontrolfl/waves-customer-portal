@@ -1068,6 +1068,8 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   const needsSync = deps.needsSync || pricingEngine.needsSync;
   const syncConstantsFromDB = deps.syncConstantsFromDB || pricingEngine.syncConstantsFromDB;
   const mapResult = deps.mapV1ToLegacyShape || mapV1ToLegacyShape;
+  const withTrustedCatalogPricing = deps.withTrustedCatalogPricing
+    || require('./pricing-engine/trusted-catalog-pricing').withTrustedCatalogPricing;
   // Lazy-require the route adapter to avoid a service→route load-order cycle.
   let translate = deps.translateV2CallToV1Input;
   if (translate === undefined) {
@@ -1164,6 +1166,10 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   if (deps.recurringCustomer === true || priorQualifyingServices.length > 0) {
     v1Input.recurringCustomer = true;
   }
+  v1Input = await withTrustedCatalogPricing(v1Input, {
+    database: deps.database,
+    readRodentAdditionalCheckPriceFromCatalog: deps.readRodentAdditionalCheckPriceFromCatalog,
+  });
 
   // Operator-stated price adjustment (agent flows): persisted OUTSIDE the
   // replay inputs and re-injected transiently on every reprice, mirroring

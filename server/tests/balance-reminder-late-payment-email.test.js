@@ -1,5 +1,14 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../utils/customer-comms-lock', () => ({ withCustomerCommsLock: jest.fn() }));
+// The late-payment email rides the shared billing email authority (owner
+// ruling 2026-09-27). Its own locks, rechecks and suppression reads are pinned
+// in billing-channel-email-authority.test.js and the Postgres suite; here it
+// authorizes the billing recipient the customer-contact mock returns, and a
+// test overrides it to refuse at the first read or at the provider handoff.
+jest.mock('../services/billing-channel-email-authority', () => ({
+  loadBillingEmailContext: jest.fn(),
+  dispatchUnderBillingEmailAuthority: jest.fn(),
+}));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -53,10 +62,26 @@ const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const EmailTemplates = require('../services/email-template-library');
+const BillingEmailAuthority = require('../services/billing-channel-email-authority');
 const BalanceReminder = require('../services/workflows/balance-reminder');
 const ContactLedger = require('../services/collections/contact-ledger');
 const ContactPolicy = require('../services/collections/contact-policy');
 const { etDateString } = require('../utils/datetime-et');
+
+beforeEach(() => {
+  BillingEmailAuthority.loadBillingEmailContext.mockReset().mockResolvedValue({
+    category: 'billing',
+    recipient: { email: 'billing@example.com', name: 'Taylor', role: 'primary' },
+    recipientEmail: 'billing@example.com',
+  });
+  BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockReset()
+    .mockImplementation(async ({ dispatch, state }) => {
+      state.handoffStarted = true;
+      await dispatch('authority-trx');
+      state.providerAccepted = true;
+      return { ok: true };
+    });
+});
 
 function chain({ result = [], first, returning } = {}) {
   const q = {};
@@ -339,116 +364,73 @@ describe('late-payment email sidecar', () => {
     },
   );
 
-  test('skips late-payment email when general customer email is disabled', async () => {
-    setDbQueues({
-      invoices: [chain({ first: invoice() })],
-      notification_prefs: [chain({ first: { email_enabled: false } })],
-    });
+  // The customer's choice, recipient and invoice ownership come from the
+  // shared billing email authority: first at preparation, then under its
+  // locks at the provider handoff. Its refusals map onto the reasons the
+  // late-payment paths already settle on.
+  const lateEmail = () => BalanceReminder.sendLatePaymentEmail({
+    customer: customer(),
+    invoice: invoice(),
+    balance: { totalBalance: 129, oldestDueDate: '2026-05-19' },
+    smsTemplateKey: 'late_payment_30d',
+    invoiceTitle: 'Quarterly Pest Control',
+    serviceDateClause: '',
+    payUrl: 'https://portal.wavespestcontrol.com/pay/token-1',
+  });
+  const disabled = { code: 'BILLING_EMAIL_DISABLED', blocked: true, reason: 'Email notifications are disabled for this customer' };
 
-    const result = await BalanceReminder.sendLatePaymentEmail({
-      customer: customer(),
-      invoice: invoice(),
-      balance: { totalBalance: 129, oldestDueDate: '2026-05-19' },
-      smsTemplateKey: 'late_payment_30d',
-      invoiceTitle: 'Quarterly Pest Control',
-      serviceDateClause: '',
-      payUrl: 'https://portal.wavespestcontrol.com/pay/token-1',
-    });
-
-    expect(result).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
+  test('the shared check refusing at preparation skips the email', async () => {
+    setDbQueues({ invoices: [chain({ first: invoice() })] });
+    BillingEmailAuthority.loadBillingEmailContext.mockResolvedValueOnce({ error: disabled });
+    expect(await lateEmail()).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
-  test.each([
-    ['enabled preference', { email_enabled: true }, null],
-    ['missing preference row', undefined, null],
-    ['failed initial preference read', undefined, new Error('preferences unavailable')],
-  ])('late-payment email proceeds with %s', async (_label, prefs, error) => {
-    const prefRead = chain({ first: prefs });
-    const freshPrefs = chain({ first: prefs });
-    const freshCustomer = chain({ first: customer() });
-    const ownershipRead = chain({ first: { payer_id: null, scheduled_send_error: null } });
-    if (error) prefRead.first.mockRejectedValueOnce(error);
-    setDbQueues({
-      invoices: [chain({ first: invoice() }), ownershipRead],
-      notification_prefs: [prefRead, freshPrefs],
-      customers: [freshCustomer],
-      customer_interactions: [chain()],
-    });
-    const dispatch = jest.fn(async (database) => {
-      expect(lockHeld).toBe(true);
-      expect(database).toBe(trx);
-      await Promise.resolve();
-      expect(lockHeld).toBe(true);
-    });
-    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+  test('the email is prepared and dispatched under the shared check', async () => {
+    setDbQueues({ invoices: [chain({ first: invoice() })], customer_interactions: [chain()] });
+    const dispatch = jest.fn(async () => {});
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff, to }) => {
+      expect(to).toBe('billing@example.com');
       const verdict = await withProviderHandoff(dispatch);
-      expect(verdict).toEqual({ ok: true });
       return { sent: verdict.ok };
     });
+    expect(await lateEmail()).toEqual({ ok: true });
+    const input = {
+      customerId: 'cust-1', invoiceId: 'inv-1', channel: 'email', metadata: { billingDeliveryCategory: 'billing' },
+    };
+    expect(BillingEmailAuthority.loadBillingEmailContext).toHaveBeenCalledWith(input);
+    expect(BillingEmailAuthority.dispatchUnderBillingEmailAuthority).toHaveBeenCalledWith(expect.objectContaining({
+      input, recipientEmail: 'billing@example.com', templateKey: 'billing_late_payment_30_day',
+    }));
+    expect(dispatch).toHaveBeenCalledWith('authority-trx');
+  });
 
-    const result = await BalanceReminder.sendLatePaymentEmail({
-      customer: customer(),
-      invoice: invoice(),
-      balance: { totalBalance: 129, oldestDueDate: '2026-05-19' },
-      smsTemplateKey: 'late_payment_30d',
-      invoiceTitle: 'Quarterly Pest Control',
-      serviceDateClause: '',
-      payUrl: 'https://portal.wavespestcontrol.com/pay/token-1',
+  test('an unreadable billing context is a retryable not-sent, never a blind send', async () => {
+    setDbQueues({ invoices: [chain({ first: invoice() })] });
+    BillingEmailAuthority.loadBillingEmailContext.mockRejectedValueOnce(new Error('preferences unavailable'));
+    expect(await lateEmail()).toEqual({
+      ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'billing_email_context_unavailable',
     });
-
-    expect(result).toMatchObject({ ok: true });
-    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
-    expect(withCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
-    expect(trx.mock.calls).toEqual([['invoices'], ['notification_prefs'], ['customers']]);
-    expect(ownershipRead.where).toHaveBeenCalledWith({ id: 'inv-1' });
-    expect(freshPrefs.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
-    expect(freshPrefs.first).toHaveBeenCalledTimes(1);
-    expect(freshCustomer.where).toHaveBeenCalledWith({ id: 'cust-1' });
-    expect(require('../services/customer-contact').getInvoiceEmailRecipients)
-      .toHaveBeenLastCalledWith(customer(), prefs || {});
-    expect(dispatch).toHaveBeenCalledTimes(1);
-    expect(dispatch).toHaveBeenCalledWith(trx);
-    expect(lockHeld).toBe(false);
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
   test('a fresh email opt-out before provider handoff prevents dispatch', async () => {
+    setDbQueues({ invoices: [chain({ first: invoice() })], customer_interactions: [chain()] });
     const dispatch = jest.fn();
-    let handoffResult;
+    BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => {
+      state.boundaryBlock = disabled;
+      return { ok: false };
+    });
     EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
-      handoffResult = await withProviderHandoff(dispatch);
+      await withProviderHandoff(dispatch);
       return { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
     });
-    setDbQueues({
-      invoices: [
-        chain({ first: invoice() }),
-        chain({ first: { payer_id: null, scheduled_send_error: null } }),
-      ],
-      notification_prefs: [
-        chain({ first: { email_enabled: true } }),
-        chain({ first: { email_enabled: false } }),
-      ],
-    });
-
-    const result = await BalanceReminder.sendLatePaymentEmail({
-      customer: customer(),
-      invoice: invoice(),
-      balance: { totalBalance: 129, oldestDueDate: '2026-05-19' },
-      smsTemplateKey: 'late_payment_30d',
-      invoiceTitle: 'Quarterly Pest Control',
-      serviceDateClause: '',
-      payUrl: 'https://portal.wavespestcontrol.com/pay/token-1',
-    });
-
-    expect(handoffResult).toEqual({ ok: false });
-    expect(withCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
-    expect(trx.mock.calls).toEqual([['invoices'], ['notification_prefs']]);
-    expect(lockHeld).toBe(false);
+    expect(await lateEmail()).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
     expect(dispatch).not.toHaveBeenCalled();
-    expect(result).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
   });
 
   test('legacy email opt-out still sends SMS without recording an email delivery', async () => {
+    BillingEmailAuthority.loadBillingEmailContext.mockResolvedValueOnce({ error: disabled });
     const smsInteraction = chain();
     ContactLedger.recordContact
       .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }))
@@ -484,7 +466,39 @@ describe('late-payment email sidecar', () => {
     }));
   });
 
+  // The no-choice path's email row is unkeyed: an attempt the shared check
+  // refused before the provider never contacted the customer, so it must not
+  // fill the collections window the customer's next run is judged by.
+  test('a retryable email refusal on the no-choice path stamps its ledger row never_contacted', async () => {
+    BillingEmailAuthority.loadBillingEmailContext.mockRejectedValueOnce(new Error('connection terminated'));
+    ContactLedger.recordContact
+      .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }))
+      .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }));
+    setDbQueues({
+      customers: [chain({ result: [customer()] })],
+      payments: [chain({ result: [overduePayment(8)] })],
+      invoices: [
+        chain({ result: [] }),
+        chain({ first: { id: 'inv-1', token: 'token-1' } }),
+        chain({ first: invoice() }),
+        chain({ first: invoice() }),
+      ],
+      sms_log: [chain({ first: { count: '0' } }), chain({ first: null })],
+      notification_prefs: [chain({ first: {} })],
+      customer_interactions: [chain()],
+    });
+
+    await BalanceReminder.latePaymentCheck();
+
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'led-email' }),
+      { reason: 'billing_email_context_unavailable', never_contacted: true },
+    );
+  });
+
   test('email opt-out with explicit Email and Text still sends SMS without recording an email delivery', async () => {
+    BillingEmailAuthority.loadBillingEmailContext.mockResolvedValueOnce({ error: disabled });
     const smsInteraction = chain();
     ContactLedger.recordContact
       .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }))

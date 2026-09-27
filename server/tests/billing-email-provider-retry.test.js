@@ -91,11 +91,11 @@ test('replays a no-phone billing Email only after locked eligibility and reuses 
 });
 
 test.each([
-  { payload_snapshot: '{}' },
+  { payload_snapshot: '{"__billing_replay_context":null}' },
   { recipient_id: 'another-customer' },
   { trigger_event_id: 'another-event' },
   { categories: JSON.stringify(['payment_receipt']) },
-])('a missing or mismatched replay context stops before authority or provider work: %j', async (override) => {
+])('a present invalid or mismatched replay context stops before authority or provider work: %j', async (override) => {
   await expect(retryOne(storedMessage(override))).resolves.toMatchObject({ sent: false, stopped: true });
   expect(authority.dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
   expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();

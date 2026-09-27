@@ -117,22 +117,36 @@ async function markDelivered(target, { database = db, match = {} } = {}) {
   }
 }
 
+// Outcome flags belong to the ledger's own stamps, never a caller's snapshot.
+function reservationSnapshot(metadata) {
+  const snapshot = { ...(metadata || {}) };
+  for (const key of ['delivered', 'resolved', 'resolution', 'send_failed']) delete snapshot[key];
+  return snapshot;
+}
+
 // A keyed reservation permits one provider attempt. Only a confirmed failed
 // attempt may be retried; an unstamped reused reservation is ambiguous. Clear
 // the old failure before retrying so a later acceptance-stamp failure cannot
 // make that accepted attempt look safe to send again.
-async function claimAttempt(entry) {
+// A retry can quote different debt than the failed attempt that created the
+// reservation. `refresh` ({ invoiceIds, metadata }: what this attempt sends)
+// is written in the same claim, so the row records what the retry quoted.
+async function claimAttempt(entry, refresh = null) {
   if (!entry?.id) return { allowed: false, held: true };
   if (entry.metadata?.delivered === true) return { allowed: false, delivered: true };
+  if (entry.metadata?.resolved === true) return { allowed: false, resolved: true };
   if (!entry.reused) return { allowed: true };
   if (entry.metadata?.send_failed !== true) return { allowed: false, held: true };
   const changed = await db('collections_contact_ledger').where({ id: entry.id })
-    .whereRaw("metadata @> ?::jsonb AND NOT (metadata @> ?::jsonb)", [
-      JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }),
+    .whereRaw("metadata @> ?::jsonb AND NOT (metadata @> ?::jsonb) AND NOT (metadata @> ?::jsonb)", [
+      JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
     ])
-    .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [
-      JSON.stringify({ send_failed: false }),
-    ]) });
+    .update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [
+        JSON.stringify({ ...reservationSnapshot(refresh?.metadata), send_failed: false }),
+      ]),
+      ...(Array.isArray(refresh?.invoiceIds) ? { invoice_ids: JSON.stringify(refresh.invoiceIds) } : {}),
+    });
   return changed === 1 ? { allowed: true } : { allowed: false, held: true };
 }
 

@@ -78,6 +78,82 @@ function buildSignatureTailRes(addresseeKey) {
 const SIGNATURE_TAIL_RES = { '': buildSignatureTailRes('') };
 for (const key of Object.keys(PEOPLE)) SIGNATURE_TAIL_RES[key] = buildSignatureTailRes(key);
 
+// Opt-in `anySigner`: a sign-off by a name the patterns above do not know
+// ("— Sarah", "Thanks,\nSarah", "Talk soon!\nSarah"), for callers whose text a
+// model writes from arbitrary input. A bare capitalized final line is not
+// enough on its own — "Call Today", "Schedule Online" and "Reply YES" have the
+// same shape as "Sarah Jones" — so only sign-off-marked shapes count:
+//  - a dash-set name: the dash starts its own line (not under a value word,
+//    trailing spaces included: "Your technician is \n— Sarah" is an answer),
+//    follows a sentence ending in . or ! on the same line, or is the whole
+//    text. The name is one word in any case or script, or two capitalized
+//    words, optionally ", <Company>" in capitalized words or "from Waves";
+//  - a known closer on its own line with the name under it ("Thanks,\nSarah")
+//    — a closer from CLOSER, never any comma-ended line ("Here are the
+//    options,\nLawn Care" is a list);
+//  - a name alone on the last line right under a closer line ("Talk
+//    soon!\nSarah"): the closer line stays, the name goes;
+//  - a closer and the name on one line ("We can help. Thanks, Sarah") only
+//    when the customer's first name is known and is not that name — thanking
+//    the customer by name looks the same.
+// A name that is the customer's own first name is the addressee, so it stays;
+// a dash after a question on the same line may be the answer, so it stays too.
+// The patterns below are compiled without `i` (under it \p{Lu} also matches
+// lowercase, and "Tuesday works" would read as a capitalized name), so the
+// lowercase-only word lists are made case-insensitive by hand.
+function anyCase(source) {
+  let out = '';
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === '\\') { out += ch + source[i + 1]; i += 1; } else if (/[a-z]/.test(ch)) out += `[${ch}${ch.toUpperCase()}]`;
+    else out += ch;
+  }
+  return out;
+}
+const ANY_TOKEN = "\\p{L}[\\p{L}'\\u2019-]*";
+const CAP_TOKEN = "\\p{Lu}[\\p{L}'\\u2019-]*";
+// After the name: ", Waves Team" in capitalized words, or the company joined
+// by from/at/with ("— Sarah from Waves") as SIGNATURE_BLOCK joins it.
+const CAP_COMPANY = `(?:\\s*,\\s*${CAP_TOKEN}(?:\\s+${CAP_TOKEN}){0,3}|\\s+${anyCase(`(?:from|at|with)\\s+${COMPANY}`)})?`;
+const CAP_NAME = `(?<name>${CAP_TOKEN}(?:\\s+${CAP_TOKEN})?)${CAP_COMPANY}`;
+const DASH_NAME = `(?<name>${CAP_TOKEN}\\s+${CAP_TOKEN}|${ANY_TOKEN})${CAP_COMPANY}`;
+const VALUE_WORD = anyCase('(?:is|are|was|were|be|as|named|called|by)');
+const ANY_CLOSER = anyCase(CLOSER);
+// mode: 'always' strips regardless of the customer; 'keepAddressee' keeps the
+// customer's own first name; 'otherThanAddressee' strips only when the
+// customer's first name is known and differs.
+const ANY_SIGNER_RES = [
+  // (?<![ \t]) starts the line-break alternative at the first trailing space,
+  // so the value-word lookbehind sees the word itself, not a space after it.
+  { re: new RegExp(`(?:^|(?<=[.!]["'\\u201D\\u2019]?)[ \\t]*|(?<!\\b${VALUE_WORD}[ \\t]*)(?<![ \\t])[ \\t]*\\n\\s*)${DASH}\\s*${DASH_NAME}${TAIL}`, 'u'), mode: 'always' },
+  { re: new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})${ANY_CLOSER},?[ \\t]*\\n\\s*${CAP_NAME}${TAIL}`, 'u'), mode: 'keepAddressee' },
+  { re: new RegExp(`(?<=(?:^|[.!?\\n])\\s*${ANY_CLOSER}[!.]?)[ \\t]*\\n\\s*${CAP_NAME}${TAIL}`, 'u'), mode: 'keepAddressee' },
+  { re: new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})${ANY_CLOSER},?[ \\t]+${CAP_NAME}${TAIL}`, 'u'), mode: 'otherThanAddressee' },
+];
+// A dash can also set a value on its own line: under a label ("Your
+// technician:\n— Sarah", "Which service:\n— Lawn Care"), under an information
+// question ("Who will be coming?\n— Sarah") or as the next item of a dashed
+// or bulleted list. Such a text keeps its tail through both passes, known
+// signers included. A broad closing question ("Would you like to
+// schedule?\n— Sarah") is still a sign-off, and so is a dashed line set off
+// by a blank line or carrying a company ("— Adam, Waves Pest Control").
+const VALUE_QUESTION = anyCase('(?:who|what|which|where|when|why|how)');
+const DASH_VALUE_TAIL_RE = new RegExp(
+  `(?:^|\\n)(?:[^\\n]*:[ \\t]*|[^\\n]*\\b${VALUE_QUESTION}\\b[^.!?\\n]*\\?[ \\t]*|[ \\t]*(?:${DASH}|[\\u2022*])[^\\n]*)\\n[ \\t]*${DASH}[ \\t]*(?:${CAP_TOKEN}[ \\t]+${CAP_TOKEN}|${ANY_TOKEN})${TAIL}`,
+  'u',
+);
+
+function stripAnySignerOnce(text, addresseeFirstName) {
+  const addressee = String(addresseeFirstName || '').trim().toLowerCase();
+  return ANY_SIGNER_RES.reduce((current, { re, mode }) => current.replace(re, (...args) => {
+    const { name } = args[args.length - 1];
+    const isAddressee = Boolean(addressee) && String(name || '').split(/\s+/)[0].toLowerCase() === addressee;
+    if (mode === 'keepAddressee' && isAddressee) return args[0];
+    if (mode === 'otherThanAddressee' && (!addressee || isAddressee)) return args[0];
+    return '';
+  }), text).trim();
+}
+
 function addresseeKey(firstName) {
   const key = String(firstName || '').trim().toLowerCase();
   return Object.prototype.hasOwnProperty.call(PEOPLE, key) ? key : '';
@@ -118,15 +194,20 @@ const THANKS_BY_NAME_RES = Object.fromEntries(Object.entries(PEOPLE).map(([key, 
 
 // Returns the text without its trailing sign-off. A text with no sign-off
 // comes back exactly as given (quotes and all). Pass the customer's first
-// name when known, so a text addressed to a customer named Adam keeps it.
-function stripTrailingSignature(message, { addresseeFirstName } = {}) {
+// name when known, so a text addressed to a customer named Adam keeps it,
+// and `anySigner: true` to also strip a dash sign-off by any name (above).
+function stripTrailingSignature(message, { addresseeFirstName, anySigner = false } = {}) {
   const key = addresseeKey(addresseeFirstName);
   const res = SIGNATURE_TAIL_RES[key];
   const original = String(message || '').trim();
   if (key && THANKS_BY_NAME_RES[key].test(original)) return original;
   let text = original;
+  // Checked before each pass on the text that pass sees: stripping a
+  // signature can expose a dashed value ("Options:\n- Lawn Care\n\n— Adam").
+  const keepsValue = (t) => anySigner && DASH_VALUE_TAIL_RE.test(t);
   for (let i = 0; i < 3; i += 1) {
-    const next = stripOnce(text, res);
+    let next = keepsValue(text) ? text : stripOnce(text, res);
+    if (anySigner && !keepsValue(next)) next = stripAnySignerOnce(next, addresseeFirstName);
     if (next === text) break;
     text = next;
   }

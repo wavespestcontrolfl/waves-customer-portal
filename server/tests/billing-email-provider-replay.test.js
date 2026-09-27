@@ -7,7 +7,6 @@ const { dispatchUnderBillingEmailAuthority } = require('../services/billing-chan
 const { billingEmailReplayEligible } = require('../services/messaging/billing-email-replay-eligibility');
 const {
   isBillingEmailProviderReplay,
-  readStoredBillingReplayContext,
   runBillingEmailProviderReplayHandoff,
 } = require('../services/billing-email-provider-replay');
 
@@ -43,16 +42,27 @@ beforeEach(() => {
   billingEmailReplayEligible.mockResolvedValue({ eligible: true });
 });
 
-test('recognizes only the two canonical billing templates', () => {
+test('recognizes a stored replay contract only on the canonical billing templates', () => {
   expect(isBillingEmailProviderReplay(message())).toBe(true);
   expect(isBillingEmailProviderReplay(message({ template_key: 'billing.receipt_notice' }))).toBe(true);
   expect(isBillingEmailProviderReplay(message({ template_key: 'invoice.sent' }))).toBe(false);
 });
 
-test('delegates stored row validation to the canonical context reader', () => {
-  const stored = message();
-  expect(readStoredBillingReplayContext(stored)).toBe(context);
-  expect(EmailTemplateLibrary.readStoredBillingReplayContext).toHaveBeenCalledWith(stored);
+test.each(['billing.notice', 'billing.receipt_notice'])('contextless %s retains the existing provider retry path', async (templateKey) => {
+  const legacy = message({ template_key: templateKey, payload_snapshot: JSON.stringify({ notification_body: 'Payment received' }) });
+  expect(isBillingEmailProviderReplay(legacy)).toBe(false);
+  await expect(runBillingEmailProviderReplayHandoff(legacy, jest.fn())).resolves.toEqual({ handled: false });
+  expect(dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
+  expect(EmailTemplateLibrary.readStoredBillingReplayContext).not.toHaveBeenCalled();
+});
+
+test.each([null, {}, 'bad-context'])('a present invalid contract %j cannot fall back to an unguarded replay', async (stored) => {
+  const invalid = message({ payload_snapshot: { __billing_replay_context: stored } });
+  EmailTemplateLibrary.readStoredBillingReplayContext.mockReturnValueOnce(null);
+  expect(isBillingEmailProviderReplay(invalid)).toBe(true);
+  await expect(runBillingEmailProviderReplayHandoff(invalid, jest.fn())).resolves.toMatchObject({
+    handled: true, terminal: true, code: 'BILLING_REPLAY_CONTEXT_INVALID',
+  });
 });
 
 test('runs eligibility and provider dispatch on the held authority database', async () => {
@@ -64,14 +74,18 @@ test('runs eligibility and provider dispatch on the held authority database', as
     expect(options.input).toMatchObject({ customerId: 'cust-1', invoiceId: 'inv-1',
       metadata: { billingDeliveryCategory: 'invoice', notificationEventKey: context.notificationEventKey } });
     expect(options.recipientEmail).toBe('casey@example.com');
+    // The retried row's own template decides the suppression recheck.
+    expect(options.templateKey).toBe('billing.notice');
     expect(await options.preSendCheck({ database: heldDatabase })).toEqual({ ok: true });
     options.state.handoffStarted = true;
     await options.dispatch(heldDatabase);
     options.state.providerAccepted = true;
   });
 
-  await expect(runBillingEmailProviderReplayHandoff(message(), dispatch))
+  const stored = message();
+  await expect(runBillingEmailProviderReplayHandoff(stored, dispatch))
     .resolves.toEqual({ handled: true, allowed: true });
+  expect(EmailTemplateLibrary.readStoredBillingReplayContext).toHaveBeenCalledWith(stored);
   expect(billingEmailReplayEligible).toHaveBeenCalledWith(context, heldDatabase);
   expect(dispatch).toHaveBeenCalledWith(heldDatabase);
   expect(order).toEqual(['eligibility', 'dispatch']);

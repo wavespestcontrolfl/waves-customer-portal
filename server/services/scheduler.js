@@ -26,7 +26,7 @@ const SCHEDULED_ESTIMATE_CLAIM_LIMIT = 20;
 const SCHEDULED_ESTIMATE_STALE_CLAIM_MS = 30 * 60 * 1000;
 const SCHEDULED_ESTIMATE_MAX_ATTEMPTS = 3;
 const SCHEDULED_ESTIMATE_RETRY_DELAY_MS = 5 * 60 * 1000;
-const CONTENT_REGISTRY_LIVE_STATUSES = ['matched', 'db_changed_since_sync', 'conflict', 'db_published_missing_astro'];
+const CONTENT_REGISTRY_LIVE_STATUSES = ['matched', 'astro_only', 'astro_changed_since_sync', 'db_changed_since_sync', 'conflict', 'db_published_missing_astro'];
 const CONTENT_REGISTRY_LIVE_LIMIT = 300;
 
 function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}) {
@@ -4332,6 +4332,36 @@ function initScheduledJobs() {
               `, [completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
+          } else if (smsResult.code === 'BILLING_TEXT_LEG_IN_FLIGHT' && smsResult.nextAllowedAt) {
+            // Another attempt holds this notice's billing Text claim
+            // (messaging/billing-text-leg-dedupe.js), so no provider send
+            // was tried. Refund the attempt like QUIET_HOURS_HOLD above:
+            // spent on the bounded ladder, a claim live across three ticks
+            // would terminally block this replay, and the notice would be
+            // lost if that other attempt then ends not_sent. Still bounded:
+            // past CLAIM_STALE_MS the claim answers with the non-retryable
+            // BILLING_TEXT_LEG_CLAIM_STALE instead of this hold.
+            const inFlightRetryAt = new Date(smsResult.nextAllowedAt);
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+              status: 'scheduled',
+              scheduled_for: inFlightRetryAt,
+              updated_at: completedAt,
+              metadata: db.raw(`
+                COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                  'billing_text_in_flight_hold_at', ?::timestamptz,
+                  'scheduled_sms_attempts',
+                  GREATEST(
+                    CASE
+                      WHEN COALESCE(metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
+                        THEN (metadata->>'scheduled_sms_attempts')::int - 1
+                      ELSE 0
+                    END,
+                    0
+                  )
+                )
+              `, [completedAt]),
+            });
+            logger.info(`[scheduled-sms] ${msg.id} waiting on an in-flight billing text for the same notice — rescheduled for ${inFlightRetryAt.toISOString()} (attempt refunded)`);
           } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED' || smsResult.code === 'MOVE_HOLD')
                      && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
             // MOVE_HOLD: the replay now names its visit (appointmentId, app
@@ -4767,17 +4797,15 @@ function initScheduledJobs() {
     const results = await Promise.allSettled([
       Promise.resolve().then(() => require('./missed-call-bell').sweepMissedCalls()),
       Promise.resolve().then(() => require('./repeat-caller-bell').sweepRepeatCallers()),
-      // The promise-chaser bell's ONE path — a stateless, idempotent sweep
-      // (see the file's own docstring): no claim, no lease, nothing ever
-      // written to call_log. Same durable-retry slot as the two above.
-      // promiseChaserBell (required eagerly, below the requires at the top
-      // of this file — mirroring #5018's own boot-time pattern) is what
-      // captures its own MODULE_LOAD_AT at process boot, not at this
-      // tick's own first fire.
+      Promise.resolve().then(() => require('./missed-call-text-back').sweepMissedCallTextBacks()),
+      // The promise-chaser bell's ONE path: a stateless, idempotent sweep
+      // (see that file's docstring). promiseChaserBell is required eagerly at
+      // the top of this file so its MODULE_LOAD_AT is process boot, not this
+      // tick's first fire (mirrors #5018's boot-time pattern).
       Promise.resolve().then(() => promiseChaserBell.sweepPromiseChasers()),
     ]);
     results.forEach((result, index) => {
-      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller', 'promise-chaser'][index]} sweep failed: ${result.reason.message}`);
+      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller', 'missed-call-text-back', 'promise-chaser'][index]} sweep failed: ${result.reason.message}`);
     });
   }, { timezone: 'America/New_York' });
 

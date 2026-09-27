@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { cleanVisitSummary } from './ReportViewPage';
-import { epaReg, isProductApplication } from '../lib/product-application';
+import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
 import {
   MARKED_PHOTO_INTRO, markColor, markedPhotoCaption,
 } from '../components/report/markedPhotoCopy';
+import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 
 // Work-order style service report document (owner direction 2026-08-03,
 // modeled on the TruGreen WO / All U Need service-notification formats):
@@ -308,6 +309,21 @@ function InfoRow({ label, children }) {
     <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '1.5px 0', minWidth: 0 }}>
       <Label>{label}</Label>
       <span style={{ color: INK, fontSize: 11.5, lineHeight: 1.35, minWidth: 0, overflowWrap: 'anywhere' }}>{children}</span>
+    </div>
+  );
+}
+
+// titled: the standalone block already heads it "Poison Control".
+// showApplicator: the visit recorded an actual application.
+function DocPoisonControl({ data, listsProducts = false, titled = false, showApplicator = false }) {
+  const applicator = showApplicator ? applicatorIdLine(data.technicianName, data.applicatorFdacsId) : null;
+  return (
+    <div className="doc-keep" data-testid="doc-poison-control" style={{ margin: '8px 0 0', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
+      <p style={{ margin: 0 }}>
+        {!titled && <><strong style={{ color: INK, fontWeight: 700 }}>Poison Control:</strong>{' '}</>}
+        <PoisonControlCopy listsProducts={listsProducts} linkStyle={{ color: INK, fontWeight: 700 }} />
+      </p>
+      {applicator && <p style={{ margin: '2px 0 0', color: INK, fontWeight: 600 }}>{applicator}</p>}
     </div>
   );
 }
@@ -1257,6 +1273,22 @@ export default function ServiceReportDocument({ data, token }) {
                   );
               })}
             </table>
+            {/* Same gate as the web section: only a visit that applied a
+                product prints Poison Control. The tel: link stays tappable
+                in the PDF. */}
+            <DocPoisonControl data={data} listsProducts showApplicator />
+          </div>
+        )}
+
+        {/* No product rows, yet something went down (the server's
+            applicationMade verdict, an unknown verdict — null, fail toward
+            the safety line — or rodenticide in bait stations): Poison
+            Control prints on its own, mirroring the web report. The
+            applicator is named only on real application evidence. */}
+        {appliedProducts.length === 0 && (data.applicationMade === true || data.applicationMade === null || reportHasRodenticide(data)) && (
+          <div className="doc-keep">
+            <SectionHeader>Poison Control</SectionHeader>
+            <DocPoisonControl data={data} titled showApplicator={data.applicationMade === true} />
           </div>
         )}
 
