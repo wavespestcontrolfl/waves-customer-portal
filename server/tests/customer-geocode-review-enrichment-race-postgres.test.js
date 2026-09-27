@@ -29,7 +29,10 @@ postgres('geocode review enrichment serialization in PostgreSQL', () => {
     admin = knex({ client: 'pg', connection, pool: { min: 0, max: 2 } });
     schema = `geocode_enrichment_${randomUUID().replaceAll('-', '')}`;
     await admin.raw('CREATE SCHEMA ??', [schema]);
-    mockConnection = knex({ client: 'pg', connection, searchPath: [schema, 'public'], pool: { min: 0, max: 4 } });
+    mockConnection = knex({
+      client: 'pg', connection: { connectionString: connection, application_name: 'geocode-enrichment-race' },
+      searchPath: [schema, 'public'], pool: { min: 0, max: 4 },
+    });
     await mockConnection.schema.createTable('customers', (t) => {
       t.uuid('id').primary();
       for (const field of ['address_line1', 'address_line2', 'city', 'state', 'zip']) t.string(field);
@@ -114,9 +117,22 @@ postgres('geocode review enrichment serialization in PostgreSQL', () => {
       }
       return attempts;
     }).finally(() => { enrichmentSettled = true; });
-    await new Promise(resolve => setImmediate(resolve));
-    expect(enrichmentSettled).toBe(false);
-    releaseDecision();
+    const deadline = Date.now() + 5000;
+    let blocked = false;
+    while (!blocked && Date.now() < deadline) {
+      const waiting = await admin('pg_stat_activity')
+        .where({ datname: new URL(connection).pathname.slice(1), application_name: 'geocode-enrichment-race' })
+        .where({ state: 'active', wait_event_type: 'Lock' })
+        .count('* as count').first();
+      blocked = Number(waiting?.count || 0) > 0;
+      if (!blocked) await new Promise(resolve => setImmediate(resolve));
+    }
+    try {
+      expect(blocked).toBe(true);
+      expect(enrichmentSettled).toBe(false);
+    } finally {
+      releaseDecision();
+    }
     await decision;
     expect(await enrichment).toEqual([0, 0, 0]);
     expect(await mockConnection('customer_properties').where({ id: propertyId }).first()).toMatchObject({
