@@ -1976,6 +1976,13 @@ class AutonomousRunner {
   }
 
   async _checkProtectedPage(opp = {}, brief = null) {
+    // add_internal_links never edits its target: the planner edits OTHER
+    // pages to point at it. Refusing a protected money page here meant the
+    // city hubs — the pages that most need inbound links — never got any
+    // (10 of 18 live runs through 2026-09-27). The executor still revalidates
+    // every source page it edits.
+    const actionType = (brief && brief.action_type) || opp.effective_action_type || opp.action_type;
+    if (actionType === 'add_internal_links') return null;
     const protectedPages = getProtectedPages();
     if (!protectedPages?.isProtected) return null;
     const target = protectedPageCandidateUrl(opp, brief);

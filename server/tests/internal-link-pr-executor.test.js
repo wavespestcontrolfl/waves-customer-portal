@@ -1098,3 +1098,63 @@ describe('internal-link dry-run executor helpers', () => {
     );
   });
 });
+
+describe('internal-link candidate sweep', () => {
+  const saved = {};
+  const keys = ['SHADOW_MODE_ADD_INTERNAL_LINKS', 'AUTONOMOUS_INTERNAL_LINK_CANDIDATE_SWEEP', 'AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR', 'AUTONOMOUS_INTERNAL_LINK_SWEEP_SCAN_LIMIT'];
+  beforeEach(() => { for (const k of keys) { saved[k] = process.env[k]; delete process.env[k]; } });
+  afterEach(() => { for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
+
+  function openPrQuery(row) {
+    const q = { whereIn: jest.fn(() => q), first: jest.fn(async () => row) };
+    db.mockImplementation(() => q);
+    return q;
+  }
+
+  test('does nothing while add_internal_links is in shadow mode', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance.runPrBatch = jest.fn();
+    expect(await instance.runCandidateSweep()).toEqual({ status: 'shadow' });
+    process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'true';
+    expect(await instance.runCandidateSweep()).toEqual({ status: 'shadow' });
+    expect(instance.runPrBatch).not.toHaveBeenCalled();
+  });
+
+  test('honors the kill switch', async () => {
+    process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
+    process.env.AUTONOMOUS_INTERNAL_LINK_CANDIDATE_SWEEP = 'false';
+    const instance = new InternalLinkPrExecutor();
+    instance.runPrBatch = jest.fn();
+    expect(await instance.runCandidateSweep()).toEqual({ status: 'disabled' });
+    expect(instance.runPrBatch).not.toHaveBeenCalled();
+  });
+
+  test('waits while a link PR is still open', async () => {
+    process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
+    const q = openPrQuery({ id: 't1', astro_pr_url: 'https://github.com/x/y/pull/9' });
+    const instance = new InternalLinkPrExecutor();
+    instance.runPrBatch = jest.fn();
+    expect(await instance.runCandidateSweep()).toEqual({ status: 'pr_already_open', pr_url: 'https://github.com/x/y/pull/9' });
+    expect(q.whereIn).toHaveBeenCalledWith('status', ['pr_reserved', 'pr_open']);
+    expect(instance.runPrBatch).not.toHaveBeenCalled();
+  });
+
+  test('ships unclaimed candidates with a scan window past the PR cap', async () => {
+    process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
+    process.env.AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR = '2';
+    openPrQuery(undefined);
+    const instance = new InternalLinkPrExecutor();
+    instance.runPrBatch = jest.fn(async () => ({ status: 'pr_open', count: 2 }));
+    expect(await instance.runCandidateSweep()).toEqual({ status: 'pr_open', count: 2 });
+    expect(instance.runPrBatch).toHaveBeenCalledWith({ limit: 2, scanLimit: 15 });
+  });
+
+  test('runPrBatch loads the scan window, not just the cap', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._loadPatchCandidateTasks = jest.fn(async () => []);
+    await instance.runPrBatch({ limit: 1, scanLimit: 15 });
+    expect(instance._loadPatchCandidateTasks).toHaveBeenCalledWith({ limit: 15, taskIds: null });
+    await instance.runPrBatch({ limit: 3 });
+    expect(instance._loadPatchCandidateTasks).toHaveBeenLastCalledWith({ limit: 3, taskIds: null });
+  });
+});

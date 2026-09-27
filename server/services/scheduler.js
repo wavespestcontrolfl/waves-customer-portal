@@ -2278,6 +2278,22 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Autonomous content engine failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 10:30AM ET — Internal-link candidate sweep. Opens one Astro PR for
+  // patch candidates no run shipped (post-merge planning only plans; the
+  // runner only ships its own run's tasks). No-ops while
+  // SHADOW_MODE_ADD_INTERNAL_LINKS is on or a link PR is still open.
+  // Kill switch: AUTONOMOUS_INTERNAL_LINK_CANDIDATE_SWEEP=false.
+  cron.schedule('30 10 * * *', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    try {
+      await runExclusive('internal-link-candidate-sweep', async () => {
+        const executor = require('./content/internal-link-pr-executor');
+        const result = await executor.runCandidateSweep();
+        logger.info(`Internal-link candidate sweep: ${result?.status || 'unknown'}${result?.pr_url ? ` ${result.pr_url}` : ''}${result?.count ? ` (${result.count} link(s))` : ''}`);
+      });
+    } catch (err) { logger.error(`Internal-link candidate sweep failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // DAILY 1PM ET — Autonomous Content Engine catch-up. A deploy restarting
   // the container mid-batch killed the 9am run in place on 2026-06-12 —
   // zero posts AND zero alerts, with claimable work still queued. The

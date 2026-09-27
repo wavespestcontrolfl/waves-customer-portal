@@ -72,8 +72,10 @@ class InternalLinkPrExecutor {
     return evaluateDryRunTask(task, { sourcePage: source, targetPage: target });
   }
 
-  async runPrBatch({ limit = envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR', 3), taskIds = null } = {}) {
-    const tasks = await this._loadPatchCandidateTasks({ limit, taskIds });
+  async runPrBatch({ limit = envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR', 3), taskIds = null, scanLimit = null } = {}) {
+    // scanLimit lets the sweep look past candidates that fail revalidation
+    // (each failure is persisted, so they drop out of later sweeps).
+    const tasks = await this._loadPatchCandidateTasks({ limit: Math.max(limit, Number(scanLimit) || 0), taskIds });
     const selected = [];
     const sourceCounts = new Map();
     const targetCounts = new Map();
@@ -208,6 +210,23 @@ class InternalLinkPrExecutor {
       commit_sha: headSha,
       results: selected.map((item) => ({ ...item.validation, status: 'pr_open', astro_pr_url: pr.html_url })),
     };
+  }
+
+  // Daily sweep for patch candidates nothing else ships. The runner opens a
+  // PR only for tasks queued by its own run, and post-merge planning
+  // (astro-publisher planInternalLinksForTarget) stops at patch_candidate, so
+  // before this sweep those rows sat forever (19 in prod on 2026-09-27).
+  // One open link PR at a time: PRs merge by hand after Codex, so a second
+  // batch would only pile up. runPrBatch revalidates every candidate against
+  // current main and the live page before touching it.
+  async runCandidateSweep({ limit = envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR', 3) } = {}) {
+    if (!envBool('AUTONOMOUS_INTERNAL_LINK_CANDIDATE_SWEEP', true)) return { status: 'disabled' };
+    if (!/^(false|0|off)$/i.test(String(process.env.SHADOW_MODE_ADD_INTERNAL_LINKS || '').trim())) {
+      return { status: 'shadow' };
+    }
+    const open = await db(TABLE).whereIn('status', ['pr_reserved', 'pr_open']).first('id', 'astro_pr_url');
+    if (open) return { status: 'pr_already_open', pr_url: open.astro_pr_url || null };
+    return this.runPrBatch({ limit, scanLimit: envInt('AUTONOMOUS_INTERNAL_LINK_SWEEP_SCAN_LIMIT', 15) });
   }
 
   async _validateRenderedSourceAnchor(task, validation) {

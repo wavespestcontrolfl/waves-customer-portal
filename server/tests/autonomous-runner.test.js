@@ -1923,6 +1923,30 @@ describe('protected-page guard', () => {
     expect(queue.pendingReview).not.toHaveBeenCalled();
   });
 
+  test('add_internal_links is never blocked by target protection (the target page is not edited)', async () => {
+    const protectedPages = {
+      isProtected: jest.fn().mockResolvedValue({ protected: true, reason: 'money_page', source: 'pattern' }),
+    };
+    const runner = loadRunnerWith({ queue: { claimNext: jest.fn() }, briefBuilder: { compose: jest.fn() }, protectedPages });
+
+    expect(await runner._checkProtectedPage({
+      action_type: 'add_internal_links',
+      page_url: '/pest-control-sarasota-fl/',
+    })).toBeNull();
+    expect(await runner._checkProtectedPage(
+      { action_type: 'refresh_existing_page', page_url: '/pest-control-sarasota-fl/' },
+      { action_type: 'add_internal_links', target_url: '/pest-control-sarasota-fl/' },
+    )).toBeNull();
+    expect(protectedPages.isProtected).not.toHaveBeenCalled();
+
+    // Page-editing action types still get the guard.
+    const verdict = await runner._checkProtectedPage({
+      action_type: 'refresh_existing_page',
+      page_url: '/pest-control-sarasota-fl/',
+    });
+    expect(verdict).toMatchObject({ protected: true, reason: 'money_page' });
+  });
+
   test('a thrown protected-page check fails closed and is tagged is_error (not a routine skip)', async () => {
     const protectedPages = {
       isProtected: jest.fn().mockRejectedValue(new Error('db timeout')),
