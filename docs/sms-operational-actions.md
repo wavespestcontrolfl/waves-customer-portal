@@ -44,7 +44,8 @@ scheduling, account changes, consent changes or money movement is included. Obli
 left undated (customer-owned, or with an unresolved stated time) stay visible for manual
 work without timed overdue bells. A payment question ("did my payment go through?") is
 answered only by money landing after it: a settled payment toward an invoice, in full or
-in part (dated when the money settled, not when the invoice was stamped paid), a staff-
+in part (dated when the money settled, not when the invoice was stamped paid; money taken
+through Stripe counts once Stripe's own settlement moment is recorded on it), a staff-
 recorded cash, check or Zelle payment, a customer-level card charge such as the monthly
 autopay, or a received estimate deposit. A payment receipt (text, App push or email) is
 not evidence of its own; the money row it reports is. Nor is a visit's prepaid stamp: it

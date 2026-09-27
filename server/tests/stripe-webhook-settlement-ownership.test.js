@@ -309,7 +309,7 @@ describe('the withdrawal is re-read under the settlement lock', () => {
 // /confirm can promote a bank (ACH) row from processing to paid when it sees
 // the PaymentIntent succeed before this event lands, with no Stripe time to
 // stamp (Codex #4996 r10): the settlement moment arrives with this event.
-describe('an ACH row /confirm already promoted takes this event\'s settlement time', () => {
+describe('a paid row with no settlement stamp takes this event\'s settlement time', () => {
   const EVENT_CREATED = 1790000000;
   const settlementStamp = (u) => u.table === 'payments' && u.inTrx && u.payload.metadata && !('status' in u.payload);
 
@@ -329,8 +329,17 @@ describe('an ACH row /confirm already promoted takes this event\'s settlement ti
     expect(mockState.inserts.find((i) => i.table === 'payments')).toBeFalsy();
   });
 
-  test('a card payment already paid is left alone', async () => {
+  test('a card payment already paid with no settlement stamp (its charge was unreadable at /confirm) is stamped too', async () => {
     mockState.fallbackPayment = { id: 'pay-card', status: 'paid', metadata: { payment_state: 'paid' } };
+
+    await handlePaymentIntentSucceeded(succeededPI(), EVENT_CREATED);
+
+    expect(mockState.updates.find(settlementStamp).payload.metadata.bindings).toEqual([new Date(EVENT_CREATED * 1000).toISOString()]);
+  });
+
+  test('a payment already carrying a settlement stamp is left alone', async () => {
+    mockState.fallbackPayment = { id: 'pay-card', status: 'paid',
+      metadata: JSON.stringify({ payment_state: 'paid', settled_event_at: '2026-09-20T14:00:00.000Z' }) };
 
     await handlePaymentIntentSucceeded(succeededPI(), EVENT_CREATED);
 

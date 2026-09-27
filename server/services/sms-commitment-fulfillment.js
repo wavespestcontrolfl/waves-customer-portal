@@ -310,10 +310,18 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // earlier installment) never borrows it.
       const staffRecordedSql = `(${manualMatchSql} OR (COALESCE(p.metadata::jsonb ->> 'source', '') = 'admin_payment_reconcile' AND ${exactMatchSql}))`;
       const invoiceTender = (column) => `, CASE WHEN ${staffRecordedSql} THEN pinv.${column} END`;
-      // When the money actually landed: an async (ACH) row is inserted
-      // 'processing' and stamped with its Stripe settlement moment when it
-      // clears (stripe-webhook.js), so created_at is the wrong clock there.
-      const settledAt = (alias) => `COALESCE((${alias}.metadata::jsonb ->> 'settled_event_at')::timestamptz, ${alias}.created_at)`;
+      // When the money actually landed. Stripe money counts only from the
+      // settlement moment its writers stamp from Stripe itself
+      // (settled_event_at: the succeeded event, or a card charge's balance
+      // transaction). Its row's own creation time can be a /confirm repair
+      // days after the charge, or an ACH debit's start, so a Stripe row with
+      // no stamp yet waits for the succeeded webhook to record one (Codex
+      // #4996 r13 pre-push). Money staff record, with no gateway behind it,
+      // lands when it is recorded.
+      const settledAt = (alias) => `CASE WHEN ${alias}.stripe_payment_intent_id IS NULL AND ${alias}.stripe_charge_id IS NULL
+          AND COALESCE(${alias}.processor, '') <> 'stripe'
+        THEN COALESCE((${alias}.metadata::jsonb ->> 'settled_event_at')::timestamptz, ${alias}.created_at)
+        ELSE (${alias}.metadata::jsonb ->> 'settled_event_at')::timestamptz END`;
       const settledAtSql = settledAt('p');
       // An ask is scoped to a property only when the customer has one active
       // property (intake). When it is the only property the customer has

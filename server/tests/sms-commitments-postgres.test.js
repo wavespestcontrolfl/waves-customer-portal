@@ -2261,7 +2261,10 @@ postgres('SMS commitments on PostgreSQL', () => {
     const [savedCard, savedBank] = await mockPg('payment_methods').insert([{ customer_id: message.customer_id, stripe_payment_method_id: `pm_synthetic_${randomUUID()}`,
       card_brand: 'MASTERCARD', last_four: '5454', method_type: 'card' },
     { customer_id: message.customer_id, stripe_payment_method_id: `pm_synthetic_${randomUUID()}`, method_type: 'ach', bank_last_four: '4321' }]).returning('id');
-    const card = (extra) => ({ customer_id: message.customer_id, status: 'paid', payment_date: etDateString(after), processor: 'stripe', created_at: after, ...extra });
+    // Stripe rows carry the settlement moment their writers stamp from Stripe.
+    const stamped = (metadata) => JSON.stringify({ ...metadata, settled_event_at: after.toISOString() });
+    const card = (extra) => ({ customer_id: message.customer_id, status: 'paid', payment_date: etDateString(after), processor: 'stripe', created_at: after,
+      ...extra, metadata: stamped(JSON.parse(extra.metadata || '{}')) });
     const [, dues, bank, savedBankDues] = await mockPg('payments').insert([
       card({ amount: 102.90, base_amount_cents: 10000, surcharge_amount_cents: 290, stripe_payment_intent_id: 'pi_card_invoice',
         card_brand: 'visa', card_last_four: '4242', metadata: JSON.stringify({ invoice_id: invoice.id, payment_method: 'card' }) }),
@@ -2416,6 +2419,31 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(evidence.records.filter((r) => r.type === 'payment').map((r) => [r.id, r.invoice_id])).toEqual([[payment.id, named]]);
   });
 
+  test('Codex #4996 r13 pre-push: a Stripe row counts only from Stripe\'s own settlement moment — a /confirm repair recorded after the question for money that landed before it never passes as new', async () => {
+    const landed = new Date(message.created_at.getTime() - 3 * 86400000);
+    const repaired = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(repaired.getTime() + 1000);
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-1005',
+      title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: repaired }).returning('id');
+    // Booked after the question with no settlement moment: its charge could not be read.
+    const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(repaired),
+      processor: 'stripe', stripe_payment_intent_id: 'pi_repaired', created_at: repaired, metadata: JSON.stringify({ invoice_id: invoice.id }) }).returning('id');
+    // Money staff record at the same moment lands when it is recorded.
+    const [cash] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 40, status: 'paid', payment_date: etDateString(repaired),
+      created_at: repaired, metadata: JSON.stringify({ method: 'cash' }) }).returning('id');
+    const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const ids = async () => (await loadSmsFulfillmentEvidence(mockPg, commitment, message, now)).records.filter((r) => r.type === 'payment').map((r) => r.id);
+    expect(await ids()).toEqual([cash.id]);
+    // The succeeded webhook stamps Stripe's moment: before the question, so it still never counts.
+    const stamp = (at) => mockPg('payments').where({ id: payment.id })
+      .update({ metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: at.toISOString() }) });
+    await stamp(landed);
+    expect(await ids()).toEqual([cash.id]);
+    // Money that truly landed after the question counts once its moment is recorded.
+    await stamp(repaired);
+    expect((await ids()).sort()).toEqual([payment.id, cash.id].sort());
+  });
+
   test('Codex #4996 r9: a no-show or late-cancellation fee is not payment evidence — the webhook books it when it runs, with no settlement time of its own', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);
@@ -2425,7 +2453,8 @@ postgres('SMS commitments on PostgreSQL', () => {
       invoiceRow('WPC-2026-0992', 'Late-cancellation fee'), invoiceRow('WPC-2026-0993', 'Quarterly Pest Control')]).returning('id');
     // Booked by a redelivered webhook after the question, for captures that landed before it.
     const payment = (metadata) => ({ customer_id: message.customer_id, amount: 50, status: 'paid', payment_date: etDateString(after),
-      processor: 'stripe', stripe_payment_intent_id: `pi_${randomUUID()}`, created_at: after, metadata: JSON.stringify(metadata) });
+      processor: 'stripe', stripe_payment_intent_id: `pi_${randomUUID()}`, created_at: after,
+      metadata: JSON.stringify({ ...metadata, settled_event_at: after.toISOString() }) });
     const [, , , paid] = await mockPg('payments').insert([
       payment({ purpose: 'card_hold_no_show_fee', invoice_id: cardHoldFee.id, reason: 'no_show' }),
       payment({ purpose: 'appointment_card_no_show_fee', invoice_id: appointmentFee.id }),
@@ -2534,7 +2563,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const [claimed, disputed] = await mockPg('invoices').insert([invoiceRow('WPC-2026-0931', 'pi_invoice'),
       invoiceRow('WPC-2026-0932', null)]).returning('id');
     const stripeRow = (pi, metadata) => ({ customer_id: message.customer_id, amount: 89, status: 'paid', payment_date: etDateString(after),
-      processor: 'stripe', stripe_payment_intent_id: pi, metadata: JSON.stringify(metadata), created_at: after });
+      processor: 'stripe', stripe_payment_intent_id: pi, metadata: JSON.stringify({ ...metadata, settled_event_at: after.toISOString() }), created_at: after });
     const [autopay, claimedPaid, disputedPaid] = await mockPg('payments').insert([
       // StripeService.charge stamps the month it collects for, and no type; a retry keeps the original month.
       stripeRow('pi_autopay', { base_amount: 89, card_surcharge: 0, idempotency_key: 'monthly:synthetic:2026-08', billed_month: '2026-08' }),
