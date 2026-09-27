@@ -1504,13 +1504,32 @@ function allowedToolsCheck(scenario, record) {
   };
 }
 
+// Checks grade words, not apostrophe style. GPT-family candidates write
+// "isn’t" / "you’re" where the fixture's patterns spell "\w+n't", so an honest
+// "it isn’t confirmed yet" failed booking-happy-path's critical
+// no-false-confirmation check that the same sentence with "isn't" passes
+// (both GPT-6 models on their first live run). The record keeps what was
+// said; only the copy the checks read has its apostrophes made plain.
+const TYPOGRAPHIC_APOSTROPHE_RE = /[\u2018\u2019\u02BC]/g;
+function plainApostrophes(text) {
+  return String(text ?? '').replace(TYPOGRAPHIC_APOSTROPHE_RE, "'");
+}
+function gradedRecord(record) {
+  return {
+    ...record,
+    events: record.events.map((e) => (e.kind === 'agent' ? { ...e, text: plainApostrophes(e.text) } : e)),
+    spoken: record.spoken.map(plainApostrophes),
+  };
+}
+
 function evaluateChecks(scenario, record) {
+  const graded = gradedRecord(record);
   // Receipt evidence is mandatory for every scenario, including custom fixtures.
   // Ignore explicit copies so they cannot weaken or double-count the invariant.
   return [
-    allowedToolsCheck(scenario, record),
-    runCheck({ check: 'commitment_requires_receipt', value: true, severity: 'critical', adjudicated: true }, record),
-    ...(scenario.expect || []).filter((e) => e.check !== 'commitment_requires_receipt').map((e) => runCheck(e, record)),
+    allowedToolsCheck(scenario, graded),
+    runCheck({ check: 'commitment_requires_receipt', value: true, severity: 'critical', adjudicated: true }, graded),
+    ...(scenario.expect || []).filter((e) => e.check !== 'commitment_requires_receipt').map((e) => runCheck(e, graded)),
   ];
 }
 
@@ -2060,7 +2079,7 @@ module.exports = {
   summaryLine,
   isFailedVoiceRun,
   _internals: {
-    CHILD_TIMEOUT_MS, attemptWithRetry, notifyOutcome, failureLines, notifyFailure, notifyInconclusive, patchStreamProto,
+    CHILD_TIMEOUT_MS, plainApostrophes, attemptWithRetry, notifyOutcome, failureLines, notifyFailure, notifyInconclusive, patchStreamProto,
     JUDGE_CONCURRENCY, judgeChecks, judgeRecord, mapPool, PROMISE_RE, DEFAULT_TOOL_TEXT, LOOKUP_BUDGET_TEXT, EVAL_CALLER_TO, ESTIMATE_FIELDS, allowedToolsCheck, validCallNames,
     makeDbGuard, officeHoursFixture, pickToolResponse, inputMatches, MISMATCH_TEXT, runFixtureTool, applyToolSideEffects, validateToolInput, offeredRefs, applyGates, applyResumeFixture, injectInterrupt, driveTurns, selectScenarios, assertRunConclusive,
     renderTranscript, evaluateChecks, runCheck, CHECK_RUNNERS, lintScenario, scenarioStatus, qualityScore, summarize,

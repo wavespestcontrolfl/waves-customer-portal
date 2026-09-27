@@ -239,7 +239,7 @@ test('late dues do not authorize a reminder from an incomplete empty invoice sna
   });
   await expect(runSweep({ now: new Date('2026-08-14T15:00:00Z') }))
     .resolves.toMatchObject({ sent: 0, skipped: 1 });
-  expect(collectionsChannelVerdict).toHaveBeenCalledTimes(2);
+  expect(collectionsChannelVerdict).toHaveBeenCalledTimes(1);
   expect(collectionsChannelVerdict).toHaveBeenCalledWith(expect.objectContaining({ offLedgerBalanceCents: 6900 }));
   expect(claimChain.update).not.toHaveBeenCalled();
   expect(sendCustomerMessage).not.toHaveBeenCalled();

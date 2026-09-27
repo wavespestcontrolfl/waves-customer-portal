@@ -1418,7 +1418,36 @@ The check is the intake-local topic chokepoint in `ask-waves-intake.js`
 (`intakeSafetyClaimSupplement`), run on typography-folded text; the shared
 `reentrySafetyClaimFinding` is deliberately NOT called on this per-turn path
 (its worst case blocks the event loop, #4905). Safety wording is judged by
-topic, not grammatical subject, so it over-blocks by design. NOT CORS-open — credentialed allowlist
+topic, not grammatical subject, so it over-blocks by design.
+With `GATE_ASK_WAVES_TOPIC_ROUTING` on (dark; read at call time through
+`askWavesTopicRoutingLive()`), the model also returns a `topic`
+(`medical_emergency` / `product_safety` / `reentry_timing` / `none`; the field
+and its rules are sent only while the gate is on), and routing on that topic
+runs before the claim chokepoint:
+- `medical_emergency` → the emergency script (no quote CTA). Poison Control /
+  veterinary lines follow the visitor's words as in `emergencyGuidance`, and
+  any `PET_WORD` animal in the conversation or a vet / animal-hospital question
+  adds the veterinary line.
+- `product_safety` / `reentry_timing` → the reviewed "follow the product label"
+  copy (EN/ES), keeping the model's validated quote fields (restored when the
+  model also labeled the turn "emergency"); it becomes the emergency script
+  instead only on qualified evidence in the conversation (`qualifiedEmergencyIn`
+  — a product exposure, a symptom after a treatment, or trouble breathing),
+  never on the broad detector's other phrases (#4899).
+- `none`, or a missing / unknown topic, keeps the model's answer, which still
+  goes through the claim chokepoint and the price scrub. The broad emergency
+  detector is not consulted on this path: a flagged claim, a reassurance or
+  price talk becomes the emergency script only on qualified evidence
+  (`qualifiedEmergencyIn`) or when the model's own reply directs to emergency
+  care; otherwise a claim gets the reviewed label copy and price talk the
+  price redirect. There is no regex floor on the visitor's words: routing
+  follows the model's classification only.
+The model also returns `language` (`en` / `es`, the language of its reply,
+sent only while the gate is on); the reviewed copy follows it, and a missing
+value falls back to the Spanish-word detector on the visitor's active message,
+then the reply.
+The provider-failure fallback is unchanged (there is no model topic). Gate off:
+prompt, schema and replies are unchanged. NOT CORS-open — credentialed allowlist
 origins only (hub site)).
 `/api/public/experiments` (`GET /status` + `POST /exposure`) (client-side
 GrowthBook experimentation surface — no auth, anonymous visitors are the
@@ -3295,7 +3324,8 @@ fleet site — falling back to `/sitemap.xml`, which only the hub serves, as a
 redirect to that index; read with content-registry-live-status's
 `fetchSitemapPaths` and compared with `normalizeContentUrl`, cached 6 h per
 site; a failed refresh keeps the last good list and retries after 5 min; no
-list yet means the beacon is dropped), so invented slugs never create rows —
+list yet means the beacon is dropped; each sitemap outage is warn-logged once
+and its recovery once, with the fleet site key only), so invented slugs never create rows —
 today every blog post is hub-only, so spoke beacons find no blog paths and
 drop; and each `(day, site, path, milestone)` bucket stops at 2,000 a day
 (the upsert's `WHERE count < 2000`), so a forged flood can skew one post by

@@ -92,7 +92,7 @@ const LIVE_PATHS_TTL_MS = 6 * 60 * 60 * 1000;
 // not the default (codex P1 r3 on #5022).
 const SITEMAP_PATHS = ['/sitemap-index.xml', '/sitemap.xml'];
 const LIVE_PATHS_RETRY_MS = 5 * 60 * 1000;
-// site -> { paths: Set|null, ok: bool, checkedAt: ms, pending: Promise|null }
+// site -> { paths: Set|null, ok: bool, checkedAt: ms, pending: Promise|null, outage: bool }
 let livePathCache = new Map();
 
 async function fetchSiteSitemap(site) {
@@ -103,6 +103,19 @@ async function fetchSiteSitemap(site) {
   return null;
 }
 
+// A site whose sitemap can't be read loses (or freezes) its counts without
+// any other sign, so each outage is warn-logged once and its recovery once —
+// the fleet site key only, never anything from a beacon.
+function noteSitemapHealth(site, entry, loaded) {
+  if (!loaded && !entry.outage) {
+    entry.outage = true;
+    logger.warn(`[blog-read-depth] sitemap for ${site} could not be read; ${entry.paths ? 'counting against the last good list' : 'its beacons are dropped'} until it loads (retried every 5 min)`);
+  } else if (loaded && entry.outage) {
+    entry.outage = false;
+    logger.info(`[blog-read-depth] sitemap for ${site} is readable again`);
+  }
+}
+
 // The claimed site's own sitemap, as normalized content URLs (a bare path
 // for the hub, an absolute URL for a spoke — normalizeContentUrl decides
 // both sides). One fetch in flight per site; a failed refresh keeps the
@@ -110,7 +123,7 @@ async function fetchSiteSitemap(site) {
 function livePaths(site, now) {
   let entry = livePathCache.get(site);
   if (!entry) {
-    entry = { paths: null, ok: false, checkedAt: -Infinity, pending: null };
+    entry = { paths: null, ok: false, checkedAt: -Infinity, pending: null, outage: false };
     livePathCache.set(site, entry);
   }
   if (entry.pending) return entry.pending;
@@ -118,6 +131,7 @@ function livePaths(site, now) {
   entry.pending = fetchSiteSitemap(site)
     .then((paths) => {
       entry.checkedAt = now;
+      noteSitemapHealth(site, entry, !!paths);
       entry.ok = !!paths;
       if (paths) entry.paths = paths;
       entry.pending = null;
