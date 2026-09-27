@@ -349,6 +349,29 @@ describe('invoice follow-up email sidecar', () => {
   // the choice: the handoff's preference-change hold keeps the touch due for
   // a re-fan-out on the current choice; the sequence is never paused on the
   // stale Email-only snapshot.
+  // The cron fires once a day (10:16 NY, Tue–Fri), so a held step must land on
+  // a time the NEXT tick still treats as due and fresh, or skipStaleTouches
+  // passes it by. A Friday hold rolls to Tuesday's anchor.
+  test('a Friday hold is retried, not stale-skipped, at the Tuesday tick', async () => {
+    jest.setSystemTime(new Date('2026-05-29T14:16:00.000Z')); // Fri 10:16 NY
+    const sequence = followupRow({ next_touch_at: '2026-05-29T14:00:00.000Z' });
+    const sequenceUpdate = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [sequence], first: sequence })],
+      customers: [chain({ first: customer({ phone: null }) })],
+      invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
+      notification_prefs: [chain({ first: {} })],
+      customer_interactions: [chain(), chain()],
+      invoice_followup_sequences: [chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
+    });
+    BillingEmailAuthority.loadBillingEmailContext.mockRejectedValueOnce(new Error('connection terminated'));
+    await InvoiceFollowUps.runPending();
+    const heldAt = sequenceUpdate.update.mock.calls[0][0].next_touch_at;
+    const tuesdayTick = new Date('2026-06-02T14:16:00.000Z'); // Tue 10:16 NY
+    expect(heldAt <= tuesdayTick).toBe(true);
+    expect(tuesdayTick - InvoiceFollowUps.firstEligibleFireAt(heldAt)).toBeLessThanOrEqual(InvoiceFollowUps.STALE_TOUCH_GRACE_MS);
+  });
+
   // No explicit channel choice and no phone: the email is the only leg, so a
   // retryable refusal from the shared check must hold the touch rather than
   // fall to the pause branch and end every remaining follow-up.
@@ -369,7 +392,8 @@ describe('invoice follow-up email sidecar', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     const [update] = sequenceUpdate.update.mock.calls[0];
     expect(update).not.toHaveProperty('status');
-    expect(update.next_touch_at).toEqual(new Date(Date.now() + 30 * 60 * 1000));
+    // The next NY calendar day: tomorrow's tick retries it, not a stale-skip.
+    expect(update.next_touch_at).toEqual(new Date('2026-05-27T04:00:00.000Z'));
     // The attempt never left, so its unkeyed ledger row must not fill the
     // collections window the held retry is judged by.
     expect(require('../services/collections/contact-ledger').markSendFailed).toHaveBeenCalledWith(
@@ -407,7 +431,8 @@ describe('invoice follow-up email sidecar', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     const [update] = sequenceUpdate.update.mock.calls[0];
     expect(update).not.toHaveProperty('status');
-    expect(update.next_touch_at).toEqual(new Date(Date.now() + 30 * 60 * 1000));
+    // The next NY calendar day: tomorrow's tick retries it, not a stale-skip.
+    expect(update.next_touch_at).toEqual(new Date('2026-05-27T04:00:00.000Z'));
     // An explicit selection's keyed reservation is excluded from its own
     // step's consult, so it is not stamped never_contacted.
     const [[, stamp]] = require('../services/collections/contact-ledger').markSendFailed.mock.calls;

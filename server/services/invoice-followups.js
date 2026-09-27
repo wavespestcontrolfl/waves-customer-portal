@@ -731,6 +731,15 @@ function isStaleTouch(dueAt, now) {
   return now.getTime() - firstEligibleFireAt(dueAt).getTime() > STALE_TOUCH_GRACE_MS;
 }
 
+// The earliest a held step may be retried: the start of the next NY calendar
+// day. The cron fires once a day (10:16 NY, Tue–Fri), so a same-day retry
+// time would be about a day old by the next tick and skipStaleTouches would
+// pass the step by instead of retrying it. A Saturday-to-Monday date rolls
+// to Tuesday's anchor at staleness time (firstEligibleFireAt).
+function heldTouchFloor(now = new Date()) {
+  return anchorTo10amNY(now, 1, 0);
+}
+
 /**
  * Advance a sequence past touches whose eligible send day already passed,
  * without sending them. Walks the same anchored timeline fireTouch advances
@@ -1174,8 +1183,8 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     const holdStep = (result = {}) => {
       smsHoldUnowned = true;
       const requested = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
-      const at = requested && !Number.isNaN(requested.getTime())
-        ? requested : new Date(Date.now() + 30 * 60 * 1000);
+      const floor = heldTouchFloor();
+      const at = requested && !Number.isNaN(requested.getTime()) && requested > floor ? requested : floor;
       if (!smsDeferUntil || at > smsDeferUntil) smsDeferUntil = at;
     };
     if (emailHold) holdStep();
@@ -1390,7 +1399,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     // phone would otherwise fall to the pause below and lose every remaining
     // follow-up over one transient refusal.
     if (!smsDeferUntil && (emailResult.retryable === true || emailResult.deferred === true)) {
-      smsDeferUntil = new Date(Date.now() + 30 * 60 * 1000);
+      smsDeferUntil = heldTouchFloor();
     }
     if (smsDeferUntil) {
       // Nothing failed — the touch fired outside the 8AM-8PM ET send
