@@ -1,4 +1,5 @@
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const { hasCreditableWaterIn, normalizeLawnAftercare } = require('./lawn-aftercare');
 
 const { WAVES_SUPPORT_PHONE_DISPLAY: WAVES_PHONE_DISPLAY } = require('../../constants/business');
 
@@ -551,15 +552,25 @@ function answerWateringAftercare({ data, weekPlan, aftercare }) {
   // Same guards as the rendered card: a credited watering-in only for a
   // REQUIRED watering-in, on a visit inside the plan week, on a plan that
   // prescribes a run (codex gh-r31).
-  const credited = aftercare.waterInRequired === true && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === true;
+  const recordedWaterIn = hasCreditableWaterIn(aftercare);
+  const credited = recordedWaterIn && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === true;
   const reduced = credited && weekPlan?.afterTreatment?.title ? weekPlan.afterTreatment : null;
-  // A HOLD plan beside a required watering-in: the answer must carry the
-  // plan's no-extra-runs guidance too — the label instruction alone reads
-  // as permission to resume the normal schedule (codex gh-r45).
-  const holdBeside = !reduced && aftercare.waterInRequired === true
-    && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === false && weekPlan?.title
+  // Keep the full plan beside uncredited aftercare. A HOLD plan also stays
+  // beside an affirmative water-in so it cannot read as permission to resume.
+  const planBeside = !reduced && weekPlan?.title
+    && (!recordedWaterIn
+      || (weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === false))
     ? weekPlan : null;
-  return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : (holdBeside ? `${holdBeside.title}. ${holdBeside.detail}` : null)].filter(Boolean).join(' ');
+  return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : (planBeside ? `${planBeside.title}. ${planBeside.detail}` : null)].filter(Boolean).join(' ');
+}
+
+function answerConditionalWateringPlan({ weekPlan, aftercare }) {
+  if (!weekPlan?.title) return aftercare.watering;
+  const condition = aftercare.needsReview === true
+    ? 'Confirm the product watering directions with your technician before applying the plan below. Any recorded restriction must also have ended; use only the plan’s listed days and watering windows.'
+    : 'The recorded product watering restriction comes first. Use the plan below only after that restriction has ended, and only within the plan’s listed days and watering windows.';
+  const plan = [weekPlan.title, weekPlan.detail].filter(Boolean).join('. ');
+  return [aftercare.watering, condition, plan].filter(Boolean).join(' ');
 }
 
 // AW-06 / codex #4839 round-4 (4109926463): first-match precedence rules,
@@ -572,8 +583,16 @@ function questionRoutingRules({
   data, nextAppointment, weekPlan, aftercare, wateringIntent,
 }) {
   return [
-    // Aftercare/watering answers first — never re-entry or generic copy
-    // under the plan shown on the same page (codex #3565 gh-r29).
+    // Explicit observation intent outranks incidental watering vocabulary:
+    // "What did you find by the sprinkler?" still asks about findings.
+    { test: (q) => OBSERVATION_QUESTION_RE.test(q) && !EFFECTIVENESS_RE.test(q) && !APPOINTMENT_RE.test(q), answer: () => answerFindings({ data }) },
+    // Preserve unverified or restricted aftercare before any watering plan.
+    {
+      test: () => wateringIntent
+        && Boolean(aftercare?.watering)
+        && (aftercare.wateringHold === true || aftercare.needsReview === true),
+      answer: () => answerConditionalWateringPlan({ weekPlan, aftercare }),
+    },
     {
       test: (q) => wateringIntent && Boolean(aftercare?.watering) && /\b(treat\w*|application|applied|product|spray\w*|today)\b/.test(q),
       answer: () => answerWateringAftercare({ data, weekPlan, aftercare }),
@@ -591,9 +610,8 @@ function questionRoutingRules({
     // codex #4839 round-4 P2 4109926457: explicit appointment wording
     // outranks a treatment inflection ("What are you applying at my next
     // appointment?" answers with the appointment, not today's application).
-    // Observation verbs outrank treatment inflections ("What did you find
-    // while treating?") — codex #4839 P2.
-    { test: (q) => OBSERVATION_QUESTION_RE.test(q) && !EFFECTIVENESS_RE.test(q) && !APPOINTMENT_RE.test(q), answer: () => answerFindings({ data }) },
+    // Observation verbs already outrank treatment inflections and watering
+    // vocabulary in the first rule above ("What did you find while treating?").
     // Preparation wording outranks appointment nouns — codex #4839 P2.
     { test: (q) => PREP_ADVICE_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
     // Explicit advice outranks treatment inflections ("What do you recommend
@@ -668,7 +686,7 @@ function answerServiceReportQuestion({
   }
 
   const weekPlan = data?.reportV2?.water?.weekPlan;
-  const aftercare = data?.reportV2?.aftercare;
+  const aftercare = normalizeLawnAftercare(data?.reportV2?.aftercare);
   // Controller phrasing without the word "water" — "How long should I run
   // each zone?", "how many minutes per zone" — is a watering question too
   // (codex gh-r38); the safety-intent guard above still wins.

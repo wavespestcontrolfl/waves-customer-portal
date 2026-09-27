@@ -419,15 +419,27 @@ advice retains its `area_estimated` label.
 Without either signal, observation/summary wording cannot trigger sprinkler
 advice or an unqualified "no action needed" reassurance. Measured water
 deficits/surpluses and eligible stored water snapshots
-retain their existing behavior. A current watering snapshot can originate from
+retain their existing behavior.
+Lawn `reportV2.aftercare` permits a watering-in credit only when
+`creditableWaterIn` is exactly `true`, `evidenceSource` is
+`product_instruction`, and neither `wateringHold` nor `needsReview` is true.
+That same rule governs the live plan, insight actions, report assistant,
+narrative overlay, and PDF. A historical non-neutral watering object without
+evidence provenance is normalized to review-required: its recorded note remains
+visible beside confirmation guidance, while the former inferred “normal watering
+within 24 hours” instruction is removed. Historical neutral fallbacks retain
+their existing shape and wording.
+A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
 (or the original email timestamp on older snapshots), with the same policy,
 plan-week and service-premise checks. Unpublished drafts remain unavailable.
 The optional whole-report AI narrative runs
 only when `droughtSignal` is `true`; otherwise all deterministic report copy
-is retained before narrative cache/model access. Lawn PDF render strategy `p4` regenerates
-older cached PDFs to match this evidence rule),
+is retained before narrative cache/model access. Review-required or restricted
+aftercare also keeps the deterministic report before cache/model access. Lawn
+PDF render strategy `p6-aftercare-guards-20260927` regenerates older cached PDFs
+to match these evidence rules),
 the legacy SPA `/recap/:token` link (token-shaped and rate-limited; redirects
 to `/report/:token#visit-recap`, where the report embeds the approved "Your
 Visit, in Motion" recap and consumes `/api/reports/:token/recap` +

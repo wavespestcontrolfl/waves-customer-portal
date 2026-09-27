@@ -24,8 +24,9 @@ const MODELS = require('../../config/models');
 const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
+const { hasCreditableWaterIn, normalizeLawnAftercare } = require('./lawn-aftercare');
 
-const PROMPT_VERSION = 'lawn_report_v2_narrative_v7'; // v7: ground drought rewrites in the report's low/high water states.
+const PROMPT_VERSION = 'lawn_report_v2_narrative_v8_aftercare'; // Preserve unverified/restricted aftercare before any overlay or cache hit.
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -252,11 +253,16 @@ function mergeNarrative(v2, out) {
  * @param {object} deps { callModel?: async ({system,text}) => ({ ok, json }) }
  */
 async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
+  const aftercare = normalizeLawnAftercare(v2?.aftercare);
+  const guardedV2 = aftercare === v2?.aftercare ? v2 : { ...v2, aftercare };
   // Every rewritten field can introduce moisture advice, including an unrelated
   // insight or treatment sentence. Preserve the complete deterministic report
   // before cache/model access unless structured evidence establishes drought.
-  if (!v2 || v2.water?.droughtSignal !== true) return v2;
-  const facts = groundingFacts(v2, ctx);
+  // A non-neutral product note also stays deterministic until its provenance is
+  // affirmative and unopposed. Any narrative field could contradict it.
+  if (!guardedV2 || guardedV2.water?.droughtSignal !== true
+    || (guardedV2.aftercare?.neutral !== true && !hasCreditableWaterIn(guardedV2.aftercare))) return guardedV2;
+  const facts = groundingFacts(guardedV2, ctx);
   const cacheKey = crypto.createHash('sha256').update(`${PROMPT_VERSION}|${stableStringify(facts)}`).digest('hex');
   const hit = _cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
@@ -266,11 +272,11 @@ async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
     { laneId: 'lawn_visit_narratives', jsonMode: true, maxTokens: 1300, ...payload },
   ));
 
-  let merged = v2;
+  let merged = guardedV2;
   try {
     const res = await callModel({ system: SYSTEM_PROMPT, text: buildUserMessage(facts), jsonSchema: narrativeSchema(facts) });
     if (res && res.ok && res.json) {
-      merged = mergeNarrative(v2, res.json);
+      merged = mergeNarrative(guardedV2, res.json);
     } else {
       logger.warn(`[lawn-report-v2] narrative miss (${res && res.reason}); using deterministic copy`);
     }

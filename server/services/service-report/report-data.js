@@ -2194,7 +2194,9 @@ class PinnedAssessmentUnavailable extends Error {
 // p5: before/after pairing is Front-only; close-up / trouble photos never
 // pair or fill the fallback (owner ruling 2026-09-24). PDFs rendered under
 // the old any-zone pairing must not be reused.
-const LAWN_RENDER_STRATEGY = 'p5';
+// p6: lawn water-plan credits now require explicit product-instruction
+// provenance; older PDFs may contain the former inferred 24-hour instruction.
+const LAWN_RENDER_STRATEGY = 'p6-aftercare-guards-20260927';
 
 async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
