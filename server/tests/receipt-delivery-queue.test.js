@@ -218,6 +218,13 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
 
     expect(result.ok).toBe(false);
+    // The email leg is the routed receipt: the authority reads the choice and
+    // refuses; nothing is sent, and the race is retried.
+    expect(sendReceiptEmail).toHaveBeenCalledTimes(1);
+    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', {
+      idempotencyKey: 'receipt_email_auto:inv1',
+      billingDeliveryCategory: 'payment_receipt',
+    });
     expect(jobsTable.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'retry_scheduled', last_error: 'Receipt delivery preferences changed between channel checks',
     }));
