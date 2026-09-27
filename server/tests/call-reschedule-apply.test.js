@@ -108,19 +108,14 @@ describe('planRescheduleFromCall', () => {
     expect(planRescheduleFromCall({ ...args, candidates: [visit(), ...args.candidates.slice(1)] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 
-  // No service named on the call: fall back to the property's one in-span
-  // visit, but only when that is unambiguous. Two programs in span, two
-  // visits of one program in span, nothing in span, or an in-span row whose
-  // catalog identity no longer resolves all still need a human to pick.
-  test('a call that names no service falls back to the one in-span visit at the property', () => {
-    const base = { v2: v2({ service_request: { specific_service_name: null }, confidence: { primary_service_category: 0.95 } }), call: call(), customer: customer(), now: NOW };
-    expect(planRescheduleFromCall({ ...base, candidates: [visit()] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
-    expect(planRescheduleFromCall({ ...base, candidates: [visit(), visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-09-25' })] }).reason).toBe('service_needs_review');
-    expect(planRescheduleFromCall({ ...base, candidates: [visit({ scheduled_date: '2026-12-01' })] }).reason).toBe('no_visit_on_books');
-    expect(planRescheduleFromCall({ ...base, candidates: [visit({ catalog_service_name: null })] }).reason).toBe('service_needs_review');
-    // One program, two of its visits in span: the fallback does not guess.
-    expect(planRescheduleFromCall({ ...base, candidates: [visit(), visit({ id: 'same-program-2', scheduled_date: '2026-09-28' })] }))
-      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'same-program-2'] });
+  // Coarse categories cannot tell programs apart: a call that names no
+  // service stays in review, even when V2 is sure of the category and the
+  // property holds one visit.
+  test('a call that names no service stays in review', () => {
+    const noName = v2({ service_request: { specific_service_name: null, primary_service_category: 'pest_general' },
+      confidence: { primary_service_category: 0.99 } });
+    expect(planRescheduleFromCall({ v2: noName, call: call(), customer: customer(), now: NOW, candidates: [visit()] }).reason)
+      .toBe('service_needs_review');
   });
 
   // A named service that matches nothing is an explicit mismatch, never a
@@ -132,45 +127,43 @@ describe('planRescheduleFromCall', () => {
       .toBe('service_needs_review');
   });
 
-  // A name matching two programs resolves only among THOSE programs, and
-  // never picks between them: both in span is a service question, and the
-  // other program's upcoming visit is one more visit the caller may mean.
+  // A name matching two programs resolves only among THOSE programs and
+  // never picks between them, near the destination or not; another
+  // program the name does not match is no candidate at all.
   test('a name matching two programs never picks between them', () => {
     const base = { v2: v2(), call: call(), customer: customer(), now: NOW };
     const farTwin = visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-12-01' });
     expect(planRescheduleFromCall({ ...base, candidates: [visit(), farTwin] }))
       .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'other-program'] });
     const nearTwin = visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-09-26' });
-    expect(planRescheduleFromCall({ ...base, candidates: [visit(), nearTwin] }).reason).toBe('service_needs_review');
+    expect(planRescheduleFromCall({ ...base, candidates: [visit(), nearTwin] }))
+      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'other-program'] });
     const lawn = visit({ id: 'lawn-visit', service_id: 'lawn-program', service_type: 'Lawn Care Service', scheduled_date: '2026-12-01' });
     expect(planRescheduleFromCall({ ...base, candidates: [visit(), lawn] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 
   // A call about two services may cover a visit this path would leave
   // unmoved while it resolves the card: secondary categories keep it in
-  // review, named or not.
+  // review even when the named service matches one visit.
   test('a call V2 files under more than one service category stays in review', () => {
     const base = { call: call(), customer: customer(), now: NOW, candidates: [visit()] };
     expect(planRescheduleFromCall({ ...base, v2: v2({ service_request: { secondary_categories: ['lawn_care'] } }) }).reason)
       .toBe('service_needs_review');
-    expect(planRescheduleFromCall({ ...base, v2: v2({ service_request: { specific_service_name: null, secondary_categories: ['lawn_care'] },
-      confidence: { primary_service_category: 0.95 } }) }).reason).toBe('service_needs_review');
     expect(planRescheduleFromCall({ ...base, v2: v2({ service_request: { secondary_categories: [] } }) }))
       .toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 
-  // No name falls back only within V2's own category: a termite call never
-  // moves the property's pest visit, and an unmapped category never falls back.
-  test('the no-name fallback requires the visit to match V2\'s service category', () => {
-    const noName = (category, confidence = 0.95) => v2({ service_request: { specific_service_name: null, primary_service_category: category },
-      confidence: { primary_service_category: confidence } });
-    const base = { call: call(), customer: customer(), now: NOW, candidates: [visit()] };
-    expect(planRescheduleFromCall({ ...base, v2: noName('pest_general') })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
-    expect(planRescheduleFromCall({ ...base, v2: noName('termite') }).reason).toBe('service_needs_review');
-    expect(planRescheduleFromCall({ ...base, v2: noName('other') }).reason).toBe('service_needs_review');
-    // An uncertain category is not a name: below the confidence bar, or absent, it stays in review.
-    expect(planRescheduleFromCall({ ...base, v2: noName('pest_general', 0.6) }).reason).toBe('service_needs_review');
-    expect(planRescheduleFromCall({ ...base, v2: noName('pest_general', null) }).reason).toBe('service_needs_review');
+  // The catch-all booking placeholder names no service yet: a visit on it
+  // may be the one the caller means, so the call stays in review, and the
+  // placeholder is never moved as the named service's visit.
+  test('a visit on the catch-all placeholder service keeps the call in review', () => {
+    const placeholder = (overrides) => visit({ service_id: 'general-appointment', catalog_service_key: 'general_appointment',
+      catalog_service_name: 'Waves Pest Control Appointment', ...overrides });
+    const base = { call: call(), customer: customer(), now: NOW };
+    expect(planRescheduleFromCall({ ...base, v2: v2(), candidates: [visit(), placeholder({ id: 'placeholder', scheduled_date: '2026-12-01' })] }).reason)
+      .toBe('service_needs_review');
+    expect(planRescheduleFromCall({ ...base, v2: v2({ service_request: { specific_service_name: 'Waves Pest Control Appointment' } }),
+      candidates: [placeholder()] }).reason).toBe('service_needs_review');
   });
 
   // An orphaned in-span row may be the caller's target, so it keeps even a

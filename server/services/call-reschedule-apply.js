@@ -18,23 +18,20 @@
  *     scheduling_window confidence clears MIN_SCHEDULING_CONFIDENCE, and
  *     the existing trusted-speaker-label gate is enabled
  *   - confirmed_start_at is a real future instant exactly on the hour
- *   - exactly ONE live visit (pending or confirmed — a row parked at
- *     'rescheduled' awaits a real rebook and stays a card; not dispatch-
+ *   - exactly ONE upcoming live visit (pending or confirmed — a row parked
+ *     at 'rescheduled' awaits a real rebook and stays a card; not dispatch-
  *     owned pending, not an unactivated AI office-review booking, not
- *     grouped) of that customer's service — matched on the row's CATALOG
+ *     grouped) of the service the call names — matched on the row's CATALOG
  *     identity, never on a label a repoint can leave stale — at the
- *     identified property sits within
- *     CANDIDATE_SPAN_DAYS of the target date — two candidates is ambiguous,
- *     zero means the call was about a visit we don't have (the booking lane
- *     owns that). An explicit service name that matches nothing stays in
- *     review. No name falls back to the property's in-span visit of V2's own
- *     confident category (pest, mosquito or lawn only); a name matching
- *     several programs resolves only among those; two programs in span, a
- *     call V2 files under more than one service category, or a row whose
- *     catalog identity no longer resolves, stays in review. So does more
- *     than one upcoming visit the call could mean: V2 records the new slot,
- *     not which visit it replaces. A grouped visit needs the whole-visit
- *     mover's disclosure a phone call never gave
+ *     identified property, within CANDIDATE_SPAN_DAYS of the target date.
+ *     Two is ambiguous (V2 records the new slot, not which visit it
+ *     replaces); none in span means the call was about a visit we don't
+ *     have (the booking lane owns that). A call naming no service or one
+ *     that matches nothing, a call V2 files under more than one service
+ *     category, or a visit at the property with no service identity to weigh
+ *     (its catalog row gone, or the catch-all placeholder) stays in review.
+ *     A grouped visit needs the whole-visit mover's disclosure a phone call
+ *     never gave
  *   - the pipeline did not itself create an appointment from this call
  *   - the customer has no open portal reschedule request for that same
  *     appointment — that is a staff-owned track with its own preferred date,
@@ -100,19 +97,9 @@ const ACTIVITY_ACTION = 'call_reschedule_applied';
 const RESCHEDULE_REASON_CODE = 'ai_call_reschedule'; // reschedule_log.reason_code varchar(30)
 const INITIATED_BY = 'ai_call_pipeline'; // reschedule_log.initiated_by varchar(20)
 const DEFAULT_DURATION_MINUTES = 60;
-// A call that names no service falls back to a visit only when V2's
-// service_request.primary_service_category agrees with the visit's own
-// family (appointment-tagger's classifyAppointmentType), and only for the
-// recurring families whose category maps one-to-one onto a visit type.
-// Specialty categories (termite, palm_injection, bed_bug, wdo, rodent,
-// exclusion, stinging_insect, inspection_only, other) and a missing one never
-// fall back: their visits are distinct services a tag cannot tell apart.
-const FALLBACK_CATEGORY_TAGS = {
-  pest_general: ['pest_general'],
-  bundled_waveguard: ['pest_general'],
-  mosquito: ['mosquito'],
-  lawn_care: ['lawn'],
-};
+// The catch-all booking placeholder ("Waves Pest Control Appointment"): its
+// real service is assigned after the first assessment.
+const PLACEHOLDER_SERVICE_KEY = 'general_appointment';
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 
@@ -193,9 +180,11 @@ function humanHandledRescheduleCard(conn, callLogId, { excludeId = null } = {}) 
 
 // The catalog name a visit is matched on: its catalog row's name when it has
 // one (a repoint can leave service_type stale), else its own label. Null when
-// its catalog row no longer resolves.
+// its catalog row no longer resolves or is the placeholder, which names no
+// service yet.
 function authoritativeServiceName(row) {
-  return row.service_id ? row.catalog_service_name : row.service_type;
+  if (!row.service_id) return row.service_type;
+  return row.catalog_service_key === PLACEHOLDER_SERVICE_KEY ? null : row.catalog_service_name;
 }
 
 /**
@@ -269,65 +258,33 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
       return key === targetKey;
     });
     if (!atProperty.length) return skip('no_visit_on_books');
+    const serviceRequest = v2.service_request || {};
     // A call V2 files under more than one service ("move my pest and lawn
     // visits to Thursday") may cover a visit this path would leave unmoved
-    // while it resolves the call's card: review, named or not.
-    const secondary = v2.service_request?.secondary_categories;
-    if (Array.isArray(secondary) ? secondary.length > 0 : secondary != null) return skip('service_needs_review');
-    // Match the named service BEFORE proximity. A different program near the
-    // destination cannot stand in for the requested visit outside the span.
-    const namedServices = new Set(serviceNameCandidates(v2.service_request?.specific_service_name)
+    // while it resolves the call's card: review.
+    if (serviceRequest.secondary_categories?.length) return skip('service_needs_review');
+    // A visit with no service identity to weigh (its catalog row gone, or the
+    // placeholder) may be the one the caller means, whatever the call names.
+    if (atProperty.some((row) => !authoritativeServiceName(row))) return skip('service_needs_review');
+    // Only visits of the service the call names. Coarse categories cannot
+    // tell programs apart, so a call naming no service, or one the customer
+    // does not have, stays in review. A row that names a catalog service is
+    // matched on THAT catalog name only: a repoint leaves
+    // scheduled_services.service_type stale, so the label alone can name the
+    // requested program while the row now belongs to a different one.
+    const namedServices = new Set(serviceNameCandidates(serviceRequest.specific_service_name)
       .map((name) => stripServiceSuffixes(name).toLowerCase()));
-    // A row that names a catalog service is matched on THAT catalog name only:
-    // a repoint leaves scheduled_services.service_type stale, so the label alone
-    // can name the requested program while the row now belongs to a different
-    // one. A row whose service_id no longer resolves has no authoritative
-    // identity. A row with no service_id keeps its only identity: its label.
-    const matchingServices = atProperty.filter((row) => {
-      const authoritative = authoritativeServiceName(row);
-      if (!authoritative) return false;
-      return serviceNameCandidates(authoritative).some((name) => namedServices.has(stripServiceSuffixes(name).toLowerCase()));
-    });
-    const programOf = (row) => row.service_id || stripServiceSuffixes(row.catalog_service_name || row.service_type || '').toLowerCase();
-    const inSpanOf = (rows) => rows.filter((row) => {
-      const d = dateOnly(row.scheduled_date);
-      return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
-    });
-    // A visit whose catalog identity no longer resolves, in span or anywhere
-    // ahead, may be the caller's actual target ("move my December visit"),
-    // whatever the name matched, and cannot be weighed as one: review.
     const today = etDateString(now);
-    const isUpcoming = (row) => dateOnly(row.scheduled_date) >= today;
-    if (atProperty.some((row) => (isUpcoming(row) || inSpanOf([row]).length) && !authoritativeServiceName(row))) return skip('service_needs_review');
-    // The visits the call's service evidence can mean: the program(s) a name
-    // matched, or, when the call names no service, the property's visits of
-    // V2's own category — only when V2 is sure of it (an uncertain
-    // "pest_general" on a mosquito call must not pick the pest visit). A name
-    // that matches nothing stays in review.
-    let pool = matchingServices;
-    if (namedServices.size && !pool.length) return skip('service_needs_review');
-    if (!namedServices.size) {
-      const tags = FALLBACK_CATEGORY_TAGS[v2.service_request?.primary_service_category];
-      const categoryConfidence = v2.confidence?.primary_service_category;
-      if (!tags || typeof categoryConfidence !== 'number' || categoryConfidence < MIN_SCHEDULING_CONFIDENCE) return skip('service_needs_review');
-      const tagger = require('./appointment-tagger');
-      pool = atProperty.filter((row) => tags.includes(tagger.classifyAppointmentType(authoritativeServiceName(row)).tag));
-    }
-    // Span FIRST, then ambiguity on what is actually near the target date:
-    // loadCandidates has no upper date bound, so judging every future
-    // occurrence made each recurring-plan customer ambiguous_visit (0 of 1,089
-    // replayed calls ever moved a visit). Two programs in span stay in review.
-    const inSpan = inSpanOf(pool);
-    if (new Set(inSpan.map(programOf)).size > 1) return skip('service_needs_review');
-    if (inSpan.length > 1) return skip('ambiguous_visit', { candidateIds: inSpan.map((r) => r.id) });
+    const upcoming = atProperty.filter((row) => dateOnly(row.scheduled_date) >= today
+      && serviceNameCandidates(authoritativeServiceName(row)).some((name) => namedServices.has(stripServiceSuffixes(name).toLowerCase())));
+    if (!upcoming.length) return skip('service_needs_review');
     // V2 records only the new slot, never WHICH visit it replaces, so nothing
     // on the call ties it to one of several upcoming visits: nearness picks
     // September for "move December to October 1", and even a time change on
-    // the destination day can mean another visit ("move the later one to the
-    // 24th at noon"). Only a sole upcoming visit is taken.
-    const upcoming = pool.filter(isUpcoming);
+    // the destination day can mean another ("move the later one to the 24th
+    // at noon"). Only a sole upcoming visit within the span is taken.
     if (upcoming.length > 1) return skip('ambiguous_visit', { candidateIds: upcoming.map((r) => r.id) });
-    nearby = inSpan; // invariant preserved: length is 0 or 1 here
+    nearby = upcoming.filter((row) => Math.abs(calendarDaysBetween(dateOnly(row.scheduled_date), newDate)) <= CANDIDATE_SPAN_DAYS);
   }
   if (nearby.length === 0) return skip('no_visit_on_books');
   const visit = nearby[0];
@@ -343,7 +300,7 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   // (outbound-review-confirm.js:703 and :866-876, which also treats a
   // 'rescheduled' one as superseded). The status-scoped dispatch-owned check
   // below sees only the pending ones (GH codex #4204 r6 P1).
-  if (visit.source_action && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(visit.source_action)
+  if (OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(visit.source_action)
     && (humanOverride || visit.customer_confirmed !== true)) {
     return skip('office_review_unconfirmed', { visitId: visit.id });
   }
@@ -352,11 +309,10 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   // but sending it through that contract would hide it from the customer
   // schedule again. Keep the whole source-owned workflow in the schedule
   // editor; the automatic path retains its narrower pending-row guard.
-  if (humanOverride && visit.source_action
-    && DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(visit.source_action)) {
+  if (humanOverride && DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(visit.source_action)) {
     return skip('dispatch_owned_workflow', { visitId: visit.id });
   }
-  if (visit.source_action && DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(visit.source_action) && visit.status === 'pending') {
+  if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(visit.source_action) && visit.status === 'pending') {
     return skip('dispatch_owned_pending', { visitId: visit.id });
   }
 
@@ -410,7 +366,7 @@ async function loadCandidates(conn, customerId, now = new Date(), { includePast 
       'scheduled_services.internal_notes', 'scheduled_services.is_recurring', 'scheduled_services.self_booking_id',
       'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
       'scheduled_services.service_address_city', 'scheduled_services.service_address_state', 'scheduled_services.service_address_zip',
-      'services.name as catalog_service_name');
+      'services.name as catalog_service_name', 'services.service_key as catalog_service_key');
 }
 
 // Human review chooses the source visit and requested time, then shares the
