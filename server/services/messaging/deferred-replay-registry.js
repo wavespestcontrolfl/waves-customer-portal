@@ -1612,7 +1612,9 @@ async function contactSlotStillAuthorized(meta, label) {
 // scheduler may finish this row.
 async function partialFanoutReplayOutcome(meta, result) {
   const channelResults = result?.channelResults;
-  const legs = channelResults && typeof channelResults === 'object' ? Object.values(channelResults) : [];
+  const { billingLegDeliveryState } = require('./billing-channel-routing');
+  const entries = channelResults && typeof channelResults === 'object' ? Object.entries(channelResults) : [];
+  const legs = entries.map(([, leg]) => leg);
   if (!legs.length) return result;
   const accepted = (leg) => leg?.sent === true && leg?.deliveryOutcome === 'accepted';
   // A leg accepted on THIS attempt needs its durable stamp NOW: the
@@ -1622,7 +1624,7 @@ async function partialFanoutReplayOutcome(meta, result) {
   // row sent. Idempotent (COALESCE-guarded) — stamping again at eventual
   // finalize is harmless. Never let a stamp-read failure surface as a
   // dispatch error — the send itself already succeeded.
-  if (meta.partial_fanout_retry === true && meta.invoice_id && legs.some(accepted)) {
+  if (meta.partial_fanout_retry === true && meta.invoice_id && entries.some(([channel, leg]) => billingLegDeliveryState(channel, leg || {}))) {
     try {
       await stampPartialFanoutDeliveryDurably(meta);
     } catch (err) {
@@ -1630,7 +1632,7 @@ async function partialFanoutReplayOutcome(meta, result) {
     }
   }
   const { isReplayHold } = require('./billing-channel-routing');
-  const pending = legs.filter((leg) => !accepted(leg));
+  const pending = entries.filter(([channel, leg]) => !billingLegDeliveryState(channel, leg || {})).map(([, leg]) => leg);
   // An uncertain leg means we don't know whether it already went out — the
   // SAME rule invoice.js's own enqueue-time check follows (a whole-notice
   // replay would retry it too, risking a double-send): ANY uncertain leg
@@ -1704,7 +1706,7 @@ async function stampPartialFanoutDeliveryDurably(meta) {
     // clobbers an earlier stamp with a later timestamp.
     await db('invoices').where({ id: meta.invoice_id }).whereNot({ status: 'void' }).update({
       ...(emailAccepted ? { email_sent_at: db.raw('COALESCE(email_sent_at, now())') } : {}),
-      ...(smsOrAppAccepted ? { sms_sent_at: db.raw('COALESCE(sms_sent_at, now())') } : {}),
+      ...(smsOrAppAccepted ? { sms_sent_at: db.raw('COALESCE(sms_sent_at, ?::timestamptz, now())', [textAccepted ? null : appAccepted?.created_at || null]) } : {}),
       updated_at: new Date(),
     });
     return { ok: true };
@@ -1773,7 +1775,11 @@ async function billingAppDurablyAccepted(notificationEventKey) {
     .whereIn('status', ['queued', 'sent', 'delivered'])
     .whereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey])
     .first('twilio_sid');
-  return !!row && !row.twilio_sid;
+  if (row && !row.twilio_sid) return true;
+  // A visible billing bell settles its event even without native acceptance.
+  return await db('notifications').where({ recipient_type: 'customer' })
+    .whereIn('category', ['invoice', 'payment_issue', 'billing', 'payment_receipt'])
+    .whereRaw("metadata->>'dedupeKey' = ?", [notificationEventKey]).first('created_at') || false;
 }
 
 // Shared: deferred invoice pay-link/dunning replays must confirm the

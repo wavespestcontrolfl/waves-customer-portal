@@ -57,7 +57,7 @@ test('keyed retry (conflict, nothing inserted) REUSES the standing row', async (
   q.first = jest.fn(async () => ({ id: 'led-9', metadata: '{"replay":true}' }));
   db.mockReturnValue(q);
   const entry = await recordContact({ ...ARGS, idempotencyKey: 'followup-replay:rk-1' });
-  expect(entry).toEqual({ id: 'led-9', metadata: { replay: true }, reused: true });
+  expect(entry).toMatchObject({ id: 'led-9', metadata: { replay: true }, reused: true, occurred_at: expect.any(Date) });
 });
 
 test('keyed conflict with no standing row throws — the caller must hold, not send unledgered', async () => {
@@ -120,14 +120,24 @@ test('reservation stamps require one fully bound row and use a savepoint in call
   expect(q.whereRaw).toHaveBeenCalledWith('invoice_ids @> ?::jsonb', [JSON.stringify(['inv-1'])]);
 });
 
-test('a reused reservation refreshes occurred_at to the current attempt (codex r5)', async () => {
+test.each([{}, { send_failed: true }])('an unsettled reused reservation refreshes before dispatch: %j', async (metadata) => {
   const q = insertChain({ returned: [] });
-  q.first = jest.fn(async () => ({ id: 'led-9', metadata: null }));
+  q.first = jest.fn(async () => ({ id: 'led-9', metadata }));
   db.mockReturnValue(q);
   const at = new Date('2026-08-15T12:00:00Z');
   const entry = await recordContact({ ...ARGS, idempotencyKey: 'followup-replay:rk-1', occurredAt: at });
   expect(entry).toMatchObject({ id: 'led-9', reused: true });
   expect(q.update).toHaveBeenCalledWith({ occurred_at: at });
+});
+
+test.each([{ delivered: true }, { resolved: true }])('reusing settled reservation preserves original time: %j', async (metadata) => {
+  const originalAt = new Date('2026-05-20T14:00:00Z');
+  const q = insertChain({ returned: [] });
+  q.first.mockResolvedValue({ id: 'led-9', metadata, occurred_at: originalAt });
+  db.mockReturnValue(q);
+  const entry = await recordContact({ ...ARGS, idempotencyKey: 'event:push' });
+  expect(entry.occurred_at).toEqual(originalAt);
+  expect(q.update).not.toHaveBeenCalled();
 });
 
 // prb-r11: markSendFailed is an atomic jsonb MERGE, never a whole-object

@@ -79,3 +79,15 @@ describe('dispatchBillingChannels — Email + Text replay, both already accepted
     expect(outcome.sent).toBe(true);
   });
 });
+
+// A guarded current bell is accepted while native delivery stays uncertain.
+test.each([false, true])('settles the current App bell and preserves unfinished siblings: %s', async (siblings) => {
+  const app = { sent: false, bellPersisted: true, deliveryOutcome: 'uncertain', deferred: true, retryable: true, code: 'APP_DELIVERY_HOLD' };
+  const send = jest.fn(async input => input.metadata.billingDeliveryLeg === 'push' ? app
+    : { sent: false, retryable: true, deliveryOutcome: 'not_sent', code: 'SIBLING_RETRY' });
+  const result = await dispatchBillingChannels(billingInput(), { billing_channels: siblings ? ['email', 'push', 'sms'] : ['push'] }, send);
+  expect(send).toHaveBeenCalledTimes(siblings ? 3 : 1);
+  expect(result).toMatchObject(siblings ? { sent: false, code: 'SIBLING_RETRY' } : { sent: true, deliveryOutcome: 'accepted' });
+  expect(result.channelResults.push).toEqual(app);
+  expect(result.providerMessageId).toBeUndefined();
+});

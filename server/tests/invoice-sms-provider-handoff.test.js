@@ -486,6 +486,22 @@ describe('invoice SMS provider handoff', () => {
         .some((change) => typeof change.status === 'string' && !change.status.startsWith('CASE WHEN'));
     }
 
+    test.each(['bell', 'bell+email'])('settled App %s finalizes once and preserves unfinished siblings', async (mode) => {
+      const activityInserts = [], smsLogInserts = [];
+      const { invoiceQueries, mock } = invoiceQueryDb({ activityInserts, smsLogInserts });
+      db.mockImplementation(mock);
+      const push = { sent: false, deliveryOutcome: 'uncertain', bellPersisted: true };
+      sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', channelResults: {
+        push, ...(mode === 'bell' ? {} : { email: { sent: false, deliveryOutcome: 'not_sent', retryable: true } }),
+      } });
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      expect(result.sent).toBe(true);
+      expect(result.pendingChannelQueued === true).toBe(mode !== 'bell');
+      expect(claimWasRestored(invoiceQueries)).toBe(false);
+      const stamp = invoiceQueries.flatMap(q => q.update.mock.calls.map(([change]) => change)).find(change => change.sent_at);
+      expect(stamp.sms_sent_at).toEqual(expect.any(Date));
+    });
+
     test('an accepted Email leg is finalized and never restores the claim when the Text leg still needs a retryable retry', async () => {
       const activityInserts = [];
       const { invoiceQueries, mock } = invoiceQueryDb({ activityInserts });
