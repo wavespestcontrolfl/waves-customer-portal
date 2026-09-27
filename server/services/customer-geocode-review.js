@@ -66,7 +66,7 @@ async function getReviewDetail(customerId, conn = db) {
 }
 
 const ADDRESS_MATCH_SQL = 'r.address_snapshot = jsonb_build_array(c.address_line1, c.address_line2, c.city, c.state, c.zip)';
-const PRIMARY_ADDRESS_MATCH_SQL = 'jsonb_build_array(p.address_line1, p.address_line2, p.city, p.state, p.zip) = jsonb_build_array(c.address_line1, c.address_line2, c.city, c.state, c.zip)';
+const PRIMARY_ADDRESS_MATCH_SQL = "jsonb_build_array(COALESCE(p.address_line1, ''), COALESCE(p.address_line2, ''), COALESCE(p.city, ''), COALESCE(p.state, ''), COALESCE(p.zip, '')) = jsonb_build_array(COALESCE(c.address_line1, ''), COALESCE(c.address_line2, ''), COALESCE(c.city, ''), COALESCE(c.state, ''), COALESCE(c.zip, ''))";
 const PRIMARY_HAS_PIN_SQL = `((${PRIMARY_ADDRESS_MATCH_SQL}) AND p.latitude IS NOT NULL AND p.longitude IS NOT NULL AND p.latitude <> 0 AND p.longitude <> 0)`;
 const EFFECTIVE_LAT_SQL = `(CASE WHEN ${PRIMARY_HAS_PIN_SQL} THEN p.latitude ELSE c.latitude END)`;
 const EFFECTIVE_LNG_SQL = `(CASE WHEN ${PRIMARY_HAS_PIN_SQL} THEN p.longitude ELSE c.longitude END)`;
@@ -126,7 +126,7 @@ function excludeMatchingPrimaryPins(query, customerAlias = 'customers') {
       .where({ 'p.active': true, 'p.is_primary': true })
       .whereNotNull('p.latitude').whereNotNull('p.longitude')
       .whereRaw('p.latitude <> 0 AND p.longitude <> 0')
-      .whereRaw('jsonb_build_array(p.address_line1, p.address_line2, p.city, p.state, p.zip) = jsonb_build_array(??.address_line1, ??.address_line2, ??.city, ??.state, ??.zip)',
+      .whereRaw("jsonb_build_array(COALESCE(p.address_line1, ''), COALESCE(p.address_line2, ''), COALESCE(p.city, ''), COALESCE(p.state, ''), COALESCE(p.zip, '')) = jsonb_build_array(COALESCE(??.address_line1, ''), COALESCE(??.address_line2, ''), COALESCE(??.city, ''), COALESCE(??.state, ''), COALESCE(??.zip, ''))",
         Array(5).fill(customerAlias));
   });
 }
@@ -250,8 +250,7 @@ async function attemptReviewedGeocode(customerId, conn = db, { onCoordinatesComm
     const currentPrimary = await trx('customer_properties')
       .where({ customer_id: customerId, active: true, is_primary: true }).forShare().first();
     if (!current || !reviewEnabled()
-      || reviewRevision(current, latestReview, currentPrimary) !== reviewRevision(customer, review, primary)
-      || hasPin(effectiveCustomer(current, currentPrimary))) return null;
+      || reviewRevision(current, latestReview, currentPrimary) !== reviewRevision(customer, review, primary)) return null;
     const location = result.location;
     const status = location ? 'geocoded' : !result.permanent ? 'provider_unavailable'
       : result.reason === 'incomplete_address' ? 'needs_details' : result.reason === 'outside_service_area' ? 'outside_area' : 'needs_pin';
