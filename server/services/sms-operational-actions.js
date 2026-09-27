@@ -19,7 +19,7 @@ const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplici
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentCanAnswer, paymentEvidenceRow } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -489,11 +489,12 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
         sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyId,
           property_ambiguous: !propertyId,
           customer_id: customer.id, source_at: message.created_at,
-          // Whether money landing can answer this ask at all (a refund or a
-          // payment-method change never is): the event page reads it, since
-          // an ask's words never change after intake (Codex #4996 r6).
-          ...(PAYMENT_WITNESS_KINDS.includes(item.kind)
-            ? { money_answerable: paymentCanAnswer({ description: item.description, evidence: [{ quote: item.quote }] }) } : {}) },
+          // Whether money landing can answer this ask at all: the
+          // extraction's own judgement (answered_by_payment; a refund or a
+          // payment-method change never is, however worded). Payment
+          // admissibility and the event page read it, since an ask's words
+          // never change after intake (Codex #4996 r6).
+          ...(PAYMENT_WITNESS_KINDS.includes(item.kind) ? { money_answerable: item.answered_by_payment === true } : {}) },
       };
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
     // The existing notifier writes only through trx. Preview rolls this back
@@ -736,10 +737,11 @@ const unseen = (column) => `${column} <= ? AND ${column} > ${UNSEEN_FLOOR}`;
 const PAYMENT_CHANGED_AT = "GREATEST(pm.updated_at, COALESCE((pm.metadata->>'settled_event_at')::timestamptz, pm.created_at))";
 // Read against the event page's candidate row, like RETRY_AFTER_SQL and
 // SOURCE_AT: `cc` is the open call_commitments row and `s` its source
-// sms_log row (openRows in refreshSmsCommitments). Rows captured before the
-// flag existed stay eligible.
+// sms_log row (openRows in refreshSmsCommitments). An ask money can answer
+// carries the extraction's stamp; one without it never wakes on money, as
+// money never answers it.
 const MONEY_KIND = `cc.kind IN (${PAYMENT_WITNESS_KINDS.map((v) => `'${v}'`).join(', ')})
-  AND COALESCE((cc.sms_context->>'money_answerable')::boolean, true)`;
+  AND cc.sms_context->>'money_answerable' = 'true'`;
 // Whose estimate a deposit is on: the customer's own, or an unowned one a
 // lead of theirs names. A superset of whereEstimateCustomerOwnership (which
 // also drops estimates another lead claims) is enough to trigger a check;
