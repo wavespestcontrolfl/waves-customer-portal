@@ -10,6 +10,20 @@
  * leg before sweeping. Off = bit-for-bit no-op: no reads beyond the gate
  * check, no writes, no LLM calls.
  *
+ * LLM REWRITE IS ITS OWN DARK GATE: GATE_PREVISIT_BRIEF_LLM (also read
+ * HERE, at call time). Prod evidence (llm_dispatch_log 2026-09-25..26):
+ * the Claude leg was rejected 76 of 77 times and the OpenAI fallback 52
+ * of 76 by the grounding validator below, so nearly every brief already
+ * ends on templateBriefBody — this gate stops paying both providers for
+ * rewrites the validator throws away. Off (default; owner decision
+ * 2026-09-26) → every brief is built from templateBriefBody with no
+ * provider call at all. A gate-off template is a STABLE result — the
+ * `unchanged` cache branch treats it like a real cache hit (not
+ * re-processed every :19/:49 tick) and it never advances the
+ * validator-rejection attempt cap. Flipping the gate back on is read at
+ * the next sweep tick and un-sticks those visits into a fresh LLM
+ * attempt (see the `unchanged` check in generateVisitBrief).
+ *
  * Shape (mirrors the WDO skeleton in appointment-tagger.js):
  *   - deterministic grounding assembly reusing existing pieces
  *     (context-aggregator — already redacts access codes — plus
@@ -136,6 +150,14 @@ const APPROVED_NAME_TERM_RE = /^waves\s+pest\s+control$/;
 
 function briefGateEnabled() {
   return process.env.GATE_PREVISIT_BRIEF === 'true';
+}
+
+// The LLM rewrite is a SEPARATE dark gate from brief generation itself
+// (briefGateEnabled above) — off by default (owner decision 2026-09-26):
+// generateBriefBody skips the provider call entirely and every brief is
+// the deterministic template. Read at call time, same convention.
+function briefLlmGateEnabled() {
+  return process.env.GATE_PREVISIT_BRIEF_LLM === 'true';
 }
 
 // Deterministic visit facts for the tech Visit Brief read path — served by
@@ -2450,6 +2472,12 @@ async function generateBriefBody(grounding, deps = {}) {
   // missKind rides back to the generator so deterministic validator
   // rejections can be attempt-capped; anything else keeps retrying.
   const fallback = (missKind = 'transient') => ({ via: 'template', body: templateBriefBody(grounding), missKind });
+  // Dark by default (owner decision 2026-09-26): no provider call at all
+  // until GATE_PREVISIT_BRIEF_LLM is exactly 'true'. missKind 'gate_off'
+  // is a distinct provenance from 'validator'/'transient' — it never
+  // advances the validator-rejection attempt cap (generateVisitBrief) and
+  // the caller treats it as a stable, non-reprocessed result.
+  if (!briefLlmGateEnabled()) return fallback('gate_off');
   if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) return fallback();
   // An unreadable catalog means NO response can be validated — fail closed
   // to the template without spending an LLM call at all.
@@ -2582,14 +2610,26 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
   const groundingHash = hashOf(grounding);
 
   const existing = parseStoredBrief(svc.pre_service_brief);
+  const llmGateOn = briefLlmGateEnabled();
   // Template-generated briefs are NOT a permanent cache hit: they exist
   // because a provider was down or a response was rejected, and an
   // unchanged grounding would otherwise pin the reduced template forever.
   // Each sweep retries the LLM; a repeat miss just re-stores the template.
+  //
+  // The ONE exception is a template stored because GATE_PREVISIT_BRIEF_LLM
+  // was OFF (llm_miss_kind 'gate_off'): with the LLM gate STILL off, that
+  // is a stable, deliberate result, not a miss — treat it as a real cache
+  // hit so the :19/:49 backstops don't re-derive (and re-write) the same
+  // template every tick. The LLM gate's current value rides this check
+  // (not just the stored brief) so flipping it back on falls through
+  // below and earns a fresh LLM attempt on the very next sweep tick.
   if (
     String(svc.pre_service_brief_type || '') === VISIT_BRIEF_TYPE
     && existing?.grounding_hash === groundingHash
-    && existing.generated_via !== 'template'
+    && (
+      existing.generated_via !== 'template'
+      || (existing.llm_miss_kind === 'gate_off' && !llmGateOn)
+    )
   ) {
     return { skipped: true, reason: 'unchanged', brief: existing };
   }
@@ -2813,6 +2853,7 @@ function briefClearOnReclassification(newTag, storedBriefType) {
 
 module.exports = {
   briefGateEnabled,
+  briefLlmGateEnabled,
   visitFactsGateEnabled,
   deterministicVisitFacts,
   generateVisitBrief,
