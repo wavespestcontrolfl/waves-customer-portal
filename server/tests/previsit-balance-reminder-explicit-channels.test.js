@@ -438,11 +438,12 @@ describe('quotedBalanceStillOwed (provider handoff recheck of the quoted balance
   const { quotedBalanceStillOwed } = require('../services/previsit-balance-reminder');
   const live = { id: 'inv-9', customer_id: 'cust-1', status: 'sent', total: '96.60', payer_id: null };
 
-  function boundaryDb(rows, visit = { ...VISIT, status: 'confirmed' }, activity = []) {
+  function boundaryDb(rows, visit = { ...VISIT, status: 'confirmed' }, activity = [], customer = VISIT) {
     return (table) => {
       if (table === 'scheduled_services') return chain({ first: visit });
       if (table === 'invoices') return chain({ result: rows });
       if (table === 'activity_log') return chain({ result: activity });
+      if (table === 'customers') return chain({ first: customer });
       throw new Error(`Unexpected table ${table}`);
     };
   }
@@ -456,6 +457,23 @@ describe('quotedBalanceStillOwed (provider handoff recheck of the quoted balance
   test('passes while every quoted invoice still owes exactly the quoted amount', async () => {
     invoicesDb([live]);
     await expect(check()).resolves.toEqual({ ok: true });
+  });
+
+  test('holds an invoice-only quote when current monthly dues become late', async () => {
+    jest.useFakeTimers({ now: new Date('2026-08-20T15:00:00Z') });
+    try {
+      require('../services/billing-lane').resolveBillingLane.mockReturnValueOnce({ mode: 'monthly_membership' });
+      require('../services/billing-lane').monthlyDuesCollected.mockResolvedValueOnce(false);
+      const database = boundaryDb([live], undefined, [], { monthly_rate: '49.00', billing_day: 1 });
+      const predicate = quotedBalanceStillOwed({
+        visit: VISIT, quotedInvoices: [{ id: 'inv-9', due: 96.6 }], quotedDuesCents: 0,
+      });
+      await expect(predicate({ database })).resolves.toMatchObject({
+        ok: false, code: 'PREVISIT_QUOTE_CHANGED', reason: 'quoted monthly dues changed before dispatch', retryable: true,
+      });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test.each([

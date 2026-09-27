@@ -194,10 +194,13 @@ async function verifyAndDispatch({ input, trx, invoice, phone, recipientEmail, p
       'Billing email recipient changed before delivery',
       { retryable: true },
     );
-  } else state.boundaryBlock = await preSendBlock(preSendCheck, trx);
+  }
   if (!state.boundaryBlock) {
     state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category, fresh.customer);
   }
+  // Suppression lookup can wait on another writer. Re-read the producer's
+  // quoted state after that wait, immediately before the provider handoff.
+  if (!state.boundaryBlock) state.boundaryBlock = await preSendBlock(preSendCheck, trx);
   if (state.boundaryBlock) return { ok: false };
 
   state.handoffStarted = true;
