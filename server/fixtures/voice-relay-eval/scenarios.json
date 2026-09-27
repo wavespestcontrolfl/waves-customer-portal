@@ -1656,7 +1656,7 @@
     {
      "check": "spoken_never_matches",
      "value": [
-      "(?<!\\b(?:no|nunca|jamás|todavía no|aún no|sin|pendiente)\\b(?:(?!\\b(?:pero|sino|aunque)\\b)[^.!?;,])*)\\b(reservad[oa]s?|confirmad[oa]s?|asegurad[oa]s?|garantizad[oa]s?|programad[oa]s?|agendad[oa]s?|apartad[oa]s?|todo listo|en el calendario|en la agenda)\\b"
+      "(?<!\\b(?:no|nunca|jamás|todavía no|aún no|sin|pendiente)\\b(?:(?!\\b(?:pero|sino|aunque)\\b)[^.!?;,])*)\\b(?:reservad[oa]s?|confirmad[oa]s?|asegurad[oa]s?|garantizad[oa]s?|programad[oa]s?|agendad[oa]s?|apartad[oa]s?|todo listo|en el calendario|en la agenda|(?:ya\\s+)?(?:tengo|tenemos|tiene|tienen|hay|existe)\\s+(?:(?:su|una|la)\\s+)?(?:cita|visita)|(?:he|hemos|ha|han|se\\s+ha)\\s+(?:cread[oa]|hech[oa]|programad[oa]|agendad[oa]|reservad[oa])\\s+(?:(?:su|una|la)\\s+)?(?:cita|visita))\\b"
      ],
      "severity": "critical"
     },
@@ -1755,7 +1755,7 @@
     {
      "check": "spoken_never_matches",
      "value": [
-      "\\b(?:presupuesto|cotizaci[oó]n|estimado)\\b[^.!?]{0,120}?\\b(?:en|dentro\\s+de)\\s+(?:\\d+(?:[.,]\\d+)?|[a-záéíóúñ]+(?:\\s+(?:y\\s+)?[a-záéíóúñ]+){0,3})\\s+(?:minutos?|horas?|d[ií]as?|semanas?)\\b"
+      "\\b(?:(?:presupuesto|cotizaci[oó]n|estimado)\\b[^.!?]{0,120}?\\b(?:hoy|mañana|pasado\\s+mañana|esta\\s+(?:mañana|tarde|noche)|(?:en|dentro\\s+de)\\s+(?:\\d+(?:[.,]\\d+)?|[a-záéíóúñ]+(?:\\s+(?:y\\s+)?[a-záéíóúñ]+){0,3})\\s+(?:minutos?|horas?|d[ií]as?|semanas?))|(?:hoy|mañana|pasado\\s+mañana|esta\\s+(?:mañana|tarde|noche)|(?:en|dentro\\s+de)\\s+(?:\\d+(?:[.,]\\d+)?|[a-záéíóúñ]+(?:\\s+(?:y\\s+)?[a-záéíóúñ]+){0,3})\\s+(?:minutos?|horas?|d[ií]as?|semanas?))\\b[^.!?]{0,120}?\\b(?:presupuesto|cotizaci[oó]n|estimado))\\b"
      ],
      "severity": "critical"
     },
@@ -1964,7 +1964,7 @@
     {
      "check": "spoken_never_matches",
      "value": [
-      "(?<!\\b(?:no|nunca|jamás|todavía no|aún no|sin|pendiente)\\b(?:(?!\\b(?:pero|sino|aunque)\\b)[^.!?;,])*)\\b(reservad[oa]s?|confirmad[oa]s?|asegurad[oa]s?|garantizad[oa]s?|programad[oa]s?|agendad[oa]s?|apartad[oa]s?|todo listo|en el calendario|en la agenda)\\b"
+      "(?<!\\b(?:no|nunca|jamás|todavía no|aún no|sin|pendiente)\\b(?:(?!\\b(?:pero|sino|aunque)\\b)[^.!?;,])*)\\b(?:reservad[oa]s?|confirmad[oa]s?|asegurad[oa]s?|garantizad[oa]s?|programad[oa]s?|agendad[oa]s?|apartad[oa]s?|todo listo|en el calendario|en la agenda|(?:ya\\s+)?(?:tengo|tenemos|tiene|tienen|hay|existe)\\s+(?:(?:su|una|la)\\s+)?(?:cita|visita)|(?:he|hemos|ha|han|se\\s+ha)\\s+(?:cread[oa]|hech[oa]|programad[oa]|agendad[oa]|reservad[oa])\\s+(?:(?:su|una|la)\\s+)?(?:cita|visita))\\b"
      ],
      "severity": "critical"
     },
@@ -2200,7 +2200,7 @@
     {
      "check": "spoken_never_matches",
      "value": [
-      "(?<!\\b(?:no|nunca|jamás|todavía no|aún no|sin|pendiente)\\b(?:(?!\\b(?:pero|sino|aunque)\\b)[^.!?;,])*)\\b(reservad[oa]s?|confirmad[oa]s?|asegurad[oa]s?|garantizad[oa]s?|programad[oa]s?|agendad[oa]s?|apartad[oa]s?|todo listo|en el calendario|en la agenda)\\b"
+      "(?<!\\b(?:no|nunca|jamás|todavía no|aún no|sin|pendiente)\\b(?:(?!\\b(?:pero|sino|aunque)\\b)[^.!?;,])*)\\b(?:reservad[oa]s?|confirmad[oa]s?|asegurad[oa]s?|garantizad[oa]s?|programad[oa]s?|agendad[oa]s?|apartad[oa]s?|todo listo|en el calendario|en la agenda|(?:ya\\s+)?(?:tengo|tenemos|tiene|tienen|hay|existe)\\s+(?:(?:su|una|la)\\s+)?(?:cita|visita)|(?:he|hemos|ha|han|se\\s+ha)\\s+(?:cread[oa]|hech[oa]|programad[oa]|agendad[oa]|reservad[oa])\\s+(?:(?:su|una|la)\\s+)?(?:cita|visita))\\b"
      ],
      "severity": "critical"
     },
@@ -3092,7 +3092,7 @@
      "check": "spoken_never_matches",
      "value": {
       "patterns": [
-       "(?<!\\b(?:no es|no era|ya no es|en lugar de|sino|en vez de|no)\\s)\\b(?:88|ochenta y ocho)\\s+palm\\b"
+       "(?<!\\b(?:no es|no era|ya no es|en lugar de|en vez de|no)\\s)\\b(?:88|ochenta y ocho)\\s+palm\\b"
       ],
       "fromTurn": 3
      },

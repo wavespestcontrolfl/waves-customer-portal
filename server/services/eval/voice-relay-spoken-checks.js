@@ -413,7 +413,9 @@ const TIME_ANYWHERE_RES = Object.freeze([
 // A day named relative to today, or an ordinal, counts only next to a
 // scheduling predicate in the same sentence: "a team member will call
 // tomorrow" is a follow-up, "your visit is tomorrow" is an invented date.
-const RELATIVE_DAY_RE = new RegExp(`\\b(?:tomorrow|day after tomorrow|next week|this week|(?:${WEEKDAYS})|\\d{1,2}(?:st|nd|rd|th)(?:\\s+of\\s+[a-z]+)?|mañana|pasado mañana|la (?:próxima|proxima) semana)\\b`, 'i');
+const SAME_DAY_SOURCE = 'today|tonight|this (?:morning|afternoon|evening|night)|hoy|esta (?:mañana|tarde|noche)';
+const SAME_DAY_RE = new RegExp(`\\b(?:${SAME_DAY_SOURCE})\\b`, 'i');
+const RELATIVE_DAY_RE = new RegExp(`\\b(?:${SAME_DAY_SOURCE}|tomorrow|day after tomorrow|next week|this week|(?:${WEEKDAYS})|\\d{1,2}(?:st|nd|rd|th)(?:\\s+of\\s+[a-z]+)?|mañana|pasado mañana|la (?:próxima|proxima) semana)\\b`, 'i');
 // A weekday modified by "next"/"this"/"last" ("Next Tuesday", "This
 // Tuesday") is still that same relative day — RELATIVE_DAY_RE's own weekday
 // branch, shared with every embedded-sentence use, accepts only the bare
@@ -521,7 +523,18 @@ function no_visit_time(value, record, { utterances }) {
       const anywhere = TIME_ANYWHERE_RES.map((re) => re.exec(sentence)).find(Boolean);
       if (anywhere) return ['fail', `"${anywhere[0]}" spoken${grounded ? '' : ` before ${opts.afterTool} ever succeeded`}: "${clip(raw, 160)}"`];
       const relative = RELATIVE_DAY_RE.exec(sentence);
-      if (relative && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || STANDALONE_DATE_RE.test(sentence))) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
+      if (relative) {
+        const sameDay = SAME_DAY_RE.test(relative[0]);
+        // A returned arrival window may naturally be introduced as today's
+        // window. Once that exact window was stripped, the same-day label is
+        // grounded with it rather than an extra invented date.
+        const labelsGroundedWindow = sameDay && activeStrip && sentence !== raw;
+        // "We'll call today to schedule the visit" dates the callback, not
+        // the visit. Keep the follow-up cue before the same-day token; "the
+        // visit is today" has no such cue and remains prohibited.
+        const datesFollowUp = sameDay && /\b(?:calls?|call(?:s|ed|ing)? back|follow(?:s|ed|ing)? up|contact(?:s|ed|ing)?|llamad[ao]s?|llamar|llamaremos|llamarán|llamaran|devolver(?:án|an|emos)? la llamada|seguimiento|contactar(?:án|an|emos)?)\b/i.test(sentence.slice(0, relative.index));
+        if (!labelsGroundedWindow && !datesFollowUp && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || STANDALONE_DATE_RE.test(sentence))) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
+      }
     }
   }
   const label = (w) => w.map((h) => `${twelveHour(h)} ${meridiemOfHour(h).toUpperCase()}`).join('–');
@@ -2726,8 +2739,8 @@ function assertedMatch(text, re) {
  * on, like capture_lead_input_includes; the best capture wins.
  */
 function capture_lead_input_asserts(value, record) {
-  const captures = (record.toolCalls || []).filter((t) => t.name === 'capture_lead' && t.ok === true && !t.invalid && !t.unexpected);
-  if (!captures.length) return ['fail', (record.toolCalls || []).some((t) => t.name === 'capture_lead') ? 'capture_lead never succeeded (every call was rejected for its arguments or failed)' : 'capture_lead was never called'];
+  const captures = (record.toolCalls || []).filter((t) => t.name === 'capture_lead' && t.ok === true && t.receipt === true && !t.invalid && !t.unexpected);
+  if (!captures.length) return ['fail', (record.toolCalls || []).some((t) => t.name === 'capture_lead') ? 'capture_lead never succeeded with a receipt (every call was suppressed, rejected for its arguments, or failed)' : 'capture_lead was never called'];
   const misses = (input) => Object.entries(value).filter(([field, patterns]) => {
     const have = String((input || {})[field] ?? '');
     return ![].concat(patterns).some((source) => assertedMatch(have, new RegExp(source, 'i')));

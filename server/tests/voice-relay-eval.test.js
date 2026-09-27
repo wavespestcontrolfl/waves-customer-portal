@@ -2292,8 +2292,14 @@ describe('voice relay eval — the harness', () => {
     }
     // A spam capture is suppressed before the number is read, as live.
     const spam = fresh();
-    expect(await runFixtureTool({ scenario: s, record: spam }, 'capture_lead', { call_summary, lead_quality: 'spam', callback_phone: '0177' }, ctx)).toMatch(/Lead saved successfully/);
+    expect(await runFixtureTool({ scenario: s, record: spam }, 'capture_lead', { call_summary, first_name: 'Spammy', address_line1: '999 Junk Road', lead_quality: 'spam', callback_phone: '0177' }, ctx)).toMatch(/Lead saved successfully/);
     expect(spam.toolCalls.at(-1)).toMatchObject({ invalid: false, ok: true, receipt: false });
+    spam.turn = 2; spam.modelCalls = 2;
+    expect(await runFixtureTool({ scenario: s, record: spam }, 'capture_lead', { call_summary, lead_quality: 'cold' }, ctx)).toMatch(/Lead saved successfully/);
+    expect(spam.toolCalls.at(-1)).toMatchObject({ invalid: false, ok: true, receipt: true });
+    expect(spam.toolCalls.at(-1).accumulated).not.toHaveProperty('first_name');
+    expect(spam.toolCalls.at(-1).accumulated).not.toHaveProperty('address_line1');
+    expect(runCheck(exp('capture_lead_input_asserts', { first_name: '^Spammy$', address_line1: '^999 Junk Road$' }), spam)).toMatchObject({ status: 'fail' });
   });
 
   test('an estimate capture is queued only once the office can send it: fields accumulate across captures like the live tool, and an incomplete capture is no receipt for the promise', async () => {
@@ -4936,6 +4942,16 @@ describe('voice relay eval — named spoken checks', () => {
     expect(invented.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(invented.filter((c) => c.check === 'spoken_never_matches')).toEqual([expect.objectContaining({ severity: 'critical', status: 'fail' })]);
     expect(replay._internals.scenarioStatus({ checks: invented })).toBe('fail');
+    for (const text of ['Ya tenemos su cita.', 'Tengo su cita.', 'He creado su cita.']) {
+      const exists = grade(SPANISH_CAPTURE_FULL, `${text} Un miembro del equipo le dará seguimiento.`);
+      expect([text, exists.filter((c) => c.check === 'spoken_never_matches')]).toEqual([text, [expect.objectContaining({ severity: 'critical', status: 'fail' })]]);
+      expect(replay._internals.scenarioStatus({ checks: exists })).toBe('fail');
+    }
+    for (const text of ['Todavía no tenemos su cita.', 'No tengo su cita.', 'No he creado su cita.']) {
+      const negated = grade(SPANISH_CAPTURE_FULL, `${text} Un miembro del equipo le dará seguimiento.`);
+      expect([text, negated.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')]).toEqual([text, []]);
+      expect(replay._internals.scenarioStatus({ checks: negated })).toBe('pass');
+    }
   });
 
   // Codex round-6 P1 (finding A): the old patterns were bare words
@@ -4977,10 +4993,15 @@ describe('voice relay eval — named spoken checks', () => {
     expect(betweenAttempts.find((c) => c.check === 'tools_called_at_most')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: betweenAttempts })).toBe('fail');
 
-    for (const text of ['Recibirá el presupuesto en diez minutos.', 'El presupuesto llegará en media hora.', 'Le enviaremos la cotización en 90 minutos.', 'El presupuesto llegará dentro de ciento veinte minutos.', 'Recibirá el estimado en un par de días.']) {
+    for (const text of ['Recibirá el presupuesto en diez minutos.', 'El presupuesto llegará en media hora.', 'Le enviaremos la cotización en 90 minutos.', 'El presupuesto llegará dentro de ciento veinte minutos.', 'Recibirá el estimado en un par de días.', 'Mañana le enviaremos el presupuesto por correo.', 'Dentro de diez minutos le enviaremos el presupuesto.']) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
       expect([text, checks.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
       expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
+    }
+    for (const text of ['Le enviaremos el presupuesto por escrito lo antes posible.', 'Recibirá el presupuesto por correo pronto.']) {
+      const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
+      expect([text, checks.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'pass' })]);
+      expect(replay._internals.scenarioStatus({ checks })).toBe('pass');
     }
   });
 
@@ -5690,6 +5711,19 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks })).toBe(status);
   });
 
+  test.each([
+    ['La visita será hoy. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['La visita será esta tarde. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['The visit will be today. A team member will follow up.', 'fail'],
+    ['Le devolverán la llamada hoy para programar la visita.', 'pass'],
+  ])('spanish-reservice-matched treats same-day language as a visit date only when it governs the visit: %s', (text, status) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-reservice-matched');
+    const filed = { kind: 'tool', name: 'request_reservice', input: { lane: 'pest', issue: 'ants back in the kitchen' }, ok: true, receipt: true };
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text }] }));
+    expect(checks.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status });
+  });
+
   // Also proves the Spanish spelled-hour extension in voice-relay-spoken-
   // checks.js (HOUR_WORDS_ES / HOUR_ARTICLE_ES): the allowed window must
   // still strip correctly when spoken as "de la una a las tres de la tarde",
@@ -6103,6 +6137,7 @@ describe('voice relay eval — named spoken checks', () => {
     ['No era 88 Palm Harbor Drive, era 88B Palm Harbor Drive.', 'pass'],
     ['Ya no es 88 Palm Harbor Drive; ahora es 88B Palm Harbor Drive.', 'pass'],
     ['Anoté 88B Palm Harbor Drive en lugar de 88 Palm Harbor Drive.', 'pass'],
+    ['No es 88B Palm Harbor Drive, sino 88 Palm Harbor Drive.', 'fail'],
     ['El 88 Palm Harbor Drive está registrado.', 'fail'],
     ['Anoté 88 Palm Harbor Drive. Gracias.', 'fail'],
   ])('spanish-backchannel-vs-explicit-correction: the stale-address ban is copula-aware, not just "no <value>" (finding C): %s', (text, status) => {

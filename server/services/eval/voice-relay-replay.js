@@ -940,7 +940,10 @@ function matcherInput(record, event, name, input) {
   const view = { ...input };
   if (!usable('email', view.email)) delete view.email;
   for (const prior of [...record.toolCalls].reverse()) {
-    if (prior === event || prior.name !== 'capture_lead' || prior.ok !== true) continue;
+    // Production returns from the spam branch before noteEstimateFields. A
+    // schema-valid suppressed call is therefore neither a receipt nor a
+    // source for a later capture's accumulated field view.
+    if (prior === event || prior.name !== 'capture_lead' || prior.ok !== true || prior.input?.lead_quality === 'spam') continue;
     for (const field of ESTIMATE_FIELDS) if (!nz(view[field]) && usable(field, prior.input[field])) view[field] = prior.input[field];
   }
   return view;
