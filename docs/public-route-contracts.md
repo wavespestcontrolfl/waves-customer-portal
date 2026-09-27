@@ -1098,10 +1098,11 @@ Transform "Add visitor location headers"): a visitor geolocated in
 Florida gets the nearest curated city, anyone else `null`. The location
 values are never logged or stored, and it carries
 `Cache-Control: private, no-store` (per visitor).
-Note: unlike the token-gated read routes, this surface
-is deliberately cacheable and indexable — it exposes only modeled,
-non-sensitive forecast data, so `no-store`/`noindex` privacy headers do
-NOT apply here).
+Note: unlike the token-gated read routes, the forecast and `/locations`
+responses are deliberately cacheable and indexable — they expose only
+modeled, non-sensitive forecast data, so `no-store`/`noindex` privacy
+headers do NOT apply to them. `/nearest` is the exception: its answer is
+per visitor, so it stays `private, no-store`).
 `/api/public/ui-flags` (read-only, no auth, no token, no params, no DB
 access, no PII — compatibility shim that always returns
 `{ portalGlass: true }`. The glass release gate is retired and current
