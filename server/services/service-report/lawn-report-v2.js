@@ -644,7 +644,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // next-visit task. wavesNext carries what Waves WILL do — future tense only: falling
   // back to the past-tense wavesAction ("Applied a fungicide…") under the client's
   // "What Waves will do next" label read as a tense error. Cards without a plan hide the row.
-  const realCustomerAction = [...new Set([aftercareWaterAction, topIssue?.customerAction].filter(Boolean))].join(' ') || null;
+  const realCustomerAction = aftercareWaterAction && topIssue?.customerAction?.includes(aftercareWaterAction)
+    ? topIssue.customerAction
+    : [aftercareWaterAction, topIssue?.customerAction].filter(Boolean).join(' ') || null;
   const wavesNext = topIssue ? (topIssue.nextVisitPlan || null) : null;
 
   // Cross-signal ROOT CAUSE: connect water + coverage + mowing + stress into one

@@ -67,18 +67,24 @@ const CASES = {
 
 describe('unconfirmed product directions take precedence throughout the report', () => {
   test.each([
-    ['healthy', null],
-    ['deficit', null],
-    ['deficit', { title: 'Run two cycles this week', action: 'run' }],
-    ['overWatered', { title: 'Skip watering this week', action: 'hold' }],
-  ])('%s with plan %j retains confirmation instead of independent watering advice', (scenario, weekPlan) => {
+    ['healthy', null, 'balanced'],
+    ['deficit', null, 'deficit'],
+    ['deficit', { title: 'Run two cycles this week', action: 'run' }, 'deficit'],
+    ['overWatered', { title: 'Skip watering this week', action: 'hold' }, 'surplus'],
+    ['balancedDryCoverage', null, 'balanced'],
+    ['balancedDryCoverage', null, 'unknown'],
+  ])('%s with plan %j and %s water retains one confirmation task', (scenario, weekPlan, waterStatus) => {
     const assessment = CASES[scenario];
+    const waterContext = { ...assessment.waterContext, weekPlan };
+    waterContext.irrigationAdvice = { ...waterContext.irrigationAdvice, status: waterStatus };
     const report = buildLawnReportV2({
-      lawnAssessment: { ...assessment, waterContext: { ...assessment.waterContext, weekPlan } },
+      lawnAssessment: { ...assessment, waterContext },
       applications: [{ product: { irrigation_required: true } }],
     });
     expect(report.aftercare.needsReview).toBe(true);
     expect(report.snapshot.customerAction).toMatch(/Confirm the product watering directions/);
+    expect(report.snapshot.customerAction.match(/Confirm the product watering directions/g)).toHaveLength(1);
+    if (scenario === 'balancedDryCoverage') expect(report.snapshot.customerAction).toContain('Check sprinkler coverage');
     expect(report.snapshot.noActionNeeded).toBe(false);
     expect(report.snapshot.rootCause).toBeNull();
     expect(report.water.explanation).toMatch(/Confirm the product watering directions/);

@@ -241,7 +241,7 @@ describe('watering questions answer with the weekly plan when the report carries
       findings: [{ title: 'Mushrooms observed' }],
       reportV2: { aftercare: { watering: 'Product note.', needsReview: true, evidenceSource: 'legacy_unverified_instruction' } },
     };
-    for (const question of ['What should I do next?', 'What should I do about the mushrooms I observed?', 'What do you recommend based on what you spotted?']) {
+    for (const question of ['What should I do next?', 'What should I do about the mushrooms I observed?', 'What do you recommend based on what you spotted?', 'What do I do about the mushrooms I observed?', 'I observed mushrooms. What can I do about them?', 'What could we do about the areas you spotted?']) {
       const answer = answerServiceReportQuestion({ question, data });
       expect(answer).toMatch(/^Confirm the product watering directions/);
       if (source !== 'fallback') expect(answer).toContain(mowing);
