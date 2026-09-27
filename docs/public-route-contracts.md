@@ -186,6 +186,65 @@ fields only: /api/booking/availability builds each public slot field by field
 (`routes/booking.js`) and the estimate routes build theirs through
 `classifySlot`, so neither field reaches a customer response. Gate-off availability is unchanged apart from the
 shared grid / day-end / lunch-gate rules above, which apply in both modes.
+Commit-time capacity re-check (`GATE_BOOK_CAPACITY_COMMIT`, owner-approved
+2026-09-26; needs `GATE_SCHEDULING_CAPACITY` live too): every `createSelfBooking`
+commit — `/api/booking/confirm` here and the re-service commit below — prepares
+the traffic-aware whole-route proof before scheduling locks, then reuses
+`arrival-route.js`'s `verifyArrivalCapacity` under the transaction's existing
+tech-day advisory locks. Capacity commits acquire the selected and unassigned
+tech-day keys together through `lockTechDays`, in canonical order and before
+row locks, because both memberships are fingerprint inputs. Verification then
+locks the relevant route rows, requires the live fingerprint to match the
+prepared route, and evaluates without a provider request while locks are held. This closes the gap the
+overlap-only re-check (`findConflictingVisits`) leaves: another booking landing
+on the tech-day between offer and confirm can push a LATER stop's promised
+window past its promise, or the day over capacity, without ever overlapping
+the confirmed window — that booking now refuses with the existing `SLOT_TAKEN`
+409 (the same shape and client recovery as every other slot race on this
+route) instead of committing a route the offer engine would no longer certify.
+If the customer's exact service point changes after traffic preparation,
+confirm asks for a fresh offer instead of reusing legs prepared for the old
+point, even when both points share the public rounded grid.
+A zone/no-tech confirm (no technician bound) has no single route to re-check
+and keeps only the overlap gate, unchanged. Either gate off skips this
+whole-route capacity re-check.
+
+Public-confirm location freshness applies with either capacity gate on or
+off. After the scheduling and customer-communications fences, the customer
+row is held `FOR SHARE` through the insert. A complete live pin in another
+signed-offer grid cell returns `LOCATION_CHANGED_RETRY` (409); a same-cell
+exact correction drives the final overlap probe when the capacity commit gate
+is off, while an already-prepared traffic proof requires a fresh offer.
+Customers without a complete stored pair are geocoded from their server-owned
+address before locks. The address and missing pair must still be unchanged under the fence,
+and a matching staff geocode-review hold refuses the fallback. A valid
+server-resolved pair must match the signed grid and is stamped with its
+address on the new visit so dispatch uses the same location the commit
+certified. The customer profile is not rewritten, cleared pins are not
+restored, and no geocoder request runs while scheduling locks are held.
+The official `/book` client sends its estimate identity, street-only line,
+dedicated unit, and structured city/state/ZIP on every availability,
+date-browse, and `/find-slots` request. The street stays free of a stale Places
+subpremise after a unit edit while the structured locality keeps same-street
+properties in different ZIPs distinct. The offer side
+resolves the same location: `/api/booking/availability` and `/find-slots` build
+an existing customer's offers (an estimate identifies the account and the
+typed address/unit selects the matching property row, else the unique
+unit-aware customer at that address) at that commit location — the
+stored pin, else a staff-verified pin or the canonical geocode — over any
+caller coordinates, and echo it only rounded; `/reservice/:token` builds its
+offers on it too. Everyone else keeps the caller's coordinates or address.
+For a bare signed-in `/book` entry, all three offer requests use the portal's
+authenticated fetch path. These routes validate the optional bearer and bind
+the typed property only within that server-resolved account while customers-
+only mode is enabled; a body/query customer id is never identity. With that
+gate off, offers and confirmation both ignore an ambient portal bearer and
+keep the same public address behavior. A bearer from a different account
+cannot sign offers on a pin that confirmation will refuse. An invalid or
+absent bearer also keeps public behavior. An expired
+access token gets the refreshable 401 only when the customers-only gate needs
+that identity. An estimate-linked request keeps the estimate account instead
+of inheriting an ambient portal session.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`
@@ -386,7 +445,34 @@ renders the report's IDENTITY facts from the completion-time snapshot on
 carries one: `customerName`, `serviceAddress` / `propertyAddress` /
 `cityState` and the `mapCenter` those resolved to, `technicianName`, the
 `serviceDisplayName` title, and each application's approved product facts
-(EPA number, precaution / re-entry / summary copy, approval). Records
+(EPA number, precaution / re-entry / summary copy, approval). The payload
+also carries `applicatorFdacsId` (F.S. 482.2265(1)(b) — the applying
+technician's FDACS identification card number, `technicians.fl_applicator_license`):
+`null` when blank on file, when `technicians.license_expiry` had already
+passed as of the service date (a missing expiry is active), or when the
+frozen `technicianName` above disagrees with the technician currently
+joined (report-identity-snapshot.js withholds the id rather than print it
+beside a name it may not match). The project report's GET
+`/api/reports/project/:token/data` carries the same field, judged against
+the report's own `projectDate` (the WDO last-filing date when one exists),
+PLUS `applicatorName` (the resolved technician's name) and `poisonControl`
+(boolean). Both `applicatorFdacsId` and `applicatorName` on the project
+payload resolve from the technician who actually PERFORMED the linked
+service — the project's own `service_record_id` → `scheduled_service_id` →
+its `created_by_tech_id` only when genuinely unlinked
+(`resolveProjectApplicatorTechnician`, report-data.js) — never simply the
+project's creator, which the separate `technicianName` field still reflects
+unchanged. `poisonControl` is the canonical typed-application verdict
+(`activity-indicators.js`'s `projectPoisonControl`) over the project's raw
+`findings` + `followup_findings`, OR'd, plus `rodent_bait_station` visits
+(always true — the stations hold rodenticide though servicing one records no
+typed application); never true for WDO/certificate/inspection-only project
+types. The admin detail endpoint `GET /api/admin/projects/:id` mirrors both
+fields on the returned `project` object as `applicator_fdacs_id` /
+`applicator_name` / `poison_control` (same shared resolver, judged against
+`project_date || created_at`), so the staff customer-report preview can never
+show a different applicator or Poison Control verdict than the sent report.
+Records
 completed before the snapshot shipped carry none and keep the live
 customers / scheduled_services / technicians / products_catalog joins; a
 snapshot leg that could not be frozen (missing customer or technician row)
@@ -992,11 +1078,20 @@ like the dark surface — only analyze/claim are gated.)
 `/api/public/pest-forecast` (+ `/pest-forecast/locations`) (read-only,
 no auth, no DB writes, no PII — returns a deterministic Florida
 pest-pressure model keyed only on a curated city slug / FL ZIP plus
-public NWS + FAWN weather; no request body. Intentionally CORS-open
+public NWS weather and NOAA MRMS radar rainfall (via the Iowa
+Environmental Mesonet); no request body. Intentionally CORS-open
 (`Access-Control-Allow-Origin: *`) so the free embeddable forecast
 widget can run on third-party domains; inherits the global `/api/` IP
-rate limit, served from a 3h per-location server cache and public CDN
-`Cache-Control`. Note: unlike the token-gated read routes, this surface
+rate limit. Caching: the per-location server cache and the forecast
+response's `Cache-Control: public, max-age=<≤3600>, s-maxage=<≤10800>`
+share one freshness instant — 3h after the forecast's weather was
+fetched, 15 minutes while a SWFL city's radar rain for yesterday is not
+available yet (IEM backfills late), and never past the next ET midnight
+(the rain signal is yesterday's measured total). Both HTTP lifetimes are
+the seconds left until that instant, measured when the response is sent,
+so a result computed before ET midnight and sent after it carries
+`max-age=0, s-maxage=0`; `/locations` stays `public, max-age=86400`.
+Note: unlike the token-gated read routes, this surface
 is deliberately cacheable and indexable — it exposes only modeled,
 non-sensitive forecast data, so `no-store`/`noindex` privacy headers do
 NOT apply here).
@@ -1310,8 +1405,50 @@ when both LLM providers miss) read English AND Spanish — the prompt answers
 Spanish visitors in Spanish. Each turn has a wall-clock budget across both
 providers (`ASK_WAVES_TURN_BUDGET_MS`, default 22000) after which the
 deterministic fallback is returned; the conversation log never delays the
-reply. NOT CORS-open — credentialed allowlist origins
-only (hub site)).
+reply. Any reply — from either provider, on any intent — that carries
+safety wording, an EPA-approval claim, or a fixed re-entry/drying time
+(duration or clock time) is replaced wholesale with a reviewed "follow the
+product label" answer, in English or Spanish matching the reply's own language
+(a reply with emergency direction keeps the 911 / veterinary script instead;
+a non-emergency reply that carries both a claim and price talk gets the
+reviewed price redirect, which is also claim-free). The safety/emergency check
+reads the model's original reply before the price scrub, so a price mention
+never erases emergency direction.
+The check is the intake-local topic chokepoint in `ask-waves-intake.js`
+(`intakeSafetyClaimSupplement`), run on typography-folded text; the shared
+`reentrySafetyClaimFinding` is deliberately NOT called on this per-turn path
+(its worst case blocks the event loop, #4905). Safety wording is judged by
+topic, not grammatical subject, so it over-blocks by design.
+With `GATE_ASK_WAVES_TOPIC_ROUTING` on (dark; read at call time through
+`askWavesTopicRoutingLive()`), the model also returns a `topic`
+(`medical_emergency` / `product_safety` / `reentry_timing` / `none`; the field
+and its rules are sent only while the gate is on), and routing on that topic
+runs before the claim chokepoint:
+- `medical_emergency` → the emergency script (no quote CTA). Poison Control /
+  veterinary lines follow the visitor's words as in `emergencyGuidance`, and
+  any `PET_WORD` animal in the conversation or a vet / animal-hospital question
+  adds the veterinary line.
+- `product_safety` / `reentry_timing` → the reviewed "follow the product label"
+  copy (EN/ES), keeping the model's validated quote fields (restored when the
+  model also labeled the turn "emergency"); it becomes the emergency script
+  instead only on qualified evidence in the conversation (`qualifiedEmergencyIn`
+  — a product exposure, a symptom after a treatment, or trouble breathing),
+  never on the broad detector's other phrases (#4899).
+- `none`, or a missing / unknown topic, keeps the model's answer, which still
+  goes through the claim chokepoint and the price scrub. The broad emergency
+  detector is not consulted on this path: a flagged claim, a reassurance or
+  price talk becomes the emergency script only on qualified evidence
+  (`qualifiedEmergencyIn`) or when the model's own reply directs to emergency
+  care; otherwise a claim gets the reviewed label copy and price talk the
+  price redirect. There is no regex floor on the visitor's words: routing
+  follows the model's classification only.
+The model also returns `language` (`en` / `es`, the language of its reply,
+sent only while the gate is on); the reviewed copy follows it, and a missing
+value falls back to the Spanish-word detector on the visitor's active message,
+then the reply.
+The provider-failure fallback is unchanged (there is no model topic). Gate off:
+prompt, schema and replies are unchanged. NOT CORS-open — credentialed allowlist
+origins only (hub site)).
 `/api/public/experiments` (`GET /status` + `POST /exposure`) (client-side
 GrowthBook experimentation surface — no auth, anonymous visitors are the
 unit. **POST /exposure is gated behind GATE_GROWTHBOOK** (404 when off) with
@@ -1416,16 +1553,27 @@ ranges — no auth, no token, public `Cache-Control`, no side effects, no PII.
 Ranges are computed from the live pricing engine (DB-authoritative
 pricing_config) so the published numbers cannot drift from admin-edited
 pricing; owner ruling 2026-08-06 approved publishing ranges for all
-residential services. Consumed by the Astro build for the agent-readable
-/pricing.md surface and directly by AI agents (both surfaces read this
-same computed payload — neither carries its own copy of the sweep).
-Exact per-property pricing stays on POST /api/public/quote/calculate.
+residential services. Owner ruling 2026-09-27 narrowed what each range
+means: every row is now a TYPICAL residential job at LIST price (standard
+scheduling, before WaveGuard bundle discounts, recurring-customer perks,
+and advertised waivers), not an envelope of every possible quote — a
+larger or more complex property, a heavier infestation, a bigger scope, or
+emergency/after-hours service can quote above the published high, and the
+payload's `disclaimer` says so. "Typical" is sized from the estimator's own
+property lookups: the middle 80% (10th-90th percentile) of the residential
+homes in `property_lookups` for house, lot, and turf size, with the
+landscaping, pool-cage, and water-proximity mix those homes show. Consumed by the Astro build for the
+agent-readable /pricing.md surface and directly by AI agents (both
+surfaces read this same computed payload — neither carries its own copy
+of the sweep). Exact per-property pricing stays on POST
+/api/public/quote/calculate.
 The `tree_shrub_care` row contracted with the Light tier's retirement
 (2026-09-24): the sweep is now `standard`/`enhanced` only (`light` dropped
 from the tier sweep the same way the lawn row above dropped its retired
-6x column), so the published low end is Standard-derived (`low` ≈ $28,
-was lower under Light's cheaper 4x rate) and `notes` now reads "6 or 9
-applications per year by tier" instead of the old 4/6/9 wording).
+6x column), and `notes` reads "6 or 9 applications per year by tier"
+instead of the old 4/6/9 wording; since the 2026-09-27 typical-job
+narrowing above, the published low is Standard's list-price floor on a
+typical lot (`low` ≈ $36), not a bundle-discounted value.
 `/api/public/credentials` (+ `/api/public/credentials/:slug`) (read-only
 canonical FDACS / license / insurance numbers — no auth, no token, public
 `Cache-Control`. Consumed by the Astro content build; intentionally public
@@ -2047,7 +2195,29 @@ never bills the monthly rate; re-service catalog service_id; card-capture
 step + ad attribution skipped; `/booking/confirm` pins the option null
 after the body spread). The lane dedupe is re-checked INSIDE the commit
 transaction under a customer+lane advisory lock, so parallel commits
-cannot double-book a lane's free visit. find-slots mirrors the
+cannot double-book a lane's free visit. Because the commit runs through the
+SAME `createSelfBooking` transaction, it gets the SAME commit-time capacity
+re-check under `GATE_BOOK_CAPACITY_COMMIT` (see the `GATE_SCHEDULING_CAPACITY`
+paragraph above) — a tech-bound re-service slot that a later booking made
+infeasible refuses with `SLOT_TAKEN` and this route's existing refresh (fresh
+availability in the 409 body) instead of committing an infeasible route.
+For a customer missing a complete stored latitude/longitude pair, the route
+also reads the canonical address-bound staff review under `GATE_GEOCODE_REVIEW`.
+A matching permanent `address_review_required` result blocks online scheduling;
+the full stored address, including line 2, must match that review. Once a
+bookable lane is selected (or implicit), GET keeps its eligibility payload but
+returns `availability: null` and `location_review_required: true` instead of
+offering times. Search and confirm return HTTP 409
+`{ error, code: 'LOCATION_REVIEW_REQUIRED' }` before building availability or
+committing. A complete stored pair, a stale/nonblocking review, or the review
+gate being off retains the existing pre-check behavior. If the booking
+transaction later returns `LOCATION_CHANGED_RETRY` or
+`CUSTOMER_CHANGED_RETRY` (including an address or review change after the
+pre-check), confirm reloads the token row and maps it to that same 409 recovery
+without stale refreshed slots. The page clears its selected slot and availability,
+hides time search, and asks the customer to text or call Waves to confirm the
+service address. Ordinary `SLOT_TAKEN`/`DAY_FULL` races still refresh times.
+find-slots mirrors the
 reschedule search: model-backed parseWhen clamped on BOTH ends to the
 booking window, READ-ONLY, no raw query logging. Generic 404 for
 bad/unknown tokens and while the gate is off. Treat the reservice token,
@@ -2074,7 +2244,25 @@ reordered by this — every feasible slot the engine found is still there,
 and the commit-time single-day revalidation still accepts exactly what that
 list offers. Gate off (default): buildBookingAvailability ignores the
 profile and this route's payload is byte-for-byte identical to before this
-gate existed.
+gate existed. One-tap pest chips (owner-approved, GATE_RESERVICE_PEST_CHIPS,
+nested inside GATE_RESERVICE_SELF_SERVE): with the gate live, GET's `base`
+payload carries `pestChoices` — `server/services/reservice-request.js`'s
+RESERVICE_PEST_CHOICES map, keyed to only the customer's currently bookable
+lanes. POST accepts an optional `pests` array (chip keys for the CHOSEN
+lane only); `normalizeRequestPests` drops anything invalid or from the
+other lane, de-dupes, and caps at that lane's own choice count — an empty
+result is treated as no pests. The chosen pests fold into the same
+customer-visible `customer_notes` line the details box already produced
+(`Re-service request (Ants, Roaches): <details>`, or `Re-service request:
+Ants, Roaches` with no details) and are passed into `createSelfBooking`'s
+internal-only `callbackVisit.customerRequest = { text, source: 'picker',
+pests }` (`scheduled_services.customer_request` / `_source` / `_pests`,
+migration `20260927100000`, hasColumn-guarded). Gate off: GET omits
+`pestChoices` entirely, POST ignores any posted `pests`, and both the
+payload and the existing no-pests `customer_notes` fallbacks are
+byte-identical to before this gate existed. The columns themselves are
+additive and stamped from the details box regardless of this gate — only
+the pest-chip normalization is gated.
 `/api/public/inspection/:token` (GET + POST, plus `POST /:token/find-slots`,
 `POST /:token/availability`, `POST /:token/waitlist`; the lead-scoped "Book
 with Adam" consultation link — booking.js's free Waves Assessment (owner
@@ -3136,7 +3324,8 @@ fleet site — falling back to `/sitemap.xml`, which only the hub serves, as a
 redirect to that index; read with content-registry-live-status's
 `fetchSitemapPaths` and compared with `normalizeContentUrl`, cached 6 h per
 site; a failed refresh keeps the last good list and retries after 5 min; no
-list yet means the beacon is dropped), so invented slugs never create rows —
+list yet means the beacon is dropped; each sitemap outage is warn-logged once
+and its recovery once, with the fleet site key only), so invented slugs never create rows —
 today every blog post is hub-only, so spoke beacons find no blog paths and
 drop; and each `(day, site, path, milestone)` bucket stops at 2,000 a day
 (the upsert's `WHERE count < 2000`), so a forged flood can skew one post by

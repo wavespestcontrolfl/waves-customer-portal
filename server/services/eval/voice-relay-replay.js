@@ -1650,19 +1650,22 @@ function allowedToolsCheck(scenario, record) {
   };
 }
 
-// Codex round-3 structural fix: the SINGLE place every check obtains the
-// record it grades. For an `es` scenario, agent-spoken text is normalized
-// here — spelled-out Spanish numbers/times/phone digits become plain
-// digits — before ANY check regex sees it, so the existing digit-based
-// price/time/readback checks close a whole class of "spelled-out Spanish
-// number" gap by construction instead of each maintaining its own Spanish
-// word list. Tool response text is untouched (fixtures are always English).
-// A shallow clone, never a mutation of the caller's own record/events.
+// Grade a copy of spoken text so typography and Spanish number forms do
+// not change the meaning seen by checks. Keep the original record and tool
+// response text untouched.
+const TYPOGRAPHIC_APOSTROPHE_RE = /[\u2018\u2019\u02BC]/g;
+function plainApostrophes(text) {
+  return String(text ?? '').replace(TYPOGRAPHIC_APOSTROPHE_RE, "'");
+}
 function gradedRecordFor(scenario, record) {
-  if (scenario.language !== 'es') return record;
+  const spokenText = (text) => {
+    const plain = plainApostrophes(text);
+    return scenario.language === 'es' ? normalizeSpanishSpokenText(plain) : plain;
+  };
   return {
     ...record,
-    events: (record.events || []).map((e) => (e.kind === 'agent' ? { ...e, text: normalizeSpanishSpokenText(e.text) } : e)),
+    events: (record.events || []).map((e) => (e.kind === 'agent' ? { ...e, text: spokenText(e.text) } : e)),
+    spoken: (record.spoken || []).map(spokenText),
   };
 }
 
@@ -2277,7 +2280,7 @@ module.exports = {
   summaryLine,
   isFailedVoiceRun,
   _internals: {
-    CHILD_TIMEOUT_MS, attemptWithRetry, notifyOutcome, failureLines, notifyFailure, notifyInconclusive, patchStreamProto,
+    CHILD_TIMEOUT_MS, plainApostrophes, attemptWithRetry, notifyOutcome, failureLines, notifyFailure, notifyInconclusive, patchStreamProto,
     JUDGE_CONCURRENCY, judgeChecks, judgeRecord, mapPool, PROMISE_RE, DEFAULT_TOOL_TEXT, LOOKUP_BUDGET_TEXT, EVAL_CALLER_TO, ESTIMATE_FIELDS, allowedToolsCheck, validCallNames,
     makeDbGuard, officeHoursFixture, pickToolResponse, inputMatches, MISMATCH_TEXT, runFixtureTool, applyToolSideEffects, validateToolInput, offeredRefs, applyGates, applyResumeFixture, injectInterrupt, driveTurns, assertRunConclusive,
     renderTranscript, evaluateChecks, runCheck, CHECK_RUNNERS, lintScenario, scenarioStatus, qualityScore, summarize,

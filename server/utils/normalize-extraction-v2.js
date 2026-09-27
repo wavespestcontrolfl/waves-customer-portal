@@ -268,6 +268,7 @@ function normalizeExtractionV2(extraction) {
     ...(extraction.scheduling ? { scheduling: {
       ...extraction.scheduling,
       proposed_start_at: cleanText(extraction.scheduling.proposed_start_at),
+      moved_appointment_date: cleanText(extraction.scheduling.moved_appointment_date),
     } } : {}),
     ...(extraction.secondary_contact !== undefined
       ? { secondary_contact: normalizeSecondaryContact(extraction.secondary_contact) }

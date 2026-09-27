@@ -40,6 +40,11 @@ jest.mock('../services/short-url', () => ({
   createShortCode: jest.fn(async () => ({ code: 'k3j9x', shortUrl: 'https://portal.wavespestcontrol.com/l/k3j9x' })),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The shared "never auto-text this number" holds are pinned against a real
+// schema in auto-text-holds-postgres.test.js; here only their wiring.
+jest.mock('../services/messaging/auto-text-holds', () => ({
+  autoTextHoldReason: jest.fn(async () => null),
+}));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
@@ -48,6 +53,7 @@ const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const lineType = require('../services/messaging/validators/line-type');
 const { mintLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { createShortCode } = require('../services/short-url');
+const { autoTextHoldReason } = require('../services/messaging/auto-text-holds');
 const { sendVoicemailQuoteLink, MESSAGE_TYPE } = require('../services/voicemail-lead-sms');
 
 const LEAD_ID = '3f2f7b9c-1111-4222-8333-abcdefabcdef';
@@ -108,6 +114,7 @@ beforeEach(() => {
   renderSmsTemplate.mockImplementation(async (key, vars) => `Hi ${vars.first_name} — ${vars.service_label}: ${vars.quote_url}`);
   // A REAL provider id — sent:true alone is a suppression sentinel (isRealProviderSend).
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM0123456789abcdef0123456789abcdef' });
+  autoTextHoldReason.mockResolvedValue(null);
 });
 
 function args(overrides = {}) {
@@ -166,11 +173,96 @@ describe('voicemail lead text-back gates', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('every prior quote-link row counts, whatever its status — a replay that ended blocked cannot be proven unsent (a retry-exhausted timeout ends blocked too)', async () => {
+    state.firstResults.sms_log = [{ id: 'blocked-replay' }];
+    expect(await sendVoicemailQuoteLink(args())).toEqual({ sent: false, skipped: 'already_sent_to_phone' });
+    const history = db.mock.results[db.mock.calls.findIndex(([table]) => table === 'sms_log')].value;
+    // The history read filters on the phone and the type only, never on status.
+    expect(history.where).toHaveBeenCalledTimes(1);
+    expect(history.where).toHaveBeenCalledWith({ to_phone: PHONE, message_type: MESSAGE_TYPE });
+    expect(history.whereNotIn).not.toHaveBeenCalled();
+  });
+
   test('dedupe read failure fails CLOSED — never risk a duplicate automated text', async () => {
     state.firstResults.sms_log = [new Error('db down')];
     const result = await sendVoicemailQuoteLink(args());
     expect(result).toEqual({ sent: false, skipped: 'dedupe_read_failed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  describe('who never gets the quote-link text (owner rulings 2026-09-27)', () => {
+    const claimTaken = () => state.inserts.some((i) => i.table === 'voicemail_sms_claims');
+
+    test('a voicemail that itself asks not to be contacted is held before any claim', async () => {
+      const result = await sendVoicemailQuoteLink(args({ doNotContactRequested: true }));
+      expect(result).toEqual({ sent: false, skipped: 'asked_not_to_be_contacted' });
+      expect(claimTaken()).toBe(false);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test.each(['quote_on_file', 'lead_assigned', 'asked_not_to_be_contacted', 'not_a_prospect', 'recent_conversation'])(
+      'a %s hold skips the text without consuming the one-shot',
+      async (hold) => {
+        autoTextHoldReason.mockResolvedValueOnce(hold);
+        const result = await sendVoicemailQuoteLink(args());
+        expect(result).toEqual({ sent: false, skipped: hold });
+        expect(claimTaken()).toBe(false);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      },
+    );
+
+    test('the hold check runs for this number from this voicemail\'s time — its own call read by id, whatever number it came from — ignoring the lane\'s own texts', async () => {
+      const at = new Date('2026-09-26T15:00:00Z');
+      await sendVoicemailQuoteLink(args({ call: { id: 'call-9', twilio_call_sid: 'CA-test-1', created_at: at } }));
+      expect(autoTextHoldReason).toHaveBeenCalledWith(PHONE, { callAt: at, originCallId: 'call-9', excludeMessageTypes: [MESSAGE_TYPE] });
+    });
+
+    // sendCustomerMessage stand-in that runs the lane's providerPreSendCheck
+    // where Twilio does (after every other await, right before its request)
+    // and maps a refusal the way the real pipeline does.
+    const throughProviderBoundary = () => sendCustomerMessage.mockImplementationOnce(async (input) => {
+      const verdict = await input.providerPreSendCheck({ channel: 'sms', dbi: 'handoff-conn' });
+      if (!verdict || verdict.ok !== true) {
+        return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: verdict?.code, reason: verdict?.reason };
+      }
+      return { sent: true, providerMessageId: 'SM0123456789abcdef0123456789abcdef' };
+    });
+
+    test('a hold that appears while the claims, lookup, render and pipeline run is caught at the provider boundary — both claims released', async () => {
+      throughProviderBoundary();
+      autoTextHoldReason.mockResolvedValueOnce(null).mockResolvedValueOnce('recent_conversation');
+      const result = await sendVoicemailQuoteLink(args());
+      expect(result).toEqual({ sent: false, skipped: 'recent_conversation' });
+      expect(autoTextHoldReason).toHaveBeenCalledTimes(2);
+      // The boundary recheck reads on the connection Twilio hands it.
+      expect(autoTextHoldReason).toHaveBeenLastCalledWith(PHONE, expect.objectContaining({ dbi: 'handoff-conn' }));
+      expect(phoneClaimReleased()).toBe(true);
+      expect(leadClaimCleared()).toBe(true);
+      expect(stampsFor()).not.toContain('sent');
+    });
+
+    test('an unreadable provider-boundary recheck fails CLOSED and releases both claims', async () => {
+      throughProviderBoundary();
+      autoTextHoldReason.mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('db down'));
+      const result = await sendVoicemailQuoteLink(args());
+      expect(result).toEqual({ sent: false, skipped: 'hold_check_failed' });
+      expect(phoneClaimReleased()).toBe(true);
+      expect(leadClaimCleared()).toBe(true);
+    });
+
+    test('no hold at the provider boundary: the text goes out', async () => {
+      throughProviderBoundary();
+      expect(await sendVoicemailQuoteLink(args())).toEqual({ sent: true });
+      expect(autoTextHoldReason).toHaveBeenCalledTimes(2);
+    });
+
+    test('an unreadable hold check fails CLOSED', async () => {
+      autoTextHoldReason.mockRejectedValueOnce(new Error('db down'));
+      const result = await sendVoicemailQuoteLink(args());
+      expect(result).toEqual({ sent: false, skipped: 'hold_check_failed' });
+      expect(claimTaken()).toBe(false);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
   });
 
   test('phone claim conflict — of two concurrent voicemails from one phone, the loser skips atomically', async () => {
@@ -352,7 +444,8 @@ describe('voicemail lead text-back send outcomes', () => {
     sendCustomerMessage.mockResolvedValue({
       sent: false, blocked: false, retryable: true, code: 'PROVIDER_FAILURE', nextAllowedAt,
     });
-    const result = await sendVoicemailQuoteLink(args());
+    const callAt = new Date('2026-07-01T23:30:00Z');
+    const result = await sendVoicemailQuoteLink(args({ call: { id: 'call-7', twilio_call_sid: 'CA-test-1', created_at: callAt } }));
     expect(result).toEqual({ sent: false, scheduled: true, nextAllowedAt });
 
     const queued = state.inserts.find((i) => i.table === 'sms_log');
@@ -368,6 +461,10 @@ describe('voicemail lead text-back send outcomes', () => {
     const meta = JSON.parse(queued.payload.metadata);
     expect(meta.consent_basis).toEqual(expect.objectContaining({ status: 'transactional_allowed' }));
     expect(meta.lead_id).toBe(LEAD_ID);
+    // The replay re-runs the holds against the originating call (read by
+    // id) from its time.
+    expect(meta.call_log_id).toBe('call-7');
+    expect(new Date(meta.call_created_at)).toEqual(callAt);
     expect(stampsFor()).toContain('scheduled');
     expect(phoneClaimOutcomes()).toContain('scheduled');
     expect(phoneClaimReleased()).toBe(false);

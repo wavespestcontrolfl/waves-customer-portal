@@ -60,6 +60,18 @@ function canonicalProductId(value) {
 // carries "Apt 4" in line1 must not inherit the primary's unit line.
 const INLINE_UNIT_RE = /\s(apt|apartment|unit|ste|suite|#)\.?\s*[a-z0-9-]+\s*$/i;
 
+// Whether the FDACS applicator id should be withheld from an overlay: the
+// name the join currently produces disagrees with the name frozen on the
+// snapshot (a technician rename, or — rarer — the row now joining a
+// different technician_id). No live name to compare against (no join, no
+// technician) is not a mismatch — there's nothing for the frozen name to
+// disagree with.
+function fdacsIdMismatchesJoinedTechnician(service, frozenTechnicianName) {
+  const joinedName = textOrNull(service.technician_name)
+    || textOrNull([service.technician_first_name, service.technician_last_name].filter(Boolean).join(' '));
+  return Boolean(joinedName) && joinedName !== frozenTechnicianName;
+}
+
 function visitDiverges(visit = {}, customer = {}) {
   return stampedAddressDiverges({
     service_address_line1: visit?.service_address_line1,
@@ -198,6 +210,17 @@ function applyReportIdentitySnapshot(service) {
     out.customer_longitude = snapshot.mapCenter?.lng ?? null;
   }
   if (snapshot.technicianName) {
+    // The FDACS applicator id (technician_fdacs_id/technician_license_expiry,
+    // when the caller's join carries them) belongs to a SPECIFIC person. If
+    // the frozen name disagrees with the technician currently joined, the id
+    // must never print beside a name it may not actually match, so it's
+    // withheld here, once, for every caller of this overlay (report-data's
+    // own top-of-builder call plus every route/queue/email loader that
+    // applies it directly after its join).
+    if (fdacsIdMismatchesJoinedTechnician(service, snapshot.technicianName)) {
+      out.technician_fdacs_id = null;
+      out.technician_license_expiry = null;
+    }
     out.technician_name = snapshot.technicianName;
     // formatTechnicianForCustomer prefers first/last over name — a caller
     // that joined those must not out-vote the frozen name.

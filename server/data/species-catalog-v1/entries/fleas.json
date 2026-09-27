@@ -17,7 +17,7 @@
     "safety_line": "Bites itch and can trigger flea allergy dermatitis in pets. See a doctor if bites become infected or you develop a rash that spreads.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "cat-flea",
@@ -43,8 +43,9 @@
       {
         "slug": "chiggers",
         "difference": "Cat fleas are visible jumpers on pets and carpet; chiggers are picked up outdoors and too small to see, causing welts at sock lines.",
-        "next_photo": "A technician judges from the site (pets/carpet vs. outdoor vegetation) and whether a jumping insect is caught — a bite pattern alone can't confirm which insect caused it.",
-        "photo_can_confirm": false
+        "next_photo": "A photo of the bites alone can't tell these apart. From a safe distance, note where you were bitten (pets/carpet vs. outdoor plants); a technician judges from that.",
+        "photo_can_confirm": false,
+        "photo_veto_applies_to": "sign"
       }
     ],
     "size": "tiny",

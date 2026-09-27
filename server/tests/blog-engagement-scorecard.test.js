@@ -1,4 +1,6 @@
 const {
+  addReadDepth,
+  blogPostLoads,
   classifyPath,
   countsAsPageView,
   formatMarkdown,
@@ -168,6 +170,107 @@ describe('summarize', () => {
     expect(md).toContain('| Another blog post | 6 |');
     expect(md).toContain('| /pest-control/huntsman/ | 150 | 150 | 8 | 5.3% | 2 |');
     expect(md).not.toContain('/pest-control/bagworm/ |');
+  });
+});
+
+describe('read depth', () => {
+  const groups = [
+    { path: '/pest-control/huntsman/', refererHost: 'www.google.com', refererPath: '/', views: 150 },
+    // a reload re-runs the counter: not a fresh view, but a load
+    { path: '/pest-control/huntsman/', refererHost: 'www.wavespestcontrol.com', refererPath: '/pest-control/huntsman/', navigationType: 'reload', views: 50 },
+    // a bfcache restore and an in-page route change run nothing new
+    { path: '/pest-control/huntsman/', refererHost: '', refererPath: '', navigationType: 'back-forward-cache', views: 7 },
+    { path: '/pest-control/huntsman/', refererHost: '', refererPath: '', navigationType: 'routing-apis', views: 5 },
+    { path: '/pest-control/bagworm/', refererHost: 'www.google.com', refererPath: '/', views: 40 },
+    { path: '/pest-control-sarasota-fl/', refererHost: 'www.google.com', refererPath: '/', views: 70 },
+  ];
+  const summary = summarize(groups);
+  const loads = blogPostLoads(groups);
+  const depthRows = [
+    { path: '/pest-control/huntsman/', milestone: '25', count: 60 },
+    { path: '/pest-control/huntsman/', milestone: '50', count: 30 },
+    { path: '/pest-control/huntsman/', milestone: '100', count: 12 },
+    { path: '/pest-control/huntsman/', milestone: 'next', count: 9 },
+    { path: '/pest-control/bagworm', milestone: '50', count: '4' }, // pg may hand back strings; no trailing slash
+    { path: '/pest-control/unsampled/', milestone: '50', count: 5 }, // Cloudflare never sampled it
+    { path: '/pest-control/huntsman/', milestone: 'bogus', count: 3 },
+    { path: '/pest-control/huntsman/', milestone: '75', count: 0 },
+  ];
+
+  test('page loads that run the counter: reloads and back/forward count, bfcache restores and route changes do not', () => {
+    const l = blogPostLoads([
+      { path: '/pest-control/a/', navigationType: 'navigate', views: 10 },
+      { path: '/pest-control/a/', navigationType: 'reload', views: 3 },
+      { path: '/pest-control/a/', navigationType: 'back-forward', views: 2 },
+      { path: '/pest-control/a/', navigationType: 'restore', views: 1 },
+      { path: '/pest-control/a/', navigationType: 'back-forward-cache', views: 4 },
+      { path: '/pest-control/a/', navigationType: 'routing-apis', views: 5 },
+      { path: '/pest-control/a/', navigationType: 'soft-navigation', views: 6 },
+      { path: '/pest-control-sarasota-fl/', navigationType: 'reload', views: 9 },
+    ]);
+    expect(l.byPath.get('/pest-control/a/')).toBe(16);
+    expect(l.total).toBe(16);
+  });
+
+  test('joins counts onto the posts, with rates per page load', () => {
+    const rd = addReadDepth(summary, depthRows, { start: '2026-09-28', end: '2026-10-05', loads });
+    expect(rd.coverage).toBe('full');
+    expect(rd.posts[0]).toEqual({
+      path: '/pest-control/huntsman/', loads: 200, r25: 60, r50: 30, r75: 0, r100: 12, next: 9, halfRate: 0.15, nextRate: 0.045,
+    });
+    expect(rd.posts[1]).toMatchObject({ path: '/pest-control/bagworm/', loads: 40, r50: 4, halfRate: 0.1, nextRate: 0 });
+    // the unsampled post reaches the count totals (39 at 50%) but not the
+    // rates, whose denominator has none of its loads: (30 + 4) / 240
+    expect(rd.totals).toMatchObject({ r25: 60, r50: 39, r75: 0, r100: 12, next: 9, loads: 240 });
+    expect(rd.totals.halfRate).toBeCloseTo(34 / 240);
+    expect(rd.totals.nextRate).toBeCloseTo(9 / 240);
+  });
+
+  test('coverage follows the window: none before counting began, partial across it, full after', () => {
+    const none = addReadDepth(summary, depthRows, { start: '2026-09-20', end: '2026-09-27', loads });
+    expect(none).toEqual({ liveSince: '2026-09-27', coverage: 'none', totals: null, posts: [] });
+    expect(addReadDepth(summary, [], { start: '2026-09-21', end: '2026-09-28', loads }).coverage).toBe('partial');
+    expect(addReadDepth(summary, [], { start: '2026-09-27', end: '2026-10-04', loads }).coverage).toBe('partial');
+    expect(addReadDepth(summary, [], { start: '2026-09-28', end: '2026-10-05', loads }).coverage).toBe('full');
+  });
+
+  test('no loads means no rate, never a divide-by-zero', () => {
+    const rd = addReadDepth(summarize([]), depthRows, { start: '2026-10-01', end: '2026-10-08', loads: blogPostLoads([]) });
+    expect(rd.totals.halfRate).toBeNull();
+    expect(rd.posts).toEqual([]);
+  });
+
+  test('a window spanning the first counted day gets counts but no rates', () => {
+    const rd = addReadDepth(summary, depthRows, { start: '2026-09-21', end: '2026-09-28', loads });
+    expect(rd.coverage).toBe('partial');
+    expect(rd.totals).toMatchObject({ r50: 39, halfRate: null, nextRate: null });
+    expect(rd.posts[0]).toMatchObject({ r50: 30, halfRate: null, nextRate: null });
+    const md = formatMarkdown(summary, { start: '2026-09-21', end: '2026-09-27', top: 1, readDepth: rd });
+    expect(md).toContain('Counting began 2026-09-27 (Eastern), partway through this window: counts cover only the days since, and rates are left out.');
+    expect(md).not.toContain('Half-read:');
+    expect(md).toContain('| /pest-control/huntsman/ | 200 | 60 | 30 | 0 | 12 | 9 | — | — |');
+  });
+
+  test('a fully covered window shows every milestone and the rates, labelled as page loads', () => {
+    const readDepth = addReadDepth(summary, depthRows, { start: '2026-09-28', end: '2026-10-05', loads });
+    const md = formatMarkdown(summary, { start: '2026-09-28', end: '2026-10-04', top: 1, readDepth });
+    expect(md).toContain('### Read depth (cookie-free counts, hub)');
+    expect(md).not.toContain('Counting began');
+    expect(md).toContain('Page loads reaching 25 / 50 / 75 / 100% of a post: 60 / 39 / 0 / 12; reaching the keep-reading row: 9 (loads, not people: a reload counts again)');
+    expect(md).toContain('Half-read: 14.2% of 240 post loads; reached keep reading: 3.8% (over the posts Cloudflare sampled, so approximate)');
+    expect(md).toContain('| Post (top 1 by views) | Loads | 25% | 50% | 75% | 100% | Keep reading | Half-read | Reached keep reading |');
+    expect(md).toContain('| /pest-control/huntsman/ | 200 | 60 | 30 | 0 | 12 | 9 | 15.0% | 4.5% |');
+    expect(md).not.toContain('| /pest-control/bagworm/ | 40 |');
+    expect(md).not.toMatch(/Readers/);
+  });
+
+  test('a window before counting says so instead of printing zeros; unavailable and not-asked stay distinct', () => {
+    const before = addReadDepth(summary, depthRows, { start: '2026-09-19', end: '2026-09-26', loads });
+    const md = formatMarkdown(summary, { start: '2026-09-19', end: '2026-09-25', readDepth: before });
+    expect(md).toContain('Read depth: none for this window (counting began 2026-09-27, Eastern).');
+    expect(md).not.toContain('### Read depth');
+    expect(formatMarkdown(summary, { start: 'a', end: 'b', readDepth: null })).toContain('Read depth: not included (needs DATABASE_PUBLIC_URL');
+    expect(formatMarkdown(summary, { start: 'a', end: 'b' })).not.toContain('Read depth');
   });
 });
 
