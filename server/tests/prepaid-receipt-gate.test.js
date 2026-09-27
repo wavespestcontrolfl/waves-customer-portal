@@ -78,4 +78,33 @@ describe('resolveScheduledServiceCharge', () => {
     expect(resolveScheduledServiceCharge({ estimatedPrice: null, isCallback: false, monthlyRate: null }))
       .toBe(0);
   });
+
+  // Codex pre-push P1: this resolver used to short-circuit ANY explicit
+  // non-monthly billingMode to 0 before ever looking at a per-application
+  // fee — Charge Now / prepaid-receipt minting billed $0 for an unpriced
+  // explicit per_application visit with a real acceptance fee on file,
+  // although completion (completionInvoiceAmount) and the schedule sheet's
+  // own billingLane.prediction both billed the fee. Delegating to
+  // completionInvoiceAmount fixes the divergence for every caller.
+  test('an explicit per_application lane bills its acceptance fee, not zero', () => {
+    expect(resolveScheduledServiceCharge({
+      estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application', perApplicationFee: 97.2,
+    })).toBe(97.2);
+    // No fee stamped on the per_application account — nothing bills, and
+    // still never the lingering monthlyRate (that number is the dues
+    // figure, not a per-visit fee).
+    expect(resolveScheduledServiceCharge({
+      estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application', perApplicationFee: null,
+    })).toBe(0);
+    // A callback never bills the acceptance fee either.
+    expect(resolveScheduledServiceCharge({
+      estimatedPrice: null, isCallback: true, monthlyRate: 74.7, billingMode: 'per_application', perApplicationFee: 97.2,
+    })).toBe(0);
+  });
+
+  test('an explicit non-monthly, non-per_application lane still never falls back to the lingering monthly rate', () => {
+    expect(resolveScheduledServiceCharge({
+      estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_visit',
+    })).toBe(0);
+  });
 });

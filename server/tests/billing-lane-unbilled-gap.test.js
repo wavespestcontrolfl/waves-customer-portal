@@ -38,14 +38,14 @@ describe('no_charge reason split', () => {
     // a $0 amount is covered by any positive cash/Zelle stamp, so the sheet
     // must not warn (or offer a card link) on a visit the office collected.
     const p = predictCompletionBilling({ ...unbilledShape, prepaidAmount: 50, prepaidMethod: 'cash' });
-    expect(p).toEqual({ kind: 'prepaid', amount: 50, conflictStampedPrice: false });
+    expect(p).toEqual({ kind: 'prepaid', amount: 50, grossAmount: 0, conflictStampedPrice: false });
     expect(unbilledCompletionGap({ prediction: p })).toBeNull();
     // Per-application lane, same shape: no fee on file but a hand prepayment.
     const perApp = predictCompletionBilling({
       ...unbilledShape, lane: 'per_application', billingMode: 'per_application', perApplicationFee: null,
       prepaidAmount: 25, prepaidMethod: 'zelle',
     });
-    expect(perApp).toEqual({ kind: 'prepaid', amount: 25, conflictStampedPrice: false });
+    expect(perApp).toEqual({ kind: 'prepaid', amount: 25, grossAmount: 0, conflictStampedPrice: false });
     // A zero/null stamp is not coverage; a STALE annual stamp never counts.
     expect(predictCompletionBilling({ ...unbilledShape, prepaidAmount: 0, prepaidMethod: 'cash' }).reason).toBe('no_amount_on_file');
     expect(predictCompletionBilling({ ...unbilledShape, prepaidAmount: 50, prepaidMethod: 'annual_prepay_invoice' }).reason).toBe('no_amount_on_file');

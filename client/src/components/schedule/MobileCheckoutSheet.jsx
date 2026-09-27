@@ -107,20 +107,28 @@ export default function MobileCheckoutSheet({
   // SIBLING row, never this one's own attached invoice, so there is nothing
   // for this sheet to mint regardless of the prediction amount.
   //
-  // The prediction's `amount` is ALREADY net of prepaidAmount for an
-  // 'invoice'/'auto_charge' kind (predictCompletionBilling subtracts it
-  // server-side before returning), and a 'prepaid' kind's amount is what was
-  // ALREADY collected, not a new balance — so `usingUnpricedPrediction`
-  // gates the prepaid-credit math below from being applied a SECOND time on
-  // top of a figure that's already final (codex pre-push P1: double-netting
-  // silently zeroed a real remaining balance on a partially-prepaid visit).
-  const predictionKind = service.billingLane?.prediction?.kind || null;
-  const usingUnpricedPrediction = rawPrice == null && !service.isCallback;
+  // This sheet, uniquely among the four schedule surfaces, can stack extra
+  // line items on top of the base visit — so it reads `grossAmount` (the
+  // fee/rate BEFORE the recorded prepayment was netted out), never the
+  // already-net `amount` the other three surfaces use directly. Feeding the
+  // ALREADY-NET figure into this sheet's OWN prepaid-credit math below would
+  // net the SAME prepayment a SECOND time (codex pre-push P1: a $100 fee
+  // with $60 prepaid predicts $40 net; crediting $60 again against that $40
+  // zeroed the charge although $40 was still owed) — and once extras are
+  // added, would drop credit still owed on them too (a $100 fee, $100
+  // prepaid, plus a $30 extra bills $110 gross with $100 applied, $10 due —
+  // never a flat $30 that ignores the $100 sitting on file). `grossAmount`
+  // is absent for kinds this sheet doesn't need to re-net (payer: never
+  // netted against THIS customer's prepaid to begin with; covered_*/
+  // no_charge: null/0 either way) — `?? amount` covers those, and an older
+  // cached payload with no grossAmount at all.
   const price = rawPrice != null
     ? rawPrice
-    : (service.isCallback || predictionKind === 'prepaid'
+    : (service.isCallback
       ? 0
-      : Number(service.billingLane?.prediction?.amount) || 0);
+      : Number(
+        service.billingLane?.prediction?.grossAmount ?? service.billingLane?.prediction?.amount
+      ) || 0);
   const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
     appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
@@ -253,12 +261,13 @@ export default function MobileCheckoutSheet({
   const totalBeforePrepaid = invoicePreview
     ? invoicePreview.amountDue
     : Math.max(0, servicesSubtotal + extraDiscountsTotal);
-  // No SECOND netting against the unpriced-visit prediction (see `price`
-  // above) — there is no attached invoice here to have already applied the
-  // prepayment either, so this is the one and only place it could double up.
-  const prepaidCredit = invoicePreview
-    ? (invoicePreview.prepaidApplied ? 0 : Math.min(prepaidAmount, totalBeforePrepaid))
-    : (usingUnpricedPrediction ? 0 : Math.min(prepaidAmount, totalBeforePrepaid));
+  // `price` above is the GROSS fee (billingLane.prediction.grossAmount when
+  // there's no attached invoice) — this is the ONE place the recorded
+  // prepayment nets against it, whether the visit is unpriced or not, and
+  // whether or not extra line items are stacked on top.
+  const prepaidCredit = invoicePreview && invoicePreview.prepaidApplied
+    ? 0
+    : Math.min(prepaidAmount, totalBeforePrepaid);
   const total = Math.max(0, totalBeforePrepaid - prepaidCredit);
   // A genuinely $0 visit (e.g. a free callback with no added extras) has nothing
   // to mint — the invoice endpoint rejects a zero charge — so disable the Charge

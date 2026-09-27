@@ -138,7 +138,7 @@ describe('predictCompletionBilling', () => {
     expect(predictCompletionBilling({ ...memberBase, autopayActive: false, duesCollectedThisMonth: true }))
       .toEqual({ kind: 'covered_membership', amount: null, conflictStampedPrice: false });
     expect(predictCompletionBilling({ ...memberBase, autopayActive: false, duesCollectedThisMonth: false }))
-      .toEqual({ kind: 'invoice', amount: 33.33, conflictStampedPrice: false });
+      .toEqual({ kind: 'invoice', amount: 33.33, grossAmount: 33.33, conflictStampedPrice: false });
   });
 
   test('membership recurring visit → covered, and a stamped price flags the conflict', () => {
@@ -149,19 +149,19 @@ describe('predictCompletionBilling', () => {
 
   test('membership one-off priced visit → invoices the price', () => {
     expect(predictCompletionBilling({ ...memberBase, isRecurring: false, estimatedPrice: 150 }))
-      .toEqual({ kind: 'invoice', amount: 150, conflictStampedPrice: false });
+      .toEqual({ kind: 'invoice', amount: 150, grossAmount: 150, conflictStampedPrice: false });
   });
 
   test('membership with dead autopay falls through to an invoice (monthly-rate fallback)', () => {
     expect(predictCompletionBilling({ ...memberBase, autopayActive: false }))
-      .toEqual({ kind: 'invoice', amount: 33.33, conflictStampedPrice: false });
+      .toEqual({ kind: 'invoice', amount: 33.33, grossAmount: 33.33, conflictStampedPrice: false });
   });
 
   test('per-application: auto-charge with a live saved method, invoice without one', () => {
     const perApp = { ...memberBase, lane: 'per_application', billingMode: 'per_application', perApplicationFee: 98, monthlyRate: null };
-    expect(predictCompletionBilling(perApp)).toEqual({ kind: 'auto_charge', amount: 98, conflictStampedPrice: false });
+    expect(predictCompletionBilling(perApp)).toEqual({ kind: 'auto_charge', amount: 98, grossAmount: 98, conflictStampedPrice: false });
     expect(predictCompletionBilling({ ...perApp, autopayActive: false }))
-      .toEqual({ kind: 'invoice', amount: 98, conflictStampedPrice: false });
+      .toEqual({ kind: 'invoice', amount: 98, grossAmount: 98, conflictStampedPrice: false });
     expect(predictCompletionBilling({ ...perApp, isCallback: true }))
       .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'callback' });
     expect(predictCompletionBilling({ ...perApp, perApplicationFee: null }))
@@ -183,9 +183,9 @@ describe('predictCompletionBilling', () => {
   test('prepaid suppresses only when it covers the WHOLE amount; a partial nets the invoice (Codex r1)', () => {
     const perVisit = { ...memberBase, lane: 'per_visit', billingMode: 'per_visit', monthlyRate: null, estimatedPrice: 100 };
     expect(predictCompletionBilling({ ...perVisit, prepaidAmount: 120 }))
-      .toEqual({ kind: 'prepaid', amount: 120, conflictStampedPrice: false });
+      .toEqual({ kind: 'prepaid', amount: 120, grossAmount: 100, conflictStampedPrice: false });
     expect(predictCompletionBilling({ ...perVisit, prepaidAmount: 50 }))
-      .toEqual({ kind: 'invoice', amount: 50, conflictStampedPrice: false });
+      .toEqual({ kind: 'invoice', amount: 50, grossAmount: 100, conflictStampedPrice: false });
   });
 
   test('annual prepay: covered ONLY by the term-validated stamp; uncovered priced visits invoice (Codex r2)', () => {
@@ -218,13 +218,13 @@ describe('predictCompletionBilling', () => {
       .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'no_amount_on_file' });
     // NULL (legacy) keeps the historical monthly-rate fallback.
     expect(predictCompletionBilling({ ...memberBase, billingMode: null, autopayActive: false }))
-      .toEqual({ kind: 'invoice', amount: 33.33, conflictStampedPrice: false });
+      .toEqual({ kind: 'invoice', amount: 33.33, grossAmount: 33.33, conflictStampedPrice: false });
   });
 
   test('per-visit lane invoices the stamped price, callback bills nothing', () => {
     const perVisit = { ...memberBase, lane: 'per_visit', billingMode: 'per_visit', monthlyRate: null };
     expect(predictCompletionBilling({ ...perVisit, estimatedPrice: 129 }))
-      .toEqual({ kind: 'invoice', amount: 129, conflictStampedPrice: false });
+      .toEqual({ kind: 'invoice', amount: 129, grossAmount: 129, conflictStampedPrice: false });
     expect(predictCompletionBilling({ ...perVisit, isCallback: true }))
       .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'callback' });
   });
@@ -361,11 +361,11 @@ describe('predictCompletionBilling — GATE_COMPLETION_AUTOPAY_CHARGE extension 
     // one-off (non-recurring) priced visit — dues never cover it
     expect(predictCompletionBilling({
       ...memberBase, isRecurring: false, estimatedPrice: 90.55, completionAutopayChargeEnabled: true,
-    })).toEqual({ kind: 'auto_charge', amount: 90.55, conflictStampedPrice: false });
+    })).toEqual({ kind: 'auto_charge', amount: 90.55, grossAmount: 90.55, conflictStampedPrice: false });
   });
   test('gate off keeps the historical invoice prediction byte-identical', () => {
     expect(predictCompletionBilling({ ...memberBase, isRecurring: false, estimatedPrice: 90.55 }))
-      .toEqual({ kind: 'invoice', amount: 90.55, conflictStampedPrice: false });
+      .toEqual({ kind: 'invoice', amount: 90.55, grossAmount: 90.55, conflictStampedPrice: false });
   });
   test('autopay inactive keeps invoice even with the gate on', () => {
     expect(predictCompletionBilling({
@@ -380,9 +380,9 @@ describe('predictCompletionBilling — GATE_COMPLETION_AUTOPAY_CHARGE extension 
   test('per-visit lane priced invoice predicts auto_charge under the gate; partial prepay still nets', () => {
     const perVisit = { ...memberBase, lane: 'per_visit', billingMode: 'per_visit', monthlyRate: null, estimatedPrice: 100, completionAutopayChargeEnabled: true };
     expect(predictCompletionBilling(perVisit))
-      .toEqual({ kind: 'auto_charge', amount: 100, conflictStampedPrice: false });
+      .toEqual({ kind: 'auto_charge', amount: 100, grossAmount: 100, conflictStampedPrice: false });
     expect(predictCompletionBilling({ ...perVisit, prepaidAmount: 50 }))
-      .toEqual({ kind: 'auto_charge', amount: 50, conflictStampedPrice: false });
+      .toEqual({ kind: 'auto_charge', amount: 50, grossAmount: 100, conflictStampedPrice: false });
     expect(predictCompletionBilling({ ...perVisit, prepaidAmount: 120 }).kind).toBe('prepaid');
   });
   test('no-cost visits never predict auto_charge even under the gate (mirror of the charge lane)', () => {

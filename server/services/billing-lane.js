@@ -195,6 +195,18 @@ function completionInvoiceAmount({
  *   'auto_charge'      — per-application fee auto-collects from saved method
  *   'invoice'          — an invoice for `amount` goes out on completion
  *   'no_charge'        — nothing bills (callback / no amount on file)
+ *
+ * `amount` is the FINAL figure for a consumer that stacks nothing on top of
+ * it (completion itself, the schedule sheet's own preview). For 'prepaid' /
+ * 'invoice' / 'auto_charge' out of the per_application and self-pay lanes,
+ * `grossAmount` also rides along — the fee/rate BEFORE the recorded
+ * prepayment was netted out — for the one consumer that DOES stack more on
+ * top (Charge Now checkout adding extra line items): it must total those
+ * extras against the gross fee, then net the prepayment ONCE against
+ * fee+extras combined, never against the already-net `amount` (codex
+ * pre-push P1: netting the same prepayment twice hid a real remaining
+ * balance, or dropped credit still owed once extras made the total larger
+ * than what `amount` alone had already absorbed).
  */
 function predictCompletionBilling({
   lane,
@@ -327,15 +339,24 @@ function predictCompletionBilling({
       // /:id/prepaid) on an unpriced visit is what completion calls covered
       // — prepaid_amount > 0 AND >= the $0 amount — so it is paid, not a
       // money gap (Codex P2). Same ordering as the self-pay lane below.
-      if (prepaid > 0) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
+      if (prepaid > 0) return { kind: 'prepaid', amount: prepaid, grossAmount: amount, conflictStampedPrice: false };
       return noCharge('no_amount_on_file');
     }
     // Completion only suppresses when the prepayment covers the WHOLE
     // amount; a partial prepay is applied as credit and the remainder
     // still collects (Codex r1).
-    if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
+    if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, grossAmount: amount, conflictStampedPrice: false };
     const due = Math.max(0, amount - prepaid);
-    return { kind: autopayActive ? 'auto_charge' : 'invoice', amount: due, conflictStampedPrice: false };
+    // grossAmount is the fee BEFORE prepaid netting — a schedule-sheet
+    // consumer that lets the office stack extra line items on top of this
+    // visit (Charge Now checkout) must total those extras against the
+    // GROSS fee, then net the recorded prepayment ONCE against fee+extras
+    // combined, or crediting prepaidAmount separately against the
+    // ALREADY-NET `amount` here would apply the same prepayment twice
+    // (codex pre-push P1). `amount` itself stays the final net figure for
+    // every consumer that doesn't stack anything on top (completion
+    // preview, detail sheet, sidebar).
+    return { kind: autopayActive ? 'auto_charge' : 'invoice', amount: due, grossAmount: amount, conflictStampedPrice: false };
   }
   const covered = membershipDuesCoverVisit({
     visitIsPayerBilled: false,
@@ -367,15 +388,20 @@ function predictCompletionBilling({
     // covers its $0 amount, so completion mints nothing BECAUSE it is paid.
     // Asked before the money-gap verdict, or the sheet warns — and offers a
     // card link — on a visit the office already collected for (Codex P2).
-    if (prepaid > 0) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
+    if (prepaid > 0) return { kind: 'prepaid', amount: prepaid, grossAmount: amount, conflictStampedPrice: false };
     return noCharge('no_amount_on_file');
   }
-  if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
+  if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, grossAmount: amount, conflictStampedPrice: false };
   return {
     // Same no-cost exclusion as the annual branch (manual-audit P1).
     kind: (autopayActive && completionAutopayChargeEnabled
       && !isCallback && !isAlwaysFreeServiceType(serviceType)) ? 'auto_charge' : 'invoice',
     amount: Math.max(0, amount - prepaid),
+    // See the per_application branch above for why grossAmount rides
+    // alongside the net `amount` — a checkout that stacks extras on top of
+    // this visit must net the prepayment once against fee+extras, not
+    // again against the already-net figure.
+    grossAmount: amount,
     conflictStampedPrice: false,
   };
 }

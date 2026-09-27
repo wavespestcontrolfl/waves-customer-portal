@@ -217,13 +217,14 @@ describe('MobileCheckoutSheet money lines', () => {
 });
 
 describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', () => {
-  // Codex pre-push P1: predictCompletionBilling already nets prepaidAmount
-  // out of an 'invoice' prediction server-side ($100 fee − $60 prepaid =
-  // $40 due). With no attached invoice here, this sheet's OWN prepaid-credit
-  // math (the "applies prepaid credit" case above) must not net the SAME
-  // prepayment a second time against that already-net figure — $60 credited
-  // against $40 would zero the charge although $40 is still owed.
-  it('charges the real remaining balance, never double-netting the prepayment', () => {
+  // Codex pre-push P1: this sheet stacks extras on top of the base visit,
+  // so it reads `grossAmount` (the fee BEFORE the recorded prepayment was
+  // netted out) and applies its OWN prepaid-credit math against that gross
+  // figure exactly once — never the already-net `amount` the other three
+  // schedule surfaces use directly, which would net the same prepayment a
+  // second time ($100 fee, $60 prepaid predicts $40 net; crediting $60
+  // again against that $40 would zero the charge although $40 is owed).
+  it('charges the real remaining balance against the gross fee, crediting the prepayment once', () => {
     render(
       <MobileCheckoutSheet
         service={{
@@ -236,19 +237,24 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
             mode: 'per_application',
             source: 'explicit',
             monthlyRate: null,
-            prediction: { kind: 'invoice', amount: 40, conflictStampedPrice: false },
+            prediction: { kind: 'invoice', amount: 40, grossAmount: 100, conflictStampedPrice: false },
           },
         }}
         onClose={() => {}}
       />,
     );
     expect(screen.getByRole('button', { name: 'Charge $40.00' })).toBeInTheDocument();
-    expect(screen.queryByText('Prepaid credit')).not.toBeInTheDocument();
+    expect(screen.getByText('Prepaid credit')).toBeInTheDocument();
+    expect(screen.getByText('−$60.00')).toBeInTheDocument();
   });
 
-  // A 'prepaid' kind means completion mints nothing new — its `amount` is
-  // what was ALREADY collected (informational), never a balance still due.
-  it('has nothing to charge on a fully-covered "prepaid" prediction', () => {
+  // A 'prepaid' kind means completion mints nothing new against the base
+  // visit — grossAmount ($80) is the fee, fully absorbed by the $100
+  // prepaid, so the button still mints (a $0-due invoice the prepaid
+  // credit settles), never disabled outright — the base is chargeable
+  // pre-prepaid even though the net total is $0 (mirrors the existing
+  // attached-invoice "fully prepaid" behavior above).
+  it('nets a fully-covered "prepaid" prediction to $0 with no extras added, crediting the gross fee', () => {
     render(
       <MobileCheckoutSheet
         service={{
@@ -261,13 +267,37 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
             mode: 'per_application',
             source: 'explicit',
             monthlyRate: null,
-            prediction: { kind: 'prepaid', amount: 100, conflictStampedPrice: false },
+            prediction: { kind: 'prepaid', amount: 100, grossAmount: 80, conflictStampedPrice: false },
           },
         }}
         onClose={() => {}}
       />,
     );
-    const button = screen.getByRole('button', { name: 'No charge — complete from job' });
-    expect(button).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Charge $0.00' })).toBeInTheDocument();
+    expect(screen.getByText('Prepaid credit')).toBeInTheDocument();
+    expect(screen.getByText('−$80.00')).toBeInTheDocument();
+  });
+
+  // Older cached payload (or a kind that never nets against THIS customer's
+  // prepaid, like 'payer') carries no grossAmount at all — falls back to
+  // `amount` rather than crashing on a missing field.
+  it('falls back to `amount` when the payload has no grossAmount', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          waveguardTier: null,
+          estimatedPrice: null,
+          billingLane: {
+            mode: 'per_visit',
+            source: 'inferred',
+            monthlyRate: 60,
+            prediction: { kind: 'invoice', amount: 60, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Charge $60.00' })).toBeInTheDocument();
   });
 });

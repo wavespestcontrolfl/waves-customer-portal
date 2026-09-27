@@ -44,7 +44,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoveredCompletionPrediction, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoveredCompletionPrediction, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -15620,20 +15620,26 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // Mark-prepaid action chain them server-side behind the prepaidInvoiceReceipt
 // gate. The two pure decision helpers are exported on router._test.
 
-// Pure: the visit's chargeable price. Explicit estimate price wins; otherwise a
-// non-callback recurring/WaveGuard visit falls back to the monthly rate; a
-// callback (re-service) is free by definition. Mirrors the Charge-now amount
-// rule so a mark-time receipt invoices the same figure completion would.
-function resolveScheduledServiceCharge({ estimatedPrice, isCallback, monthlyRate, billingMode }) {
-  if (estimatedPrice != null && Number(estimatedPrice) > 0) return Number(estimatedPrice);
-  // Explicit non-monthly lanes never fall back to the customer-level
-  // monthly_rate — that is the membership dues number, and completion's
-  // completionInvoiceAmount refuses the same fallback (Codex r10): an
-  // unpriced visit in these lanes bills manually, never at the old dues
-  // amount through Charge Now / prepaid-receipt minting.
-  if (billingMode && billingMode !== 'monthly_membership') return 0;
-  if (!isCallback && monthlyRate && Number(monthlyRate) > 0) return Number(monthlyRate);
-  return 0;
+// Pure: the visit's chargeable price. Delegates to the SAME
+// completionInvoiceAmount (billing-lane.js) completion itself uses, so
+// Charge Now / prepaid-receipt minting can never diverge from what
+// completing the visit would bill — that used to be a second, narrower
+// re-implementation with no per_application branch at all, so an unpriced
+// explicit per_application visit with a real acceptance fee resolved $0
+// here (billingMode !== 'monthly_membership' short-circuited before ever
+// looking at the fee) while completion and the schedule sheet's own
+// prediction both billed the fee. The schedule sheet's Charge preview now
+// reads that same prediction (codex pre-push P1: previewing a positive
+// Charge amount this resolver would then reject as "no chargeable amount").
+function resolveScheduledServiceCharge({ estimatedPrice, isCallback, monthlyRate, billingMode, perApplicationFee }) {
+  return completionInvoiceAmount({
+    estimatedPrice,
+    isCallback,
+    perApplicationBilling: billingMode === 'per_application',
+    perApplicationFee,
+    monthlyRate,
+    billingMode,
+  });
 }
 
 // Pure: should the Mark-prepaid request even attempt a receipt? Series prepays
@@ -15677,6 +15683,7 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     isCallback: svc.is_callback,
     monthlyRate: svc.cust_monthly_rate,
     billingMode: svc.cust_billing_mode || null,
+    perApplicationFee: svc.cust_per_application_fee,
   });
   if (!(amount > 0)) return { invoice: null, reason: 'no_chargeable_amount' };
   const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService(svc.id, {
@@ -15794,6 +15801,7 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
       'customers.property_type as cust_property_type',
       'customers.waveguard_tier as cust_waveguard_tier',
       'customers.billing_mode as cust_billing_mode',
+      'customers.per_application_fee as cust_per_application_fee',
     )
     .first();
   if (!svc) return { sent: false, reason: 'service_not_found' };
@@ -16146,7 +16154,8 @@ router.post('/:id/invoice', async (req, res, next) => {
         'customers.monthly_rate as cust_monthly_rate',
         'customers.property_type as cust_property_type',
         'customers.waveguard_tier as cust_waveguard_tier',
-        'customers.billing_mode as cust_billing_mode')
+        'customers.billing_mode as cust_billing_mode',
+        'customers.per_application_fee as cust_per_application_fee')
       .first();
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
 
@@ -16340,12 +16349,14 @@ router.post('/:id/invoice', async (req, res, next) => {
     // "Charge now" before completion would bill a full month's dues for a
     // no-charge re-service. Mirrors the completion-path suppression in
     // admin-dispatch.js. Honour an explicit positive price if one was set;
-    // otherwise the visit is $0.
+    // an explicit per_application lane bills its acceptance fee; otherwise
+    // the visit is $0.
     const amount = resolveScheduledServiceCharge({
       estimatedPrice: svc.estimated_price,
       isCallback: svc.is_callback,
       monthlyRate: svc.cust_monthly_rate,
       billingMode: svc.cust_billing_mode || null,
+      perApplicationFee: svc.cust_per_application_fee,
     });
 
     // Mobile checkout sheet can append extra services + discount lines before

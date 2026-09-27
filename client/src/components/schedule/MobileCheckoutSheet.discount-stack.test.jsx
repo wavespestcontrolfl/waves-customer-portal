@@ -488,3 +488,38 @@ describe('MobileCheckoutSheet — blocking alert readability', () => {
     expect(parseFloat(copy.style.fontSize)).toBeGreaterThanOrEqual(14);
   });
 });
+
+// Codex pre-push P1: billingLane.prediction.grossAmount (the fee BEFORE the
+// recorded prepayment was netted out) is what this sheet must stack extras
+// against — an $80 fallback fully covered by $100 prepaid, plus a $100
+// extra service, bills $180 gross with $100 credited, $80 still due. Reading
+// the already-net `amount` instead (or skipping this sheet's own crediting
+// entirely once an unpriced visit's prediction covered the base) would have
+// shown either $100 (extra alone, the $80 base miscounted as covered with
+// no credit line) or the wrong net figure recomputed a second time.
+describe('MobileCheckoutSheet — unpriced-visit prediction gross base + extras', () => {
+  it('stacks an extra service against the GROSS fee and credits the prepayment once', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...SERVICE,
+          estimatedPrice: null,
+          waveguardTier: null,
+          prepaidAmount: 100,
+          prepaidMethod: 'cash',
+          billingLane: {
+            mode: 'monthly_membership',
+            source: 'explicit',
+            monthlyRate: 80,
+            prediction: { kind: 'prepaid', amount: 100, grossAmount: 80, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    addService();
+    expect(screen.getByRole('button', { name: 'Charge $80.00' })).toBeInTheDocument();
+    expect(screen.getByText('Prepaid credit')).toBeInTheDocument();
+    expect(screen.getByText('−$100.00')).toBeInTheDocument();
+  });
+});
