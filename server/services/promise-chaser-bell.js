@@ -24,7 +24,11 @@
  * as followed up never rings this bell either.
  *
  * STATELESS, IDEMPOTENT SWEEP — the ONE path (no /voice wiring, no per-call
- * claim, no lease, nothing ever written to call_log or call_commitments):
+ * claim, no lease, and no promise-chaser-owned state of its own ever
+ * written to call_log or call_commitments — refreshFulfillment's own
+ * shared stale-hint stamp on call_commitments, the SAME side effect the
+ * SLA pager's own read already triggers, is the one pre-existing write
+ * this file's own reads happen to cause, not a new one):
  * the existing 2-minute call-alert recovery cron (scheduler.js — the same
  * one missed-call-bell / repeat-caller-bell use) calls sweepPromiseChasers,
  * which re-evaluates every eligible inbound call from the last 30 minutes
@@ -58,8 +62,8 @@
  * bounds everything else regardless of how long the process has been up.
  *
  * Gated by GATE_PROMISE_CHASER_BELL (needs GATE_CALL_COMMITMENTS too — no
- * commitment rows exist without it). Gate off: no query at all. Bell
- * only — no customer comms, no writes to call_commitments.
+ * commitment rows exist without it). Gate off: no query at all, and so no
+ * writes either. Bell only — no customer comms, ever.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -103,11 +107,14 @@ function describePromise(row) {
 }
 
 // Which open Waves promise (if any) this call should ring for — or null,
-// which is NEVER a terminal fact here (nothing is written): a promise
-// whose own commitments extraction hasn't landed yet, or whose fulfillment
-// proof couldn't be verified this instant, reads exactly the same as
-// "genuinely nothing open" — either way, the next tick (still inside the
-// sweep's own window) just re-runs this same read from scratch.
+// which is NEVER a terminal fact here (no promise-chaser-owned state is
+// ever recorded either way — refreshFulfillment's own shared stale-hint
+// stamp below is the SLA pager's own established side effect, not a new
+// claim/tracking write of this file's own): a promise whose own commitments
+// extraction hasn't landed yet, or whose fulfillment proof couldn't be
+// verified this instant, reads exactly the same as "genuinely nothing
+// open" — either way, the next tick (still inside the sweep's own window)
+// just re-runs this same read from scratch.
 async function findPromiseToRing(call, now) {
   // Every open Waves promise (callback / quote / time to come out) made on
   // an EARLIER call for this same contact number — direction-agnostic
@@ -191,9 +198,9 @@ async function findPromiseToRing(call, now) {
 }
 
 // Dispatches the alert for one eligible call, if any open Waves promise
-// still applies and hasn't already rung today. Nothing is ever written to
-// call_log or call_commitments — the bell row itself (checked by dedupeKey
-// before dispatch) is the only durable state this whole file produces.
+// still applies and hasn't already rung today. This file owns no claim,
+// lease, or tracking state of its own — the bell row itself (checked by
+// dedupeKey before dispatch) is the only durable state IT produces.
 async function ringForCall(call, now = new Date()) {
   const found = await findPromiseToRing(call, now);
   if (!found) return false;
