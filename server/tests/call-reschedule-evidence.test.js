@@ -368,6 +368,12 @@ describe('rescheduleAgreementEvidence', () => {
       confirmedStartAt: '2027-01-02T14:00:00-05:00', callStartedAt: '2027-01-01T15:00:00Z' }).ok).toBe(false);
   });
 
+  test('a commitment conditioned on the caller, or on an unanswered proposal, is not an agreement', () => {
+    expect(evidence('Caller: Can we move my visit to Thursday at two?\nAgent: I will do that if you can confirm with your husband.').ok).toBe(false);
+    expect(evidence('Caller: Can we move my visit?\nAgent: Would Thursday at two work for you?\nAgent: You are all set.').ok).toBe(false);
+    expect(evidence('Caller: Can we move my visit?\nAgent: Would Thursday at two work for you?\nCaller: Yes.\nAgent: You are all set.').ok).toBe(true);
+  });
+
   test('"I am" is not a time, and a courtesy "if" does not condition the commitment', () => {
     expect(evidence('Caller: Can we move my visit?\nAgent: We will see you Thursday at two.\nCaller: I am good, thank you.').ok).toBe(true);
     expect(evidence('Caller: Can we move my visit?\nAgent: We will see you Thursday at two, and if you need anything, call us.').ok).toBe(true);

@@ -140,11 +140,15 @@ const COURTESY_CONDITIONS = [
   'if that s all right', 'if you don t mind', 'if it s okay', 'if it s ok', 'if you need anything', 'if you have any questions',
   'if you need to', 'if anything changes', 'if there s any issues', 'if there are any issues', 'if you have any issues',
 ];
+// An agent's closing offer inside the commitment sentence conditions nothing
+// ("We'll see you then, and if you need anything, call us"); a request of the
+// caller does ("I'll do that if you can confirm with your husband").
+const CLOSING_OFFERS = ['if you need anything', 'if you have any questions', 'if anything changes', 'if you need to reschedule'];
 // A condition that is not a courtesy ("if my husband agrees", "only if it
 // doesn't rain").
-function hasCondition(ns) {
+function hasCondition(ns, courtesies = COURTESY_CONDITIONS) {
   let p = padded(ns);
-  for (const phrase of COURTESY_CONDITIONS) p = p.split(padded(phrase)).join(' ');
+  for (const phrase of courtesies) p = p.split(padded(phrase)).join(' ');
   return CONDITION_WORDS.some((w) => p.includes(padded(w)));
 }
 // A hedge, or a condition on the slot from either side.
@@ -160,7 +164,7 @@ function hasAnyMarker(ns, markers) {
 // no condition on it ("We'll see you then, and if you need anything, call
 // us" commits; "We'll see you then if a slot opens up" does not)?
 function commitsToSlot(turn) {
-  return sentenceSpans(turn.raw).some((sentence) => hasAnyMarker(sentence.ns, COMMITMENT_MARKERS) && !hasCondition(sentence.ns));
+  return sentenceSpans(turn.raw).some((sentence) => hasAnyMarker(sentence.ns, COMMITMENT_MARKERS) && !hasCondition(sentence.ns, CLOSING_OFFERS));
 }
 function hasRefusalMarker(ns) {
   const p = padded(ns);
@@ -463,8 +467,12 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
   // that does not affirm does not settle it: either way the slot was not
   // agreed.
   const agentTurnFrom = (from) => turns.findIndex((t, i) => i >= from && t.agent);
+  const nextTurn = (after, agent) => (after < 0 ? -1 : turns.findIndex((t, i) => i > after && t.agent === agent));
   let affirmIdx = agentTurnFrom(anchorIdx);
-  if (affirmIdx === anchorIdx && asksCaller(affirmIdx)) affirmIdx = agentTurnFrom(anchorIdx + 1);
+  // The agent putting the slot to the caller needs the caller's answer before
+  // the next agent turn can commit ("Would Thursday at two work for you?" —
+  // "You are all set" answers nothing).
+  if (affirmIdx === anchorIdx && asksCaller(affirmIdx)) affirmIdx = nextTurn(nextTurn(anchorIdx, false), true);
   if (affirmIdx === -1 || asksCaller(affirmIdx) || !commitsToSlot(turns[affirmIdx])) return failAt('no_affirming_agent_turn');
 
   // A negation on the slot's own words, after it in the turn completing it,
