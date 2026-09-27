@@ -152,6 +152,18 @@ const ALLOWLIST = [
     reason: 'whereIn(status, [blocked, failed, cancelled]) excludes \'sending\' — an unresolved reservation cannot match this status filter.',
   },
   {
+    file: 'services/messaging/deferred-replay-registry.js',
+    snippet: "const row = await db('sms_log')",
+    nth: 1,
+    reason: 'billingTextDurablyAccepted: status-scoped to queued/sent/delivered (excludes sending) AND keyed to notificationEventKey with a real twilio_sid — a send reservation is never a billing-leg provider row.',
+  },
+  {
+    file: 'services/messaging/deferred-replay-registry.js',
+    snippet: "const row = await db('sms_log')",
+    nth: 2,
+    reason: 'billingAppDurablyAccepted: status-scoped to queued/sent/delivered (excludes sending) AND keyed to from_phone \'push\' + notificationEventKey — a send reservation is always an ordinary outbound row, never the push-proof row.',
+  },
+  {
     file: 'services/messaging/sync-optout.js',
     snippet: 'const inbound = await trx(\'sms_log\')',
     reason: 'from_phone = the opting-out customer\'s own number — every send reservation is Waves\' own outbound row and can never match a customer\'s from_phone.',
@@ -345,8 +357,19 @@ const ALLOWLIST = [
   },
   {
     file: 'services/invoice.js',
+    // queuePendingChannelReplay takes its `database` handle as a param
+    // (Codex round-3 P1/P2 #4963: runs under finalizeInvoiceAfterSms's own
+    // transaction so a queue-insert failure is retried with the delivery
+    // stamp) — its own dedup read reads through that param, not the bare
+    // `db` the wrapper's held-SMS-leg queue below still uses, so the two
+    // no longer share one snippet.
+    snippet: 'const existingQueued = await database("sms_log")',
+    reason: 'queuePendingChannelReplay (Codex round-3 P1 #4963): metadata key (entry_point = \'invoice_send_deferred\') is exclusive to this deferred pay-link SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
+  },
+  {
+    file: 'services/invoice.js',
     snippet: 'const existingQueued = await db("sms_log")',
-    reason: 'metadata key (entry_point = \'invoice_send_deferred\') is exclusive to this deferred pay-link SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
+    reason: 'sendViaSMSAndEmail\'s held-SMS-leg queue: same metadata key (entry_point = \'invoice_send_deferred\') exclusive to this deferred pay-link SMS claim — a review-ask/reply reservation never sets it, regardless of any status/direction overlap.',
   },
   {
     file: 'services/invoice.js',
