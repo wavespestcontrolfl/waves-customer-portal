@@ -121,6 +121,11 @@ const NOT_AN_AMOUNT = 'of|details?|accounts?|records?|items?|things?|options?|vi
 const ID_TAG = '(?:\\s+(?:number|no\\.?|n[uú]mero)\\s+|\\s*#\\s*|\\s+)';
 const PRICE_VERB = `(?:${PRICE_VERB_ES}|charges?|costs?|priced\\s+at|price\\s+(?:is|of)|runs?|would\\s+(?:run|cost))`;
 const COUNT_NOUN_AHEAD = '(?!\\s*(?:%|por\\s*ciento|percent|aplicaciones|applications|visitas|visits|veces|times|tratamientos|treatments|meses|months|a[ñn]os|years|d[ií]as|days|semanas|weeks|pies|feet|square|sq\\b|minutos|minutes|horas|hours))';
+// A bare amount after a plan/price noun and copula is customer-facing price
+// copy too ("el plan trimestral es 150"). Keep this grammar shared with
+// amount_requires_unit so disclosure and unit enforcement see the same construction.
+const PLAN_NOUN = '(?:programa|plan|premium|mejorado|b[aá]sico|servicio|tratamiento|precio|opci[oó]n|paquete|costo|tarifa|program|enhanced|basic|service|treatment|price|option|package|cost|rate)';
+const PLAN_COPULA = `\\b${PLAN_NOUN}\\b[^.!?;,\\d$]{0,30}?\\b(?:es|son|ser[íi]an?|queda\\s+en|est[áa]\\s+en|is|are|would\\s+be|will\\s+be)\\s+(?:de\\s+|about\\s+|around\\s+)?`;
 const AMOUNT_RES = Object.freeze([
   new RegExp(`\\$\\s?(${DIGITS})`, 'gi'),
   new RegExp(`(?<![\\d.,$])\\b(${DIGITS})\\s*(?:dollars?|bucks|d[oó]lares?|pesos?)\\b`, 'gi'),
@@ -133,6 +138,7 @@ const AMOUNT_RES = Object.freeze([
   // right after the noun ("invoice 2026-0812 is $129", "invoice number 4471",
   // "account 88213") are not amounts.
   new RegExp(`\\b(?:(?:${ID_NOUNS})${ID_TAG}\\d[\\d-]*\\b[^.!?;]{0,30}?|(?:${ID_NOUNS})\\b(?!${ID_TAG}\\d)[^.!?;]{0,30}?|(?:balance|total|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|monto|debe|precio|cuesta|cobra|tarifa|${PRICE_VERB})(?![a-záéíóúñ])[^.!?;]{0,30}?)(?<![\\d.,$-])(?<!\\b(?:${MONTHS})\\s(?:the\\s)?)(?<!\\b(?:${MONTHS})\\s\\d{1,2},?\\s)\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b${COUNT_NOUN_AHEAD}(?!\\s+de\\s+(?:${MONTHS})\\b)(?![\\d,.]*\\s*(?:${NOT_AN_AMOUNT})\\b)`, 'gi'),
+  new RegExp(`${PLAN_COPULA}(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b${COUNT_NOUN_AHEAD}`, 'gi'),
 ]);
 
 function amountMentions(text) {
@@ -201,8 +207,6 @@ const BARE_YEAR_NUMBER = `(?:${PRICE_NUMBER}|\\b${NUMBER_RUN_ES})`;
 // a quantity, not a price).
 // Codex r11 on #4946: a copular plan price ("el premium es 150", "premium
 // is 150") — a plan/price noun, a copula, then the figure — is a price too.
-const PLAN_NOUN = '(?:programa|plan|premium|mejorado|b[aá]sico|servicio|tratamiento|precio|opci[oó]n|paquete|costo|tarifa|program|enhanced|basic|service|treatment|price|option|package|cost|rate)';
-const PLAN_COPULA = `\\b${PLAN_NOUN}\\b[^.!?;,\\d$]{0,30}?\\b(?:es|son|ser[íi]an?|queda\\s+en|est[áa]\\s+en|is|are|would\\s+be|will\\s+be)\\s+(?:de\\s+|about\\s+|around\\s+)?`;
 const priceRe = (unit) => new RegExp(`\\$\\s?(${PRICE_NUMBER})|(${PRICE_NUMBER})\\s*(?:dollars?|bucks|d[oó]lares?)\\b|(${PRICE_NUMBER})\\s*(?:per|an?|each|every|for each|for every|por|cada)\\s+${unit}s?\\b|(${BARE_BILLED_NUMBER})\\s*(?:per|each|every|por|cada)\\s+${SERVICE_BILLING_UNIT}(?![a-záéíóúñ])|(${BARE_BILLED_NUMBER})\\s*(?:per|each|every|por|cada|al)\\s+${PERIOD_BILLING_UNIT}(?![a-záéíóúñ])|(${BARE_YEAR_NUMBER})\\s*(?:per|each|every|por|cada|al)\\s+${YEAR_BILLING_UNIT}(?![a-záéíóúñ])|\\b${PRICE_VERB}\\s+(?:de\\s+|about\\s+|around\\s+)?(${BARE_BILLED_NUMBER})${COUNT_NOUN_AHEAD}|${PLAN_COPULA}(${BARE_BILLED_NUMBER})${COUNT_NOUN_AHEAD}`, 'gi');
 // Customer-facing price copy reads "per application"/"por aplicación" —
 // AGENTS.md; "per visit"/"por visita"/"cada visita" is banned outright,
