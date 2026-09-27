@@ -195,6 +195,11 @@ describe('rescanLive — stale seeded rows are re-checked before drafting (Codex
       expect(await seeder.rescanLive(opp, { publisher })).toEqual({ gaps: [], results: {}, ineligible: true });
     }
   });
+  test('re-derives the topic from the live frontmatter (Codex P2, 2026-09-27)', async () => {
+    const publisher = { loadExistingPageBody: async () => ({ source_file: 'src/content/blog/pest/ghost.mdx', body: POOR.slice(FM().length), frontmatter: { title: 'Bed Bugs After Travel', category: 'pest-control', related_services: ['bed-bug-treatment'] } }) };
+    const r = await seeder.rescanLive({ ...opp, page_url: '/pest/ghost/', service: 'pest', signal_metadata: { specialty_topic: null } }, { publisher });
+    expect(r).toMatchObject({ service: seeder._internals.serviceForPost({ category: 'pest-control', related_services: ['bed-bug-treatment'] }), specialty_topic: 'bed-bug' });
+  });
   test('unreadable page → null (caller keeps the seeded gaps)', async () => {
     expect(await seeder.rescanLive(opp, { publisher: { loadExistingPageBody: async () => null } })).toBeNull();
     expect(await seeder.rescanLive({ ...opp, page_url: null }, { publisher: { loadExistingPageBody: jest.fn() } })).toBeNull();

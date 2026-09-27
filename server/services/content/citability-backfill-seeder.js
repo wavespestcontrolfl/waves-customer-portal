@@ -210,7 +210,16 @@ async function rescanLive(opportunity, { publisher = require('../content-astro/a
   }
   if (!live.source_file) return null;
   const scan = scanParsed({ frontmatter: fmData, body: live.body, url, file: live.source_file });
-  return { gaps: scan.gaps, results: scan.results, ineligible: false };
+  // The topic can change over the wait too (a broad pest post retagged bed
+  // bugs): re-derive it so compose's FAQ_BLOCKED_SERVICE check and facts
+  // lookups follow the article as it reads now (Codex P2, 2026-09-27).
+  return {
+    gaps: scan.gaps,
+    results: scan.results,
+    ineligible: false,
+    service: serviceForPost(fmData),
+    specialty_topic: specialtyTopicForPost(fmData, url),
+  };
 }
 
 function dedupeKeyFor(url) {

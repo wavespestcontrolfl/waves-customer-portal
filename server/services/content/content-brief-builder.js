@@ -453,7 +453,15 @@ class ContentBriefBuilder {
         return null;
       });
       if (live) {
-        opp = { ...opp, signal_metadata: { ...(opp.signal_metadata || {}), citability_gaps: live.gaps, citability_scan: live.results } };
+        // A readable live page also re-derives the topic, replacing the
+        // seed-time service / specialty_topic the FAQ guard reads.
+        const liveTopic = live.service ? { service: live.service } : {};
+        const liveSpecialty = live.service ? { specialty_topic: live.specialty_topic || null } : {};
+        opp = {
+          ...opp,
+          ...liveTopic,
+          signal_metadata: { ...(opp.signal_metadata || {}), citability_gaps: live.gaps, citability_scan: live.results, ...liveSpecialty },
+        };
         citabilityIneligible = !!live.ineligible;
         citabilityResolved = !citabilityIneligible && live.gaps.length === 0;
       }

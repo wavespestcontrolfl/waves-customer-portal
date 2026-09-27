@@ -1077,10 +1077,17 @@ describe('compose — citability backfill re-scans the live page first (Codex P2
     expect(out.decision.action_type).toBe('refresh_existing_page');
     expect(out.opportunity.signal_metadata.citability_gaps).toEqual(['comparison', 'how_to_choose']);
   });
+  test('the live topic replaces the seed-time service and specialty topic (Codex P2, 2026-09-27)', async () => {
+    jest.spyOn(seeder, 'rescanLive').mockResolvedValue({ gaps: ['named_sources'], results: {}, service: 'pest', specialty_topic: 'bed-bug' });
+    const out = await stubBuilder({ ...opp, service: 'lawn', signal_metadata: { ...opp.signal_metadata, specialty_topic: null } }).compose(7, { persist: false });
+    expect(out.opportunity.service).toBe('pest');
+    expect(out.opportunity.signal_metadata.specialty_topic).toBe('bed-bug');
+  });
   test('unreadable page → seeded gaps kept', async () => {
     jest.spyOn(seeder, 'rescanLive').mockResolvedValue(null);
-    const out = await stubBuilder(opp).compose(7, { persist: false });
+    const out = await stubBuilder({ ...opp, service: 'pest', signal_metadata: { ...opp.signal_metadata, specialty_topic: 'wasp' } }).compose(7, { persist: false });
     expect(out.opportunity.signal_metadata.citability_gaps).toEqual(['named_sources', 'comparison']);
+    expect(out.opportunity.signal_metadata.specialty_topic).toBe('wasp');
   });
 });
 
