@@ -22,6 +22,7 @@ import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { pestDefaultMixSelections } from '../../lib/pest-default-mix';
+import { defaultApplicationMethodForLine, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import { shouldResetCompletionIdempotencyKey } from '../../lib/completion-idempotency';
 import { UiSurface, Button, Field, Input, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
@@ -37,11 +38,38 @@ const AMOUNT_UNITS = ['oz', 'fl_oz', 'ml', 'g', 'lb', 'gal'];
 const unitLabel = (unit) => String(unit || '').replace(/_/g, ' ');
 const hasAmount = (row) => Number(row.totalAmount) > 0;
 
-// The one application method this screen ever submits: no linear-ft/sqft
-// field fits on one screen, and spot_treatment is the one method that
-// requires neither (requiredApplicationArea, server-mirrored in
-// complete-scheduled-service.js's requires*ForReportApplication).
-const SUBMIT_APPLICATION_METHOD = 'spot_treatment';
+// How the non-bait products went down. Spot treatment needs no measured
+// area; a perimeter spray records its linear feet (the application record's
+// area and the server's perimeter-footage check). Bait and gel products are
+// always recorded as bait placement.
+const METHOD_CHOICES = [
+  { value: 'spot_treatment', label: 'Spot treatment' },
+  { value: 'perimeter_spray', label: 'Perimeter spray' },
+];
+
+// The application rate the recap form prefills for this product (the shared
+// resolver at the product's own default pest method). It starts the row;
+// the tech can change it under "Edit amounts", and completing records it.
+function catalogRate(product, serviceType) {
+  const applicationMethod = defaultApplicationMethodForLine(product, 'pest', { serviceType });
+  const resolved = resolveRatePrefill(product, { applicationMethod, serviceLine: 'pest' });
+  const rate = Number(resolved.rate);
+  return Number.isFinite(rate) && rate > 0 && resolved.rateUnit
+    ? { rate: String(rate), rateUnit: resolved.rateUnit }
+    : { rate: '', rateUnit: '' };
+}
+
+function productRow(product, serviceType, totalAmount) {
+  return {
+    productId: product.id,
+    name: product.name,
+    totalAmount,
+    amountUnit: DEFAULT_MIX_UNIT,
+    ...catalogRate(product, serviceType),
+    bait: defaultApplicationMethodForLine(product, 'pest') === 'bait_placement',
+    active: true,
+  };
+}
 
 const PEST_CHIPS = ['Ants', 'Roaches', 'Spiders', 'Silverfish', 'Wasps', 'Earwigs'];
 const PEST_CHIPS_MORE = ['Fleas', 'Crickets', 'Centipedes', 'Other'];
@@ -135,6 +163,9 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   const [areas, setAreas] = useState(() => new Set());
   const [activity, setActivity] = useState('');
   const [note, setNote] = useState('');
+  const [otherPest, setOtherPest] = useState('');
+  const [method, setMethod] = useState('spot_treatment');
+  const [linearFt, setLinearFt] = useState('');
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -157,9 +188,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
         const products = Array.isArray(data?.products) ? data.products : [];
         setCatalog(products);
         const mix = pestDefaultMixSelections(products);
-        setProductRows(mix.map(({ product, totalAmount }) => ({
-          productId: product.id, name: product.name, totalAmount, amountUnit: DEFAULT_MIX_UNIT, active: true,
-        })));
+        setProductRows(mix.map(({ product, totalAmount }) => productRow(product, service?.serviceType, totalAmount)));
       } catch (err) {
         if (active) setLoadError(err?.message || 'Failed to load products');
       } finally {
@@ -167,7 +196,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
       }
     })();
     return () => { active = false; };
-  }, [base, request]);
+  }, [base, request, service?.serviceType]);
 
   const toggleProductActive = useCallback((productId) => {
     setProductRows((prev) => prev.map((row) => (
@@ -186,12 +215,12 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
     setProductRows((prev) => (
       prev.some((row) => row.productId === product.id)
         ? prev.map((row) => (row.productId === product.id ? { ...row, active: true } : row))
-        : [...prev, { productId: product.id, name: product.name, totalAmount: '', amountUnit: DEFAULT_MIX_UNIT, active: true }]
+        : [...prev, productRow(product, service?.serviceType, '')]
     ));
     setEditAmounts(true);
     setShowAddProduct(false);
     setAddProductQuery('');
-  }, []);
+  }, [service?.serviceType]);
 
   const addableProducts = useMemo(() => {
     const already = new Set(productRows.map((row) => row.productId));
@@ -206,10 +235,17 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
 
   const activeProducts = productRows.filter((row) => row.active);
   const missingAmount = activeProducts.find((row) => !hasAmount(row));
-  const missingReason = !activeProducts.length
-    ? 'Select at least one product.'
-    : missingAmount ? `Enter the amount for ${missingAmount.name}.`
-      : !pests.size ? 'Select at least one pest.' : !activity ? 'Select activity seen.' : '';
+  const needsLinearFt = method === 'perimeter_spray' && activeProducts.some((row) => !row.bait);
+  // Every requirement the application record needs, in screen order.
+  const missingReason = [
+    [!activeProducts.length, 'Select at least one product.'],
+    [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
+    [!pests.size, 'Select at least one pest.'],
+    [pests.has('Other') && !otherPest.trim(), 'Name the other pest.'],
+    [!areas.size, 'Select where you treated.'],
+    [needsLinearFt && !(Number(linearFt) > 0), 'Enter the linear feet you sprayed.'],
+    [!activity, 'Select activity seen.'],
+  ].find(([missing]) => missing)?.[1] || '';
 
   const close = useCallback(() => { if (!submitting) onClose?.(); }, [submitting, onClose]);
   closeRef.current = close;
@@ -219,7 +255,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
     submitInFlight.current = true;
     setSubmitting(true);
     setError('');
-    const targets = [...pests];
+    const targets = [...pests].map((pest) => (pest === 'Other' ? otherPest.trim() : pest));
     // Where is recorded on each product row too: service_products'
     // application_area comes only from the row (the full form sends the same
     // comma-joined string), so the application record keeps the location.
@@ -227,14 +263,19 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
     const body = pendingBodyRef.current || {
       idempotencyKey: idempotencyKeyRef.current,
       visitOutcome: 'completed',
-      products: activeProducts.map((row) => ({
-        productId: row.productId,
-        applicationMethod: SUBMIT_APPLICATION_METHOD,
-        targets,
-        totalAmount: Number(row.totalAmount),
-        amountUnit: row.amountUnit,
-        ...(applicationArea ? { applicationArea } : {}),
-      })),
+      products: activeProducts.map((row) => {
+        const applicationMethod = row.bait ? 'bait_placement' : method;
+        return {
+          productId: row.productId,
+          applicationMethod,
+          targets,
+          totalAmount: Number(row.totalAmount),
+          amountUnit: row.amountUnit,
+          applicationArea,
+          ...(Number(row.rate) > 0 && row.rateUnit ? { rate: Number(row.rate), rateUnit: row.rateUnit } : {}),
+          ...(applicationMethod === 'perimeter_spray' ? { areaValue: Number(linearFt), areaUnit: 'linear_ft' } : {}),
+        };
+      }),
       areasServiced: [...areas],
       clientPestRating: ACTIVITY_LEVELS.find((a) => a.value === activity)?.rating ?? null,
       technicianNotes: note.trim(),
@@ -274,7 +315,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
       setSubmitting(false);
       submitInFlight.current = false;
     }
-  }, [base, request, missingReason, activeProducts, pests, areas, activity, note]);
+  }, [base, request, missingReason, activeProducts, pests, otherPest, areas, method, linearFt, activity, note]);
 
   // Nothing is editable while a save is in flight, unresolved, or refused
   // for good. The recap modal (Full form) can't resume a /complete attempt,
@@ -368,6 +409,11 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
                   ))
                   : <Chip disabled={locked} label="More" onClick={() => setShowMorePests(true)} />}
               </div>
+              {pests.has('Other') && (
+                <Field label="Which pest?" className="tech-visit-field">
+                  <Input className="tech-visit-control" value={otherPest} onChange={(e) => setOtherPest(e.target.value)} placeholder="e.g. palmetto bugs" />
+                </Field>
+              )}
 
               <h3 className="tech-visit-section-title">Where</h3>
               <div className="tech-visit-tile-grid">
@@ -375,6 +421,18 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
                   <Chip disabled={locked} key={label} label={label} pressed={areas.has(label)} onClick={() => toggleArea(label)} />
                 ))}
               </div>
+
+              <h3 className="tech-visit-section-title">How</h3>
+              <div className="tech-visit-tile-grid">
+                {METHOD_CHOICES.map((choice) => (
+                  <Chip disabled={locked} key={choice.value} label={choice.label} pressed={method === choice.value} onClick={() => setMethod(choice.value)} />
+                ))}
+              </div>
+              {needsLinearFt && (
+                <Field label="Linear ft sprayed" className="tech-visit-field">
+                  <Input className="tech-visit-control" type="number" inputMode="decimal" min="0" step="any" value={linearFt} onChange={(e) => setLinearFt(e.target.value)} />
+                </Field>
+              )}
 
               <h3 className="tech-visit-section-title">Activity seen</h3>
               <div className="tech-visit-tile-grid">
@@ -409,7 +467,9 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
 
 function AmountRow({ row, onChange }) {
   const inputId = useId();
+  const rateId = useId();
   return (
+    <>
     <div className="tech-visit-amount-row">
       <label htmlFor={inputId} className="tech-visit-amount-label">{row.name}</label>
       <Input
@@ -431,6 +491,23 @@ function AmountRow({ row, onChange }) {
         {AMOUNT_UNITS.map((unit) => <option key={unit} value={unit}>{unitLabel(unit)}</option>)}
       </select>
     </div>
+    {row.rateUnit ? (
+      <div className="tech-visit-amount-row">
+        <label htmlFor={rateId} className="tech-visit-amount-label">{`${row.name} rate`}</label>
+        <Input
+          id={rateId}
+          className="tech-visit-control"
+          type="number"
+          inputMode="decimal"
+          min="0"
+          step="any"
+          value={row.rate ?? ''}
+          onChange={(e) => onChange({ rate: e.target.value })}
+        />
+        <span className="tech-visit-amount-label">{unitLabel(row.rateUnit)}</span>
+      </div>
+    ) : null}
+    </>
   );
 }
 

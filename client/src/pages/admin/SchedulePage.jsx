@@ -898,9 +898,6 @@ export function createCompletionIdempotencyKey(serviceId) {
   return `complete_${serviceId}_${randomPart}`;
 }
 
-// Moved to lib/completion-idempotency (shared with the tech Fast Complete
-// sheet); re-exported so this module's named export stays in place.
-export { shouldResetCompletionIdempotencyKey };
 
 // completion_side_effects_running means the completion COMMITTED (the claim
 // only returns it for an attempt that already has a service_record) and the

@@ -14,10 +14,10 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 // Catalog carrying the exact house pest mix (lib/pest-default-mix.js) plus
 // one extra product the tech can add manually.
 const CATALOG = [
-  { id: 'taurus', name: 'Taurus SC', category: 'Insecticide' },
+  { id: 'taurus', name: 'Taurus SC', category: 'Insecticide', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
   { id: 'talstar', name: 'Talstar P', category: 'Insecticide' },
   { id: 'surfactant', name: 'Non-ionic Surfactant', category: 'adjuvant' },
-  { id: 'extra', name: 'Advion Ant Bait Gel', category: 'Insecticide' },
+  { id: 'extra', name: 'Advion Ant Bait Gel', category: 'Bait' },
 ];
 
 function makeRequest() {
@@ -69,7 +69,7 @@ describe('FastCompleteSheet', () => {
     expect(taurus.getAttribute('aria-pressed')).toBe('true');
   });
 
-  test('submit is blocked until a product, a pest and an activity are all selected', async () => {
+  test('submit is blocked until product, pest, where and activity are all set', async () => {
     const request = makeRequest();
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
 
@@ -85,14 +85,50 @@ describe('FastCompleteSheet', () => {
     expect(screen.getByText('Select at least one product.')).toBeTruthy();
     expect(submit.disabled).toBe(true);
 
-    // Restore a product, add a pest — still missing activity.
+    // Restore a product, add a pest — still missing where, then activity.
     fireEvent.click(screen.getByRole('button', { name: /Taurus SC/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    expect(screen.getByText('Select where you treated.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Outside' }));
     expect(screen.getByText('Select activity seen.')).toBeTruthy();
     expect(submit.disabled).toBe(true);
 
     fireEvent.click(screen.getByRole('button', { name: 'Light' }));
     expect(submit.disabled).toBe(false);
+  });
+
+  test('a perimeter spray records its linear feet; bait stays bait placement; Other needs a name', async () => {
+    const request = makeRequest();
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
+
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: '+ Add product' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Advion Ant Bait Gel' }));
+    fireEvent.change(screen.getByLabelText('Advion Ant Bait Gel'), { target: { value: '30' } });
+    fireEvent.change(screen.getByLabelText('Unit for Advion Ant Bait Gel'), { target: { value: 'g' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'More' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }));
+    expect(screen.getByText('Name the other pest.')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Which pest?'), { target: { value: 'Palmetto bugs' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Outside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Perimeter spray' }));
+    expect(screen.getByText('Enter the linear feet you sprayed.')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Linear ft sprayed'), { target: { value: '140' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Heavy' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+
+    await waitFor(() => {
+      expect(request.calls.some((c) => c.path.endsWith('/complete'))).toBe(true);
+    });
+    const body = JSON.parse(request.calls.find((c) => c.path.endsWith('/complete')).options.body);
+    const taurus = body.products.find((p) => p.productId === 'taurus');
+    expect(taurus).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: 140, areaUnit: 'linear_ft', applicationArea: 'Outside' });
+    expect(taurus.targets).toEqual(['Ants', 'Palmetto bugs']);
+    const bait = body.products.find((p) => p.productId === 'extra');
+    expect(bait.applicationMethod).toBe('bait_placement');
+    expect(bait.areaValue).toBeUndefined();
   });
 
   test('submits the full-completion body shape and shows the done view', async () => {
@@ -127,6 +163,10 @@ describe('FastCompleteSheet', () => {
     expect(body.products).toHaveLength(3);
     const taurus = body.products.find((p) => p.productId === 'taurus');
     expect(taurus).toMatchObject({ totalAmount: 4, amountUnit: 'oz', applicationMethod: 'spot_treatment' });
+    // The same rate the recap form prefills (the shared resolver at the
+    // product's default pest method: the 4-oz perimeter house default when
+    // the catalog has no per-1,000 rate).
+    expect(taurus).toMatchObject({ rate: 4, rateUnit: 'oz' });
     expect(taurus.targets).toEqual(['Ants', 'Roaches']);
     // Where rides each product row for the application record.
     expect(taurus.applicationArea).toBe('Inside');
@@ -164,6 +204,7 @@ describe('FastCompleteSheet', () => {
 
     await screen.findByRole('button', { name: /Taurus SC/ });
     fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
     fireEvent.click(screen.getByRole('button', { name: 'Light' }));
     fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
     expect(await screen.findByText('Completion failed.')).toBeTruthy();
@@ -183,6 +224,7 @@ describe('FastCompleteSheet', () => {
 
     await screen.findByRole('button', { name: /Taurus SC/ });
     fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
     fireEvent.click(screen.getByRole('button', { name: 'Light' }));
     fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
     expect(await screen.findByText(/couldn't confirm it saved/)).toBeTruthy();
@@ -215,6 +257,7 @@ describe('FastCompleteSheet', () => {
 
     await screen.findByRole('button', { name: /Taurus SC/ });
     fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
     fireEvent.click(screen.getByRole('button', { name: 'Light' }));
     fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
 
@@ -241,6 +284,7 @@ describe('FastCompleteSheet', () => {
 
     await screen.findByRole('button', { name: /Taurus SC/ });
     fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
     fireEvent.click(screen.getByRole('button', { name: 'Light' }));
     fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
     expect(await screen.findByText(/already saved. The office will finish anything still pending/)).toBeTruthy();
@@ -262,6 +306,7 @@ describe('FastCompleteSheet', () => {
 
     await screen.findByRole('button', { name: /Taurus SC/ });
     fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
     fireEvent.click(screen.getByRole('button', { name: 'Light' }));
     fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
 
@@ -281,6 +326,7 @@ describe('FastCompleteSheet', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Advion Ant Bait Gel' }));
 
     fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
     fireEvent.click(screen.getByRole('button', { name: 'Light' }));
     const submit = screen.getByRole('button', { name: 'Complete re-service' });
     expect(screen.getByText('Enter the amount for Advion Ant Bait Gel.')).toBeTruthy();
