@@ -119,7 +119,9 @@ const WITNESS_TRANSITION_STATUSES = Object.freeze(['confirmed', 'rescheduled', '
 // payment go through?" asks about a setup fee, Codex #4996 r5), nor a payment
 // as the thing changed ("did you add my cash payment?" asks whether it was
 // recorded, r7): the change must be to a card, method, autopay or billing.
-const NOT_ANSWERED_BY_PAYMENT = /\b(?:(?:two|2|multiple)\s+(?:payment\s+)?(?:methods|cards)|(?:update|change|switch|replace|remove|add|set up|cancel|turn (?:on|off))\s+(?:\w+\s+){0,3}?(?:cards?|methods?|autopay|auto ?pay|billing)|setup\s+(?:autopay|auto ?pay)|refund\w*|disput\w*|chargeback\w*|overcharg\w*|double[- ]?charg\w*)\b/i;
+// Money going back is named many ways: reverse or void a charge, return or
+// cancel a payment, "put it back", "my money back" (Codex #4996 r12).
+const NOT_ANSWERED_BY_PAYMENT = /\b(?:(?:two|2|multiple)\s+(?:payment\s+)?(?:methods|cards)|(?:update|change|switch|replace|remove|add|set up|cancel|turn (?:on|off))\s+(?:\w+\s+){0,3}?(?:cards?|methods?|autopay|auto ?pay|billing)|setup\s+(?:autopay|auto ?pay)|refund\w*|disput\w*|chargeback\w*|overcharg\w*|double[- ]?charg\w*|revers(?:e|es|ed|al|ing)|void(?:s|ed|ing)?|money back|(?:give|send|put|credit)\w*\s+(?:\w+\s+){0,3}?back|pay\s+(?:me|us)\s+back|return\w*\s+(?:\w+\s+){0,2}?(?:money|payment|charge|funds)|cancel\w*\s+(?:\w+\s+){0,2}?(?:charge|payment|transaction))\b/i;
 // The ask itself decides, whatever its grammar. The extractor grounds a
 // description as a verbatim phrase of its quote naming the requested action
 // (groundExtraction), so when it is found there the rest of the quote is
@@ -165,14 +167,17 @@ const FEE_PURPOSES = ['card_hold_no_show_fee', 'appointment_card_no_show_fee'];
 // the payer column that customer-keyed payment readers exclude, or the payer
 // a webhook stamps in metadata);
 // not a prepaid balance applied at completion (the invoice leg explains);
-// not a fee; not refunded in full; and no refund in flight —
-// StripeService.refund stamps pending_refund_key before it calls Stripe and
-// clears it only once Stripe has answered, so a row carrying it may be
-// refunded at any moment (Codex #4996 r9).
+// not a fee; not part of a combined balance charge (a partial refund of
+// one is parked for the operator, stripe_orphan_charges, and never reaches
+// its rows, so they cannot show what was returned — Codex #4996 r12); not
+// refunded in full; and no refund in flight — StripeService.refund stamps
+// pending_refund_key before it calls Stripe and clears it only once Stripe
+// has answered, so a row carrying it may be refunded at any moment (r9).
 const paymentEvidenceRow = (t) => `${t}.status = 'paid'
   AND ${t}.payer_id IS NULL AND COALESCE(${t}.metadata::jsonb ->> 'payer_id', '') = ''
   AND COALESCE(${t}.metadata::jsonb ->> 'source', '') <> 'scheduled_service_prepaid'
   AND COALESCE(${t}.metadata::jsonb ->> 'purpose', '') NOT IN (${FEE_PURPOSES.map((purpose) => `'${purpose}'`).join(', ')})
+  AND COALESCE(${t}.metadata::jsonb ->> 'combined_payment', '') <> 'true'
   AND COALESCE(${t}.metadata::jsonb ->> 'pending_refund_key', '') = ''
   AND ${NOT_FULLY_REFUNDED(t)}`;
 const refundNote = (refunded) => (Number(refunded) > 0 ? `; $${Number(refunded).toFixed(2)} of it refunded` : '');
@@ -181,8 +186,10 @@ const refundNote = (refunded) => (Number(refunded) > 0 ? `; $${Number(refunded).
 // Structured fields only, each from an allowlist: the free-form method some
 // writers accept (the /prepaid route) never reaches the model. The
 // payment's own snapshot columns come first and its saved method only fills
-// a gap; deleting that method copies it into the same columns
-// (20260924000032), so the text never moves under a close.
+// a gap (a bank account's last four lives in its own column, Codex #4996
+// r12); deleting that method copies it into the same columns (20260924000032,
+// the bank digits since 20260927150000), so the text never moves under a
+// close.
 const TENDERS = { cash: 'cash', check: 'check', zelle: 'Zelle', venmo: 'Venmo', paypal: 'PayPal', card: 'card', card_present: 'card',
   ach: 'bank account (ACH)', us_bank_account: 'bank account (ACH)', apple_pay: 'Apple Pay', google_pay: 'Google Pay', link: 'Link' };
 const CARD_BRANDS = { visa: 'Visa', mastercard: 'Mastercard', amex: 'American Express', american_express: 'American Express',
@@ -201,7 +208,7 @@ function tenderText(row) {
 const tenderColumns = (conn, t, fallback = () => '') => [
   conn.raw(`COALESCE(${t}.payment_method_type, ${t}_method.method_type, ${t}.metadata::jsonb ->> 'payment_method'${fallback('payment_method')}) AS method_type`),
   conn.raw(`COALESCE(${t}.card_brand, ${t}_method.card_brand${fallback('card_brand')}) AS card_brand`),
-  conn.raw(`COALESCE(${t}.card_last_four, ${t}_method.last_four${fallback('card_last_four')}) AS last_four`),
+  conn.raw(`COALESCE(${t}.card_last_four, ${t}_method.last_four, ${t}_method.bank_last_four${fallback('card_last_four')}) AS last_four`),
   conn.raw(`${t}.metadata::jsonb ->> 'method' AS method`)];
 // A card payment's amount includes its surcharge (stripe.js); the invoice
 // amount it paid rides beside it, so either figure can be matched (Codex
@@ -285,9 +292,8 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // request is tied to an invoice — exact metadata naming it, OR the one
       // durable link a manually recorded self-pay settlement leaves (below),
       // OR a shared PaymentIntent on a row that names no invoice at all
-      // (rule 3, rule 5, rule 8). A combined-balance charge writes one row
-      // per invoice, each naming its own allocation (pay-combined.js), so a
-      // SIBLING's row never vouches for this invoice (Codex round 1 P2).
+      // (rule 3, rule 5, rule 8). A combined-balance charge's rows, one per
+      // invoice it covers, are not evidence at all (paymentEvidenceRow).
       const exactMatchSql = namesInvoice('p', 'pinv.id::text');
       // invoice-manual-payment.js's self-pay path clears
       // stripe_payment_intent_id and stamps NO metadata linking the invoice
@@ -341,12 +347,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         // the row names first, then the manual stamp, then a shared
         // PaymentIntent. A metadata key the row lacks compares as NULL, which
         // DESC would sort first, so each link ranks as true or false.
-        // A combined-balance charge books one row per invoice it covers
-        // (pay-combined.js); each carries the whole charge's total, so a
-        // question about the full amount has one record to quote (Codex
-        // #4996 r7).
-        conn.select('*', conn.raw('SUM(payment_amount) OVER (PARTITION BY charge_key) AS charge_total'),
-          conn.raw('COUNT(*) OVER (PARTITION BY charge_key) AS charge_invoices')).from(conn('payments as p')
+        conn.select('*').from(conn('payments as p')
           .joinRaw(`JOIN invoices pinv ON pinv.customer_id = p.customer_id AND pinv.payer_id IS NULL
             AND (${exactMatchSql} OR ${manualMatchSql} OR ${sharedPiSql})`)
           .leftJoin('scheduled_services as pinv_visit', 'pinv_visit.id', 'pinv.scheduled_service_id')
@@ -380,7 +381,6 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
             ...tenderColumns(conn, 'p', invoiceTender),
             conn.raw(`${settledAtSql} AS settled_at`), 'pinv.id as invoice_id', 'pinv.title', 'pinv.service_type', 'pinv.invoice_number',
             conn.raw('COALESCE(pinv_visit.property_id, sfc_visit.property_id, sfc_estimate.property_id, prepay_estimate.property_id) AS property_id'),
-            conn.raw('COALESCE(p.stripe_payment_intent_id, p.id::text) AS charge_key'),
             conn.raw('pinv.paid_at IS NOT NULL AS paid_in_full'))
           .as('invoice_payments'))
           .orderBy([{ column: 'settled_at', order: 'desc' }, { column: 'id', order: 'desc' }]).limit(LIMIT + 1),
@@ -433,13 +433,12 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         const untendered = ({ method_type: _type, card_brand: _brand, last_four: _lastFour, method: _method, ...row }) => row;
         const legs = [
           invoicePayments.map((payment) => {
-            const { paid_in_full: paidInFull, charge_key: _charge, charge_total: chargeTotal, charge_invoices: chargeInvoices, ...row } = untendered(payment);
+            const { paid_in_full: paidInFull, ...row } = untendered(payment);
             return { ...row, property_id: row.property_id || soleProperty, payment_source: 'invoice',
               text: `Payment of ${paidAmount(row.payment_amount, row)}${tenderText(payment)} toward invoice ${row.invoice_number || row.invoice_id}`
                 + `${row.title || row.service_type ? ` (${row.title || row.service_type})` : ''}`
                 + ` received ${etDateString(new Date(row.settled_at))}${refundNote(row.refund_amount)}`
-                + `${paidInFull ? '; the invoice is paid in full' : ''}`
-                + `${Number(chargeInvoices) > 1 ? `; part of one $${Number(chargeTotal).toFixed(2)} charge covering ${chargeInvoices} invoices` : ''}` };
+                + `${paidInFull ? '; the invoice is paid in full' : ''}` };
           }),
           ledger.map((payment) => {
             const { billed_month: billedMonth, ...row } = untendered(payment);

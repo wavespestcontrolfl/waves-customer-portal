@@ -5485,6 +5485,12 @@ const StripeService = {
       let resolvedPaymentMethod = pi.payment_method_types?.[0] || 'card';
       let bankLastFour = null;
       let pmdType = null;
+      // A card charge settles when Stripe creates it; its own timestamp is
+      // the settlement moment readers date the payment by, never this
+      // handler's run time — a /confirm that repairs a missing row days
+      // later must not date old money as new (Codex #4996 r12). A bank
+      // charge settles later; the succeeded webhook stamps that one.
+      let chargeCreated = null;
 
       // Get receipt and card info from the charge
       if (charge) {
@@ -5493,6 +5499,7 @@ const StripeService = {
             ? await stripe.charges.retrieve(charge)
             : charge;
           receiptUrl = chargeObj.receipt_url || null;
+          chargeCreated = Number(chargeObj.created) || null;
           const pmd = chargeObj.payment_method_details;
           pmdType = pmd?.type || null;
           if (pmd?.card) {
@@ -5879,6 +5886,8 @@ const StripeService = {
             charged_amount: chargedTotal,
             payment_method: resolvedPaymentMethod,
             payment_state: paymentStatus,
+            ...(paymentStatus === 'paid' && pmdType === 'card' && chargeCreated > 0
+              ? { settled_event_at: new Date(chargeCreated * 1000).toISOString() } : {}),
           }),
         };
 
@@ -5901,24 +5910,22 @@ const StripeService = {
           // the payments row before it settles the invoice, so /confirm racing
           // (or repairing after) a half-applied webhook must still be able to
           // mark the open invoice paid — money genuinely arrived (Codex P2).
-          // A webhook that flipped the row first stamped Stripe's settlement
-          // moment and, for payer-funded money, the payer; the rewrite keeps
-          // both, or an ACH that settled days after it began would read as
-          // settled when it started and payer money as the homeowner's own
-          // (Codex #4996 r11).
+          // The rewrite merges into the row's metadata rather than replacing
+          // it: what a webhook or a refund stamped first stays — Stripe's
+          // settlement moment, the payer of payer-funded money, a refund
+          // attempt in flight — or an ACH that settled days after it began
+          // would read as settled when it started, payer money as the
+          // homeowner's own, and a refund in flight as untouched money
+          // (Codex #4996 r11/r12).
           let priorMeta = {};
           try {
             priorMeta = existingPayment.metadata
               ? (typeof existingPayment.metadata === 'string' ? JSON.parse(existingPayment.metadata) : existingPayment.metadata) : {};
           } catch { priorMeta = {}; }
-          const settlementMeta = Object.fromEntries(['settled_event_at', 'payer_id']
-            .filter((key) => priorMeta[key] != null && priorMeta[key] !== '').map((key) => [key, priorMeta[key]]));
           const [record] = await trx('payments')
             .where({ id: existingPayment.id })
             .whereNotIn('status', ['refunded', 'disputed'])
-            .update(Object.keys(settlementMeta).length
-              ? { ...paymentPayload, metadata: JSON.stringify({ ...JSON.parse(paymentPayload.metadata), ...settlementMeta }) }
-              : paymentPayload)
+            .update({ ...paymentPayload, metadata: JSON.stringify({ ...priorMeta, ...JSON.parse(paymentPayload.metadata) }) })
             .returning('*');
           if (!record) {
             throw new Error('Payment record changed while confirming — refresh the invoice and try again');

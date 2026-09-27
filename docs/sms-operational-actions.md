@@ -51,9 +51,11 @@ not evidence of its own; the money row it reports is. Nor is a visit's prepaid s
 is a balance with no receipt history (an edit or a series re-spread moves its time and
 amount with no money arriving), so a prepayment counts only once it is recorded as a
 payment. Nor is a no-show or late-cancellation fee: Waves takes it from the card on file
-and the row carries no settlement time of its own. Account credit, third-party payers,
-refunds and disputes are never money landing, nor is a payment while a refund of it is
-in flight (a partial refund is shown beside the payment it reduces). A payment never
+and the row carries no settlement time of its own. Nor is a combined balance charge that
+paid several invoices at once: a partial refund of one is parked for the office, never
+recorded on its rows. Account credit, third-party payers, refunds and disputes are never
+money landing, nor is a payment while a refund of it is in flight (a partial refund is
+shown beside the payment it reduces). A payment never
 answers a request for a refund, a dispute or a change of how the customer pays. Only
 the request itself counts: a clause beside it that declines or narrates ("don't refund
 it", "I set up autopay on Friday") does not shut money out, while such a term inside the

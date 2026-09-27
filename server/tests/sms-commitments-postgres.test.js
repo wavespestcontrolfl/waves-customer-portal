@@ -2053,7 +2053,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       .toMatchObject([{ id: own.id, invoice_id: invoice.id }]);
   });
 
-  test('Codex #4996 r1: each invoice of a combined charge cites its own allocation row; a sibling\'s row never vouches for an invoice, and a row naming no invoice still links by its PaymentIntent', async () => {
+  test('Codex #4996 r1/r12: a combined balance charge is not evidence (its partial refunds are parked off its rows); a row naming no invoice still links by its PaymentIntent', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);
     const invoiceRow = (number, pi) => ({ customer_id: message.customer_id, token: randomUUID(), invoice_number: number,
@@ -2064,18 +2064,15 @@ postgres('SMS commitments on PostgreSQL', () => {
     // One settlement instant for every allocation of the combined charge.
     const paymentRow = (pi, metadata) => ({ customer_id: message.customer_id, amount: 60, status: 'paid', payment_date: etDateString(after),
       stripe_payment_intent_id: pi, metadata: JSON.stringify({ ...metadata, settled_event_at: after.toISOString() }), created_at: after });
-    const [firstPaid, secondPaid, legacyPaid] = await mockPg('payments').insert([paymentRow('pi_combined', { invoice_id: first.id }),
-      paymentRow('pi_combined', { invoice_id: second.id }), paymentRow('pi_legacy', {})]).returning('id');
+    // pay-combined.js books one row per invoice the charge covers, each marked combined_payment.
+    const combined = { combined_payment: true, combined_anchor_invoice_id: first.id };
+    const [, , legacyPaid] = await mockPg('payments').insert([paymentRow('pi_combined', { ...combined, invoice_id: first.id }),
+      paymentRow('pi_combined', { ...combined, invoice_id: second.id }), paymentRow('pi_legacy', {})]).returning('id');
     const commitment = { kind: 'other', description: 'Did both payments go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     for (let read = 0; read < 2; read += 1) {
       const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
-      expect(Object.fromEntries(evidence.records.filter((r) => r.payment_source === 'invoice').map((r) => [r.invoice_id, r.id])))
-        .toEqual({ [first.id]: firstPaid.id, [second.id]: secondPaid.id, [legacy.id]: legacyPaid.id });
-      // Each allocation of the combined charge carries the whole charge (Codex #4996 r7).
-      const text = Object.fromEntries(evidence.records.filter((r) => r.payment_source === 'invoice').map((r) => [r.id, r.text]));
-      expect(text[firstPaid.id]).toContain('; part of one $120.00 charge covering 2 invoices');
-      expect(text[secondPaid.id]).toContain('; part of one $120.00 charge covering 2 invoices');
-      expect(text[legacyPaid.id]).not.toContain('part of one');
+      expect(Object.fromEntries(evidence.records.filter((r) => r.type === 'payment').map((r) => [r.invoice_id, r.id])))
+        .toEqual({ [legacy.id]: legacyPaid.id });
     }
   });
 
@@ -2261,15 +2258,18 @@ postgres('SMS commitments on PostgreSQL', () => {
     const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-1001',
       title: null, service_type: 'Termite Treatment', total: 100, subtotal: 100, line_items: '[]', status: 'paid', paid_at: after }).returning('id');
     // The saved card the monthly dues charge ran on; the payment row carries no snapshot of its own.
-    const [savedCard] = await mockPg('payment_methods').insert({ customer_id: message.customer_id, stripe_payment_method_id: `pm_synthetic_${randomUUID()}`,
-      card_brand: 'MASTERCARD', last_four: '5454', method_type: 'card' }).returning('id');
+    const [savedCard, savedBank] = await mockPg('payment_methods').insert([{ customer_id: message.customer_id, stripe_payment_method_id: `pm_synthetic_${randomUUID()}`,
+      card_brand: 'MASTERCARD', last_four: '5454', method_type: 'card' },
+    { customer_id: message.customer_id, stripe_payment_method_id: `pm_synthetic_${randomUUID()}`, method_type: 'ach', bank_last_four: '4321' }]).returning('id');
     const card = (extra) => ({ customer_id: message.customer_id, status: 'paid', payment_date: etDateString(after), processor: 'stripe', created_at: after, ...extra });
-    const [, dues, bank] = await mockPg('payments').insert([
+    const [, dues, bank, savedBankDues] = await mockPg('payments').insert([
       card({ amount: 102.90, base_amount_cents: 10000, surcharge_amount_cents: 290, stripe_payment_intent_id: 'pi_card_invoice',
         card_brand: 'visa', card_last_four: '4242', metadata: JSON.stringify({ invoice_id: invoice.id, payment_method: 'card' }) }),
       card({ amount: 92.57, base_amount_cents: 9000, surcharge_amount_cents: 257, stripe_payment_intent_id: 'pi_card_dues',
         payment_method_id: savedCard.id, metadata: JSON.stringify({ billed_month: '2026-09' }) }),
-      card({ amount: 60, stripe_payment_intent_id: 'pi_bank', card_last_four: '6789', metadata: JSON.stringify({ payment_method: 'us_bank_account' }) })]).returning('id');
+      card({ amount: 60, stripe_payment_intent_id: 'pi_bank', card_last_four: '6789', metadata: JSON.stringify({ payment_method: 'us_bank_account' }) }),
+      // A bank autopay charge on a saved ACH method: the digits live in the method's own bank column (Codex #4996 r12).
+      card({ amount: 45, stripe_payment_intent_id: 'pi_saved_bank', payment_method_id: savedBank.id, metadata: JSON.stringify({ billed_month: '2026-09' }) })]).returning('id');
     const commitment = { kind: 'other', description: 'Did my $100 termite payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     expect(evidence.records.find((r) => r.payment_source === 'invoice').text)
@@ -2278,6 +2278,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(ledger[dues.id].text)
       .toBe(`Payment of $92.57 ($90.00 plus a $2.57 card surcharge) by Mastercard ending 5454 recorded ${etDateString(after)} (monthly plan charge for 2026-09)`);
     expect(ledger[bank.id].text).toBe(`Payment of $60.00 by bank account (ACH) ending 6789 recorded ${etDateString(after)}`);
+    expect(ledger[savedBankDues.id].text).toBe(`Payment of $45.00 by bank account (ACH) ending 4321 recorded ${etDateString(after)} (monthly plan charge for 2026-09)`);
     // The tender reaches the model only as text, never as fields of its own.
     for (const record of evidence.records.filter((r) => r.type === 'payment')) {
       for (const field of ['method', 'method_type', 'card_brand', 'last_four']) expect(record).not.toHaveProperty(field);
@@ -2636,7 +2637,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       const paid = (customerId, metadata) => ({ customer_id: customerId, amount: 125, status: 'paid', payment_date: etDateString(minutes(2)),
         created_at: minutes(2), updated_at: minutes(2), metadata: JSON.stringify(metadata) });
       await mockPg('payments').insert([paid(otherCustomer, {}), paid(message.customer_id, { purpose: 'card_hold_no_show_fee' }),
-        paid(message.customer_id, { pending_refund_key: 'refund_pay_synthetic_rest_0' })]);
+        paid(message.customer_id, { pending_refund_key: 'refund_pay_synthetic_rest_0' }), paid(message.customer_id, { combined_payment: true })]);
       const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, status: 'accepted', service_interest: 'Termite' }).returning('id');
       await mockPg('estimate_deposits').insert({ estimate_id: estimate.id, amount: 150, status: 'refunding', received_at: minutes(2), updated_at: minutes(2),
         stripe_payment_intent_id: `pi_deposit_${randomUUID()}` });

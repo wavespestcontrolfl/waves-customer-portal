@@ -221,20 +221,22 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
     expect(paymentsInsert).not.toHaveBeenCalled();
   });
 
-  test('repairing after the webhook keeps the settlement moment and payer it stamped on the row (Codex #4996 r11)', async () => {
+  test('repairing after the webhook merges into the row: its settlement moment, payer and a refund in flight stay (Codex #4996 r11/r12)', async () => {
     existingPaymentRow = { id: 'pay_existing', status: 'paid',
-      metadata: { payment_state: 'paid', settled_event_at: '2026-09-20T14:00:00.000Z', payer_id: '7', stale_key: 'dropped' } };
+      metadata: { payment_state: 'processing', settled_event_at: '2026-09-20T14:00:00.000Z', payer_id: '7',
+        pending_refund_key: 'refund_pay_existing_rest_0', pending_refund_at: '2026-09-21T10:00:00.000Z' } };
     const StripeService = require('../services/stripe');
     await StripeService.confirmInvoicePayment('inv_123', PI_ID);
 
     expect(paymentsUpdate).toHaveBeenCalledTimes(1);
     const metadata = JSON.parse(paymentsUpdate.mock.calls[0][0].metadata);
-    expect(metadata).toMatchObject({ invoice_id: 'inv_123', payment_state: 'paid', settled_event_at: '2026-09-20T14:00:00.000Z', payer_id: '7' });
-    // Only the settlement stamps carry over; the rest is rewritten as before.
-    expect(metadata).not.toHaveProperty('stale_key');
+    expect(metadata).toMatchObject({ invoice_id: 'inv_123', settled_event_at: '2026-09-20T14:00:00.000Z', payer_id: '7',
+      pending_refund_key: 'refund_pay_existing_rest_0', pending_refund_at: '2026-09-21T10:00:00.000Z' });
+    // What /confirm knows wins over what the row said.
+    expect(metadata.payment_state).toBe('paid');
   });
 
-  test('a row with no settlement stamp is rewritten exactly as before', async () => {
+  test('a row with no settlement stamp gets none from a confirm that saw no card charge', async () => {
     existingPaymentRow = { id: 'pay_existing', status: 'processing', metadata: JSON.stringify({ payment_state: 'processing' }) };
     const StripeService = require('../services/stripe');
     await StripeService.confirmInvoicePayment('inv_123', PI_ID);
@@ -242,5 +244,18 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
     const metadata = JSON.parse(paymentsUpdate.mock.calls[0][0].metadata);
     expect(metadata).not.toHaveProperty('settled_event_at');
     expect(metadata).not.toHaveProperty('payer_id');
+  });
+
+  test('a card payment carries the charge\'s own time as its settlement moment, not the confirm time (Codex #4996 r12)', async () => {
+    const chargedAt = 1789900000; // well before this confirm runs
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({ ...makePi(), latest_charge: 'ch_card' });
+    stripeClient.charges.retrieve.mockResolvedValue({ id: 'ch_card', created: chargedAt, receipt_url: null,
+      payment_method_details: { type: 'card', card: { brand: 'visa', last4: '4242' } } });
+    const StripeService = require('../services/stripe');
+    await StripeService.confirmInvoicePayment('inv_123', PI_ID);
+
+    expect(paymentsInsert).toHaveBeenCalledTimes(1);
+    const metadata = JSON.parse(paymentsInsert.mock.calls[0][0].metadata);
+    expect(metadata).toMatchObject({ payment_state: 'paid', settled_event_at: new Date(chargedAt * 1000).toISOString() });
   });
 });
