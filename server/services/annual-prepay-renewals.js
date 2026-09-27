@@ -3536,10 +3536,9 @@ async function cancelTermWithRestorations(termId, conn = db, { throwOnError = fa
       }
       await clearPrepaidStampsForTerm(updated.id, t, { throwOnError });
       // Also reopen any per-visit invoices this term settled as NON-CASH coverage
-      // (status='prepaid' by this term, or a partial with a coverage line) — the
-      // prepay is gone, so the covered work is owed again. Mirrors the stamp
-      // clear; best-effort (never blocks the cancel), and never reopens a
-      // cash-paid invoice.
+      // (status 'prepaid', stamped with this term) — the prepay is gone, so the
+      // covered work is owed again. Mirrors the stamp clear; best-effort (never
+      // blocks the cancel), and never reopens a cash-paid invoice.
       try {
         // strict under throwOnError: a per-invoice reopen failure throws
         // (ADMIN-BUG-R17-FINDING-2) instead of being logged inside the

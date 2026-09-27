@@ -11,6 +11,7 @@
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
+ *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
  *   GATE_OUTBOUND_VOICEMAIL_SMS=true (admin click-to-call that hits the customer's voicemail hangs up and texts "sorry we missed you" instead)
@@ -110,6 +111,7 @@
  *   GATE_LAWN_DELIVERY_RECOVERY=true (resume a confirmed lawn visit's interrupted customer delivery; FAILS CLOSED everywhere — off = the sweep shadow-logs candidates and sends nothing)
  *   SELF_SERVE_NOTICE_HOURS=24 (not a gate — the self-serve notice window, server/services/scheduling/self-serve-notice.js: no SELF-SERVE booking or reschedule of a visit starting within this many hours of now, on the estimate picker + reserve, /book, public reschedule, public re-service and the assistant's booking tools; staff/admin/voice agent unaffected; cancels keep the fee-window policy; read at call time, default 24)
  *   GATE_SELF_BOOK_DAY_CAP=true (owner ruling 2026-09-23: the old "max 3 self-bookings per calendar day" cap — retired in favor of the self-serve notice window, server/services/scheduling/self-serve-notice.js. Unset (default) = no per-day cap anywhere: the offer-time date filtering in routes/booking.js buildBookingAvailability, the commit-time re-checks in routes/booking.js createSelfBooking and services/availability.js confirmBooking, and the offer-time day-loop skip in services/availability.js getAvailableSlots all skip their countActiveSelfBookingsForDay / acquireSelfBookingDayCapLock calls. 'true' = today's cap behavior byte-for-byte. Read at call time via selfBookDayCapEnabled() below — a flip needs no redeploy. The lock/count primitives themselves are unaffected and stay available to every self-booking writer.)
+ *   GATE_BLOG_READ_DEPTH=true   (anonymous, cookie-free blog scroll-depth counter — POST /api/public/blog-read-depth accepts a no-cors beacon from the hub + spoke blog posts and upserts an aggregate daily count keyed by site/path/milestone; owner-approved 2026-09-27, "E2: cookie-free read-depth counts", extends the 2026-07-16 pre-consent Cloudflare-counter exception. Dark = the generic unknown-route 404 for EVERY request to the path, before the route's own rate limiter, per the house dark-GATE_* contract. No cookies, no IP, no per-visitor identifier is ever stored — see docs/public-route-contracts.md.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -2224,6 +2226,20 @@ const gates = {
   // would calibrate the estimator while logGateStatus reported it disabled.
   driveTimeCalibration: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION'),
 
+  // Schedule tie-proximity display order (owner ruling 2026-09-26) — when two
+  // stops on a tech's day start within 30 minutes of each other, the one
+  // closer to the previous stop shows first, instead of falling back to
+  // whichever was booked first. DISPLAY ONLY: server/services/schedule-tie-
+  // proximity.js returns a `displayOrder` per stop; nothing writes
+  // route_order or any other column, and no customer communication is sent.
+  // Uses the existing shared drive-time estimator (GATE_DRIVE_TIME_CALIBRATION
+  // governs which one) — no new Google API calls. Off (default in every
+  // environment) → the mobile day/week list and the desktop day board's route-
+  // order badge sort by window start alone, exactly as before this gate
+  // existed. Consumers read gateEnvValue() at CALL time, so a flip needs no
+  // redeploy. Kill switch: unset GATE_SCHEDULE_TIE_PROXIMITY.
+  scheduleTieProximity: gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY'),
+
   // Slot Travel Gap — the customer-facing pickers (estimate, one-tap, /book,
   // reschedule, re-service, voice, rain-out, AI assistant) and every commit
   // gate behind them require modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES
@@ -2690,6 +2706,12 @@ const gates = {
   // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
   techTips: gateEnvValue('GATE_TECH_TIPS'),
 
+  // Searchable service-report completion vocabulary plus dated recommendations
+  // from the customer's previous three visits on the same service line. Dark
+  // by default and independent of GATE_TECH_TIPS. The dispatch route reads the
+  // env at request time through gateEnvValue so unsetting it is a live kill.
+  serviceReportCompletionChoices: gateEnvValue('GATE_SERVICE_REPORT_COMPLETION_CHOICES'),
+
   // Ops queue (2026-09-02): the Agents hub "Queue" tab — a read-only
   // projection of every long-running lane's persisted state (pending /
   // parked / failed) in one place. No actions live there. OFF unless set,
@@ -2956,6 +2978,14 @@ const gates = {
   // Kill switch: unset GATE_BOOK_CAPACITY_COMMIT — createSelfBooking's commit
   // gate goes back to the overlap-only re-check, byte for byte.
   bookCapacityCommit: gateEnvValue('GATE_BOOK_CAPACITY_COMMIT'),
+
+  // Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
+  // "E2: cookie-free read-depth counts"). Ships DARK: off unless exactly
+  // 'true'. The route reads this via isEnabled('blogReadDepth') at request
+  // time — same convention as payerStatements/lawnAssessmentMagnet above —
+  // so the dark 404 is checked on every request, before the route's own
+  // rate limiter (see server/routes/public-blog-read-depth.js).
+  blogReadDepth: process.env.GATE_BLOG_READ_DEPTH === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
