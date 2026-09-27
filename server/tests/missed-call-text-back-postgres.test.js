@@ -359,7 +359,7 @@ jest.setTimeout(30000);
 
   test('an earlier text-back in sms_log blocks a second one even with no claim row (belt under the claim)', async () => {
     await database('sms_log').insert({
-      direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE,
+      direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE, twilio_sid: 'SMearlier00000000000000000000000000',
       message_body: 'earlier', status: 'sent', message_type: 'missed_call_text_back',
       created_at: new Date(NOW - 3 * 24 * 60 * 60 * 1000),
     });
@@ -397,27 +397,44 @@ jest.setTimeout(30000);
       expect(await database('sms_log').where({ to_phone: PHONE, status: 'sending', message_type: 'missed_call_text_back' }).first('id')).toBeTruthy();
     });
 
-    test('a staff text still mid-handoff holds this send (no claim, unsettled); once it lands as sent, the call settles as contacted', async () => {
-      let staffRowId;
+    test('a staff reply still scheduled or mid-send counts as contact — the human wins (lead-auto-reply.js\'s rule)', async () => {
       sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, {
-        before: async () => {
-          [{ id: staffRowId }] = await database('sms_log').insert({
-            direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE, message_body: 'staff reply',
-            status: 'sending', message_type: 'manual', metadata: JSON.stringify({ manual_send_reservation: true }),
-          }).returning('id');
-        },
+        before: () => database('sms_log').insert({
+          direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE, message_body: 'staff reply',
+          status: 'sending', message_type: 'manual', metadata: JSON.stringify({ manual_send_reservation: true }),
+        }),
       }));
       const row = call(READY_MINUTES_AGO);
       await database('call_log').insert(row);
-      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'error', reason: 'MISSED_CALL_SEND_IN_FLIGHT' });
-      expect(await claimRow()).toBeUndefined();
-      expect((await stored(row)).metadata.missed_call_text_settled_at).toBeUndefined();
-
-      await database('sms_log').where({ id: staffRowId }).update({ status: 'sent' });
       expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'already_contacted' });
+      expect(await claimRow()).toBeUndefined();
     });
 
-    test('a voicemail-lane text still mid-handoff is waited on, and this call is texted if that send fails and its reservation is removed', async () => {
+    test('a failed or undelivered staff text reached nobody — not contact, so the caller is still texted', async () => {
+      await database('sms_log').insert([
+        { direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE, twilio_sid: 'SMfailed00000000000000000000000000',
+          message_body: 'staff reply', status: 'failed', message_type: 'manual', created_at: new Date(NOW - 60 * 1000) },
+        { direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE, twilio_sid: 'SMundelv00000000000000000000000000',
+          message_body: 'staff reply', status: 'undelivered', message_type: 'manual', created_at: new Date(NOW - 30 * 1000) },
+      ]);
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+    });
+
+    test('a delivered staff text or a text from the caller is contact', async () => {
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      await database('sms_log').insert({
+        direction: 'inbound', from_phone: PHONE, to_phone: '+19412975749', message_body: 'hi, who called?',
+        status: 'received', message_type: 'inbound', created_at: new Date(NOW - 60 * 1000),
+      });
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'already_contacted' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('a voicemail-lane text mid-handoff (claim + reservation) is waited on, and this call is texted if that send fails', async () => {
+      await database('voicemail_sms_claims').insert({ phone: PHONE, lead_id: randomUUID(), outcome: 'claimed' });
       const [{ id: reservationId }] = await database('sms_log').insert({
         direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE, message_body: 'quote link',
         status: 'sending', message_type: 'voicemail_quote_link', metadata: JSON.stringify({ provider_handoff_reservation: true }),
@@ -425,17 +442,19 @@ jest.setTimeout(30000);
       }).returning('id');
       const row = call(READY_MINUTES_AGO);
       await database('call_log').insert(row);
-      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'pending', reason: 'contact_in_flight' });
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'pending', reason: 'claim_in_flight' });
       expect(sendCustomerMessage).not.toHaveBeenCalled();
 
-      await database('sms_log').where({ id: reservationId }).del(); // not_sent: the reservation is deleted
+      // Its send failed: the provider layer deletes the reservation, the lane releases its claim.
+      await database('sms_log').where({ id: reservationId }).del();
+      await require('../services/voicemail-lead-sms')._deferredClaims.releasePhoneClaim(PHONE);
       expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
     });
 
     test('a staff text that lands after the lease stops the send at the boundary; no claim is taken', async () => {
       sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, {
         before: () => database('sms_log').insert({
-          direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE,
+          direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE, twilio_sid: 'SMstaff000000000000000000000000000',
           message_body: 'staff reply', status: 'sent', message_type: 'manual', created_at: new Date(NOW),
         }),
       }));
