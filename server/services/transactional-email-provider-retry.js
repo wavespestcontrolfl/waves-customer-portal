@@ -455,7 +455,10 @@ async function settleRetrySend(message, result, database = db, { requireQueued =
 // Post-commit reconciliation. The accepted Email row is already durable, so
 // these best-effort aggregate stamps can never reopen its provider attempt.
 async function finishRetrySend(message, updated) {
-  if (!updated) return { sent: false, uncertain: true, reason: 'claim_lost_after_acceptance' };
+  if (!updated) {
+    await markRetryUncertain(message, new Error('Provider retry acceptance settlement is not durable'));
+    return { sent: false, uncertain: true, reason: 'claim_lost_after_acceptance' };
+  }
   if (updated?.template_key === 'service.visit_summary') {
     await require('./visit-completion-summary').reconcileSummaryEmailRecovery(updated)
       .catch((err) => logger.warn(`[email-provider-retry] visit summary recovery not reconciled for ${message.id}: ${err.message}`));
@@ -632,7 +635,18 @@ async function retryOne(message) {
           status: 'blocked', reason: handoff.reason, rejectedAfterStart: state.rejected,
         });
       }
-      if (state.acceptedMessage) return await finishRetrySend(message, state.acceptedMessage);
+      if (state.acceptedMessage) {
+        // The authority preserves provider acceptance when COMMIT fails or
+        // loses its acknowledgement. Only a durable acceptance stamp can
+        // authorize delivered-ledger reconciliation after that transaction.
+        const accepted = await db('email_messages')
+          .where({ id: message.id, send_attempt_token: message.send_attempt_token,
+            provider_handoff_attempt_token: message.send_attempt_token,
+            provider_message_id: state.result.messageId })
+          .whereNotNull('sent_at')
+          .first();
+        return await finishRetrySend(message, accepted);
+      }
     } else {
       await dispatchToProvider();
     }

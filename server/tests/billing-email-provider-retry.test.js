@@ -52,7 +52,8 @@ beforeEach(() => {
   query = {};
   query.where = jest.fn(() => query);
   query.update = jest.fn(() => query);
-  query.first = jest.fn(async () => ({ id: 'existing-alert' }));
+  query.first = jest.fn(async () => storedMessage({ status: 'sent', sent_at: new Date() }));
+  query.whereNotNull = jest.fn(() => query);
   query.whereRaw = jest.fn(() => query);
   query.whereIn = jest.fn(() => query);
   query.forUpdate = jest.fn(() => query);
@@ -195,6 +196,14 @@ test('failure saving accepted billing Email does not schedule a second provider 
   query.returning.mockRejectedValueOnce(new Error('acceptance write unavailable'));
   await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, uncertain: true });
   expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+  expect(query.update.mock.calls.some(([patch]) => patch.provider_retry_next_at instanceof Date)).toBe(false);
+});
+
+test('a rolled-back acceptance stamp cannot report sent or deliver the reservation', async () => {
+  query.first.mockResolvedValueOnce({ id: 'message-1' }).mockResolvedValueOnce(null);
+  await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, uncertain: true });
+  expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+  expect(reservation.markBillingEmailReservationDelivered).not.toHaveBeenCalled();
   expect(query.update.mock.calls.some(([patch]) => patch.provider_retry_next_at instanceof Date)).toBe(false);
 });
 

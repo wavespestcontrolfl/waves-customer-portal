@@ -105,6 +105,7 @@ postgres('billing Email provider preparation on its held connection', () => {
       table.boolean('has_attachments').notNullable().defaultTo(false);
       for (const key of ['sent_at', 'queued_at', 'updated_at', 'provider_retry_next_at', 'provider_retry_exhausted_at']) table.timestamp(key);
     });
+    await mockPg.raw('CREATE TABLE retry_commit_guard (message_id uuid REFERENCES email_messages(id) DEFERRABLE INITIALLY DEFERRED)');
     await mockPg('customers').insert({ id: customerId, email: 'qa@example.invalid' });
     await mockPg('notification_prefs').insert({ customer_id: customerId,
       email_enabled: true, billing_channels: ['email'] });
@@ -274,6 +275,50 @@ postgres('billing Email provider preparation on its held connection', () => {
       });
     } finally {
       mockPg = rootDatabase;
+    }
+  }, 15000);
+
+  test.each([false, true])('acceptance is reconciled only when durable after a commit failure (committed: %s)', async (committed) => {
+    const chargeDate = etDateString(addETDays(new Date(), 1));
+    await mockPg('customers').where({ id: customerId }).update({ active: true, autopay_enabled: true,
+      monthly_rate: 100, billing_day: Number(chargeDate.slice(-2)), billing_mode: 'monthly_membership' });
+    await mockPg('notification_prefs').where({ customer_id: customerId })
+      .update({ email_enabled: true, billing_channels: ['email'] });
+    const stored = billingReplayRow(chargeDate);
+    await mockPg('email_messages').insert(stored);
+    const originalTransaction = Object.getOwnPropertyDescriptor(mockPg, 'transaction');
+    let injectFailure = true;
+    Object.defineProperty(mockPg, 'transaction', { configurable: true, value: async (callback) => {
+      const inject = injectFailure;
+      injectFailure = false;
+      const result = await originalTransaction.value.call(mockPg, async (trx) => {
+        const outcome = await callback(trx);
+        // The deferred FK rejects COMMIT after the acceptance UPDATE ran.
+        if (inject && !committed) await trx('retry_commit_guard').insert({ message_id: randomUUID() });
+        return outcome;
+      });
+      if (inject) throw new Error('Synthetic lost commit acknowledgement');
+      return result;
+    } });
+    const reservation = require('../services/billing-email-reservation');
+    const delivered = jest.spyOn(reservation, 'markBillingEmailReservationDelivered').mockResolvedValue(true);
+    try {
+      const outcome = await retryOne(stored);
+      const saved = await mockPg('email_messages').where({ id: stored.id }).first();
+      expect(global.fetch.mock.calls.filter(([, options]) => options.method === 'POST')).toHaveLength(1);
+      expect(saved.provider_retry_next_at).toBeNull();
+      if (committed) {
+        expect(outcome).toMatchObject({ sent: true });
+        expect(saved).toMatchObject({ status: 'sent', sent_at: expect.any(Date) });
+        expect(delivered).toHaveBeenCalledWith(expect.objectContaining({ id: stored.id, sent_at: expect.any(Date) }));
+      } else {
+        expect(outcome).toMatchObject({ sent: false, uncertain: true });
+        expect(saved).toMatchObject({ status: 'failed', sent_at: null, provider_retry_exhausted_at: expect.any(Date) });
+        expect(delivered).not.toHaveBeenCalled();
+      }
+    } finally {
+      Object.defineProperty(mockPg, 'transaction', originalTransaction);
+      delivered.mockRestore();
     }
   }, 15000);
 
