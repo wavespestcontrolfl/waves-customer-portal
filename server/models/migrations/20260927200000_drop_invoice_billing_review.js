@@ -21,9 +21,7 @@ const COLUMNS = ['billing_review_opened_at', 'billing_review_reason', 'billing_r
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('invoices'))) return;
   for (const col of COLUMNS) {
-     
     if (await knex.schema.hasColumn('invoices', col)) {
-       
       await knex.schema.alterTable('invoices', (t) => {
         t.dropColumn(col);
       });
