@@ -100,7 +100,14 @@ export default function WavesShell({
         {/* tabIndex=-1: WebKit/Safari only moves focus to fragment targets
             that are programmatically focusable — without it the skip link
             scrolls but Tab keeps walking the header. */}
-        <main id="waves-shell-main" tabIndex={-1} style={{ flex: 1, display: 'flex', flexDirection: 'column', outline: 'none' }}>
+        <main id="waves-shell-main" tabIndex={-1} style={{
+          flex: 1, display: 'flex', flexDirection: 'column', outline: 'none',
+          // Native contentInset="never" leaves notch clearance to the shell.
+          // Keep each page's own gutters inside that safe content area.
+          paddingLeft: 'env(safe-area-inset-left, 0px)',
+          paddingRight: 'env(safe-area-inset-right, 0px)',
+          boxSizing: 'border-box',
+        }}>
           {children}
         </main>
         {/* The ONE contentinfo landmark. Owning the footer here (not in each
