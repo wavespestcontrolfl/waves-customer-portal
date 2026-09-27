@@ -170,10 +170,15 @@ const namesNoInvoice = (alias) => INVOICE_KEYS.map((key) => `COALESCE(${alias}.m
 // event), and it never bounced — the email_delivery witness's own proof.
 const EMAIL_DELIVERED_SQL = (t) => `(${t}.status IN ('delivered', 'opened', 'clicked') OR ${t}.opened_at IS NOT NULL OR ${t}.clicked_at IS NOT NULL)
   AND ${t}.sent_at IS NOT NULL AND ${t}.bounced_at IS NULL`;
-// A receipt email (aliased rem) sent to this customer after the request and delivered.
+// A receipt email (aliased rem) sent under this customer after the request
+// and delivered. Its address is checked, not only its customer: a receipt
+// goes to the billing contact when one is set (customer-contact.js
+// getReceiptEmailRecipients), which may be someone else (pre-push audit).
 const whereDeliveredReceiptEmail = (q, customerId, after, now) => q.where({ 'rem.recipient_type': 'customer', 'rem.recipient_id': String(customerId) })
+  .joinRaw('JOIN customers rcust ON rcust.id::text = rem.recipient_id')
   .whereRaw(EMAIL_DELIVERED_SQL('rem')).where('rem.sent_at', '>', after).where('rem.sent_at', '<=', now)
-  .orderBy('rem.sent_at', 'desc').limit(LIMIT + 1);
+  .orderBy('rem.sent_at', 'desc').limit(LIMIT + 1)
+  .select(q.client.raw('LOWER(TRIM(rem.recipient_email_snapshot)) = LOWER(TRIM(rcust.email)) AS to_customer_email'));
 
 async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
   const after = new Date(message.created_at);
@@ -365,7 +370,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .modify((q) => whereEstimateCustomerOwnership(q, customerId))
           .whereIn('red.status', ['received', 'credited'])
           .modify((q) => whereDeliveredReceiptEmail(q, customerId, after, now))
-          .select('rem.id', 'rem.sent_at', 'rem.recipient_email_snapshot', 'red.estimate_id', 'red.amount',
+          .select('rem.id', 'rem.sent_at', 'rem.recipient_email_snapshot', 'red.id as deposit_id', 'red.estimate_id', 'red.amount',
             'estimates.property_id as property_id'),
       ]).then(([invoicesPaid, ledger, paymentSms, deposits, invoiceReceiptEmails, depositReceiptEmails]) => {
         const legs = [
@@ -587,10 +592,12 @@ function admissibleWitness(record, commitment, records = []) {
   if (!witnessTypes(commitment).includes(record.type)) return false;
   if (['estimate', 'visit', 'payment'].includes(record.type) && !scopedToProperty(record, commitment)) return false;
   // An ask naming an address is answered only at that address: a delivery
-  // email, or a receipt email sent there (Codex #4996 r2).
-  const receiptEmailToAsked = record.payment_source === 'email' && emails.size === 1
-    && emails.has(normalized(record.recipient_email_snapshot));
-  if (emails.size && record.type !== 'email_delivery' && !receiptEmailToAsked) return false;
+  // email, or a receipt email sent there (Codex #4996 r2). With no address
+  // named, a receipt email counts only at the customer's own address.
+  if (record.payment_source === 'email' && !(emails.size
+    ? emails.size === 1 && emails.has(normalized(record.recipient_email_snapshot))
+    : record.to_customer_email === true)) return false;
+  if (emails.size && record.type !== 'email_delivery' && record.payment_source !== 'email') return false;
   const after = new Date(commitment.sms_context?.source_at);
   const deliveredEstimate = () => !!linkedEstimate(record, commitment, records) && new Date(record.sent_at) > after;
   const witnesses = {
@@ -711,12 +718,14 @@ function witnessTime(witness, commitment) {
 
 // The row a payment witness also depends on, held at close with it: the
 // payments row that settled an invoice (a dispute reverses it before the
-// invoice), the invoice a receipt email receipts, or the estimate a deposit
-// or its receipt email is on — with the lead that admitted it
-// (holdsLeadOwnership).
+// invoice), the invoice a receipt email receipts, the deposit a deposit
+// receipt email receipts (a refund claims it apart from the estimate —
+// pre-push audit), or the estimate a deposit is on. A deposit's estimate is
+// held too, with the lead that admitted it (revalidateSmsFulfillment).
 function paymentLink(witness) {
   if (witness.payment_source === 'invoice') return witness.payment_id ? { linked_record_type: 'payment_row', linked_record_id: witness.payment_id } : {};
   if (witness.invoice_id) return { linked_record_type: 'invoice', linked_record_id: witness.invoice_id };
+  if (witness.deposit_id) return { linked_record_type: 'deposit', linked_record_id: witness.deposit_id };
   if (witness.estimate_id) return { linked_record_type: 'estimate', linked_record_id: witness.estimate_id };
   return {};
 }
@@ -775,6 +784,14 @@ async function holdsLeadOwnership(trx, estimateId, customerId) {
   return held.length > 0;
 }
 
+// The estimate a (locked) deposit is on, held without waiting like every
+// witness row; null when the deposit or its estimate is gone or busy.
+async function lockDepositEstimate(trx, depositId) {
+  const estimateId = (await trx('estimate_deposits').where({ id: depositId }).first('estimate_id'))?.estimate_id;
+  const held = estimateId && await trx('estimates').where({ id: estimateId }).forUpdate().skipLocked().first('id');
+  return held ? estimateId : null;
+}
+
 // The provider runs outside the transaction. Lock its actual witness and
 // re-read the same evidence before allowing a delayed verdict to close work.
 async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) {
@@ -789,8 +806,9 @@ async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) 
     // reversed money (rule 8, Codex #4816 r13 P1).
     payment: { invoice: 'invoices', ledger: 'payments', sms: 'sms_log', deposit: 'estimate_deposits', email: 'email_messages' }[verdict.payment_source],
     // Linked rows (paymentLink): the settling payments row behind an
-    // invoice-source payment, and the invoice a receipt email receipts.
-    payment_row: 'payments', invoice: 'invoices' };
+    // invoice-source payment, and the invoice or deposit a receipt email
+    // receipts.
+    payment_row: 'payments', invoice: 'invoices', deposit: 'estimate_deposits' };
   const table = tables[verdict.record_type];
   if (!table || !verdict.record_id || !verdict.evidence_hash) return false;
   // Customer/source locks are already held. Estimate writers lock estimate
@@ -809,8 +827,13 @@ async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) 
   // rule, means a racing soft delete either loses the row to us or leaves us
   // nothing to hold, and the verdict fails closed rather than closing work on
   // a proposal that has stopped belonging to the customer.
-  const estimateId = verdict.record_type === 'estimate' ? verdict.record_id
+  let estimateId = verdict.record_type === 'estimate' ? verdict.record_id
     : (verdict.linked_record_type === 'estimate' ? verdict.linked_record_id : null);
+  // A deposit receipt email holds the deposit (above) and its estimate.
+  if (verdict.linked_record_type === 'deposit') {
+    estimateId = await lockDepositEstimate(trx, verdict.linked_record_id);
+    if (!estimateId) return false;
+  }
   if (estimateId && !await holdsLeadOwnership(trx, estimateId, message.customer_id)) return false;
   const evidence = await loadSmsFulfillmentEvidence(trx, commitment, message, now);
   const eventOnly = verdict.event_only === true;

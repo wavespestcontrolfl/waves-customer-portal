@@ -2241,11 +2241,13 @@ postgres('SMS commitments on PostgreSQL', () => {
       status: 'accepted', service_interest: 'Termite' }).returning('id');
     await mockPg('estimate_deposits').insert({ estimate_id: estimate.id, amount: 150, status: 'received', received_at: before,
       stripe_payment_intent_id: 'pi_deposit_receipt' });
+    await mockPg('customers').where({ id: message.customer_id }).update({ email: 'Pat.Example@example.invalid' });
     const email = (trigger, extra = {}) => ({ trigger_event_id: trigger, recipient_type: 'customer', recipient_id: String(message.customer_id),
       recipient_email_snapshot: 'pat.example@example.invalid', subject_snapshot: 'Your receipt', text_snapshot: 'Hi Pat, thanks for your payment.',
       status: 'delivered', sent_at: after, delivered_at: after, ...extra });
-    const [delivered, depositReceipt] = await mockPg('email_messages').insert([email(`invoice_receipt:${invoice.id}`),
-      email('deposit_receipt:pi_deposit_receipt')]).returning('id');
+    // The third goes to a separate billing contact under the customer's id (customer-contact.js).
+    const [delivered, depositReceipt, toBillingContact] = await mockPg('email_messages').insert([email(`invoice_receipt:${invoice.id}`),
+      email('deposit_receipt:pi_deposit_receipt'), email(`invoice_receipt:${invoice.id}`, { recipient_email_snapshot: 'billing@example.invalid' })]).returning('id');
     await mockPg('email_messages').insert([
       email(`invoice_receipt:${invoice.id}`, { status: 'bounced', bounced_at: after }),
       email(`invoice_receipt:${invoice.id}`, { status: 'sent', delivered_at: null }),
@@ -2256,8 +2258,10 @@ postgres('SMS commitments on PostgreSQL', () => {
       sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const receipts = evidence.records.filter((r) => r.payment_source === 'email');
-    expect(receipts.map((r) => r.id).sort()).toEqual([delivered.id, depositReceipt.id].sort());
+    expect(receipts.map((r) => r.id).sort()).toEqual([delivered.id, depositReceipt.id, toBillingContact.id].sort());
     const byId = Object.fromEntries(receipts.map((r) => [r.id, r]));
+    // A receipt to someone else's address is context, never the answer.
+    expect(admissibleWitness(byId[toBillingContact.id], commitment)).toBe(false);
     expect(byId[delivered.id]).toMatchObject({ invoice_id: invoice.id, property_id: context.properties[0].id,
       text: `Receipt email for invoice WPC-2026-0941 delivered ${etDateString(after)}` });
     expect(byId[depositReceipt.id]).toMatchObject({ estimate_id: estimate.id, property_id: context.properties[0].id,
@@ -2267,11 +2271,13 @@ postgres('SMS commitments on PostgreSQL', () => {
     const addressed = (address) => ({ ...commitment, evidence: [{ quote: `Please email the receipt to ${address}` }] });
     expect(admissibleWitness(byId[delivered.id], addressed('pat.example@example.invalid'))).toBe(true);
     expect(admissibleWitness(byId[delivered.id], addressed('someone.else@example.invalid'))).toBe(false);
+    expect(admissibleWitness(byId[toBillingContact.id], addressed('billing@example.invalid'))).toBe(true);
   });
 
   test('Codex #4996 r2: a receipt-email witness holds its invoice at close; a writer holding it, or a refund since the check, fails the close', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);
+    await mockPg('customers').where({ id: message.customer_id }).update({ email: 'pat.example@example.invalid' });
     const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0943',
       title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: message.created_at }).returning('id');
     const [receipt] = await mockPg('email_messages').insert({ trigger_event_id: `invoice_receipt:${invoice.id}`, recipient_type: 'customer',
@@ -2292,6 +2298,36 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(await closes()).toBe(false);
     } finally { await writer.rollback(); }
     await mockPg('invoices').where({ id: invoice.id }).update({ status: 'refunded' });
+    expect(await closes()).toBe(false);
+  });
+
+  test('Codex #4996 r2 pre-push: a deposit receipt email holds its deposit and estimate at close; a refund claiming the deposit, an estimate writer, or a refund starting fails the close', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    await mockPg('customers').where({ id: message.customer_id }).update({ email: 'pat.example@example.invalid' });
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, status: 'accepted', service_interest: 'Termite' }).returning('id');
+    const [deposit] = await mockPg('estimate_deposits').insert({ estimate_id: estimate.id, amount: 150, status: 'received',
+      received_at: message.created_at, stripe_payment_intent_id: 'pi_deposit_close' }).returning('id');
+    const [receipt] = await mockPg('email_messages').insert({ trigger_event_id: 'deposit_receipt:pi_deposit_close', recipient_type: 'customer',
+      recipient_id: String(message.customer_id), recipient_email_snapshot: 'pat.example@example.invalid', status: 'delivered',
+      sent_at: after, delivered_at: after }).returning('id');
+    const commitment = { kind: 'other', description: 'Please send me the deposit receipt', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const witness = evidence.records.find((r) => r.payment_source === 'email');
+    const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
+    expect(grounded).toMatchObject({ verdict: 'fulfilled', record_id: receipt.id, linked_record_type: 'deposit', linked_record_id: deposit.id });
+    const verdict = { ...grounded, evidence_hash: fulfillmentFingerprint(commitment, evidence).evidenceHash };
+    const closes = () => mockPg.transaction((trx) => revalidateSmsFulfillment(trx, commitment, message, verdict, now));
+    expect(await closes()).toBe(true);
+    for (const [table, id] of [['estimate_deposits', deposit.id], ['estimates', estimate.id]]) {
+      const holder = await mockPg.transaction();
+      try {
+        await holder(table).where({ id }).forUpdate().first('id');
+        expect(await closes()).toBe(false);
+      } finally { await holder.rollback(); }
+    }
+    expect(await closes()).toBe(true);
+    await mockPg('estimate_deposits').where({ id: deposit.id }).update({ status: 'refunding' });
     expect(await closes()).toBe(false);
   });
 
@@ -2327,6 +2363,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       ['a delivered receipt text', (at) => mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound', from_phone: message.to_phone,
         to_phone: message.from_phone, message_body: 'Payment received, thank you.', message_type: 'receipt', status: 'delivered', created_at: at })],
       ['a delivered receipt email', async (at) => {
+        await mockPg('customers').where({ id: message.customer_id }).update({ email: 'pat.example@example.invalid' });
         const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0944',
           title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: message.created_at }).returning('id');
         await mockPg('email_messages').insert({ trigger_event_id: `invoice_receipt:${invoice.id}`, recipient_type: 'customer',
