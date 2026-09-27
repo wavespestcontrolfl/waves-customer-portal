@@ -47,6 +47,13 @@ const logger = require('./logger');
 const { isSmsReaction } = require('./sms-intent');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { etDateString } = require('../utils/datetime-et');
+// The SAME customer-originated first_contact_channel allowlist the
+// collections consent-provenance module uses (codex pre-push r4 P1 on PR
+// #5012): a staff-created lead row (admin manual entry, tech field
+// observation, tech-run lawn diagnostic) proves a staffer typed a number,
+// never that its owner contacted Waves — reused verbatim, never a second
+// allowlist that could drift from it.
+const { CUSTOMER_ORIGINATED_LEAD_CHANNELS } = require('./collections/consent-provenance');
 
 const REASONS = Object.freeze({
   QUOTE_REQUEST: 'quote_request',
@@ -177,15 +184,23 @@ async function latestQuoteFormLead({ customerId, phoneLast10, before, since }) {
     .first('id', 'created_at');
 }
 
-// Any lead row at all for this phone (not scoped to the form/quote channels
-// latestQuoteFormLead checks) — "a lead record" in the owner's own list of
-// what counts as prior contact (2026-09-26, outbound return-message gate).
+// Any CUSTOMER-ORIGINATED lead row for this phone (not scoped to the
+// form/quote channels latestQuoteFormLead checks, but never a staff-created
+// one either — see CUSTOMER_ORIGINATED_LEAD_CHANNELS below) — "a lead
+// record" in the owner's own list of what counts as prior contact
+// (2026-09-26, outbound return-message gate).
 async function anyLeadRecord({ phoneLast10, before }) {
   if (!phoneLast10) return null;
   return db('leads')
     .whereNull('deleted_at')
     .where('created_at', '<', before)
     .whereRaw("right(regexp_replace(phone, '\\D', '', 'g'), 10) = ?", [phoneLast10])
+    // Customer-originated channels ONLY (codex pre-push r4 P1): a lead this
+    // module counted before included 'manual' / 'field_observation' /
+    // 'lawn_diagnostic' rows, which only prove a STAFFER entered a number —
+    // never that its owner contacted Waves. whereIn also fails closed on a
+    // NULL or unrecognized channel (it matches no IN list, never a wildcard).
+    .whereIn('first_contact_channel', CUSTOMER_ORIGINATED_LEAD_CHANNELS)
     .orderBy('created_at', 'desc')
     .first('id', 'created_at');
 }

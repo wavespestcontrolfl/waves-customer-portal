@@ -1428,15 +1428,21 @@ const gates = {
   // a prior inbound call/text, a lead record, or an existing customer
   // (server/services/outbound-call-reason.js's hasPriorContact, unbounded,
   // reused rather than a second query). NEVER on a cold/sales call we
-  // placed to someone who never contacted us. Each site keeps its own
-  // existing "real conversation" precondition (a confirmed booking, a
-  // workable lead signal, the missing-unit ask's own drop exclusion, or the
-  // drop detector's own MIN_CALL_SECONDS engagement floor) — this gate adds
-  // no separate duration check. Sends customer SMS + creates records —
-  // owner-flip only. Off → every one of the four sites stays byte-identical
-  // to today (the `!isOutboundCall(call)` checks are untouched; the lead-
-  // creation site's new outbound restriction is a no-op while this gate is
-  // off).
+  // placed to someone who never contacted us. The shared outboundReturn
+  // MessagesEligible flag is prior contact ONLY (codex pre-push r4 P1,
+  // reversing r1's own guidance): each site keeps its OWN existing "real
+  // conversation" precondition instead — a confirmed booking
+  // (GATE_CALL_OUTBOUND_BOOKING), a workable lead signal, or the drop
+  // detector's own MIN_CALL_SECONDS engagement floor — so a short but
+  // genuinely confirmed exchange (offer → acceptance → confirmation, as
+  // few as 3 turns) still gets its confirmation SMS. The ONE exception is
+  // the clarify draft: nothing else at that site rules out an early drop,
+  // so it alone ALSO requires hasRealTwoWayConversation (>= 4 exchanged
+  // turns across >= 2 distinct speaker labels) on top of the shared flag.
+  // Sends customer SMS + creates records — owner-flip only. Off → every
+  // one of the four sites stays byte-identical to today (the
+  // `!isOutboundCall(call)` checks are untouched; the lead-creation site's
+  // new outbound restriction is a no-op while this gate is off).
   callOutboundReturnMessages: process.env.GATE_CALL_OUTBOUND_RETURN_MESSAGES === 'true',
   // Call-ingest completeness watchdog: a 30-min cron that diffs Twilio's own
   // call ledger against call_log and rings an admin bell for any answered

@@ -9433,25 +9433,24 @@ const CallRecordingProcessor = {
     // owner ruling 2026-09-26): whether the four customer-facing features
     // #4912 kept inbound-only below (booking-confirmation implied consent,
     // the dropped-mid-intake address text, customer-less lead creation, the
-    // clarify draft) may run the same on THIS outbound call. Requires BOTH:
-    //   - prior contact — a prior inbound call/text, a lead record, or an
-    //     existing customer (hasPriorContact, unbounded, reused from
-    //     outbound-call-reason.js rather than a new query).
-    //   - a real two-way conversation (hasRealTwoWayConversation below) —
-    //     voicemail is already excluded structurally above (an outbound
-    //     call reaching the customer's voicemail terminal-returns before
-    //     this point), but a call that connected and hung up in the first
-    //     few seconds is NOT itself evidence of one (codex pre-push r1 P2:
-    //     droppedMidIntake's own detector requires >= MIN_CALL_SECONDS of
-    //     engagement before it can even fire, so `!droppedMidIntake` reads
-    //     an early drop as a completed conversation — the opposite of what
-    //     it means). This is the ONE shared predicate every site below
-    //     reads; none adds its own separate duration check.
-    // Gate off, or inbound, or a probe failure ⇒ false, and every
+    // clarify draft) may run the same on THIS outbound call. Requires prior
+    // contact — a prior inbound call/text, a lead record, or an existing
+    // customer (hasPriorContact, unbounded, reused from outbound-call-
+    // reason.js rather than a new query). Codex pre-push r4 P1 (reversing
+    // r1's own guidance): does NOT also require hasRealTwoWayConversation
+    // here — folding that into this ONE shared flag blocked a legitimate
+    // SHORT confirmed exchange (offer → acceptance → confirmation is 3
+    // turns) from getting its confirmation SMS, since GATE_CALL_OUTBOUND_BOOKING
+    // had already booked it. Each site below keeps its OWN existing "real
+    // conversation" precondition instead — a confirmed booking, a workable
+    // lead signal, the drop detector's MIN_CALL_SECONDS floor — and the
+    // clarify-draft site alone ALSO requires hasRealTwoWayConversation,
+    // since nothing else there rules out an early drop (see its own call
+    // site). Gate off, or inbound, or a probe failure ⇒ false, and every
     // `!isOutboundCall(call)` check downstream stays exactly as it reads
     // today.
     let outboundReturnMessagesEligible = false;
-    if (isOutboundCall(call) && isEnabled('callOutboundReturnMessages') && hasRealTwoWayConversation(transcription)) {
+    if (isOutboundCall(call) && isEnabled('callOutboundReturnMessages')) {
       try {
         // outboundPriorContactCustomerId (above): call.customer_id, or
         // knownCaller.id (the phone pre-lookup) as a fallback for a row
@@ -14650,8 +14649,19 @@ const CallRecordingProcessor = {
         // is false whenever the gate is off, so this stays exactly
         // `!isOutboundCall(call)` off-gate. clarifyAskTargetPhone already
         // resolves the customer leg for both directions.
+        // hasRealTwoWayConversation is required HERE, on the outbound leg
+        // ONLY (codex pre-push r1 P2 + r4 P1): nothing else at this site
+        // rules out a call that connected and hung up in the first few
+        // seconds — !droppedMidIntake is not that proof, since the drop
+        // detector itself requires MIN_CALL_SECONDS of engagement before it
+        // can even fire, so an early drop reads as "too short to judge"
+        // (never flagged dropped) rather than as a completed conversation.
+        // Moved OUT of the shared eligibility flag (r4): the other three
+        // sites keep their own existing conversation precondition instead,
+        // so a short but genuinely CONFIRMED booking (offer → acceptance →
+        // confirmation, 3 turns) still gets its confirmation SMS.
         if (leadId && !droppedMidIntake && !extracted.is_spam && !extracted.is_voicemail
-          && (!isOutboundCall(call) || outboundReturnMessagesEligible)
+          && (!isOutboundCall(call) || (outboundReturnMessagesEligible && hasRealTwoWayConversation(transcription)))
           && v2Result?.extraction?.consent?.do_not_contact_request !== true
           && extracted.do_not_contact_request !== true) {
           try {

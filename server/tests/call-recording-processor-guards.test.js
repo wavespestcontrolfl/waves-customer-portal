@@ -2243,6 +2243,46 @@ describe('hasRealTwoWayConversation (owner ruling 2026-09-26: never on a call th
   });
 });
 
+// Codex pre-push r4 P1 on PR #5012, reversing r1's own guidance: folding
+// hasRealTwoWayConversation into the SHARED outboundReturnMessagesEligible
+// flag blocked a legitimate short confirmed exchange — offer → acceptance →
+// confirmation is 3 turns, so GATE_CALL_OUTBOUND_BOOKING books it but the
+// implied-consent recompute would have suppressed its confirmation SMS. The
+// shared flag is prior contact ONLY; hasRealTwoWayConversation moved to the
+// clarify-draft call site alone (the one site with no other conversation
+// precondition). Source-shape assertions, mirroring this file's existing
+// "callDateET reads call.created_at directly" pattern — the actual
+// booking-confirmation path is exercised end-to-end only through the full
+// processRecording pipeline, which this suite does not run live.
+describe('hasRealTwoWayConversation lives ONLY at the clarify-draft site, not in the shared eligibility flag (codex pre-push r4 P1)', () => {
+  const { hasRealTwoWayConversation } = CallRecordingProcessor._test;
+  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test('the shared outboundReturnMessagesEligible gate does not call hasRealTwoWayConversation', () => {
+    const gateLine = src.split('\n').find((l) => l.includes("isEnabled('callOutboundReturnMessages')") && l.includes('isOutboundCall(call)'));
+    expect(gateLine).toBeDefined();
+    expect(gateLine).not.toContain('hasRealTwoWayConversation');
+  });
+
+  test('the clarify-draft site alone ANDs hasRealTwoWayConversation onto outboundReturnMessagesEligible', () => {
+    expect(src).toContain('outboundReturnMessagesEligible && hasRealTwoWayConversation(transcription)');
+  });
+
+  test('a 3-turn confirmed exchange (offer, acceptance, confirmation) still clears hasRealTwoWayConversation\'s own >= 4 floor only when it needs to — but the SHARED flag never calls it at all, so eligibility itself never depends on turn count', () => {
+    // Direct proof of the fix's actual behavior change: with prior contact
+    // established, outboundReturnMessagesEligible no longer cares how many
+    // turns the transcript has — a short 3-turn confirmed booking (this
+    // string) would have failed the OLD >= 4 combined check, but the new
+    // gate condition never evaluates hasRealTwoWayConversation at all.
+    const threeTurnConfirmedExchange = [
+      'Agent: We can do Tuesday at 9 AM, does that work?',
+      'Caller: Yes, that works.',
+      'Agent: Great, you are confirmed for Tuesday at 9 AM.',
+    ].join('\n');
+    expect(hasRealTwoWayConversation(threeTurnConfirmedExchange)).toBe(false);
+  });
+});
+
 // Codex pre-push r2 P2 on PR #5012: an outbound row that was never
 // prelinked (call.customer_id null) but whose dialed number matches an
 // existing customer (knownCaller, the phone pre-lookup) reached

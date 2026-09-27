@@ -57,6 +57,18 @@ function installDb(byTable = {}) {
     const rowsFor = () => {
       const isQuoteBridge = table === 'call_log' && q.wheres.some((w) => w[0] === 'direction' && w[1] === 'outbound');
       if (isQuoteBridge) return state.byTable.quote_bridges || [];
+      // anyLeadRecord's leads query (no fromContact wrapper — that helper
+      // always pushes a FUNCTION where, so this only matches the direct,
+      // customerId-less phone query anyLeadRecord runs): apply the recorded
+      // first_contact_channel allowlist for real, so channel-scoping tests
+      // (codex pre-push r4 P1) prove genuine filtering, not just query
+      // shape. latestQuoteFormLead's fromContact-wrapped queries elsewhere
+      // in this file are untouched.
+      if (table === 'leads' && !q.wheres.some((w) => typeof w[0] === 'function')) {
+        const allowlistEntry = q.wheres.find((w) => w[0] === 'IN' && w[1] === 'first_contact_channel');
+        const rows = state.byTable.leads || [];
+        return allowlistEntry ? rows.filter((r) => allowlistEntry[2].includes(r.first_contact_channel)) : rows;
+      }
       return state.byTable[table] || [];
     };
     b.whereIn = jest.fn((...a) => { q.wheres.push(['IN', ...a]); return b; });
@@ -444,8 +456,42 @@ describe('hasPriorContact', () => {
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
   });
 
-  test('an existing lead record for the phone counts, whatever its channel', async () => {
-    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1) }] });
+  // Codex pre-push r4 P1: a lead row only counts as prior-contact evidence
+  // when the CUSTOMER originated it — a staff-created row (admin manual
+  // entry, tech field observation, tech-run lawn diagnostic) proves a
+  // staffer typed a number, never that its owner contacted Waves. Reuses
+  // the SAME allowlist server/services/collections/consent-provenance.js
+  // already applies for the identical question in the collections
+  // contact-policy, rather than a second list that could drift from it.
+  test('a staff-created (manual) lead does NOT count as prior contact', async () => {
+    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: 'manual' }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+  });
+
+  test('a customer-originated web-form lead counts as prior contact', async () => {
+    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: 'web' }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+  });
+
+  test('a lead with a NULL first_contact_channel does NOT count (unknown fails closed)', async () => {
+    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: null }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+  });
+
+  test('the lead probe reuses the EXACT consent-provenance allowlist (never a second, drift-prone list)', async () => {
+    const { CUSTOMER_ORIGINATED_LEAD_CHANNELS } = require('../services/collections/consent-provenance');
+    installDb({ leads: [{ id: 'lead-1' }] });
+    await hasPriorContact({ customerId: null, phone: PHONE, before: T0 });
+    const leadsQuery = state.queries.find((q) => q.table === 'leads');
+    const allowlistClause = leadsQuery.wheres.find((w) => w[0] === 'IN' && w[1] === 'first_contact_channel');
+    expect(allowlistClause[2]).toBe(CUSTOMER_ORIGINATED_LEAD_CHANNELS);
+  });
+
+  // "an actual prior inbound call still counts regardless" — this is the
+  // call probe, an independent code path from the lead probe above; a year-
+  // old prior inbound call already proves it counts unconditionally.
+  test('an actual prior inbound call still counts as prior contact regardless of the lead-channel scoping', async () => {
+    installDb({ call_log: [{ id: 'in-old', created_at: new Date('2025-01-01'), ai_extraction_enriched: { call_nature: 'new_lead' } }] });
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
   });
 
