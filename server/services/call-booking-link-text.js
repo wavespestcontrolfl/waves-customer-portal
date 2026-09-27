@@ -978,7 +978,26 @@ async function dispatchIneligibleReason(ctx) {
 function neverSendRecheck(call, leadId, destinationPhone) {
   return async ({ dbi }) => {
     try {
-      const lead = await dbi('leads').where({ id: leadId }).whereNull('deleted_at').first();
+      // .forUpdate() (codex #5018 r12 P1): a plain SELECT let a phone
+      // correction committed between this read and messages.create() go
+      // unnoticed — admin-leads.js's own PATCH updates leads.phone under a
+      // row lock (routes/admin-leads.js ~1155-1180: `trx('leads')…forUpdate()`
+      // then `.update(...)`), and without a competing lock here that write
+      // can land in the gap and this hook would still send to the phone it
+      // read a moment earlier. Locking on dbi — the SAME connection the
+      // phone-locked handoff (withSmsHandoff) already holds — makes that
+      // writer wait until this whole handoff (through the SDK request)
+      // finishes, exactly like the phone-consent lock already does for a
+      // STOP. LOCK ORDER: lockSmsPhone (an advisory key, taken by
+      // withSmsHandoff BEFORE this function ever runs) always precedes this
+      // row lock — the same order lead-response-tools.js's own locked
+      // handoff documents ("Booking and estimate acceptance hold this
+      // advisory key before rows. Join their fence before either row
+      // lock..." — resolveLeadSubject/withLockedLeadSubject). admin-leads.js
+      // takes ONLY this row lock, never the phone key, so there is no
+      // second writer that could take these two in the opposite order —
+      // no inversion, no deadlock risk.
+      const lead = await dbi('leads').where({ id: leadId }).whereNull('deleted_at').forUpdate().first();
       if (!lead || !isOpenLeadRow(lead)) return { ok: false, code: 'lead_no_longer_open' };
       if (lead.estimate_id) return { ok: false, code: 'estimate_linked' };
       // Re-verified on the freshest possible read, same reason as every

@@ -1075,7 +1075,7 @@ describe('neverSendRecheck', () => {
   function dbi({ lead = OPEN, bookedSince = null, smsWithLink = null } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify']
+      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.first = jest.fn(async () => {
         if (table === 'leads') return lead;
@@ -1098,6 +1098,22 @@ describe('neverSendRecheck', () => {
   test('an open lead with no estimate, not booked, no recent link: ok', async () => {
     const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
     await expect(check({ dbi: dbi() })).resolves.toEqual({ ok: true });
+  });
+
+  // codex #5018 r12 P1: the lead read must be locked FOR UPDATE, on dbi —
+  // the SAME connection the phone-locked handoff already holds — so a
+  // concurrent phone correction (admin-leads.js's own forUpdate write)
+  // waits until this whole handoff finishes instead of landing in the gap
+  // before messages.create(). Real lock-collision proof (a mocked knex
+  // cannot prove a lock is genuinely held) lives in
+  // call-booking-link-text-postgres.test.js.
+  test('the leads read is locked FOR UPDATE, on the same connection the handoff holds', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    const conn = dbi();
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: true });
+    const leadsCallIndex = conn.mock.calls.findIndex(([table]) => table === 'leads');
+    expect(leadsCallIndex).toBeGreaterThanOrEqual(0);
+    expect(conn.mock.results[leadsCallIndex].value.forUpdate).toHaveBeenCalled();
   });
 
   test('a lead closed since dispatchIneligibleReason ran blocks the send', async () => {
@@ -1173,7 +1189,7 @@ describe('neverSendRecheck', () => {
     const conn = dbi();
     conn.mockImplementation((table) => {
       const chain = {};
-      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify']
+      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.first = jest.fn(async () => (table === 'leads' ? OPEN : (table === 'sms_log' ? { id: 'sms-1' } : undefined)));
       chain.pluck = jest.fn(async () => (table === 'short_codes' ? ['abcd'] : []));
@@ -1207,7 +1223,7 @@ describe('neverSendRecheck', () => {
     const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
     const readOnlyDbi = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify']
+      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.first = jest.fn(async () => (table === 'leads' ? OPEN : undefined));
       chain.pluck = jest.fn(async () => []);
@@ -1276,7 +1292,7 @@ describe('dispatchClaimedCall', () => {
     callLogUpdate = jest.fn(async () => 1), activityInsert = jest.fn(async () => {}), capture = {} } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
-      ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify']
+      ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify', 'forUpdate']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.where = jest.fn((...args) => {
         if (table === 'scheduled_services' && args[0] === 'created_at') capture.bookedSinceBound = args[2];

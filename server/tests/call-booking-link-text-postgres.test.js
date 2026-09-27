@@ -376,6 +376,50 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(outcome).toEqual({ ambiguous: true }); // never resent, exactly the contract this stamp exists to prove
   });
 
+  // codex #5018 r12 P1: neverSendRecheck's lead read must be locked FOR
+  // UPDATE, on dbi — the SAME connection the phone-locked handoff holds —
+  // so a concurrent phone correction (admin-leads.js's own shape:
+  // `UPDATE leads SET phone = …` under a row lock) waits until this whole
+  // handoff finishes rather than landing in the gap before
+  // messages.create(). A mocked knex cannot prove a lock is genuinely
+  // held; this drives a second real connection against the SAME row with
+  // a short lock_timeout.
+  test('neverSendRecheck\'s FOR UPDATE lead lock blocks a concurrent leads.phone UPDATE until the handoff finishes', async () => {
+    const leadId = await insertLead(mockPg, { phone: '+15555550555' });
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      from_phone: '+15555550555',
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-5', line: 'Pick a time.\n\n', phone: '+15555550555' });
+    let concurrentUpdateErrorCode = null;
+    // Mirrors twilio.js's own real dispatch(): providerPreSendCheck runs
+    // INSIDE the held handoff transaction, exactly where the real FOR
+    // UPDATE lead lock is taken, before the (simulated) SDK request.
+    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck }) => {
+      const verdict = await withSmsHandoff(async (trx) => {
+        const check = await providerPreSendCheck({ dbi: trx });
+        if (!check.ok) return check;
+        await mockPg.transaction(async (trx2) => {
+          await trx2.raw("SET LOCAL lock_timeout = '200ms'");
+          await trx2('leads').where({ id: leadId }).update({ phone: '+15555559999' });
+        }).catch((err) => { concurrentUpdateErrorCode = err.code; });
+        return { ok: true };
+      });
+      return verdict.ok
+        ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest0000000000000000000000005' }
+        : { sent: false, ...verdict };
+    });
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const result = await callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+    expect(result).toEqual({ sent: true, providerMessageId: 'SMtest0000000000000000000000005' });
+    expect(concurrentUpdateErrorCode).toBe('55P03'); // lock_timeout — the real FOR UPDATE lock was held
+    const lead = await mockPg('leads').where({ id: leadId }).first('phone');
+    expect(lead.phone).toBe('+15555550555'); // the concurrent write never landed
+  });
+
   test('dispatchClaimedCall skips booked_since_call against a real scheduled_services row created after the call', async () => {
     const customerId = randomUUID();
     await mockPg('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Customer', phone: '+15555550222', address_line1: '1 Example St', city: 'Bradenton', zip: '34205' });
