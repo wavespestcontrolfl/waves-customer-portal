@@ -883,7 +883,8 @@ describe('email template library rendering', () => {
       email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
       email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
       email_suppressions: [chain({ result: [] })],
-      email_messages: [chain({ returning: [queued] }), boundaryUpdate, chain({ first: current }), recovered],
+      email_messages: [chain({ first: null }), chain({ returning: [queued] }), boundaryUpdate,
+        chain({ first: current }), recovered],
       email_message_events: [chain()],
     });
     const providerBoundaryCheck = jest.fn(async () => ({
@@ -901,15 +902,43 @@ describe('email template library rendering', () => {
     await expect(EmailTemplates.sendTemplate({
       templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
       payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+      idempotencyKey: 'boundary-settlement-retry',
       withProviderHandoff: async (dispatch) => {
         await dispatch(database, providerBoundaryCheck);
         return { ok: false };
       },
     })).rejects.toBe(settlementError);
 
-    expect(recovered.whereIn).toHaveBeenCalledWith('provider_handoff_phase', ['started']);
+    expect(recovered.whereIn).toHaveBeenCalledWith('provider_handoff_phase', ['pending', 'started']);
     expect(recovered.update).toHaveBeenCalledWith(expect.objectContaining({
-      status: 'failed', error_message: settlementError.message, provider_handoff_phase: 'started',
+      status: 'failed', error_message: settlementError.message, provider_handoff_phase: 'pending',
+    }));
+
+    const failed = {
+      ...current,
+      status: 'failed',
+      error_message: settlementError.message,
+      provider_handoff_phase: 'pending',
+      idempotency_key: 'boundary-settlement-retry',
+    };
+    const requeued = { ...failed, status: 'queued', provider_handoff_phase: 'pending' };
+    const sent = { ...requeued, status: 'sent', provider_message_id: 'sg-boundary-retry' };
+    const retryClaim = chain({ returning: [requeued] });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ first: failed }), retryClaim, chain({ returning: [sent] })],
+    });
+    sendgrid.sendOne.mockResolvedValueOnce({ messageId: 'sg-boundary-retry' });
+
+    await expect(EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice', to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+      idempotencyKey: 'boundary-settlement-retry',
+    })).resolves.toMatchObject({ sent: true, providerAccepted: true });
+    expect(retryClaim.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'queued', provider_handoff_phase: 'pending', error_message: null,
     }));
   });
 

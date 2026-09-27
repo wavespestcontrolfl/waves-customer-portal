@@ -138,10 +138,16 @@ function recoveryIdFromMessage(message) {
  * whether the corrected address is itself suppressed, decide what to do.
  * Extracted so the gating logic is unit-testable without a DB.
  */
-function decideRecoveryAction({ candidate, suppressed, ownedByOther, hasAttachments, addressOnFile = true, min = 'high' }) {
+function decideRecoveryAction({
+  candidate, suppressed, ownedByOther, hasAttachments, requiresSourceAuthorization = false,
+  addressOnFile = true, min = 'high',
+}) {
   if (!candidate) return { action: 'skip', status: 'no_candidate' };
   if (!meetsConfidence(candidate.confidence, min)) {
     return { action: 'skip', status: 'skipped_low_confidence' };
+  }
+  if (requiresSourceAuthorization) {
+    return { action: 'skip', status: 'billing_replay_reauthorization_required' };
   }
   // PRIVACY: the corrected address is on file for a DIFFERENT customer (or, for
   // a lead with no resolvable customer, for any customer/lead/estimate).
@@ -496,19 +502,10 @@ async function insertRecoveryMessage(bouncedMessage, correctedEmail, recoveryId)
  * LAST. Idempotent — a row already sent (e.g. a partial-retry) is not re-sent.
  */
 async function dispatchRecoveryMessage({ message, categories, bouncedMessage, correctedEmail, ownCustomerId = null }) {
-  if (message.status === 'sent' && message.provider_message_id) {
+  if (message.provider_message_id) {
     return { ok: true, messageRowId: message.id, reused: true };
   }
   try {
-    // Billing snapshots carry source authority that must be rechecked against
-    // the original message. Until this recovery path can do that under the
-    // billing locks, fail closed instead of bypassing it through direct sendOne.
-    if (billingReplay.isBillingEmailProviderReplay(bouncedMessage)) {
-      const reason = 'billing_replay_reauthorization_required';
-      await db('email_messages').where({ id: message.id, status: 'queued' })
-        .update({ status: 'blocked', error_message: reason, updated_at: new Date() });
-      return { ok: false, suppressed: true, reason };
-    }
     let result;
     // Codex round 3 on #4608 (structural move): set inside dispatchToProvider
     // when sendgrid.sendOne's OWN annual-offer guard (the authoritative
@@ -564,12 +561,13 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
         throw err;
       }
     };
-    if (bouncedMessage.template_key === 'service.visit_summary') {
+    const visitSummary = bouncedMessage.template_key === 'service.visit_summary';
+    let fence;
+    if (visitSummary) {
       // Domain correction changes the destination, not the customer's consent
       // or the authority of the original visit link. The original recipient
       // is re-authorized on held rows and the request runs while they are
       // held; a recheck that cannot be read fails closed through the catch.
-      let fence;
       try {
         fence = await require('./visit-completion-summary').retrySummaryThroughHandoff(bouncedMessage, async (trx) => {
           // The corrected destination is revalidated immediately before the
@@ -584,22 +582,19 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
         if (!result) throw err;
         logger.warn(`[bounce-recovery] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
       }
-      if (!result) {
-        const reason = annualWithheld ? 'annual_offer_withheld' : (fence?.reason || 'visit_summary_unavailable');
-        await db('email_messages').where({ id: message.id, status: 'queued' })
-          .update({ status: 'blocked', error_message: reason, updated_at: new Date() }).catch(() => {});
+    } else {
+      await dispatchToProvider();
+    }
+    if (!result) {
+      const reason = annualWithheld ? 'annual_offer_withheld' : (fence?.reason || 'visit_summary_unavailable');
+      await db('email_messages').where({ id: message.id, status: 'queued' })
+        .update({ status: 'blocked', error_message: reason, updated_at: new Date() }).catch(() => {});
+      if (visitSummary) {
         // No provider request follows: settle the summary aggregate from the ledger.
         await require('./visit-completion-summary').reconcileSummaryEmailRecovery({ ...message, status: 'blocked' })
           .catch((err) => logger.warn(`[bounce-recovery] visit summary suppression not reconciled for ${message.id}: ${err.message}`));
-        return { ok: false, suppressed: true, reason };
       }
-    } else {
-      await dispatchToProvider();
-      if (annualWithheld) {
-        await db('email_messages').where({ id: message.id, status: 'queued' })
-          .update({ status: 'blocked', error_message: 'annual_offer_withheld', updated_at: new Date() }).catch(() => {});
-        return { ok: false, suppressed: true, reason: 'annual_offer_withheld' };
-      }
+      return { ok: false, suppressed: true, reason };
     }
     // Always record the provider id + send time. These are safe regardless of
     // any concurrent webhook.
@@ -630,7 +625,7 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
     // catch ran (lost-response case). If so, don't regress it or report failure.
     const current = await db('email_messages').where({ id: message.id }).first().catch(() => null);
     const status = String(current?.status || '').toLowerCase();
-    if (current && status !== 'queued' && status !== 'failed') {
+    if (current && !['queued', 'failed'].includes(status)) {
       return { ok: true, messageRowId: message.id, reused: true };
     }
     await db('email_messages')
@@ -708,7 +703,11 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
     // pre-flag rows and any direct inserter that didn't stamp has_attachments).
     const hasAttachments = !!bouncedMessage.has_attachments
       || ATTACHMENT_TEMPLATE_KEYS.has(String(bouncedMessage.template_key || ''));
-    const decision = decideRecoveryAction({ candidate, suppressed, ownedByOther, hasAttachments, addressOnFile, min: minConfidence() });
+    const decision = decideRecoveryAction({
+      candidate, suppressed, ownedByOther, hasAttachments, addressOnFile,
+      requiresSourceAuthorization: billingReplay.isBillingEmailProviderReplay(bouncedMessage),
+      min: minConfidence(),
+    });
 
     const baseUpdate = {
       corrected_email: candidate?.corrected || null,
@@ -724,7 +723,8 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
       // Every skip means a service/transactional email did NOT reach the
       // customer — nudge a human to fix the address (and show the suggestion
       // when we have one, e.g. a medium-confidence typo below the auto-send bar).
-      if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other', 'has_attachments', 'address_no_longer_on_file'].includes(decision.status)) {
+      if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other',
+        'has_attachments', 'address_no_longer_on_file', 'billing_replay_reauthorization_required'].includes(decision.status)) {
         await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status, candidate });
         // Audio re-verification lane (gated, best-effort): the domain
         // corrector can't touch LOCAL-PART errors ("apitz" vs the spelled
@@ -1062,6 +1062,7 @@ const UNRECOVERABLE_REASONS = {
   has_attachments: 'it includes an attachment (e.g. an invoice or report PDF) that cannot be auto-resent',
   address_no_longer_on_file: 'the bounced address is no longer on the record (it was already changed)',
   recovery_error: 'the automatic recovery hit an unexpected error',
+  billing_replay_reauthorization_required: 'the billing source must be reauthorized before it can be re-sent',
   send_failed: 're-sending to the corrected address failed',
   skipped_low_confidence: 'the likely correction was not confident enough to send automatically',
   no_candidate: 'no safe address correction was possible',

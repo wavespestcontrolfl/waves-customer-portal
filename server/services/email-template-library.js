@@ -1599,7 +1599,7 @@ async function sendTemplate({
 
   let providerAccepted = false;
   let providerHandoffStarted = false;
-  let markerWriteFailed = false;
+  let providerRequestDefinitelyUnsent = false;
   let result;
   const recordAcceptance = () => db('email_messages')
     .where({ id: message.id, send_attempt_token: sendAttemptToken,
@@ -1677,7 +1677,7 @@ async function sendTemplate({
           provider_handoff_attempt_token: sendAttemptToken })
         .update({ provider_handoff_phase: PROVIDER_HANDOFF_STARTED,
           provider_handoff_attempt_token: sendAttemptToken, updated_at: new Date() })
-        .catch((err) => { markerWriteFailed = true; throw err; });
+        .catch((err) => { providerRequestDefinitelyUnsent = true; throw err; });
       if (Number(marked) !== 1) {
         throw inFlightCollisionError(idempotencyKey || message.id);
       }
@@ -1719,7 +1719,10 @@ async function sendTemplate({
       } catch (err) {
         if (err?.annualOfferWithheld) return ANNUAL_OFFER_WITHHELD;
         if (err?.annualOfferGuardFailed) return { [ANNUAL_OFFER_GUARD_FAILED]: true, error: err };
-        if (err?.providerBoundaryBlocked) return PROVIDER_BOUNDARY_BLOCKED;
+        if (err?.providerBoundaryBlocked) {
+          providerRequestDefinitelyUnsent = true;
+          return PROVIDER_BOUNDARY_BLOCKED;
+        }
         throw err;
       }
     };
@@ -1727,7 +1730,13 @@ async function sendTemplate({
     if (handoff.abortedBeforeDispatch) return abortBeforeDispatch();
     result = handoff.result;
     if (result === ANNUAL_OFFER_WITHHELD) return abortWithheldBeforeDispatch();
-    if (result === PROVIDER_BOUNDARY_BLOCKED) return await abortProviderBoundaryBeforeDispatch();
+    if (result === PROVIDER_BOUNDARY_BLOCKED) {
+      // The final callback ran after preparation but refused before fetch.
+      // If its settlement write fails, recover either visible marker state as
+      // definitely unsent rather than leaving a started row ambiguous.
+      providerHandoffStarted = false;
+      return await abortProviderBoundaryBeforeDispatch();
+    }
     // Pre-push audit P1: both the withProviderHandoff branch and the direct
     // branch above assign `result` from the SAME dispatchToProvider, so this
     // one check covers either caller shape.
@@ -1779,7 +1788,7 @@ async function sendTemplate({
     const expectedFailurePhase = providerHandoffStarted
       ? PROVIDER_HANDOFF_STARTED
       : PROVIDER_HANDOFF_PENDING;
-    const expectedFailurePhases = markerWriteFailed && !providerHandoffStarted
+    const expectedFailurePhases = providerRequestDefinitelyUnsent && !providerHandoffStarted
       ? [PROVIDER_HANDOFF_PENDING, PROVIDER_HANDOFF_STARTED] : [expectedFailurePhase];
     const recordedFailurePhase = definiteRejection
       ? PROVIDER_HANDOFF_REJECTED
