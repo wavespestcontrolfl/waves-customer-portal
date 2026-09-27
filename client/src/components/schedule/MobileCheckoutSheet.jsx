@@ -38,7 +38,7 @@ import {
   isCardExpired,
 } from '../../hooks/useCustomerCards';
 import { attachedVisitInvoice } from './visitInvoice';
-import { siblingInvoiceCoverageCopy } from '../../lib/siblingInvoiceCoverage';
+import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -299,25 +299,28 @@ export default function MobileCheckoutSheet({
   // predictionAmount, making this sheet preview a positive, chargeable
   // total the mint endpoint's payer guard then refuses outright.
   const payerBilled = !!service.billedToPayer || predictionKind === 'payer';
-  // Codex round 5 P2: this visit's combined-trip invoice needs manual
-  // review (billing-lane.js siblingCoveredCompletionPrediction — a
-  // refunded/terminal match, or the lookup itself failing) — the mint
+  // ONE canonical per-visit collection verdict (owner decision — narrow +
+  // fail closed): `billingLane.siblingCoverage` — is this visit's own
+  // charge entangled with another invoice's state, either a same-day
+  // sibling's combined invoice or this visit's OWN attached invoice sitting
+  // in a terminal state (round-8 P2). A 'review' verdict means the mint
   // resolver (resolveScheduledServiceCharge, admin-schedule.js) refuses to
-  // mint ANYTHING for it, base OR extras, with a 409, so Charge must stay
+  // mint ANYTHING for it, base OR extras, with a 409 — Charge must stay
   // disabled here even after an operator stacks a checkout extra on top of
   // the (already $0) base — servicesSubtotal alone would otherwise turn
-  // positive from the extra and read as chargeable.
-  const siblingNeedsReview = !hasOwnPrice && predictionKind === 'sibling_needs_review';
-  // codex round-7 P1: a covered_sibling_invoice prediction never mints a
-  // second invoice for THIS visit's base fee either way (price above is
-  // already $0 for it — grossAmount/amount are both null by design), but
-  // when the sibling invoice is still collectible (draft/sent/overdue/…)
-  // the generic "No charge — complete from job" copy read exactly like
-  // the genuinely-settled case, hiding a real balance due elsewhere.
+  // positive from the extra and read as chargeable. A 'collect_on_combined_invoice'
+  // or 'settled' verdict never mints a second invoice for THIS visit's base
+  // fee either (price above is already $0 for it — grossAmount/amount are
+  // both null by design), and the same 409 refusal applies to it too
+  // (round-8 P1: no extras-only invoice on a covered visit at all) — Charge
+  // stays disabled for EVERY non-'none' state, not only 'review'.
+  const siblingCoverageVerdict = service.billingLane?.siblingCoverage || null;
+  const siblingNeedsReview = !hasOwnPrice && siblingCoverageVerdict?.state === 'review';
   const siblingCoverage = !hasOwnPrice && predictionKind === 'covered_sibling_invoice'
-    ? siblingInvoiceCoverageCopy(service.billingLane?.prediction)
+    ? siblingCoverageCopy(siblingCoverageVerdict, { siblingServiceType: service.billingLane?.prediction?.siblingServiceType || null })
     : null;
   const siblingCollectible = !!siblingCoverage?.collectible;
+  const siblingBlocksCharge = !hasOwnPrice && !!siblingCoverageVerdict && siblingCoverageVerdict.state !== 'none';
   const openVisitInvoice = !payerBilled && inv && inv.open && inv.total > 0 ? inv : null;
   // A processing invoice is money already in flight (e.g. a pending ACH
   // debit) — the payment routes reject it, so block charging outright
@@ -381,7 +384,7 @@ export default function MobileCheckoutSheet({
   // existing, separately-tested self-pay flow this must not disable.
   const nothingToCharge = priceRefreshBlocksCharge || totalBeforePrepaid <= 0 || !!processingVisitInvoice
     || (!hasOwnPrice && payerBilled && !invoicePreview)
-    || (siblingNeedsReview && !invoicePreview);
+    || siblingBlocksCharge;
 
   // One-line card-on-file note for the tech. Shows the first non-expired
   // method (server orders default first); if every method is expired, says
@@ -602,7 +605,7 @@ export default function MobileCheckoutSheet({
               ? 'Payment processing — nothing to collect'
               : priceRefreshBlocksCharge
                 ? 'Price needs a refresh — reopen this visit'
-                : siblingNeedsReview && !invoicePreview
+                : siblingNeedsReview
                 ? 'Needs review on Customer 360 — can’t charge here'
                 : siblingCollectible && nothingToCharge
                 ? 'Combined trip invoice due — collect there, not here'

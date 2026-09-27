@@ -154,13 +154,14 @@ function JobCharge({ service, data, apply }) {
   // (paid/prepaid/processing) really is "covered," but a collectible one
   // (draft/sent/overdue/…) still has a real balance due elsewhere.
   // `billing.collectNeeded`/`billing.headline` (visitBrief.js
-  // visitMoneySummary, via siblingInvoiceCoverageCopy) already carry that
-  // split, so this card never re-derives it.
+  // visitMoneySummary, via the server's own siblingCoverage verdict —
+  // billing-lane.js siblingCoverageForSchedule) already carry that split,
+  // so this card never re-derives it.
   const siblingCollectible = billing.kind === "covered_sibling_invoice" && billing.collectNeeded;
   const covered = ["prepaid", "covered_membership", "covered_annual", "covered_sibling_invoice"].includes(billing.kind)
     && !siblingCollectible;
   // 'sibling_needs_review': the sibling lookup came back needs_review/error
-  // (billing-lane.js siblingCoveredCompletionPrediction) — the server's own
+  // (billing-lane.js siblingCoverageForSchedule) — the server's own
   // mint resolver (resolveScheduledServiceCharge, admin-schedule.js)
   // refuses to charge this visit for EITHER reason, so this card must never
   // fall back to `data.proposedAmount`/`data.currentAmount` (a positive

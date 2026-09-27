@@ -201,12 +201,13 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
     // 'per_application' — proving the gate reads the visit's shape, not
     // the mutable lane.
     expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalled();
-    // 'covered' resolves the base to 0; with no checkout extras the route's
-    // existing "nothing chargeable" gate refuses outright — the pre-fix
-    // regression instead fell through to the $74.70 monthly rate and
-    // minted it, a real second charge beside the sibling's invoice.
-    expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.body.error).toMatch(/no chargeable amount/i);
+    // Owner decision (round-8 P1, narrow + fail closed): a definitive
+    // 'covered' verdict now refuses the mint OUTRIGHT with a 409, never
+    // falls through to $0-plus-extras — the pre-fix regression instead fell
+    // through to the $74.70 monthly rate and minted it, a real second
+    // charge beside the sibling's invoice.
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.body.error).toMatch(/combined trip invoice/i);
     expect(mockMint).not.toHaveBeenCalled();
   });
 
@@ -275,30 +276,27 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
       });
     });
 
-    test('refuses the mint when a concurrent refund flips "covered" to "none" under the lock', async () => {
+    // Owner decision (round-8 P1, narrow + fail closed): a definitive
+    // 'covered' verdict now refuses the mint OUTRIGHT — no zero-base-plus-
+    // extras path exists any more for Charge Now to mint AROUND coverage.
+    // The mint (and any recheckInTrx) is never reached at all, even with an
+    // operator-added checkout extra — this replaces the old "covered
+    // resolves the base to 0, extras make it chargeable, recheck catches a
+    // concurrent refund" scenario, which no longer occurs because 'covered'
+    // never gets that far pre-lock.
+    test('a definitive "covered" verdict refuses the ENTIRE mint before the lock — no extras-only path around it', async () => {
       findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
         invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
         liveBeside: null,
       });
-      mockMint.mockImplementation(async ({ buildCreateParams }) => {
-        buildCreateParams();
-        throw new Error('stop-after-capture');
-      });
-      // A 'covered' base resolves to 0 — an operator-added extra is needed
-      // for the route's "nothing chargeable" gate to let the mint through
-      // at all (the base alone would 400 before ever reaching it).
       const { req, res, next } = makeReqRes({
         extraLineItems: [{ description: 'Extra treatment', quantity: 1, unit_price: 40, amount: 40 }],
       });
       await handler(req, res, next);
-      const { recheckInTrx } = mockMint.mock.calls[0][0];
 
-      // The covering sibling invoice was refunded between the pre-lock read
-      // and the locked recheck.
-      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
-      await expect(recheckInTrx({})).rejects.toMatchObject({
-        status: 409, code: 'SIBLING_COVERAGE_CHANGED',
-      });
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.body.error).toMatch(/combined trip invoice/i);
+      expect(mockMint).not.toHaveBeenCalled();
     });
 
     test('no recheckInTrx at all when the visit has its own explicit price (the sibling lookup never ran)', async () => {
@@ -341,6 +339,19 @@ describe('mintOrReuseScheduledServiceInvoice — sibling-lookup refusal', () => 
     });
     const result = await mintOrReuseScheduledServiceInvoice(SVC);
     expect(result).toEqual({ invoice: null, reason: 'sibling_invoice_needs_review' });
+    expect(mockMint).not.toHaveBeenCalled();
+  });
+
+  // Round-8 P1 (owner decision — narrow + fail closed): a definitive
+  // 'covered' verdict is ALSO a flat refusal now — MarkPrepaidModal's
+  // RECEIPT_REASON_TEXT has copy for this exact reason.
+  test('a definitive "covered" verdict refuses to mint with a structured reason, never a $0 "nothing chargeable"', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+      liveBeside: null,
+    });
+    const result = await mintOrReuseScheduledServiceInvoice(SVC);
+    expect(result).toEqual({ invoice: null, reason: 'sibling_invoice_covered' });
     expect(mockMint).not.toHaveBeenCalled();
   });
 

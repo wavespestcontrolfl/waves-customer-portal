@@ -61,7 +61,7 @@ it('shows an accepted discount once when the same net is already stamped on the 
 
 // Codex round-6 P2: a same-day combined per-application trip whose sibling
 // lookup couldn't confirm coverage ('sibling_needs_review' — billing-lane.js
-// siblingCoveredCompletionPrediction) used to fall through to
+// siblingCoverageForSchedule) used to fall through to
 // `data.currentAmount`/`data.proposedAmount` here — a real positive
 // acceptance-fee charge — since neither `covered` nor `noCharge` recognized
 // the kind. The server's own mint resolver refuses to charge this visit
@@ -99,8 +99,12 @@ it('reads a still-collectible covered_sibling_invoice prediction as flagged, not
   const collectibleSvc = { id: 'job-collectible', serviceType: 'Every 6 Weeks Lawn Care', estimatedPrice: null,
     billingLane: {
       prediction: {
-        kind: 'covered_sibling_invoice', amount: null, invoiceNumber: 'WPC-TEST-0001', invoiceStatus: 'overdue', amountDue: 153.6,
+        kind: 'covered_sibling_invoice', amount: null, invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001',
       },
+      // The server's own canonical verdict (billing-lane.js
+      // siblingCoverageForSchedule) — this card renders THAT, never a raw
+      // invoiceStatus.
+      siblingCoverage: { state: 'collect_on_combined_invoice', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 153.6, reason: null },
     } };
   const collectibleData = { ...data, serviceId: collectibleSvc.id, currentAmount: 97.2, proposedAmount: 97.2, canApply: false, lines: [] };
   render(<CompletionPricingCard service={collectibleSvc} adminFetch={vi.fn().mockResolvedValue({ completionPricing: collectibleData })} onReviewChange={vi.fn()} />);

@@ -86,6 +86,12 @@ const RECEIPT_REASON_TEXT = {
     'The prepayment was recorded, but this visit’s combined-trip invoice needs a human look before a receipt goes out — reconcile it from Customer 360, then resend the receipt.',
   sibling_lookup_failed:
     'The prepayment was recorded, but we couldn’t confirm whether this visit’s combined-trip invoice already covers it, so no receipt was sent yet — refresh and try again in a moment.',
+  // Round-8 P1 (owner decision — narrow + fail closed): a DEFINITIVE
+  // 'covered' verdict now refuses the mint too, so this visit never gets
+  // its own invoice/receipt at all — collect on the combined trip invoice
+  // instead.
+  sibling_invoice_covered:
+    'The prepayment was recorded, but this visit is billed on the combined trip invoice — collect there, not here.',
   send_failed:
     'The prepayment was recorded, but the receipt couldn’t be sent just now. You can resend it from the invoice.',
   error: 'The prepayment was recorded, but the receipt couldn’t be sent just now.',

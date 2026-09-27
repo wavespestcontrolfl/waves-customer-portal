@@ -29,7 +29,11 @@ vi.mock('../../hooks/useDiscountStacking', () => ({
 
 afterEach(cleanup);
 
-function siblingService(invoiceStatus) {
+// `state`/`amountDue` mirror the server's own canonical
+// `billingLane.siblingCoverage` verdict (billing-lane.js
+// siblingCoverageForSchedule) — the component renders THAT, never a raw
+// invoiceStatus, per the owner's narrow + fail closed decision.
+function siblingService(state, amountDue = 153.6) {
   return {
     id: 'svc-lawn',
     serviceType: 'Every 6 Weeks Lawn Care',
@@ -46,9 +50,14 @@ function siblingService(invoiceStatus) {
         conflictStampedPrice: false,
         invoiceId: 'inv-1',
         invoiceNumber: 'WPC-TEST-0001',
-        invoiceStatus,
-        amountDue: 153.6,
         siblingServiceType: 'Quarterly Pest Control',
+      },
+      siblingCoverage: {
+        state,
+        invoiceId: 'inv-1',
+        invoiceNumber: 'WPC-TEST-0001',
+        amountDue: state === 'collect_on_combined_invoice' ? amountDue : 0,
+        reason: state === 'settled' ? 'invoice_settled' : null,
       },
     },
   };
@@ -56,13 +65,13 @@ function siblingService(invoiceStatus) {
 
 describe('MobileCheckoutSheet sibling-covered visit', () => {
   it('a settled (paid) sibling invoice reads as the ordinary no-charge state', () => {
-    render(<MobileCheckoutSheet service={siblingService('paid')} onClose={() => {}} />);
+    render(<MobileCheckoutSheet service={siblingService('settled')} onClose={() => {}} />);
     expect(screen.getByRole('button', { name: 'No charge — complete from job' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: /Combined trip invoice due/i })).not.toBeInTheDocument();
   });
 
   it('a collectible (overdue) sibling invoice says so instead of the ordinary no-charge state', () => {
-    render(<MobileCheckoutSheet service={siblingService('overdue')} onClose={() => {}} />);
+    render(<MobileCheckoutSheet service={siblingService('collect_on_combined_invoice')} onClose={() => {}} />);
     expect(screen.getByRole('button', { name: /Combined trip invoice due — collect there, not here/i })).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'No charge — complete from job' })).not.toBeInTheDocument();
   });

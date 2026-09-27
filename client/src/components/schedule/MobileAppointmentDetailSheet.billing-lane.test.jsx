@@ -255,13 +255,18 @@ describe('MobileAppointmentDetailSheet sibling-covered first-application visit',
         conflictStampedPrice: false,
         invoiceId: 'inv-1',
         invoiceNumber: 'WPC-TEST-0001',
-        // Codex round-7 P1: the sibling invoice's status decides "no charge
-        // needed" vs "still due — collect on that invoice". This fixture
-        // pins the SETTLED case (paid) — see the collectible-status
-        // describe block below for the still-due case.
-        invoiceStatus: 'paid',
-        amountDue: 153.6,
         siblingServiceType: 'Quarterly Pest Control',
+      },
+      // The server's own canonical verdict (billing-lane.js
+      // siblingCoverageForSchedule) — the sheet renders THAT, never a raw
+      // invoiceStatus. This fixture pins the SETTLED case (paid) — see the
+      // collectible-status describe block below for the still-due case.
+      siblingCoverage: {
+        state: 'settled',
+        invoiceId: 'inv-1',
+        invoiceNumber: 'WPC-TEST-0001',
+        amountDue: 0,
+        reason: 'invoice_settled',
       },
       unbilledGap: null,
     },
@@ -324,9 +329,14 @@ describe('MobileAppointmentDetailSheet sibling-covered visit whose sibling invoi
         conflictStampedPrice: false,
         invoiceId: 'inv-1',
         invoiceNumber: 'WPC-TEST-0001',
-        invoiceStatus: 'overdue',
-        amountDue: 153.6,
         siblingServiceType: 'Quarterly Pest Control',
+      },
+      siblingCoverage: {
+        state: 'collect_on_combined_invoice',
+        invoiceId: 'inv-1',
+        invoiceNumber: 'WPC-TEST-0001',
+        amountDue: 153.6,
+        reason: null,
       },
       unbilledGap: null,
     },
@@ -574,7 +584,7 @@ describe('MobileAppointmentDetailSheet monthlyRate fallback', () => {
 });
 
 // Codex round 5 P2: the sibling lookup came back needs_review/error
-// (billing-lane.js siblingCoveredCompletionPrediction) — the mint resolver
+// (billing-lane.js siblingCoverageForSchedule) — the mint resolver
 // (resolveScheduledServiceCharge) refuses to charge this visit either way,
 // so the sheet must never preview a $ amount or offer "Review & checkout"
 // for it, and must point staff to Customer 360 instead.
@@ -598,7 +608,13 @@ describe('MobileAppointmentDetailSheet sibling invoice needs-review visit', () =
         conflictStampedPrice: false,
         invoiceId: 'inv-1',
         invoiceNumber: 'WPC-TEST-0001',
-        invoiceStatus: 'refunded',
+      },
+      siblingCoverage: {
+        state: 'review',
+        invoiceId: 'inv-1',
+        invoiceNumber: 'WPC-TEST-0001',
+        amountDue: null,
+        reason: 'terminal_invoice',
       },
       unbilledGap: null,
     },

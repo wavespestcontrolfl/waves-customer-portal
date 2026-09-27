@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // Codex round 5 P2: this visit's combined-trip sibling invoice needs manual
-// review (billing-lane.js siblingCoveredCompletionPrediction — a refunded/
+// review (billing-lane.js siblingCoverageForSchedule — a refunded/
 // terminal match, or the lookup itself failing) — the mint resolver
 // (resolveScheduledServiceCharge, admin-schedule.js) refuses to charge
 // ANYTHING for it, base or extras, with a retryable 409. This sheet must
@@ -51,7 +51,16 @@ const NEEDS_REVIEW_SERVICE = {
       conflictStampedPrice: false,
       invoiceId: 'inv-1',
       invoiceNumber: 'WPC-TEST-0001',
-      invoiceStatus: 'refunded',
+    },
+    // The server's own canonical verdict (billing-lane.js
+    // siblingCoverageForSchedule) — this sheet renders THAT, never a raw
+    // invoiceStatus.
+    siblingCoverage: {
+      state: 'review',
+      invoiceId: 'inv-1',
+      invoiceNumber: 'WPC-TEST-0001',
+      amountDue: null,
+      reason: 'terminal_invoice',
     },
   },
 };

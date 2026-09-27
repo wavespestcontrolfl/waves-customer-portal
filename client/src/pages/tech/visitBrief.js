@@ -5,7 +5,7 @@
 // comes from the canonical attachedVisitInvoice helper. Checkout math stays
 // exclusively in MobileCheckoutSheet — the brief displays, checkout charges.
 import { attachedVisitInvoice, visitInvoiceStatusNote } from '../../components/schedule/visitInvoice';
-import { siblingInvoiceCoverageCopy } from '../../lib/siblingInvoiceCoverage';
+import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 
 // A status-only completion still needs the combined closeout to create its
 // canonical service record. Require the explicit false from the current day
@@ -71,18 +71,17 @@ const PREDICTION_COPY = {
   no_charge: () => 'No charge',
   // Same-day combined per-application trip — a sibling visit's
   // first-application invoice already bills it (billing-lane.js
-  // siblingCoveredCompletionPrediction). Without an entry here the kind
+  // siblingCoverageForSchedule). Without an entry here the kind
   // fell through `copy ? copy(amount) : null` to a silent headline: null,
   // dropping the billing row from the brief entirely (codex round-6 P2).
   //
   // codex round-7 P1: "nothing to collect" was ALWAYS the headline here,
   // even when the sibling invoice is still draft/sent/overdue — genuinely
-  // collectible. `prediction` (not just `amount`, which stays null for
-  // this kind by design) carries invoiceStatus/amountDue, so
-  // siblingInvoiceCoverageCopy can tell a technician to collect on that
-  // invoice instead of walking off the job.
-  covered_sibling_invoice: (_amt, prediction) => {
-    const coverage = siblingInvoiceCoverageCopy(prediction);
+  // collectible. `siblingCoverage` (the server's own canonical verdict,
+  // billing-lane.js siblingCoverageForSchedule) tells a technician to
+  // collect on that invoice instead of walking off the job.
+  covered_sibling_invoice: (_amt, prediction, siblingCoverage) => {
+    const coverage = siblingCoverageCopy(siblingCoverage, { siblingServiceType: prediction?.siblingServiceType });
     return coverage?.collectible ? coverage.short : 'Covered by sibling invoice — nothing to collect';
   },
   // The sibling lookup came back needs_review/error — the mint resolver
@@ -103,6 +102,7 @@ export function visitMoneySummary(service) {
   const invoice = attachedVisitInvoice(service);
   const note = invoice ? visitInvoiceStatusNote(invoice) : null;
   const prediction = service?.billingLane?.prediction || null;
+  const siblingCoverage = service?.billingLane?.siblingCoverage || null;
   const kind = prediction?.kind || null;
   if (!kind) {
     return { kind: null, amount: null, collectNeeded: false, headline: null, note, invoice };
@@ -114,12 +114,13 @@ export function visitMoneySummary(service) {
   // invoice is still collectible flags collectNeeded too — same amber
   // "needs action" treatment VisitBriefPanel already gives an `invoice`
   // row, so the brief doesn't bury a real balance due in quiet gray text.
-  const siblingCollectNeeded = kind === 'covered_sibling_invoice' && !!siblingInvoiceCoverageCopy(prediction)?.collectible;
+  const siblingCollectNeeded = kind === 'covered_sibling_invoice'
+    && siblingCoverage?.state === 'collect_on_combined_invoice';
   return {
     kind,
     amount,
     collectNeeded: (kind === 'invoice' && amount > 0) || siblingCollectNeeded,
-    headline: copy ? copy(amount, prediction) : null,
+    headline: copy ? copy(amount, prediction, siblingCoverage) : null,
     note,
     invoice,
   };

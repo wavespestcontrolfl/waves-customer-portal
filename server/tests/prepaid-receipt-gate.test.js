@@ -213,15 +213,25 @@ describe('resolveScheduledServiceCharge', () => {
     const SVC = { id: 'svc-lawn', customer_id: 'cust-1', source_estimate_id: 'est-1', scheduled_date: '2026-09-27' };
     const DB_CONN = {};
 
-    test('a sibling-covered unpriced per_application visit never mints the lingering acceptance fee', async () => {
+    // Owner decision (round-8 P1, narrow + fail closed): a definitive
+    // 'covered' verdict is now a flat structured refusal, not a $0 that a
+    // caller with checkout extras could mint an extras-only invoice past —
+    // see admin-schedule-charge-now-sibling-refusal.test.js for the
+    // route-level "no extras-only mint on a covered visit" coverage.
+    test('a sibling-covered unpriced per_application visit refuses to mint the lingering acceptance fee', async () => {
       findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
         invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
         liveBeside: null,
       });
-      expect(await resolveScheduledServiceCharge({
+      const result = await resolveScheduledServiceCharge({
         estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
         perApplicationFee: 97.2, serviceType: 'Every 6 Weeks Lawn Care', svc: SVC, dbConn: DB_CONN,
-      })).toBe(0);
+      });
+      expect(result).toEqual({
+        refused: true,
+        reason: 'sibling_invoice_covered',
+        message: expect.stringMatching(/combined trip invoice/i),
+      });
     });
 
     test('an explicit own price still wins over sibling coverage', async () => {

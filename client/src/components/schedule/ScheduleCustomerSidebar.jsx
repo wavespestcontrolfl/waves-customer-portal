@@ -7,7 +7,7 @@ import CancelFeeNotice from './CancelFeeNotice';
 import { TIMEZONE } from '../../lib/timezone';
 import { appointmentHistory as buildAppointmentHistory } from './customerAppointments';
 import CallBridgeLink from '../admin/CallBridgeLink';
-import { siblingInvoiceCoverageCopy } from '../../lib/siblingInvoiceCoverage';
+import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 
 function money(value) {
   const n = Number(value || 0);
@@ -168,22 +168,25 @@ export default function ScheduleCustomerSidebar({
   // fix — codex pre-push P1).
   const rawPrice = service?.estimatedPrice != null ? Number(service.estimatedPrice) : null;
   const hasOwnPrice = rawPrice != null && rawPrice > 0;
-  // Codex round-6 P2: 'sibling_needs_review' (billing-lane.js
-  // siblingCoveredCompletionPrediction) carries a null amount — the mint
-  // resolver (resolveScheduledServiceCharge, admin-schedule.js) refuses to
-  // charge this visit at all until the combined-trip invoice is reconciled.
-  // `Number(null) || 0` alone renders an ordinary $0.00 Total with no
-  // explanation, which reads as "nothing to collect" rather than "go
-  // resolve this" — surface the review state explicitly (mirrors
-  // MobileAppointmentDetailSheet / MobileCheckoutSheet / BillingLaneCard).
-  const siblingNeedsReview = service?.billingLane?.prediction?.kind === 'sibling_needs_review';
-  // codex round-7 P1: a covered_sibling_invoice prediction whose sibling
-  // invoice is still collectible (draft/sent/overdue/…) must not read as a
-  // silent $0 total — the combined trip invoice still has a real balance
-  // due. siblingInvoiceCoverageCopy centralizes the settled/collectible
-  // split every consumer of this prediction shares.
+  // `billingLane.siblingCoverage` (billing-lane.js siblingCoverageForSchedule)
+  // is the ONE canonical per-visit collection verdict the server computes
+  // (owner decision — narrow + fail closed). A 'review' verdict carries a
+  // null amount — the mint resolver (resolveScheduledServiceCharge,
+  // admin-schedule.js) refuses to charge this visit at all until the
+  // combined-trip invoice is reconciled. `Number(null) || 0` alone renders
+  // an ordinary $0.00 Total with no explanation, which reads as "nothing to
+  // collect" rather than "go resolve this" — surface the review state
+  // explicitly (mirrors MobileAppointmentDetailSheet / MobileCheckoutSheet /
+  // BillingLaneCard).
+  const siblingNeedsReview = service?.billingLane?.siblingCoverage?.state === 'review';
+  // A 'collect_on_combined_invoice' verdict must not read as a silent $0
+  // total — the combined trip invoice still has a real balance due.
+  // siblingCoverageCopy is pure copy formatting of the server verdict, never
+  // its own classifier.
   const siblingCoverage = service?.billingLane?.prediction?.kind === 'covered_sibling_invoice'
-    ? siblingInvoiceCoverageCopy(service.billingLane.prediction)
+    ? siblingCoverageCopy(service.billingLane.siblingCoverage, {
+      siblingServiceType: service.billingLane.prediction?.siblingServiceType || null,
+    })
     : null;
   const basePrice = hasOwnPrice
     ? rawPrice

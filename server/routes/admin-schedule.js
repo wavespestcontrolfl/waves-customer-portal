@@ -44,7 +44,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoveredCompletionPrediction, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -5188,73 +5188,35 @@ function unbilledVisitAlert({ hasChargeableMethod, prediction, willMint = null }
 async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, completionContext = null, checkoutInvoice = null }) {
   const customerId = svc?.customer_id;
   const achStatus = svc?.ach_status;
-  // Sibling-covered first-application: before treating a "nothing will
-  // bill" prediction as a real money gap, ask whether a same-day sibling
-  // visit's first-application invoice already covers this one (a combined
-  // per-application accept — see billing-lane.js
-  // siblingCoveredCompletionPrediction, which reuses closeout's OWN
-  // sibling-invoice lookup). Only worth asking when this visit's own
-  // prediction is already an unbilled-money-gap no_charge AND it carries a
-  // source estimate to look a sibling up from; any lookup failure falls
-  // through to the existing gap logic below unchanged.
-  const moneyGapReason = billingLane?.prediction?.kind === 'no_charge' ? billingLane.prediction.reason : null;
-  // The OTHER shape a sibling-covered promoted row can take (codex pre-push
-  // P1): an established per_application customer's fee survives an add-on
-  // accept (estimate-converter.js ~5212-5217 preserves it) even on THIS
-  // sibling-covered row, so predictCompletionBilling's per_application
-  // branch falls back to that lingering fee and predicts an ordinary
-  // 'invoice'/'auto_charge' — never the no_charge money gap the check above
-  // alone catches. Left unchecked, the schedule preview showed fee+extras
-  // while the Charge Now mint resolver (already sibling-aware) billed
-  // extras alone — a preview the actual charge then contradicts. Ask the
-  // SAME sibling lookup whenever this row has no price of its own,
-  // regardless of what the naive fallback already predicted — completion
-  // itself asks unconditionally too (findFirstApplicationInvoiceForEstimateService,
-  // re-checked right before minting). Excludes the RESERVED row's own
-  // attached-invoice prediction (that visit genuinely bills the combined
-  // total; it is not the one being asked "is a sibling covering YOU").
-  //
-  // 'prepaid' belongs in this list too (codex pre-push P1, round 2): the
-  // SAME lingering per_application fee can predict 'prepaid' instead of
-  // 'invoice' when the customer also fully prepaid it (fee $100, prepaid
-  // $100) — predictCompletionBilling's ordinary, non-sibling-aware branch
-  // has no idea this row is sibling-covered, so it still returns
-  // grossAmount: 100 for the checkout sheet to add extras on top of. The
-  // Charge Now mint resolver (resolveScheduledServiceCharge) asks the
-  // sibling question unconditionally and would use a $0 base instead —
-  // previewing $40 due on a $40 extra while the mint credits the SAME
-  // prepaid pot against it and settles at $0 due is exactly the
-  // preview-vs-actual divergence this lookup exists to prevent.
-  const hasOwnPrice = svc?.estimated_price != null && Number(svc.estimated_price) > 0;
-  // Codex round-6 pre-push P1: a lane-changed customer's naive prediction
-  // can ALSO land on 'covered_membership' — monthly dues cover an unpriced
-  // per_application-shaped visit, with `grossAmount` set to the monthlyRate
-  // (billing-lane.js predictCompletionBilling). That kind was never in this
-  // OR-list, so the sheet kept showing "covered by dues, $X" untouched even
-  // though resolveScheduledServiceCharge (this file, the shape-based P1 fix
-  // above) now asks the SAME sibling question unconditionally and can
-  // return a $0 base or refuse with needs_review — a preview that no
-  // longer matches what Charge Now actually mints. Reuse the ONE shared
-  // shape predicate (isSiblingCoverageEligibleVisit, billing-lane.js) that
-  // resolver already gates on, so enrichment and the mint can never
-  // disagree about whether a sibling COULD be covering this trip, for
-  // every kind that shape can produce — not just the three hand-picked
-  // ones this list used to name. Attached-invoice precedence is preserved
-  // (the RESERVED row's own combined-total prediction is never overridden).
-  const feeFallbackPrediction = isSiblingCoverageEligibleVisit({
-    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
-  })
-    && ['invoice', 'auto_charge', 'prepaid', 'covered_membership'].includes(billingLane?.prediction?.kind)
-    && billingLane?.prediction?.source !== 'attached_invoice';
-  if (((moneyGapReason && UNBILLED_MONEY_GAP_REASONS.has(moneyGapReason)) || feeFallbackPrediction) && svc?.source_estimate_id) {
-    try {
-      const covered = await siblingCoveredCompletionPrediction({ svc, dbConn: db });
-      if (covered) {
-        billingLane.prediction = covered;
-        billingLane.unbilledGap = null;
-        return billingLane;
-      }
-    } catch { /* fails toward the existing gap verdict below */ }
+  // ONE canonical per-visit collection verdict (owner decision — narrow +
+  // fail closed): is this visit's own charge entangled with another
+  // invoice's state — a same-day sibling's combined first-application
+  // invoice, or (round-8 P2) this visit's OWN attached invoice sitting in a
+  // terminal state? Resolved for EVERY sibling-coverage-eligible visit
+  // (unpriced, estimate-linked, not a callback, not an always-free type —
+  // billing-lane.js isSiblingCoverageEligibleVisit), regardless of what
+  // this visit's own naive prediction already says — the SAME shape gate
+  // the Charge Now mint resolver (resolveScheduledServiceCharge) gates on,
+  // so the preview and the mint can never disagree about whether a sibling
+  // COULD be covering this trip. `billingLane.siblingCoverage` is the field
+  // every client surface renders for its collect/settled/review copy —
+  // client/src/lib/siblingInvoiceCoverage.js is pure copy formatting of it,
+  // never its own classifier.
+  const { coverage: siblingCoverage, prediction: siblingPrediction } = svc?.source_estimate_id
+    ? await siblingCoverageForSchedule({ svc, dbConn: db }).catch(() => ({ coverage: null, prediction: null }))
+    : { coverage: null, prediction: null };
+  billingLane.siblingCoverage = siblingCoverage || {
+    state: 'none', invoiceId: null, invoiceNumber: null, amountDue: null, reason: null,
+  };
+  if (siblingPrediction) {
+    // Overrides the naive prediction — nothing here changes what completion
+    // or Charge Now actually bill, only what the sheet SHOWS, and every
+    // downstream consumer of billingLane.prediction (the no-card /
+    // unbilled-visit alerts, the checkout/detail sheets) reads the sibling
+    // verdict instead of a stale tier/rate fallback.
+    billingLane.prediction = siblingPrediction;
+    billingLane.unbilledGap = null;
+    return billingLane;
   }
   // The OTHER half of the same shape: THIS visit is the reserved row — its
   // own checkoutInvoice already bills the combined same-day total (pest +
@@ -15693,7 +15655,10 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // still wins on this resolver exactly as it always has (unchanged for
 // isCallback too — only the always-free-TYPE fallback is narrowed here).
 //
-// Sibling-covered same-trip visit (codex pre-push P1): a same-day combined
+// Sibling-covered same-trip visit (owner decision — narrow + fail closed,
+// after 8 Codex rounds of partial-coverage machinery trying to let Charge
+// Now mint AROUND a covered visit — zero-base-plus-extras, an onVerdict
+// callback threaded into a locked recheck, …). A same-day combined
 // per-application accept invoices the RESERVED sibling row for the whole
 // trip and deliberately leaves THIS, the PROMOTED row, unpriced — but the
 // customer can still carry an established per_application_fee from an
@@ -15701,12 +15666,10 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // already-per_application customer accepting an ADD-ON keeps their
 // established fee"), so the ordinary fee fallback below would mint an
 // unrelated charge for a trip that is already billed on the sibling's
-// invoice — Charge Now would even stack it under an operator-added
-// checkout extra, though the checkout sheet only ever previewed the extra.
-// Ask siblingInvoiceCoverageVerdict (billing-lane.js) — the SAME
-// sibling-coverage determination siblingCoveredCompletionPrediction reads
-// for the schedule sheet's own prediction, so this resolver, the sheet, and
-// completion itself (which re-checks findFirstApplicationInvoiceForEstimateService
+// invoice. Ask siblingInvoiceCoverageVerdict (billing-lane.js) — the SAME
+// sibling-coverage determination the schedule sheet's own prediction reads
+// (siblingCoverageForSchedule), so this resolver, the sheet, and completion
+// itself (which re-checks findFirstApplicationInvoiceForEstimateService
 // directly before minting) can never disagree — before ever falling back
 // to the fee. `svc`/`dbConn` are optional so a caller that hasn't been
 // updated (or a pure unit test) still gets the unchanged, DB-free
@@ -15717,32 +15680,20 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // invoice may exist unseen — completion's own mint refuses to mint under
 // exactly that condition rather than risk a duplicate — and a
 // terminal/refunded match ('needs_review') is completion's own
-// manual-billing-alert shape, never a green light to remint. Zero-base is
-// reserved for a definitive 'covered' verdict (the sibling's invoice really
-// does cover this trip). 'error' and 'needs_review' are NOT "nothing
-// chargeable" — returning the SAME bare 0 for them let `extraLineItems`
-// alone clear a caller's "any positive amount" mint gate (codex round-2
-// P1): an operator-added checkout extra then minted an extras-only invoice
-// for this visit, and completion — finding that own live invoice first —
-// never re-ran the sibling lookup and never raised the manual-billing alert
-// for the missing setup/application fee. So this resolver now returns a
-// structured refusal object for 'error'/'needs_review' instead of a
-// number; every caller must check `.refused` and refuse to mint ANYTHING
-// (base or extras) rather than treat it as a priceable $0. Only a
+// manual-billing-alert shape, never a green light to remint. A definitive
+// 'covered' verdict is ALSO a flat refusal now (round-8 P1): a $0 base
+// that only suppresses THIS visit's own fee/rate let `extraLineItems` alone
+// clear the "any positive amount" mint gate below and mint an extras-only
+// invoice for a visit whose combined-trip invoice can still be refunded
+// out from under it — completion, finding that own live invoice first,
+// would never re-run the sibling lookup or raise the manual-billing alert
+// for the missing fee. So EVERY non-'none' status returns the SAME
+// structured refusal — every caller must check `.refused` and refuse to
+// mint ANYTHING (base or extras) — before extras are even parsed. Only a
 // definitive 'none' (genuinely no relevant sibling invoice at all) falls
 // through to the established fee.
 async function resolveScheduledServiceCharge({
   estimatedPrice, isCallback, monthlyRate, billingMode, perApplicationFee, serviceType, svc = null, dbConn = null,
-  // codex pre-push P1 (round 3): the sibling-coverage verdict this resolver
-  // reads is a plain, unlocked snapshot — a concurrent refund/restoration
-  // can invalidate it before the invoice this verdict gated is actually
-  // created. Callers that go on to mint pass `onVerdict` to capture the
-  // status THIS call resolved (only invoked when the lookup actually ran),
-  // then re-run siblingInvoiceCoverageVerdict with `lockRows: true` inside
-  // the mint's own locked transaction (scheduled-invoice-mint.js
-  // recheckInTrx) and refuse the mint if it changed. Optional — every
-  // existing caller (read-only previews, unit tests) is unaffected.
-  onVerdict = null,
 }) {
   const perApplicationBilling = billingMode === 'per_application' && !isAlwaysFreeServiceType(serviceType);
   // codex pre-push P1 (round 3): a provenance-backed $0 (completion-pricing's
@@ -15765,9 +15716,9 @@ async function resolveScheduledServiceCharge({
   // on the VISIT'S OWN SHAPE instead (isSiblingCoverageEligibleVisit,
   // billing-lane.js — unpriced, estimate-linked, not a callback, not an
   // always-free type) — the SAME shape schedule enrichment
-  // (siblingCoveredCompletionPrediction's caller, ~5228-5251) and
-  // completion (findFirstApplicationInvoiceForEstimateService) already ask
-  // unconditionally, so all three can never disagree about whether a
+  // (siblingCoverageForSchedule's caller, enrichBillingLaneWithWalletGap)
+  // and completion (findFirstApplicationInvoiceForEstimateService) already
+  // ask unconditionally, so all three can never disagree about whether a
   // sibling COULD be covering this trip. `svc` absent (pure/unit-test
   // callers) reads as ineligible — byte-identical to before for them.
   if (isSiblingCoverageEligibleVisit({
@@ -15779,15 +15730,17 @@ async function resolveScheduledServiceCharge({
     } catch {
       verdict = { status: 'error' };
     }
-    if (onVerdict) onVerdict(verdict.status);
-    if (verdict.status === 'covered') return 0;
     if (verdict.status !== 'none') {
       return {
         refused: true,
-        reason: verdict.status === 'needs_review' ? 'sibling_invoice_needs_review' : 'sibling_lookup_failed',
-        message: verdict.status === 'needs_review'
-          ? 'This visit’s combined-trip invoice needs manual review before charging — handle it from Customer 360, or refresh and try again.'
-          : 'Could not confirm whether this visit’s combined-trip invoice already covers it — refresh and try again.',
+        reason: verdict.status === 'covered'
+          ? 'sibling_invoice_covered'
+          : (verdict.status === 'needs_review' ? 'sibling_invoice_needs_review' : 'sibling_lookup_failed'),
+        message: verdict.status === 'covered'
+          ? 'This visit is billed on the combined trip invoice — collect on that invoice, or set a price on this visit first.'
+          : (verdict.status === 'needs_review'
+            ? 'This visit’s combined-trip invoice needs manual review before charging — handle it from Customer 360, or refresh and try again.'
+            : 'Could not confirm whether this visit’s combined-trip invoice already covers it — refresh and try again.'),
       };
     }
   }
@@ -15806,19 +15759,25 @@ async function resolveScheduledServiceCharge({
 // under its OWN advisory lock + row locks, right before creating the
 // invoice (codex pre-push P1, round 3): resolveScheduledServiceCharge's
 // sibling-coverage verdict is a plain, unlocked snapshot read before that
-// transaction even opens — a concurrent refund can invalidate a 'covered'
-// verdict (an extras-only invoice then mints for a trip whose fee was never
-// billed) or a concurrent restoration can invalidate a 'none' verdict (a
-// second base charge mints beside the sibling's). Re-running the SAME
-// lookup with `lockRows: true` — so it holds the matched invoice row(s) to
-// commit rather than reading a snapshot again — and refusing on ANY status
-// change closes both directions. `priorStatus` is undefined when the
-// resolver never consulted the lookup at all (an explicit/authoritative
-// own price, an always-free type, a callback, or no svc/dbConn) — no
-// recheck needed then, so this returns null and the caller passes no
-// `recheckInTrx`.
-function siblingCoverageRecheckInTrx(svc, priorStatus) {
-  if (priorStatus == null) return null;
+// transaction even opens — a concurrent restoration could invalidate a
+// 'none' verdict (a base charge minting beside a sibling invoice that
+// appeared in the meantime). Re-runs the SAME lookup with `lockRows: true`
+// — so it holds the matched invoice row(s) to commit rather than reading a
+// snapshot again — and refuses the mint if it comes back anything but
+// 'none'. Recomputes eligibility itself (the same shape
+// isSiblingCoverageEligibleVisit gates the resolver on) rather than take a
+// prior status from the caller — every sibling-coverage-eligible visit
+// gets exactly one honest answer, 'none', to recheck under the lock; the
+// resolver above already refused everything else before this ever runs.
+// `svc` missing the shape (pure/unit-test callers) returns null — no
+// recheck, byte-identical to before.
+function siblingCoverageRecheckInTrx(svc) {
+  const primaryLinePrice = svc?.primary_line_price ?? null;
+  const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
+    || hasAuthoritativeZeroPrice(svc?.estimated_price, primaryLinePrice);
+  if (!isSiblingCoverageEligibleVisit({
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
+  })) return null;
   return async (trx) => {
     let recheck;
     try {
@@ -15837,7 +15796,7 @@ function siblingCoverageRecheckInTrx(svc, priorStatus) {
     } catch {
       recheck = { status: 'error' };
     }
-    if (recheck.status !== priorStatus) {
+    if (recheck.status !== 'none') {
       const e = new Error('This visit’s combined-trip coverage changed while charging — refresh and try again.');
       e.status = 409;
       e.statusCode = 409;
@@ -15890,7 +15849,6 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     .orderBy('created_at', 'desc')
     .first();
   if (existing) return { invoice: existing, reused: true };
-  let siblingVerdictStatus;
   const amount = await resolveScheduledServiceCharge({
     estimatedPrice: svc.estimated_price,
     isCallback: svc.is_callback,
@@ -15900,7 +15858,6 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     serviceType: svc.service_type,
     svc,
     dbConn: db,
-    onVerdict: (status) => { siblingVerdictStatus = status; },
   });
   if (amount && typeof amount === 'object' && amount.refused) {
     return { invoice: null, reason: amount.reason };
@@ -15912,7 +15869,7 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
   });
   return mintScheduledServiceInvoiceWithDeposit({
     svc,
-    recheckInTrx: siblingCoverageRecheckInTrx(svc, siblingVerdictStatus),
+    recheckInTrx: siblingCoverageRecheckInTrx(svc),
     buildCreateParams: () => ({
       customerId: svc.customer_id,
       scheduledServiceId: svc.id,
@@ -16572,7 +16529,6 @@ router.post('/:id/invoice', async (req, res, next) => {
     // admin-dispatch.js. Honour an explicit positive price if one was set;
     // an explicit per_application lane bills its acceptance fee; otherwise
     // the visit is $0.
-    let siblingVerdictStatus;
     const rawAmount = await resolveScheduledServiceCharge({
       estimatedPrice: svc.estimated_price,
       isCallback: svc.is_callback,
@@ -16582,17 +16538,16 @@ router.post('/:id/invoice', async (req, res, next) => {
       serviceType: svc.service_type,
       svc,
       dbConn: db,
-      onVerdict: (status) => { siblingVerdictStatus = status; },
     });
-    // A sibling-coverage lookup that couldn't confirm 'covered' ('error' /
-    // 'needs_review') refuses BEFORE any extras are even parsed (codex
-    // round-2 P1): the bug this closes let a bare 0 base clear the
-    // "nothing chargeable" gate below the instant extraLineItems carried a
-    // positive total, minting an extras-only invoice for a visit whose
-    // real setup/application fee was never resolved — completion then
-    // found that own live invoice first and never raised the
-    // manual-billing alert. 409 (retryable) is this file's convention for
-    // "reload and try again" refusals.
+    // A sibling-coverage lookup that isn't a definitive 'none' ('covered' /
+    // 'error' / 'needs_review') refuses BEFORE any extras are even parsed
+    // (owner decision — narrow + fail closed, round-8 P1): no extras-only
+    // invoice can be minted on a covered visit at all, even when only
+    // checkout extras are being added — completion, finding the sibling's
+    // own live invoice first, would never re-run this lookup or raise the
+    // manual-billing alert for the missing setup/application fee. 409
+    // (retryable) is this file's convention for "reload and try again"
+    // refusals.
     if (rawAmount && typeof rawAmount === 'object' && rawAmount.refused) {
       throw httpError(409, rawAmount.message);
     }
@@ -16688,7 +16643,7 @@ router.post('/:id/invoice', async (req, res, next) => {
     // price on top of it.
     const minted = await mintScheduledServiceInvoiceWithDeposit({
       svc,
-      recheckInTrx: siblingCoverageRecheckInTrx(svc, siblingVerdictStatus),
+      recheckInTrx: siblingCoverageRecheckInTrx(svc),
       // In-lock ownership recheck: substantial async work happens between
       // the authorized SELECT at the top of this route and the mint
       // transaction — re-verify (row-locked) that the visit is still this

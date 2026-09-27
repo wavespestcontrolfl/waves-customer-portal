@@ -75,7 +75,7 @@ async function expectRecapOnlyCta() {
 }
 
 describe('CompletionPanel invoiceAmount — server-computed billingLane.prediction', () => {
-  it('never invoices a sibling-covered first-application visit (amount is null, covered by the sibling row)', async () => {
+  it('never invoices a sibling-covered first-application visit whose sibling invoice is settled (amount is null, covered by the sibling row)', async () => {
     await renderPanel({
       ...BASE_SERVICE,
       waveguardTier: 'Silver',
@@ -87,13 +87,48 @@ describe('CompletionPanel invoiceAmount — server-computed billingLane.predicti
           kind: 'covered_sibling_invoice',
           amount: null,
           conflictStampedPrice: false,
+          invoiceId: 'inv-1',
           invoiceNumber: 'WPC-TEST-0001',
           siblingServiceType: 'Quarterly Pest Control',
         },
+        // The server's own canonical verdict (billing-lane.js
+        // siblingCoverageForSchedule).
+        siblingCoverage: { state: 'settled', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 0, reason: 'invoice_settled' },
       },
     });
     await expectRecapOnlyCta();
     expect(screen.queryByRole('button', { name: /^Complete & Send Invoice/i })).not.toBeInTheDocument();
+  });
+
+  // Round-8 P1: `billingLane.siblingCoverage` in state
+  // 'collect_on_combined_invoice' means completion REUSES the sibling
+  // invoice at completion (complete-scheduled-service.js) — an EXISTING
+  // outstanding invoice, not a fresh mint — so the panel must treat it as
+  // an invoice that WILL happen (pay link + held review), matching what
+  // completion actually does, even though `createInvoiceOnComplete` /
+  // `waveguardTier` / `typedOneTimeBilling` say nothing about it.
+  it('invoices (reuses) a sibling-covered visit whose combined invoice is STILL DUE — pay link, held review, real amount', async () => {
+    await renderPanel({
+      ...BASE_SERVICE,
+      createInvoiceOnComplete: false,
+      waveguardTier: null,
+      billingLane: {
+        mode: 'per_application',
+        source: 'explicit',
+        monthlyRate: null,
+        prediction: {
+          kind: 'covered_sibling_invoice',
+          amount: null,
+          conflictStampedPrice: false,
+          invoiceId: 'inv-1',
+          invoiceNumber: 'WPC-TEST-0001',
+          siblingServiceType: 'Quarterly Pest Control',
+        },
+        siblingCoverage: { state: 'collect_on_combined_invoice', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 153.6, reason: null },
+      },
+    });
+    await expectInvoiceCta();
+    expect(screen.queryByRole('button', { name: /^Complete & Send Recap/i })).not.toBeInTheDocument();
   });
 
   it('invoices the per-application acceptance fee for an unpriced visit on a tiered per-application customer (never $0, never the monthlyRate)', async () => {

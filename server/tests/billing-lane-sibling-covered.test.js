@@ -1,19 +1,25 @@
 /**
- * Sibling-covered first-application prediction — a per-application accept
- * that combines two recurring programs into ONE same-day slot invoices the
- * RESERVED program's row for the combined total and leaves the PROMOTED
- * program's row deliberately unpriced (estimate-converter.js
- * reservedAcceptPerVisitSplit). closeout-status.js reads this shape as
- * `sibling_first_application`.
+ * Sibling-coverage schedule verdict — a per-application accept that combines
+ * two recurring programs into ONE same-day slot invoices the RESERVED
+ * program's row for the combined total and leaves the PROMOTED program's row
+ * deliberately unpriced (estimate-converter.js reservedAcceptPerVisitSplit).
+ * closeout-status.js reads this shape as `sibling_first_application`.
  *
  * Prod 2026-09-26: a per-application Silver customer accepted lawn
  * ($56.40/app) + quarterly pest ($97.20/app) into ONE reserved slot. The
  * pest row's invoice ($153.60) covered the trip; the lawn row was left
  * unpriced on purpose. The schedule sheet showed the lawn visit's price as
  * $74.70 (the annual/12 equivalent of monthlyRate — meaningless here) and
- * warned "nothing will bill", both wrong. These pin
- * siblingCoveredCompletionPrediction reusing the SAME sibling-invoice
- * lookup completion uses, so the sheet can never contradict it.
+ * warned "nothing will bill", both wrong. These pin siblingCoverageForSchedule
+ * reusing the SAME sibling-invoice lookup completion uses, so the sheet can
+ * never contradict it.
+ *
+ * Owner decision (narrow + fail closed, after 8 Codex rounds): the server
+ * computes ONE canonical verdict — { state, invoiceId, invoiceNumber,
+ * amountDue, reason } — built ONLY from siblingInvoiceCoverageVerdict plus
+ * invoice-helpers' own collectibility checks (invoiceWithdrawnFromCustomer,
+ * payer ownership, credit-applied netting, terminal statuses). Every client
+ * surface renders this verdict and nothing else.
  */
 
 jest.mock('../services/estimate-first-application-invoice', () => ({
@@ -21,7 +27,7 @@ jest.mock('../services/estimate-first-application-invoice', () => ({
 }));
 
 const { findFirstApplicationInvoiceForEstimateService } = require('../services/estimate-first-application-invoice');
-const { siblingCoveredCompletionPrediction, siblingInvoiceCoverageVerdict, coveringSiblingInvoice } = require('../services/billing-lane');
+const { siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, coveringSiblingInvoice } = require('../services/billing-lane');
 
 // Minimal knex-like stand-in: distinguishes the two 'scheduled_services'
 // queries the function issues by their `where` shape — a lookup by id
@@ -68,7 +74,7 @@ afterEach(() => {
   jest.clearAllMocks();
 });
 
-describe('siblingCoveredCompletionPrediction', () => {
+describe('siblingCoverageForSchedule', () => {
   test('reads the reserved sibling invoice as covering the unpriced promoted visit, with a reconciled breakdown', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
       invoice: {
@@ -85,15 +91,20 @@ describe('siblingCoveredCompletionPrediction', () => {
       members: [PEST_ROW, LAWN_ROW],
     });
 
-    const prediction = await siblingCoveredCompletionPrediction({ svc: LAWN_SVC, dbConn });
+    const { coverage, prediction } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
 
+    expect(coverage).toEqual({
+      state: 'collect_on_combined_invoice',
+      invoiceId: 'inv-1',
+      invoiceNumber: 'WPC-TEST-0001',
+      amountDue: 153.6,
+      reason: null,
+    });
     expect(prediction).toMatchObject({
       kind: 'covered_sibling_invoice',
       amount: null,
       invoiceId: 'inv-1',
       invoiceNumber: 'WPC-TEST-0001',
-      invoiceStatus: 'sent',
-      amountDue: 153.6,
       siblingServiceType: 'Quarterly Pest Control',
     });
     expect(prediction.breakdown).toEqual(
@@ -105,13 +116,11 @@ describe('siblingCoveredCompletionPrediction', () => {
     expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalledWith(LAWN_SVC, dbConn);
   });
 
-  // Codex round-7 P1: `invoiceStatus` alone told a consumer THAT a sibling
-  // invoice exists, never whether it still needs collecting — every
-  // covered_sibling_invoice consumer rendered "no charge needed" even for a
-  // draft/sent/overdue invoice. `amountDue` is the canonical charge base
-  // (invoiceAmountDue, invoice-helpers.js: total minus credit_applied,
-  // clamped at 0) so the client copy can say exactly what remains on THAT
-  // invoice, never the invoice's raw (pre-credit) total.
+  // Codex round-7 P1 (mechanism retained, verdict now server-side): the raw
+  // invoice status alone told a consumer THAT a sibling invoice exists,
+  // never whether it still needs collecting. `amountDue` (total minus
+  // credit_applied — invoiceAmountDue, invoice-helpers.js) lets the state
+  // machine tell staff exactly what's still owed on THAT invoice.
   test('amountDue nets any account credit already applied to the sibling invoice', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
       invoice: {
@@ -124,8 +133,71 @@ describe('siblingCoveredCompletionPrediction', () => {
       byId: { 'svc-pest': { id: 'svc-pest', service_type: 'Quarterly Pest Control' } },
     });
 
-    const prediction = await siblingCoveredCompletionPrediction({ svc: LAWN_SVC, dbConn });
-    expect(prediction).toMatchObject({ kind: 'covered_sibling_invoice', invoiceStatus: 'overdue', amountDue: 103.6 });
+    const { coverage } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
+    expect(coverage).toMatchObject({ state: 'collect_on_combined_invoice', amountDue: 103.6 });
+  });
+
+  // Round-8 P1: a credit-applied invoice fully covered (amountDue <= 0) is
+  // settled — nothing left to collect — even though the raw status is still
+  // an ordinarily-collectible one like 'sent'.
+  test('a fully credit-covered sibling invoice (amountDue <= 0) reads settled, not collect', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: {
+        id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-TEST-0001',
+        status: 'sent', total: 153.6, credit_applied: 200,
+      },
+      liveBeside: null,
+    });
+    const dbConn = fakeDbConn({ byId: { 'svc-pest': { id: 'svc-pest', service_type: 'Quarterly Pest Control' } } });
+
+    const { coverage } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
+    expect(coverage).toEqual({ state: 'settled', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 0, reason: 'credit_applied' });
+  });
+
+  // Round-8 P1: a payer-owned or withdrawn-from-customer sibling invoice is
+  // not collectible from THIS customer at all — the payment paths reject
+  // those explicitly (invoiceWithdrawnFromCustomer, payer ownership,
+  // invoice-helpers.js) — so it reads settled, never "collect on that
+  // invoice," even while the invoice itself is still draft/sent.
+  test('a payer-owned sibling invoice reads settled, never collectible from the homeowner', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: {
+        id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-TEST-0001',
+        status: 'sent', total: 153.6, payer_id: 'payer-1',
+      },
+      liveBeside: null,
+    });
+    const dbConn = fakeDbConn({ byId: { 'svc-pest': { id: 'svc-pest', service_type: 'Quarterly Pest Control' } } });
+
+    const { coverage } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
+    expect(coverage).toEqual({ state: 'settled', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 0, reason: 'payer_billed' });
+  });
+
+  test('a sibling invoice withdrawn from the customer (payer_billed: stamp) reads settled', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: {
+        id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-TEST-0001',
+        status: 'sent', total: 153.6, scheduled_send_error: 'payer_billed:payer-1',
+      },
+      liveBeside: null,
+    });
+    const dbConn = fakeDbConn({ byId: { 'svc-pest': { id: 'svc-pest', service_type: 'Quarterly Pest Control' } } });
+
+    const { coverage } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
+    expect(coverage).toEqual({ state: 'settled', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 0, reason: 'withdrawn_from_customer' });
+  });
+
+  // A paid/prepaid/processing sibling invoice is settled — money already
+  // collected or in flight — regardless of amountDue's raw value.
+  test('a paid sibling invoice reads settled', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-TEST-0001', status: 'paid', total: 153.6 },
+      liveBeside: null,
+    });
+    const dbConn = fakeDbConn({ byId: { 'svc-pest': { id: 'svc-pest', service_type: 'Quarterly Pest Control' } } });
+
+    const { coverage } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
+    expect(coverage).toEqual({ state: 'settled', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 0, reason: 'invoice_settled' });
   });
 
   test('omits the breakdown when the anchored splits do not reconcile to the invoice total', async () => {
@@ -140,7 +212,7 @@ describe('siblingCoveredCompletionPrediction', () => {
       members: [PEST_ROW, LAWN_ROW], // sums to 153.60, not 200
     });
 
-    const prediction = await siblingCoveredCompletionPrediction({ svc: LAWN_SVC, dbConn });
+    const { prediction } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
     expect(prediction.kind).toBe('covered_sibling_invoice');
     expect(prediction.breakdown).toBeUndefined();
   });
@@ -153,39 +225,57 @@ describe('siblingCoveredCompletionPrediction', () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
     const dbConn = fakeDbConn();
 
-    const prediction = await siblingCoveredCompletionPrediction({ svc: LAWN_SVC, dbConn });
+    const { coverage, prediction } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
+    expect(coverage.state).toBe('none');
     expect(prediction).toBeNull();
   });
 
-  // Codex round 5 P2: a refunded/terminal match is NOT collapsed to null
-  // any more — resolveScheduledServiceCharge (the mint-side resolver
-  // sharing this same lookup) always refuses this exact shape with a 409,
-  // so leaving the caller's naive positive prediction in place offered a
-  // Charge button that could never succeed. A `sibling_needs_review`
-  // prediction (amount: null) tells staff to go resolve it instead.
-  test('surfaces a sibling_needs_review prediction for a refunded sibling invoice — never a false "covered" or a stale positive amount', async () => {
+  // Codex round 5 P2 (mechanism retained): a refunded/terminal match is NOT
+  // collapsed to 'none' — resolveScheduledServiceCharge (the mint-side
+  // resolver sharing this same lookup) always refuses this exact shape with
+  // a 409, so leaving the naive positive prediction in place offered a
+  // Charge button that could never succeed. A 'review' verdict tells staff
+  // to go resolve it instead.
+  test('surfaces a review verdict for a refunded sibling invoice — never a false "covered" or a stale positive amount', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
       invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-TEST-0001', status: 'refunded', total: 153.6 },
       liveBeside: null,
     });
     const dbConn = fakeDbConn({ byId: { 'svc-pest': { id: 'svc-pest', service_type: 'Quarterly Pest Control' } } });
 
-    const prediction = await siblingCoveredCompletionPrediction({ svc: LAWN_SVC, dbConn });
+    const { coverage, prediction } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
+    expect(coverage).toEqual({ state: 'review', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: null, reason: 'terminal_invoice' });
     expect(prediction).toEqual({
       kind: 'sibling_needs_review',
       amount: null,
       conflictStampedPrice: false,
       invoiceId: 'inv-1',
       invoiceNumber: 'WPC-TEST-0001',
-      invoiceStatus: 'refunded',
     });
   });
 
+  // Round-8 P2: this visit's OWN attached first-application invoice sitting
+  // in a terminal state (refunded) also reads 'review' — the raw lookup
+  // (siblingInvoiceCoverageVerdict) surfaces a terminal match regardless of
+  // WHOSE row it sits on, before its own-visit exclusion, so no special case
+  // is needed here for "own invoice, not a sibling's."
+  test('surfaces a review verdict for THIS visit\'s own refunded attached invoice (not a sibling\'s)', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: LAWN_SVC.id, invoice_number: 'WPC-TEST-0001', status: 'refunded', total: 56.4 },
+      liveBeside: null,
+    });
+    const dbConn = fakeDbConn();
+
+    const { coverage, prediction } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
+    expect(coverage.state).toBe('review');
+    expect(prediction.kind).toBe('sibling_needs_review');
+  });
+
   // Codex round 5 P2: the canceled-acceptance-invoice-with-setup-fee shape
-  // (siblingInvoiceCoverageVerdict's `canceledSetupFee`) is also
-  // needs_review with NO invoice at all — must still surface the review
-  // prediction, not null, and not throw on the missing invoice.
-  test('surfaces a sibling_needs_review prediction for a canceled acceptance invoice with no live replacement (no invoice on the verdict)', async () => {
+  // (siblingInvoiceCoverageVerdict's `canceledSetupFee`) is also review with
+  // NO invoice at all — must still surface the review verdict, not 'none',
+  // and not throw on the missing invoice.
+  test('surfaces a review verdict for a canceled acceptance invoice with no live replacement (no invoice on the verdict)', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
       invoice: null,
       liveBeside: null,
@@ -193,48 +283,50 @@ describe('siblingCoveredCompletionPrediction', () => {
     });
     const dbConn = fakeDbConn();
 
-    const prediction = await siblingCoveredCompletionPrediction({ svc: LAWN_SVC, dbConn });
+    const { coverage, prediction } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
+    expect(coverage).toEqual({ state: 'review', invoiceId: null, invoiceNumber: null, amountDue: null, reason: 'canceled_setup_fee' });
     expect(prediction).toEqual({
       kind: 'sibling_needs_review',
       amount: null,
       conflictStampedPrice: false,
       invoiceId: null,
       invoiceNumber: null,
-      invoiceStatus: null,
     });
   });
 
-  test('never covers a visit against its OWN invoice (not a sibling)', async () => {
+  test('never covers a visit against its OWN live (non-terminal) invoice (not a sibling)', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
       invoice: { id: 'inv-1', scheduled_service_id: LAWN_SVC.id, invoice_number: 'WPC-TEST-0001', status: 'sent', total: 56.4 },
       liveBeside: null,
     });
     const dbConn = fakeDbConn();
 
-    const prediction = await siblingCoveredCompletionPrediction({ svc: LAWN_SVC, dbConn });
+    const { coverage, prediction } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn });
+    expect(coverage.state).toBe('none');
     expect(prediction).toBeNull();
   });
 
-  test('fails toward null (never a false "covered") when there is no source estimate', async () => {
-    const prediction = await siblingCoveredCompletionPrediction({ svc: { ...LAWN_SVC, source_estimate_id: null }, dbConn: fakeDbConn() });
+  test('fails toward "none" (never a false "covered") when there is no source estimate', async () => {
+    const { coverage, prediction } = await siblingCoverageForSchedule({ svc: { ...LAWN_SVC, source_estimate_id: null }, dbConn: fakeDbConn() });
+    expect(coverage.state).toBe('none');
     expect(prediction).toBeNull();
     expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
   });
 
-  // Codex round 5 P2: a lookup FAILURE is treated exactly like needs_review,
-  // not collapsed to null — resolveScheduledServiceCharge refuses to mint
-  // for 'error' too, so the naive positive prediction must not survive
-  // untouched here either.
-  test('surfaces a sibling_needs_review prediction (never null) when the shared lookup throws', async () => {
+  // Codex round 5 P2 (mechanism retained): a lookup FAILURE is treated
+  // exactly like needs_review/'review', not collapsed to 'none' —
+  // resolveScheduledServiceCharge refuses to mint for it too, so the naive
+  // positive prediction must not survive untouched here either.
+  test('surfaces a review verdict (never "none") when the shared lookup throws', async () => {
     findFirstApplicationInvoiceForEstimateService.mockRejectedValue(new Error('db down'));
-    const prediction = await siblingCoveredCompletionPrediction({ svc: LAWN_SVC, dbConn: fakeDbConn() });
+    const { coverage, prediction } = await siblingCoverageForSchedule({ svc: LAWN_SVC, dbConn: fakeDbConn() });
+    expect(coverage).toEqual({ state: 'review', invoiceId: null, invoiceNumber: null, amountDue: null, reason: 'lookup_failed' });
     expect(prediction).toEqual({
       kind: 'sibling_needs_review',
       amount: null,
       conflictStampedPrice: false,
       invoiceId: null,
       invoiceNumber: null,
-      invoiceStatus: null,
     });
   });
 });
@@ -242,7 +334,7 @@ describe('siblingCoveredCompletionPrediction', () => {
 // Codex pre-push P0 (x2): a MINT decision (resolveScheduledServiceCharge,
 // admin-schedule.js) must tell "definitely no relevant sibling invoice"
 // apart from "a lookup failure" and "a terminal/refunded match" — both of
-// which completion's own mint refuses to remint over. siblingCoveredCompletionPrediction's
+// which completion's own mint refuses to remint over. siblingCoverageForSchedule's
 // display-safe wrapper (coveringSiblingInvoice) collapses all three
 // non-covered cases to null on purpose (advisory, never toward a false
 // "covered"); the verdict function underneath must NOT collapse them the

@@ -34,7 +34,7 @@ import PrepaySwitchSheet from './PrepaySwitchSheet';
 import { useCustomerCards } from '../../hooks/useCustomerCards';
 import { attachedVisitInvoice, visitInvoiceStatusNote } from './visitInvoice';
 import { describeCardRequestState, describeCardRequestResult, canSendCardRequest } from './cardLinkStatus';
-import { siblingInvoiceCoverageCopy } from '../../lib/siblingInvoiceCoverage';
+import { siblingCoverageCopy } from '../../lib/siblingInvoiceCoverage';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -249,26 +249,28 @@ export default function MobileAppointmentDetailSheet({
   // pre-push P1).
   const hasOwnPrice = rawPrice != null && rawPrice > 0;
   // Sibling-covered first-application visit (a combined per-application
-  // accept — server/services/billing-lane.js siblingCoveredCompletionPrediction):
-  // this visit is deliberately unpriced because a same-day sibling's invoice
-  // already covers it. Never preview a $0 or a borrowed rate for it — the
-  // billing-lane card explains the real reason, and this sheet just needs to
-  // not contradict it.
+  // accept): this visit is deliberately unpriced because a same-day
+  // sibling's invoice already covers it — never preview a $0 or a borrowed
+  // rate for it. `billingLane.siblingCoverage` is the ONE canonical
+  // per-visit collection verdict the server computes (owner decision —
+  // narrow + fail closed) — this sheet renders THAT and nothing else for
+  // collect/settled/review copy; `siblingCoveredInvoice` below is kept only
+  // for the sibling's service-type label / breakdown, which still ride on
+  // the naive prediction.
   const siblingCoveredInvoice = service.billingLane?.prediction?.kind === 'covered_sibling_invoice'
     ? service.billingLane.prediction
     : null;
-  // codex round-7 P1: the sibling invoice's OWN status decides the copy —
-  // a settled (paid/prepaid/processing) sibling invoice needs nothing, but
-  // a collectible one (draft/sent/overdue/…) still has a real balance due
-  // that a technician must not walk away from. Centralized in
-  // siblingInvoiceCoverageCopy so every consumer of this prediction agrees.
-  const siblingCoverage = siblingInvoiceCoverageCopy(siblingCoveredInvoice);
-  // Codex round 5 P2: the sibling lookup came back needs_review/error
-  // (billing-lane.js siblingCoveredCompletionPrediction) — the mint
-  // resolver refuses to charge this visit for EITHER reason, so it must
-  // never preview a $ amount or offer Charge; the billing-lane card tells
-  // staff to resolve it on Customer 360.
-  const siblingNeedsReview = service.billingLane?.prediction?.kind === 'sibling_needs_review';
+  // Scoped to siblingCoveredInvoice (never for a 'review' verdict, rendered
+  // by its own block below) so the two never render at once.
+  const siblingCoverage = siblingCoveredInvoice
+    ? siblingCoverageCopy(service.billingLane?.siblingCoverage, {
+      siblingServiceType: siblingCoveredInvoice.siblingServiceType || null,
+    })
+    : null;
+  // A definitive 'review' verdict: the mint resolver refuses to charge this
+  // visit either way, so it must never preview a $ amount or offer Charge;
+  // the billing-lane card tells staff to resolve it on Customer 360.
+  const siblingNeedsReview = service.billingLane?.siblingCoverage?.state === 'review';
   // Callbacks (re-services) are free for recurring/WaveGuard customers — don't
   // preview the monthlyRate fallback (mirrors the completion panel + checkout).
   // For an unpriced visit, monthlyRate is only ever the right fallback for a

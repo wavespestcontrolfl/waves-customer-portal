@@ -134,7 +134,16 @@ describe('ScheduleCustomerSidebar sibling-covered visit', () => {
   it('a settled (paid) sibling invoice reads as covered, no link needed', async () => {
     render(
       <ScheduleCustomerSidebar
-        service={{ ...baseService, billingLane: { ...baseService.billingLane, prediction: { ...baseService.billingLane.prediction, invoiceStatus: 'paid', amountDue: 153.6 } } }}
+        service={{
+          ...baseService,
+          billingLane: {
+            ...baseService.billingLane,
+            // The server's own canonical verdict (billing-lane.js
+            // siblingCoverageForSchedule) — the sidebar renders THAT, never
+            // a raw invoiceStatus.
+            siblingCoverage: { state: 'settled', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 0, reason: 'invoice_settled' },
+          },
+        }}
         onClose={() => {}}
       />,
     );
@@ -147,7 +156,13 @@ describe('ScheduleCustomerSidebar sibling-covered visit', () => {
   it('a collectible (sent) sibling invoice tells staff to collect there, with the amount due and a link to it', async () => {
     render(
       <ScheduleCustomerSidebar
-        service={{ ...baseService, billingLane: { ...baseService.billingLane, prediction: { ...baseService.billingLane.prediction, invoiceStatus: 'sent', amountDue: 153.6 } } }}
+        service={{
+          ...baseService,
+          billingLane: {
+            ...baseService.billingLane,
+            siblingCoverage: { state: 'collect_on_combined_invoice', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 153.6, reason: null },
+          },
+        }}
         onClose={() => {}}
       />,
     );

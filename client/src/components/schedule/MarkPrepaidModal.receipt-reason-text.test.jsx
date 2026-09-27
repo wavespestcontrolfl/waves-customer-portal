@@ -21,6 +21,14 @@ describe('receiptReasonText — sibling-coverage refusals', () => {
     expect(text).toMatch(/prepayment was recorded/i);
   });
 
+  // Round-8 P1 (owner decision — narrow + fail closed): a definitive
+  // 'covered' sibling-coverage verdict is now ALSO a flat mint refusal.
+  it('sibling_invoice_covered tells the operator to collect on the combined trip invoice instead', () => {
+    const text = receiptReasonText({ reason: 'sibling_invoice_covered' });
+    expect(text).toMatch(/combined trip invoice/i);
+    expect(text).toMatch(/prepayment was recorded/i);
+  });
+
   it('an unrecognized reason still falls back to the generic message (unchanged)', () => {
     expect(receiptReasonText({ reason: 'something_new' }))
       .toBe('The prepayment was recorded, but no receipt was sent.');

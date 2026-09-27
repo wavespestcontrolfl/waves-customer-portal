@@ -96,12 +96,14 @@ describe('visitMoneySummary', () => {
   // collecting the combined trip invoice that remained due. This must flag
   // collectNeeded (the SAME amber treatment as an ordinary `invoice` row)
   // and headline the amount still due, never the settled-case copy.
-  it('a collectible sibling invoice status flags collectNeeded and headlines the amount still due', () => {
+  it('a collectible sibling-coverage verdict flags collectNeeded and headlines the amount still due', () => {
     const collectible = {
       billingLane: {
-        prediction: {
-          kind: 'covered_sibling_invoice', amount: null, invoiceNumber: 'WPC-TEST-0001', invoiceStatus: 'overdue', amountDue: 153.6,
-        },
+        prediction: { kind: 'covered_sibling_invoice', amount: null, invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001' },
+        // The server's own canonical verdict (billing-lane.js
+        // siblingCoverageForSchedule) — the brief renders THAT, never a raw
+        // invoiceStatus.
+        siblingCoverage: { state: 'collect_on_combined_invoice', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 153.6, reason: null },
       },
     };
     const summary = visitMoneySummary(collectible);
@@ -110,9 +112,8 @@ describe('visitMoneySummary', () => {
 
     const settled = {
       billingLane: {
-        prediction: {
-          kind: 'covered_sibling_invoice', amount: null, invoiceNumber: 'WPC-TEST-0001', invoiceStatus: 'paid', amountDue: 153.6,
-        },
+        prediction: { kind: 'covered_sibling_invoice', amount: null, invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001' },
+        siblingCoverage: { state: 'settled', invoiceId: 'inv-1', invoiceNumber: 'WPC-TEST-0001', amountDue: 0, reason: 'invoice_settled' },
       },
     };
     const settledSummary = visitMoneySummary(settled);

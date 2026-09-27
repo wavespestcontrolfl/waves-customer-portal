@@ -16,7 +16,7 @@ const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 // header) so it's safe to require at the top alongside isAlwaysFreeServiceType,
 // unlike the CANCELLED_SERVICE_RESOLVED_STATUSES / estimate-first-application-invoice
 // requires below, which stay lazy/in-function on purpose.
-const { invoiceAmountDue } = require('./invoice-helpers');
+const { invoiceAmountDue, invoiceWithdrawnFromCustomer, isInvoiceCollectibleStatus } = require('./invoice-helpers');
 
 // Mirror of AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD — duplicated
 // as a literal so this module stays db-free for pure unit tests; the
@@ -817,7 +817,7 @@ async function sameTripFirstApplicationBreakdown({ svc, invoiceTotal, dbConn } =
 // manual-billing alert rather than a settled cover.
 //
 // THIS is the one sibling-coverage determination every caller should share —
-// the schedule sheet's prediction (siblingCoveredCompletionPrediction below),
+// the schedule sheet's prediction (siblingCoverageForSchedule below),
 // Charge Now / the prepaid receipt's own resolver (resolveScheduledServiceCharge,
 // admin-schedule.js), and completion itself (complete-scheduled-service.js
 // re-checks findFirstApplicationInvoiceForEstimateService directly) all
@@ -856,8 +856,8 @@ async function sameTripFirstApplicationBreakdown({ svc, invoiceTotal, dbConn } =
 // row deliberately unpriced (estimate-converter.js
 // reservedAcceptPerVisitSplit), and later move to monthly/legacy-null dues
 // — the old acceptance invoice still covers this trip regardless. Schedule
-// enrichment (siblingCoveredCompletionPrediction's caller,
-// admin-schedule.js ~5228-5251) and completion itself
+// enrichment (siblingCoverageForSchedule's caller,
+// admin-schedule.js enrichBillingLaneWithWalletGap) and completion itself
 // (complete-scheduled-service.js, findFirstApplicationInvoiceForEstimateService)
 // already ask this question unconditionally, keyed on the SAME shape; the
 // mint resolver below (resolveScheduledServiceCharge) is the one caller
@@ -946,95 +946,131 @@ async function coveringSiblingInvoice(svc, dbConn) {
   return verdict.status === 'covered' ? verdict.invoice : null;
 }
 
+// The ONE canonical per-visit collection verdict (owner decision — narrow +
+// fail closed, after 8 Codex rounds of the schedule preview, Charge Now,
+// completion and six client surfaces each re-deriving "is this visit
+// covered by another invoice?" separately and drifting). Built ONLY from
+// existing server gates: the shared sibling-invoice lookup
+// (siblingInvoiceCoverageVerdict — the SAME lookup completion
+// (findFirstApplicationInvoiceForEstimateService) and the Charge Now mint
+// resolver (resolveScheduledServiceCharge) both consult) plus
+// invoice-helpers' own collectibility checks — invoiceWithdrawnFromCustomer,
+// payer ownership (payer_id), and credit fully covering the total
+// (amountDue <= 0). A terminal status on the matched invoice is 'review'
+// regardless of WHOSE row it sits on (siblingInvoiceCoverageVerdict's own
+// header: the shared lookup returns a terminal/refunded match ahead of any
+// live replacement, own-visit or sibling, before its own-visit exclusion)
+// — this is also how a visit whose OWN attached first-application invoice
+// is refunded/canceled reads 'review' (round-8 P2), with no special case
+// needed here.
+//
+// Returns { state: 'none' | 'settled' | 'collect_on_combined_invoice' | 'review',
+//   invoiceId, invoiceNumber, amountDue, reason }.
+//
+// Every schedule surface renders THIS field for its collect/settled/review
+// copy — client/src/lib/siblingInvoiceCoverage.js is pure copy formatting
+// of it, never its own classifier.
+const NO_SIBLING_COVERAGE = Object.freeze({ state: 'none', invoiceId: null, invoiceNumber: null, amountDue: null, reason: null });
+
 /**
- * Sibling-covered first-application visit — a per-application accept that
- * combines two recurring programs into ONE same-day slot invoices the
- * RESERVED program's row for the combined same-day total and leaves the
- * PROMOTED program's row deliberately unpriced (estimate-converter.js
- * `reservedAcceptPerVisitSplit`) — the reserved row's first-application
- * invoice covers the trip. closeout-status.js reads exactly this shape as
- * `sibling_first_application` via the SAME lookup this function calls
- * (estimate-first-application-invoice.js findFirstApplicationInvoiceForEstimateService)
- * — no second classifier, so the schedule sheet can never predict a money
- * gap that completion itself would not raise.
+ * Schedule-payload builder: resolves the canonical sibling-coverage verdict
+ * above AND (only when it is non-'none') the matching `billingLane.prediction`
+ * override — the same shape earlier rounds called `covered_sibling_invoice`
+ * / `sibling_needs_review`, still amount: null (nothing mints a second
+ * invoice for this visit either way), enriched with the sibling's own
+ * service type and a same-trip breakdown when the anchored per-visit splits
+ * reconcile to the invoice total (see sameTripFirstApplicationBreakdown).
  *
  * Read-only and advisory, like predictCompletionBilling: it never mints,
- * voids, or changes what completion charges. Returns null (fail toward the
- * ordinary unbilled-gap verdict, never toward a false "covered") only when
- * there is no source estimate to look a sibling up from, or the lookup
- * finds no relevant match at all ('none').
- *
- * A 'needs_review' or 'error' verdict is NOT collapsed to null (codex round
- * 5 P2) — the caller in admin-schedule.js only ever asks this question when
- * the visit's OWN naive prediction is already a positive 'invoice' /
- * 'auto_charge' / 'prepaid' (the lingering per-application fee, an unpriced
- * row's rate fallback, …). Returning null there left that positive
- * prediction standing untouched, so the sheet offered "Charge $97.20" for a
- * visit resolveScheduledServiceCharge (the SAME lookup, mint-side) always
- * refuses with a 409 the instant the old acceptance invoice comes back
- * refunded/terminal (needs_review) or the lookup itself fails (error) —
- * a Charge button that can never succeed. Surfacing a `sibling_needs_review`
- * prediction instead (amount: null, so nothing here or in checkout reads it
- * as chargeable — see BillingLaneCard / MobileAppointmentDetailSheet /
- * MobileCheckoutSheet) tells the office to go resolve it on Customer 360
- * instead. 'error' gets the exact same treatment as 'needs_review': the
- * mint resolver refuses BOTH identically (only 'covered' and 'none' let it
- * proceed), so collapsing 'error' to null would reopen the same "Charge
- * offered, 409 on click" gap this fix exists to close — a transient lookup
- * failure should read as "go check", never as a silent, incorrectly
- * positive fee.
+ * voids, or changes what completion or Charge Now charge — only what the
+ * sheet SHOWS. Resolved for EVERY sibling-coverage-ELIGIBLE visit
+ * (isSiblingCoverageEligibleVisit — unpriced, estimate-linked, not a
+ * callback, not an always-free type) regardless of what this visit's own
+ * naive prediction already says — the SAME shape gate the Charge Now mint
+ * resolver gates on, so the preview and the mint can never disagree about
+ * whether a sibling COULD be covering this trip.
  *
  * `dbConn` is caller-owned (day/week schedule feeds pass their `db`), kept
  * as an explicit param so this module stays DB-free for pure unit tests
  * except where a caller opts in, same as monthlyDuesCollected above.
  */
-async function siblingCoveredCompletionPrediction({ svc, dbConn } = {}) {
-  if (!svc?.source_estimate_id || !svc?.customer_id || !svc?.scheduled_date || !dbConn) return null;
-  const verdict = await siblingInvoiceCoverageVerdict(svc, dbConn);
-  if (verdict.status === 'needs_review' || verdict.status === 'error') {
+async function siblingCoverageForSchedule({ svc, dbConn } = {}) {
+  const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
+    || hasAuthoritativeZeroPrice(svc?.estimated_price, svc?.primary_line_price ?? null);
+  if (!svc?.source_estimate_id || !svc?.customer_id || !svc?.scheduled_date || !dbConn
+    || !isSiblingCoverageEligibleVisit({
+      sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
+    })) {
+    return { coverage: NO_SIBLING_COVERAGE, prediction: null };
+  }
+  let verdict;
+  try {
+    verdict = await siblingInvoiceCoverageVerdict(svc, dbConn);
+  } catch {
+    verdict = { status: 'error' };
+  }
+  if (verdict.status === 'error' || verdict.status === 'needs_review') {
+    const inv = verdict.invoice || null;
+    const coverage = {
+      state: 'review',
+      invoiceId: inv?.id || null,
+      invoiceNumber: inv?.invoice_number || null,
+      amountDue: null,
+      reason: verdict.status === 'error' ? 'lookup_failed' : (inv ? 'terminal_invoice' : 'canceled_setup_fee'),
+    };
     return {
-      kind: 'sibling_needs_review',
-      amount: null,
-      conflictStampedPrice: false,
-      invoiceId: verdict.invoice?.id || null,
-      invoiceNumber: verdict.invoice?.invoice_number || null,
-      invoiceStatus: verdict.invoice?.status || null,
+      coverage,
+      prediction: {
+        kind: 'sibling_needs_review',
+        amount: null,
+        conflictStampedPrice: false,
+        invoiceId: coverage.invoiceId,
+        invoiceNumber: coverage.invoiceNumber,
+      },
     };
   }
-  if (verdict.status !== 'covered') return null;
-  const inv = verdict.invoice;
+  if (verdict.status !== 'covered') return { coverage: NO_SIBLING_COVERAGE, prediction: null };
 
-  let siblingVisit = null;
-  try {
-    siblingVisit = await dbConn('scheduled_services').where({ id: inv.scheduled_service_id }).first('id', 'service_type');
-  } catch {
-    siblingVisit = null;
+  const inv = verdict.invoice;
+  const amountDue = invoiceAmountDue(inv);
+  let coverage;
+  // codex round-8 P1: a draft/sent sibling invoice with payer_id set, or
+  // withdrawn from the homeowner via the `payer_billed:` stamp, is not
+  // collectible from THIS customer at all — the payment paths reject it
+  // (invoiceWithdrawnFromCustomer, payer ownership,
+  // server/services/invoice-helpers.js) — so it reads settled here (nothing
+  // for a technician to collect from the homeowner), never "collect on
+  // that invoice."
+  if (invoiceWithdrawnFromCustomer(inv)) {
+    coverage = { state: 'settled', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue: 0, reason: 'withdrawn_from_customer' };
+  } else if (inv.payer_id) {
+    coverage = { state: 'settled', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue: 0, reason: 'payer_billed' };
+  } else if (!isInvoiceCollectibleStatus(inv.status)) {
+    // paid / prepaid / processing — money already collected or in flight.
+    coverage = { state: 'settled', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue: 0, reason: 'invoice_settled' };
+  } else if (!(amountDue > 0)) {
+    // A draft/sent/... invoice fully covered by account credit.
+    coverage = { state: 'settled', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue: 0, reason: 'credit_applied' };
+  } else {
+    coverage = { state: 'collect_on_combined_invoice', invoiceId: inv.id, invoiceNumber: inv.invoice_number || null, amountDue, reason: null };
   }
 
-  // codex round-7 P1: `invoiceStatus` alone told every consumer THAT a
-  // sibling invoice exists, never whether it still needs collecting — every
-  // one of them rendered "no charge needed" even for a draft/sent/overdue
-  // invoice, so a technician could walk off a job whose combined-trip
-  // invoice was still due. `amountDue` (total − credit_applied, the same
-  // canonical charge base every Stripe/Terminal/autopay path prices from —
-  // invoiceAmountDue, invoice-helpers.js) lets the client-side copy helper
-  // (client/src/lib/siblingInvoiceCoverage.js) tell staff exactly what's
-  // still owed on THAT invoice, without minting a second one for this visit
-  // (amount stays null — the verdict here is unchanged).
   const prediction = {
     kind: 'covered_sibling_invoice',
     amount: null,
     conflictStampedPrice: false,
-    invoiceId: inv.id,
-    invoiceNumber: inv.invoice_number || null,
-    invoiceStatus: inv.status || null,
-    amountDue: invoiceAmountDue(inv),
-    siblingServiceType: siblingVisit?.service_type || null,
+    invoiceId: coverage.invoiceId,
+    invoiceNumber: coverage.invoiceNumber,
   };
-
-  const breakdown = await sameTripFirstApplicationBreakdown({ svc, invoiceTotal: inv.total, dbConn });
-  if (breakdown) prediction.breakdown = breakdown;
-  return prediction;
+  try {
+    const siblingVisit = await dbConn('scheduled_services').where({ id: inv.scheduled_service_id }).first('id', 'service_type');
+    if (siblingVisit?.service_type) prediction.siblingServiceType = siblingVisit.service_type;
+  } catch { /* no service-type label — the coverage verdict still stands */ }
+  try {
+    const breakdown = await sameTripFirstApplicationBreakdown({ svc, invoiceTotal: inv.total, dbConn });
+    if (breakdown) prediction.breakdown = breakdown;
+  } catch { /* no breakdown — the coverage verdict still stands */ }
+  return { coverage, prediction };
 }
 
 /**
@@ -1122,7 +1158,7 @@ module.exports = {
   completionInvoiceAmount,
   predictCompletionBilling,
   monthlyDuesCollected,
-  siblingCoveredCompletionPrediction,
+  siblingCoverageForSchedule,
   coveringSiblingInvoice,
   siblingInvoiceCoverageVerdict,
   isSiblingCoverageEligibleVisit,
