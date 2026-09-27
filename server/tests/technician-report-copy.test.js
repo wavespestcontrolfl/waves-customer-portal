@@ -144,6 +144,10 @@ describe('custom action credential screening', () => {
     'Opened rear gate on 02/30/2026',
     'Opened rear gate by entering 2468 ml',
     'Unlocked side door after typing 8842 oz',
+    'Unlocked side door after typing AB8842 oz',
+    'Unlocked side door after typing 88-42 oz',
+    'Opened rear gate after entering 24-68 ml',
+    'Opened rear gate after entering 09/27/2026',
     'Opened rear gate with 09/27/2026',
     'Opened rear gate using 2026-09-27',
     'Opened rear gate with 09/27/26',
@@ -206,6 +210,8 @@ describe('custom action credential screening', () => {
     'Opened rear gate and observed 200 ants',
     'Opened rear gate and treated station 2468',
     'Opened rear gate and serviced station 2468',
+    'Unlocked side door on 09/27/2026',
+    'Unlocked side door after servicing station 8842',
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
   });
@@ -253,6 +259,10 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Opened rear gate on 02/30/2026',
     'Opened rear gate by entering 2468 ml',
     'Unlocked side door after typing 8842 oz',
+    'Unlocked side door after typing AB8842 oz',
+    'Unlocked side door after typing 88-42 oz',
+    'Opened rear gate after entering 24-68 ml',
+    'Opened rear gate after entering 09/27/2026',
     'Opened rear gate with 09/27/2026',
     'Opened rear gate using 2026-09-27',
     'Opened rear gate with 09/27/26',
@@ -308,6 +318,8 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Opened rear gate and observed 200 ants',
     'Opened rear gate and treated station 2468',
     'Opened rear gate and serviced station 2468',
+    'Unlocked side door on 09/27/2026',
+    'Unlocked side door after servicing station 8842',
   ])('publishes bounded material, date, unit-id, and fertilizer details: %s', (action) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${action}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toContain(action);

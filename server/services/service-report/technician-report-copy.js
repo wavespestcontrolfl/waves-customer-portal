@@ -409,10 +409,14 @@ function accessCodeDetectionText(text) {
 // original sentence directly ties that token to opening or entering a device.
 // Keep this relationship check narrow so later treatment detail remains legal:
 // "Opened rear gate, applied 100 ml around hinges" has no access connector.
+const REPORT_SUBORDINATE_ACCESS_CODE_RE = new RegExp(
+  String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,12}\b(?:by|after)\s+(?:entering|typing|inputting|pressing|using)\s+(?:${REPORT_STRUCTURED_DATE_TEXT}|${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?=$|[^A-Za-z0-9])`,
+  'i',
+);
 const REPORT_DIRECT_ACCESS_CODE_RES = [
   /\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,
   new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*${REPORT_STRUCTURED_DATE_TEXT}\b`, 'i'),
-  /\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,12}\b(?:by|after)\s+(?:entering|typing|inputting|pressing|using)\s+\d{3,8}\b/i,
+  REPORT_SUBORDINATE_ACCESS_CODE_RE,
   new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b(?:\s+(?!(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|broadcast(?:ed|ing)?|spread(?:ing)?|distribut(?:e|ed|ing)|spray(?:ed|ing)?|dust(?:ed|ing)?|clean(?:ed|ing)?)\b)[a-z][a-z'’\-]*){1,5}\s+(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b`, 'i'),
   new RegExp(String.raw`\b\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:(?:to|for)\s+)?(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,20}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b`, 'i'),
   new RegExp(String.raw`\b(?:enter|entering|type|typing|press|pressing|punch(?:ing)?|input(?:ting)?|try|trying)\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b`, 'i'),
