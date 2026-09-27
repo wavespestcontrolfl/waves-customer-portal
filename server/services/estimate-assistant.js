@@ -473,7 +473,7 @@ function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {
         item.quoteRequired === true ? 'Quote required' : null,
         Number.isFinite(amount) && amount > 0 ? fmtMoney(amount) : null,
       ].filter(Boolean);
-      const evidence = reconcilePricedTrenchingWarrantyEvidence(item, evidenceGroups, pricingBundle);
+      const evidence = reconcilePricedTrenchingWarrantyEvidence(item, evidenceGroups, pricingBundle, items);
       return {
         service: cleanText(item.service || item.serviceKey || item.service_key || item.key) || null,
         label: cleanText(item.label || item.name || item.service || 'One-time service'),
@@ -546,9 +546,10 @@ function oneTimeRowsFromEstimateData(estData = {}) {
   const evidenceGroups = oneTimeEvidenceGroupsFromEstimateData(estData);
   const currentRows = oneTimeRowsFromResult(roots[0]);
   const fallbackRows = roots.slice(1).flatMap(oneTimeRowsFromResult);
-  return mergeOneTimeServiceRows(currentRows, fallbackRows).map((row) => {
+  const mergedRows = mergeOneTimeServiceRows(currentRows, fallbackRows);
+  return mergedRows.map((row) => {
     if (trenchingServiceIdentity(row) !== 'termite_trenching') return row;
-    const evidence = reconcileTrenchingWarrantyEvidence(row, evidenceGroups);
+    const evidence = reconcileTrenchingWarrantyEvidence(row, evidenceGroups, mergedRows);
     return { ...row, purchasedTerms: purchasedTermsForRow(evidence) };
   });
 }
@@ -1582,10 +1583,12 @@ function writtenServiceClaimAnswer(question, context = {}, fallback = null) {
     seenRows.add(key);
     return true;
   });
-  const genericGuaranteeIntent = /\b(callbacks?|money[- ]?back|risk[- ]?free)\b/.test(question);
-  if (!genericGuaranteeIntent && /\b(bond|warrant\w*|annual inspection|re-?treat\w*)\b/.test(question)) {
+  const genericGuaranteeIntent = /\b(callbacks?|money[- ]?back|risk[- ]?free|satisfaction)\b/.test(question);
+  const namedScope = purchasedServiceScopeForQuestion(question, rows);
+  const purchasedTermIntent = /\b(bond|warrant\w*|annual inspection|re-?treat\w*)\b/.test(question)
+    || (/\bguarantee\w*\b/.test(question) && namedScope.named);
+  if (!genericGuaranteeIntent && purchasedTermIntent) {
     const purchasedRows = rows.filter((row) => Array.isArray(row.purchasedTerms) && row.purchasedTerms.length);
-    const namedScope = purchasedServiceScopeForQuestion(question, rows);
     const relevantRows = namedScope.named
       ? namedScope.rows.filter((row) => Array.isArray(row.purchasedTerms) && row.purchasedTerms.length)
       : purchasedRows;

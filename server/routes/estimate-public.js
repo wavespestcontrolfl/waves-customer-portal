@@ -41,6 +41,7 @@ const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { GUARANTEE_COPY, resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
 const {
   hasPurchasedTrenchingWarranty,
+  matchingTrenchingWarrantyRow,
   rawOneTimeWarrantyEvidenceItems,
   trenchingServiceIdentity,
   trenchingWarrantyDecision,
@@ -17206,6 +17207,9 @@ function oneTimeItemsForRender(estResult, estData) {
     nestRemovalSelected: row.nestRemovalSelected === true,
     chemistryType: row.chemistryType || null,
     warrantyTier: row.warrantyTier || null,
+    ...(Object.prototype.hasOwnProperty.call(row, 'warrantyAdder') ? {
+      warrantyAdder: row.warrantyAdder,
+    } : {}),
     debrisRemovalIncluded: row.debrisRemovalIncluded === true,
     creditableWithinDays: row.creditableWithinDays || null,
     includesScreening: row.includesScreening === true,
@@ -23594,9 +23598,12 @@ function oneTimeServiceIdentity(item = {}) {
   return String(item?.service || item?.serviceKey || item?.service_key || item?.key || '').toLowerCase();
 }
 
-function matchingRawOneTimeRow(row, rawRows = []) {
+function matchingRawOneTimeRow(row, rawRows = [], targetRows = [row]) {
   const service = oneTimeServiceIdentity(row);
   if (!service) return { row: null, ambiguous: false };
+  if (service === 'termite_trenching') {
+    return matchingTrenchingWarrantyRow(row, rawRows, targetRows);
+  }
   const candidates = rawRows.filter((raw) => oneTimeServiceIdentity(raw) === service);
   if (candidates.length < 2) return { row: candidates[0] || null, ambiguous: false };
   const sameLabel = candidates.filter((raw) => (
@@ -23608,12 +23615,13 @@ function matchingRawOneTimeRow(row, rawRows = []) {
   return { row: null, ambiguous: true };
 }
 
-function withReconciledContractWarranty(row, rawRowGroups = [], target = row, pricing = {}) {
+function withReconciledContractWarranty(row, rawRowGroups = [], target = row, pricing = {}, targetRows = [target]) {
   if (trenchingServiceIdentity(row) !== 'termite_trenching') return row;
   const evidence = reconcilePricedTrenchingWarrantyEvidence(
     target,
     rawRowGroups.map((group) => group.sourceItems),
     pricing,
+    targetRows,
   );
   const reconciled = { ...row };
   delete reconciled.warrantyTier;
@@ -23627,16 +23635,16 @@ function withReconciledContractWarranty(row, rawRowGroups = [], target = row, pr
   return reconciled;
 }
 
-function rawContractRowFor(row, rawRowGroups = []) {
+function rawContractRowFor(row, rawRowGroups = [], targetRows = [row]) {
   const [currentGroup = { rows: [], sourceItems: [] }, ...fallbackGroups] = rawRowGroups;
-  if (matchingRawOneTimeRow(row, currentGroup.sourceItems).ambiguous) return null;
-  const currentMatch = matchingRawOneTimeRow(row, currentGroup.rows);
+  if (matchingRawOneTimeRow(row, currentGroup.sourceItems, targetRows).ambiguous) return null;
+  const currentMatch = matchingRawOneTimeRow(row, currentGroup.rows, targetRows);
   if (currentMatch.ambiguous) return null;
   const current = currentMatch.row;
   if (trenchingWarrantyDecision(current) !== 'unset') return current;
 
-  if (fallbackGroups.some((group) => matchingRawOneTimeRow(row, group.sourceItems).ambiguous)) return current;
-  const fallbackMatches = fallbackGroups.map((group) => matchingRawOneTimeRow(row, group.rows));
+  if (fallbackGroups.some((group) => matchingRawOneTimeRow(row, group.sourceItems, targetRows).ambiguous)) return current;
+  const fallbackMatches = fallbackGroups.map((group) => matchingRawOneTimeRow(row, group.rows, targetRows));
   if (fallbackMatches.some((match) => match.ambiguous)) return current;
   const fallbackRows = fallbackMatches.map((match) => match.row).filter(Boolean);
   if (fallbackRows.length !== 1) return current || null;
@@ -23692,9 +23700,9 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
             .map((row) => noGuaranteeClaims && GUARANTEE_COPY.test(row.detail || '') ? { ...row, detail: null } : row);
           if (!rowCopyAllowed) return labeled;
           const copyInputs = labeled.map((row) => {
-            const raw = rawContractRowFor(row, rawContractRowGroups);
+            const raw = rawContractRowFor(row, rawContractRowGroups, labeled);
             const input = raw ? { ...raw, ...row } : row;
-            return withReconciledContractWarranty(input, rawContractRowGroups, row, payload);
+            return withReconciledContractWarranty(input, rawContractRowGroups, row, payload, labeled);
           });
           const copies = resolveOneTimeRowCopies(copyInputs, { noGuaranteeClaims });
           return labeled.map((row, i) => {

@@ -833,6 +833,70 @@ describe('server-rendered page', () => {
   });
 
   test.each([
+    ['same-price singleton purchase',
+      [
+        { service: 'trenching', label: 'Front Trenching', amount: 900 },
+        { service: 'trenching', label: 'Rear Trenching', amount: 900 },
+      ],
+      [{ service: 'trenching', label: 'Front Trenching', amount: 900,
+        warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }],
+      ['Front Trenching']],
+    ['renamed distinct-price jobs',
+      [
+        { service: 'trenching', label: 'Current north scope', amount: 900 },
+        { service: 'trenching', label: 'Current south scope', amount: 700 },
+      ],
+      [
+        { service: 'trenching', label: 'Legacy front scope', amount: 900,
+          warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 },
+        { service: 'trenching', label: 'Legacy rear scope', amount: 700,
+          warrantyTier: 'none', warrantyAdder: 0 },
+      ],
+      ['Current north scope']],
+    ['same-price paid and unpaid jobs',
+      [
+        { service: 'trenching', label: 'Front Trenching', amount: 900 },
+        { service: 'trenching', label: 'Rear Trenching', amount: 900 },
+      ],
+      [
+        { service: 'trenching', label: 'Front Trenching', amount: 900,
+          warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+        { service: 'trenching', label: 'Rear Trenching', amount: 900,
+          warrantyTier: 'none', warrantyAdder: 0 },
+      ],
+      ['Front Trenching']],
+  ])('public projection assigns warranty evidence to one distinct trenching job: %s', (
+    _name, projectedRows, savedRows, purchasedLabels,
+  ) => {
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: projectedRows.reduce((sum, row) => sum + row.amount, 0), items: projectedRows } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      { result: { recurring: { services: [] }, oneTime: { items: savedRows } } },
+    );
+    expect(contract.oneTimeBreakdown.items
+      .filter((row) => row.copy.includes.includes('Annual inspection during the warranty period'))
+      .map((row) => row.label)).toEqual(purchasedLabels);
+  });
+
+  test.each([
+    ['purchased', { warrantyTier: 'one_year_retreat', warrantyAdder: 0 }, true],
+    ['removed', { warrantyTier: 'none', warrantyAdder: 0 }, false],
+    ['unknown', { warrantyTier: 'one_year_retreat' }, false],
+  ])('engine-only SSR trenching keeps exact warranty evidence: %s', (_name, warranty, purchased) => {
+    const html = renderPage('engine-only-warranty-token', {
+      id: 'estimate-engine-only-warranty', status: 'sent', customerName: 'Test Customer',
+      address: '1 Main St, Bradenton, FL 34203', monthlyTotal: 0, annualTotal: 0,
+      onetimeTotal: 900, quoteRequired: false, noGuaranteeClaims: true,
+    }, {
+      engineResult: {
+        lineItems: [{ service: 'trenching', label: 'Termite Trenching', price: 900, ...warranty }],
+        oneTime: { total: 900 },
+      },
+    });
+    expect(html.includes('Annual inspection during the warranty period')).toBe(purchased);
+  });
+
+  test.each([
     ['Rain re-spray guarantee', false],
     ['Rain re-spray within 48 hours', false],
     ['Free re-service between visits', false],

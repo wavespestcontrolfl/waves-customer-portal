@@ -214,6 +214,17 @@ describe('estimate assistant no-guarantee context', () => {
     const answer = answerEstimateQuestionFallback('What is included?', context);
     expect(answer).toContain('Annual inspection during the warranty period');
     expect(answer).not.toMatch(/termite-free forever|money-back guarantee|unlimited.*callback/i);
+    expect(answerEstimateQuestionFallback('What guarantee does the trenching include?', context))
+      .toContain('Annual inspection during the warranty period');
+    for (const question of [
+      'Does the trenching include a money-back guarantee?',
+      'Does its guarantee include callbacks?',
+      'Does the trenching include a satisfaction guarantee?',
+    ]) {
+      const genericAnswer = answerEstimateQuestionFallback(question, context);
+      expect(genericAnswer).toMatch(/do not see an estimate-wide callback or money-back guarantee/i);
+      expect(genericAnswer).not.toContain('Annual inspection during the warranty period');
+    }
     const unproven = buildEstimateAssistantContext(input({ ...row, warrantyAdder: undefined }));
     expect(unproven.oneTime.items[0].purchasedTerms || []).toEqual([]);
     expect(answerEstimateQuestionFallback('What is included?', unproven)).not.toContain('Annual inspection during the warranty period');
@@ -308,6 +319,59 @@ describe('estimate assistant no-guarantee context', () => {
     expect(context.oneTime.items.find((row) => row.label === 'Front foundation').purchasedTerms)
       .toEqual(['Annual inspection during the warranty period']);
     expect(context.oneTime.items.find((row) => row.label === 'Rear foundation').purchasedTerms).toEqual([]);
+  });
+
+  test.each([
+    ['same-price named jobs',
+      [
+        { service: 'trenching', label: 'Front foundation', amount: 900 },
+        { service: 'trenching', label: 'Rear foundation', amount: 900 },
+      ],
+      [{ service: 'trenching', label: 'Front foundation', amount: 900,
+        warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }],
+      ['Front foundation']],
+    ['renamed jobs with distinct prices',
+      [
+        { service: 'trenching', label: 'Current north scope', amount: 900 },
+        { service: 'trenching', label: 'Current south scope', amount: 700 },
+      ],
+      [
+        { service: 'trenching', label: 'Legacy front scope', amount: 900,
+          warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 },
+        { service: 'trenching', label: 'Legacy rear scope', amount: 700,
+          warrantyTier: 'none', warrantyAdder: 0 },
+      ],
+      ['Current north scope']],
+    ['same-price paid and unpaid jobs',
+      [
+        { service: 'trenching', label: 'Front foundation', amount: 900 },
+        { service: 'trenching', label: 'Rear foundation', amount: 900 },
+      ],
+      [
+        { service: 'trenching', label: 'Front foundation', amount: 900,
+          warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+        { service: 'trenching', label: 'Rear foundation', amount: 900,
+          warrantyTier: 'none', warrantyAdder: 0 },
+      ],
+      ['Front foundation']],
+  ])('pricing reconciliation assigns warranty evidence to one distinct trenching job: %s', (
+    _name, pricedRows, savedRows, purchasedLabels,
+  ) => {
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: pricedRows.reduce((sum, row) => sum + row.amount, 0) },
+      estData: { result: { oneTime: { items: savedRows } } },
+      pricingBundle: { anchorOneTimePrice: 1800, oneTimeBreakdown: { items: pricedRows } },
+      serviceMode: 'one_time',
+      noGuaranteeClaims: true,
+    });
+    expect(context.oneTime.items.filter((row) => row.purchasedTerms.length).map((row) => row.label))
+      .toEqual(purchasedLabels);
+    const answer = answerEstimateQuestionFallback('What guarantee does the trenching include?', context);
+    expect(answer).toContain('Annual inspection during the warranty period');
+    expect(answer).toContain(purchasedLabels[0]);
+    for (const row of pricedRows.filter((item) => !purchasedLabels.includes(item.label))) {
+      expect(answer).not.toContain(row.label);
+    }
   });
 
   test.each([
@@ -416,7 +480,7 @@ describe('estimate assistant no-guarantee context', () => {
     expect(answer).toContain('applies only to that service');
     expect(answerEstimateQuestionFallback('Does my termite bond include free callbacks?', context))
       .toMatch(/do not see an estimate-wide callback/i);
-    for (const question of ['What bond did I buy?', 'What warranty did I buy?']) {
+    for (const question of ['What bond did I buy?', 'What warranty did I buy?', 'What guarantee does my termite bond include?']) {
       expect(answerEstimateQuestionFallback(question, context))
         .toContain('Purchased termite bond: 10-year term with re-treatment coverage.');
     }

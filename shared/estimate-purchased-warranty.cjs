@@ -60,30 +60,51 @@ function rawOneTimeWarrantyEvidenceItems(result = {}) {
   ].filter((item) => item && typeof item === 'object'))];
 }
 
-function matchingTrenchingWarrantyRow(target, rows = []) {
+function matchingTrenchingWarrantyRow(target, rows = [], targets = [target]) {
   const identity = trenchingServiceIdentity(target);
   if (identity !== 'termite_trenching') return { row: null, ambiguous: false };
   const candidates = rows.filter((row) => trenchingServiceIdentity(row) === identity);
-  if (candidates.length < 2) return { row: candidates[0] || null, ambiguous: false };
+  if (!candidates.length) return { row: null, ambiguous: false };
+  const peers = targets.filter((row) => trenchingServiceIdentity(row) === identity);
   const label = String(target?.label || target?.displayName || target?.name || '').trim().toLowerCase();
   const sameLabel = candidates.filter((row) => (
     String(row.label || row.displayName || row.name || '').trim().toLowerCase() === label
   ));
-  if (sameLabel.length === 1) return { row: sameLabel[0], ambiguous: false };
-  const amount = Number(target?.amount ?? target?.price ?? target?.total);
-  const sameAmount = sameLabel.filter((row) => Number(row.amount ?? row.price ?? row.total) === amount);
-  if (sameAmount.length === 1) return { row: sameAmount[0], ambiguous: false };
+  const peerLabelCount = peers.filter((row) => (
+    String(row.label || row.displayName || row.name || '').trim().toLowerCase() === label
+  )).length;
+  if (label && sameLabel.length === 1 && peerLabelCount === 1) {
+    return { row: sameLabel[0], ambiguous: false };
+  }
+  const targetAmount = target?.amount ?? target?.price ?? target?.total;
+  const amount = Number(targetAmount);
+  const sameAmount = candidates.filter((row) => {
+    const value = row.amount ?? row.price ?? row.total;
+    return value !== '' && value != null && Number(value) === amount;
+  });
+  const peerAmountCount = peers.filter((row) => {
+    const value = row.amount ?? row.price ?? row.total;
+    return value !== '' && value != null && Number(value) === amount;
+  }).length;
+  if (targetAmount !== '' && targetAmount != null && Number.isFinite(amount)
+    && sameAmount.length === 1 && peerAmountCount === 1) {
+    return { row: sameAmount[0], ambiguous: false };
+  }
+  // A single renamed job may borrow its one matching legacy row. With two
+  // current jobs, the same fallback would otherwise be lent to both.
+  if (candidates.length === 1 && peers.length === 1) return { row: candidates[0], ambiguous: false };
+  if (candidates.length === 1) return { row: null, ambiguous: false };
   return { row: null, ambiguous: true };
 }
 
 // Evidence groups are ordered newest to oldest. A current explicit decision
 // wins; incomplete current data may borrow only matching, unambiguous proof.
-function reconcileTrenchingWarrantyEvidence(target, evidenceGroups = []) {
+function reconcileTrenchingWarrantyEvidence(target, evidenceGroups = [], targets = [target]) {
   if (trenchingServiceIdentity(target) !== 'termite_trenching') return null;
   let current = null;
   let currentDecision = 'unset';
   for (const rows of evidenceGroups) {
-    const match = matchingTrenchingWarrantyRow(target, rows);
+    const match = matchingTrenchingWarrantyRow(target, rows, targets);
     if (match.ambiguous) return current;
     if (!match.row) continue;
     const decision = trenchingWarrantyDecision(match.row);
@@ -118,18 +139,19 @@ function reconcileTrenchingWarrantyEvidence(target, evidenceGroups = []) {
 // A replayed engine bundle is current unless it came from a sent snapshot.
 // Otherwise neither a priced removal nor a current saved removal may be
 // overwritten by purchased metadata in the other, unversioned projection.
-function reconcilePricedTrenchingWarrantyEvidence(target, evidenceGroups = [], pricing = {}) {
+function reconcilePricedTrenchingWarrantyEvidence(target, evidenceGroups = [], pricing = {}, targets = [target]) {
   const [current = [], ...fallback] = evidenceGroups;
   const liveEnginePricing = pricing.source === 'engine_invocation' && pricing.snapshotHit !== true;
   const pricedRemoval = trenchingWarrantyDecision(target) === 'none';
   const ordered = liveEnginePricing || pricedRemoval
     ? [[target], current, ...fallback]
     : [current, [target], ...fallback];
-  return reconcileTrenchingWarrantyEvidence(target, ordered);
+  return reconcileTrenchingWarrantyEvidence(target, ordered, targets);
 }
 
 module.exports = {
   hasPurchasedTrenchingWarranty,
+  matchingTrenchingWarrantyRow,
   rawOneTimeWarrantyEvidenceItems,
   reconcileTrenchingWarrantyEvidence,
   reconcilePricedTrenchingWarrantyEvidence,
