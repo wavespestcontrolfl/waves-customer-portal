@@ -10,8 +10,12 @@
  * gracefully — load_suppression_state catches a missing-table error and
  * returns null, and validators interpret null as "no suppression record".
  *
- * Consent suppression is HARD across purposes, audiences, and channels.
- * non_mobile is an SMS-capability fact and does not suppress Email or App.
+ * Consent suppression is HARD across purposes, audiences, and channels,
+ * with two carve-outs. non_mobile is an SMS-capability fact and does not
+ * suppress Email or App. And a payment or billing EMAIL is stopped only by
+ * a staff do-not-contact (or an unknown reason): a STOP text and a
+ * wrong-number flag are facts about the phone, and payment emails cannot
+ * be turned off (owner ruling 2026-09-27; texts still honor STOP).
  * A consent entry blocks until explicitly cleared. The only escape
  * hatch is a START keyword on the inbound channel, which is handled by
  * the twilio-webhook STOP/START flow and clears the suppression record.
@@ -36,6 +40,22 @@ function requiresVerifiedSuppression(channel) {
   return channel === 'push' || channel === 'email';
 }
 
+// The one rule for which phone suppressions stop a payment or billing email
+// (owner ruling 2026-09-27): a staff do-not-contact and any reason not named
+// here do; a STOP text, a natural-language opt-out, a wrong-number flag and a
+// landline fact do not. The collections contact policy reads the same rule.
+const PHONE_FACT_REASONS = new Set(['opt_out_keyword', 'opt_out_natural_language', 'wrong_number', 'non_mobile']);
+
+function suppressionBlocksPaymentEmail(reason) {
+  return !PHONE_FACT_REASONS.has(reason);
+}
+
+function isBillingEmail(input) {
+  if (input.channel !== 'email') return false;
+  if (input.metadata?.billingDeliveryLeg) return true;
+  return Boolean(require('../billing-channel-routing').billingDeliveryCategory(input));
+}
+
 /**
  * @param {import('../policy').SendCustomerMessageInput} input
  * @param {Object} _policy
@@ -54,6 +74,7 @@ async function checkSuppression(input, _policy, contactState) {
   }
   const suppression = contactState && contactState.suppression;
   if (!suppression) return { ok: true };
+  if (isBillingEmail(input) && !suppressionBlocksPaymentEmail(suppression.reason)) return { ok: true };
 
   if (suppression.reason === 'opt_out_keyword' || suppression.reason === 'opt_out_natural_language') {
     return {
@@ -404,4 +425,5 @@ module.exports = {
   recordNonMobileSuppression,
   clearSuppression,
   requiresVerifiedSuppression,
+  suppressionBlocksPaymentEmail,
 };

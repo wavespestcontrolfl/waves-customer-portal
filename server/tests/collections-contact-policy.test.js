@@ -878,12 +878,20 @@ describe('canonical suppression list', () => {
     }
   });
 
-  test('STOP-style opt-outs and wrong_number deny EVERY channel (canonical HARD semantics, codex r3)', async () => {
+  // Owner ruling 2026-09-27: a STOP text and a wrong-number flag are facts
+  // about the phone, so they never stop a payment email; every other channel
+  // keeps the canonical HARD semantics (codex r3).
+  test('STOP-style opt-outs and wrong_number deny every channel except the payment email', async () => {
     for (const reason of ['opt_out_keyword', 'opt_out_natural_language', 'wrong_number']) {
-      for (const ch of ['voice', 'manual_call', 'sms', 'email', 'push']) {
+      for (const ch of ['voice', 'manual_call', 'sms', 'push']) {
         armWithSuppression(reason);
         const result = await ContactPolicy.evaluate('cust-1', { channel: ch, purpose: 'late_payment', now: WED_11AM_EDT });
         expect(result.denialReasons).toContain(`suppression_${reason}`);
+      }
+      for (const purpose of ['late_payment', 'balance_reminder']) {
+        armWithSuppression(reason);
+        const email = await ContactPolicy.evaluate('cust-1', { channel: 'email', purpose, now: WED_11AM_EDT });
+        expect(email.denialReasons).not.toContain(`suppression_${reason}`);
       }
     }
   });

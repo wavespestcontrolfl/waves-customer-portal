@@ -262,7 +262,7 @@ postgres('billing Email provider preparation on its held connection', () => {
 
   test.each([
     ['manual_dnc', 'SUPPRESSED_MANUAL_DNC'],
-    ['opt_out_keyword', 'SUPPRESSED_OPT_OUT'],
+    ['mystery_reason', 'SUPPRESSED_OTHER'],
   ])('%s blocks provider work under the held transaction', async (reason, code) => {
     const phone = '+19415550100';
     await mockPg('customers').where({ id: customerId }).update({ phone });
@@ -306,10 +306,13 @@ postgres('billing Email provider preparation on its held connection', () => {
     }
   }, 15000);
 
-  test('SMS-only non_mobile suppression still permits authorized Email dispatch', async () => {
+  // A landline fact, a STOP text and a wrong-number flag are about the phone:
+  // none of them stops a payment email (owner ruling 2026-09-27 for the
+  // last two). A staff do-not-contact does (below).
+  test.each(['non_mobile', 'opt_out_keyword', 'opt_out_natural_language', 'wrong_number'])('a %s phone suppression still permits authorized Email dispatch', async (reason) => {
     const phone = '+19415550100';
     await mockPg('customers').where({ id: customerId }).update({ phone });
-    await mockPg('messaging_suppression').insert({ phone, reason: 'non_mobile', active: true });
+    await mockPg('messaging_suppression').insert({ phone, reason, active: true });
     const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
     try {
       expect(await dispatchUnderBillingEmailAuthority({

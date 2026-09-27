@@ -80,7 +80,7 @@ describe('billing reminder per-channel delivery progress', () => {
     purpose: 'balance_reminder', eventKey, channels, metadata: { tier: 'gentle' }, send,
   });
 
-  test.each(['SUPPRESSED_MANUAL_DNC', 'SUPPRESSED_OPT_OUT'])('an all-channel %s Email refusal resolves the leg terminally', async (code) => {
+  test.each(['SUPPRESSED_MANUAL_DNC', 'SUPPRESSED_OTHER'])('a phone-keyed %s Email refusal resolves the leg terminally', async (code) => {
     const result = await deliver(['email'], jest.fn(async () => ({
       sent: false, blocked: true, deliveryOutcome: 'not_sent', code, reason: 'Recipient is suppressed',
     })));
