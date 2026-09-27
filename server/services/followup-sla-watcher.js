@@ -329,6 +329,26 @@ async function followedUpIds(conn, rows) {
     const matched = new Date(f?.matched_at || 0).getTime();
     if (f?.kind === 'estimate_sent' && matched > (sinceById.get(String(h.id))?.getTime() ?? Infinity)) done.add(h.id);
   }
+  // A quote promise staff confirmed, edited or typed has a human verdict,
+  // which refreshFulfillment never rewrites — so its stored hint above is
+  // never populated, and a quote sent after the review would read as still
+  // owed. Look the delivery up live for those rows, read-only (the verdict
+  // stays the office's). A lookup that throws propagates: every caller
+  // already treats that as unverified, never as kept.
+  const reviewedQuotes = scoped.filter((x) => x.r.kind === 'send_estimate' && x.r.human_state && !done.has(x.r.id) && x.r.call_log_id);
+  if (reviewedQuotes.length) {
+    const quoteCalls = await conn('call_log').whereIn('id', [...new Set(reviewedQuotes.map((x) => x.r.call_log_id))])
+      .select('id', 'twilio_call_sid', 'customer_id', 'from_phone', 'to_phone', 'direction', 'created_at', 'bridged_at', 'duration_seconds', 'metadata');
+    const callById = new Map(quoteCalls.map((c) => [String(c.id), c]));
+    for (const x of reviewedQuotes) {
+      const call = callById.get(String(x.r.call_log_id));
+      if (!call) continue;
+      const live = await conn('call_commitments').where({ id: x.r.id }).first();
+      if (!live) continue;
+      const proof = await commitments.resolveFulfillment(conn, live, call);
+      if (proof?.kind === 'estimate_sent' && new Date(proof.matched_at || 0).getTime() > x.since.getTime()) done.add(x.r.id);
+    }
+  }
   const after = (rec, since) => new Date(rec.created_at).getTime() > since.getTime();
   const mine = (rec, x) => (x.r.customer_id ? String(rec.customer_id) === String(x.r.customer_id)
     : phoneKey(rec.to_phone) === x.phone);

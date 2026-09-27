@@ -30,7 +30,7 @@ const OUR_NUMBER = '+19415550100';
 (SKIP ? describe.skip : describe)('promise-chaser bell — stateless sweep, on PostgreSQL', () => {
   let database;
   const schema = `promise_chaser_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['call_log', 'call_commitments', 'scheduled_services', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'audit_log'];
+  const tables = ['call_log', 'call_commitments', 'scheduled_services', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'audit_log', 'estimates'];
   // promise_chaser_deliveries is cloned separately, WITH its real primary
   // key (LIKE ... INCLUDING ALL, unlike every other table's plain WITH NO
   // DATA copy above): the delivery-fact insert needs an actual unique
@@ -1195,6 +1195,26 @@ const OUR_NUMBER = '+19415550100';
 
       expect(await sweepPromiseChasers()).toBe(1);
       expect(triggerNotification).toHaveBeenCalledTimes(1);
+    });
+
+    test('a CONFIRMED quote promise is kept by an estimate delivered after the review — a human verdict blocks refreshFulfillment, so followedUpIds looks the delivery up live (pre-push audit P1)', async () => {
+      const earlier = callRow(240);
+      const reviewedAt = new Date(now - 3 * 3600000);
+      const commitment = commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the quote', human_state: 'confirmed', reviewed_at: reviewedAt });
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+      // The unlinked caller's quote went out by text two hours ago — after
+      // both the call and the confirm.
+      const deliveredAt = new Date(now - 2 * 3600000).toISOString();
+      await mockConn('estimates').insert({
+        id: randomUUID(), customer_id: null, customer_phone: PHONE, status: 'sent',
+        estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: deliveredAt, lastDeliveredAt: deliveredAt } }),
+        created_at: new Date(now - 3.5 * 3600000), updated_at: new Date(now - 2 * 3600000),
+      });
+
+      expect(await sweepPromiseChasers()).toBe(0);
+      expect(triggerNotification).not.toHaveBeenCalled();
     });
 
     test('an EDIT followed by an ordinary CONFIRM keeps its renewal boundary — stale pre-edit evidence is not kept, and the callback still rings (Codex #5019 r16→r17 P1, the finding\'s own scenario)', async () => {
