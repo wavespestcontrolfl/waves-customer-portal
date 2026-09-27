@@ -922,10 +922,110 @@ async function resolveProduct(input) {
   return { product: matches[0] };
 }
 
+// ─── OPERATOR-NAMED PRODUCT FALLBACK ────────────────────────────
+//
+// The rigid grammar below only recognizes a handful of phrasings ("add <qty>
+// <unit> of <name>", "restock <name>", ...). Real voice-typed operator
+// prompts routinely miss it ("we just bought a thing of Taurus... I think
+// it's 78 ounces"). When the grammar can't extract a target at all, this
+// fallback still requires the OPERATOR's own words (this turn, or their own
+// recent prior turns on the same thread — never an assistant turn, tool
+// result, attachment, or note) to name exactly the product already sitting
+// in the preview. It never widens WHO can name a target, only HOW casually
+// they can say it.
+//
+// Generic catalog vocabulary is never distinctive enough, alone, to ground a
+// target — "lesco" and "control" show up in dozens of active product names,
+// so a bare mention proves nothing about which one an operator meant. Real
+// product identity words (Taurus, Alpine, Bifen, ...) are never on this list.
+const GENERIC_PRODUCT_WORDS = new Set([
+  'insecticide', 'insecticides', 'termiticide', 'termiticides', 'fungicide', 'fungicides',
+  'herbicide', 'herbicides', 'fertilizer', 'fertilizers', 'granular', 'granules', 'liquid',
+  'liquids', 'concentrate', 'concentrated', 'professional', 'control', 'bait', 'baits',
+  'gel', 'station', 'stations', 'spray', 'sprays', 'pest', 'lawn', 'turf', 'plus', 'with',
+  'and', 'bottle', 'bottles', 'jug', 'jugs', 'bag', 'bags', 'gallon', 'gallons', 'ounce',
+  'ounces', 'lesco', 'product', 'products', 'inventory', 'stock', 'shelf', 'purchase',
+  'purchased', 'chemical', 'chemicals', 'vendor', 'restock', 'reorder', 'order', 'shipment',
+]);
+
+// A name token can ground a target only when it is long enough to be a real
+// identity word, not a bare number, and not generic catalog vocabulary.
+// Whether it is actually distinctive (unique to one active product) is
+// decided fresh per call in productsNamedIn — a later catalog addition can
+// only ever remove a token's distinctiveness, never silently invent one.
+function isCandidateToken(token) {
+  return token.length >= 4 && !/^[0-9]+$/.test(token) && !GENERIC_PRODUCT_WORDS.has(token);
+}
+
+const UUID_RE_THREAD = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Which ACTIVE catalog products does normalized operator text name? A
+// product is named by its full catalog name, one of its product_aliases, or
+// a name token that belongs to it ALONE across the active catalog — each
+// matched as whole words (never a substring of a longer word). Returns a Set
+// of product ids: 0 (nothing named), 1 (grounded), or 2+ (ambiguous — the
+// caller refuses rather than guessing).
+async function productsNamedIn(textNorm) {
+  const named = new Set();
+  if (!textNorm) return named;
+  const { normalizeForMatch, containsWholeWords } = require('../purchase-receipts/product-matcher');
+  const products = await db('products_catalog').where({ active: true }).select('id', 'name');
+  const aliasRows = await db('product_aliases as pa')
+    .join('products_catalog as pc', 'pc.id', 'pa.product_id')
+    .where('pc.active', true)
+    .select('pa.alias_name', 'pa.product_id');
+
+  // A token shared by 2+ active products' names proves nothing on its own.
+  const tokenOwners = new Map(); // normalized token -> Set(productId)
+  for (const p of products) {
+    for (const token of normalizeForMatch(p.name).split(' ')) {
+      if (!isCandidateToken(token)) continue;
+      if (!tokenOwners.has(token)) tokenOwners.set(token, new Set());
+      tokenOwners.get(token).add(p.id);
+    }
+  }
+
+  for (const p of products) {
+    const nameNorm = normalizeForMatch(p.name);
+    const byName = containsWholeWords(textNorm, nameNorm);
+    const byAlias = !byName && aliasRows.some((a) => a.product_id === p.id
+      && containsWholeWords(textNorm, normalizeForMatch(a.alias_name)));
+    const byToken = !byName && !byAlias && nameNorm.split(' ').some((token) => isCandidateToken(token)
+      && tokenOwners.get(token)?.size === 1 && containsWholeWords(textNorm, token));
+    if (byName || byAlias || byToken) named.add(p.id);
+  }
+  return named;
+}
+
+// Does the operator's own text (this prompt, or — only when this prompt
+// names nothing — their own recent prior turns) ground the preview's
+// product? Returns { productId } (allow), { mismatch: true } (a different
+// single product was named — target_relationship_mismatch), or null (no
+// grounding found; the caller keeps its original clarification refusal,
+// which also covers "named 2+ products").
+async function resolveByOperatorGrounding(prompt, preview, actorId, threadId) {
+  const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
+  if (!preview?.product?.id) return null;
+  const decide = (named) => {
+    if (named.size !== 1) return null; // 0 = nothing to ground on; 2+ = ambiguous, refuse
+    const [id] = named;
+    return id === preview.product.id ? { productId: id } : { mismatch: true };
+  };
+  const currentNamed = await productsNamedIn(normalizeForMatch(prompt));
+  const fromCurrent = decide(currentNamed);
+  if (fromCurrent) return fromCurrent;
+  if (currentNamed.size > 0) return null; // current prompt named something (ambiguous) — never fall back
+  const IbThreads = require('./threads');
+  if (!IbThreads.threadsEnabled() || !actorId || !UUID_RE_THREAD.test(String(threadId || ''))) return null;
+  const turns = await IbThreads.recentOperatorTurns(actorId, threadId, { limit: 3, maxAgeMinutes: 30 });
+  if (!turns.length) return null;
+  return decide(await productsNamedIn(normalizeForMatch(turns.join(' '))));
+}
+
 // Inventory noun slots come from the current operator request, never a model
 // selector, note body, attachment, or transcript. Keep formulation punctuation
 // intact: `10% SC` and `20% SC` are different products.
-async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview }) {
+async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId = null, threadId = null }) {
   const { targetClause, UUID_RE } = require('./task-context');
   // A colon/quote can be part of a catalog identity. Never turn a qualified
   // product into the shorter base product by applying the contact-body split.
@@ -964,6 +1064,16 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
     && !/^(?:save|create)\s+another\s+(?:(?:restock|reorder)\s+)?request\s+for\s+/i.test(clause)) {
     return { error: 'Explicitly request another restock request to create a duplicate.', code: 'duplicate_intent_required' };
   }
+  // Grammar found no interpretable product reference at all: fall back to
+  // whether the OPERATOR's own words (this prompt, or — only when this
+  // prompt names nothing — their own recent prior turns) name exactly the
+  // product already sitting in the preview. See resolveByOperatorGrounding.
+  const groundedOrUnavailable = async (clarification) => {
+    const fallback = await resolveByOperatorGrounding(prompt, preview, actorId, threadId);
+    if (fallback?.productId) return { productId: fallback.productId };
+    if (fallback?.mismatch) return { ...unavailable, code: 'target_relationship_mismatch' };
+    return clarification;
+  };
   const amount = `(?:the\\s+)?${quantity}\\s+${unit}\\s+of\\s+`;
   const patterns = [
     /^write off the (?:spilled|damaged) (?:bag|bottle|container|case|jug) of\s+(.+)$/i,
@@ -975,7 +1085,7 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
     /^(?:restock|reorder)\s+(.+)$/i,
   ];
   const selected = patterns.map(pattern => clause.match(pattern)?.[1]).find(Boolean);
-  if (!selected) return unavailable;
+  if (!selected) return groundedOrUnavailable(unavailable);
   let name = selected.replace(/\s+(?:to\s+(?:the\s+)?(?:restock|reorder)\s+list|that\s+(?:physically\s+)?arrived|on the shelf)[.!]?$/i, '').trim();
   let literal = null;
   const deadline = toolName === 'create_restock_request' && name.match(/^(.+?)\s+(?:before|by)\s+(?:(?:this|next)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|\d{4}-\d{2}-\d{2})[.!]?$/i);
@@ -984,7 +1094,7 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
     // Only split it after that lookup misses, and never drop the preview date.
     literal = await resolveProduct({ product_name: name });
     if (!literal.product && !literal.candidates) {
-      if (!preview.needed_by) return unavailable;
+      if (!preview.needed_by) return groundedOrUnavailable(unavailable);
       name = deadline[1].trim();
       literal = null;
     }
@@ -993,9 +1103,9 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   const productId = deictic && inventoryPage ? pageData.productId || pageData.product_id || query.get('productId')
     : name.replace(/^product\s+/i, '');
   const selector = UUID_RE.test(String(productId || '')) ? { product_id: productId } : { product_name: name };
-  if (deictic && !selector.product_id) return unavailable;
+  if (deictic && !selector.product_id) return groundedOrUnavailable(unavailable);
   const resolved = literal || await resolveProduct(selector);
-  if (resolved.error) return { ...resolved, code: 'target_clarification_required' };
+  if (resolved.error) return groundedOrUnavailable({ ...resolved, code: 'target_clarification_required' });
   if (resolved.product.id !== preview.product?.id) return { ...unavailable, code: 'target_relationship_mismatch' };
   return { productId: resolved.product.id };
 }

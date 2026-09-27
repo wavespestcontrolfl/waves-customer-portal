@@ -151,6 +151,32 @@ async function getThread(actorId, threadId) {
   };
 }
 
+/**
+ * The actor's most recent OPERATOR (role='user') turns on one thread, bounded
+ * by count and age. Used by the inventory write-target grounding fallback
+ * (procurement-tools.resolveInventoryWriteTarget) to let a follow-up like
+ * "1 bottle" ground off a product the operator themself named a turn or two
+ * earlier — never an assistant turn, tool result, attachment, or note.
+ *
+ * Actor-bound like every other accessor here: a thread owned by a different
+ * actor (or one that doesn't exist) returns []. The CURRENT, in-flight prompt
+ * is never in this table yet (persistence happens after the reply), so this
+ * only ever returns PRIOR turns.
+ */
+async function recentOperatorTurns(actorId, threadId, { limit = 3, maxAgeMinutes = 30 } = {}) {
+  if (!actorId || !threadId) return [];
+  const thread = await db('ib_threads').where({ id: threadId, admin_actor_id: actorId }).first();
+  if (!thread) return [];
+  const rows = await db('ib_thread_turns')
+    .where('thread_id', threadId)
+    .where('role', 'user')
+    .where('created_at', '>=', db.raw("NOW() - (? || ' minutes')::interval", [maxAgeMinutes]))
+    .orderBy('seq', 'desc')
+    .limit(limit)
+    .select('content');
+  return rows.map((r) => r.content);
+}
+
 /** Recent threads for the picker (no turns). */
 async function listThreads(actorId, limit = 20) {
   if (!actorId) return [];
@@ -179,6 +205,7 @@ module.exports = {
   latestThread,
   getThread,
   listThreads,
+  recentOperatorTurns,
   purgeExpiredThreads,
   deriveTitle,
   RESUME_TURN_LIMIT,

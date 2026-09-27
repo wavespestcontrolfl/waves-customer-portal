@@ -263,6 +263,14 @@ const PII_TAINT_MARKER = '[PII-bearing tool context may contain customer PII]';
 // already in the thread and in the client's history from the first reply.
 const CONTINUATION_TURN = 'Continue the saved request using its recorded step outcomes.';
 
+// Phantom-card guard (see the finalResponse assembly below): text claiming
+// THIS reply carries a confirmation card. "below"/"this reply" language is
+// what ties the claim to the current turn's own output.
+const CARD_CLAIM_RE = /\bcard below\b|\bconfirm(?:ation)? card\b|\bclick confirm\b|\bconfirm(?:ation)? on the card\b/i;
+// A reply can truthfully mention an EARLIER card (already sent, still open
+// from a prior turn) without this turn creating a new one — never flag that.
+const EARLIER_CARD_REFERENCE_RE = /\b(?:earlier|already|previous(?:ly)?|above|prior)\b[^.?!]{0,40}\bcard\b|\bcard\b[^.?!]{0,40}\b(?:earlier|already|previous(?:ly)?|above|prior)\b/i;
+
 function hasImageTaintedHistory(conversationHistory) {
   if (!Array.isArray(conversationHistory)) return false;
   return conversationHistory.some((message) => {
@@ -1206,8 +1214,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     }
   }
   if (['adjust_stock', 'create_restock_request', 'update_restock_request'].includes(toolUse.name)) {
+    // actorId/threadId only feed the operator-grounding fallback (a prior
+    // OPERATOR turn on the OPERATOR's OWN server-persisted thread naming the
+    // preview's product) — resolveInventoryWriteTarget re-verifies thread
+    // ownership and the threads gate itself before reading anything.
     const target = await require('../services/intelligence-bar/procurement-tools').resolveInventoryWriteTarget({
       toolName: toolUse.name, prompt: req.body.prompt, pageData: req.body.pageData, preview,
+      actorId: getAdminActorId(req), threadId: req.body.thread_id,
     });
     if (target.error) return { failed: true, modelResult: target };
     if (toolUse.name !== 'update_restock_request') {
@@ -2570,6 +2583,19 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     if (finalResponse === null && lastToolResponse) ledgerCallRejected(lastToolResponse, 'tool_loop_exhausted');
     if (!finalResponse) {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
+    }
+
+    // Phantom-card guard (2026-09-25 production case): the model can write
+    // "awaiting your Confirm on the card below" in plain prose with no tool
+    // call at all, so THIS turn creates no pending action and no card ever
+    // renders. Deterministic and truthful either way — it only compares what
+    // this reply claims against what this turn actually produced, so a reply
+    // that merely references an EARLIER card (already sent, still open from a
+    // prior turn) is left alone. Appended here, before analytics logging and
+    // thread persistence, so the logged/persisted text matches what the
+    // operator sees.
+    if (!pendingProposals.length && CARD_CLAIM_RE.test(finalResponse) && !EARLIER_CARD_REFERENCE_RE.test(finalResponse)) {
+      finalResponse += '\n\nNo confirmation card was created for this reply, so nothing will change. Ask again with the product and amount (for example: add 78 fl oz of Taurus SC).';
     }
 
     // Log the query for analytics. tool_calls stores names + field keys only;

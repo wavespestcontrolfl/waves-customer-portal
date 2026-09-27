@@ -17,8 +17,17 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// resolveInventoryWriteTarget's operator-grounding fallback lazily requires
+// this for its prior-turn lookup — stubbed here so the grounding-fallback
+// tests below control threadsEnabled()/recentOperatorTurns() directly
+// instead of touching a real thread.
+jest.mock('../services/intelligence-bar/threads', () => ({
+  threadsEnabled: jest.fn(() => false),
+  recentOperatorTurns: jest.fn(async () => []),
+}));
 const dbMock = require('../models/db');
-const { executeProcurementTool: executeRaw } = require('../services/intelligence-bar/procurement-tools');
+const { executeProcurementTool: executeRaw, resolveInventoryWriteTarget } = require('../services/intelligence-bar/procurement-tools');
+const IbThreadsMock = require('../services/intelligence-bar/threads');
 
 // Drive the server-owned preview/confirmation contract. A model-supplied
 // confirmed flag alone is intentionally no longer an execution credential.
@@ -380,5 +389,206 @@ describe('update_restock_request', () => {
     expect(result.status).toBe('ordered');
     expect(mutations).toHaveLength(1);
     expect(mutations[0]).toMatchObject({ table: 'product_restock_requests', op: 'update' });
+  });
+});
+
+// ─── resolveInventoryWriteTarget: operator-grounding fallback ───────────
+//
+// Real voice-typed operator prompts from production (2026-09-25/26) miss the
+// rigid grammar entirely ("We just bought a thing of Taurus... 78 ounces").
+// This fallback still requires the OPERATOR's own words — this prompt, or
+// (only when this prompt names nothing) their own recent prior turns on the
+// same thread — to name exactly the product already in the preview. A
+// dedicated db mock is used here (not makeRecordingDb, which ignores WHERE
+// conditions) because these tests specifically assert active-only filtering.
+describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
+  const TAURUS = { id: 'p-taurus', name: 'Taurus SC', active: true };
+  const ALPINE = { id: 'p-alpine', name: 'Alpine WSG', active: true };
+  const LESCO_FERTILIZER = { id: 'p-lesco-1', name: 'Lesco 24-5-11 Fertilizer', active: true };
+  const LESCO_HERBICIDE = { id: 'p-lesco-2', name: 'Lesco Momentum FX2 Herbicide', active: true };
+  const THREAD_ID = '11111111-1111-1111-1111-111111111111';
+
+  // products_catalog needs to serve BOTH productsNamedIn's real ".where({
+  // active: true }).select(...)" AND resolveProduct's exact/ILIKE lookup —
+  // this mock actually implements the two predicates resolveProduct issues
+  // (an exact lower/trim match, then a %contains% ILIKE) so a grammar match
+  // that legitimately resolves does so directly, and a grammar match that
+  // legitimately fails (e.g. a typo-mangled name) genuinely reaches the
+  // fallback under test rather than an artifact of a dumb pass-through mock.
+  function setGroundingDb({ products = [], aliases = [] } = {}) {
+    function catalogBuilder() {
+      let rows = [...products];
+      let single = false;
+      const api = {
+        where(condOrCol, val) {
+          if (condOrCol && typeof condOrCol === 'object') {
+            rows = rows.filter((p) => Object.entries(condOrCol).every(([k, v]) => p[k] === v));
+          } else if (arguments.length === 2) {
+            rows = rows.filter((p) => p[condOrCol] === val);
+          }
+          return api;
+        },
+        whereRaw(sql, params) {
+          if (/lower\(btrim\(name\)\)/i.test(sql)) {
+            const target = String(params[0] || '').toLowerCase();
+            rows = rows.filter((p) => String(p.name || '').trim().toLowerCase() === target);
+          }
+          return api;
+        },
+        whereILike(col, pattern) {
+          const needle = String(pattern || '').replace(/^%|%$/g, '').toLowerCase();
+          rows = rows.filter((p) => String(p[col] || '').toLowerCase().includes(needle));
+          return api;
+        },
+        limit(n) { rows = rows.slice(0, n); return api; },
+        first() { single = true; return api; },
+        select() { return Promise.resolve(single ? rows[0] : rows.map((p) => ({ ...p }))); },
+        then(resolve) { resolve(single ? rows[0] : rows.map((p) => ({ ...p }))); },
+      };
+      return api;
+    }
+    dbMock.mockImplementation((table) => {
+      if (table === 'products_catalog') return catalogBuilder();
+      if (table === 'product_aliases as pa') {
+        return {
+          join: () => ({
+            where: (_col, activeVal) => ({
+              select: async () => {
+                const activeIds = new Set(products.filter((p) => p.active === activeVal).map((p) => p.id));
+                return aliases.filter((a) => activeIds.has(a.product_id)).map((a) => ({ ...a }));
+              },
+            }),
+          }),
+        };
+      }
+      throw new Error(`Unhandled table in grounding-fallback mock: ${table}`);
+    });
+  }
+
+  test('a real ungrammatical voice-typed prompt is allowed for the matching preview product (Taurus)', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock',
+      prompt: "We just bought a thing of Taurus as to add this to your inventory I think it's 78 ounces",
+      preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+    });
+    expect(result).toEqual({ productId: TAURUS.id });
+  });
+
+  test('a real ungrammatical voice-typed prompt is allowed for the matching preview product (Alpine WSG)', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock',
+      prompt: 'Could you add we added your purchase in the Alpine WSG can you add that to our inventory stock',
+      preview: { product: { id: ALPINE.id, name: ALPINE.name } },
+    });
+    expect(result).toEqual({ productId: ALPINE.id });
+  });
+
+  test.each([
+    ['Can you add 12 fluid ounces of Taurus ST to our inventory'],
+    ['Can you add 12 fluid ounces to the inventory of what we have on hand for Taurus SE'],
+  ])('a "Taurus S_" voice-typo grounds via the distinctive "taurus" token: %s', async (prompt) => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt, preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+    });
+    expect(result).toEqual({ productId: TAURUS.id });
+  });
+
+  test('a follow-up naming nothing ("1 bottle") grounds off a recent prior OPERATOR turn', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+    IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce([
+      'Could you add we added your purchase in the Alpine WSG can you add that to our inventory stock',
+    ]);
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt: '1 bottle',
+      preview: { product: { id: ALPINE.id, name: ALPINE.name } },
+      actorId: 'actor-1', threadId: THREAD_ID,
+    });
+    expect(result).toEqual({ productId: ALPINE.id });
+    expect(IbThreadsMock.recentOperatorTurns).toHaveBeenCalledWith('actor-1', THREAD_ID, { limit: 3, maxAgeMinutes: 30 });
+  });
+
+  test('a prior turn that only exists as ASSISTANT text never grounds (recentOperatorTurns already excludes it)', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+    // The real query filters role='user' — an assistant-only mention of
+    // Alpine WSG never reaches this list (see intelligence-bar-threads-
+    // operator-turns.test.js for the role filter itself).
+    IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce([]);
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt: '1 bottle',
+      preview: { product: { id: ALPINE.id, name: ALPINE.name } },
+      actorId: 'actor-1', threadId: THREAD_ID,
+    });
+    expect(result).toMatchObject({ code: 'target_clarification_required' });
+  });
+
+  test('the current prompt naming a DIFFERENT product than the preview refuses as a mismatch', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock',
+      prompt: 'Add the Alpine WSG please',
+      preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+    });
+    expect(result).toMatchObject({ code: 'target_relationship_mismatch' });
+  });
+
+  test('the current prompt naming TWO products refuses as ambiguous (original clarification, unchanged)', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock',
+      prompt: 'We have Taurus SC and Alpine WSG here',
+      preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+    });
+    expect(result).toEqual({ error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' });
+  });
+
+  test('"lesco" alone never resolves, even as the only word in the prompt (stoplisted, and shared by many products)', async () => {
+    setGroundingDb({ products: [LESCO_FERTILIZER, LESCO_HERBICIDE] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock',
+      prompt: 'add some lesco to the inventory',
+      preview: { product: { id: LESCO_FERTILIZER.id, name: LESCO_FERTILIZER.name } },
+    });
+    expect(result).toMatchObject({ code: 'target_clarification_required' });
+  });
+
+  test('an inactive product is never a valid grounding target, even naming it exactly', async () => {
+    const inactiveTaurus = { ...TAURUS, active: false };
+    setGroundingDb({ products: [inactiveTaurus, ALPINE] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock',
+      prompt: "We just bought a thing of Taurus... it's 78 ounces",
+      preview: { product: { id: inactiveTaurus.id, name: inactiveTaurus.name } },
+    });
+    expect(result).toMatchObject({ code: 'target_clarification_required' });
+  });
+
+  test('update_restock_request stays strict: no fallback applies even with a thread available', async () => {
+    setGroundingDb({ products: [ALPINE] });
+    IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+    IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['Alpine WSG']);
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'update_restock_request',
+      prompt: '1 bottle',
+      preview: { product: { id: ALPINE.id, name: ALPINE.name }, request: { id: 'req-1' } },
+      actorId: 'actor-1', threadId: THREAD_ID,
+    });
+    expect(result).toEqual({ error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' });
+    expect(IbThreadsMock.recentOperatorTurns).not.toHaveBeenCalled();
+  });
+
+  test('the existing rigid grammar still resolves directly with no fallback involved', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock',
+      prompt: 'restock Taurus SC',
+      preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+    });
+    expect(result).toEqual({ productId: TAURUS.id });
+    expect(IbThreadsMock.recentOperatorTurns).not.toHaveBeenCalled();
   });
 });
