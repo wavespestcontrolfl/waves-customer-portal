@@ -1,59 +1,6 @@
-const crypto = require('crypto');
-
 // Shared by claim, finalization, and provider-boundary checks.
 const SEND_CLAIMABLE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'overdue'];
 const SEND_FINALIZABLE_STATUSES = [...SEND_CLAIMABLE_STATUSES, 'sending'];
-
-// Same-trip first-application billing review (#5021 round-3 redesign —
-// owner ruling: the hold only ever protects an invoice the customer has
-// NOT yet received. 'draft' (never sent) and 'scheduled' (queued, not yet
-// sent) are the two at-rest undelivered states; 'sending' is the in-flight
-// claim a worker or operator send holds BETWEEN flipping the row and
-// actually handing off to the SMS/email provider — the customer still does
-// not have it yet, so a review that opens while a row sits claimed at
-// 'sending' must still block that handoff (see invoice.js's preclaimed
-// re-check, right before provider handoff). Once a row reaches 'sent' /
-// 'viewed' / 'overdue' (or any terminal status), the customer already has
-// it — a review opened at or after that point is recorded for the office
-// (durable item + admin alert) but never blocks collection; blocking a
-// delivered invoice would only obstruct payment on a total the customer
-// already saw, with nothing left to protect.
-const UNDELIVERED_INVOICE_STATUSES = Object.freeze(['draft', 'scheduled', 'sending']);
-
-// The status-only check above is ambiguous for 'sending': claimInvoiceForSend
-// flips ANY claimed row to 'sending' during the claim — a first send of a
-// never-delivered draft AND a resend of an already-delivered (sent/viewed/
-// overdue) invoice both read as 'sending' by the time a provider-handoff
-// recheck (or a review that opens while the claim is in flight) looks at
-// the row (Codex #5021 round-3 pre-push P1: the earlier version of this
-// file used UNDELIVERED_INVOICE_STATUSES.includes(status) directly at
-// EVERY billing-review checkpoint, which read a resend-in-flight of a
-// DELIVERED invoice as still-undelivered and wrongly held it). The
-// delivery stamps (sent_at/sms_sent_at/email_sent_at) are written once, on
-// the FIRST successful delivery, and are never cleared by a later resend
-// claim — their presence is the one signal a claim's own status flip
-// can't erase, so 'sending' only counts as undelivered when none of them
-// are set yet. Every billing-review enforcement point (assertInvoiceCollectible,
-// the two claimInvoiceForSend checks, the sendViaSMS/sendInvoiceEmail
-// provider-handoff rechecks) and the write-time `held` decision
-// (first-application-sibling-split.js's openBillingReview) all call THIS,
-// never the raw array, for exactly that reason.
-function isInvoiceUndeliveredForBillingReview(invoice) {
-  const status = invoiceStatusKey(invoice?.status);
-  // 'draft' is ALSO ambiguous, not just 'scheduled'/'sending' (Codex #5021
-  // round-4 P1): a draft row can carry a delivery stamp when bookkeeping
-  // later restores or retains 'draft' after the invoice actually reached
-  // the customer (the existing first-delivery-claim tests explicitly cover
-  // a draft row with email_sent_at set). Treating every draft as
-  // unconditionally undelivered would hold automatic collection AND block
-  // an explicit resend on an invoice the customer already has — same fix
-  // as 'scheduled'/'sending': fall back to the delivery stamps, which
-  // nothing clears once written.
-  if (status === 'draft' || status === 'scheduled' || status === 'sending') {
-    return !(invoice?.sent_at || invoice?.sms_sent_at || invoice?.email_sent_at);
-  }
-  return false;
-}
 
 /**
  * Pure invoice helpers — no DB, no Stripe SDK, no Twilio.
@@ -257,43 +204,6 @@ function assertInvoiceCollectible(invoice) {
   if (status === 'canceled' || status === 'cancelled') {
     throw new Error('Invoice is canceled and cannot be paid');
   }
-  // Same-trip first-application billing review (owner ruling, #5021 round-3
-  // redesign — "flag, don't auto-split"): a diverging sibling's move opens
-  // a durable, invoice-keyed review (first-application-sibling-split.js, in
-  // the SAME transaction as the date write) rather than touching this
-  // invoice's money. This is the ONE gate every charge/send seam already
-  // calls before moving money — widening it here, instead of fencing each
-  // seam individually, is what actually holds automatic collection
-  // (saved-card charge, scheduled send finalize, autopay/dunning) while the
-  // review is open.
-  //
-  // Scoped to UNDELIVERED_INVOICE_STATUSES (round-3: the customer hasn't
-  // received it yet) — a review recorded against an already-delivered
-  // invoice (sent/viewed/overdue) or a terminal one (paid/prepaid/
-  // processing/void/refunded/canceled — the checks above already returned
-  // for those) is a durable item + admin alert ONLY: the office can't
-  // recall what the customer already has, so blocking here would only
-  // obstruct payment on a total the customer already saw. The office
-  // resolves either case by hand and clears it (POST /admin/invoices/:id/
-  // billing-review/clear, or — undelivered only — the trivial same-date/
-  // untouched auto-clear).
-  //
-  // Placed AFTER every terminal-status check above (paid/prepaid/
-  // processing/void/refunded/canceled already returned by this point) and
-  // BEFORE the withdrawal check below — the "terminal status reports its
-  // own reason first, withdrawal checked last" ordering the comment below
-  // documents is unaffected: a terminal row never reaches this line at all.
-  //
-  // Depends on the caller's invoice object actually carrying this column —
-  // every current caller of assertInvoiceCollectible (stripe.js, invoice-
-  // manual-payment.js, admin-payments-reconcile.js, customer-credit.js)
-  // fetches the row via a plain `.first()`/`.select('*')` with no column
-  // projection, so this is never missing today; a future caller that
-  // narrows its own SELECT must include billing_review_opened_at (and
-  // status) or this hold silently never fires for it.
-  if (invoice.billing_review_opened_at && isInvoiceUndeliveredForBillingReview(invoice)) {
-    throw new Error('This invoice has an open billing review — a same-trip visit diverged in date; resolve and clear the review before collecting');
-  }
   // Checked last so a terminal status still reports its own, more accurate
   // reason (a withdrawal never stamps a terminal row, but a row that settled
   // between the withdrawal and this read can carry both).
@@ -312,125 +222,6 @@ function assertInvoiceNotWithdrawnFromCustomer(invoice) {
   if (invoiceWithdrawnFromCustomer(invoice)) {
     throw new Error('This visit is now billed to a third-party payer and is no longer payable here');
   }
-}
-
-function parseLineItems(raw) {
-  if (Array.isArray(raw)) return raw;
-  if (typeof raw !== 'string' || !raw.trim()) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-// A stable fingerprint of exactly the columns the same-trip billing-review
-// hold protects (first-application-sibling-split.js) — never `updated_at`,
-// which is only a proxy other invoice-mutating code paths are
-// conventionally supposed to bump and nothing enforces: a write that
-// changed real money but forgot to touch updated_at would let
-// maybeAutoClearBillingReview treat a genuinely-edited, still-uncovered
-// invoice as "untouched" and silently release the hold. Comparing the
-// money fields themselves has no such gap — anything that actually changed
-// what the customer owes shows up here directly. Canonical home (round-4
-// Codex P1): billingReviewVersion below needs the money-only variant too,
-// and importing it FROM first-application-sibling-split.js (which itself
-// imports THIS file) would be circular — these fingerprints live here
-// instead, and that module imports them from here.
-function invoiceMoneyFingerprint(invoice) {
-  return JSON.stringify({
-    total: invoice?.total ?? null,
-    subtotal: invoice?.subtotal ?? null,
-    discount_amount: invoice?.discount_amount ?? null,
-    status: invoice?.status ?? null,
-    lineItems: parseLineItems(invoice?.line_items) || invoice?.line_items || null,
-  });
-}
-
-// Money-ONLY fingerprint — everything invoiceMoneyFingerprint hashes EXCEPT
-// `status` (pre-push P1, first-application-sibling-split.js: a manual-clear
-// resolution's own money fingerprint must not include status — reusing the
-// status-inclusive one would reopen a correctly-resolved review the moment
-// an invoice simply progressed through its ordinary delivery lifecycle,
-// draft -> scheduled -> sent -> paid, with no money change at all).
-// isDivergenceAlreadyResolved, clearBillingReview's resolution record, and
-// billingReviewVersion below all use this one; maybeAutoClearBillingReview
-// keeps invoiceMoneyFingerprint (with status) unchanged.
-function invoiceMoneyOnlyFingerprint(invoice) {
-  return JSON.stringify({
-    total: invoice?.total ?? null,
-    subtotal: invoice?.subtotal ?? null,
-    discount_amount: invoice?.discount_amount ?? null,
-    lineItems: parseLineItems(invoice?.line_items) || invoice?.line_items || null,
-  });
-}
-
-// A stable fingerprint of the review state an admin operator saw on the
-// invoice detail page — never `updated_at` (see invoiceMoneyFingerprint
-// above for why that column is unreliable). POST /admin/invoices/:id/
-// billing-review/clear requires the caller to echo this back; the server
-// recomputes it under the row's own lock right before releasing the hold,
-// and a mismatch means the review changed (typically: a NEW sibling
-// diverged) since the operator loaded the page — clearing on stale
-// information would silently drop that later divergence (Codex #5021 r3
-// P1). Returns null when no review is open — nothing for a client to echo
-// back.
-//
-// Includes the invoice's own MONEY-ONLY fingerprint (round-4 Codex P1):
-// reopenBillingReviewOnInvoiceMoneyChange (first-application-sibling-
-// split.js) deliberately does nothing to opened_at/reason/context when a
-// review is ALREADY open and money changes on it (that state is already
-// held/alerted — nothing new to record) — but without the money fingerprint
-// here, an operator who loaded the page BEFORE that money change would
-// still hold a version that matches the UNCHANGED review metadata, and
-// could Clear the review against amounts they never actually saw. Folding
-// the money-only fingerprint into this hash means ANY money change while a
-// review is open — including the office's own by-hand split, exactly the
-// thing the banner instructs — invalidates any previously-fetched version,
-// forcing a reload before Clear can succeed. The admin UI already refetches
-// the invoice (and this version) after every save, so the ordinary
-// edit-then-clear workflow is unaffected; only a genuinely STALE page is
-// refused, same as the existing sibling-divergence case this was already
-// built for.
-function billingReviewVersion(invoice) {
-  if (!invoice?.billing_review_opened_at) return null;
-  // Normalize context to an object before stringifying — pg's jsonb driver
-  // usually parses it, but a caller that read the column as text (or a
-  // fixture that inserted a JSON string) must hash identically either way.
-  let context = invoice.billing_review_context;
-  if (typeof context === 'string') {
-    try { context = JSON.parse(context); } catch { /* hash the raw string below */ }
-  }
-  const payload = JSON.stringify({
-    opened_at: new Date(invoice.billing_review_opened_at).toISOString(),
-    reason: invoice.billing_review_reason || null,
-    context: context || null,
-    money: invoiceMoneyOnlyFingerprint(invoice),
-  });
-  return crypto.createHash('sha1').update(payload).digest('hex');
-}
-
-// The invoice detail/list serializers' one shared read of the review state
-// (InvoiceService.getById / .list) — same shape either surface returns, so
-// the admin UI's banner (AdminInvoicesPage.jsx) reads one consistent
-// field regardless of which fetch populated the row. `held` mirrors
-// EXACTLY what assertInvoiceCollectible / the send-claim predicates
-// enforce (UNDELIVERED_INVOICE_STATUSES) — never re-derived by the client.
-// Null when no review is open.
-function billingReviewSummary(invoice) {
-  if (!invoice?.billing_review_opened_at) return null;
-  let context = invoice.billing_review_context;
-  if (typeof context === 'string') {
-    try { context = JSON.parse(context); } catch { context = null; }
-  }
-  return {
-    reason: invoice.billing_review_reason || null,
-    context: context || null,
-    opened_at: invoice.billing_review_opened_at,
-    held: isInvoiceUndeliveredForBillingReview(invoice),
-    version: billingReviewVersion(invoice),
-  };
 }
 
 function assertInvoiceVoidable(currentStatus) {
@@ -455,33 +246,6 @@ function assertInvoiceVoidable(currentStatus) {
   }
 }
 
-// Knex WHERE predicate mirroring isInvoiceUndeliveredForBillingReview's
-// status semantics as real SQL (a JS predicate can't run inside a WHERE
-// clause, and this needs to run inside one twice — see below): a row is
-// excluded ONLY when a review is open AND none of the delivery stamps
-// (sent_at/sms_sent_at/email_sent_at) are set yet, exactly the
-// 'draft'/'scheduled'/'sending' fallback that function documents. The
-// status itself is never re-checked here — every caller already scopes its
-// own query to status='scheduled', which is one of the three ambiguous
-// statuses, so the delivery-stamp fallback is the only thing left to encode.
-//
-// Exported so BOTH the atomic claim (claimDueScheduledInvoiceForSend) and
-// any batch selector that feeds it under an ORDER BY + LIMIT (invoice.js's
-// processScheduledSends due query) build the predicate from this ONE place
-// and can never drift apart (Codex #5021 pre-push finding: the due query
-// used to select held rows into its ordered LIMIT and simply `continue`
-// past their failed claim — once the earliest `limit` due invoices were all
-// held, every run reselected those same rows and later eligible invoices
-// never sent). Applying this to the due-selection query too means a held
-// invoice never occupies a LIMIT slot in the first place.
-function excludeBillingReviewHeldInvoices(queryBuilder) {
-  return queryBuilder.where((q) =>
-    q.whereNull('billing_review_opened_at')
-      .orWhereNotNull('sent_at')
-      .orWhereNotNull('sms_sent_at')
-      .orWhereNotNull('email_sent_at'));
-}
-
 /**
  * The " (Visa ending 4242)" clause customer-facing payment texts append after
  * an amount. One formatter for every sender (receipt SMS, combined completion
@@ -497,9 +261,6 @@ function formatCardLine(brand, last4) {
 module.exports = {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
-  UNDELIVERED_INVOICE_STATUSES,
-  isInvoiceUndeliveredForBillingReview,
-  excludeBillingReviewHeldInvoices,
   INVOICE_UPDATE_ALLOWED_FIELDS,
   STALE_SEND_PARK_ERROR,
   isStaleClaimReviewHold,
@@ -517,8 +278,4 @@ module.exports = {
   invoiceWithdrawnFromCustomer,
   invoiceAmountDue,
   formatCardLine,
-  billingReviewVersion,
-  billingReviewSummary,
-  invoiceMoneyFingerprint,
-  invoiceMoneyOnlyFingerprint,
 };

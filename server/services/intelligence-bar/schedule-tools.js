@@ -1334,15 +1334,6 @@ async function moveStopsToDay(input, actionContext = {}) {
   });
   const { lockTechDays } = require('../scheduling/tech-day-lock');
   const runBatchTrx = async () => db.transaction(async (trx) => {
-    // Sibling-group lock FIRST — rung 0, before rung 1 below and every row
-    // lock this transaction takes (see first-application-sibling-split.js's
-    // ROOT FIX comment). ONE call for the WHOLE batch: it reads every
-    // stop's source_estimate_id and acquires the distinct estimate ids in
-    // ascending order, so two concurrent batches that share more than one
-    // estimate group always converge on the same relative order. A no-op
-    // for a stop with no estimate.
-    await require('../first-application-sibling-split')
-      .lockSiblingGroupsForVisits(trx, classified.map((c) => c.s.id));
     const overlappedIds = [];
     // Rung 1 + tech-blind probes FIRST (occupancy.js ORDERING CONTRACT: the
     // date-wide lock precedes the tech-day fence). Advisory only — a hit
@@ -1414,20 +1405,19 @@ async function moveStopsToDay(input, actionContext = {}) {
       }
       c.committedTechId = committedRows[0]?.technician_id || null;
     }
-    // Same-trip first-application billing-review chokepoint (owner ruling,
-    // #5021 redesign — "flag, don't auto-split"): this batch mover writes
+    // Same-trip first-application billing alert (owner ruling, #5021
+    // redesign — "alert only, no hold"): this batch mover writes
     // scheduled_date directly and must call it too. Run after every row in
-    // this batch has committed its date write (same shared-transaction
-    // pattern as before) so a batch that moves BOTH siblings of a combined
-    // invoice to the SAME new day is judged on the batch's FINAL state, not
-    // a mid-loop snapshot. Runs in its own savepoint off this trx per row
-    // (the "safely" wrapper) — a failure inside it never poisons this
-    // batch's commit. Opens a durable review rather than touching money —
-    // see first-application-sibling-split.js.
+    // this batch has committed its date write so a batch that moves BOTH
+    // siblings of a combined invoice to the SAME new day is judged on the
+    // batch's FINAL state, not a mid-loop snapshot. Raises a durable admin
+    // alert rather than touching money — see
+    // first-application-sibling-split.js. Fails closed (the "safely"
+    // wrapper re-throws), so a failure here rolls back this whole batch.
     for (const c of classified) {
       if (c.observedDate === dateStr) continue;
       await require('../first-application-sibling-split')
-        .flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, c.s.id, 'intelligence-bar batch move');
+        .flagFirstApplicationSiblingDivergenceSafely(trx, c.s.id, 'intelligence-bar batch move');
     }
     return overlappedIds;
   });

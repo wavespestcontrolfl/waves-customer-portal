@@ -1413,14 +1413,6 @@ class SmartRebooker {
       }
     };
     await moveTrx(async (trx) => {
-      // Sibling-group lock FIRST — rung 0, before EVERY other lock this
-      // transaction takes, including rung 1 below and this move's own CAS
-      // row UPDATE (see first-application-sibling-split.js's ROOT FIX
-      // comment: a date writer's own single-row UPDATE used to run before
-      // the group-wide FOR UPDATE the billing-review flag takes later,
-      // which is exactly the shape that deadlocked two concurrent sibling
-      // moves against each other). A no-op for a visit with no estimate.
-      await require('./first-application-sibling-split').lockSiblingGroupForVisit(trx, serviceId);
       // The kept technician's route is real — writing 'confirmed' on top
       // of an overlapping job double-books them deterministically (the
       // customer picked from offers that never checked the route).
@@ -1746,22 +1738,19 @@ class SmartRebooker {
         new_window: win.start ? `${win.start}-${win.end}` : null,
       });
 
-      // Same-trip first-application billing-review chokepoint (owner ruling,
-      // #5021 redesign — "flag, don't auto-split"): a date-only move of this
-      // row may pull it off the date of a shared first-application invoice
-      // (either side — the invoice-holding row or an unpriced sibling).
-      // Opens a durable, invoice-keyed review rather than touching money —
-      // see first-application-sibling-split.js. Runs in its own savepoint
-      // off this trx (the "safely" wrapper) — the flag still commits
-      // atomically with the move, but a failure inside it never poisons this
-      // transaction the way a plain try/catch around a failing statement
-      // would on Postgres. Idempotent, so a batch caller that moves more
-      // than one member of the same visit group (visit-groups.js
-      // moveVisitAsUnit) needs no deferral here — each member's own commit
-      // reconciles against state as of THAT commit.
+      // Same-trip first-application billing alert (owner ruling, #5021
+      // redesign — "alert only, no hold"): a date-only move of this row may
+      // pull an unpriced sibling off the shared first-application invoice's
+      // date. Raises a durable admin alert rather than touching money or
+      // holding anything — see first-application-sibling-split.js. Fails
+      // closed: a failure here propagates and rolls back this move (the
+      // "safely" wrapper logs, then re-throws). Idempotent, so a batch
+      // caller that moves more than one member of the same visit group
+      // (visit-groups.js moveVisitAsUnit) needs no deferral here — each
+      // member's own commit reconciles against state as of THAT commit.
       if (dateOnly(newDate) !== dateOnly(originalDate)) {
         await require('./first-application-sibling-split')
-          .flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, serviceId, 'single-visit reschedule');
+          .flagFirstApplicationSiblingDivergenceSafely(trx, serviceId, 'single-visit reschedule');
       }
     });
 
@@ -2151,11 +2140,6 @@ class SmartRebooker {
       await preloadServiceLocations(db, arrivalRows.map(row => row.id));
     }
     const occurrencesRescheduled = await db.transaction(async (trx) => {
-      // Sibling-group lock FIRST — rung 0, before rung 1 and every row lock
-      // this transaction takes (see first-application-sibling-split.js's
-      // ROOT FIX comment, and the single-visit path above for the same
-      // call). A no-op for a series with no estimate.
-      await require('./first-application-sibling-split').lockSiblingGroupForVisit(trx, serviceId);
       // Same ORDERING CONTRACT as the single path (GH codex #4204 r5 P1): the
       // caller's guard takes customer/property/call locks, so it runs after
       // rung 1 and before this transaction's first row lock. Idempotent — the
@@ -3344,16 +3328,14 @@ class SmartRebooker {
         series_move_id: seriesMoveId,
       });
 
-      // Same-trip first-application billing-review chokepoint (owner ruling,
-      // #5021 redesign): the anchor's own date always changes on this path
-      // (the caller only reaches rescheduleSeries when it does) — it may
-      // pull the anchor off the date of a shared first-application invoice,
-      // on either side. Runs in its own savepoint off this trx (the
-      // "safely" wrapper) — see the single-visit path above for why a plain
-      // try/catch does not suffice.
+      // Same-trip first-application billing alert (owner ruling, #5021
+      // redesign — "alert only, no hold"): the anchor's own date always
+      // changes on this path (the caller only reaches rescheduleSeries when
+      // it does) — it may pull an unpriced sibling off its date. See the
+      // single-visit path above for the fail-closed rationale.
       if (dateOnly(newDate) !== dateOnly(service.scheduled_date)) {
         await require('./first-application-sibling-split')
-          .flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, serviceId, 'series reschedule');
+          .flagFirstApplicationSiblingDivergenceSafely(trx, serviceId, 'series reschedule');
       }
 
       return touched;

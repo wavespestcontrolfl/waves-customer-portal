@@ -43,22 +43,13 @@ jest.mock('../services/scheduling/day-stops', () => ({
   ...jest.requireActual('../services/scheduling/day-stops'),
   preloadServiceLocations: jest.fn().mockResolvedValue(undefined),
 }));
-// Same-trip first-application billing-review chokepoint (#5021): this
-// suite's own concern is the tech-blind occupancy gate, not the billing-
-// review flag (that module has its own exhaustive Postgres suite). The
-// mock trx here has no real `.transaction` (savepoint) support, so mock the
-// whole module out — round-4 made the "Safely" wrapper propagate a genuine
-// failure instead of swallowing it, and a real (unmocked) call against this
-// suite's plain mock trx would now throw TypeError on every date-changing
-// test.
+// Same-trip first-application billing alert (#5021): this suite's own
+// concern is the tech-blind occupancy gate, not the billing alert
+// (that module has its own exhaustive Postgres suite). The mock trx here
+// has no real DB, so mock the whole module out rather than let the real
+// function run a query against it.
 jest.mock('../services/first-application-sibling-split', () => ({
-  flagFirstApplicationInvoiceReviewOnDateChangeSafely: jest.fn().mockResolvedValue({ action: 'skipped' }),
-  // Root fix (lock order): every date writer now calls this FIRST, before
-  // its own row lock/write — the mocked module needs it too, or the real
-  // (unmocked) function would throw "is not a function" against this
-  // suite's plain mock trx.
-  lockSiblingGroupForVisit: jest.fn().mockResolvedValue(null),
-  lockSiblingGroupsForVisits: jest.fn().mockResolvedValue([]),
+  flagFirstApplicationSiblingDivergenceSafely: jest.fn().mockResolvedValue({ action: 'skipped' }),
 }));
 
 const db = require('../models/db');
@@ -402,26 +393,24 @@ describe('reschedule — shared occupancy conflict gate', () => {
     expect(dateLockOrder).toBeLessThan(findConflictingVisits.mock.invocationCallOrder[0]);
   });
 
-  // Round-4 (Codex #5021 P1): flagFirstApplicationInvoiceReviewOnDateChange-
-  // Safely used to SWALLOW a genuine failure and return {action:'error'} —
-  // the caller's own date write still committed with only a log entry, no
-  // durable review. It now propagates, so a failure inside it rejects the
-  // WHOLE reschedule() call and (on real Postgres) rolls the date write
-  // back with it.
-  test('an injected failure in the billing-review flag propagates — the reschedule call rejects rather than silently committing the date move', async () => {
+  // The billing-alert "Safely" wrapper fails CLOSED: a genuine failure
+  // raising the alert propagates, so it rejects the WHOLE reschedule() call
+  // and (on real Postgres) rolls the date write back with it — a move must
+  // never commit without its alert.
+  test('an injected failure in the billing alert propagates — the reschedule call rejects rather than silently committing the date move', async () => {
     const { trxScheduled } = wireRescheduleMocks(service());
-    const flagMock = require('../services/first-application-sibling-split').flagFirstApplicationInvoiceReviewOnDateChangeSafely;
-    const injected = new Error('injected billing-review flag failure');
+    const flagMock = require('../services/first-application-sibling-split').flagFirstApplicationSiblingDivergenceSafely;
+    const injected = new Error('injected billing alert failure');
     flagMock.mockRejectedValueOnce(injected);
 
     await expect(SmartRebooker.reschedule(
       'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_sms',
-    )).rejects.toThrow('injected billing-review flag failure');
+    )).rejects.toThrow('injected billing alert failure');
 
     // The mock CAS write ran (mirroring a real trx's own uncommitted
     // statements) but the transaction's own promise rejected — on real
     // Postgres that rejection is exactly what rolls the scheduled_date
-    // write back with it, instead of the old swallow-and-commit behavior.
+    // write back with it, instead of a swallow-and-commit behavior.
     expect(trxScheduled.update).toHaveBeenCalled();
     expect(flagMock).toHaveBeenCalled();
   });

@@ -2822,13 +2822,12 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   const failed = [];
   const warnings = [...(plan.techClashWarnings || [])];
   let primaryResult = null;
-  // Same-trip first-application billing-review chokepoint (owner ruling,
-  // #5021 redesign — "flag, don't auto-split"): every member below moves
-  // through its OWN rebooker call, each its own committed transaction —
+  // Same-trip first-application billing alert (owner ruling, #5021
+  // redesign — "alert only, no hold"): every member below moves through its
+  // OWN rebooker call, each its own committed transaction —
   // rebooker.js's rescheduleOnce already calls first-application-sibling-
   // split.js on its own date write, so no batch deferral is needed here:
-  // the flag write is idempotent and reconciles against state as of each
-  // member's own commit.
+  // the alert is judged fresh against each member's own commit.
   // technicianId is NOT forwarded to sibling moves (codex r15 P1): the
   // rebooker writes technician_id directly, bypassing the canonical
   // assignment writer (tech-day fences, unassigned_overdue resolution,

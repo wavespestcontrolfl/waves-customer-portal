@@ -2573,56 +2573,6 @@ router.post('/:id/unarchive', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /:id/billing-review/clear — releases the same-trip first-application
-// billing review (first-application-sibling-split.js; owner ruling, #5021
-// round-3 redesign — "flag, don't auto-split"): a diverging sibling's move
-// opens this review IN THE SAME TRANSACTION as the date write. While the
-// invoice is still UNDELIVERED (draft/scheduled/sending — see
-// invoice-helpers.js's UNDELIVERED_INVOICE_STATUSES), the SAME review also
-// holds automatic collection (assertInvoiceCollectible + the two send-claim
-// predicates); once delivered, it is a durable item + admin alert only. The
-// trivial case (the diverging visits land back on the invoice's date and
-// the invoice was never touched) clears itself automatically on the next
-// date write that module sees; this route is the manual path for every
-// other case — the office edits the invoice (or the visits' prices) by
-// hand, then clears the review here.
-//
-// Body: { version } — the `billing_review.version` the operator's page
-// read (InvoiceService.getById/.list, via billingReviewSummary). Required:
-// a stale clear (Codex #5021 round-3 P1) happens when the operator loads
-// the invoice, a CONCURRENT reschedule appends a new diverging sibling to
-// the still-open review in between, and the operator's Clear click — built
-// from what they saw BEFORE that — would otherwise still match the
-// (still-non-null) billing_review_opened_at and release a review the
-// operator never actually saw. Recomputed and compared under the row's own
-// lock (FOR UPDATE) so a review that changes between the read and the
-// write here is caught too, not just one that changed before the request
-// arrived.
-router.post('/:id/billing-review/clear', requireAdmin, async (req, res, next) => {
-  try {
-    const { version } = req.body || {};
-    if (!version) return res.status(400).json({ error: 'version is required — send the billing_review.version this invoice carried when you loaded it' });
-    // Delegates to first-application-sibling-split.js's clearBillingReview —
-    // the ONE chokepoint for the row lock + version check + clear + bell
-    // resolve, all in one transaction, shared with this module's own tests.
-    const { clearBillingReview } = require('../services/first-application-sibling-split');
-    // adminAuthenticate populates req.technicianId (never req.user) — see
-    // the followup pause/stop routes above for the same pattern. Stamped
-    // into the resolution record clearBillingReview now writes so the
-    // office has a record of who cleared it; nothing in this module reads
-    // it back.
-    const outcome = await clearBillingReview(req.params.id, version, undefined, req.technicianId || null);
-    if (outcome.code === 'not_found') return res.status(404).json({ error: 'Invoice not found' });
-    if (outcome.code === 'stale') {
-      return res.status(409).json({
-        error: 'This invoice\'s billing review changed since you loaded it — reload the invoice and try again.',
-        code: 'billing_review_stale',
-      });
-    }
-    res.json(await InvoiceService.getById(req.params.id));
-  } catch (err) { next(err); }
-});
-
 // POST /:id/send-receipt — operator-triggered receipt delivery for a paid
 // invoice. Hits the branded email + the invoice_receipt SMS template, then
 // stamps invoices.receipt_sent_at so the UI can mark the service closed.

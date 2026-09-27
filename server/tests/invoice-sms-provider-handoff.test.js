@@ -211,51 +211,6 @@ describe('invoice SMS provider handoff', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  // Same-trip first-application billing review (#5021 round-3 P1): the
-  // scheduled-send worker's own preclaim (allowClaimed:true) never
-  // rechecked this at all — a concurrent date-diverging move could open
-  // the review AFTER the preclaim flips the row to 'sending' and BEFORE
-  // the provider is actually called, delivering the wrong-total invoice
-  // despite the hold. `current` here (the fresh, under-lock re-read
-  // withInvoiceDepositSettlement's callback always takes) is the ACTUAL
-  // recheck point — the literal last step before `dispatch()` — so this
-  // proves the block fires there, restorably (never calls dispatch),
-  // exactly like the pre-existing INVOICE_BALANCE_CHANGED check right
-  // beside it.
-  test('refuses the preclaimed handoff when a billing review opened after the claim, right before the provider is called', async () => {
-    const reviewed = { ...invoice, billing_review_opened_at: new Date(), status: 'sending' };
-    invoiceReads = [invoice, invoice, reviewed];
-    const dispatch = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
-    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));
-    withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, reviewed));
-
-    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
-      .rejects.toMatchObject({ code: 'billing_review_open' });
-    expect(dispatch).not.toHaveBeenCalled();
-  });
-
-  // A DELIVERED invoice's review (round-3: alert-only, never a hold) must
-  // never refuse a legitimate RESEND through this SAME chokepoint. Codex
-  // #5021 round-3 pre-push P1: claimInvoiceForSend already flipped status
-  // to 'sending' by the time this callback runs, for a first send OR a
-  // resend alike — status here is genuinely 'sending' (matching the real
-  // transition, not a stand-in 'sent'), and it is the delivery stamp
-  // (sent_at from an earlier, real delivery) that proves this resend must
-  // NOT be blocked.
-  test('a review on an already-delivered invoice (status now \'sending\' from THIS resend claim, but sent_at proves a prior delivery) never blocks the provider handoff', async () => {
-    const delivered = {
-      ...invoice, billing_review_opened_at: new Date(), status: 'sending', sent_at: new Date('2026-01-01T00:00:00Z'),
-    };
-    invoiceReads = [invoice, invoice, delivered];
-    const dispatch = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
-    sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));
-    withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, delivered));
-
-    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
-      .resolves.toMatchObject({ sent: true });
-    expect(dispatch).toHaveBeenCalledTimes(1);
-  });
-
   test('blocks the provider handoff when the linked visit was cancelled during preparation', async () => {
     const cancelled = { ...invoice, scheduled_service_id: 'svc-cancelled' };
     invoiceReads = [cancelled, cancelled, cancelled];

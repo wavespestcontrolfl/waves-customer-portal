@@ -2897,10 +2897,6 @@ async function rescheduleAppointment(input, actionContext = {}) {
   let committedTechId = null;
   let overlapAdvisory = null;
   await db.transaction(async (trx) => {
-      // Sibling-group lock FIRST — rung 0, before rung 1 below and every
-      // row lock this transaction takes (see first-application-sibling-
-      // split.js's ROOT FIX comment). A no-op for a visit with no estimate.
-      await require('../first-application-sibling-split').lockSiblingGroupForVisit(trx, appointment_id);
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
       // #3609 r30 P2): probeSlotOverlap's ordering contract puts the
       // occupancy lock before any narrower lock, and the other IB date
@@ -2985,18 +2981,16 @@ async function rescheduleAppointment(input, actionContext = {}) {
         .returning(['id', 'technician_id']);
       updatedRows = committed.length;
       committedTechId = committed[0]?.technician_id || null;
-      // Same-trip first-application billing-review chokepoint (owner ruling,
-      // #5021 redesign): this appointment writer moves scheduled_date
-      // directly and must call it too — a moved member of a same-day
-      // combined first-application invoice opens a durable review rather
-      // than touching money (see first-application-sibling-split.js), and
-      // the collection gate holds automatic charging/sending on that
-      // invoice until the office resolves it. Runs in its own savepoint off
-      // this trx (the "safely" wrapper) — a failure inside it never
-      // poisons this move.
+      // Same-trip first-application billing alert (owner ruling, #5021
+      // redesign — "alert only, no hold"): this appointment writer moves
+      // scheduled_date directly and must call it too — a moved member of a
+      // same-day combined first-application invoice raises a durable admin
+      // alert rather than touching money (see
+      // first-application-sibling-split.js). Fails closed (the "safely"
+      // wrapper re-throws), so a failure here rolls back this move.
       if (updatedRows > 0 && dateStr !== observedDate) {
         await require('../first-application-sibling-split')
-          .flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, appointment_id, 'intelligence-bar reschedule');
+          .flagFirstApplicationSiblingDivergenceSafely(trx, appointment_id, 'intelligence-bar reschedule');
       }
   });
   if (updatedRows === 0) {

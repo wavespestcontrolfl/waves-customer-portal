@@ -58,22 +58,13 @@ jest.mock('../services/appointment-reminders', () => ({
 jest.mock('../services/tech-status', () => ({
   clearTechCurrentJob: jest.fn().mockResolvedValue(null),
 }));
-// Same-trip first-application billing-review chokepoint (#5021): this
-// suite's own concern is the bulk-reschedule route's own guards, not the
-// billing-review flag (that module has its own exhaustive Postgres suite).
-// The mock trx here has no real `.transaction` (savepoint) support, so mock
-// the whole module out — round-4 made the "Safely" wrapper propagate a
-// genuine failure instead of swallowing it, and a real (unmocked) call
-// against this suite's plain mock trx would now throw TypeError on every
-// reschedule-action test.
+// Same-trip first-application billing alert (#5021): this suite's own
+// concern is the bulk-reschedule route's own guards, not the billing alert
+// (that module has its own exhaustive Postgres suite). The mock trx here
+// has no real DB, so mock the whole module out rather than let the real
+// function run a query against it.
 jest.mock('../services/first-application-sibling-split', () => ({
-  flagFirstApplicationInvoiceReviewOnDateChangeSafely: jest.fn().mockResolvedValue({ action: 'skipped' }),
-  // Root fix (lock order): every date writer now calls this FIRST, before
-  // its own row lock/write — the mocked module needs it too, or the real
-  // (unmocked) function would throw "is not a function" against this
-  // suite's plain mock trx.
-  lockSiblingGroupForVisit: jest.fn().mockResolvedValue(null),
-  lockSiblingGroupsForVisits: jest.fn().mockResolvedValue([]),
+  flagFirstApplicationSiblingDivergenceSafely: jest.fn().mockResolvedValue({ action: 'skipped' }),
 }));
 const mockIoEmit = jest.fn();
 jest.mock('../sockets', () => ({
@@ -288,14 +279,12 @@ test('a past scheduledDate produces per-row failed[] entries instead of moving a
   ]);
 });
 
-// Round-4 (Codex #5021 P1): flagFirstApplicationInvoiceReviewOnDateChange-
-// Safely used to SWALLOW a genuine failure and return {action:'error'} —
-// the row's own date write still committed with only a log entry, no
-// durable review. It now propagates, so a failure inside it makes THIS
-// row's own transaction reject — the per-id try/catch in the route
-// already reports that as a per-row failure (existing convention for any
-// other in-trx throw), never a 500 for the whole batch.
-test('an injected failure in the billing-review flag lands this row in failed[] — the batch keeps going and the date is not moved', async () => {
+// The billing-alert "Safely" wrapper fails CLOSED: a genuine failure
+// raising the alert propagates, making THIS row's own transaction reject —
+// the per-id try/catch in the route already reports that as a per-row
+// failure (existing convention for any other in-trx throw), never a 500
+// for the whole batch.
+test('an injected failure in the billing alert lands this row in failed[] — the batch keeps going and the date is not moved', async () => {
   const updateChain = chain();
   wireTrx({
     scheduled_services: [
@@ -306,7 +295,7 @@ test('an injected failure in the billing-review flag lands this row in failed[] 
     reschedule_log: [chain()],
   });
   require('../services/first-application-sibling-split')
-    .flagFirstApplicationInvoiceReviewOnDateChangeSafely.mockRejectedValueOnce(new Error('injected billing-review flag failure'));
+    .flagFirstApplicationSiblingDivergenceSafely.mockRejectedValueOnce(new Error('injected billing alert failure'));
 
   const { status, body } = await bulk({
     action: 'reschedule',
@@ -316,7 +305,7 @@ test('an injected failure in the billing-review flag lands this row in failed[] 
 
   expect(status).toBe(200);
   expect(body.updated).toEqual([]);
-  expect(body.failed).toEqual([{ id: 'svc-1', reason: 'injected billing-review flag failure' }]);
+  expect(body.failed).toEqual([{ id: 'svc-1', reason: 'injected billing alert failure' }]);
   // The mock CAS write ran (mirroring a real trx's own uncommitted
   // statements) but the row's own transaction promise rejected — on real
   // Postgres that rejection is exactly what rolls the scheduled_date write

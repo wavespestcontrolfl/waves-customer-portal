@@ -24,11 +24,8 @@ const { customerSafeServiceNotes } = require("./project-types");
 const {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
-  isInvoiceUndeliveredForBillingReview,
   isStaleClaimReviewHold,
   staleClaimReviewHoldError,
-  billingReviewSummary,
-  excludeBillingReviewHeldInvoices,
 } = require("./invoice-helpers");
 
 // Customer-facing presign TTL: photo URLs mint per page-load, so the TTL must
@@ -2342,22 +2339,6 @@ async function refuseZeroDuePreclaimedInvoice(invoiceId, current, database) {
   throw err;
 }
 
-// Same-trip first-application billing review (#5021 round-3 P1: the
-// preclaimed send path never rechecked this at all — a concurrent
-// date-diverging move could open the review AFTER the scheduled-send
-// worker's own preclaim flips the row to 'sending', and nothing caught it
-// before the provider handoff). The recheck itself lives at the ACTUAL
-// provider-handoff boundary instead of here — see the
-// withInvoiceDepositSettlement callbacks in sendViaSMS below and
-// invoice-email.js's sendInvoiceEmail, both of which already re-read the
-// row fresh, under its own lock, as literally the last step before
-// `dispatch()` runs. Checking there (not here) covers BOTH claim paths —
-// preclaimed AND a fresh claim — with the SAME code, and needs no EXTRA
-// read: those callbacks already carry a freshly re-read `current` row for
-// the identical reason (the INVOICE_BALANCE_CHANGED check right beside
-// it). An extra read here would also be redundant with that one, taken
-// only moments earlier.
-
 // Settle (prepaid, system:zero_balance) or report the RECOGNIZED business
 // reason settleZeroBalance itself returned for not settling (in-flight
 // reconciliation, existing payment work, and similar — every `skip(...)`
@@ -2769,39 +2750,11 @@ async function claimDueScheduledInvoiceForSend(database, invoiceId) {
   // (customer_id, token, invoice_number, payer_id, scheduled_service_id)
   // this narrower column list silently dropped. Costs nothing to widen —
   // the worker loop below still only reads the four fields it needs.
-  let claimQuery = database("invoices")
+  const [claimed] = await database("invoices")
     .where({ id: invoiceId, status: "scheduled" })
     .whereNotNull("scheduled_send_at")
     .where("scheduled_send_at", "<=", new Date())
-    .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5));
-  // Same-trip first-application billing review (owner ruling, #5021
-  // round-3 redesign — see first-application-sibling-split.js): the
-  // automatic scheduled-send worker must never deliver an UNDELIVERED
-  // invoice whose combined total is under review. This is the ONE claim
-  // query both processScheduledSends' own loop and
-  // claimPacketInvoiceForSend's requireDue branch share, so gating it
-  // here holds every automatic send without fencing each caller
-  // separately. A parked row is simply skipped (returns null, same as
-  // "not due yet") — it is retried once the review clears, never errored.
-  //
-  // 'scheduled' is ambiguous the same way invoice-helpers.js's
-  // isInvoiceUndeliveredForBillingReview documents (Codex #5021 round-3
-  // pre-push P1, second round): a combined send that delivered its SMS
-  // leg but held/failed the email leg restores to 'scheduled' for a
-  // retry, WITH sms_sent_at already stamped — genuinely partial
-  // delivery, not undelivered, even though the row reads exactly like a
-  // never-sent queued invoice. excludeBillingReviewHeldInvoices
-  // (invoice-helpers.js) mirrors that function's logic as a real WHERE
-  // clause (a JS predicate can't run inside SQL): block ONLY when a
-  // review is open AND no delivery leg has stamped yet. processScheduledSends'
-  // own due-selection query (invoice.js, ordered + LIMITed, feeds this same
-  // claim) applies the identical predicate BEFORE its limit — see that
-  // query's comment — so the two can never drift apart (Codex #5021
-  // pre-push finding: a due query that didn't exclude held rows kept
-  // reselecting the same held rows into its LIMIT forever, starving every
-  // later eligible invoice).
-  claimQuery = excludeBillingReviewHeldInvoices(claimQuery);
-  const [claimed] = await claimQuery
+    .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5))
     .update({ status: "sending", updated_at: new Date(), send_claim_token: claimToken })
     .returning("*");
   return claimed || null;
@@ -2892,43 +2845,11 @@ async function claimInvoiceForSend(invoiceId, {
       [`${require("./invoice-helpers").STALE_SEND_PARK_ERROR}%`],
     );
   }
-  // Same-trip first-application billing review (owner ruling, #5021
-  // round-3 redesign): a diverging sibling's move opens a durable review on
-  // this invoice (first-application-sibling-split.js, invoices.
-  // billing_review_opened_at) rather than touching its money — but only an
-  // UNDELIVERED invoice is ever actually held: current.status here can
-  // also be sent/viewed/overdue (an operator resend of an already-
-  // delivered invoice, still pre-flip so status alone is trustworthy —
-  // see isInvoiceUndeliveredForBillingReview's own comment for the 'sending'
-  // case that is NOT trustworthy), and for those the customer already has
-  // the invoice — the review is a durable item + admin alert only, never a
-  // block, so this predicate must not apply to them (round-3 P1: blocking
-  // a resend of a delivered invoice was never the design). No override
-  // switch here (unlike the stale-claim review hold above): the release
-  // valve is clearing the review itself (POST /admin/invoices/:id/
-  // billing-review/clear), not a per-send flag.
-  if (isInvoiceUndeliveredForBillingReview(current)) {
-    claimFlip.whereNull("billing_review_opened_at");
-  }
   const [invoice] = await claimFlip
     .update({ status: "sending", send_claim_token: freshClaimToken, updated_at: new Date() })
     .returning("*");
   if (!invoice) {
     const latest = await database("invoices").where({ id: invoiceId }).first();
-    // Same-trip first-application billing review: report this specific
-    // reason rather than the generic "not sendable" — see the claimFlip
-    // predicate above. Scoped the same way: a billing_review_opened_at on
-    // an already-delivered/terminal latest row never explains a claim
-    // miss here (that predicate never ran for it), so falling through to
-    // the ordinary diagnostics below is correct. `latest.status` CAN be
-    // 'sending' here (a concurrent claim won the race) — isInvoiceUndelivered-
-    // ForBillingReview's own delivery-stamp fallback handles that case
-    // correctly, unlike a raw status-list check.
-    if (latest?.billing_review_opened_at && isInvoiceUndeliveredForBillingReview(latest)) {
-      const err = new Error(`Invoice ${invoiceId} has an open billing review — resolve and clear it before sending`);
-      err.code = "billing_review_open";
-      throw err;
-    }
     // The row moved between the read and the flip: report the guard the
     // latest row trips (review hold first, then delivered for a first
     // delivery) rather than a generic "not sendable" (round-6 P1 #4131).
@@ -5282,26 +5203,6 @@ const InvoiceService = {
                     code: "INVOICE_BALANCE_CHANGED", error: "Invoice balance changed while preparing delivery; retry send",
                     validator: "check_invoice_deposit_settlement" };
                 }
-                // Same-trip first-application billing review (#5021
-                // round-3 P1): `current` is this exact re-read, under the
-                // invoice's own lock, taken as the LAST step before
-                // provider handoff — the one point a review opened AFTER
-                // the claim (whether this send was preclaimed or claimed
-                // fresh moments ago) is still guaranteed to be caught.
-                // current.status is ALWAYS 'sending' here (the claim above
-                // already flipped it, whether this is a first send or a
-                // resend of an already-delivered invoice) — status alone
-                // cannot tell those apart, so isInvoiceUndeliveredForBilling-
-                // Review falls back to the delivery stamps (Codex #5021
-                // round-3 pre-push P1: an earlier version of this check
-                // used the raw UNDELIVERED_INVOICE_STATUSES list directly,
-                // which read 'sending' as always-undelivered and wrongly
-                // blocked a resend of a delivered invoice too).
-                if (current.billing_review_opened_at && isInvoiceUndeliveredForBillingReview(current)) {
-                  return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-                    code: "billing_review_open", error: "This invoice has an open billing review — resolve and clear it before sending",
-                    validator: "check_invoice_billing_review" };
-                }
                 providerStarted = true;
                 dispatchedOutcome = await dispatch();
                 return dispatchedOutcome;
@@ -6421,17 +6322,7 @@ const InvoiceService = {
         updated_at: new Date(),
       });
 
-    // excludeBillingReviewHeldInvoices (invoice-helpers.js, shared with
-    // claimDueScheduledInvoiceForSend's own atomic claim below) is applied
-    // BEFORE the limit (Codex #5021 pre-push finding): without it, a held
-    // invoice could occupy one of the ordered LIMIT slots below, its claim
-    // would then fail (claimDueScheduledInvoiceForSend's identical
-    // predicate refuses it) and the loop simply `continue`s past it — once
-    // the earliest `limit` due invoices were all held, every run reselected
-    // those exact rows and later eligible invoices never sent. Excluding
-    // held rows here means a held invoice never takes a LIMIT slot in the
-    // first place, so eligible invoices behind it are still selected.
-    let dueQuery = db("invoices")
+    const due = await db("invoices")
       .where({ status: "scheduled" })
       .whereNotNull("scheduled_send_at")
       .where("scheduled_send_at", "<=", new Date())
@@ -6439,9 +6330,7 @@ const InvoiceService = {
         q
           .whereNull("scheduled_send_attempts")
           .orWhere("scheduled_send_attempts", "<", 5),
-      );
-    dueQuery = excludeBillingReviewHeldInvoices(dueQuery);
-    const due = await dueQuery
+      )
       .orderBy("scheduled_send_at", "asc")
       .limit(limit)
       .select(
@@ -7100,11 +6989,6 @@ const InvoiceService = {
       // guess at the error text — isStaleClaimReviewHold is the one source
       // of truth for both.
       review_hold: isStaleClaimReviewHold(invoice),
-      // #5021 round-3 P1: the admin invoice detail surface had no way to
-      // see or clear a same-trip billing review — billingReviewSummary is
-      // the one source of truth for the banner AND for POST .../clear's
-      // own stale-version check (the client echoes back `version`).
-      billing_review: billingReviewSummary(invoice),
     };
   },
 
@@ -7302,11 +7186,7 @@ const InvoiceService = {
     // from the SAME predicate (isStaleClaimReviewHold) — one source of
     // truth for the list AND detail rows the Send modal reads.
     return {
-      invoices: invoices.map((invoice) => ({
-        ...invoice,
-        review_hold: isStaleClaimReviewHold(invoice),
-        billing_review: billingReviewSummary(invoice),
-      })),
+      invoices: invoices.map((invoice) => ({ ...invoice, review_hold: isStaleClaimReviewHold(invoice) })),
       total: parseInt(count, 10),
     };
   },
@@ -7669,51 +7549,6 @@ const InvoiceService = {
     };
 
     const runEdit = async (client) => {
-      // ROOT FIX — estimate-group advisory lock FIRST (see first-
-      // application-sibling-split.js's ROOT FIX comment on
-      // lockSiblingGroupForVisit): taken before EVERYTHING else in this
-      // transaction, including this edit's own invoice guard lock below and
-      // the row-level group lock immediately after. This is what actually
-      // closes the deadlock against a CONCURRENT reschedule on the same
-      // estimate group — every date writer (rebooker, admin-schedule, the
-      // Intelligence Bar movers) takes this SAME advisory lock before its
-      // own row UPDATE, so whichever side gets here first fully finishes
-      // before the other takes any row lock at all. Unconditional (not
-      // gated on isRetotal): it is a plain read + an instant no-op
-      // advisory-lock acquire for an invoice with no linked visit or no
-      // estimate, so there is no cost to skip by narrowing it.
-      if (existing.scheduled_service_id) {
-        await require("./first-application-sibling-split")
-          .lockSiblingGroupForVisit(client, existing.scheduled_service_id);
-      }
-      // Lock order (round-4 Codex P1 on #5021): every date-changing writer
-      // (rebooker, admin-schedule, the Intelligence Bar movers) locks
-      // scheduled_services FIRST, then locks the invoice
-      // (first-application-sibling-split.js's loadLockedEstimateGroup /
-      // findLockedFirstApplicationInvoice). This edit is about to lock the
-      // INVOICE first (below) — the opposite order — and Postgres's own
-      // referential-integrity check on invoices.scheduled_service_id means
-      // even the LATER billing-review write below (unrelated columns) can
-      // need an implicit lock on the linked scheduled_services row. Taking
-      // the SAME scheduled_services-group lock here, BEFORE the invoice
-      // lock, keeps one consistent order everywhere for THIS (row-level,
-      // FK-implicit-lock) concern — a NARROWER, second-order fix layered on
-      // top of the advisory lock above, which is what closes the actual
-      // cross-transaction deadlock. Cheap when it doesn't apply:
-      // loadLockedEstimateGroup's own early skips (`not_estimate_anchor` /
-      // `no_siblings`) take no row lock at all, so this only matters — and
-      // only locks anything — for an invoice that's actually linked to a
-      // multi-member estimate-accept group. Skipped entirely for a
-      // non-retotal edit (metadata only): a plain title/notes/due-date save
-      // changes no protected money field, so reopenBillingReviewOnInvoice-
-      // MoneyChange below is a no-op fingerprint compare either way — no
-      // reason to take this row lock for it (the advisory lock above is
-      // taken regardless, since IT is what serializes against a concurrent
-      // reschedule, not just against the FK-implicit-lock case).
-      if (isRetotal && existing.scheduled_service_id) {
-        await require("./first-application-sibling-split")
-          .loadLockedEstimateGroup(client, existing.scheduled_service_id);
-      }
       // Serialize against in-flight dun sends: lock the invoice row FIRST.
       // fireStep's claim transaction locks this same row before stamping
       // touch_claimed_at, so one of the two strictly precedes the other —
@@ -7862,24 +7697,6 @@ const InvoiceService = {
           "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
         );
       }
-      // Same-trip first-application billing-review chokepoint (round-4,
-      // Codex #5021 P1): a manually-cleared (or auto-cleared) shared
-      // invoice was only ever re-checked by a LATER DATE CHANGE on some
-      // member of its estimate-accept group — a plain money edit here
-      // (line items / tax rate) never ran that check, so a resolved-but-
-      // still-diverged invoice could quietly recombine unreviewed. Same
-      // transaction as this edit, under the row lock already taken above —
-      // see first-application-sibling-split.js's own header for why this
-      // is deliberately NOT resolution-aware (simpler and safe: reopens
-      // whenever money changed AND the group is still diverged, whether or
-      // not the invoice was ever formally resolved). Not wrapped in its own
-      // savepoint (unlike the date-change chokepoint's "Safely" wrapper):
-      // this genuinely-unexpected failure should abort the edit itself,
-      // same as every other guard in this transaction (e.g. the due-date
-      // resequence below) — a money edit that can't be re-validated for
-      // divergence must not commit either.
-      await require("./first-application-sibling-split")
-        .reopenBillingReviewOnInvoiceMoneyChange(client, lockedRow, edited);
       // Phase 2: an edited accrued invoice changes the statement total — reroll in
       // the SAME transaction so a reroll failure ABORTS the edit; we never commit
       // a changed invoice beside a stale statement subtotal/tax/total.
@@ -10494,9 +10311,3 @@ module.exports.claimInvoiceForSend = claimInvoiceForSend;
 // (invoice-claim-ownership-postgres.test.js) so a genuine restore failure can
 // be asserted against real schema without driving the whole send twice.
 module.exports.restoreSendClaim = restoreSendClaim;
-// Test-only seam (#5021 round-3): the scheduled-send worker's own due-claim
-// query, exercised directly against real Postgres so the billing-review
-// predicate's partial-delivery carve-out (a 'scheduled' row with a
-// delivery stamp already set) can be asserted without driving the whole
-// worker loop.
-module.exports._claimDueScheduledInvoiceForSend = claimDueScheduledInvoiceForSend;

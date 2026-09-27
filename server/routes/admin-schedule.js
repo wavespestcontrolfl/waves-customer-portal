@@ -9412,11 +9412,6 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             let liveMoveRefreshStatus = 'confirmed';
             let bulkTechMoveNotice = null;
             await db.transaction(async (trx) => {
-              // Sibling-group lock FIRST — rung 0, before rung 1 below and
-              // every row lock this transaction takes (see first-
-              // application-sibling-split.js's ROOT FIX comment). A no-op
-              // for a visit with no estimate.
-              await require('../services/first-application-sibling-split').lockSiblingGroupForVisit(trx, id);
               // Rung 1 (occupancy.js ORDERING CONTRACT): the date-wide lock
               // must precede every other lock in this trx — including the
               // tech-day fence below — so take it up front; the probe itself
@@ -9730,16 +9725,17 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   { isValidation: true },
                 );
               }
-              // Same-trip first-application billing-review chokepoint (owner
-              // ruling, #5021 redesign): a bulk date move may pull this row
-              // off the date of a shared first-application invoice, on
-              // either side. Opens a durable, idempotent review rather than
-              // touching money — see first-application-sibling-split.js —
-              // so no batch deferral is needed even though this route
-              // commits each id in its own transaction.
+              // Same-trip first-application billing alert (owner ruling,
+              // #5021 redesign — "alert only, no hold"): a bulk date move
+              // may pull an unpriced sibling off the shared first-
+              // application invoice's date. Raises a durable admin alert
+              // rather than touching money — see
+              // first-application-sibling-split.js — so no batch deferral
+              // is needed even though this route commits each id in its own
+              // transaction.
               if (prevDate !== bulkTargetDate) {
                 await require('../services/first-application-sibling-split')
-                  .flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, id, 'bulk reschedule');
+                  .flagFirstApplicationSiblingDivergenceSafely(trx, id, 'bulk reschedule');
               }
               {
                 const committedTechId = bulkCommittedRows[0]?.technician_id || null;
@@ -12775,10 +12771,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     }
     let addressUpdatedIds = [];
     await db.transaction(async (trx) => {
-      // Sibling-group lock FIRST — rung 0, before rung 1/6 below and every
-      // row lock this transaction takes (see first-application-sibling-
-      // split.js's ROOT FIX comment). A no-op for a visit with no estimate.
-      await require('../services/first-application-sibling-split').lockSiblingGroupForVisit(trx, req.params.id);
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
       // spawn recurring children (scheduled_services inserts) — lock
       // customer-comms off an unlocked peek BEFORE any row lock in the trx
@@ -13594,30 +13586,24 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // land between the claim and the provider request. Recurring children
         // keep inheriting the parent's Bill-To through this update.)
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
-        // Same-trip first-application billing-review chokepoint (owner
-        // ruling, #5021 redesign): a date-only edit here may pull this row
-        // off the date of a shared first-application invoice, on either
-        // side (the invoice-holding row or an unpriced sibling). Opens a
-        // durable review rather than touching money — see first-
-        // application-sibling-split.js. Runs in its own savepoint off this
-        // trx (the "safely" wrapper) — a plain try/catch around a failing
-        // statement does not recover a Postgres transaction; every later
-        // statement on it, including this route's own COMMIT, would fail.
+        // Same-trip first-application billing alert (owner ruling, #5021
+        // redesign — "alert only, no hold"): a date-only edit here may pull
+        // an unpriced sibling off the shared first-application invoice's
+        // date. Raises a durable admin alert rather than touching money —
+        // see first-application-sibling-split.js.
         //
         // Compared against reminderBefore's PRE-UPDATE scheduled_date
         // (fetched above, under this same gate) rather than firing on mere
-        // key presence (Claude fallback-auditor P1, this branch's own
-        // first push): an update-details save that resubmits scheduled_date
-        // unchanged must not take FOR UPDATE locks across every sibling in
-        // this estimate group and the linked invoice on every such
-        // request — only a genuine date change, matching the comparison
-        // every other date-changing writer in this file already makes
-        // (bulk-action's prevDate !== bulkTargetDate, rebooker's
+        // key presence: an update-details save that resubmits scheduled_date
+        // unchanged must not read every sibling in this estimate group on
+        // every such request — only a genuine date change, matching the
+        // comparison every other date-changing writer in this file already
+        // makes (bulk-action's prevDate !== bulkTargetDate, rebooker's
         // dateOnly(newDate) !== dateOnly(originalDate)).
         if (updates.scheduled_date !== undefined && reminderBefore
           && dateOnly(reminderBefore.scheduled_date) !== dateOnly(updates.scheduled_date)) {
           await require('../services/first-application-sibling-split')
-            .flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, req.params.id, 'update-details save');
+            .flagFirstApplicationSiblingDivergenceSafely(trx, req.params.id, 'update-details save');
         }
         // A job Bill-To edit (payer cleared, self-pay override set) that makes a
         // withdrawn combined-visit invoice self-pay again requeues it here.
