@@ -577,7 +577,6 @@ function fixedTimingClaim(reply, contextText, treatmentContext, activeMessage = 
   const isAccess = (t) => ACCESS_SIGNAL_RE.test(physical(t)) || ACCESS_TOPIC_RE.test(physical(t));
   const accessTopic = isAccess(text) || visitorAccess(activeMessage);
   const visitLength = VISIT_LENGTH_QUESTION_RE.test(activeMessage);
-  if (visitorAccess(activeMessage) && REENTRY_PERMISSION_RE.test(physical(text)) && !REENTRY_CONDITION_RE.test(text)) return true;
   if (accessTopic && (CLOCK_TIME_RE.test(text) || DURATION_RE.test(text) || ANY_TIME_FIGURE_RE.test(text))) return true;
   // No access topic: a clock time is booking ("we can treat tomorrow"); a
   // duration is judged by the words right around it.
@@ -659,12 +658,13 @@ function intakeSafetyClaimSupplement(rawReply, rawContext = '', rawActive = rawC
   // copy, which is itself a correct answer to any of those questions.
   if (safetyClaimIn(t)) return true;
   if (terseClaim(t, activeMessage)) return true;
+  const physicalReply = t.replace(DIGITAL_ACCESS_RE, ' ');
+  if (visitorAccess(activeMessage) && REENTRY_PERMISSION_RE.test(physicalReply) && !REENTRY_CONDITION_RE.test(t)) return true;
   const physicalActive = activeMessage.replace(DIGITAL_ACCESS_RE, ' ');
   // Treatment context comes from the reply and the ACTIVE message — an old
   // "tell me about your treatment" must not make "About 2 hours." (answering
   // "How long is the inspection?") a re-entry figure.
   const treatmentContext = INTAKE_TREATMENT_CONTEXT_RE.test(`${t}\n${activeMessage}`);
-  const physicalReply = t.replace(DIGITAL_ACCESS_RE, ' ');
   if (!treatmentContext && !INTAKE_TREATMENT_CONTEXT_RE.test(t) && SCHEDULING_DURATION_RE.test(activeMessage)
     && !visitorAccess(physicalActive)
     && !ACCESS_SIGNAL_RE.test(physicalReply) && !ACCESS_TOPIC_RE.test(physicalReply)) return false;
