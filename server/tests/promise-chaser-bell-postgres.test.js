@@ -802,4 +802,45 @@ const OUR_NUMBER = '+19415550100';
     const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
     expect(row.metadata.promise_chaser).toMatchObject({ status: 'rung', commitmentId: commitment.id });
   });
+
+  test("a partial push's own claim keeps its commitmentId, so a SEPARATE call reaching the same promise next finds it through promiseDeliveryState", async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(10);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    // Attempt 1: a partial push — stampTarget stamps commitmentId, then
+    // recordProgress persists deliveredSubscriptionIds. Both must survive
+    // on the SAME row afterward.
+    triggerNotification.mockResolvedValueOnce({
+      bellWritten: true, retryable: true,
+      push: { sent: 1, failed: 1, deliveredSubscriptionIds: ['sub-accepted-1'] },
+    });
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+    const afterProgress = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(afterProgress.metadata.promise_chaser).toMatchObject({
+      status: 'pending', commitmentId: commitment.id, deliveredSubscriptionIds: ['sub-accepted-1'],
+    });
+
+    // Age the lease so `back` reads as a STALE claim (not "active") to the
+    // second call below — this test is about commitmentId/deliveredSub
+    // survival, not the separate activeElsewhere defer path.
+    afterProgress.metadata.promise_chaser.claimed_at = new Date(now - 20 * 60000).toISOString();
+    await mockConn('call_log').where({ id: back.id }).update({ metadata: JSON.stringify(afterProgress.metadata) });
+
+    // A genuinely SEPARATE call (the same lead calling right back) reaches
+    // the SAME promise next — it must see `back`'s own commitmentId (and
+    // therefore its deliveredSubscriptionIds) through promiseDeliveryState,
+    // never re-buzzing the device `back` already reached.
+    const secondCall = callRow(0);
+    await mockConn('call_log').insert(secondCall);
+    triggerNotification.mockResolvedValueOnce({
+      bellWritten: true,
+      push: { sent: 1, failed: 0, deliveredSubscriptionIds: ['sub-accepted-1', 'sub-new'] },
+    });
+    expect(await ringPromiseChaserIfNeeded(secondCall.twilio_call_sid)).toBe(true);
+    const [, , opts] = triggerNotification.mock.calls[1];
+    expect(opts.deliveredSubscriptionIds).toEqual(['sub-accepted-1']);
+  });
 });

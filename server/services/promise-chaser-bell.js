@@ -185,12 +185,21 @@ async function settle(callId, token, status, reason = null, commitmentId = null)
 // lookup, stats.retryable) also leaves claimed_at untouched, so a retry's
 // own cadence is the same LEASE_MS backoff throughout, never reset to a
 // fresh window just because this one attempt made partial progress.
+// Merged INTO the existing sub-object (jsonb_set on its own path), never
+// replacing it wholesale: `extra` never carries commitmentId, so a
+// wholesale replace here would silently wipe the commitmentId stampTarget
+// just stamped moments earlier, breaking promiseDeliveryState's cross-call
+// check for a SEPARATE call that reaches this same promise next (Codex
+// #5019 r10 — a wholesale replace bringing back the same bug class
+// claimAttempt was already fixed for, just on a different write path).
 async function recordProgress(callId, token, extra) {
   await db('call_log').where({ id: callId })
     .whereRaw("metadata->'promise_chaser'->>'claimed_at' = ?", [token])
     .update({
-      metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('promise_chaser', ?::jsonb)",
-        [JSON.stringify({ status: 'pending', claimed_at: token, ...extra })]),
+      metadata: db.raw(
+        "jsonb_set(COALESCE(metadata,'{}'::jsonb), '{promise_chaser}', COALESCE(metadata->'promise_chaser', '{}'::jsonb) || ?::jsonb, true)",
+        [JSON.stringify({ status: 'pending', claimed_at: token, ...extra })],
+      ),
     });
 }
 
