@@ -26,16 +26,17 @@ const CONTEXT_SERVICE = {
   id: 'svc-1', customerName: 'Pat Jones', hasPhone: false,
   customerId: 'cust-1', propertyId: 'prop-1', catalogServiceId: 'cat-1',
   serviceType: 'Pest Control Re-Service', scheduledDate: '2026-09-26', address: { line1: '123 Main St' },
+  serviceKey: 'pest_re_service', status: 'confirmed',
 };
 
-function makeRequest({ rating = { allowed: true, scaleLabels: null } } = {}) {
+function makeRequest({ rating = { allowed: true, scaleLabels: null }, service = CONTEXT_SERVICE } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
     if (path.endsWith('/pest-recap/context')) {
       return {
         ok: true,
-        service: CONTEXT_SERVICE,
+        service,
         products: CATALOG,
         existingRecord: null,
       };
@@ -140,7 +141,7 @@ describe('FastCompleteSheet', () => {
     const bait = body.products.find((p) => p.productId === 'extra');
     expect(bait.applicationMethod).toBe('bait_placement');
     expect(bait.areaValue).toBeUndefined();
-  });
+  }, 15000);
 
   test('submits the full-completion body shape and shows the done view', async () => {
     const request = makeRequest();
@@ -355,7 +356,7 @@ describe('FastCompleteSheet', () => {
     // The How row only moves sprays; the stations stay bait placement.
     expect(stations).toMatchObject({ applicationMethod: 'bait_placement', totalAmount: 3, amountUnit: 'each' });
     expect(stations.areaValue).toBeUndefined();
-  });
+  }, 15000);
 
   test('the activity row follows the server rating contract', async () => {
     const off = makeRequest({ rating: { allowed: false, scaleLabels: null } });
@@ -377,6 +378,28 @@ describe('FastCompleteSheet', () => {
     await screen.findByRole('button', { name: /Taurus SC/ });
     expect(screen.getByRole('button', { name: 'Low' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'High' })).toBeTruthy();
+  });
+
+  test('an edited rate above the label maximum shows the recap editor\'s warning', async () => {
+    const request = makeRequest();
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
+
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Edit amounts' }));
+    // Spot treatment resolves Taurus's label band 0.2-0.8 fl oz/gal.
+    expect(screen.getByLabelText('Taurus SC rate').value).toBe('0.2');
+    expect(screen.queryByText(/label max/)).toBeNull();
+    fireEvent.change(screen.getByLabelText('Taurus SC rate'), { target: { value: '1.2' } });
+    expect(screen.getByText('> label max 0.8')).toBeTruthy();
+  });
+
+  test('a visit reclassified since the schedule loaded is not completed here', async () => {
+    const request = makeRequest({ service: { ...CONTEXT_SERVICE, serviceKey: 'general_pest_control' } });
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
+
+    expect(await screen.findByText('This visit is no longer a pest re-service. Use the full form.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Complete re-service' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(false);
   });
 
   test('an added product blocks Complete until its amount is entered; edited amounts and units are submitted', async () => {

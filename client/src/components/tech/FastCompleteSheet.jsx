@@ -1,21 +1,24 @@
 // client/src/components/tech/FastCompleteSheet.jsx
 //
-// Fast Complete — a one-screen, no-scrolling completion for PEST RE-SERVICE
-// visits (server/services/re-service.js: pest_re_service, a free
-// between-visit callback). Owner ask: today's forms are "too long and
-// laborious for techs" for a job that is, in practice, a quick spot check.
+// Fast Complete — a one-screen completion for PEST RE-SERVICE visits
+// (server/services/re-service.js: pest_re_service, a free between-visit
+// callback). Owner ask: today's forms are "too long and laborious for techs"
+// for what is, in practice, a quick targeted treatment.
 //
-// Records only: products used (prefilled from the house pest mix), pests
-// targeted, where, and activity seen — then submits the FULL completion
-// endpoint (POST /admin/dispatch/:id/complete → completeScheduledService),
-// NOT /pest-recap: the full path records per-product targets, amounts and
-// areas for the FDACS application record; the recap path drops them. A
-// "Full form" escape hatch always reaches today's ServiceRecapModal so
-// nothing is lost if the one-screen flow doesn't fit.
+// Records only what the application record needs — products (house mix
+// prefilled), their amounts and rates, pests targeted, where, how, and the
+// activity seen when the server keeps a tech rating — then submits the FULL
+// completion endpoint (POST /admin/dispatch/:id/complete →
+// completeScheduledService), NOT /pest-recap: the full path records
+// per-product method, targets, amounts, rates and areas. "Full form" reaches
+// today's ServiceRecapModal before any attempt may have reached the server.
 //
-// Product catalog: reused from the SAME context endpoint ServiceRecapModal
-// already loads (GET /admin/dispatch/:id/pest-recap/context) — no new
-// server surface for the picker.
+// The layout is compact (three/four-across choice rows, the note behind a
+// tap) so the choices fit a typical phone screen; the Complete button is
+// pinned in the footer either way.
+//
+// Product catalog and visit identity come from the SAME context endpoint
+// ServiceRecapModal loads (GET /admin/dispatch/:id/pest-recap/context).
 import React, { useCallback, useEffect, useMemo, useRef, useState, useId } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
@@ -28,10 +31,7 @@ import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import { UiSurface, Button, Field, Input, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
-// House pest mix totals are all in whole/fractional ounces (pest-default-mix.js)
-// — 'oz' is a valid, ambiguous-dimension unit on the server's shared
-// rate-unit allowlist (inventory-units.js), so it needs no per-product
-// catalog lookup to resolve.
+// House pest mix totals are all in whole/fractional ounces (pest-default-mix.js).
 const DEFAULT_MIX_UNIT = 'oz';
 // Same six totals units the full completion form offers (SchedulePage's
 // STANDARD_AMOUNT_UNIT_OPTIONS), all on the server's VALID_RATE_UNITS list.
@@ -39,14 +39,64 @@ const AMOUNT_UNITS = ['oz', 'fl_oz', 'ml', 'g', 'lb', 'gal'];
 const unitLabel = (unit) => String(unit || '').replace(/_/g, ' ');
 const hasAmount = (row) => Number(row.totalAmount) > 0;
 
-// How the SPRAY products went down (the How row). Spot treatment needs no
-// measured area; a perimeter spray records its linear feet (the application
-// record's area and the server's perimeter-footage check).
+// How the SPRAY products went down. Spot treatment needs no measured area;
+// a perimeter spray records its linear feet (the application record's area
+// and the server's perimeter-footage check).
 const METHOD_CHOICES = [
   { value: 'spot_treatment', label: 'Spot treatment' },
   { value: 'perimeter_spray', label: 'Perimeter spray' },
 ];
 const SPRAY_METHODS = new Set(METHOD_CHOICES.map((choice) => choice.value));
+
+const PEST_CHIPS = ['Ants', 'Roaches', 'Spiders', 'Silverfish', 'Wasps', 'Earwigs'];
+const PEST_CHIPS_MORE = ['Fleas', 'Crickets', 'Centipedes', 'Other'];
+const AREA_CHIPS = ['Inside', 'Outside', 'Garage'];
+// Four taps on the server's 0–5 pest-pressure scale. Labels come from the
+// server's active scale (tech-rating-allowed) so the tap means what the
+// report will say; these are only the fallback.
+const ACTIVITY_LEVELS = [
+  { value: 'none', label: 'None', rating: 0 },
+  { value: 'light', label: 'Light', rating: 2 },
+  { value: 'moderate', label: 'Moderate', rating: 3 },
+  { value: 'heavy', label: 'Heavy', rating: 5 },
+];
+const CLOSED_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
+
+// Every /complete failure lands in one of four outcomes:
+//  saved       — the visit is already saved: this or an earlier attempt
+//                committed (a lost response, another device, or a partly
+//                finished earlier try whose changed body the resume check
+//                refuses — the office's Billing Recovery finishes those).
+//  correctable — a definitive pre-commit rejection: fix and resubmit under a
+//                fresh key (the full form's shared rule).
+//  retry       — outcome unknown or still running (network drop, 5xx, an
+//                attempt pending or finishing its side effects): resend the
+//                SAME body under the SAME key so the server replays/resumes.
+//  terminal    — a conflict no retry can fix (a future-dated, closed or
+//                changed visit): show it and let the tech leave.
+const SAVED_CODES = new Set(['service_already_completed', 'completion_resume_payload_mismatch', 'idempotency_key_mismatch']);
+const IN_PROGRESS_CODES = new Set(['service_completion_pending', 'completion_pending', 'completion_side_effects_running']);
+function completionFailureOutcome(err) {
+  const status = Number(err?.status);
+  if (status === 409 && SAVED_CODES.has(err?.code)) return 'saved';
+  if (shouldResetCompletionIdempotencyKey(err)) return 'correctable';
+  if (!Number.isFinite(status) || status >= 500 || (status === 409 && IN_PROGRESS_CODES.has(err?.code))) return 'retry';
+  return 'terminal';
+}
+
+function genIdempotencyKey() {
+  try {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  } catch { /* fall through */ }
+  return `fastcomplete_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+function toggleInSet(set, value) {
+  const next = new Set(set);
+  if (next.has(value)) next.delete(value);
+  else next.add(value);
+  return next;
+}
 
 // A row keeps its catalog product: its method comes from the catalog (the
 // shared pest resolver) unless it is a spray, which follows the How row; its
@@ -73,64 +123,161 @@ function rowMethod(row, sprayMethod) {
   return SPRAY_METHODS.has(row.catalogMethod) ? sprayMethod : row.catalogMethod;
 }
 
+// The row's rate at its submitted method, plus the label ceiling the recap
+// editor warns against: per-basis bands carry their upper bound; per-1,000
+// rates use the verified catalog max; the 4-oz house default has none.
 function rowRate(row, sprayMethod) {
   const resolved = resolveRatePrefill(row.product, { applicationMethod: rowMethod(row, sprayMethod), serviceLine: 'pest' });
   const prefill = Number(resolved.rate) > 0 && resolved.rateUnit ? String(Number(resolved.rate)) : '';
-  return { rate: row.rateInput ?? prefill, rateUnit: resolved.rateUnit || '' };
+  const maxRaw = resolved.perBasisUnit
+    ? resolved.labelMaxRate
+    : resolved.usePestSprayDefault ? null : parseFloat(String(row.product?.max_label_rate_per_1000 ?? ''));
+  const max = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : null;
+  return { rate: row.rateInput ?? prefill, rateUnit: resolved.rateUnit || '', max };
 }
 
-const PEST_CHIPS = ['Ants', 'Roaches', 'Spiders', 'Silverfish', 'Wasps', 'Earwigs'];
-const PEST_CHIPS_MORE = ['Fleas', 'Crickets', 'Centipedes', 'Other'];
-const AREA_CHIPS = ['Inside', 'Outside', 'Garage'];
-// Four taps on the server's 0–5 pest-pressure scale. Labels come from the
-// server's active scale (tech-rating-allowed) so the tap means what the
-// report will say; these are only the fallback.
-const ACTIVITY_LEVELS = [
-  { value: 'none', label: 'None', rating: 0 },
-  { value: 'light', label: 'Light', rating: 2 },
-  { value: 'moderate', label: 'Moderate', rating: 3 },
-  { value: 'heavy', label: 'Heavy', rating: 5 },
-];
-
-function genIdempotencyKey() {
-  try {
-    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-  } catch { /* fall through */ }
-  return `fastcomplete_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+// Every requirement the application record needs, in screen order.
+function missingRequirement(form, rows, ratingAllowed) {
+  const active = rows.filter((row) => row.active);
+  const missingAmount = active.find((row) => !hasAmount(row));
+  const needsLinearFt = active.some((row) => rowMethod(row, form.method) === 'perimeter_spray');
+  return [
+    [!active.length, 'Select at least one product.'],
+    [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
+    [!form.pests.size, 'Select at least one pest.'],
+    [form.pests.has('Other') && !form.otherPest.trim(), 'Name the other pest.'],
+    [!form.areas.size, 'Select where you treated.'],
+    [needsLinearFt && !(Number(form.linearFt) > 0), 'Enter the linear feet you sprayed.'],
+    [ratingAllowed && !form.activity, 'Select activity seen.'],
+  ].find(([missing]) => missing)?.[1] || '';
 }
 
-// Every /complete failure lands in one of four outcomes:
-//  saved       — the visit is already saved: this or an earlier attempt
-//                committed (a lost response, another device, or a partly
-//                finished earlier try whose changed body the resume check
-//                refuses — the office's Billing Recovery finishes those).
-//  correctable — a definitive pre-commit rejection: fix and resubmit under a
-//                fresh key (the full form's shared rule).
-//  retry       — outcome unknown or still running (network drop, 5xx, an
-//                attempt pending or finishing its side effects): resend the
-//                SAME body under the SAME key so the server replays/resumes.
-//  terminal    — a conflict no retry can fix (a future-dated or already
-//                closed visit): show it and let the tech leave.
-const SAVED_CODES = new Set(['service_already_completed', 'completion_resume_payload_mismatch', 'idempotency_key_mismatch']);
-const IN_PROGRESS_CODES = new Set(['service_completion_pending', 'completion_pending', 'completion_side_effects_running']);
-function completionFailureOutcome(err) {
-  const status = Number(err?.status);
-  if (status === 409 && SAVED_CODES.has(err?.code)) return 'saved';
-  if (shouldResetCompletionIdempotencyKey(err)) return 'correctable';
-  if (!Number.isFinite(status) || status >= 500 || (status === 409 && IN_PROGRESS_CODES.has(err?.code))) return 'retry';
-  return 'terminal';
+function targetsOf(form) {
+  return [...form.pests].map((pest) => (pest === 'Other' ? form.otherPest.trim() : pest));
 }
 
-function toggleInSet(set, value) {
-  const next = new Set(set);
-  if (next.has(value)) next.delete(value);
-  else next.add(value);
-  return next;
+function completionBody(form, rows, { visitIdentity, ratingAllowed }) {
+  const targets = targetsOf(form);
+  // Where rides each product row too: service_products.application_area
+  // comes only from the row (the full form sends the same comma-joined string).
+  const applicationArea = [...form.areas].join(', ');
+  return {
+    visitOutcome: 'completed',
+    ...(visitIdentity ? { expectedVisit: visitIdentity } : {}),
+    products: rows.filter((row) => row.active).map((row) => {
+      const applicationMethod = rowMethod(row, form.method);
+      const { rate, rateUnit } = rowRate(row, form.method);
+      return {
+        productId: row.productId,
+        applicationMethod,
+        targets,
+        totalAmount: Number(row.totalAmount),
+        amountUnit: row.amountUnit,
+        applicationArea,
+        ...(Number(rate) > 0 && rateUnit ? { rate: Number(rate), rateUnit } : {}),
+        ...(applicationMethod === 'perimeter_spray' ? { areaValue: Number(form.linearFt), areaUnit: 'linear_ft' } : {}),
+      };
+    }),
+    areasServiced: [...form.areas],
+    ...(ratingAllowed ? { clientPestRating: ACTIVITY_LEVELS.find((a) => a.value === form.activity)?.rating ?? null } : {}),
+    technicianNotes: form.note.trim(),
+    // The customer recap text ships in a later Fast Complete PR; until then
+    // this path sends none. No review ask on a re-service (adopted
+    // 2026-09-26), and a free callback never carries a pay link.
+    sendCompletionSms: false,
+    requestReview: false,
+    includePayLink: false,
+  };
 }
 
-// One tile, shared by every section (products / pests / where / activity /
-// the add-product picker) — a real button, aria-pressed, 44px min touch
-// target via the shared Button component's `touch` density.
+// The context + rating contract for this visit. The routed schedule row can
+// be stale: the context is re-checked to still be an open pest re-service
+// before anything can be completed here.
+function useFastCompleteContext({ base, request, serviceType }) {
+  const [ctx, setCtx] = useState({
+    loading: true, loadError: '', blockedReason: '', catalog: [], rows: [], visitIdentity: null,
+    rating: { allowed: false, scaleLabels: null },
+  });
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const [data, ratingContract] = await Promise.all([
+          request(`${base}/pest-recap/context`),
+          // A failed read keeps the rating off: never send a rating the
+          // server may drop, or show a scale it may not use.
+          request(`${base}/tech-rating-allowed`).catch(() => null),
+        ]);
+        if (!active) return;
+        const visit = data?.service || {};
+        const products = Array.isArray(data?.products) ? data.products : [];
+        const reclassified = visit.serviceKey !== 'pest_re_service';
+        const closed = CLOSED_STATUSES.has(String(visit.status || ''));
+        setCtx({
+          loading: false,
+          loadError: '',
+          blockedReason: reclassified
+            ? 'This visit is no longer a pest re-service. Use the full form.'
+            : closed ? `This visit is already ${visit.status}. Use the full form to edit it.` : '',
+          catalog: products,
+          rows: pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, serviceType, totalAmount)),
+          visitIdentity: recapVisitIdentity(visit),
+          rating: { allowed: ratingContract?.allowed === true, scaleLabels: ratingContract?.scaleLabels || null },
+        });
+      } catch (err) {
+        if (active) setCtx((prev) => ({ ...prev, loading: false, loadError: err?.message || 'Failed to load products' }));
+      }
+    })();
+    return () => { active = false; };
+  }, [base, request, serviceType]);
+  return ctx;
+}
+
+// One completion attempt at a time, settled into the four outcomes above.
+function useFastCompleteSubmit({ base, request }) {
+  const keyRef = useRef(null);
+  if (!keyRef.current) keyRef.current = genIdempotencyKey();
+  const pendingBodyRef = useRef(null);
+  const inFlight = useRef(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const [failure, setFailure] = useState(null);
+  const [done, setDone] = useState(null);
+
+  const submit = useCallback(async (buildBody, summary) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setSubmitting(true);
+    setError('');
+    const body = pendingBodyRef.current || { idempotencyKey: keyRef.current, ...buildBody() };
+    try {
+      await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
+      pendingBodyRef.current = null;
+      setFailure(null);
+      setDone({ summary });
+    } catch (err) {
+      const outcome = completionFailureOutcome(err);
+      pendingBodyRef.current = outcome === 'retry' ? body : null;
+      if (outcome === 'correctable') keyRef.current = genIdempotencyKey();
+      if (outcome === 'saved') {
+        setFailure(null);
+        setDone({ summary: 'This visit was already saved. The office will finish anything still pending.' });
+      } else {
+        setFailure(outcome === 'correctable' ? null : outcome);
+        setError(outcome === 'retry'
+          ? `${err?.message || 'Completion failed'} We couldn't confirm it saved. Tap Retry to send the same completion again.`
+          : (err?.message || 'Completion failed'));
+      }
+      setSubmitting(false);
+      inFlight.current = false;
+    }
+  }, [base, request]);
+
+  return { submitting, error, failure, done, submit, retryPending: failure === 'retry', hasPendingBody: () => !!pendingBodyRef.current };
+}
+
+// One tile — a real button, aria-pressed, 44px min touch target via the
+// shared Button component's `touch` density.
 function Chip({ label, pressed, onClick, className, disabled }) {
   return (
     <Button
@@ -146,6 +293,18 @@ function Chip({ label, pressed, onClick, className, disabled }) {
   );
 }
 
+function ChoiceSection({ title, action, columns = 2, children }) {
+  return (
+    <section className="tech-visit-choice-section">
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title">{title}</h3>
+        {action}
+      </div>
+      <div className={cn('tech-visit-tile-grid', `tech-visit-tile-grid--${columns}`)}>{children}</div>
+    </section>
+  );
+}
+
 export default function FastCompleteSheet({ service, request, onClose, onCompleted, onFullForm }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
@@ -153,206 +312,16 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   useLockBodyScroll(true);
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
-
-  // One key per sheet open, reused across a resubmit (double-tap, a network
-  // retry) so the server's completion-attempt claim can dedupe instead of
-  // minting a second completion from two client requests.
-  const idempotencyKeyRef = useRef(null);
-  if (!idempotencyKeyRef.current) idempotencyKeyRef.current = genIdempotencyKey();
-
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState('');
-  const [catalog, setCatalog] = useState([]);
-  // { productId, name, totalAmount (number or the typed string), amountUnit, active }
-  const [productRows, setProductRows] = useState([]);
-  const [editAmounts, setEditAmounts] = useState(false);
-  const [showAddProduct, setShowAddProduct] = useState(false);
-  const [addProductQuery, setAddProductQuery] = useState('');
-
-  const [pests, setPests] = useState(() => new Set());
-  const [showMorePests, setShowMorePests] = useState(false);
-  const [areas, setAreas] = useState(() => new Set());
-  const [activity, setActivity] = useState('');
-  const [note, setNote] = useState('');
-  const [otherPest, setOtherPest] = useState('');
-  const [method, setMethod] = useState('spot_treatment');
-  // The visit identity the context was built from, re-checked by the
-  // server under the row lock (expectedVisit), as the recap form does.
-  const [visitIdentity, setVisitIdentity] = useState(null);
-  // The server's per-service rating contract: whether a tech rating is kept
-  // for this visit, and the active scale's labels.
-  const [rating, setRating] = useState({ allowed: false, scaleLabels: null });
-  const [linearFt, setLinearFt] = useState('');
-
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
-  const [done, setDone] = useState(null);
-  const submitInFlight = useRef(false);
-  // The exact body of an attempt whose outcome is unknown. The server
-  // refuses a reused key with a changed payload, so Retry resends this body
-  // as-is and the form stays locked.
-  const pendingBodyRef = useRef(null);
-  // null, or 'retry' / 'terminal' from completionFailureOutcome.
-  const [failure, setFailure] = useState(null);
-  const retryPending = failure === 'retry';
-
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      try {
-        const [data, ratingContract] = await Promise.all([
-          request(`${base}/pest-recap/context`),
-          // A failed read keeps the rating off: never send a rating the
-          // server may drop, or show a scale it may not use.
-          request(`${base}/tech-rating-allowed`).catch(() => null),
-        ]);
-        if (!active) return;
-        setVisitIdentity(recapVisitIdentity(data?.service));
-        setRating({ allowed: ratingContract?.allowed === true, scaleLabels: ratingContract?.scaleLabels || null });
-        const products = Array.isArray(data?.products) ? data.products : [];
-        setCatalog(products);
-        const mix = pestDefaultMixSelections(products);
-        setProductRows(mix.map(({ product, totalAmount }) => productRow(product, service?.serviceType, totalAmount)));
-      } catch (err) {
-        if (active) setLoadError(err?.message || 'Failed to load products');
-      } finally {
-        if (active) setLoading(false);
-      }
-    })();
-    return () => { active = false; };
-  }, [base, request, service?.serviceType]);
-
-  const toggleProductActive = useCallback((productId) => {
-    setProductRows((prev) => prev.map((row) => (
-      row.productId === productId ? { ...row, active: !row.active } : row
-    )));
-  }, []);
-
-  const updateRow = useCallback((productId, patch) => {
-    setProductRows((prev) => prev.map((row) => (row.productId === productId ? { ...row, ...patch } : row)));
-  }, []);
-
-  // An added product has no house-mix total, so the amount editor opens and
-  // Complete stays blocked until the tech enters what they used; the amount
-  // feeds the application record and the inventory deduction.
-  const addProduct = useCallback((product) => {
-    setProductRows((prev) => (
-      prev.some((row) => row.productId === product.id)
-        ? prev.map((row) => (row.productId === product.id ? { ...row, active: true } : row))
-        : [...prev, productRow(product, service?.serviceType, '')]
-    ));
-    setEditAmounts(true);
-    setShowAddProduct(false);
-    setAddProductQuery('');
-  }, [service?.serviceType]);
-
-  const addableProducts = useMemo(() => {
-    const already = new Set(productRows.map((row) => row.productId));
-    const q = addProductQuery.trim().toLowerCase();
-    return catalog
-      .filter((p) => !already.has(p.id) && (!q || String(p.name || '').toLowerCase().includes(q)))
-      .slice(0, 40);
-  }, [catalog, productRows, addProductQuery]);
-
-  // A rate typed for one spray method doesn't carry to another.
-  const chooseMethod = useCallback((next) => {
-    setMethod(next);
-    setProductRows((prev) => prev.map((row) => (SPRAY_METHODS.has(row.catalogMethod) ? { ...row, rateInput: null } : row)));
-  }, []);
-
-  const togglePest = useCallback((label) => setPests((prev) => toggleInSet(prev, label)), []);
-  const toggleArea = useCallback((label) => setAreas((prev) => toggleInSet(prev, label)), []);
-
-  const activeProducts = productRows.filter((row) => row.active);
-  const missingAmount = activeProducts.find((row) => !hasAmount(row));
-  const needsLinearFt = activeProducts.some((row) => rowMethod(row, method) === 'perimeter_spray');
-  // Every requirement the application record needs, in screen order.
-  const missingReason = [
-    [!activeProducts.length, 'Select at least one product.'],
-    [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
-    [!pests.size, 'Select at least one pest.'],
-    [pests.has('Other') && !otherPest.trim(), 'Name the other pest.'],
-    [!areas.size, 'Select where you treated.'],
-    [needsLinearFt && !(Number(linearFt) > 0), 'Enter the linear feet you sprayed.'],
-    [rating.allowed && !activity, 'Select activity seen.'],
-  ].find(([missing]) => missing)?.[1] || '';
+  const ctx = useFastCompleteContext({ base, request, serviceType: service?.serviceType });
+  const submission = useFastCompleteSubmit({ base, request });
+  const { submitting, done } = submission;
 
   const close = useCallback(() => { if (!submitting) onClose?.(); }, [submitting, onClose]);
   closeRef.current = close;
-
-  const handleSubmit = useCallback(async () => {
-    if (submitInFlight.current || (missingReason && !pendingBodyRef.current)) return;
-    submitInFlight.current = true;
-    setSubmitting(true);
-    setError('');
-    const targets = [...pests].map((pest) => (pest === 'Other' ? otherPest.trim() : pest));
-    // Where is recorded on each product row too: service_products'
-    // application_area comes only from the row (the full form sends the same
-    // comma-joined string), so the application record keeps the location.
-    const applicationArea = [...areas].join(', ');
-    const body = pendingBodyRef.current || {
-      idempotencyKey: idempotencyKeyRef.current,
-      visitOutcome: 'completed',
-      ...(visitIdentity ? { expectedVisit: visitIdentity } : {}),
-      products: activeProducts.map((row) => {
-        const applicationMethod = rowMethod(row, method);
-        const { rate: rowRateValue, rateUnit } = rowRate(row, method);
-        return {
-          productId: row.productId,
-          applicationMethod,
-          targets,
-          totalAmount: Number(row.totalAmount),
-          amountUnit: row.amountUnit,
-          applicationArea,
-          ...(Number(rowRateValue) > 0 && rateUnit ? { rate: Number(rowRateValue), rateUnit } : {}),
-          ...(applicationMethod === 'perimeter_spray' ? { areaValue: Number(linearFt), areaUnit: 'linear_ft' } : {}),
-        };
-      }),
-      areasServiced: [...areas],
-      ...(rating.allowed ? { clientPestRating: ACTIVITY_LEVELS.find((a) => a.value === activity)?.rating ?? null } : {}),
-      technicianNotes: note.trim(),
-      // The customer recap text ships in a later Fast Complete PR; until
-      // then this path sends none. No review ask on a re-service (adopted
-      // 2026-09-26), and a free callback never carries a pay link.
-      sendCompletionSms: false,
-      requestReview: false,
-      includePayLink: false,
-    };
-    try {
-      await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
-      pendingBodyRef.current = null;
-      setFailure(null);
-      const productNames = activeProducts.map((p) => p.name).join(', ');
-      setDone({ summary: `${productNames} · ${targets.join(', ')}` });
-    } catch (err) {
-      const outcome = completionFailureOutcome(err);
-      if (outcome === 'saved') {
-        pendingBodyRef.current = null;
-        setFailure(null);
-        setDone({ summary: 'This visit was already saved. The office will finish anything still pending.' });
-      } else if (outcome === 'correctable') {
-        idempotencyKeyRef.current = genIdempotencyKey();
-        pendingBodyRef.current = null;
-        setFailure(null);
-        setError(err?.message || 'Completion failed');
-      } else if (outcome === 'retry') {
-        pendingBodyRef.current = body;
-        setFailure('retry');
-        setError(`${err?.message || 'Completion failed'} We couldn't confirm it saved. Tap Retry to send the same completion again.`);
-      } else {
-        pendingBodyRef.current = null;
-        setFailure('terminal');
-        setError(err?.message || 'This visit can\'t be completed here.');
-      }
-      setSubmitting(false);
-      submitInFlight.current = false;
-    }
-  }, [base, request, missingReason, activeProducts, pests, otherPest, areas, method, linearFt, activity, note, visitIdentity, rating.allowed]);
-
   // Nothing is editable while a save is in flight, unresolved, or refused
-  // for good. The recap modal (Full form) can't resume a /complete attempt,
+  // for good; the recap modal (Full form) can't resume a /complete attempt,
   // so it is offered only before one may have reached the server.
-  const locked = submitting || failure !== null;
+  const locked = submitting || submission.failure !== null;
 
   return createPortal(
     <UiSurface
@@ -379,184 +348,276 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
           )}
           <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={close} disabled={submitting} aria-label="Close">×</Button>
         </header>
-
-        {done ? (
-          <div className="tech-visit-body">
-            <div className="tech-visit-card">
-              <p className="tech-visit-muted">{[service?.address, service?.timeLabel].filter(Boolean).join(' · ') || 'This visit'}</p>
-              <p>{done.summary}</p>
-            </div>
-            <div className="tech-visit-actions">
-              <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={() => onCompleted?.()}>Next stop</Button>
-            </div>
-          </div>
-        ) : loading ? (
-          <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>
-        ) : loadError ? (
-          <ActionFeedback error className="tech-visit-feedback tech-visit-loading">{loadError}</ActionFeedback>
-        ) : showAddProduct ? (
-          <div className="tech-visit-body">
-            <AddProductPanel
-              products={addableProducts}
-              query={addProductQuery}
-              setQuery={setAddProductQuery}
-              onPick={addProduct}
-              onBack={() => { setShowAddProduct(false); setAddProductQuery(''); }}
-            />
-          </div>
-        ) : (
-          <>
-            <div className="tech-visit-body">
-              <fieldset className="tech-visit-form" disabled={locked}>
-              <div className="tech-visit-section-head">
-                <h3 className="tech-visit-section-title">Products used</h3>
-                <Button type="button" variant="ghost" className="tech-visit-action" aria-pressed={editAmounts} onClick={() => setEditAmounts((on) => !on)}>
-                  {editAmounts ? 'Done' : 'Edit amounts'}
-                </Button>
-              </div>
-              <div className="tech-visit-tile-grid">
-                {productRows.map((row) => (
-                  <Chip disabled={locked}
-                    key={row.productId}
-                    label={hasAmount(row) ? `${row.name} — ${row.totalAmount} ${unitLabel(row.amountUnit)}` : `${row.name} — amount?`}
-                    pressed={row.active}
-                    onClick={() => toggleProductActive(row.productId)}
-                    className={!row.active ? 'tech-visit-product--off' : undefined}
-                  />
-                ))}
-                <Chip disabled={locked} label="+ Add product" onClick={() => setShowAddProduct(true)} />
-              </div>
-              {editAmounts && activeProducts.map((row) => (
-                <AmountRow key={row.productId} row={row} rate={rowRate(row, method)} onChange={(patch) => updateRow(row.productId, patch)} />
-              ))}
-
-              <h3 className="tech-visit-section-title">Pests targeted</h3>
-              <div className="tech-visit-tile-grid">
-                {PEST_CHIPS.map((label) => (
-                  <Chip disabled={locked} key={label} label={label} pressed={pests.has(label)} onClick={() => togglePest(label)} />
-                ))}
-                {showMorePests
-                  ? PEST_CHIPS_MORE.map((label) => (
-                    <Chip disabled={locked} key={label} label={label} pressed={pests.has(label)} onClick={() => togglePest(label)} />
-                  ))
-                  : <Chip disabled={locked} label="More" onClick={() => setShowMorePests(true)} />}
-              </div>
-              {pests.has('Other') && (
-                <Field label="Which pest?" className="tech-visit-field">
-                  <Input className="tech-visit-control" value={otherPest} onChange={(e) => setOtherPest(e.target.value)} placeholder="e.g. palmetto bugs" />
-                </Field>
-              )}
-
-              <h3 className="tech-visit-section-title">Where</h3>
-              <div className="tech-visit-tile-grid">
-                {AREA_CHIPS.map((label) => (
-                  <Chip disabled={locked} key={label} label={label} pressed={areas.has(label)} onClick={() => toggleArea(label)} />
-                ))}
-              </div>
-
-              <h3 className="tech-visit-section-title">How</h3>
-              <div className="tech-visit-tile-grid">
-                {METHOD_CHOICES.map((choice) => (
-                  <Chip disabled={locked} key={choice.value} label={choice.label} pressed={method === choice.value} onClick={() => chooseMethod(choice.value)} />
-                ))}
-              </div>
-              {needsLinearFt && (
-                <Field label="Linear ft sprayed" className="tech-visit-field">
-                  <Input className="tech-visit-control" type="number" inputMode="decimal" min="0" step="any" value={linearFt} onChange={(e) => setLinearFt(e.target.value)} />
-                </Field>
-              )}
-
-              {rating.allowed && (
-                <>
-                  <h3 className="tech-visit-section-title">Activity seen</h3>
-                  <div className="tech-visit-tile-grid">
-                    {ACTIVITY_LEVELS.map((level) => (
-                      <Chip disabled={locked} key={level.value} label={rating.scaleLabels?.[level.rating] || level.label} pressed={activity === level.value} onClick={() => setActivity(level.value)} />
-                    ))}
-                  </div>
-                </>
-              )}
-
-              <Field label="Note (optional)" className="tech-visit-field">
-                <Input className="tech-visit-control" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Anything for the next visit" />
-              </Field>
-              </fieldset>
-
-              {submitting &&<ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
-            </div>
-            <footer className="tech-visit-footer">
-              {error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{error}</ActionFeedback>}
-              {missingReason && !failure && <p className="tech-visit-muted" role="status">{missingReason}</p>}
-              <div className="tech-visit-actions">
-                <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={handleSubmit} loading={submitting} disabled={failure === 'terminal' || (!!missingReason && !retryPending)}>
-                  {retryPending ? 'Retry' : 'Complete re-service'}
-                </Button>
-              </div>
-            </footer>
-          </>
-        )}
+        <SheetBody service={service} ctx={ctx} submission={submission} locked={locked} onCompleted={onCompleted} />
       </section>
     </UiSurface>,
     document.body,
   );
 }
 
+function SheetBody({ service, ctx, submission, locked, onCompleted }) {
+  if (submission.done) {
+    return (
+      <div className="tech-visit-body">
+        <div className="tech-visit-card">
+          <p className="tech-visit-muted">{[service?.address, service?.timeLabel].filter(Boolean).join(' · ') || 'This visit'}</p>
+          <p>{submission.done.summary}</p>
+        </div>
+        <div className="tech-visit-actions">
+          <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={() => onCompleted?.()}>Next stop</Button>
+        </div>
+      </div>
+    );
+  }
+  if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
+  const stop = ctx.loadError || ctx.blockedReason;
+  if (stop) return <ActionFeedback error={!!ctx.loadError} className="tech-visit-feedback tech-visit-loading">{stop}</ActionFeedback>;
+  return <FastCompleteForm service={service} ctx={ctx} submission={submission} locked={locked} />;
+}
+
+function FastCompleteForm({ service, ctx, submission, locked }) {
+  const [rows, setRows] = useState(ctx.rows);
+  const [editAmounts, setEditAmounts] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState(() => ({
+    pests: new Set(), otherPest: '', areas: new Set(), method: 'spot_treatment', linearFt: '', activity: '', note: '',
+  }));
+  const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
+
+  const updateRow = useCallback((productId, patch) => {
+    setRows((prev) => prev.map((row) => (row.productId === productId ? { ...row, ...patch } : row)));
+  }, []);
+  // An added product has no house-mix total, so the amount editor opens and
+  // Complete stays blocked until the tech enters what they used.
+  const addProduct = useCallback((product) => {
+    setRows((prev) => (prev.some((row) => row.productId === product.id)
+      ? prev.map((row) => (row.productId === product.id ? { ...row, active: true } : row))
+      : [...prev, productRow(product, service?.serviceType, '')]));
+    setEditAmounts(true);
+    setAdding(false);
+  }, [service?.serviceType]);
+  // A rate typed for one spray method doesn't carry to another.
+  const chooseMethod = useCallback((next) => {
+    setField('method', next);
+    setRows((prev) => prev.map((row) => (SPRAY_METHODS.has(row.catalogMethod) ? { ...row, rateInput: null } : row)));
+  }, [setField]);
+
+  const missingReason = missingRequirement(form, rows, ctx.rating.allowed);
+  const submit = () => {
+    if (missingReason && !submission.hasPendingBody()) return;
+    const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
+    submission.submit(
+      () => completionBody(form, rows, { visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed }),
+      `${names} · ${targetsOf(form).join(', ')}`,
+    );
+  };
+
+  if (adding) {
+    return (
+      <div className="tech-visit-body">
+        <AddProductPanel catalog={ctx.catalog} rows={rows} onPick={addProduct} onBack={() => setAdding(false)} />
+      </div>
+    );
+  }
+  return (
+    <>
+      <div className="tech-visit-body">
+        <fieldset className="tech-visit-form" disabled={locked}>
+          <ProductsSection
+            rows={rows}
+            method={form.method}
+            editAmounts={editAmounts}
+            locked={locked}
+            onToggleEdit={() => setEditAmounts((on) => !on)}
+            onToggleRow={(row) => updateRow(row.productId, { active: !row.active })}
+            onUpdateRow={updateRow}
+            onAdd={() => setAdding(true)}
+          />
+          <PestsSection form={form} setField={setField} locked={locked} />
+          <ChoiceSection title="Where" columns={3}>
+            {AREA_CHIPS.map((label) => (
+              <Chip disabled={locked} key={label} label={label} pressed={form.areas.has(label)} onClick={() => setField('areas', toggleInSet(form.areas, label))} />
+            ))}
+          </ChoiceSection>
+          <MethodSection form={form} rows={rows} setField={setField} chooseMethod={chooseMethod} locked={locked} />
+          {ctx.rating.allowed && (
+            <ChoiceSection title="Activity seen" columns={4}>
+              {ACTIVITY_LEVELS.map((level) => (
+                <Chip disabled={locked} key={level.value} label={ctx.rating.scaleLabels?.[level.rating] || level.label} pressed={form.activity === level.value} onClick={() => setField('activity', level.value)} />
+              ))}
+            </ChoiceSection>
+          )}
+          <NoteField note={form.note} onChange={(value) => setField('note', value)} />
+        </fieldset>
+        {submission.submitting && <ActionFeedback className="tech-visit-feedback">Saving completion…</ActionFeedback>}
+      </div>
+      <footer className="tech-visit-footer">
+        {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
+        {missingReason && !submission.failure && <p className="tech-visit-muted" role="status">{missingReason}</p>}
+        <div className="tech-visit-actions">
+          <Button
+            className="tech-visit-action tech-visit-complete tech-visit-wide"
+            onClick={submit}
+            loading={submission.submitting}
+            disabled={submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
+          >
+            {submission.retryPending ? 'Retry' : 'Complete re-service'}
+          </Button>
+        </div>
+      </footer>
+    </>
+  );
+}
+
+function ProductsSection({ rows, method, editAmounts, locked, onToggleEdit, onToggleRow, onUpdateRow, onAdd }) {
+  return (
+    <>
+    <ChoiceSection
+      title="Products used"
+      action={(
+        <Button type="button" variant="ghost" className="tech-visit-action" aria-pressed={editAmounts} onClick={onToggleEdit}>
+          {editAmounts ? 'Done' : 'Edit amounts'}
+        </Button>
+      )}
+    >
+      {rows.map((row) => (
+        <Chip
+          disabled={locked}
+          key={row.productId}
+          label={hasAmount(row) ? `${row.name} — ${row.totalAmount} ${unitLabel(row.amountUnit)}` : `${row.name} — amount?`}
+          pressed={row.active}
+          onClick={() => onToggleRow(row)}
+          className={!row.active ? 'tech-visit-product--off' : undefined}
+        />
+      ))}
+      <Chip disabled={locked} label="+ Add product" onClick={onAdd} />
+    </ChoiceSection>
+    {editAmounts && rows.filter((row) => row.active).map((row) => (
+      <AmountRow key={row.productId} row={row} rate={rowRate(row, method)} onChange={(patch) => onUpdateRow(row.productId, patch)} />
+    ))}
+    </>
+  );
+}
+
+function PestsSection({ form, setField, locked }) {
+  const [showMore, setShowMore] = useState(false);
+  const toggle = (label) => setField('pests', toggleInSet(form.pests, label));
+  return (
+    <>
+      <ChoiceSection
+        title="Pests targeted"
+        columns={3}
+        action={!showMore && <Button type="button" variant="ghost" className="tech-visit-action" onClick={() => setShowMore(true)}>More</Button>}
+      >
+        {(showMore ? [...PEST_CHIPS, ...PEST_CHIPS_MORE] : PEST_CHIPS).map((label) => (
+          <Chip disabled={locked} key={label} label={label} pressed={form.pests.has(label)} onClick={() => toggle(label)} />
+        ))}
+      </ChoiceSection>
+      {form.pests.has('Other') && (
+        <Field label="Which pest?" className="tech-visit-field">
+          <Input className="tech-visit-control" value={form.otherPest} onChange={(e) => setField('otherPest', e.target.value)} placeholder="e.g. palmetto bugs" />
+        </Field>
+      )}
+    </>
+  );
+}
+
+function MethodSection({ form, rows, setField, chooseMethod, locked }) {
+  const needsLinearFt = rows.some((row) => row.active && rowMethod(row, form.method) === 'perimeter_spray');
+  return (
+    <>
+      <ChoiceSection title="How">
+        {METHOD_CHOICES.map((choice) => (
+          <Chip disabled={locked} key={choice.value} label={choice.label} pressed={form.method === choice.value} onClick={() => chooseMethod(choice.value)} />
+        ))}
+      </ChoiceSection>
+      {needsLinearFt && (
+        <Field label="Linear ft sprayed" className="tech-visit-field">
+          <Input className="tech-visit-control" type="number" inputMode="decimal" min="0" step="any" value={form.linearFt} onChange={(e) => setField('linearFt', e.target.value)} />
+        </Field>
+      )}
+    </>
+  );
+}
+
+// Optional, so it stays one tap away until the tech wants it.
+function NoteField({ note, onChange }) {
+  const [open, setOpen] = useState(!!note);
+  if (!open) {
+    return <Button type="button" variant="ghost" className="tech-visit-action" onClick={() => setOpen(true)}>+ Add note</Button>;
+  }
+  return (
+    <Field label="Note (optional)" className="tech-visit-field">
+      <Input className="tech-visit-control" value={note} onChange={(e) => onChange(e.target.value)} placeholder="Anything for the next visit" autoFocus />
+    </Field>
+  );
+}
+
 function AmountRow({ row, rate, onChange }) {
   const inputId = useId();
   const rateId = useId();
+  const units = AMOUNT_UNITS.includes(row.amountUnit) ? AMOUNT_UNITS : [...AMOUNT_UNITS, row.amountUnit];
+  const overLabel = rate.max != null && parseFloat(rate.rate) > rate.max;
   return (
-    <>
-    <div className="tech-visit-amount-row">
-      <label htmlFor={inputId} className="tech-visit-amount-label">{row.name}</label>
-      <Input
-        id={inputId}
-        className="tech-visit-control"
-        type="number"
-        inputMode="decimal"
-        min="0"
-        step="any"
-        value={row.totalAmount ?? ''}
-        onChange={(e) => onChange({ totalAmount: e.target.value })}
-      />
-      <select
-        className="ui-control tech-visit-control"
-        aria-label={`Unit for ${row.name}`}
-        value={row.amountUnit || DEFAULT_MIX_UNIT}
-        onChange={(e) => onChange({ amountUnit: e.target.value })}
-      >
-        {(AMOUNT_UNITS.includes(row.amountUnit) ? AMOUNT_UNITS : [...AMOUNT_UNITS, row.amountUnit]).map((unit) => (
-          <option key={unit} value={unit}>{unitLabel(unit)}</option>
-        ))}
-      </select>
-    </div>
-    {rate.rateUnit ? (
+    <div className="tech-visit-amount-block">
       <div className="tech-visit-amount-row">
-        <label htmlFor={rateId} className="tech-visit-amount-label">{`${row.name} rate`}</label>
+        <label htmlFor={inputId} className="tech-visit-amount-label">{row.name}</label>
         <Input
-          id={rateId}
+          id={inputId}
           className="tech-visit-control"
           type="number"
           inputMode="decimal"
           min="0"
           step="any"
-          value={rate.rate ?? ''}
-          onChange={(e) => onChange({ rateInput: e.target.value })}
+          value={row.totalAmount ?? ''}
+          onChange={(e) => onChange({ totalAmount: e.target.value })}
         />
-        <span className="tech-visit-amount-label">{unitLabel(rate.rateUnit)}</span>
+        <select
+          className="ui-control tech-visit-control"
+          aria-label={`Unit for ${row.name}`}
+          value={row.amountUnit || DEFAULT_MIX_UNIT}
+          onChange={(e) => onChange({ amountUnit: e.target.value })}
+        >
+          {units.map((unit) => <option key={unit} value={unit}>{unitLabel(unit)}</option>)}
+        </select>
       </div>
-    ) : null}
-    </>
+      {rate.rateUnit ? (
+        <div className="tech-visit-amount-row">
+          <label htmlFor={rateId} className="tech-visit-amount-label">{`${row.name} rate`}</label>
+          <Input
+            id={rateId}
+            className="tech-visit-control"
+            type="number"
+            inputMode="decimal"
+            min="0"
+            step="any"
+            value={rate.rate ?? ''}
+            onChange={(e) => onChange({ rateInput: e.target.value })}
+          />
+          <span className="tech-visit-amount-label">{unitLabel(rate.rateUnit)}</span>
+        </div>
+      ) : null}
+      {overLabel && <p className="tech-visit-warning" role="status">&gt; label max {rate.max}</p>}
+    </div>
   );
 }
 
-function AddProductPanel({ products, query, setQuery, onPick, onBack }) {
+function AddProductPanel({ catalog, rows, onPick, onBack }) {
+  const [query, setQuery] = useState('');
+  const products = useMemo(() => {
+    const already = new Set(rows.map((row) => row.productId));
+    const q = query.trim().toLowerCase();
+    return catalog
+      .filter((p) => !already.has(p.id) && (!q || String(p.name || '').toLowerCase().includes(q)))
+      .slice(0, 40);
+  }, [catalog, rows, query]);
   return (
     <>
       <Button type="button" variant="ghost" className="tech-visit-action" onClick={onBack}>← Back</Button>
       <Field label="Search products" className="tech-visit-field">
         <Input className="tech-visit-control" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Product name" autoFocus />
       </Field>
-      <div className="tech-visit-tile-grid">
+      <div className="tech-visit-tile-grid tech-visit-tile-grid--2">
         {products.length === 0
           ? <p className="tech-visit-muted">No matching products.</p>
           : products.map((product) => <Chip key={product.id} label={product.name} onClick={() => onPick(product)} />)}

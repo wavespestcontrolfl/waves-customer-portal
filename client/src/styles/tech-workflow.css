@@ -111,6 +111,13 @@
    activity) — a fixed 2-column grid instead of the recap modal's wrapping
    flex row, per the owner's one-screen spec. */
 .tech-visit-tile-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
+/* Compact choice rows so the Fast Complete choices fit a typical phone
+   screen: three- or four-across tiles, tighter section rhythm. */
+.tech-visit-tile-grid--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.tech-visit-tile-grid--4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.tech-visit-choice-section { margin-bottom: 12px; }
+.tech-visit-choice-section .tech-visit-tile-grid { margin-bottom: 0; }
+.tech-visit-amount-block { margin-bottom: 8px; }
 .tech-visit-timeline-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 14px; }
 .tech-visit-choice { display: flex; gap: 12px; color: var(--tech-text); margin-top: 8px; font-size: 14px; }
 .tech-visit-checkbox { flex-shrink: 0; background: var(--tech-card); border-color: var(--tech-muted); }
