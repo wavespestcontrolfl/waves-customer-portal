@@ -1582,6 +1582,8 @@ async function computeEstimate(rawInput, { includeRawEngineResult = false } = {}
     };
   }
   if (needsSync()) await syncConstantsFromDB(db);
+  pricingEngineInput = await require('../pricing-engine/trusted-catalog-pricing')
+    .withTrustedCatalogPricing(pricingEngineInput, { database: db });
   const estimate = generateEstimate(pricingEngineInput);
 
   const summary = estimate?.summary || {};
@@ -2271,6 +2273,8 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
       manualDiscount: operatorAdjustmentToManualDiscount(operatorAdjustment),
     };
   }
+  pricingEngineInputs = await require('../pricing-engine/trusted-catalog-pricing')
+    .withTrustedCatalogPricing(pricingEngineInputs, { database: db });
   const engineResult = generateEstimate(pricingEngineInputs);
   const totals = deriveTotals(engineResult);
   if (!totals.monthly && !totals.annual && !totals.oneTime) {

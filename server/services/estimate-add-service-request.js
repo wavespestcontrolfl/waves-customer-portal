@@ -195,7 +195,7 @@ function addRequestedServiceToInputs(engineInputs, estData, serviceKey, requeste
   return { added: false, updatedInputs, reason: 'unsupported_service' };
 }
 
-function buildEstimateServiceRevisionDraft(estimate = {}, requestedService) {
+async function buildEstimateServiceRevisionDraft(estimate = {}, requestedService) {
   const serviceKey = normalizeRequestedServiceKey(requestedService);
   const serviceLabel = requestedServiceLabel(serviceKey);
   const estData = parseJson(estimate.estimate_data, {}) || {};
@@ -221,7 +221,7 @@ function buildEstimateServiceRevisionDraft(estimate = {}, requestedService) {
     };
   }
 
-  const { added, updatedInputs, reason } = addRequestedServiceToInputs(engineInputs, estData, serviceKey, requestedService);
+  const { added, updatedInputs: candidateInputs, reason } = addRequestedServiceToInputs(engineInputs, estData, serviceKey, requestedService);
   if (!added) {
     return {
       status: 'not_priced',
@@ -231,6 +231,8 @@ function buildEstimateServiceRevisionDraft(estimate = {}, requestedService) {
       generatedAt: new Date().toISOString(),
     };
   }
+  const updatedInputs = await require('./pricing-engine/trusted-catalog-pricing')
+    .withTrustedCatalogPricing(candidateInputs, { database: db });
 
   // Existing-customer estimates persist the account's qualifying services at
   // save time (estData.priorQualifyingServices) OUTSIDE engineInputs. Replay
@@ -661,7 +663,7 @@ async function createEstimateAddServiceRequest({
     const customer = await resolveEstimateCustomer(trx, estimate);
     // Pass the RAW requested text, not the normalized key — seasonal intent
     // ("Seasonal Mosquito") must survive into the draft's engine inputs.
-    const pricingRevision = buildEstimateServiceRevisionDraft(estimate, requestedService);
+    const pricingRevision = await buildEstimateServiceRevisionDraft(estimate, requestedService);
     const estimateNumber = estimate.estimate_number || estimate.id;
     const subject = `Add ${serviceLabel} to estimate #${estimateNumber}`;
     const description = `Customer requested ${serviceLabel} from public estimate ${estimateNumber}. Review property details and send a revised estimate option.`;

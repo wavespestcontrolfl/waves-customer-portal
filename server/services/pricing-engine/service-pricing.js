@@ -5321,12 +5321,15 @@ function priceRodentBait(property, options = {}) {
 // RODENT TRAPPING (One-Time)
 // ============================================================
 // Standard is the ONLY trapping plan (owner directive 2026-08-26): flat
-// $350 with UNLIMITED callbacks/checks for the same active trapping job —
-// callbacks never bill. The separate Unlimited tier, the mid-program
-// upgrade, and per-callback extras are all retired; legacy plan/upgrade/
-// callback-count inputs from saved estimates are accepted and ignored so
-// a re-price never crashes. Trap-only monitoring is priced separately and
-// is not a warranty.
+// $350 covering the setup visit plus ONE trap check for the same active
+// trapping job (owner ruling 2026-09-26). Visit 3+ is not priced on the
+// estimate — the office books the separate "Rodent Trap Check -
+// Additional" catalog row ($95) when the job needs it, so the extra checks
+// never enter a bundle discount. The Unlimited tier, the mid-program
+// upgrade, and estimate-time callback extras stay retired; legacy plan/
+// upgrade/callback-count inputs from saved estimates are accepted and
+// ignored so a re-price never crashes. Trap-only monitoring is priced
+// separately and is not a warranty.
 //
 // Inputs:
 //   property: { footprint, lotSqFt, features }
@@ -5342,6 +5345,10 @@ function _bracketLookup(value, brackets, key) {
 function priceRodentTrapping(property, options = {}) {
   const cfg = RODENT.trapping;
   const { emergency = false } = options;
+  const catalogAdditionalCheckPrice = Number(options.additionalCheckPrice);
+  const additionalCheckPrice = Number.isFinite(catalogAdditionalCheckPrice) && catalogAdditionalCheckPrice > 0
+    ? Math.round(catalogAdditionalCheckPrice * 100) / 100
+    : cfg.additionalCheckPrice;
   const callbacksUsed = Math.max(0, Math.floor(Number(options.callbacksUsed) || 0));
   const requestedExtraCallbacks = Math.max(0, Math.floor(Number(options.extraCallbackCount) || 0));
   const trappingBasePrice = cfg.standardPrice;
@@ -5355,12 +5362,12 @@ function priceRodentTrapping(property, options = {}) {
   const price = Math.round(trappingBasePrice + emergencySurcharge);
   const name = 'Rodent Trapping - Standard';
   const warnings = [
-    'Unlimited callbacks apply to the same active trapping job only, not lifetime coverage or new infestations after job closure.',
+    `Includes the setup visit and ${cfg.includedFollowUps} trap check for the same active trapping job; book any further check as "Rodent Trap Check - Additional" ($${additionalCheckPrice}).`,
   ];
   if (requestedExtraCallbacks > 0) {
-    warnings.push('Callbacks are unlimited on the Standard trapping plan — extra callback charges no longer apply.');
+    warnings.push('Extra trap checks are not priced on the estimate — book them as "Rodent Trap Check - Additional" when needed.');
   }
-  const detail = cfg.invoiceDescriptions.standard;
+  const detail = cfg.invoiceDescriptions.standard(additionalCheckPrice);
 
   return {
     service: 'rodent_trapping',
@@ -5386,17 +5393,18 @@ function priceRodentTrapping(property, options = {}) {
     base: trappingBasePrice,
     trappingBasePrice,
     rodentTrappingPlan: 'standard',
-    includedCallbacks: 'unlimited',
+    includedCallbacks: cfg.includedFollowUps,
     callbacksUsed,
     extraCallbackCount: 0,
     extraCallbackPrice: 0,
     extraCallbackAllowed: false,
-    unlimitedCallbacks: true,
+    additionalCheckPrice,
+    unlimitedCallbacks: false,
     emergency,
     emergencySurcharge: Math.round(emergencySurcharge),
     emergencySurchargeApplied: emergencySurcharge > 0,
     emergencySurchargeAmount: Math.round(emergencySurcharge),
-    includedFollowUps: 'unlimited',
+    includedFollowUps: cfg.includedFollowUps,
     activeWindowDays: null,
     customRecommended: false,
     requiresCustomQuote: false,
@@ -5412,6 +5420,8 @@ function priceRodentTrapping(property, options = {}) {
     pricingSource: 'rodent_trapping_standard_only_2026',
     pricingBasis: {
       standardPrice: cfg.standardPrice,
+      includedFollowUps: cfg.includedFollowUps,
+      additionalCheckPrice,
       emergencyMultiplier: cfg.emergencyMultiplier,
       emergencyMinimumSurcharge: cfg.emergencyMinimumSurcharge,
     },
@@ -5421,9 +5431,11 @@ function priceRodentTrapping(property, options = {}) {
 // ============================================================
 // RODENT TRAPPING — ADDITIONAL FOLLOW-UP VISITS
 // ============================================================
-// Callbacks are unlimited on the Standard plan (owner 2026-08-26), so
-// trap checks for the same active trapping job are always included — no
-// per-callback billing.
+// Legacy explicit trap-check rows on saved estimates. No current surface
+// sends this input; estimates that carry it were sold while checks were
+// included (owner 2026-08-26), and the 2026-09-26 ruling grandfathers
+// those jobs — so the rows stay $0. New extra checks are never priced on
+// an estimate: the office books "Rodent Trap Check - Additional".
 function priceRodentTrappingFollowups(count = 1) {
   const n = Math.max(0, Math.floor(count));
   if (n === 0) return null;
@@ -5434,7 +5446,6 @@ function priceRodentTrappingFollowups(count = 1) {
     perVisit: 0,
     price: 0,
     included: true,
-    unlimitedCallbacks: true,
     requiresCustomQuote: false,
     quoteRequired: false,
     customQuoteReason: null,
