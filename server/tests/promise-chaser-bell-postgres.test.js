@@ -32,13 +32,14 @@ const OUR_NUMBER = '+19415550100';
   let database;
   const schema = `promise_chaser_${randomUUID().replaceAll('-', '')}`;
   const tables = ['call_log', 'call_commitments', 'scheduled_services', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'audit_log'];
-  // system_settings is cloned separately, WITH its real primary key on
-  // `key` (LIKE ... INCLUDING ALL, unlike every other table's plain
-  // WITH NO DATA copy above) — persistedActivationBoundary's own
-  // onConflict('key') needs an actual unique constraint to target, and
-  // this keeps the activation row fully isolated to this suite's own
-  // schema: no writing to (or cleaning up) the real public.system_settings
-  // shared across every other suite and any real deployed environment.
+  // system_settings and promise_chaser_deliveries are cloned separately,
+  // WITH their real primary keys (LIKE ... INCLUDING ALL, unlike every
+  // other table's plain WITH NO DATA copy above): persistedActivationBoundary
+  // and the delivery-fact insert both need an actual unique constraint for
+  // their own onConflict to target, and this keeps both fully isolated to
+  // this suite's own schema — no writing to (or cleaning up) the real
+  // shared public tables.
+  const likeAllTables = ['system_settings', 'promise_chaser_deliveries'];
   let now;
   const gateNames = ['promiseChaserBell', 'callCommitments'];
   const savedGates = Object.fromEntries(gateNames.map((key) => [key, gates[key]]));
@@ -47,7 +48,7 @@ const OUR_NUMBER = '+19415550100';
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema, 'public'], pool: { min: 0, max: 3 } });
     await database.raw('CREATE SCHEMA ??', [schema]);
     for (const table of tables) await database.raw('CREATE TABLE ??.?? AS SELECT * FROM public.?? WITH NO DATA', [schema, table, table]);
-    await database.raw('CREATE TABLE ??.system_settings (LIKE public.system_settings INCLUDING ALL)', [schema]);
+    for (const table of likeAllTables) await database.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
     mockConn = database;
     gateNames.forEach((key) => { gates[key] = true; });
   });
@@ -75,7 +76,7 @@ const OUR_NUMBER = '+19415550100';
   afterEach(async () => {
     jest.restoreAllMocks();
     delete process.env.PROMISE_CHASER_ACTIVATED_AT;
-    for (const table of [...tables, 'system_settings']) await database.raw('TRUNCATE TABLE ??.?? CASCADE', [schema, table]);
+    for (const table of [...tables, ...likeAllTables]) await database.raw('TRUNCATE TABLE ??.?? CASCADE', [schema, table]);
     expect(logger.warn.mock.calls).toEqual([]);
   });
   afterAll(async () => {
@@ -372,25 +373,78 @@ const OUR_NUMBER = '+19415550100';
     expect(triggerNotification.mock.calls[0][1].commitmentId).toBe(commitment.id);
   });
 
-  test("a push-only admin isn't double-pushed on the second tick — the SAME dedupeKey (push tag) carries across dispatches even with no bell to check against", async () => {
-    const earlier = callRow(240);
-    const commitment = commitmentRow(earlier.id);
-    const back = callRow(0);
-    await mockConn('call_log').insert([earlier, back]);
-    await mockConn('call_commitments').insert(commitment);
+  describe('promise_chaser_deliveries — durable fact for push-only recipients (Codex #5019 r19/r20 P1)', () => {
+    test('a push-only admin (no bell ever written) is buzzed exactly ONCE across repeated ticks', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
 
-    // Every admin is push-only: no bell is ever written, so this file's
-    // own pre-check has nothing durable to find on the second tick —
-    // notification-triggers.js's own dedupeKey push tag (kept, unchanged)
-    // is what keeps the device from showing two notifications, by
-    // coalescing on the SAME tag both times.
-    triggerNotification.mockResolvedValue({ bellWritten: false, push: { sent: 1 } });
-    expect(await sweepPromiseChasers()).toBe(1);
-    expect(await sweepPromiseChasers()).toBe(1);
-    expect(triggerNotification).toHaveBeenCalledTimes(2);
-    const [[, , opts1], [, , opts2]] = triggerNotification.mock.calls;
-    expect(opts1.dedupeKey).toBe(opts2.dedupeKey);
-    expect(opts1.dedupeKey).toBe(`promise_chaser:${commitment.id}:0:${etDateString(new Date(now))}`);
+      // Every admin is push-only: no bell is ever written, so the
+      // notifications-table check alone has nothing to find on a later
+      // tick — the promise_chaser_deliveries row this dispatch writes is
+      // what stops the redispatch, not the push tag (which only replaces a
+      // notification still showing — dismissed or clicked, the next push
+      // shows again).
+      triggerNotification.mockResolvedValue({ bellWritten: false, push: { sent: 1 } });
+      expect(await sweepPromiseChasers()).toBe(1); // this tick delivers it
+      expect(await sweepPromiseChasers()).toBe(0); // later ticks find the durable fact and skip
+      expect(await sweepPromiseChasers()).toBe(0);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+      const [, , opts] = triggerNotification.mock.calls[0];
+      const dedupeKey = `promise_chaser:${commitment.id}:0:${etDateString(new Date(now))}`;
+      expect(opts.dedupeKey).toBe(dedupeKey);
+      const row = await mockConn('promise_chaser_deliveries').where({ dedupe_key: dedupeKey }).first('dedupe_key');
+      expect(row).toBeTruthy();
+    });
+
+    test('a bell+push admin is unchanged — the notifications-row check alone still stops the redispatch', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      // The default mock (see beforeEach) writes a real notifications row
+      // whenever bellWritten is true — the FIRST, unconditional check.
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(await sweepPromiseChasers()).toBe(0);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+    });
+
+    test('housekeeping deletes delivery-fact rows older than the retention window; recent ones survive', async () => {
+      const staleKey = 'promise_chaser:fixture-stale:0:2020-01-01';
+      const freshKey = 'promise_chaser:fixture-fresh:0:2020-01-01';
+      await mockConn('promise_chaser_deliveries').insert([
+        { dedupe_key: staleKey, delivered_at: new Date(now - 10 * 24 * 60 * 60 * 1000) },
+        { dedupe_key: freshKey, delivered_at: new Date(now - 6 * 60 * 60 * 1000) },
+      ]);
+      expect(await sweepPromiseChasers()).toBe(0); // nothing else to ring this tick
+      const remaining = await mockConn('promise_chaser_deliveries').pluck('dedupe_key');
+      expect(remaining).toEqual([freshKey]);
+    });
+
+    test('gate off never queries promise_chaser_deliveries either — no housekeeping, no dispatch', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+      const staleKey = 'promise_chaser:fixture-stale:0:2020-01-01';
+      await mockConn('promise_chaser_deliveries').insert({ dedupe_key: staleKey, delivered_at: new Date(now - 10 * 24 * 60 * 60 * 1000) });
+
+      gates.promiseChaserBell = false;
+      try {
+        expect(await sweepPromiseChasers()).toBe(0);
+      } finally {
+        gates.promiseChaserBell = true;
+      }
+      expect(triggerNotification).not.toHaveBeenCalled();
+      // Untouched — the gate check is the very first thing sweepPromiseChasers does.
+      const row = await mockConn('promise_chaser_deliveries').where({ dedupe_key: staleKey }).first('dedupe_key');
+      expect(row).toBeTruthy();
+    });
   });
 
   test('gate off is a hard no-op — no dispatch', async () => {

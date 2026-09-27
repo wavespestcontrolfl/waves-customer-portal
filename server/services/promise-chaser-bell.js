@@ -43,14 +43,21 @@
  * wrong promise or the wrong day, and a defer/release livelock between two
  * staggered callers). None of that machinery exists to have those bugs.
  *
- * Idempotency instead rests on ONE fact: a bell row already exists for this
- * exact promise+ET-day. That is the SAME durable "already delivered" check
- * missed-call-bell.js / repeat-caller-bell.js both use — a straight read of
- * the notifications table, never per-admin bell/push preferences — checked
- * BEFORE ever calling triggerNotification, so a tick that finds one simply
- * returns without touching the dispatch pipeline at all. A partial push is
- * NOT retried: once the bell row exists, that promise+day is done, exactly
- * like those two bells' own "a persisted bell proves delivery" rule.
+ * Idempotency rests on TWO durable facts, either one enough to skip a
+ * redispatch, both checked BEFORE ever calling triggerNotification: a bell
+ * row already exists for this exact promise+ET-day (the SAME check
+ * missed-call-bell.js / repeat-caller-bell.js both use — a straight read
+ * of the notifications table, never per-admin bell/push preferences), or a
+ * promise_chaser_deliveries row exists for the same dedupeKey (a plain
+ * fact table, not claim machinery: no ownership, no expiry, no retry
+ * bookkeeping — see that migration's own docstring). The second exists
+ * because a shop where every admin is push-only never gets a bell row at
+ * all, and a matching push tag only silently replaces a notification still
+ * showing — once staff dismiss or open it, the next tick's push shows
+ * again with no durable trace anywhere (Codex #5019 r19/r20 P1). A partial
+ * push is NOT retried: once either fact exists, that promise+day is done,
+ * exactly like those two bells' own "a persisted bell proves delivery"
+ * rule.
  *
  * The sweep window's floor is a PERSISTED first-activation boundary
  * (activationBoundary / persistedActivationBoundary below), exactly
@@ -309,14 +316,22 @@ async function ringForCall(call, now = new Date()) {
   // repeat-caller-bell.js both use before an atomic-claim reclaim — a
   // durable notifications row, never per-admin bell/push preferences: a
   // bell written with every admin push-disabled still counts as delivered.
+  //
   // A shop where every admin is push-only never gets a bell row at all
-  // (notifyAdmin only writes one for a bell-enabled recipient) — that
-  // narrow case relies on notification-triggers.js's own dedupeKey push tag
-  // (kept, unchanged) to coalesce at the device instead, same as it always
-  // has for this trigger.
+  // (notifyAdmin only writes one for a bell-enabled recipient), so this
+  // check alone had nothing to find there — a matching push tag only
+  // silently replaces a notification still showing on the device; once
+  // staff dismiss or open it, the next tick's push displays again (Codex
+  // #5019 r19/r20 P1, confirmed against client/public/sw.js). The second
+  // check (promise_chaser_deliveries — a plain fact, not a claim: no
+  // ownership, no expiry, no retry bookkeeping, same idea as
+  // sms_reply_alert_claims / missed_call_text_claims) covers exactly that
+  // gap, alongside — never instead of — the notifications check.
   const alreadyRung = await db('notifications').where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('id');
   if (alreadyRung) return false;
+  const alreadyDelivered = await db('promise_chaser_deliveries').where({ dedupe_key: dedupeKey }).first('dedupe_key');
+  if (alreadyDelivered) return false;
 
   const customer = call.customer_id
     ? await db('customers').where('id', call.customer_id).first('first_name', 'last_name')
@@ -368,7 +383,22 @@ async function ringForCall(call, now = new Date()) {
   // triggerNotification never throws, so a swallowed insert failure or a
   // failed preferences lookup simply reads as "nothing delivered" here;
   // the next tick tries again.
-  return Boolean(stats && (stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+  const delivered = Boolean(stats && (stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+  if (delivered) {
+    // Recorded AFTER dispatch, never before: the sweep is already
+    // serialized (runExclusive, scheduler.js), so there is no concurrent
+    // attempt to claim against — this is a fact about what just happened,
+    // not a lock taken before it. ON CONFLICT DO NOTHING since a bell
+    // write can ALSO satisfy the (unconditional) notifications check next
+    // time, making this row redundant but never wrong. A write failure
+    // here is logged and swallowed: the event already delivered, and a
+    // retried send next tick (same dedupeKey, so still a single bell rewrite
+    // or a same-tag push) is an acceptable cost against silently losing the
+    // "already delivered" fact.
+    await db('promise_chaser_deliveries').insert({ dedupe_key: dedupeKey }).onConflict('dedupe_key').ignore()
+      .catch((err) => logger.warn(`[promise-chaser-bell] delivery-fact insert failed for ${dedupeKey}: ${err.message}`));
+  }
+  return delivered;
 }
 
 /**
@@ -390,9 +420,18 @@ async function ringForCall(call, now = new Date()) {
  * further along; paging to a SHORT page (fewer rows than pageSize) instead
  * of a fixed cap means the whole window is always covered in one tick.
  */
+// How long a promise_chaser_deliveries row is kept — dedupeKey already
+// carries the ET day (and, when renewed, the renewal instant) as part of
+// its own identity, so a row this old can never match a live key again;
+// bounded housekeeping, same posture as every other gate-off-skips-it
+// query in this file.
+const DELIVERY_FACT_RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
+
 async function sweepPromiseChasers({ pageSize = 200 } = {}) {
   if (!isEnabled('promiseChaserBell') || !isEnabled('callCommitments')) return 0;
   const now = new Date();
+  await db('promise_chaser_deliveries').where('delivered_at', '<', new Date(now.getTime() - DELIVERY_FACT_RETENTION_MS)).del()
+    .catch((err) => logger.warn(`[promise-chaser-bell] delivery-fact housekeeping failed: ${err.message}`));
   const since = await sweepSince(db, now);
   let rang = 0;
   let cursor = null;
