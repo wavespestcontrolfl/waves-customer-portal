@@ -503,18 +503,23 @@ function validateNewProduct(raw, ctx) {
     return { kind: 'unsure', status: 'agent_unsure', reason: 'the amount does not convert to the derived inventory unit' };
   }
 
-  const titleEpa = extractEpaRegNumber(rawTitle); // deterministic — never the model's own transcription
   // The model's own active_ingredient is NEVER persisted, even when it looks
   // plausible: it's printed on service reports and PDFs, and nothing here
   // checks it against the title the way every number above is checked.
   // Leaving it undefined lets createCatalogProduct write its own
   // 'Unknown - pending SDS' placeholder, same as the admin "add product"
-  // screen — a person confirms the real value from the SDS.
+  // screen — a person confirms the real value from the SDS. Nor is an EPA
+  // registration number the listing states (read by regex, never the
+  // model's transcription): it's still vendor-typed text — a typo, another
+  // pack variant's number — and the catalog's number prints on service
+  // reports and application records. It rides along as
+  // listingEpaRegNumber, named in the bell for a person to confirm from the
+  // label (2026-09-27 pre-push audit).
   return {
     kind: 'new_product', status: 'logged', amount: reading.amount, unit: reading.unit, reading: raw.reading,
     newProduct: {
       name, category, containerSize: canonicalSizeText(reading.sizeNumber, reading.unit), inventoryUnit,
-      activeIngredient: undefined, epaRegNumber: titleEpa,
+      activeIngredient: undefined, listingEpaRegNumber: extractEpaRegNumber(rawTitle),
     },
   };
 }
@@ -920,7 +925,6 @@ async function resolveNewProduct(trx, { line, vendor, decision }) {
     name: decision.newProduct.name,
     category: decision.newProduct.category,
     activeIngredient: decision.newProduct.activeIngredient || undefined,
-    epaRegNumber: decision.newProduct.epaRegNumber || undefined,
     unitSize: decision.newProduct.containerSize,
     inventoryUnit: decision.newProduct.inventoryUnit,
     // The application unit matches the stock unit, so a visit recording
@@ -941,7 +945,10 @@ async function resolveNewProduct(trx, { line, vendor, decision }) {
   if (!created) return { ok: false, stop: { outcome: { applied: false, reason: 'name_collision_retry' } } };
   return {
     ok: true, productId: created.id, createdProductId: created.id,
-    catalogChangeNote: `added "${created.name}" to the catalog`, originalProductFields: null,
+    catalogChangeNote: `added "${created.name}" to the catalog${decision.newProduct.listingEpaRegNumber
+      ? `; the listing gives EPA Reg. No. ${decision.newProduct.listingEpaRegNumber}, so confirm it from the label and enter it on the product`
+      : ''}`,
+    originalProductFields: null,
   };
 }
 

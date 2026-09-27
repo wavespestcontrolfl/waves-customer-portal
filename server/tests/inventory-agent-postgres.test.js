@@ -889,6 +889,24 @@ jest.setTimeout(30000);
     expect(rows.length).toBeGreaterThan(0);
   });
 
+  // 2026-09-27 pre-push audit: a listing's EPA number is vendor-typed text;
+  // the catalog's prints on service reports and application records.
+  test('a new product never takes the listing\'s EPA number — the bell asks a person to confirm it from the label', async () => {
+    const line = await pendingLine({ raw_title: 'Bifen XTS Insecticide 96 oz EPA Reg. No. 279-3206', shipment_key: 'ship-epa' });
+    await run({ ok: true, json: {
+      kind: 'new_product', reason: 'not in the catalog', product_id: null,
+      new_product: { name: 'Bifen XTS', category: 'insecticide', active_ingredient: null, epa_reg_no: '279-3206' },
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    } });
+    const created = await mockConn('products_catalog').where({ name: 'Bifen XTS' }).first();
+    // createCatalogProduct's own placeholder, same as the admin add screen.
+    expect(created.epa_reg_number).toBe('N/A');
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved.agent_decision.newProduct).toMatchObject({ listingEpaRegNumber: '279-3206' });
+    const [bell] = await bellsFor(line.id);
+    expect(bell.body).toMatch(/the listing gives EPA Reg\. No\. 279-3206, so confirm it from the label/);
+  });
+
   test('a real hand-off through processReceiptLine saves handoffFrom, and a gate-off drain restores that status', async () => {
     const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
     const { drainAgentQueue } = require('../services/purchase-receipts/inventory-agent');

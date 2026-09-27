@@ -510,12 +510,15 @@ describe('classifyDecision — new_product', () => {
     expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
   });
 
-  test('the EPA reg number is read from the TITLE by regex, never trusted from the model\'s own field', () => {
+  test('the EPA reg number is read from the TITLE by regex, never trusted from the model\'s own field, and never persisted', () => {
     const raw = { kind: 'new_product', new_product: { name: 'New Chemical', category: 'insecticide', active_ingredient: null, epa_reg_no: '99999-99999' },
       reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_count: 1 } };
     // The model's echoed epa_reg_no ('99999-99999') is NOT in the title, so it's discarded.
     const decision = classifyDecision(raw, ctx({ rawTitle: 'New Chemical 78 oz. (QGCY) EPA# - 53883-279', allowedCategories }));
-    expect(decision.newProduct.epaRegNumber).toBe('53883-279');
+    // The listing's own number is only carried for a person to confirm from
+    // the label; nothing sets it on the product (2026-09-27 pre-push audit).
+    expect(decision.newProduct.listingEpaRegNumber).toBe('53883-279');
+    expect(decision.newProduct).not.toHaveProperty('epaRegNumber');
   });
 
   test('a matched line (needs_size/size_mismatch already found a real product) refuses new_product outright — never forks the catalog', () => {
