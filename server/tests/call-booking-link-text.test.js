@@ -41,6 +41,8 @@ const {
   resolveLeadLinkage,
   activationBoundary,
   persistedActivationBoundary,
+  MODULE_LOAD_AT,
+  neverSendRecheck,
   dispatchClaimedCall,
   claimForDispatch,
   stage,
@@ -105,10 +107,33 @@ describe('callEndFor', () => {
     expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:03:00Z').getTime());
   });
 
-  test('a bridged row: end is bridged_at + duration, regardless of created_at', () => {
+  test('a bridged row with no recording duration: end is bridged_at + duration_seconds, regardless of created_at', () => {
     const call = {
       direction: 'outbound', created_at: new Date('2026-09-26T18:50:00Z'), // dialing started here
       bridged_at: new Date('2026-09-26T19:00:00Z'), duration_seconds: 240, // the answer, 10 min later
+    };
+    expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:04:00Z').getTime());
+  });
+
+  // codex r2 P2: duration_seconds is the PARENT (admin) leg's length,
+  // starting at the admin's OWN answer — earlier than bridged_at (dial
+  // start) — so bridged_at + duration_seconds double-counts the press-1
+  // prompt and the customer's ring time. recording_duration_seconds
+  // (record-from-answer-dual, confirmed against /outbound-connect) is the
+  // far closer proxy and takes priority when present and positive.
+  test('a bridged row WITH a recording duration: end is bridged_at + recording_duration_seconds, not the inflated duration_seconds', () => {
+    const call = {
+      direction: 'outbound', created_at: new Date('2026-09-26T18:50:00Z'),
+      bridged_at: new Date('2026-09-26T19:00:00Z'), duration_seconds: 600, // includes the press-1 prompt + customer ring
+      recording_duration_seconds: 90, // the actual recorded conversation
+    };
+    expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:01:30Z').getTime());
+  });
+
+  test('a bridged row with a zero/missing recording duration falls back to duration_seconds', () => {
+    const call = {
+      direction: 'outbound', created_at: new Date('2026-09-26T18:50:00Z'),
+      bridged_at: new Date('2026-09-26T19:00:00Z'), duration_seconds: 240, recording_duration_seconds: 0,
     };
     expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:04:00Z').getTime());
   });
@@ -356,7 +381,13 @@ describe('activationBoundary / persistedActivationBoundary', () => {
     expect(insert).not.toHaveBeenCalled();
   });
 
-  test('the first live sweep anywhere to find nothing stored writes now() (onConflict-ignore), then reads it back', async () => {
+  // codex r2 P2: the boundary is fixed at THIS process's own module-load
+  // time (MODULE_LOAD_AT — captured once, at require, which happens at
+  // process boot since GATE_CALL_BOOKING_LINK_TEXT can only ever be live
+  // in a process that booted with it already set), never at whatever
+  // moment the first cron tick happens to run 5 minutes later. conn.raw
+  // is no longer called at all for this write.
+  test('the first process anywhere to find nothing stored writes its OWN module-load time (onConflict-ignore), then reads it back', async () => {
     let stored = null;
     const chain = {
       where: jest.fn(() => chain),
@@ -364,11 +395,12 @@ describe('activationBoundary / persistedActivationBoundary', () => {
       insert: jest.fn((row) => { stored = row.value; return { onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) }; }),
     };
     const conn = jest.fn(() => chain);
-    conn.raw = jest.fn(async () => ({ rows: [{ now: new Date('2026-03-01T00:00:00.000Z') }] }));
+    conn.raw = jest.fn();
     const boundary = await persistedActivationBoundary(conn);
-    expect(boundary.getTime()).toBe(new Date('2026-03-01T00:00:00.000Z').getTime());
-    expect(stored).toBe('2026-03-01T00:00:00.000Z');
+    expect(boundary.getTime()).toBe(MODULE_LOAD_AT.getTime());
+    expect(stored).toBe(MODULE_LOAD_AT.toISOString());
     expect(chain.insert).toHaveBeenCalledWith(expect.objectContaining({ key: 'call_booking_link_text_activated_at' }));
+    expect(conn.raw).not.toHaveBeenCalled();
   });
 });
 
@@ -561,6 +593,49 @@ describe('stage', () => {
     const decided = await stageOne(conn, call, now, boundary);
     expect(decided).toBe('pending');
   });
+
+  // codex r2 P2: the boundary is fixed at process boot (MODULE_LOAD_AT),
+  // not at the first cron tick 5 minutes later — a call that started in
+  // that gap must be staged normally, never pre_activation.
+  test('a call starting between gate-live (module load) and the first cron tick is NOT pre_activation', async () => {
+    let storedBoundary = null;
+    const now = new Date(MODULE_LOAD_AT.getTime() + 4 * 60 * 1000); // 4 min after boot — before the first 5-min tick
+    const conn = jest.fn((table) => {
+      if (table === 'system_settings') {
+        const chain = {
+          where: jest.fn(() => chain),
+          first: jest.fn(async () => (storedBoundary ? { value: storedBoundary } : undefined)),
+          insert: jest.fn((row) => { storedBoundary = row.value; return { onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) }; }),
+        };
+        return chain;
+      }
+      const chain = {};
+      ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.update = jest.fn(async () => 1);
+      return chain;
+    });
+    conn.raw = jest.fn();
+    // This IS the first-ever establishment — exactly what a real first
+    // cron tick would do too, just via the same MODULE_LOAD_AT anchor.
+    const boundary = await activationBoundary(conn);
+    expect(boundary.getTime()).toBe(MODULE_LOAD_AT.getTime());
+
+    const call = {
+      id: 'call-boot-gap', direction: 'inbound', created_at: new Date(MODULE_LOAD_AT.getTime() + 60 * 1000), duration_seconds: 90,
+      metadata: { lead_id: 'lead-1' }, // isolates the boundary check from lead-linkage resolution
+      ai_extraction_enriched: {
+        meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
+        caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
+        property: { property_type: 'single_family' },
+        service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        sentiment_and_lead: { lead_quality: 'warm' },
+      },
+      ai_address_validation: { inServiceArea: true },
+    };
+    const decided = await stageOne(conn, call, now, boundary);
+    expect(decided).toBe('pending'); // NOT skipped as pre_activation
+  });
 });
 
 // ── outbound "return call" evidence ───────────────────────────────────────
@@ -670,6 +745,72 @@ describe('resolveLeadId / resolveLeadLinkage', () => {
     const conn = jest.fn();
     const linkage = await resolveLeadLinkage(conn, { metadata: { lead_id: 'lead-1' }, twilio_call_sid: 'CAxxx' });
     expect(linkage).toEqual({ leadId: 'lead-1', ambiguous: false });
+  });
+});
+
+// ── neverSendRecheck — the providerPreSendCheck hook ──────────────────────
+// codex r2 P2: re-runs the MUTABLE never-send predicates on the connection
+// send-customer-message.js hands this callback, right before Twilio's own
+// messages.create() — never this module's own outer `conn`.
+describe('neverSendRecheck', () => {
+  const CALL_FOR_RECHECK = { id: 'call-1', created_at: new Date('2026-09-26T15:30:00Z'), direction: 'inbound' };
+  const OPEN = { id: 'lead-1', status: 'new', converted_at: null, estimate_id: null, customer_id: null, deleted_at: null };
+
+  function dbi({ lead = OPEN, bookedSince = null, smsWithLink = null } = {}) {
+    return jest.fn((table) => {
+      const chain = {};
+      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify']
+        .forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.first = jest.fn(async () => {
+        if (table === 'leads') return lead;
+        if (table === 'scheduled_services') return bookedSince;
+        if (table === 'sms_log') return smsWithLink;
+        return undefined;
+      });
+      chain.pluck = jest.fn(async () => []);
+      return chain;
+    });
+  }
+
+  test('an open lead with no estimate, not booked, no recent link: ok', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1');
+    await expect(check({ dbi: dbi() })).resolves.toEqual({ ok: true });
+  });
+
+  test('a lead closed since dispatchIneligibleReason ran blocks the send', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1');
+    const closed = dbi({ lead: { ...OPEN, status: 'won', converted_at: new Date() } });
+    await expect(check({ dbi: closed })).resolves.toEqual({ ok: false, code: 'lead_no_longer_open' });
+  });
+
+  test('a missing lead blocks the send the same way', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1');
+    await expect(check({ dbi: dbi({ lead: null }) })).resolves.toEqual({ ok: false, code: 'lead_no_longer_open' });
+  });
+
+  test('an estimate linked since then blocks the send', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1');
+    await expect(check({ dbi: dbi({ lead: { ...OPEN, estimate_id: 'est-1' } }) })).resolves.toEqual({ ok: false, code: 'estimate_linked' });
+  });
+
+  test('booked since the call started blocks the send', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1');
+    const conn = dbi({ lead: { ...OPEN, customer_id: 'cust-1' }, bookedSince: { id: 'visit-1' } });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'booked_since_call' });
+  });
+
+  test('a link delivered in the last 14 days blocks the send', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1');
+    const conn = dbi();
+    conn.mockImplementation((table) => {
+      const chain = {};
+      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify']
+        .forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.first = jest.fn(async () => (table === 'leads' ? OPEN : (table === 'sms_log' ? { id: 'sms-1' } : undefined)));
+      chain.pluck = jest.fn(async () => (table === 'short_codes' ? ['abcd'] : []));
+      return chain;
+    });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'link_sent_recently' });
   });
 });
 
@@ -912,6 +1053,49 @@ describe('dispatchClaimedCall', () => {
     const result = await dispatchClaimedCall(conn, CALL, NOW);
     expect(result.skipped).toBe('link_unavailable:Consultation links are switched off (GATE_LEAD_INSPECTION_LINK)');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  // codex r2 P2: a PERMANENT refusal (gate off, template missing, invalid
+  // phone, ineligible lead — none of these carry `transient`) still skips
+  // terminally, exactly as above. A TRANSIENT one (a DB hiccup inside the
+  // builder itself) must requeue through the same bounded retry rail a
+  // retryable send outcome uses, never a terminal skip.
+  test('a transient link-construction failure requeues through the retry rail, not a terminal skip', async () => {
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: null, line: '', reason: 'Could not build a consultation link', transient: true });
+    const conn = makeDb();
+    const result = await dispatchClaimedCall(conn, CALL, NOW);
+    expect(result.sent).toBe(false);
+    expect(result.deferred).toBe(true);
+    expect(result.skipped).toBe('link_unavailable:Could not build a consultation link');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const rawCall = conn.raw.mock.calls.find(([, bindings]) => bindings?.[0]?.includes('"status":"pending"'));
+    expect(rawCall).toBeTruthy();
+  });
+
+  test('a transient link-construction failure past the 24h deadline gives up like any other overdue retry', async () => {
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: null, line: '', reason: 'Could not build a consultation link', transient: true });
+    const originalSendAt = new Date(NOW.getTime() - 25 * 60 * 60 * 1000).toISOString();
+    const stale = {
+      ...CALL,
+      metadata: { ...CALL.metadata, call_booking_link_text: { status: 'claimed', lead_id: 'lead-1', send_at: originalSendAt, original_send_at: originalSendAt } },
+    };
+    const conn = makeDb();
+    const result = await dispatchClaimedCall(conn, stale, NOW);
+    expect(result.deferred).toBeUndefined();
+    expect(result.skipped).toBe('send_retry_timeout');
+  });
+
+  // codex r2 P2: dispatchIneligibleReason's own checks, run once earlier,
+  // can go stale by the time Twilio's own request fires — providerPreSendCheck
+  // re-runs the mutable ones on the SAME connection the provider handoff holds.
+  test('sendCustomerMessage receives a providerPreSendCheck re-running the mutable never-send checks', async () => {
+    const conn = makeDb();
+    await dispatchClaimedCall(conn, CALL, NOW);
+    const sendInput = sendCustomerMessage.mock.calls[0][0];
+    expect(typeof sendInput.providerPreSendCheck).toBe('function');
+    // And it actually re-derives the SAME never-send verdict this dispatch
+    // itself just cleared — not a stub.
+    await expect(sendInput.providerPreSendCheck({ dbi: makeDb() })).resolves.toEqual({ ok: true });
   });
 
   test('a policy-blocked send (e.g. opted out since the call) is recorded as skipped, not sent', async () => {

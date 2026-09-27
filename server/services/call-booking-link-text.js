@@ -107,6 +107,9 @@ const RETRY_BACKOFF_MS = 30 * 60 * 1000;
 // pre-existing valid-but-unstaged calls and texts them all in one burst
 // (codex r1 P1). Own key/env, since this is a different gate/lane.
 const ACTIVATION_SETTINGS_KEY = 'call_booking_link_text_activated_at';
+// See persistedActivationBoundary's own doc comment for why this is
+// captured HERE, at module load, rather than read fresh later.
+const MODULE_LOAD_AT = new Date();
 
 // A call that ends without at least this much talk time is a hang-up, a
 // voicemail greeting, or a dropped call before the ask — never a "no visit
@@ -288,17 +291,32 @@ async function outboundStagingReason(conn, call, leadId) {
 // function derives from created_at at all is a bridged outbound-connect
 // call, handled by its own branch below exactly as callEndedAt's is.
 function callEndFor(call) {
-  const durationMs = callDurationSeconds(call) * 1000;
-  // Outbound-connect bridge: Twilio's duration runs from the answer;
-  // created_at predates dialing.
+  // Outbound-connect bridge: bridged_at is stamped the instant the admin
+  // presses 1 (twilio-voice-webhook.js's /outbound-connect,
+  // `record: 'record-from-answer-dual'`) — BEFORE the customer's own leg
+  // even starts ringing. duration_seconds is the PARENT (admin) leg's
+  // total length, which starts at the admin's OWN answer — earlier still —
+  // so bridged_at + duration_seconds double-counts the press-1 prompt and
+  // the customer's ring time (codex r1 P2). recording_duration_seconds is
+  // measured off `record-from-answer-dual`, which Twilio starts recording
+  // at the moment the DIALED (customer) leg answers — confirmed against
+  // /outbound-connect's own dial (codex r2 P2) — so bridged_at +
+  // recording_duration_seconds is the far closer proxy for the true end;
+  // duration_seconds is kept only as the fallback when no recording
+  // duration is available at all.
   if (call?.bridged_at) {
     const bridged = new Date(call.bridged_at);
-    if (!Number.isNaN(bridged.getTime())) return new Date(bridged.getTime() + durationMs);
+    if (!Number.isNaN(bridged.getTime())) {
+      const recorded = Number(call?.recording_duration_seconds);
+      const bridgeDurationMs = (Number.isFinite(recorded) && recorded > 0 ? recorded : callDurationSeconds(call)) * 1000;
+      return new Date(bridged.getTime() + bridgeDurationMs);
+    }
   }
   // Every other row: callStartedAt already backs the length out of a
   // post-call (recovered / status-callback) row, so start + duration is
   // the end for ring-time rows, post-call rows, and plain outbound rows
   // alike (callEndedAt returns bare created_at for those, i.e. too early).
+  const durationMs = callDurationSeconds(call) * 1000;
   const start = callStartedAt(call);
   return start ? new Date(start.getTime() + durationMs) : null;
 }
@@ -453,17 +471,30 @@ function stagingIneligibleReason(call, extraction, leadId) {
 // every sweep after, on this process or any future one, reads the same
 // instant back. onConflict + a re-read means a multi-process race still
 // converges every process on the SAME winning instant.
+// This module's OWN load time — captured once, at require, which happens
+// at process boot (scheduler.js requires this lane unconditionally,
+// regardless of the gate). Used ONLY as the very first persisted
+// boundary's fallback value below, instead of a DB-time read taken at
+// whatever moment the first 5-minute cron tick happens to run (codex r2
+// P2: that left a real gap — an eligible call landing between the gate
+// going live and that first tick was permanently stamped pre_activation).
+// GATE_CALL_BOOKING_LINK_TEXT is read once at feature-gates.js's own
+// module load (`gates.callBookingLinkText`), so flipping it live on
+// Railway REQUIRES a redeploy — a fresh process — meaning this process's
+// own boot time already IS gate-live time for any process that ever sees
+// isEnabled(GATE) return true. onConflict('key').ignore() still means
+// only the very FIRST process (of a rolling deploy, say) to find nothing
+// stored ever writes; every other process, and every later restart, just
+// reads the same persisted value back.
 async function persistedActivationBoundary(conn) {
   const existing = await conn('system_settings').where({ key: ACTIVATION_SETTINGS_KEY }).first('value');
   if (existing?.value) return new Date(existing.value);
-  const { rows } = await conn.raw('SELECT now() AS now');
-  const now = rows[0].now;
   await conn('system_settings').insert({
-    key: ACTIVATION_SETTINGS_KEY, value: now.toISOString(), category: 'call_booking_link_text',
+    key: ACTIVATION_SETTINGS_KEY, value: MODULE_LOAD_AT.toISOString(), category: 'call_booking_link_text',
     description: 'First live-activation instant for GATE_CALL_BOOKING_LINK_TEXT; a call that started before it is historical, not a live never-booked lead to chase.',
   }).onConflict('key').ignore();
   const settled = await conn('system_settings').where({ key: ACTIVATION_SETTINGS_KEY }).first('value');
-  return settled?.value ? new Date(settled.value) : now;
+  return settled?.value ? new Date(settled.value) : MODULE_LOAD_AT;
 }
 
 // CALL_BOOKING_LINK_TEXT_ACTIVATED_AT (an ISO instant), when set, always
@@ -689,6 +720,37 @@ async function dispatchIneligibleReason(ctx) {
   return null;
 }
 
+// Re-runs the MUTABLE never-send predicates immediately before Twilio's own
+// messages.create() call, via send-customer-message.js's providerPreSendCheck
+// hook (server/services/twilio.js: called once, on the SAME connection the
+// provider handoff holds, right after the annual-offer guard and right
+// before the SDK request — codex r2 P2). dispatchIneligibleReason's own
+// checks, run once earlier in dispatchClaimedCall, can go stale across every
+// await between there and the actual provider request: a staff booking, an
+// estimate link, a lead closure, or a manual consultation-link send can all
+// land in that gap. Only the checks that can genuinely change in that
+// narrow window are worth repeating here — not the whole DISPATCH_CHECKS
+// table (call-nature/property/etc. never change after the call ended).
+// `dbi` is send-customer-message.js's own connection for this step
+// (sometimes a transaction), never this function's own outer `conn` — it
+// is the freshest possible read. A failing check returns { ok: false,
+// code } with no retryable/deferred flags, which twilio.js/send-customer-
+// message.js turn into a plain blocked (never-retried) outcome —
+// recordSendOutcome's own final fallback then records it as a terminal
+// skip under that code, exactly as if dispatchIneligibleReason itself had
+// caught it moments earlier.
+function neverSendRecheck(call, leadId) {
+  return async ({ dbi }) => {
+    const lead = await dbi('leads').where({ id: leadId }).whereNull('deleted_at').first();
+    if (!lead || !isOpenLeadRow(lead)) return { ok: false, code: 'lead_no_longer_open' };
+    if (lead.estimate_id) return { ok: false, code: 'estimate_linked' };
+    const callStart = callStartedAt(call) || new Date(call.created_at);
+    if (await bookedSinceCall(dbi, lead.customer_id, callStart)) return { ok: false, code: 'booked_since_call' };
+    if (await linkSentRecently(dbi, leadId, new Date())) return { ok: false, code: 'link_sent_recently' };
+    return { ok: true };
+  };
+}
+
 // The ownership fence at send time: 'wait' while the processor holds or is
 // rewriting the row, a skip reason once it gave up or ended non-valid, null
 // when the row is ready to judge.
@@ -770,7 +832,18 @@ async function dispatchClaimedCall(conn, call, now) {
   if (reason) return skip(reason);
 
   const built = await buildLeadConsultationSmsLine(lead.id, lead.first_name);
-  if (!built.url) return skip(built.reason ? `link_unavailable:${built.reason}` : 'link_unavailable');
+  if (!built.url) {
+    const linkReason = built.reason ? `link_unavailable:${built.reason}` : 'link_unavailable';
+    // built.transient (codex r2 P2) marks a genuine unexpected failure in
+    // the builder itself (a DB hiccup, not a deliberate refusal — gate
+    // off, an ineligible lead, an invalid phone, a missing signing secret
+    // are never flagged). Requeue it through the SAME bounded retry rail
+    // recordSendOutcome already owns for a retryable send outcome —
+    // original_send_at's deadline, the backoff, and the give-up path —
+    // rather than a second copy of that logic here.
+    if (built.transient) return recordSendOutcome(conn, call, entry, leadId, now, { sent: false, retryable: true, code: linkReason });
+    return skip(linkReason);
+  }
   // The token is signed for built.phone — the builder's OWN fresh DB read,
   // not lead.phone from the row this function fetched moments earlier
   // (codex r1 P1). Sending to lead.phone while the phone changed in that
@@ -792,6 +865,7 @@ async function dispatchClaimedCall(conn, call, now) {
     consentBasis: { status: 'transactional_allowed', source: 'call_booking_link_text' },
     entryPoint: 'call_booking_link_text',
     metadata: { original_message_type: MESSAGE_TYPE, call_log_id: call.id, lead_id: lead.id, ...(managedLine ? { fromNumber: managedLine } : {}) },
+    providerPreSendCheck: neverSendRecheck(call, leadId),
   }).catch((err) => (isRealProviderSend(err?.providerOutcome) || isAmbiguousProviderOutcome(err?.providerOutcome)) ? err.providerOutcome : Promise.reject(err));
 
   return recordSendOutcome(conn, call, entry, leadId, now, result);
@@ -912,6 +986,8 @@ module.exports = {
   activationBoundary,
   persistedActivationBoundary,
   ACTIVATION_SETTINGS_KEY,
+  MODULE_LOAD_AT,
+  neverSendRecheck,
   stage,
   stageOne,
   claimForDispatch,

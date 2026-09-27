@@ -151,7 +151,13 @@ async function buildLeadConsultationLink(leadOrId, { channel } = {}) {
     return { url: shortUrl, line: consultationSmsLineFor(shortUrl), expiresAt, immediateOnly: true, phone: lead.phone };
   } catch (err) {
     logger.warn(`[lead-consultation-link] build failed: ${err.message}`);
-    return { url: null, line: '', reason: 'Could not build a consultation link' };
+    // transient (additive, codex r2 P2): this catch is a genuine unexpected
+    // failure (a DB read, createShortCode's own insert) — never a
+    // deliberate refusal (gate off, an ineligible lead, an invalid phone,
+    // a missing signing secret all return their own {url:null, reason}
+    // ABOVE, inside the try, unflagged). An automated caller may retry a
+    // transient miss; it must never retry a permanent one.
+    return { url: null, line: '', reason: 'Could not build a consultation link', transient: true };
   }
 }
 
@@ -261,7 +267,10 @@ async function buildLeadConsultationSmsLine(leadOrId, firstName) {
     }
   } catch (err) {
     logger.warn(`[lead-consultation-link] template pre-check failed: ${err.message}`);
-    return unavailable('Consultation text template is unavailable');
+    // transient (codex r2 P2): an unexpected DB/require failure, not a
+    // deliberate refusal — see buildLeadConsultationLink's own catch for
+    // the full unflagged/flagged split this mirrors.
+    return { ...unavailable('Consultation text template is unavailable'), transient: true };
   }
   // The SMS helper mints the phone-bound SMS claim (Codex #4737 r13 P1):
   // every production text goes through here, so the page can treat the
@@ -302,7 +311,7 @@ async function buildLeadConsultationSmsLine(leadOrId, firstName) {
     };
   } catch (err) {
     logger.warn(`[lead-consultation-link] template render failed: ${err.message}`);
-    return unavailable('Could not render the consultation text template');
+    return { ...unavailable('Could not render the consultation text template'), transient: true };
   }
 }
 
