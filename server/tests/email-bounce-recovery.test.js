@@ -812,6 +812,7 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     delete process.env.EMAIL_RECOVERY_MIN_CONFIDENCE;
     emailLib.loadTemplateByKey.mockResolvedValue(undefined); // falls to the email_suppressions fallback (no rows -> not suppressed)
     sendgrid.sendOne.mockReset();
+    NotificationService.notifyAdmin.mockReset();
   });
   afterEach(() => { process.env = { ...orig }; });
 
@@ -894,6 +895,41 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
 
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
     expect(res).toMatchObject({ resent: true });
+  });
+
+  test('stored billing replay context fails closed instead of bypassing its authority through sendOne', async () => {
+    const messageRow = { id: 'msg-billing-blocked', status: 'queued' };
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+
+    const res = await recovery.attemptRecovery(
+      {
+        id: 'orig-billing-blocked', recipient_type: 'customer', recipient_id: 'c1',
+        recipient_email_snapshot: 'jane@gmial.com', template_key: 'billing.notice',
+        suppression_group_key_snapshot: 'transactional_required', categories: ['email_template'],
+        payload_snapshot: { __billing_replay_context: { customer_id: 'c1' } },
+        html_snapshot: '<p>Billing notice</p>', text_snapshot: 'Billing notice',
+      },
+      { event: 'bounce', type: 'bounce' },
+    );
+
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(res).toEqual({ skipped: 'billing_replay_reauthorization_required' });
+    expect(mockDb._calls.find((c) => c.table === 'email_messages')).toBeUndefined();
+    expect(mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries').pop())
+      .toMatchObject({ data: { status: 'billing_replay_reauthorization_required' } });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'alert',
+      'Email bounced — needs a correct address',
+      expect.stringContaining('billing source must be reauthorized'),
+      expect.objectContaining({
+        link: '/admin/customers?customerId=c1',
+        metadata: expect.objectContaining({
+          status: 'billing_replay_reauthorization_required',
+          original_message_id: 'orig-billing-blocked',
+        }),
+      }),
+    );
   });
 
   test('round 9 structural fix (P1): a bounce-recovered deposit.receipt whose stored content still carries a withheld link is rewritten by sendOne and re-sent — the recovery row snapshot is updated to match', async () => {
