@@ -209,11 +209,23 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
   test.each([
     ['stamps the visit and its send-time property (Codex #4816 r41/r49)', { appointmentId: 'visit-123' }, 'visit-123', 'prop-1'],
     ['leaves both off when the send names no visit', {}, undefined, undefined],
+    // A receipt names only its invoice (InvoiceService.sendReceipt): the
+    // invoice's visit and that visit's property are stamped (Codex #4996 r1).
+    ['stamps a receipt with its invoice\'s visit and that visit\'s property', { invoiceId: 'invoice-9' }, 'visit-9', 'prop-1'],
+    ['keeps the visit a send names over its invoice\'s', { appointmentId: 'visit-123', invoiceId: 'invoice-9' }, 'visit-123', 'prop-1'],
+    ['stamps nothing, and still sends, when the invoice lookup fails', { invoiceId: 'invoice-broken' }, undefined, undefined],
   ])('%s', async (_label, extra, expected, expectedProperty) => {
     const rows = [];
-    require('../models/db').mockImplementation((table) => (table === 'scheduled_services'
-      ? { where: () => ({ first: async () => ({ property_id: 'prop-1' }) }) }
-      : { insert: async row => { rows.push(row); } }));
+    require('../models/db').mockImplementation((table) => {
+      if (table === 'scheduled_services') return { where: () => ({ first: async () => ({ property_id: 'prop-1' }) }) };
+      if (table === 'invoices') {
+        return { where: ({ id }) => ({ first: async () => {
+          if (id === 'invoice-broken') throw new Error('invoice lookup failed');
+          return { scheduled_service_id: 'visit-9' };
+        } }) };
+      }
+      return { insert: async row => { rows.push(row); } };
+    });
     try {
       const result = await TwilioService.sendSMS(TO, 'Your appointment is confirmed.', {
         messageType: 'confirmation', fromNumber: FROM, ...extra,

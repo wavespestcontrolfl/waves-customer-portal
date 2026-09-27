@@ -489,7 +489,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     // The visit and its send-time property, kept on the proof row and on the
     // stored notification, so a repaired proof restores the delivered scope
     // (Codex #4816 r49).
-    const proofScope = await require('./notice-scope').noticeScope(appointmentId);
+    const proofScope = await require('./notice-scope').noticeScope(appointmentId, { invoiceId });
     let appNotification = null;
     if (explicitPushOnly) {
       let presentation = pushPresentation(messageType);

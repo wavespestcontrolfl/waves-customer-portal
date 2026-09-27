@@ -28,7 +28,7 @@ const schema = `sms_commitments_${randomUUID().replaceAll('-', '')}`;
 const TABLES = ['customers', 'customer_properties', 'property_preferences', 'sms_log', 'call_log',
   'call_commitments', 'data_hygiene_source_extractions', 'data_hygiene_proposals', 'data_hygiene_sensitive_vault',
   'conversations', 'messages', 'notifications', 'audit_log',
-  'emails', 'email_messages', 'estimates', 'invoices', 'payments', 'payers', 'scheduled_services', 'job_status_history', 'reschedule_log', 'system_settings', 'leads', 'messaging_audit_log'];
+  'emails', 'email_messages', 'estimates', 'estimate_deposits', 'invoices', 'payments', 'payers', 'scheduled_services', 'job_status_history', 'reschedule_log', 'system_settings', 'leads', 'messaging_audit_log'];
 let mockPg;
 let admin;
 let message;
@@ -881,6 +881,10 @@ postgres('SMS commitments on PostgreSQL', () => {
     ['supporting channel truncated but its window reaches before the witness', 'sms', 60, true],
     ['supporting channel truncated with its oldest retained row tied at the witness instant', 'sms', 59, false],
     ['supporting channel truncated past the witness', 'sms', 0, false],
+    // Codex #4996 r1: a truncated payment leg relaxes like any ordered source
+    // for a kind that can never cite a payment.
+    ['payment leg truncated but its window reaches before the witness', 'payment', 60, true],
+    ['payment leg truncated past the witness', 'payment', 0, false],
   ])('evidence completeness: %s', async (_label, channel, witnessOffsetSeconds, fulfilled) => {
     const after = new Date(message.created_at.getTime() + 1000);
     const witnessAt = new Date(after.getTime() + witnessOffsetSeconds * 1000);
@@ -896,6 +900,9 @@ postgres('SMS commitments on PostgreSQL', () => {
       created_at: new Date(after.getTime() + (channel === 'call' || witnessOffsetSeconds === 0 ? 1 : 58) * 1000 + i * 1000) }));
     if (channel === 'call') {
       await mockPg('call_log').insert(rows.map((r) => ({ ...r, duration_seconds: 5, transcription: 'voicemail' })));
+    } else if (channel === 'payment') {
+      await mockPg('payments').insert(rows.map((r) => ({ customer_id: r.customer_id, amount: 10, status: 'paid', payment_date: etDateString(r.created_at),
+        metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'cash' }), created_at: r.created_at })));
     } else {
       await mockPg('sms_log').insert(rows.map((r) => ({ ...r, message_type: 'manual', message_body: 'Context message' })));
     }
@@ -2002,6 +2009,261 @@ postgres('SMS commitments on PostgreSQL', () => {
     const row = evidence.records.find((r) => r.type === 'payment' && r.payment_source === 'invoice');
     expect(row.text).toContain(`paid ${etDateString(evening)}`);
     expect(row.text).not.toContain(evening.toISOString().slice(0, 10));
+  });
+
+  test('Codex #4996 r1: a cash, check or Zelle payment recorded against a self-pay invoice is that invoice\'s evidence at its visit\'s property, not an unlinked ledger row', async () => {
+    const [visit] = await mockPg('scheduled_services').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
+      service_type: 'Quarterly Pest Control', scheduled_date: etDateString(message.created_at), window_start: '09:00:00', status: 'completed',
+      created_at: new Date(message.created_at.getTime() - 86400000) }).returning('id');
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0901',
+      title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'sent', scheduled_service_id: visit.id,
+      stripe_payment_intent_id: 'pi_retired_pay_page' }).returning('id');
+    // What recordManualPayment (invoice-manual-payment.js) writes for a
+    // self-pay invoice with no credit applied, in ONE transaction: the
+    // invoice's paid and recorded stamps, its PaymentIntent cleared, and a
+    // ledger row that names no invoice.
+    const [manual] = await mockPg.transaction(async (trx) => {
+      await trx('invoices').where({ id: invoice.id }).update({ status: 'paid', paid_at: trx.fn.now(), payment_method: 'check',
+        payment_recorded_at: trx.fn.now(), stripe_payment_intent_id: null });
+      return trx('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid',
+        description: 'Invoice WPC-2026-0901 — check', payment_date: etDateString(new Date()) }).returning('id');
+    });
+    // A prepayment recorded on its own stays an unlinked ledger row.
+    const [prepayment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 40, status: 'paid',
+      payment_date: etDateString(new Date()), metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'cash' }),
+      created_at: new Date(Date.now() + 1000) }).returning('id');
+    const commitment = { kind: 'other', description: 'Did you get my check?',
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(Date.now() + 60000));
+    const payments = evidence.records.filter((r) => r.type === 'payment');
+    const linked = payments.find((r) => r.payment_source === 'invoice');
+    expect(linked).toMatchObject({ id: invoice.id, payment_id: manual.id, property_id: context.properties[0].id });
+    expect(admissibleWitness(linked, commitment)).toBe(true);
+    expect(payments.filter((r) => r.payment_source === 'ledger').map((r) => r.id)).toEqual([prepayment.id]);
+  });
+
+  test('Codex #4996 r1: a staff note typed on a ledger payment (a name, phone number, email) never reaches the model', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 200, status: 'paid', payment_date: etDateString(after),
+      description: 'Account credit prepayment — zelle (from Pat Example 941-555-0123 pat.example@example.invalid)',
+      metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'zelle' }), created_at: after });
+    const commitment = { kind: 'other', description: 'Did you receive my Zelle?',
+      sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    expect(evidence.records.find((r) => r.payment_source === 'ledger').text).toBe(`Payment of $200.00 recorded ${etDateString(after)} (zelle)`);
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    await verifySmsFulfillment(commitment, evidence, { now });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    const prompt = JSON.stringify(dispatchWithFallback.mock.calls[0]);
+    for (const note of ['Pat Example', '941-555-0123', 'pat.example@example.invalid']) expect(prompt).not.toContain(note);
+    expect(prompt).toContain('(zelle)');
+  });
+
+  test('Codex #4996 r1: an invoice payment reads as its number, title and settled amount, dated when the money settled — not when a late webhook stamped the invoice paid', async () => {
+    const settled = new Date(message.created_at.getTime() + 1000);
+    const stamped = new Date(settled.getTime() + 2 * 86400000);
+    const now = new Date(stamped.getTime() + 1000);
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0902',
+      title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: stamped }).returning('id');
+    const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 118.75, status: 'paid', payment_date: etDateString(settled),
+      metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: settled.toISOString() }), created_at: stamped }).returning('id');
+    const commitment = { kind: 'other', description: 'Did my $118.75 payment go through?',
+      sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const witness = evidence.records.find((r) => r.payment_source === 'invoice');
+    expect(witness.text).toBe(`Invoice WPC-2026-0902 (Quarterly Pest Control) paid ${etDateString(settled)} — $118.75`);
+    const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
+    expect(grounded).toMatchObject({ verdict: 'fulfilled', linked_record_type: 'payment_row', linked_record_id: payment.id });
+    expect(new Date(grounded.matched_at).getTime()).toBe(settled.getTime());
+  });
+
+  test('Codex #4996 r1: a payment on another customer\'s account never settles this customer\'s invoice', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const otherCustomer = randomUUID();
+    await mockPg('customers').insert({ id: otherCustomer, first_name: 'Other', last_name: 'Fixture', phone: '+12025550199',
+      address_line1: '300 Example Lane', city: 'Sarasota', zip: '34236' });
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0903',
+      title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: after }).returning('id');
+    const settledRow = (customerId) => ({ customer_id: customerId, amount: 125, status: 'paid', payment_date: etDateString(after),
+      metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: after.toISOString() }), created_at: after });
+    await mockPg('payments').insert(settledRow(otherCustomer));
+    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    expect((await loadSmsFulfillmentEvidence(mockPg, commitment, message, now)).records.filter((r) => r.type === 'payment')).toEqual([]);
+    const [own] = await mockPg('payments').insert(settledRow(message.customer_id)).returning('id');
+    expect((await loadSmsFulfillmentEvidence(mockPg, commitment, message, now)).records.filter((r) => r.type === 'payment'))
+      .toMatchObject([{ id: invoice.id, payment_id: own.id }]);
+  });
+
+  test('Codex #4996 r1: each invoice of a combined charge cites its own allocation row; a sibling\'s row never vouches for an invoice, and a row naming no invoice still links by its PaymentIntent', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const invoiceRow = (number, pi) => ({ customer_id: message.customer_id, token: randomUUID(), invoice_number: number,
+      title: 'Quarterly Pest Control', total: 60, subtotal: 60, line_items: '[]', status: 'paid', paid_at: after, stripe_payment_intent_id: pi });
+    // The third invoice shares the combined PaymentIntent with no allocation row of its own.
+    const [first, second, , legacy] = await mockPg('invoices').insert([invoiceRow('WPC-2026-0911', 'pi_combined'),
+      invoiceRow('WPC-2026-0912', 'pi_combined'), invoiceRow('WPC-2026-0913', 'pi_combined'), invoiceRow('WPC-2026-0914', 'pi_legacy')]).returning('id');
+    // One settlement instant for every allocation of the combined charge.
+    const paymentRow = (pi, metadata) => ({ customer_id: message.customer_id, amount: 60, status: 'paid', payment_date: etDateString(after),
+      stripe_payment_intent_id: pi, metadata: JSON.stringify({ ...metadata, settled_event_at: after.toISOString() }), created_at: after });
+    const [firstPaid, secondPaid, legacyPaid] = await mockPg('payments').insert([paymentRow('pi_combined', { invoice_id: first.id }),
+      paymentRow('pi_combined', { invoice_id: second.id }), paymentRow('pi_legacy', {})]).returning('id');
+    const commitment = { kind: 'other', description: 'Did both payments go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    for (let read = 0; read < 2; read += 1) {
+      const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+      expect(Object.fromEntries(evidence.records.filter((r) => r.payment_source === 'invoice').map((r) => [r.id, r.payment_id])))
+        .toEqual({ [first.id]: firstPaid.id, [second.id]: secondPaid.id, [legacy.id]: legacyPaid.id });
+    }
+  });
+
+  test('Codex #4996 r1: a deposit received after the question is payment evidence at its estimate\'s property; pending, refunding, refunded and earlier deposits, and other customers\', are not', async () => {
+    const before = new Date(message.created_at.getTime() - 1000);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const otherCustomer = randomUUID();
+    await mockPg('customers').insert({ id: otherCustomer, first_name: 'Other', last_name: 'Fixture', phone: '+12025550199',
+      address_line1: '300 Example Lane', city: 'Sarasota', zip: '34236' });
+    const [estimate, foreign] = await mockPg('estimates').insert([
+      { customer_id: message.customer_id, property_id: context.properties[0].id, status: 'accepted', service_interest: 'Termite' },
+      { customer_id: otherCustomer, status: 'accepted', service_interest: 'Termite' }]).returning('id');
+    const deposit = (estimateId, status, receivedAt) => ({ estimate_id: estimateId, amount: 150, status, received_at: receivedAt,
+      stripe_payment_intent_id: `pi_deposit_${randomUUID()}` });
+    const [received, credited] = await mockPg('estimate_deposits').insert([deposit(estimate.id, 'received', after),
+      deposit(estimate.id, 'credited', after)]).returning('id');
+    await mockPg('estimate_deposits').insert([deposit(estimate.id, 'pending', null), deposit(estimate.id, 'refunding', after),
+      deposit(estimate.id, 'refunded', after), deposit(estimate.id, 'received', before), deposit(foreign.id, 'received', after)]);
+    const commitment = { kind: 'other', description: 'Did my deposit go through?',
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
+    const deposits = evidence.records.filter((r) => r.payment_source === 'deposit');
+    expect(deposits.map((r) => r.id).sort()).toEqual([received.id, credited.id].sort());
+    expect(deposits[0]).toMatchObject({ estimate_id: estimate.id, property_id: context.properties[0].id,
+      text: `Deposit of $150.00 received ${etDateString(after)}` });
+    expect(admissibleWitness(deposits[0], commitment)).toBe(true);
+  });
+
+  test('Codex #4996 r1: a deposit witness holds its estimate at close — an estimate writer holding it, the estimate passing to another customer, or a refund starting fails the close', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const otherCustomer = randomUUID();
+    await mockPg('customers').insert({ id: otherCustomer, first_name: 'Other', last_name: 'Fixture', phone: '+12025550199',
+      address_line1: '300 Example Lane', city: 'Sarasota', zip: '34236' });
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, status: 'accepted', service_interest: 'Termite' }).returning('id');
+    const [deposit] = await mockPg('estimate_deposits').insert({ estimate_id: estimate.id, amount: 150, status: 'received', received_at: after,
+      stripe_payment_intent_id: `pi_deposit_${randomUUID()}` }).returning('id');
+    const commitment = { kind: 'other', description: 'Did my deposit go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const witness = evidence.records.find((r) => r.payment_source === 'deposit');
+    const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
+    expect(grounded).toMatchObject({ verdict: 'fulfilled', record_id: deposit.id, payment_source: 'deposit',
+      linked_record_type: 'estimate', linked_record_id: estimate.id });
+    const verdict = { ...grounded, evidence_hash: fulfillmentFingerprint(commitment, evidence).evidenceHash };
+    const closes = () => mockPg.transaction((trx) => revalidateSmsFulfillment(trx, commitment, message, verdict, now));
+    expect(await closes()).toBe(true);
+    const writer = await mockPg.transaction();
+    try {
+      await writer('estimates').where({ id: estimate.id }).forUpdate().first('id');
+      expect(await closes()).toBe(false);
+    } finally { await writer.rollback(); }
+    await mockPg('estimates').where({ id: estimate.id }).update({ customer_id: otherCustomer });
+    expect(await closes()).toBe(false);
+    await mockPg('estimates').where({ id: estimate.id }).update({ customer_id: message.customer_id });
+    expect(await closes()).toBe(true);
+    await mockPg('estimate_deposits').where({ id: deposit.id }).update({ status: 'refunding' });
+    expect(await closes()).toBe(false);
+  });
+
+  test('Codex #4996 r1: payment legs are capped on their own — a full ledger leg beside receipts is complete; one leg past its cap truncates and the other legs are cut at its floor', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const at = (seconds) => new Date(after.getTime() + seconds * 1000);
+    const ledger = (seconds) => ({ customer_id: message.customer_id, amount: 10, status: 'paid', payment_date: etDateString(after),
+      metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'cash' }), created_at: at(seconds) });
+    const receipt = (seconds) => ({ ...message, id: randomUUID(), direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone,
+      message_body: 'Payment received, thank you.', message_type: 'receipt', status: 'delivered', created_at: at(seconds) });
+    await mockPg('payments').insert(Array.from({ length: 50 }, (_, i) => ledger(10 + i)));
+    await mockPg('sms_log').insert([1, 2, 3, 70, 71, 72].map(receipt));
+    const commitment = { kind: 'other', description: 'Did my payments go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const now = at(120);
+    const complete = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    expect(complete.failures).toEqual([]);
+    expect(complete.records.filter((r) => r.type === 'payment')).toHaveLength(56);
+    // A 51st ledger row, older than the rest: that leg keeps seconds 10–59,
+    // so receipts from before second 10 are cut with it.
+    await mockPg('payments').insert(ledger(9));
+    const truncated = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    expect(truncated.failures).toEqual(['payment_truncated']);
+    const kept = truncated.records.filter((r) => r.type === 'payment');
+    expect(kept.filter((r) => r.payment_source === 'ledger')).toHaveLength(50);
+    expect(kept.filter((r) => r.payment_source === 'sms').map((r) => new Date(r.created_at).getTime()).sort((a, b) => a - b))
+      .toEqual([70, 71, 72].map((seconds) => at(seconds).getTime()));
+  });
+
+  describe('Codex #4996 r1: money landing puts a payment question on the event page ahead of the cursors', () => {
+    let target;
+    let verify;
+    const minutes = (m) => new Date(message.created_at.getTime() + m * 60000);
+    const tick = async (at) => {
+      // A due cursor already past the target: only the event page can reach it.
+      await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+        .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      verify.mockClear();
+      return refreshSmsCommitments({ conn: mockPg, verify, now: at });
+    };
+    beforeEach(async () => {
+      result.facts = [];
+      result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon', property_id: null,
+        quote: 'Did you get my payment?', description: 'Did you get my payment?' };
+      await recordMessageOperations(mockPg, message, result, context);
+      await mockPg('call_commitments').update({ due_at: null });
+      [target] = await mockPg('call_commitments').pluck('id');
+      verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    });
+
+    test.each([
+      ['a paid payment', (at) => mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(at),
+        metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'zelle' }), created_at: at, updated_at: at })],
+      ['a received estimate deposit', async (at) => {
+        const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, status: 'accepted', service_interest: 'Termite' }).returning('id');
+        await mockPg('estimate_deposits').insert({ estimate_id: estimate.id, amount: 150, status: 'received', received_at: at, updated_at: at,
+          stripe_payment_intent_id: `pi_deposit_${randomUUID()}` });
+      }],
+      ['a delivered receipt text', (at) => mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound', from_phone: message.to_phone,
+        to_phone: message.from_phone, message_body: 'Payment received, thank you.', message_type: 'receipt', status: 'delivered', created_at: at })],
+    ])('%s', async (_label, land) => {
+      expect(await tick(minutes(1))).toMatchObject({ scanned: 0 });
+      await land(minutes(2));
+      expect(await tick(minutes(3))).toMatchObject({ scanned: 1 });
+      expect(verify.mock.calls.map(([row]) => row.id)).toEqual([target]);
+      expect(verify.mock.calls[0][1].records.filter((r) => r.type === 'payment')).toHaveLength(1);
+    });
+
+    test('a late webhook flipping an ACH payment to paid counts from the flip, not its settlement stamp the watermark already passed', async () => {
+      await mockPg('call_commitments').where({ id: target }).update({ sms_context: mockPg.raw(
+        "jsonb_set(jsonb_set(sms_context, '{event_seen_at}', to_jsonb(?::text)), '{event_seen_customer_id}', to_jsonb(?::text))",
+        [minutes(5).toISOString(), message.customer_id]) });
+      const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0921',
+        title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: minutes(30),
+        stripe_payment_intent_id: 'pi_ach' }).returning('id');
+      // Inserted 'processing' an hour before the question; settled at minute
+      // 2; the webhook that flips it lands at minute 30.
+      await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(minutes(2)),
+        stripe_payment_intent_id: 'pi_ach', metadata: JSON.stringify({ invoice_id: invoice.id, payment_state: 'paid', settled_event_at: minutes(2).toISOString() }),
+        created_at: minutes(-60), updated_at: minutes(30) });
+      expect(await tick(minutes(31))).toMatchObject({ scanned: 1 });
+      expect(verify.mock.calls[0][1].records.find((r) => r.type === 'payment')).toMatchObject({ id: invoice.id, payment_source: 'invoice' });
+    });
+
+    test('another customer\'s payment, and a deposit being refunded, are not events', async () => {
+      const otherCustomer = randomUUID();
+      await mockPg('customers').insert({ id: otherCustomer, first_name: 'Other', last_name: 'Fixture', phone: '+12025550199',
+        address_line1: '300 Example Lane', city: 'Sarasota', zip: '34236' });
+      await mockPg('payments').insert({ customer_id: otherCustomer, amount: 125, status: 'paid', payment_date: etDateString(minutes(2)),
+        created_at: minutes(2), updated_at: minutes(2) });
+      const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, status: 'accepted', service_interest: 'Termite' }).returning('id');
+      await mockPg('estimate_deposits').insert({ estimate_id: estimate.id, amount: 150, status: 'refunding', received_at: minutes(2), updated_at: minutes(2),
+        stripe_payment_intent_id: `pi_deposit_${randomUUID()}` });
+      expect(await tick(minutes(3))).toMatchObject({ scanned: 0 });
+    });
   });
 
   test('R2 rule 2: a non-payment "other" question is never system-closed by an unrelated invoice payment; the model weighs it', async () => {

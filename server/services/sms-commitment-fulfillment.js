@@ -35,7 +35,11 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 // 12: a payment landing (money settled) is admissible evidence for a
 //     settlement `other` ask — model-only citation, never a no-model close
 //     (#4816 R2, owner ruling 2026-09-25).
-const FULFILLMENT_POLICY = 12;
+// 13: a manually recorded self-pay settlement links to its invoice; the
+//     settling payment's own settled time (not invoices.paid_at) grounds it;
+//     an estimate deposit is a payment leg; a ledger note's free-text
+//     description never reaches the model (Codex round 1 findings, #4996).
+const FULFILLMENT_POLICY = 13;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -138,14 +142,6 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
   const after = new Date(message.created_at);
   const customerId = message.customer_id;
   const peer = message.direction === 'inbound' ? message.from_phone : message.to_phone;
-  // A paid payments row linked to the invoice aliased pinv (metadata or a
-  // shared PaymentIntent), not payer-billed, settled after the request.
-  const settledPaymentFor = (q) => q.from('payments as p').where('p.status', 'paid')
-    .whereRaw("COALESCE(p.metadata::jsonb ->> 'payer_id', '') = ''")
-    .whereRaw("COALESCE((p.metadata::jsonb ->> 'settled_event_at')::timestamptz, p.created_at) > ?", [after])
-    .whereRaw("COALESCE((p.metadata::jsonb ->> 'settled_event_at')::timestamptz, p.created_at) <= ?", [now])
-    .whereRaw("(p.metadata::jsonb ->> 'invoice_id' = pinv.id::text OR p.metadata::jsonb ->> 'waves_invoice_id' = pinv.id::text"
-      + ' OR (p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = pinv.stripe_payment_intent_id))');
   const sources = {
     // codex #4331 P2 (structural pass): an unresolved review-ask reservation
     // must not read as fulfillment evidence for an unrelated commitment.
@@ -187,87 +183,158 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       .where('sent_at', '<=', now).orderBy('sent_at', 'desc').limit(LIMIT + 1)
       .select('id', 'status', 'sent_at', 'title', 'service_type', 'scheduled_service_id'),
     // R2 (owner ruling 2026-09-25): a payment question is answered by money
-    // actually landing, not by a staff reply — either the invoice the
-    // customer asked about went paid, an off-gateway ledger prepayment was
-    // recorded, or a payment-confirmation SMS the system sent went out,
-    // after the request. Three distinct tables share one witness type; each
-    // row is tagged with its source table so admissibility/quoting/
-    // revalidation know which (Codex #4816 r13 P1, payment-row lock order).
-    payment: Promise.all([
-      // A paid `payments` row linked to THIS invoice through metadata or a
-      // shared PaymentIntent, SETTLED (not merely created) after the
-      // request — an ACH row is inserted 'processing' well before it
-      // settles, so created_at is the wrong clock; metadata.settled_event_at
-      // is stamped at the actual settlement moment and falls back to
-      // created_at only for a payment that was never async (rule 3, Codex
-      // #4816 r13 P1). Account-credit coverage (invoice paid_at stamped with
-      // no payments row — admin-invoices.js apply-credit) never matches this
-      // whereExists, so it is never money landing. Payer-billed invoices
-      // (invoices.payer_id) and payer-billed payments
-      // (payments.metadata.payer_id) are excluded — that money is not the
-      // customer's own (rule 5). A property-scoped ask needs the invoice's
-      // own visit's property (rule 6); an office invoice with no visit link
-      // has none and never vouches for a scoped ask. Unlike a delivered
-      // notice (whose content was fixed at send, #4816 r49), money settles
-      // the invoice for its visit, so the visit's property is the payment's
-      // property even if the visit was later switched: invoices carry no
-      // property of their own to snapshot.
-      conn('invoices as pinv').where({ 'pinv.customer_id': customerId }).whereNull('pinv.payer_id')
-        .where('pinv.paid_at', '>', after).where('pinv.paid_at', '<=', now)
-        .leftJoin('scheduled_services as pinv_visit', 'pinv_visit.id', 'pinv.scheduled_service_id')
-        .whereExists(function paymentForThisInvoice() { settledPaymentFor(this.select(conn.raw('1'))); })
-        .orderBy('pinv.paid_at', 'desc').limit(LIMIT + 1)
-        // The payments row that settled it rides along: revalidation locks
-        // it too, because a dispute reverses payments.status before it
-        // touches the invoice (pre-push audit, rule 8).
-        .select('pinv.id', 'pinv.title', 'pinv.invoice_number', 'pinv.paid_at', 'pinv_visit.property_id as property_id',
-          conn.raw(`(${settledPaymentFor(conn.select('p.id')).orderByRaw("COALESCE((p.metadata::jsonb ->> 'settled_event_at')::timestamptz, p.created_at) DESC").limit(1).toQuery()}) as payment_id`)),
-      // Off-gateway money recorded by staff (cash/check/Zelle/Venmo
-      // prepayments from admin-customers.js POST /:id/credits) lands only in
-      // the payments ledger, with no invoice link and no receipt text (rule
-      // 4). It carries no property either — an unlinked ledger payment can
-      // never vouch for a property-scoped ask (rule 6).
-      conn('payments as lp').where({ 'lp.customer_id': customerId, 'lp.status': 'paid' })
-        .whereRaw("COALESCE(lp.metadata::jsonb ->> 'payer_id', '') = ''")
-        .whereRaw("COALESCE(lp.metadata::jsonb ->> 'invoice_id', '') = ''")
-        .whereRaw("COALESCE(lp.metadata::jsonb ->> 'waves_invoice_id', '') = ''")
-        .whereNull('lp.stripe_payment_intent_id')
-        .whereRaw("COALESCE((lp.metadata::jsonb ->> 'settled_event_at')::timestamptz, lp.created_at) > ?", [after])
-        .whereRaw("COALESCE((lp.metadata::jsonb ->> 'settled_event_at')::timestamptz, lp.created_at) <= ?", [now])
-        .orderBy('lp.created_at', 'desc').limit(LIMIT + 1)
-        .select('lp.id', 'lp.amount', 'lp.description', 'lp.payment_date', 'lp.created_at'),
-      // A delivered receipt-family confirmation answers a settlement
-      // question the same way a paid invoice does (rule 7) — a receipt
-      // REQUEST too (checked at the prompt). Must go through
-      // excludeUnresolvedSendReservations like every other sms_log
-      // "latest N" read (server/tests/sms-log-general-reader-source-guard.test.js).
-      // Its property, when the send named a visit, rides the same
-      // notice-scope metadata stamp the generic `sms` source reads.
-      // Delivered, or an App push the provider accepted (status stays 'sent';
-      // the same proof smsDelivered() admits for other notices).
-      excludeUnresolvedSendReservations(conn('sms_log').where({ customer_id: customerId, direction: 'outbound' })
-        .where((q) => q.where('status', 'delivered').orWhere((push) => push.where('status', 'sent')
-          .whereRaw("(sms_log.metadata->>'providerAccepted') = 'true'")
-          .where((ch) => ch.where('from_phone', 'push').orWhereRaw("(sms_log.metadata->>'channel') = 'push'")))))
-        .whereIn('message_type', PAYMENT_SMS_TYPES)
-        .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
-        .where('created_at', '>', after).where('created_at', '<=', now)
-        .orderBy('created_at', 'desc').limit(LIMIT + 1)
-        .select('id', 'status', 'message_type', 'message_body', 'created_at', 'from_phone',
-          conn.raw("(sms_log.metadata->>'providerAccepted') = 'true' as provider_accepted"),
-          conn.raw("(sms_log.metadata->>'channel') = 'push' as push_channel"),
-          conn.raw("sms_log.metadata->>'property_id' as property_id")),
-      // A truncated leg here still lands in the combined array below, so its
-      // own overflow always trips the shared LIMIT check the generic loop
-      // already runs on `payment` — a mixed-source customer can over-flag as
-      // truncated (fails closed to review) but never under-flags.
-    ]).then(([invoicesPaid, ledger, paymentSms]) => [
-      ...invoicesPaid.map((row) => ({ ...row, payment_source: 'invoice',
-        text: `Invoice ${row.title || row.invoice_number || row.id} paid ${etDateString(new Date(row.paid_at))}` })),
-      ...ledger.map((row) => ({ ...row, payment_source: 'ledger', property_id: null,
-        text: `Payment of $${Number(row.amount).toFixed(2)} recorded ${dateOnlyString(row.payment_date)}${row.description ? `: ${row.description}` : ''}` })),
-      ...paymentSms.map((row) => ({ ...row, payment_source: 'sms' })),
-    ]),
+    // actually landing, not by a staff reply — an invoice the customer asked
+    // about went paid (through its own settling payments row), an
+    // off-gateway ledger prepayment was recorded, a received estimate
+    // deposit, or a payment-confirmation SMS the system sent went out, after
+    // the request. Four distinct tables share one witness type; each row is
+    // tagged with its source table so admissibility/quoting/revalidation
+    // know which (Codex #4816 r13 P1, payment-row lock order; Codex round 1
+    // #4996: P1-A manual-payment linkage, P1-C settlement time, P2 exact-
+    // match preference, P2 estimate deposits).
+    payment: (() => {
+      // A paid `payments` row settled (not merely created) after the
+      // request, tied to THIS invoice — exact metadata naming it, OR the one
+      // durable link a manually recorded self-pay settlement leaves (below),
+      // OR a shared PaymentIntent on a row that names no invoice at all
+      // (rule 3, rule 5, rule 8). A combined-balance charge writes one row
+      // per invoice, each naming its own allocation (pay-combined.js), so a
+      // SIBLING's row never vouches for this invoice (Codex round 1 P2).
+      const exactMatchSql = "(p.metadata::jsonb ->> 'invoice_id' = pinv.id::text OR p.metadata::jsonb ->> 'waves_invoice_id' = pinv.id::text)";
+      // invoice-manual-payment.js's self-pay path clears
+      // stripe_payment_intent_id and stamps NO metadata linking the invoice
+      // (Codex round 1 P1-A) — the one durable stamp the SAME transaction
+      // leaves on both rows is this instant: Postgres now() is fixed for the
+      // whole transaction, so invoices.payment_recorded_at and this payment's
+      // created_at read the identical value.
+      const manualMatchSql = '(pinv.payment_recorded_at IS NOT NULL AND p.created_at = pinv.payment_recorded_at)';
+      const sharedPiSql = "(p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id = pinv.stripe_payment_intent_id"
+        + " AND COALESCE(p.metadata::jsonb ->> 'invoice_id', '') = '' AND COALESCE(p.metadata::jsonb ->> 'waves_invoice_id', '') = '')";
+      // When the money actually landed: an async (ACH) row is inserted
+      // 'processing' and stamped with its Stripe settlement moment when it
+      // clears (stripe-webhook.js), so created_at is the wrong clock there.
+      const settledAt = (alias) => `COALESCE((${alias}.metadata::jsonb ->> 'settled_event_at')::timestamptz, ${alias}.created_at)`;
+      const settledAtSql = settledAt('p');
+      return Promise.all([
+        // Account-credit coverage (invoice paid_at stamped with no payments
+        // row — admin-invoices.js apply-credit) never matches any branch
+        // below, so it is never money landing. Payer-billed invoices
+        // (invoices.payer_id) and payer-billed payments
+        // (payments.metadata.payer_id) are excluded — that money is not the
+        // customer's own (rule 5, plus p.customer_id = pinv.customer_id,
+        // Codex round 1 P2 customer scope). A property-scoped ask needs the
+        // invoice's own visit's property (rule 6); an office invoice with no
+        // visit link has none and never vouches for a scoped ask. Unlike a
+        // delivered notice (whose content was fixed at send, #4816 r49),
+        // money settles the invoice for its visit, so the visit's property
+        // is the payment's property even if the visit was later switched:
+        // invoices carry no property of their own to snapshot.
+        conn('invoices as pinv').where({ 'pinv.customer_id': customerId }).whereNull('pinv.payer_id')
+          .whereNotNull('pinv.paid_at')
+          .leftJoin('scheduled_services as pinv_visit', 'pinv_visit.id', 'pinv.scheduled_service_id')
+          // The settling payment rides along in one LATERAL pick, so its id
+          // (revalidation's lock target, rule 8), amount and settlement
+          // instant (P1-C: this — not invoices.paid_at, a separate wall-
+          // clock stamp — is when the money actually landed) all come from
+          // the SAME row, ranked exact/manual match first, then latest
+          // settlement, then id (deterministic, Codex round 1 P2).
+          .joinRaw(`LEFT JOIN LATERAL (
+              SELECT p.id, p.amount, ${settledAtSql} AS settled_at
+              FROM payments p
+              WHERE p.status = 'paid' AND p.customer_id = pinv.customer_id
+                AND COALESCE(p.metadata::jsonb ->> 'payer_id', '') = ''
+                AND ${settledAtSql} > ? AND ${settledAtSql} <= ?
+                AND (${exactMatchSql} OR ${manualMatchSql} OR ${sharedPiSql})
+              ORDER BY (${exactMatchSql} OR ${manualMatchSql}) DESC, ${settledAtSql} DESC, p.id DESC
+              LIMIT 1
+            ) best_payment ON true`, [after, now])
+          .whereNotNull('best_payment.id')
+          .orderBy('best_payment.settled_at', 'desc').limit(LIMIT + 1)
+          .select('pinv.id', 'pinv.title', 'pinv.invoice_number', 'pinv_visit.property_id as property_id',
+            'best_payment.id as payment_id', 'best_payment.amount as payment_amount', 'best_payment.settled_at as settled_at'),
+        // Off-gateway money recorded by staff (cash/check/Zelle/Venmo
+        // prepayments from admin-customers.js POST /:id/credits) lands only
+        // in the payments ledger, with no invoice link and no receipt text
+        // (rule 4). It carries no property either — an unlinked ledger
+        // payment can never vouch for a property-scoped ask (rule 6). Never
+        // a row the invoice leg above already claims through the manual-
+        // payment fallback (Codex round 1 P1-A: no double count).
+        conn('payments as lp').where({ 'lp.customer_id': customerId, 'lp.status': 'paid' })
+          .whereRaw("COALESCE(lp.metadata::jsonb ->> 'payer_id', '') = ''")
+          .whereRaw("COALESCE(lp.metadata::jsonb ->> 'invoice_id', '') = ''")
+          .whereRaw("COALESCE(lp.metadata::jsonb ->> 'waves_invoice_id', '') = ''")
+          .whereNull('lp.stripe_payment_intent_id')
+          .whereNotExists(function manuallySettledInvoice() {
+            this.select(conn.raw('1')).from('invoices as manual_inv')
+              .whereRaw('manual_inv.customer_id = lp.customer_id AND manual_inv.payment_recorded_at = lp.created_at');
+          })
+          .whereRaw(`${settledAt('lp')} > ?`, [after])
+          .whereRaw(`${settledAt('lp')} <= ?`, [now])
+          .orderByRaw(`${settledAt('lp')} DESC`).limit(LIMIT + 1)
+          // P1-B: payments.description can hold a customer's name, phone or
+          // email an operator typed by hand — it never reaches the model.
+          // Only the structured method (CREDIT_PAYMENT_METHODS, validated at
+          // the admin-customers.js writer) does, when set.
+          .select('lp.id', 'lp.amount', 'lp.payment_date', 'lp.created_at', conn.raw("lp.metadata->>'method' as method"),
+            conn.raw(`${settledAt('lp')} AS settled_at`)),
+        // A delivered receipt-family confirmation answers a settlement
+        // question the same way a paid invoice does (rule 7) — a receipt
+        // REQUEST too (checked at the prompt). Must go through
+        // excludeUnresolvedSendReservations like every other sms_log
+        // "latest N" read (server/tests/sms-log-general-reader-source-guard.test.js).
+        // Its property, when the send named a visit or an invoice, rides the
+        // same notice-scope metadata stamp the generic `sms` source reads.
+        // Delivered, or an App push the provider accepted (status stays
+        // 'sent'; the same proof smsDelivered() admits for other notices).
+        excludeUnresolvedSendReservations(conn('sms_log').where({ customer_id: customerId, direction: 'outbound' })
+          .where((q) => q.where('status', 'delivered').orWhere((push) => push.where('status', 'sent')
+            .whereRaw("(sms_log.metadata->>'providerAccepted') = 'true'")
+            .where((ch) => ch.where('from_phone', 'push').orWhereRaw("(sms_log.metadata->>'channel') = 'push'")))))
+          .whereIn('message_type', PAYMENT_SMS_TYPES)
+          .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
+          .where('created_at', '>', after).where('created_at', '<=', now)
+          .orderBy('created_at', 'desc').limit(LIMIT + 1)
+          .select('id', 'status', 'message_type', 'message_body', 'created_at', 'from_phone',
+            conn.raw("(sms_log.metadata->>'providerAccepted') = 'true' as provider_accepted"),
+            conn.raw("(sms_log.metadata->>'channel') = 'push' as push_channel"),
+            conn.raw("sms_log.metadata->>'property_id' as property_id")),
+        // A received (or already credited-forward) estimate deposit —
+        // estimate_deposits is its own ledger with no payments row
+        // (estimate-deposits.js) — customer-scoped the same way the
+        // `estimate` source is; pending, refunding and refunded deposits
+        // never match. received_at is the Stripe settlement moment.
+        conn('estimate_deposits as ed').join('estimates', 'estimates.id', 'ed.estimate_id')
+          .modify((q) => whereEstimateCustomerOwnership(q, customerId))
+          .whereIn('ed.status', ['received', 'credited'])
+          .where('ed.received_at', '>', after).where('ed.received_at', '<=', now)
+          .orderBy('ed.received_at', 'desc').limit(LIMIT + 1)
+          .select('ed.id', 'ed.estimate_id', 'ed.amount', 'ed.received_at', 'estimates.property_id as property_id'),
+      ]).then(([invoicesPaid, ledger, paymentSms, deposits]) => {
+        const legs = [
+          invoicesPaid.map((row) => ({ ...row, payment_source: 'invoice',
+            text: `Invoice ${row.invoice_number || row.id}${row.title ? ` (${row.title})` : ''} paid ${etDateString(new Date(row.settled_at))}`
+              + `${row.payment_amount != null ? ` — $${Number(row.payment_amount).toFixed(2)}` : ''}` })),
+          ledger.map((row) => ({ ...row, payment_source: 'ledger', property_id: null,
+            text: `Payment of $${Number(row.amount).toFixed(2)} recorded ${dateOnlyString(row.payment_date)}${row.method ? ` (${row.method})` : ''}` })),
+          paymentSms.map((row) => ({ ...row, payment_source: 'sms' })),
+          deposits.map((row) => ({ ...row, payment_source: 'deposit',
+            text: `Deposit of $${Number(row.amount).toFixed(2)} received ${etDateString(new Date(row.received_at))}` })),
+        ];
+        // Each leg is capped on its OWN LIMIT, so the four together can run
+        // past LIMIT with nothing lost; only a leg that overflowed marks the
+        // source truncated (Codex round 1 P2). Each leg is newest-first on
+        // ORDERING_TIME.payment, and an overflowing leg is complete only down
+        // to the oldest row it kept, so every leg is cut at the latest such
+        // floor: what remains is exactly the payments newer than it, which
+        // is what fatalFailures assumes of a truncated source.
+        const at = (row) => new Date(ORDERING_TIME.payment(row)).getTime();
+        const floors = legs.filter((rows) => rows.length > LIMIT).map((rows) => at(rows[LIMIT - 1]));
+        const floor = floors.length ? Math.max(...floors) : -Infinity;
+        const merged = legs.flatMap((rows) => rows.slice(0, LIMIT)).filter((row) => at(row) >= floor);
+        merged.truncated = floors.length > 0;
+        return merged;
+      });
+    })(),
     visit: conn('scheduled_services').where({ customer_id: customerId })
       .where('created_at', '<=', now)
       .modify((q) => { if (commitment.sms_context?.property_id) q.where({ property_id: commitment.sms_context.property_id }); })
@@ -333,8 +400,13 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
   results.forEach((result, index) => {
     const type = entries[index][0];
     if (result.status === 'rejected') { failures.push(type); return; }
-    if (result.value.length > LIMIT) failures.push(`${type}_truncated`);
-    for (const row of result.value.slice(0, LIMIT)) {
+    // `payment` is four legs pre-capped and merged (each against its OWN
+    // LIMIT); the combined array legitimately runs longer than LIMIT with
+    // no leg having lost a row, so it carries its own `.truncated` flag
+    // instead of the generic per-source length check (Codex round 1 P2).
+    const overflowed = type === 'payment' ? result.value.truncated : result.value.length > LIMIT;
+    if (overflowed) failures.push(`${type}_truncated`);
+    for (const row of type === 'payment' ? result.value : result.value.slice(0, LIMIT)) {
       const visitText = type === 'visit' ? `${row.service_type} on ${row.scheduled_date} at ${row.window_start}; status ${row.status}${row.moved_at ? '; moved after the request' : ''}${row.progressed_at ? '; en route/on site/completed after the request' : ''}${row.cancelled_at ? '; cancelled after the request' : ''}` : '';
       const text = row.message_body || row.transcription || row.body_text || row.text_snapshot || row.text || row.service_interest || row.title || visitText;
       if (text.length > 16000) failures.push(`${type}_body_truncated`);
@@ -491,6 +563,11 @@ function admissibleWitness(record, commitment, records = []) {
 const ORDERING_TIME = {
   sms: (row) => row.created_at, call: (row) => row.created_at, email: (row) => row.received_at,
   email_delivery: (row) => row.delivered_at || row.sent_at, invoice: (row) => row.sent_at,
+  // Each payment leg's own sort key: settled_at (invoice and ledger legs),
+  // received_at (deposits), created_at (receipt texts). With it a
+  // payment_truncated failure relaxes like any other ordered source for a
+  // commitment that can never cite a payment (Codex round 1 P2).
+  payment: (row) => row.settled_at || row.received_at || row.created_at,
 };
 function witnessTypes(commitment) {
   if (recipientSpecificEstimate(commitment)) return ['estimate', 'email_delivery'];
@@ -544,10 +621,10 @@ function fatalFailures(evidence, commitment, witness) {
 // payment that lands well inside that window would sit unchecked until the
 // deadline instead of closing at once — the whole point of "money landing
 // answers a settlement question" (owner ruling 2026-09-25). The watcher's
-// same-tick event-freshness page (UNSEEN_VISIT_ACTIVITY) stays visit-only —
-// a payment inside the window is still scanned every tick via the ordinary
-// future_cursor page (it is picked up one tick later than a visit would be,
-// never left unchecked), so no new SQL was needed there.
+// same-tick event-freshness page (UNSEEN_EVENT_ACTIVITY, sms-operational-
+// actions.js) scans payment settlement and delivered receipt-family sms
+// activity alongside visit activity (Codex round 1 P2), so a payment lands
+// on the SAME tick it settles rather than waiting for the next cursor pass.
 const SYSTEM_EVENT_TYPES = ['visit', 'payment'];
 // Inside an open window only an event earned the early check, so only an
 // event record may ground it (Codex #4816 r17).
@@ -557,10 +634,11 @@ const witnessAllowed = (record, commitment, records, eventOnly) => admissibleWit
 function witnessTime(witness, commitment) {
   if (witness.type === 'estimate') return witnessAt(witness, new Date(commitment.sms_context?.source_at));
   if (witness.type === 'visit') return visitWitnessAt(witness, commitment);
-  // An invoice-sourced payment selects paid_at and no send/delivery time
-  // (the invoice's own paid_at IS when it settled); every other payment leg
-  // (ledger, sms receipt) has no paid_at and falls through to created_at.
-  if (witness.type === 'payment') return witness.paid_at || witness.created_at;
+  // When the money landed (ORDERING_TIME.payment): the settling payment's
+  // own settlement, never invoices.paid_at — the webhook stamps that at
+  // handler time, so a delayed delivery would move the payment to a later
+  // day (Codex round 1 P1).
+  if (witness.type === 'payment') return ORDERING_TIME.payment(witness);
   return witness.delivered_at || witness.sent_at || witness.received_at || witness.created_at;
 }
 
@@ -584,6 +662,9 @@ function groundFulfillment(parsed, evidence, commitment, { eventOnly = false } =
   return { verdict: 'fulfilled', record_type: witness.type, record_id: witness.id,
     ...(linked ? { linked_record_type: 'estimate', linked_record_id: linked.id } : {}),
     ...(witness.payment_source === 'invoice' && witness.payment_id ? { linked_record_type: 'payment_row', linked_record_id: witness.payment_id } : {}),
+    // A deposit counts only while its estimate is the customer's: hold that
+    // row too, and the lead that admitted it (holdsLeadOwnership below).
+    ...(witness.payment_source === 'deposit' ? { linked_record_type: 'estimate', linked_record_id: witness.estimate_id } : {}),
     // Revalidation (below) needs to know which table a 'payment' record_id
     // actually lives in (undefined, so dropped from JSON, for other types).
     payment_source: witness.payment_source,
@@ -623,14 +704,14 @@ async function holdsLeadOwnership(trx, estimateId, customerId) {
 async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) {
   const tables = { sms: 'sms_log', call: 'call_log', email_delivery: 'email_messages',
     estimate: 'estimates', visit: 'scheduled_services',
-    // A 'payment' witness is one of three distinct rows (R2); which table to
+    // A 'payment' witness is one of four distinct rows (R2); which table to
     // lock depends on which leg matched, carried on the verdict as
     // payment_source. Lock order stays customer → source → commitment →
     // payment (lockLiveCommitment above always runs first), and skipLocked
     // means a racing refund/void/chargeback either loses this row to us or
     // leaves us nothing to hold — never a fulfilled verdict grounded on
     // reversed money (rule 8, Codex #4816 r13 P1).
-    payment: { invoice: 'invoices', ledger: 'payments', sms: 'sms_log' }[verdict.payment_source],
+    payment: { invoice: 'invoices', ledger: 'payments', sms: 'sms_log', deposit: 'estimate_deposits' }[verdict.payment_source],
     // The settling payments row behind an invoice-source payment (linked).
     payment_row: 'payments' };
   const table = tables[verdict.record_type];
@@ -696,14 +777,13 @@ async function checkSmsFulfillment(commitment, evidence, { eventOnly = false } =
     // columns could otherwise retain a short unsanitized readback fragment.
     // from_phone is a phone number and never reaches the provider; the model
     // gets only whether the row is an accepted App push (Codex #4816 r46
-    // pre-push). A ledger payment's own staff note (payments.description) is
-    // folded into its `text` (below scrubPans, same as every other string
-    // here via stringifySmsEvidence) — the raw field can hold a PAN/CVV an
-    // operator typed and must never ride twice under an unscrubbed key
-    // (rule 9).
+    // pre-push). A ledger payment's free-text staff note (payments.
+    // description) can hold a customer's name, phone, email or a PAN/CVV an
+    // operator typed — it is never selected from the database at all (Codex
+    // round 1 P1-B); only the structured `method` enum reaches `text`.
     const { message_body: _smsBody, transcription: _callBody, body_text: _emailBody,
       text_snapshot: _deliveryBody, from_phone: _fromPhone, push_channel: _pushChannel, provider_accepted: _accepted,
-      description: _ledgerNote, ...record } = row;
+      ...record } = row;
     const appPush = row.type === 'sms' || row.payment_source === 'sms' ? { app_push_accepted: smsDelivered(row) && row.status === 'sent' } : {};
     return { ...record, ...appPush, text: smsText.get(row.ref) ?? row.text };
   });

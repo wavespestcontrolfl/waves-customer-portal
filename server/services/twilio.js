@@ -1071,7 +1071,7 @@ const TwilioService = {
       // a property switch that commits while the send is in flight must not
       // re-scope an SMS already handed off (Codex #4816 r49/r50). Not inside
       // dispatch(): the provider call stays the handoff's last await.
-      const noticeScopeStamp = await require('./messaging/notice-scope').noticeScope(options.appointmentId);
+      const noticeScopeStamp = await require('./messaging/notice-scope').noticeScope(options.appointmentId, { invoiceId: options.invoiceId });
       let message;
       let dispatchStarted = false;
       // Pre-push audit P2 (twilio.js:953, round 12): dispatch() takes an

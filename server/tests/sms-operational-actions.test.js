@@ -1322,16 +1322,18 @@ describe('R2 payment evidence (owner ruling 2026-09-25): a payment receipt or pa
     expect(prompt).not.toContain('from_phone');
   });
 
-  test('rule 9: a ledger note (payments.description) never reaches the provider unscrubbed, and never rides twice under a raw key', async () => {
+  test('rule 9 / Codex round 1 P1-B: a ledger record carries only amount, date and the structured method — never a free-text key', async () => {
     dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
-    const note = 'Zelle prepayment — card 4242 4242 4242 4242 CVV 123';
-    const ledger = { ...ledgerPaid, description: note, text: `Payment of $200.00 recorded 2040-03-11: ${note}` };
+    // The real query (loadSmsFulfillmentEvidence) never selects
+    // payments.description at all any more; this is the shape it actually
+    // produces — a controlled `method` enum, no free-text field whatsoever.
+    const ledger = { ...ledgerPaid, method: 'zelle', text: 'Payment of $200.00 recorded 2040-03-11 (zelle)' };
     const ask = { kind: 'other', description: 'What is the Zelle number?', sms_context: ctx };
     await verifySmsFulfillment(ask, { records: [ledger], failures: [] });
     const prompt = dispatchWithFallback.mock.calls.at(-1)[1].text;
-    expect(prompt).not.toContain('4242 4242 4242 4242');
-    expect(prompt).not.toContain('CVV 123');
-    expect(prompt).not.toContain('"description":"Zelle');
+    expect(prompt).toContain('(zelle)');
+    const record = JSON.parse(prompt.slice(prompt.indexOf('{"obligation"'))).records[0];
+    expect(record).not.toHaveProperty('description');
     expect(prompt).toContain('"witness_refs":["payment:pay-1"]');
   });
 
