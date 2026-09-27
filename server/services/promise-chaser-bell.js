@@ -249,10 +249,33 @@ async function findPromiseToRing(call, now) {
   open = open.filter((r) => !followed.has(r.id));
   if (!open.length) return null;
 
+  // A callback that arrived BEFORE a promise's own renewal (staff reopened
+  // or restated it) cannot be "about" that renewal — it happened before
+  // the renewal even existed. Without this, a call still sitting inside
+  // the sweep window when staff later reopen the SAME promise would get
+  // re-attributed to the NEW obligation and ring a second time for a call
+  // that already had its alert, purely because the dedupeKey versions on
+  // the renewal instant. Computed here (once per candidate, reused by
+  // ringForCall for that same dedupeKey) rather than only after picking
+  // the winner, since the winner itself may be the one this excludes. A
+  // lookup failure excludes that row — never a false ring on unverified
+  // renewal state.
+  const withRenewal = [];
+  for (const r of open) {
+    const renewedAt = await commitments.obligationRenewedAt(db, r).catch((err) => {
+      logger.warn(`[promise-chaser-bell] renewal lookup failed for commitment ${r.id}: ${err.message}`);
+      return RENEWAL_LOOKUP_FAILED;
+    });
+    if (renewedAt === RENEWAL_LOOKUP_FAILED) continue;
+    if (renewedAt && renewedAt.getTime() >= call.created_at.getTime()) continue;
+    withRenewal.push({ ...r, __renewedAt: renewedAt });
+  }
+  if (!withRenewal.length) return null;
+
   // The promise the caller has waited longest for.
-  open.sort((a, b) => new Date(a.call_started_at) - new Date(b.call_started_at));
-  const promise = open[0];
-  return { promise, ...describePromise(promise) };
+  withRenewal.sort((a, b) => new Date(a.call_started_at) - new Date(b.call_started_at));
+  const promise = withRenewal[0];
+  return { promise, renewedAt: promise.__renewedAt, ...describePromise(promise) };
 }
 
 // Dispatches the alert for one eligible call, if any open Waves promise
@@ -262,19 +285,15 @@ async function findPromiseToRing(call, now) {
 async function ringForCall(call, now = new Date()) {
   const found = await findPromiseToRing(call, now);
   if (!found) return false;
-  const { promise, what, when } = found;
+  const { promise, what, when, renewedAt } = found;
 
   // A callback staff RE-OPENED or edited after it last rang is a NEW
   // obligation, not the one the old bell already covered — versioning the
-  // key on the renewal instant (0 when never renewed) lets it ring again
-  // for THAT obligation while repeated calls chasing the SAME unrenewed one
-  // still collapse onto the one bell. A lookup failure never rings — the
-  // next tick, still inside the sweep's own window, tries again.
-  const renewedAt = await commitments.obligationRenewedAt(db, promise).catch((err) => {
-    logger.warn(`[promise-chaser-bell] renewal lookup failed for commitment ${promise.id}: ${err.message}`);
-    return RENEWAL_LOOKUP_FAILED;
-  });
-  if (renewedAt === RENEWAL_LOOKUP_FAILED) return false;
+  // key on the renewal instant (0 when never renewed, computed by
+  // findPromiseToRing above — which also excludes a callback that
+  // preceded the renewal) lets it ring again for THAT obligation while
+  // repeated calls chasing the SAME unrenewed one still collapse onto the
+  // one bell.
   const dedupeKey = `promise_chaser:${promise.id}:${renewedAt ? renewedAt.getTime() : 0}:${etDateString(now)}`;
 
   // The canonical "already delivered" check missed-call-bell.js and

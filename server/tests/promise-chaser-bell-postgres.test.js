@@ -520,5 +520,27 @@ const OUR_NUMBER = '+19415550100';
       const [, , opts] = triggerNotification.mock.calls[0];
       expect(opts.dedupeKey).toBe(`promise_chaser:${commitment.id}:0:${etDateString(new Date(now))}`);
     });
+
+    test('a callback that arrived BEFORE a promise renewal is never re-attributed to the renewed obligation (Codex #5019 r17 P1)', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id, { human_state: 'confirmed' });
+      // This call happened BEFORE the renewal below — it cannot possibly
+      // be "about" an obligation that did not exist yet when it came in.
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      // Staff reopen the promise strictly AFTER this callback — still
+      // inside the SAME 30-minute sweep window (`back` is still there).
+      const renewedAt = new Date(now + 1000);
+      await mockConn('audit_log').insert({
+        id: randomUUID(), actor_type: 'admin', action: 'callback_reopen',
+        resource_type: 'call_commitment', resource_id: commitment.id,
+        metadata: JSON.stringify({ renewed_at: renewedAt.toISOString() }), created_at: renewedAt,
+      });
+
+      expect(await sweepPromiseChasers()).toBe(0);
+      expect(triggerNotification).not.toHaveBeenCalled();
+    });
   });
 });
