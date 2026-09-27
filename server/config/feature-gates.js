@@ -1420,6 +1420,30 @@ const gates = {
   // a staged rollout.) Requires a real catalog service (no generic-placeholder
   // fallback for outbound). Off → outbound bookings stay manual.
   callOutboundBooking: process.env.GATE_CALL_OUTBOUND_BOOKING === 'true',
+  // Owner ruling 2026-09-26: the four customer-facing call-processor features
+  // #4912 deliberately kept inbound-only (booking-confirmation implied
+  // consent, the dropped-mid-intake address text, customer-less lead
+  // creation, the approval-gated unit/address clarify draft) may run the
+  // same on an OUTBOUND call ONLY when the person contacted Waves FIRST —
+  // a prior inbound call/text, a lead record, or an existing customer
+  // (server/services/outbound-call-reason.js's hasPriorContact, unbounded,
+  // reused rather than a second query). NEVER on a cold/sales call we
+  // placed to someone who never contacted us. The shared outboundReturn
+  // MessagesEligible flag is prior contact ONLY (codex pre-push r4 P1,
+  // reversing r1's own guidance): each site keeps its OWN existing "real
+  // conversation" precondition instead — a confirmed booking
+  // (GATE_CALL_OUTBOUND_BOOKING), a workable lead signal, or the drop
+  // detector's own MIN_CALL_SECONDS engagement floor — so a short but
+  // genuinely confirmed exchange (offer → acceptance → confirmation, as
+  // few as 3 turns) still gets its confirmation SMS. The ONE exception is
+  // the clarify draft: nothing else at that site rules out an early drop,
+  // so it alone ALSO requires hasRealTwoWayConversation (>= 4 exchanged
+  // turns across >= 2 distinct speaker labels) on top of the shared flag.
+  // Sends customer SMS + creates records — owner-flip only. Off → every
+  // one of the four sites stays byte-identical to today (the
+  // `!isOutboundCall(call)` checks are untouched; the lead-creation site's
+  // new outbound restriction is a no-op while this gate is off).
+  callOutboundReturnMessages: process.env.GATE_CALL_OUTBOUND_RETURN_MESSAGES === 'true',
   // Call-ingest completeness watchdog: a 30-min cron that diffs Twilio's own
   // call ledger against call_log and rings an admin bell for any answered
   // inbound call (completed, >=20s) the pipeline never received — born from
