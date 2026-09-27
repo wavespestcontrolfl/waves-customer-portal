@@ -2334,39 +2334,32 @@ describe('public-quote resolveEntryChannel allowlist', () => {
 // Inputs are sized to the real caps (12 history turns × 600 chars, a
 // 2000-char message, a 600-char reply) with repetitive adversarial shapes.
 describe('intake chokepoint worst-case latency (#4905)', () => {
-  const { normalizeIntakeResult: normalize, looksLikeEmergency: emergency } = _internals;
+  const { execFileSync } = require('child_process');
+  const path = require('path');
   const shapes = ['a ', 'my ', 'not ', "child's ", 'dry ', 'no les ', '- ', 'my child ', 'can i ', 'return ', 'avoid ', 'hospital ', 'spray ', 'my dog ate un poco ', 'my dog ate the some of '];
   const fill = (unit, n) => unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
-  const runChokepoint = (reply, ctx, msg) => {
-    normalize({ reply, intent: 'question', service_keys: [], ready_for_quote: true }, 'openai', ctx, msg);
-    emergency(ctx);
+  // Timed in a fresh Node process (tests/fixtures/ask-waves-latency-probe.js):
+  // in this long-lived jest worker, process CPU also carries GC and
+  // background-compile work for every earlier test file — CI measured 54–62 ms,
+  // best of three, on shapes that take ~1 ms in isolation on Node 20 and 26.
+  // A super-linear regex still blows the budget there on every run.
+  const timeInFreshProcess = (inputs) => {
+    const out = execFileSync(process.execPath, [path.join(__dirname, 'fixtures', 'ask-waves-latency-probe.js')], {
+      input: JSON.stringify(inputs), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
+    });
+    return JSON.parse(out.split('\n').find((line) => line.startsWith('LATENCY ')).slice('LATENCY '.length));
   };
-  const cpuMs = (fn) => {
-    const started = process.cpuUsage();
-    fn();
-    const elapsed = process.cpuUsage(started);
-    return (elapsed.user + elapsed.system) / 1000;
-  };
-  // The best of three runs: a super-linear regex blows the budget on every
-  // run, while one GC or background-compile spike on a busy CI box does not
-  // (process CPU counts V8's helper threads too — #5067 saw a single 55 ms
-  // sample on a shape that measures ~1 ms before and after its change).
-  const bestCpuMs = (fn) => Math.min(cpuMs(fn), cpuMs(fn), cpuMs(fn));
 
+  let shapeMs = [];
   beforeAll(() => {
-    // Compile and exercise the full no-match path at the real input caps before
-    // measuring steady synchronous work. Wall time here is dominated by host
-    // scheduling when CI runs many suites in parallel; process CPU still counts
-    // regex/string work (and GC) that can actually block this Node event loop.
-    const msg = fill('my yard has ants and a question ', 2000);
-    const ctx = [...Array(12).fill(fill('ordinary pest question ', 600)), msg].join('\n');
-    for (let k = 0; k < 2; k += 1) runChokepoint(fill('ordinary answer ', 600), ctx, msg);
+    shapeMs = timeInFreshProcess(shapes.map((unit) => {
+      const msg = fill(unit, 2000);
+      return { reply: fill(unit, 600), ctx: [...Array(12).fill(fill(unit, 600)), msg].join('\n'), msg };
+    }));
   });
 
-  test.each(shapes)('stays well under budget for repeated %j', (unit) => {
-    const msg = fill(unit, 2000);
-    const ctx = [...Array(12).fill(fill(unit, 600)), msg].join('\n');
-    expect(bestCpuMs(() => runChokepoint(fill(unit, 600), ctx, msg))).toBeLessThan(50);
+  test.each(shapes.map((unit, index) => [unit, index]))('stays well under budget for repeated %j', (unit, index) => {
+    expect(shapeMs[index]).toBeLessThan(50);
   });
 
   test('stays under budget for seeded random mixes of the matchers\' own vocabulary', () => {
@@ -2374,14 +2367,12 @@ describe('intake chokepoint worst-case latency (#4905)', () => {
     let seed = 42;
     const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
     const words = (n) => Array.from({ length: n }, () => vocab[Math.floor(rnd() * vocab.length)]).join(' ');
-    let worst = 0;
-    for (let k = 0; k < 40; k += 1) {
+    const inputs = Array.from({ length: 40 }, () => {
       const msg = words(300).slice(0, 2000);
       const ctx = [...Array.from({ length: 12 }, () => words(100).slice(0, 600)), msg].join('\n');
-      const reply = words(100).slice(0, 600);
-      worst = Math.max(worst, bestCpuMs(() => runChokepoint(reply, ctx, msg)));
-    }
-    expect(worst).toBeLessThan(50);
+      return { reply: words(100).slice(0, 600), ctx, msg };
+    });
+    expect(Math.max(...timeInFreshProcess(inputs))).toBeLessThan(50);
   });
 });
 
