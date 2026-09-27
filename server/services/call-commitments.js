@@ -1893,6 +1893,17 @@ async function refreshFulfillment(conn, callLogId, call = null) {
         // landed meanwhile moved the evidence boundary, so the write is
         // skipped and the next refresh judges the new version.
         .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at])
+        // A slot proof was found through the call's CUSTOMER: it is written
+        // only while the call still has that customer, read under a share
+        // lock in this same statement — a relink either waits for this write
+        // (and its reopenSlotBookingProofs then undoes it) or has already
+        // moved the call (and nothing is written).
+        .modify((q) => {
+          if (proof.basis !== SLOT_BOOKING_BASIS) return;
+          q.whereExists(function callStillHasThatCustomer() {
+            this.select(conn.raw("1")).from("call_log").where({ id: callLogId, customer_id: row.customer_id }).forShare();
+          });
+        })
         .update({ status: "fulfilled", fulfillment: JSON.stringify(proof), fulfilled_at: proof.matched_at || new Date(), updated_at: new Date() });
     } else {
       // A hint is written once and refreshed only while it is still a hint.

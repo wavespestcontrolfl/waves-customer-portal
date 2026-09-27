@@ -394,6 +394,46 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     expect((await db('call_commitments').where({ id: linked.id }).first('status')).status).toBe('fulfilled');
   });
 
+  test('a refresh racing a relink never keeps the promise with the previous customer\'s booking (pre-push audit P1 on 23ab49bc0f)', async () => {
+    const { addETDays, etDateString, parseETDateTime } = require('../utils/datetime-et');
+    const day = etDateString(addETDays(new Date(), 7));
+    const threePm = parseETDateTime(`${day}T15:00`).toISOString();
+    const [first, second] = await db('customers').insert([{ first_name: 'RaceA', phone: '+15555550175' }, { first_name: 'RaceB', phone: '+15555550174' }]).returning('id');
+    cleanup.customerIds.push(first.id, second.id);
+    const [call] = await db('call_log').insert({
+      twilio_call_sid: 'CA' + '7'.repeat(30) + 's3', direction: 'inbound', from_phone: '+15555550175', to_phone: OUR_NUMBER,
+      status: 'completed', customer_id: first.id, created_at: new Date(Date.now() - 10 * 60 * 1000),
+      v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ scheduling: { status: 'confirmed', confirmed_start_at: threePm } }),
+    }).returning('*');
+    cleanup.callIds.push(call.id);
+    const [visit] = await db('scheduled_services').insert({ scheduled_date: day, window_start: '15:00', service_type: 'Rodent Trapping Service', status: 'pending', customer_id: first.id, created_at: new Date(Date.now() - 60 * 1000) }).returning('id');
+    cleanup.visitIds.push(visit.id);
+    const [promise] = await db('call_commitments').insert({
+      call_log_id: call.id, commitment_key: 'waves:schedule_visit:race', party: 'waves', kind: 'schedule_visit', description: 'Put the caller on the schedule for 3',
+      due_at: threePm, due_type: 'floor', source: 'ai', status: 'open',
+    }).returning('id');
+    // The office moves the call to the other customer; while that
+    // transaction still holds the call row, a refresh that read the call
+    // BEFORE the move persists its proof.
+    const relink = await db.transaction();
+    try {
+      await relink('call_log').where({ id: call.id }).update({ customer_id: second.id });
+      await cc.reopenSlotBookingProofs(relink, call.id);
+      const refreshing = cc.refreshFulfillment(db, call.id, call); // `call` still names the first customer
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await relink.commit();
+      await refreshing;
+    } catch (err) {
+      await relink.rollback().catch(() => {});
+      throw err;
+    }
+    expect(await db('call_commitments').where({ id: promise.id }).first('status', 'fulfillment')).toEqual({ status: 'open', fulfillment: null });
+    // Back on the customer whose booking it is, the same refresh keeps it.
+    await db('call_log').where({ id: call.id }).update({ customer_id: first.id });
+    await cc.refreshFulfillment(db, call.id);
+    expect((await db('call_commitments').where({ id: promise.id }).first('status')).status).toBe('fulfilled');
+  });
+
   test('an invoice on the visit booked from this call counts only when paid AFTER the call', async () => {
     const call = await db('call_log').where({ id: callId }).first();
     const [visit] = await db('scheduled_services').insert({ scheduled_date: '2026-09-11', service_type: 'General Pest Control', status: 'completed', source_call_log_id: callId }).returning('id');
