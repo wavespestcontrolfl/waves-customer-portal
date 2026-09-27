@@ -1147,6 +1147,25 @@ function profileMatchesAddress(row, address, location) {
   return coordsClose({ lat: row.latitude, lng: row.longitude }, location);
 }
 
+// A review quarantine may be bypassed only for a supplied address that is
+// affirmatively another property. Missing ZIP/locality/unit data is not a
+// difference: treating an incomplete copy of the reviewed address as a new
+// property would let it receive fresh provider coordinates in a sibling
+// profile. Both sides must provide a comparable value before it can prove a
+// conflict.
+function profileAffirmativelyDiffers(row, address) {
+  const { streetKey, normalizeZip, unitKey, streetEmbeddedUnitKey } = require('../services/customer-properties');
+  const unitOf = (line1, line2) => unitKey(line2 || '') || streetEmbeddedUnitKey(line1);
+  const text = value => String(value || '').trim().toLowerCase();
+  return [
+    [streetKey(row.address_line1), streetKey(address?.line1)],
+    [unitOf(row.address_line1, row.address_line2), unitOf(address?.line1, address?.line2)],
+    [normalizeZip(row.zip), normalizeZip(address?.zip)],
+    [text(row.city), text(address?.city)],
+    [text(row.state), text(address?.state)],
+  ].some(([stored, supplied]) => stored && supplied && stored !== supplied);
+}
+
 // The ONE place an unlinked lead gets attached to a customer record. Resolves
 // ensureCustomerAccount exactly once (it can WRITE — attaching a legacy
 // row's account, or minting a fresh customer_accounts row — so it must never
@@ -1717,7 +1736,7 @@ async function provisionLinkedCustomer(trx, {
   const explicitDifferentAddress = [
     resolved.source === 'supplied',
     Boolean(storedCustRow.address_line1),
-    !profileMatchesAddress(storedCustRow, resolved.address, resolved.location),
+    profileAffirmativelyDiffers(storedCustRow, resolved.address),
   ].every(Boolean);
   if (freshCustRow.geocode_review_blocked && !explicitDifferentAddress) {
     return { locationFailure: 'address_unresolved' };
