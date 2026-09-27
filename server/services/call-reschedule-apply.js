@@ -247,8 +247,8 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     if (!atProperty.length) return skip('no_visit_on_books');
     // Match the named service BEFORE proximity. A different program near the
     // destination cannot stand in for the requested visit outside the span.
-    // Coarse categories cannot distinguish programs, so absent/ambiguous
-    // catalog identity stays in office review.
+    // A name that matches nothing stays in office review; no name, or a name
+    // matching several programs, falls back below to a single in-span visit.
     const namedServices = new Set(serviceNameCandidates(v2.service_request?.specific_service_name)
       .map((name) => stripServiceSuffixes(name).toLowerCase()));
     // A row that names a catalog service is matched on THAT catalog name only:
@@ -268,16 +268,20 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     // so a customer with several quarterly visits on the books was ALWAYS
     // ambiguous_visit before this fix (0/1,089 calls ever moved a visit).
     if (programIds.size !== 1) {
-      // The stated service name is coarse, absent, or unmatched. Fall back to
-      // "what's actually on the books at this property near this date",
-      // ignoring the named service entirely — but only when exactly one
-      // program has a visit in span; two different programs both near the
-      // target stays in review same as before.
-      const inSpanAny = atProperty.filter((row) => {
+      // Fallback ONLY where the call's own service evidence cannot pick a
+      // program: no service named at all (any program at the property), or a
+      // coarse name matching several programs (only those programs). An
+      // explicit name that matches nothing stays in review — a different
+      // program must never stand in for the one the caller asked about — and
+      // so does any in-span row whose catalog identity no longer resolves.
+      if (namedServices.size && !programIds.size) return skip('service_needs_review');
+      const pool = namedServices.size ? matchingServices : atProperty;
+      const inSpanAny = pool.filter((row) => {
         const d = dateOnly(row.scheduled_date);
         return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
       });
-      const spanProgramIds = new Set(inSpanAny.map((row) => row.service_id || stripServiceSuffixes(row.catalog_service_name || row.service_type || '').toLowerCase()));
+      if (inSpanAny.some((row) => !(row.service_id ? row.catalog_service_name : row.service_type))) return skip('service_needs_review');
+      const spanProgramIds = new Set(inSpanAny.map((row) => row.service_id || stripServiceSuffixes(row.catalog_service_name || row.service_type).toLowerCase()));
       if (!inSpanAny.length || spanProgramIds.size !== 1) return skip('service_needs_review');
       // One program, but two of its visits near the target: which one the
       // caller meant is as ambiguous here as on the named-service path.

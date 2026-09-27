@@ -100,36 +100,51 @@ describe('planRescheduleFromCall', () => {
     expect(planRescheduleFromCall({ ...args, candidates: [visit(), ...args.candidates.slice(1)] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 
-  // A coarse/absent/unmatched service name falls back to "what's on the
-  // books at this property near this date" — but only when that is
-  // unambiguous. Two different programs both in span, or nothing in span at
-  // all, still needs a human to pick.
-  test('a coarse or unmatched service name falls back to the one in-span program at the property', () => {
+  // No service named on the call: fall back to the property's one in-span
+  // visit, but only when that is unambiguous. Two programs in span, two
+  // visits of one program in span, nothing in span, or an in-span row whose
+  // catalog identity no longer resolves all still need a human to pick.
+  test('a call that names no service falls back to the one in-span visit at the property', () => {
     const base = { v2: v2({ service_request: { specific_service_name: null } }), call: call(), customer: customer(), now: NOW };
     expect(planRescheduleFromCall({ ...base, candidates: [visit()] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
     expect(planRescheduleFromCall({ ...base, candidates: [visit(), visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-09-25' })] }).reason).toBe('service_needs_review');
     expect(planRescheduleFromCall({ ...base, candidates: [visit({ scheduled_date: '2026-12-01' })] }).reason).toBe('service_needs_review');
+    expect(planRescheduleFromCall({ ...base, candidates: [visit({ catalog_service_name: null })] }).reason).toBe('service_needs_review');
     // One program, two of its visits in span: the fallback does not guess.
     expect(planRescheduleFromCall({ ...base, candidates: [visit(), visit({ id: 'same-program-2', scheduled_date: '2026-09-28' })] }))
       .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'same-program-2'] });
   });
 
+  // A named service that matches nothing is an explicit mismatch, never a
+  // fallback: the call asked about quarterly pest, so the property's only
+  // in-span visit (monthly mosquito) must not stand in for it.
+  test('an explicitly named service that matches nothing stays in review', () => {
+    const mosquito = visit({ id: 'mosquito-visit', service_id: 'mosquito-monthly', service_type: 'Monthly Mosquito Control Service' });
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [mosquito] }).reason)
+      .toBe('service_needs_review');
+  });
+
+  // A name matching two programs resolves only among THOSE programs, and
+  // only when exactly one of them has a visit in span.
+  test('a name matching two programs resolves on the one of them in span', () => {
+    const base = { v2: v2(), call: call(), customer: customer(), now: NOW };
+    const farTwin = visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-12-01' });
+    expect(planRescheduleFromCall({ ...base, candidates: [visit(), farTwin] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    const nearTwin = visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-09-26' });
+    expect(planRescheduleFromCall({ ...base, candidates: [visit(), nearTwin] }).reason).toBe('service_needs_review');
+  });
+
   // A repoint leaves service_type stale, so the label alone can name the
   // requested program while the row now belongs to a different one (r8 P1).
-  // A second, distinct in-span program keeps the coarse-name fallback (item
-  // 2) from guessing either case — it only resolves a SINGLE in-span program.
   test('a stale service label cannot stand in for the catalog identity', () => {
-    const sibling = visit({ id: 'sibling', service_id: 'lawn-monthly', service_type: 'Monthly Lawn Service', scheduled_date: '2026-09-25' });
-    // Both land as service_needs_review — nothing matched the request by
-    // catalog identity, and with a second in-span program present the
-    // fallback can't resolve it either, so the office gets the card rather
-    // than the automation guessing from the label.
+    // Both land as service_needs_review — nothing matched the request, so the
+    // office gets the card rather than the automation guessing from the label.
     const repointed = visit({ service_id: 'mosquito-monthly', catalog_service_name: 'Monthly Mosquito Control Service' });
-    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [repointed, sibling] }).reason)
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [repointed] }).reason)
       .toBe('service_needs_review');
     // A row whose catalog entry is gone matches nothing rather than the label.
     const orphaned = visit({ catalog_service_name: null });
-    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [orphaned, sibling] }).reason)
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [orphaned] }).reason)
       .toBe('service_needs_review');
     // The catalog name still carries the alias contract.
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW,
