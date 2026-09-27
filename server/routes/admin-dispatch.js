@@ -3098,6 +3098,9 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
 //   unresolved: ['<name with no matching active catalog row>'] }
 router.get('/:serviceId/default-products', async (req, res, next) => {
   try {
+    const scheduled = await technicianCurrentVisitFilter(req,
+      db('scheduled_services').where({ id: req.params.serviceId })).first('id');
+    if (!scheduled) return res.status(404).json({ error: 'Service not found' });
     const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
     const result = await resolveCompletionProductDefaults({ db, serviceId: req.params.serviceId });
     res.json(result);

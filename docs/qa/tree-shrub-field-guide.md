@@ -53,6 +53,9 @@ The owner merges; this lane stops before merge.
 - Screenshots reviewed in-session. Native attachment unavailable with installed
   gh 2.90.0; no screenshot attachments are claimed.
 - 220 focused server tests passed after reconciling #5049's latest changes.
+- 34 dispatch-route checks passed, including seven cases proving default-product
+  reads enforce the existing technician assignment/status/date scope before
+  resolving any product or application history. Administrators retain access.
 - A temporary merge with #5050 at `f856e4c5eca7e7c3876ec66b170c177567275d18`
   passed 94 client checks and the production build, including brand/domain
   checks. Two combined-flow cases exercised automatic Snapshot suggestions
