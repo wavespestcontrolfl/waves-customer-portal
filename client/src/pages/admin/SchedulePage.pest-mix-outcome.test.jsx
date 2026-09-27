@@ -152,6 +152,36 @@ it('a hand-removed pest-mix row stays removed while the outcome stays completed 
   expect(screen.getAllByRole('button', { name: 'Remove product' })).toHaveLength(2);
 });
 
+it('a hand-removed pest-mix row stays removed across declined → completed (pre-push audit on #5049 r3)', async () => {
+  stubFetch();
+  await act(async () => {
+    render(
+      <CompletionPanel
+        service={pestService()}
+        products={pestCatalog}
+        onClose={() => {}}
+        onSubmit={vi.fn().mockResolvedValue({})}
+      />,
+    );
+  });
+  await screen.findByText('Atticus Talak 7.9 F');
+  const talakRow = screen.getByText('Atticus Talak 7.9 F').closest('[data-selected-product], li, tr, div');
+  const removeButtons = screen.getAllByRole('button', { name: 'Remove product' });
+  // Remove Talak specifically (the tech's own edit).
+  const talakIndex = removeButtons.findIndex((btn) => talakRow && talakRow.contains(btn));
+  fireEvent.click(removeButtons[talakIndex >= 0 ? talakIndex : 1]);
+  await waitFor(() => expect(screen.queryByText('Atticus Talak 7.9 F')).toBeNull());
+
+  const outcomeSelect = screen.getByDisplayValue('Completed');
+  fireEvent.change(outcomeSelect, { target: { value: 'customer_declined' } });
+  await waitFor(() => expect(screen.queryAllByRole('button', { name: 'Remove product' })).toHaveLength(0));
+  fireEvent.change(outcomeSelect, { target: { value: 'completed' } });
+  await screen.findByText('Taurus SC');
+  await screen.findByText('LESCO 90/10 Nonionic Surfactant');
+  // The deliberate removal survives the outcome round-trip.
+  expect(screen.queryByText('Atticus Talak 7.9 F')).toBeNull();
+});
+
 it('applies the same mix and the same outcome gating to a one-time pest visit scheduled under the bare label (Codex r3 P1+P2, PR #5049)', async () => {
   stubFetch();
   const oneTimeService = pestService({

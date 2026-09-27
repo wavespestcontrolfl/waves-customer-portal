@@ -13594,6 +13594,19 @@ export function CompletionPanel({
   // selected: the outcome-driven clearing effect below removes rows this
   // flag names and re-arms the seed for a return to "completed", exactly
   // like protocolDefaultProduct's own clearing.
+  // A DELIBERATE per-row removal of a seeded default — the protocol seed
+  // AND the pest tank mix (via removeProduct, below) — mirrors lawnRemovedDefaultIds exactly (pre-push audit P1, PR
+  // #5049 r2): without this, removing every seeded row empties
+  // selectedProducts, hasDraftContent goes false, no draft saves, and the
+  // next open silently re-seeds what the tech took off. Ids only (no
+  // names map) — nothing here renders a "skipped" summary the way lawn's
+  // does. Never touched by the non-performed-outcome clear below — that
+  // removal is OUTCOME-driven, not the tech's own, and must stay eligible
+  // to reseed.
+  // Declared ahead of both seed effects: each reads it (pre-push audit on
+  // #5049 r3 — a pest-mix row the tech removed must not come back when the
+  // outcome goes declined → completed).
+  const [protocolCompletionDefaultsRemovedIds, setProtocolCompletionDefaultsRemovedIds] = useState([]);
   const pestDefaultMixSeededRef = useRef(false);
   const pestDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
@@ -13606,7 +13619,9 @@ export function CompletionPanel({
       return;
     }
     pestDefaultMixSeededRef.current = true;
-    const rows = pestDefaultMixSelections(products).map(({ product, totalAmount }) => ({
+    const rows = pestDefaultMixSelections(products)
+      .filter(({ product }) => !protocolCompletionDefaultsRemovedIds.includes(String(product.id)))
+      .map(({ product, totalAmount }) => ({
       ...buildSelectedProduct(product),
       totalAmount,
       totalAmountManual: true,
@@ -13622,7 +13637,7 @@ export function CompletionPanel({
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, visitOutcome]);
+  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, visitOutcome, protocolCompletionDefaultsRemovedIds]);
   // Server-curated protocol/default-products prefill (owner ruling
   // 2026-09-26) for every non-lawn, non-pest program the server has a
   // curated product list for — cockroach today (Alpine WSG + Gentrol IGR +
@@ -13648,16 +13663,6 @@ export function CompletionPanel({
   // exactly (pre-push audit P2, PR #5049 r1): merely opening a cockroach
   // completion must not mint a draft or a restore prompt on its own.
   const protocolCompletionDefaultsSnapshotRef = useRef(null);
-  // A DELIBERATE per-row removal of a seeded default (via removeProduct,
-  // below) — mirrors lawnRemovedDefaultIds exactly (pre-push audit P1, PR
-  // #5049 r2): without this, removing every seeded row empties
-  // selectedProducts, hasDraftContent goes false, no draft saves, and the
-  // next open silently re-seeds what the tech took off. Ids only (no
-  // names map) — nothing here renders a "skipped" summary the way lawn's
-  // does. Never touched by the non-performed-outcome clear below — that
-  // removal is OUTCOME-driven, not the tech's own, and must stay eligible
-  // to reseed.
-  const [protocolCompletionDefaultsRemovedIds, setProtocolCompletionDefaultsRemovedIds] = useState([]);
   useEffect(() => {
     if (protocolCompletionDefaultsSeededRef.current) return;
     // NOT gated on isTypedFindings: the "Products Applied" section renders
@@ -16380,7 +16385,8 @@ export function CompletionPanel({
     // the list going empty, or a later open re-seeds what the tech took
     // off. Only THIS function (the tech's own tap) records one; the
     // non-performed-outcome clearing effect deliberately does not.
-    if (selectedProducts.find((p) => p.productId === productId)?.protocolDefaultProduct) {
+    const removedRow = selectedProducts.find((p) => p.productId === productId);
+    if (removedRow?.protocolDefaultProduct || removedRow?.pestDefaultMixProduct) {
       setProtocolCompletionDefaultsRemovedIds((ids) => [...new Set([...ids, String(productId)])]);
     }
     invalidateGeneratedReportOnTypedEdit();
