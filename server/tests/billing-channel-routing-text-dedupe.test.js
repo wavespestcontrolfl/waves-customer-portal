@@ -81,13 +81,16 @@ describe('dispatchBillingChannels — Email + Text replay, both already accepted
 });
 
 // A guarded current bell is accepted while native delivery stays uncertain.
-test.each([false, true])('settles the current App bell and preserves unfinished siblings: %s', async (siblings) => {
+test.each([[false, false], [true, false], [false, true], [true, true]])('settles the current App bell and preserves unfinished siblings: %s / thrown %s', async (siblings, throws) => {
   const app = { sent: false, bellPersisted: true, deliveryOutcome: 'uncertain', deferred: true, retryable: true, code: 'APP_DELIVERY_HOLD' };
-  const send = jest.fn(async input => input.metadata.billingDeliveryLeg === 'push' ? app
-    : { sent: false, retryable: true, deliveryOutcome: 'not_sent', code: 'SIBLING_RETRY' });
+  const send = jest.fn(async input => {
+    if (input.metadata.billingDeliveryLeg !== 'push') return { sent: false, retryable: true, deliveryOutcome: 'not_sent', code: 'SIBLING_RETRY' };
+    if (throws) throw Object.assign(new Error('audit persistence failed'), { providerOutcome: app });
+    return app;
+  });
   const result = await dispatchBillingChannels(billingInput(), { billing_channels: siblings ? ['email', 'push', 'sms'] : ['push'] }, send);
   expect(send).toHaveBeenCalledTimes(siblings ? 3 : 1);
   expect(result).toMatchObject(siblings ? { sent: false, code: 'SIBLING_RETRY' } : { sent: true, deliveryOutcome: 'accepted' });
-  expect(result.channelResults.push).toEqual(app);
+  expect(result.channelResults.push).toMatchObject({ bellPersisted: true, deliveryOutcome: 'uncertain', sent: false });
   expect(result.providerMessageId).toBeUndefined();
 });
