@@ -203,12 +203,19 @@ describe('resolveScheduledServiceCharge', () => {
     // mint refuses (throws, retryable) rather than risk minting a duplicate
     // when its equivalent lookup errors. Falling through to bill the fee
     // here would do exactly what completion refuses to do.
-    test('a lookup failure refuses the fee (never a false mint) — the resolver, not completion, still parks it as "no chargeable amount"', async () => {
+    //
+    // Codex ROUND 2 P1: a bare 0 here is NOT "nothing chargeable" — it's
+    // indistinguishable from a confirmed-covered $0, and a caller with
+    // extraLineItems could mint an extras-only invoice past that lie. The
+    // resolver now returns a structured refusal instead, which every
+    // caller must check before treating the result as a priceable amount.
+    test('a lookup failure returns a structured refusal (never a bare 0, never a false mint)', async () => {
       findFirstApplicationInvoiceForEstimateService.mockRejectedValue(new Error('db down'));
-      expect(await resolveScheduledServiceCharge({
+      const result = await resolveScheduledServiceCharge({
         estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
         perApplicationFee: 97.2, serviceType: 'Every 6 Weeks Lawn Care', svc: SVC, dbConn: DB_CONN,
-      })).toBe(0);
+      });
+      expect(result).toEqual({ refused: true, reason: 'sibling_lookup_failed', message: expect.stringMatching(/refresh and try again/i) });
     });
 
     // Codex pre-push P0: findFirstApplicationInvoiceForEstimateService
@@ -217,15 +224,16 @@ describe('resolveScheduledServiceCharge', () => {
     // (manual-billing alert), it never re-mints. Treating it as "no
     // sibling, bill the fee" here would mint a THIRD invoice for a trip
     // that may still have a live collectible one riding as liveBeside.
-    test('a terminal/refunded sibling match refuses the fee too — that stays completion\'s own manual-billing alert, not a remint', async () => {
+    test('a terminal/refunded sibling match returns a structured refusal too — that stays completion\'s own manual-billing alert, not a remint', async () => {
       findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
         invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'refunded', total: 153.6 },
         liveBeside: { id: 'inv-2', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
       });
-      expect(await resolveScheduledServiceCharge({
+      const result = await resolveScheduledServiceCharge({
         estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
         perApplicationFee: 97.2, serviceType: 'Every 6 Weeks Lawn Care', svc: SVC, dbConn: DB_CONN,
-      })).toBe(0);
+      });
+      expect(result).toEqual({ refused: true, reason: 'sibling_invoice_needs_review', message: expect.stringMatching(/manual review/i) });
     });
 
     // Codex pre-push P0 (round 2): findFirstApplicationInvoiceForEstimateService
@@ -234,16 +242,17 @@ describe('resolveScheduledServiceCharge', () => {
     // completion parks that shape for manual billing rather than reminting.
     // The resolver must refuse the fee here too, or Charge Now would mint
     // only the per-application charge and silently drop the fee.
-    test('a canceled acceptance invoice carrying the setup fee (no live replacement) refuses the fee, not just a partial mint', async () => {
+    test('a canceled acceptance invoice carrying the setup fee (no live replacement) returns a structured refusal, not just a partial mint', async () => {
       findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
         invoice: null,
         liveBeside: null,
         canceledSetupFee: { id: 'inv-3', invoice_number: 'WPC-2026-0400', status: 'canceled' },
       });
-      expect(await resolveScheduledServiceCharge({
+      const result = await resolveScheduledServiceCharge({
         estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
         perApplicationFee: 97.2, serviceType: 'Every 6 Weeks Lawn Care', svc: SVC, dbConn: DB_CONN,
-      })).toBe(0);
+      });
+      expect(result).toEqual({ refused: true, reason: 'sibling_invoice_needs_review', message: expect.stringMatching(/manual review/i) });
     });
 
     test('without svc/dbConn (a caller that has neither) skips the lookup and still bills the fee', async () => {

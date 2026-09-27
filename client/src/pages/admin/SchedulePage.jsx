@@ -13764,11 +13764,18 @@ export function CompletionPanel({
     : isCallback
       ? 0
       : (predictionKind === 'prepaid' ? 0 : Number(service.billingLane?.prediction?.amount) || 0);
-  const autopayCoversVisit =
-    !!service.autopayActive &&
-    !hasVisitPrice &&
-    !!service.waveguardTier &&
-    Number(service.monthlyRate || 0) > 0;
+  // Codex round-2 P1 (sweep): this used to infer "dues cover it" from
+  // autopayActive + a tier + a positive monthlyRate + no stamped visit
+  // price — the SAME shape as MobileAppointmentDetailSheet's
+  // coveredByMembership bug. A tiered per_application (or per_visit)
+  // customer can have autopay on AND carry a real, positive invoice/
+  // auto_charge prediction for an unpriced row (e.g. the $97.20
+  // acceptance-fee case in this file's own billing-lane-amount test) —
+  // that heuristic never looked at the prediction at all, so it would
+  // report-only a visit completion (and the schedule sheet's own Charge
+  // Now mint) actually bills. `covered_membership` is the ONLY signal
+  // this panel may treat as "dues cover it, no invoice."
+  const autopayCoversVisit = predictionKind === 'covered_membership';
   const prepaidCovered = usingUnpricedPrediction
     ? predictionKind === 'prepaid'
     : (service.prepaidAmount != null &&

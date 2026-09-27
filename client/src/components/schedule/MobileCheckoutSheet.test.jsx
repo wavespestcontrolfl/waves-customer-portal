@@ -300,4 +300,35 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
     );
     expect(screen.getByRole('button', { name: 'Charge $60.00' })).toBeInTheDocument();
   });
+
+  // Codex ROUND 2 P2: the `?? amount` fallback above treats a legacy NET
+  // amount as if it were the gross base. When a REAL prepayment is on
+  // file, that double-credits it: a $100 fee with $60 prepaid predicts
+  // `{ amount: 40 }` net — using $40 as the base and then crediting $60
+  // again previews $0.00, although the mint endpoint would create a real
+  // $40 balance. This must refuse to guess, not quietly undercharge.
+  it('refuses to guess a gross base from a legacy net `amount` when a prepayment is on file', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          waveguardTier: null,
+          estimatedPrice: null,
+          prepaidAmount: 60,
+          prepaidMethod: 'cash',
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            // No grossAmount — the legacy/stale shape.
+            prediction: { kind: 'invoice', amount: 40, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: 'Charge $0.00' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Charge $40.00' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /price needs a refresh/i })).toBeDisabled();
+  });
 });

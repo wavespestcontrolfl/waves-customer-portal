@@ -373,6 +373,39 @@ describe('MobileAppointmentDetailSheet sibling-covered first-application visit',
     expect(screen.getByRole('button', { name: /Review & checkout/i })).toBeInTheDocument();
   });
 
+  // Codex ROUND 2 P1: coveredByMembership used to come from `!!tier &&
+  // (rawPrice === 0 || rawPrice == null)` — a tiered per_application
+  // customer with an unpriced row and a real, positive invoice/auto_charge
+  // prediction (the $97.20 acceptance-fee shape SchedulePage's own
+  // billing-lane-amount test carries) satisfied that heuristic anyway,
+  // because it never looked at the prediction at all. That zeroed the
+  // displayed total, hid "Review & checkout," and claimed WaveGuard
+  // coverage — although completion and the mint endpoint both bill the
+  // fee. Membership coverage must come ONLY from
+  // `prediction.kind === 'covered_membership'`.
+  it('a tiered per_application customer with a positive acceptance-fee prediction bills the fee — never a false WaveGuard-covered $0', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...BASE_SERVICE,
+          estimatedPrice: null,
+          waveguardTier: 'Silver',
+          monthlyRate: 74.7,
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: 74.7,
+            prediction: { kind: 'invoice', amount: 97.2, grossAmount: 97.2, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getAllByText(/\$97\.20/).length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: /Review & checkout/i })).toBeInTheDocument();
+    expect(screen.queryByText(/Covered by WaveGuard/i)).not.toBeInTheDocument();
+  });
+
   // A 'prepaid' kind means completion mints nothing new — its `amount` is
   // what was ALREADY collected (informational), never a balance still due.
   it('reads a fully-covered "prepaid" prediction as no new charge, not a bill for the prepaid figure', () => {

@@ -293,15 +293,17 @@ export default function MobileAppointmentDetailSheet({
   const timeWindow = formatWindow(service);
   const hrs = durationHrs(service);
 
-  // The server's covered_sibling_invoice prediction is authoritative and
-  // must win over this tier/price heuristic (codex pre-push P2): a
-  // sibling-covered per-application visit can still carry a WaveGuard tier
-  // (e.g. an established per_application member's combined same-day
-  // accept), and without this exclusion the CTA area below said "Covered
-  // by WaveGuard {tier}" while BillingLaneCard, reading the same
-  // prediction, said a sibling invoice covers it — two different reasons
-  // for the same $0 on one screen.
-  const coveredByMembership = !!tier && (rawPrice === 0 || rawPrice == null) && !siblingCoveredInvoice;
+  // Membership coverage is the server's call, not this sheet's (codex
+  // round-2 P1): tier + a null/zero price used to stand in for "covered",
+  // but a tiered per_application customer can carry a real, positive
+  // invoice/auto_charge prediction for THIS unpriced row (e.g. the $97.20
+  // acceptance-fee case in SchedulePage.billing-lane-amount.test.jsx) —
+  // that heuristic zeroed the displayed total, hid "Review & checkout,"
+  // and claimed WaveGuard coverage for a visit completion and the mint
+  // endpoint both bill. `billingLane.prediction.kind` is the ONLY signal
+  // this sheet may treat as membership coverage; a tier badge with no
+  // `covered_membership` prediction is decoration, never a $0 inference.
+  const coveredByMembership = predictionKind === 'covered_membership';
   const prepaidAmt = service.prepaidAmount != null ? Number(service.prepaidAmount) : null;
   const isPrepaid = prepaidAmt != null && prepaidAmt > 0;
   const prepaidCovered = usingUnpricedPrediction

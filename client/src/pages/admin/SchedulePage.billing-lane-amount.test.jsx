@@ -178,6 +178,32 @@ describe('CompletionPanel invoiceAmount — server-computed billingLane.predicti
     await expectInvoiceCta();
   });
 
+  // Codex ROUND 2 P1 (sweep finding): autopayCoversVisit used to infer
+  // "dues cover it" from autopayActive + a tier + a positive monthlyRate +
+  // no stamped visit price — the SAME heuristic class as
+  // MobileAppointmentDetailSheet's coveredByMembership bug, just gated on
+  // autopay instead of the tier alone. A tiered per_application customer
+  // with autopay ON and a real, positive acceptance-fee prediction for
+  // this unpriced row satisfied that heuristic anyway (it never looked at
+  // the prediction), silencing the invoice CTA for a fee completion and
+  // the mint endpoint both bill.
+  it('still invoices the acceptance fee when autopay is active on a tiered per-application customer (autopayCoversVisit must not override the prediction)', async () => {
+    await renderPanel({
+      ...BASE_SERVICE,
+      waveguardTier: 'Silver',
+      autopayActive: true,
+      monthlyRate: 74.7,
+      billingLane: {
+        mode: 'per_application',
+        source: 'explicit',
+        monthlyRate: 74.7,
+        autopayActive: true,
+        prediction: { kind: 'invoice', amount: 97.2, grossAmount: 97.2, conflictStampedPrice: false },
+      },
+    });
+    await expectInvoiceCta();
+  });
+
   // A 'prepaid' kind means completion mints nothing new — its `amount` is
   // what was ALREADY collected (informational), never a balance still due.
   it('sends a recap only for a fully-covered "prepaid" prediction, never invoicing the prepaid figure itself', async () => {

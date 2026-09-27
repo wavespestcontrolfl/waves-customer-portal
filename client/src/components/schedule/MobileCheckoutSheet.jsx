@@ -89,6 +89,9 @@ export default function MobileCheckoutSheet({
 
   const tier = service.waveguardTier ? String(service.waveguardTier).toLowerCase() : null;
   const rawPrice = service.estimatedPrice != null ? Number(service.estimatedPrice) : null;
+  // Declared here (not at its old spot further down) so the gross-fallback
+  // safety check right below can read it before `price` is computed.
+  const prepaidAmount = service.prepaidAmount != null ? Math.max(0, Number(service.prepaidAmount) || 0) : 0;
   // Callbacks (re-services) are free by definition for recurring/WaveGuard
   // customers — the server zeroes the visit and won't bill monthly dues, so the
   // checkout preview must not fall back to monthlyRate (which would show a
@@ -122,13 +125,32 @@ export default function MobileCheckoutSheet({
   // netted against THIS customer's prepaid to begin with; covered_*/
   // no_charge: null/0 either way) — `?? amount` covers those, and an older
   // cached payload with no grossAmount at all.
+  //
+  // Codex round-2 P2: that `?? amount` fallback treats a legacy NET amount
+  // as if it WERE the gross base — for an 'invoice'/'auto_charge' kind,
+  // `amount` is already net of any recorded prepayment (predictCompletionBilling
+  // subtracts it server-side), so using it as the base here and then netting
+  // prepaidAmount a SECOND time below double-credits the SAME prepayment
+  // (a $100 fee with $60 prepaid predicts `{ amount: 40 }`; using $40 as
+  // the base and crediting $60 again previews $0 although the mint
+  // endpoint would create a real $40 balance). Client and server ship
+  // together, so this is never reachable from a current payload — it can
+  // only happen from a STALE cached one, and stale + a real prepayment on
+  // file is exactly the combination this sheet must not guess at. With NO
+  // prepayment recorded, `amount` IS the gross fee (there's nothing to net
+  // against it), so the legacy fallback stays exactly as safe as before.
+  const predictionAmount = service.billingLane?.prediction?.amount;
+  const predictionGrossAmount = service.billingLane?.prediction?.grossAmount;
+  const usingUnpricedPrediction = rawPrice == null && !service.isCallback;
+  const priceNeedsRefresh = usingUnpricedPrediction
+    && predictionGrossAmount == null
+    && predictionAmount != null
+    && prepaidAmount > 0;
   const price = rawPrice != null
     ? rawPrice
     : (service.isCallback
       ? 0
-      : Number(
-        service.billingLane?.prediction?.grossAmount ?? service.billingLane?.prediction?.amount
-      ) || 0);
+      : Number(predictionGrossAmount ?? predictionAmount) || 0);
   const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
     appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
@@ -232,7 +254,6 @@ export default function MobileCheckoutSheet({
     })),
   ), [extras]);
 
-  const prepaidAmount = service.prepaidAmount != null ? Math.max(0, Number(service.prepaidAmount) || 0) : 0;
   // An open invoice already attached to this visit (accept-minted setup +
   // first-application invoice, or an earlier Charge-now mint) is what the
   // charge actually collects — the mint endpoint reuses it AS-IS and ignores
@@ -275,7 +296,12 @@ export default function MobileCheckoutSheet({
   // chargeable amount: a positive-price visit that's fully prepaid still needs to
   // mint its invoice (the endpoint applies the prepaid credit → paid receipt), so
   // it must stay enabled even though `total` nets to $0.
-  const nothingToCharge = totalBeforePrepaid <= 0 || !!processingVisitInvoice;
+  //
+  // priceNeedsRefresh refuses the WHOLE mint, not just the base — same
+  // principle as the server round-2 fix: an unconfirmed/unsafe base must
+  // never be diluted by stacking an extra on top of it and calling the sum
+  // safe (codex round-2 P2).
+  const nothingToCharge = priceNeedsRefresh || totalBeforePrepaid <= 0 || !!processingVisitInvoice;
 
   // One-line card-on-file note for the tech. Shows the first non-expired
   // method (server orders default first); if every method is expired, says
@@ -494,7 +520,9 @@ export default function MobileCheckoutSheet({
             ? 'Opening payment…'
             : processingVisitInvoice
               ? 'Payment processing — nothing to collect'
-              : nothingToCharge
+              : priceNeedsRefresh
+                ? 'Price needs a refresh — reopen this visit'
+                : nothingToCharge
                 ? 'No charge — complete from job'
                 : discountGroupConflict
                   ? 'Resolve discount conflict to charge'

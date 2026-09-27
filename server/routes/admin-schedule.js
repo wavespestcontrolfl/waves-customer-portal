@@ -15686,12 +15686,20 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // invoice may exist unseen — completion's own mint refuses to mint under
 // exactly that condition rather than risk a duplicate — and a
 // terminal/refunded match ('needs_review') is completion's own
-// manual-billing-alert shape, never a green light to remint. So EVERY
-// non-'none' verdict refuses the fee fallback (returns 0, the resolver's
-// existing "nothing chargeable" signal, which both callers already treat
-// as "don't mint — park for manual review"); only a definitive 'none'
-// (genuinely no relevant sibling invoice at all) lets the established fee
-// through.
+// manual-billing-alert shape, never a green light to remint. Zero-base is
+// reserved for a definitive 'covered' verdict (the sibling's invoice really
+// does cover this trip). 'error' and 'needs_review' are NOT "nothing
+// chargeable" — returning the SAME bare 0 for them let `extraLineItems`
+// alone clear a caller's "any positive amount" mint gate (codex round-2
+// P1): an operator-added checkout extra then minted an extras-only invoice
+// for this visit, and completion — finding that own live invoice first —
+// never re-ran the sibling lookup and never raised the manual-billing alert
+// for the missing setup/application fee. So this resolver now returns a
+// structured refusal object for 'error'/'needs_review' instead of a
+// number; every caller must check `.refused` and refuse to mint ANYTHING
+// (base or extras) rather than treat it as a priceable $0. Only a
+// definitive 'none' (genuinely no relevant sibling invoice at all) falls
+// through to the established fee.
 async function resolveScheduledServiceCharge({ estimatedPrice, isCallback, monthlyRate, billingMode, perApplicationFee, serviceType, svc = null, dbConn = null }) {
   const perApplicationBilling = billingMode === 'per_application' && !isAlwaysFreeServiceType(serviceType);
   const hasOwnPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
@@ -15702,7 +15710,16 @@ async function resolveScheduledServiceCharge({ estimatedPrice, isCallback, month
     } catch {
       verdict = { status: 'error' };
     }
-    if (verdict.status !== 'none') return 0;
+    if (verdict.status === 'covered') return 0;
+    if (verdict.status !== 'none') {
+      return {
+        refused: true,
+        reason: verdict.status === 'needs_review' ? 'sibling_invoice_needs_review' : 'sibling_lookup_failed',
+        message: verdict.status === 'needs_review'
+          ? 'This visit’s combined-trip invoice needs manual review before charging — handle it from Customer 360, or refresh and try again.'
+          : 'Could not confirm whether this visit’s combined-trip invoice already covers it — refresh and try again.',
+      };
+    }
   }
   return completionInvoiceAmount({
     estimatedPrice,
@@ -15741,7 +15758,14 @@ const { loadActiveConfig: loadPestPressureActiveConfig } = require('../services/
 // (no operator extras — that's the Charge-now sheet's job, which is why that
 // route keeps its own inline mint). Serialized on the SAME advisory lock as
 // Charge-now so the two mint paths can't race a visit into two open invoices.
-// Returns { invoice, reused } or { invoice: null, reason }.
+// Returns { invoice, reused } or { invoice: null, reason }. `reason` also
+// carries the resolver's own refusal reasons ('sibling_lookup_failed' /
+// 'sibling_invoice_needs_review') when a sibling-coverage lookup couldn't
+// confirm 'covered' vs. a genuinely billable fee — never minted as a $0
+// "nothing chargeable" (codex round-2 P1): this is the SAME reason shape
+// generatePrepaidReceiptForService already reports through `receipt.reason`
+// for every other refusal here, so the Mark-prepaid modal explains it the
+// same way instead of the caller crashing on an unexpected object.
 async function mintOrReuseScheduledServiceInvoice(svc) {
   const InvoiceService = require('../services/invoice');
   const existing = await db('invoices')
@@ -15760,6 +15784,9 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     svc,
     dbConn: db,
   });
+  if (amount && typeof amount === 'object' && amount.refused) {
+    return { invoice: null, reason: amount.reason };
+  }
   if (!(amount > 0)) return { invoice: null, reason: 'no_chargeable_amount' };
   const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService(svc.id, {
     fallbackAmount: amount,
@@ -16426,7 +16453,7 @@ router.post('/:id/invoice', async (req, res, next) => {
     // admin-dispatch.js. Honour an explicit positive price if one was set;
     // an explicit per_application lane bills its acceptance fee; otherwise
     // the visit is $0.
-    const amount = await resolveScheduledServiceCharge({
+    const rawAmount = await resolveScheduledServiceCharge({
       estimatedPrice: svc.estimated_price,
       isCallback: svc.is_callback,
       monthlyRate: svc.cust_monthly_rate,
@@ -16436,6 +16463,19 @@ router.post('/:id/invoice', async (req, res, next) => {
       svc,
       dbConn: db,
     });
+    // A sibling-coverage lookup that couldn't confirm 'covered' ('error' /
+    // 'needs_review') refuses BEFORE any extras are even parsed (codex
+    // round-2 P1): the bug this closes let a bare 0 base clear the
+    // "nothing chargeable" gate below the instant extraLineItems carried a
+    // positive total, minting an extras-only invoice for a visit whose
+    // real setup/application fee was never resolved — completion then
+    // found that own live invoice first and never raised the
+    // manual-billing alert. 409 (retryable) is this file's convention for
+    // "reload and try again" refusals.
+    if (rawAmount && typeof rawAmount === 'object' && rawAmount.refused) {
+      throw httpError(409, rawAmount.message);
+    }
+    const amount = rawAmount;
 
     // Mobile checkout sheet can append extra services + discount lines before
     // minting. Each extra is { description, quantity, unit_price, amount,
