@@ -470,23 +470,13 @@ async function visitPayerBilled(visit) {
   }
 }
 
-async function collectedDuesForVisit(visit, lane, obligation) {
-  if (lane.mode !== 'monthly_membership') return null;
-  // Check the obligation month, not the sweep month. The noon-Z anchor keeps
-  // the ET month stable when a month-end billing day rolls into the next one.
-  return monthlyDuesCollected(db, visit.customer_id, new Date(`${obligation.dueDateEt}T12:00:00Z`));
-}
-
-function policyEligibleInvoices(invoices, eligibleIds) {
-  if (eligibleIds === null || eligibleIds === undefined) return invoices;
-  const eligible = new Set(eligibleIds.map(String));
-  return invoices.filter((invoice) => eligible.has(String(invoice.id)));
-}
-
 async function prepareVisitReminder(visit, { now, todayEt }) {
   const lane = resolveBillingLane(visit);
   const obligation = duesObligation(todayEt, visit.billing_day);
-  const duesCollected = await collectedDuesForVisit(visit, lane, obligation);
+  // Check the obligation month, not the sweep month. The noon-Z anchor keeps
+  // the ET month stable when a month-end billing day rolls into the next one.
+  const duesCollected = lane.mode === 'monthly_membership'
+    ? await monthlyDuesCollected(db, visit.customer_id, new Date(`${obligation.dueDateEt}T12:00:00Z`)) : null;
   const payerBilled = await visitPayerBilled(visit);
   const freshAll = await freshOverdueRecurringInvoices(visit.customer_id, now);
   const duesCents = lateDuesCents({ lane, duesCollected, todayEt, obligation, monthlyRate: visit.monthly_rate });
@@ -500,7 +490,8 @@ async function prepareVisitReminder(visit, { now, todayEt }) {
     },
   });
   if (gate.skip) return null;
-  const fresh = policyEligibleInvoices(freshAll, gate.eligibleIds);
+  const eligible = gate.eligibleIds == null ? null : new Set(gate.eligibleIds.map(String));
+  const fresh = eligible ? freshAll.filter((invoice) => eligible.has(String(invoice.id))) : freshAll;
   const overdueRecurringDue = fresh.reduce((sum, invoice) => sum + invoiceAmountDue(invoice), 0);
   const verdict = previsitBalanceReminderEligible({
     isRecurringVisit: true,
