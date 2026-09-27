@@ -5485,21 +5485,22 @@ const StripeService = {
       let resolvedPaymentMethod = pi.payment_method_types?.[0] || 'card';
       let bankLastFour = null;
       let pmdType = null;
-      // A card charge settles when Stripe creates it; its own timestamp is
-      // the settlement moment readers date the payment by, never this
-      // handler's run time — a /confirm that repairs a missing row days
-      // later must not date old money as new (Codex #4996 r12). A bank
-      // charge settles later; the succeeded webhook stamps that one.
-      let chargeCreated = null;
+      // When the charge's money landed: its balance transaction, which
+      // Stripe creates once the charge succeeds — after 3DS or any delayed
+      // authentication, unlike the charge's own creation (Codex #4996 r13),
+      // and at settlement for a bank charge. Readers date the payment by it,
+      // never by this handler's run time: a /confirm that repairs a missing
+      // row days later must not date old money as new (r12).
+      let chargeSettledAt = null;
 
       // Get receipt and card info from the charge
       if (charge) {
         try {
           const chargeObj = typeof charge === 'string'
-            ? await stripe.charges.retrieve(charge)
+            ? await stripe.charges.retrieve(charge, { expand: ['balance_transaction'] })
             : charge;
           receiptUrl = chargeObj.receipt_url || null;
-          chargeCreated = Number(chargeObj.created) || null;
+          chargeSettledAt = Number(chargeObj.balance_transaction?.created) || null;
           const pmd = chargeObj.payment_method_details;
           pmdType = pmd?.type || null;
           if (pmd?.card) {
@@ -5886,8 +5887,8 @@ const StripeService = {
             charged_amount: chargedTotal,
             payment_method: resolvedPaymentMethod,
             payment_state: paymentStatus,
-            ...(paymentStatus === 'paid' && pmdType === 'card' && chargeCreated > 0
-              ? { settled_event_at: new Date(chargeCreated * 1000).toISOString() } : {}),
+            ...(paymentStatus === 'paid' && chargeSettledAt > 0
+              ? { settled_event_at: new Date(chargeSettledAt * 1000).toISOString() } : {}),
           }),
         };
 
@@ -5919,11 +5920,14 @@ const StripeService = {
           // (Codex #4996 r11/r12). The merge runs in the UPDATE itself, on
           // the row as it stands then: the row was read without a lock, and a
           // refund that resolved since must not have its cleared markers
-          // written back (pre-push audit).
+          // written back (pre-push audit). A settlement moment the row
+          // already carries (the webhook's event time) outranks this one (r13).
           const [record] = await trx('payments')
             .where({ id: existingPayment.id })
             .whereNotIn('status', ['refunded', 'disputed'])
-            .update({ ...paymentPayload, metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [paymentPayload.metadata]) })
+            .update({ ...paymentPayload,
+              metadata: trx.raw(`(COALESCE(metadata, '{}'::jsonb) || ?::jsonb)
+                || jsonb_strip_nulls(jsonb_build_object('settled_event_at', metadata -> 'settled_event_at'))`, [paymentPayload.metadata]) })
             .returning('*');
           if (!record) {
             throw new Error('Payment record changed while confirming — refresh the invoice and try again');

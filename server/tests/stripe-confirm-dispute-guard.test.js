@@ -233,22 +233,37 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
     // The merge is SQL on the live row: a settlement stamp, payer or refund in flight
     // the row carries then stays, and a refund marker cleared since is not written back.
     const { metadata } = paymentsUpdate.mock.calls[0][0];
-    expect(metadata.__raw).toBe("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
+    expect(metadata.__raw).toContain("(COALESCE(metadata, '{}'::jsonb) || ?::jsonb)");
+    // ...and a settlement moment the row already carries outranks the new one (Codex #4996 r13).
+    expect(metadata.__raw).toContain("jsonb_strip_nulls(jsonb_build_object('settled_event_at', metadata -> 'settled_event_at'))");
     const merged = JSON.parse(metadata.bindings[0]);
     expect(merged).toMatchObject({ invoice_id: 'inv_123', payment_state: 'paid' });
     for (const key of ['settled_event_at', 'payer_id', 'pending_refund_key']) expect(merged).not.toHaveProperty(key);
   });
 
-  test('a card payment carries the charge\'s own time as its settlement moment, not the confirm time (Codex #4996 r12)', async () => {
-    const chargedAt = 1789900000; // well before this confirm runs
+  test('a paid charge carries its balance transaction\'s time — when it succeeded — not its creation or the confirm time (Codex #4996 r12/r13)', async () => {
+    const createdAt = 1789900000; // the charge was created, then 3DS held it
+    const succeededAt = createdAt + 600; // well before this confirm runs
     stripeClient.paymentIntents.retrieve.mockResolvedValue({ ...makePi(), latest_charge: 'ch_card' });
-    stripeClient.charges.retrieve.mockResolvedValue({ id: 'ch_card', created: chargedAt, receipt_url: null,
+    stripeClient.charges.retrieve.mockResolvedValue({ id: 'ch_card', created: createdAt, receipt_url: null,
+      balance_transaction: { id: 'txn_card', created: succeededAt },
       payment_method_details: { type: 'card', card: { brand: 'visa', last4: '4242' } } });
     const StripeService = require('../services/stripe');
     await StripeService.confirmInvoicePayment('inv_123', PI_ID);
 
+    expect(stripeClient.charges.retrieve).toHaveBeenCalledWith('ch_card', { expand: ['balance_transaction'] });
     expect(paymentsInsert).toHaveBeenCalledTimes(1);
     const metadata = JSON.parse(paymentsInsert.mock.calls[0][0].metadata);
-    expect(metadata).toMatchObject({ payment_state: 'paid', settled_event_at: new Date(chargedAt * 1000).toISOString() });
+    expect(metadata).toMatchObject({ payment_state: 'paid', settled_event_at: new Date(succeededAt * 1000).toISOString() });
+  });
+
+  test('a charge with no balance transaction yet (still settling) carries no settlement moment', async () => {
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({ ...makePi(), latest_charge: 'ch_card' });
+    stripeClient.charges.retrieve.mockResolvedValue({ id: 'ch_card', created: 1789900000, receipt_url: null, balance_transaction: null,
+      payment_method_details: { type: 'card', card: { brand: 'visa', last4: '4242' } } });
+    const StripeService = require('../services/stripe');
+    await StripeService.confirmInvoicePayment('inv_123', PI_ID);
+
+    expect(JSON.parse(paymentsInsert.mock.calls[0][0].metadata)).not.toHaveProperty('settled_event_at');
   });
 });
