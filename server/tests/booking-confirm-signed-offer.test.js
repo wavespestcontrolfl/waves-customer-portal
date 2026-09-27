@@ -319,10 +319,26 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     if (String(id) === String(loadedCustomer?.id)) return fenced ? fencedCustomer : loadedCustomer;
     return ({ [CUST.id]: CUST, [SIBLING.id]: SIBLING, [OTHER_CUST.id]: OTHER_CUST })[String(id)] || null;
   };
+  const priceableEstimate = (overrides = {}) => ({
+    source: 'admin',
+    status: 'sent',
+    annual_total: 387.96,
+    estimate_data: {
+      engineResult: {
+        lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }],
+      },
+    },
+    ...overrides,
+  });
   const ESTIMATES = {
-    [EST_ID]: { id: EST_ID, source: 'admin', customer_id: 'cust-1', status: 'sent' },
+    [EST_ID]: priceableEstimate({ id: EST_ID, customer_id: 'cust-1' }),
     // someone ELSE's estimate — linked to a different customer
-    [OTHER_EST]: { id: OTHER_EST, customer_id: 'cust-other', customer_phone: '(941) 555-0999', customer_email: 'mallory@example.com' },
+    [OTHER_EST]: priceableEstimate({
+      id: OTHER_EST,
+      customer_id: 'cust-other',
+      customer_phone: '(941) 555-0999',
+      customer_email: 'mallory@example.com',
+    }),
     // customer-less estimate whose contact phone (freeform) matches CUST
     [PHONE_EST]: { id: PHONE_EST, customer_id: null, customer_phone: '941-555-0100', customer_email: null },
     // customer-less estimate whose contact matches NOBODY on this booking
@@ -404,6 +420,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
         },
         whereNull: () => b,
         forShare: () => b,
+        forUpdate: () => b,
         first: async () => customerFixture(b._id || loadedCustomer.id, { fenced: true }),
       };
       return b;
@@ -560,17 +577,54 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  test("an estimate owned by a sibling property on the same account keeps its source link", async () => {
+  test("a sibling property's estimate keeps its source link and frozen pay-at-visit price", async () => {
     loadedCustomer = { ...SIBLING };
     fencedCustomer = { ...SIBLING };
-    const row = await runToScheduledInsert({
-      estimate_id: undefined,
+    const duplicateGuard = jest.spyOn(require('../services/recurring-appointment-seeder'), 'checkActiveSeriesLocked')
+      .mockResolvedValue({ matches: [], guardError: null });
+    const pricing = jest.spyOn(require('../services/booking-pay-at-visit'), 'resolveBookingVisitPrice')
+      .mockReturnValue({ amount: 96.99, followUpAmount: 96.99, sourceEstimateId: EST_ID, serviceKey: 'pest_control' });
+    try {
+      const row = await runToScheduledInsert({
+        authedCustomer: loadedCustomer,
+        source_estimate_id: EST_ID,
+        payAtVisit: true,
+        recurring_pattern: 'quarterly',
+      });
+      expect(row.customer_id).toBe(SIBLING.id);
+      expect(row.source_estimate_id).toBe(EST_ID);
+      expect(row.estimated_price).toBe(96.99);
+      expect(row.payment_method_preference).toBe('pay_at_visit');
+      expect(row.create_invoice_on_complete).toBe(true);
+      expect(pricing).toHaveBeenCalledWith(expect.objectContaining({
+        estimate: expect.objectContaining({ id: EST_ID }),
+        serviceKey: 'pest_control',
+        bookingVisits: 4,
+      }));
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('does not belong'));
+    } finally {
+      pricing.mockRestore();
+      duplicateGuard.mockRestore();
+    }
+  });
+
+  test("another account's priceable estimate is rejected again under the booking fence", async () => {
+    loadedCustomer = { ...SIBLING };
+    fencedCustomer = { ...SIBLING };
+    const sig = mintSlotOfferField(offerPayload());
+    await expect(createSelfBooking(confirmPayload(sig, {
+      estimate_id: OTHER_EST,
       authedCustomer: loadedCustomer,
-      source_estimate_id: EST_ID,
+      source_estimate_id: OTHER_EST,
+      payAtVisit: true,
+      recurring_pattern: 'quarterly',
+    }))).resolves.toEqual({
+      ok: false,
+      status: 409,
+      error: 'Your quote was just updated — please refresh and book again.',
+      code: 'CUSTOMER_CHANGED_RETRY',
     });
-    expect(row.customer_id).toBe(SIBLING.id);
-    expect(row.source_estimate_id).toBe(EST_ID);
-    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('does not belong'));
+    expect(capturedScheduledInsert).toBeUndefined();
   });
 
   test('a customer-less estimate whose contact PHONE matches the booking customer stamps the link', async () => {
