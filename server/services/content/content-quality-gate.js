@@ -1177,6 +1177,11 @@ function renderedCitabilityBody(body) {
 // source must start with a capital; our own company never counts as the
 // authority behind a claim.
 const ATTRIBUTED_SOURCE_RE = /\b(?:[Aa]ccording to|[Pp]er|[Rr]eported by|[Pp]ublished by|[Dd]ata from|[Gg]uidance from|[Rr]esearch (?:from|by))\s+(?:the\s+)?([A-Z][\w&.'’-]*(?:\s+(?:of|for|and|&)?\s*[A-Z][\w&.'’-]*){0,6})/g;
+// Natural subject-first attribution for named institutions outside the
+// finite authority list ("Florida Forest Service reports ..."). Require an
+// institutional head noun so a sentence-leading generic group such as
+// "Homeowners report" does not become a named source merely by casing.
+const DIRECT_INSTITUTION_SOURCE_RE = /\b((?:The\s+)?(?:[A-Z][\w&.'’-]*\s+){1,7}(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program))(?:'s|’s)?\s+(?:recommends?|says|notes?|reports?|advises?|found|finds|warns?|tracks?|lists?|states?|requires?|publishes?|estimates?|confirms?|defines?)\b/g;
 const OWN_COMPANY_RE = /^(?:the\s+)?Waves\b/i;
 // Capitalization is not evidence that a source is specific. These generic
 // source head nouns are common LLM attribution filler and must not satisfy
@@ -1190,6 +1195,10 @@ function genericAttributedSource(source) {
 
 function hasAttributedSource(body) {
   for (const m of String(body || '').matchAll(ATTRIBUTED_SOURCE_RE)) {
+    const source = m[1].trim();
+    if (!OWN_COMPANY_RE.test(source) && !genericAttributedSource(source)) return true;
+  }
+  for (const m of String(body || '').matchAll(DIRECT_INSTITUTION_SOURCE_RE)) {
     const source = m[1].trim();
     if (!OWN_COMPANY_RE.test(source) && !genericAttributedSource(source)) return true;
   }
@@ -1224,10 +1233,13 @@ const CALENDAR_WINDOW_RE = /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)
 
 // Vague stand-ins for a measurement — the prompt's own examples ("tall",
 // "a couple of weeks", "deeply"). Softening is what the nudge targets.
-const VAGUE_QUALIFIER_RE = /\b(?:a (?:couple|few) (?:of )?(?:days|weeks|months|hours|inches|feet)|several (?:days|weeks|months|hours|inches)|(?:water|soak)(?:ing)? deeply|mow(?:ing)? (?:it )?(?:tall|high|short|low)|a while|summer|winter|spring|fall|autumn|(?:rainy|dry) season)\b/i;
+const VAGUE_QUALIFIER_RE = /\b(?:a (?:couple|few) (?:of )?(?:days|weeks|months|hours|inches|feet)|several (?:days|weeks|months|hours|inches)|(?:water|soak)(?:ing)? deeply|mow(?:ing)? (?:it )?(?:tall|high|short|low)|a while|(?:in|during|this|next|last|early|late|each|every|throughout|by|before|after) (?:the )?(?:spring|summer|fall|autumn|winter)|(?:spring|summer|fall|autumn|winter) (?:season|months?|weather|rains?|rainfall|temperatures?|conditions?|timing|window|applications?|treatments?|service|pressure|activity)|(?:rainy|dry) season)\b/i;
 
 function countConcreteSpecifics(body) {
-  const text = String(body || '');
+  // Remove complete dollar literals before scanning. Otherwise a
+  // comma-formatted price such as "$1,200 per year" can be entered midway
+  // at "200 per year" and masquerade as a non-price measurement.
+  const text = String(body || '').replace(/\$\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:-|–|—|to)\s*\$?\s*\d[\d,]*(?:\.\d+)?)?/g, ' ');
   return (text.match(CONCRETE_SPECIFIC_RE) || []).length
     + (text.match(CALENDAR_WINDOW_RE) || []).length;
 }
@@ -1262,7 +1274,7 @@ const COMPARISON_TABLE_RE = /<ComparisonTable\b/;
 // "which option/approach…". A bare "Should you…?" or a yes/no question is
 // NOT a two-path comparison (it fired on 73% of the live corpus in the
 // 2026-09-25 calibration run — most were single-answer questions).
-const CHOICE_FRAMING_RE = /\bvs\.?\b|\bversus\b|^#*\s*[\w'’-]+(?: [\w'’-]+){0,3} or [\w'’-]+(?: [\w'’-]+){0,3}\?\s*$|\bwhich (?:one|option|approach|method|plan|treatment|service) (?:is|fits|works|makes|do)\b/i;
+const CHOICE_FRAMING_RE = /\bvs\.?\b|\bversus\b|^#*\s*[\w'’-]+(?: [\w'’-]+){0,3} or [\w'’-]+(?: [\w'’-]+){0,3}(?:\s*[:—-]\s*[^?\n]{1,80})?\?\s*$|\bwhich (?:one|option|approach|method|plan|treatment|service) (?:is|fits|works|makes|do)\b/i;
 
 function headingLines(body) {
   return String(body || '').split(/\r?\n/).filter((l) => /^#{1,3}\s+\S/.test(l));
@@ -1349,6 +1361,14 @@ function structuralCitabilityVerdict(gap, draft) {
 }
 
 function backfillGapVerdict(gap, draft, brief, context) {
+  // A planned specifics gap is stronger than the weight-zero nudge: the
+  // seeder explicitly selected a measurement-free page for improvement, so
+  // completion requires at least one rendered, non-price measurement.
+  if (gap === 'concrete_specifics') {
+    return countConcreteSpecifics(renderedCitabilityBody(draft.body)) > 0
+      ? { ok: true }
+      : { ok: false, reason: 'missing_concrete_specific' };
+  }
   return structuralCitabilityVerdict(gap, draft)
     || CITABILITY_GAP_CHECKS[gap]?.(draft, brief, context || {})
     || { ok: true };

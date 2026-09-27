@@ -1389,6 +1389,8 @@ describe('citability nudges (weight-0, signal-only)', () => {
 
   test('named_sources recognizes any attributed proper-noun source, never our own company', () => {
     expect(checkCitabilityNamedSources({ body: 'According to the Florida Forest Service, drought raises fire risk.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'The Florida Forest Service reports drought raises fire risk.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Mote Marine Laboratory recommends checking current red-tide reports.' }).ok).toBe(true);
     expect(checkCitabilityNamedSources({ body: 'Rainfall totals, per NOAA, ran above normal.' }).ok).toBe(true);
     expect(checkCitabilityNamedSources({ body: 'Data from Mote Marine Laboratory shows red tide peaks in fall.' }).ok).toBe(true);
     expect(checkCitabilityNamedSources({ body: 'The Texas A&M University Extension notes fire ants mound after rain.' }).ok).toBe(true);
@@ -1403,6 +1405,8 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityNamedSources({ body: 'According to Trusted Industry Research, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to Local Pest Professionals, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to Local Pest Control Experts, ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'Homeowners report ants are common.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'The Waves Pest Control reports ants are common.' }).ok).toBe(false);
     // Our own service name is not an authority; a county program or district is.
     expect(checkCitabilityNamedSources({ body: '## Mosquito Control in Venice\nWe treat yards monthly.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'The Manatee County Mosquito Control District reports aerial spray dates.' }).ok).toBe(true);
@@ -1419,6 +1423,8 @@ describe('citability nudges (weight-0, signal-only)', () => {
   test('concrete_specifics counts numbers with units, ignores dollars, years, and bare counts', () => {
     expect(countConcreteSpecifics('Mow St. Augustine at 3.5–4 inches and water 1/2 inch per week; wait 10-14 days between applications.')).toBe(3);
     expect(countConcreteSpecifics('It costs $120 and we were founded in 2024; here are 3 ways.')).toBe(0);
+    expect(countConcreteSpecifics('Plans cost $1,200 per year or $2,400–$3,000 per acre.')).toBe(0);
+    expect(countConcreteSpecifics('Plans cost $1,200 and include 3 visits per year.')).toBe(1);
     // '%' is not a word char, so a trailing \b after it never matched (fallback auditor P2, 2026-09-25).
     expect(countConcreteSpecifics('Chinch bug damage covered 20% of the lawn and 35 % of the swale.')).toBe(2);
     expect(countConcreteSpecifics('The active window runs June 1 – Sept 30.')).toBe(1);
@@ -1431,6 +1437,9 @@ describe('citability nudges (weight-0, signal-only)', () => {
     const r = checkCitabilityConcreteSpecifics({ body: 'Mow tall. Water deeply. Reapply in a few weeks.' });
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/^vague_qualifier_without_measurement:/);
+    expect(checkCitabilityConcreteSpecifics({ body: 'Use a spring trap; damaged branches fall after storms.' }).ok).toBe(true);
+    expect(checkCitabilityConcreteSpecifics({ body: 'Treat every spring when pressure rises.' }).reason)
+      .toBe('vague_qualifier_without_measurement:every spring');
   });
 
   test('concrete_specifics on refresh: dropping measurements the prior page stated is a nudge', () => {
@@ -1455,6 +1464,7 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityComparison(noTable).ok).toBe(false);
     expect(checkCitabilityComparison(noTable).reason).toBe('choice_framed_without_ComparisonTable');
     expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## Bait or spray?\nText.' }).ok).toBe(false);
+    expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## Bait or spray: which works?\nText.' }).ok).toBe(false);
     const withTable = { ...noTable, body: '<ComparisonTable columns={["What to weigh","Misting","Barrier"]} rows={[]} />' };
     expect(checkCitabilityComparison(withTable).ok).toBe(true);
   });
@@ -1532,6 +1542,21 @@ describe('citability backfill completion (Codex r6 P2s)', () => {
     expect(r.reason).toMatch(/^planned_gaps_unresolved:named_sources\(/);
     const fixed = checkCitabilityBackfillGapsCleared({ body: 'Per UF/IFAS, ants trail after rain. Water 1/2 inch per week.' }, backfill(['named_sources', 'concrete_specifics']), prior);
     expect(fixed).toEqual({ ok: true });
+  });
+  test('a planned specifics gap requires a rendered non-price measurement', () => {
+    expect(checkCitabilityBackfillGapsCleared(
+      { body: 'Plans cost $1,200 per year and treatment depends on the home.' },
+      backfill(['concrete_specifics']),
+      { previousVersion: { body: 'Treatment depends on the home.' } },
+    )).toEqual({
+      ok: false,
+      reason: 'planned_gaps_unresolved:concrete_specifics(missing_concrete_specific)',
+    });
+    expect(checkCitabilityBackfillGapsCleared(
+      { body: 'Inspect again in 14 days.' },
+      backfill(['concrete_specifics']),
+      { previousVersion: { body: 'Treatment depends on the home.' } },
+    )).toEqual({ ok: true });
   });
   test('planned structures stay binding even when the draft removes the choice framing', () => {
     const reframed = { title: 'Ghost Ant Treatments', body: '## Treatment overview\nPlain prose.' };
