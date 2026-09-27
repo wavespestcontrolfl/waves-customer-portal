@@ -7849,7 +7849,8 @@ async function sendExplicitPaymentReminderChannels({
             },
           });
         } catch (err) {
-          if (classifyDeliveryCertainty(err.providerOutcome) !== 'not_sent') reachedNow = true;
+          if (err.providerOutcome?.bellPersisted === true
+            || classifyDeliveryCertainty(err.providerOutcome) !== 'not_sent') reachedNow = true;
           throw err;
         }
         if (outcome?.bellPersisted === true

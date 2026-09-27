@@ -33,6 +33,7 @@ jest.mock('../services/collections/rail-guard', () => ({
 }));
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),
+  claimAttempt: jest.fn(async () => ({ allowed: true })),
   markSendFailed: jest.fn(async () => true),
   markDelivered: jest.fn(async () => true),
 }));
@@ -610,15 +611,16 @@ describe('explicit annual payment reminder channels', () => {
     sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
   });
 
-  function arm(channel) {
+  function arm(channel, creditApplied = 0) {
     setDbQueues({
       annual_prepay_terms: [query({ columnInfo: REMINDER_COLS }),
         query({ returning: [{ ...BASE_TERM }] }), query()],
-      invoices: [query({ first: { ...UNPAID_INVOICE } }), query({ first: { ...UNPAID_INVOICE } })],
+      invoices: [query({ first: { ...UNPAID_INVOICE } }), query({ first: { ...UNPAID_INVOICE, credit_applied: creditApplied } })],
       invoice_followup_sequences: [query({ first: undefined })],
       customers: [query({ first: { ...CUSTOMER } })],
       notification_prefs: [query({ first: { customer_id: CUSTOMER.id, billing_channels: [channel] } })],
       customer_interactions: [query()],
+      collections_contact_ledger: [query()],
     });
     sendReminderChannels.mockImplementation(async (args) => {
       await args.send(channel, { id: `ledger-${channel}` });
@@ -649,6 +651,20 @@ describe('explicit annual payment reminder channels', () => {
       expect(input.preSendCheck).toEqual(expect.any(Function));
     }
     if (channel === 'push') expect(input).toMatchObject({ channel: 'sms', metadata: { appOnly: true } });
+  });
+
+  test('keeps newly applied credit after a visible App bell when audit and ledger acceptance fail', async () => {
+    arm('push', 40);
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 40 });
+    const providerOutcome = { deliveryOutcome: 'not_sent', bellPersisted: true };
+    sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('canonical audit unavailable'), { providerOutcome }));
+    const ContactLedger = require('../services/collections/contact-ledger');
+    ContactLedger.markDelivered.mockResolvedValueOnce(false);
+    sendReminderChannels.mockImplementation(jest.requireActual('../services/billing-reminder-delivery').sendReminderChannels);
+    await expect(AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1))
+      .resolves.toEqual({ sent: true, termId: 'term-1', complete: false });
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'led-1' }));
+    expect(reverseAppliedCredit).not.toHaveBeenCalled();
   });
 
   test('an unreadable stored choice retries without falling through to legacy Text', async () => {

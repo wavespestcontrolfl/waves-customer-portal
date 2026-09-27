@@ -341,7 +341,7 @@ describe('annual-prepay payment reminder replay', () => {
   test('retries an incomplete first policy snapshot instead of sending on partial debt', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     collectionsChannelPermitted.mockResolvedValueOnce({
-      allowed: true, durable: false, balanceIncomplete: true,
+      allowed: true, durable: false, balanceIncomplete: 'payer resolve failed',
     });
     await expect(billingEmailReplayEligible(meta, database()))
       .resolves.toEqual({ eligible: false, reason: 'collections-policy-unavailable', retryable: true });

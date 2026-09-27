@@ -182,12 +182,12 @@ describe('detail verdict', () => {
       .resolves.toEqual({ allowed: false, durable: false });
   });
 
-  test('preserves an incomplete balance snapshot only in the detailed verdict', async () => {
+  test.each(['payer resolve failed', 'dunning-stop check failed'])('preserves incomplete reason %s in the detailed verdict', async (reason) => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     ContactPolicy.evaluate.mockResolvedValue({ allowed: true, denialReasons: [],
-      eligibleInvoiceIds: ['inv-1'], balanceIncomplete: true });
+      eligibleInvoiceIds: ['inv-1'], balanceIncomplete: reason });
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true }))
-      .resolves.toEqual({ allowed: true, durable: false, balanceIncomplete: true });
+      .resolves.toEqual({ allowed: true, durable: false, balanceIncomplete: reason });
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1' })).resolves.toBe(true);
   });
 });
