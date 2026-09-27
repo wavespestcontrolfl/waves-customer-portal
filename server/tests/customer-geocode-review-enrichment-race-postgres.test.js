@@ -64,9 +64,9 @@ postgres('geocode review enrichment serialization in PostgreSQL', () => {
     propertyId = randomUUID();
     visitId = randomUUID();
     const address = { address_line1: '100 Fixture Way', city: 'Bradenton', state: 'FL', zip: '34205' };
-    await mockConnection('customers').insert({ id: customerId, ...address, latitude: 27.5, longitude: -82.5 });
+    await mockConnection('customers').insert({ id: customerId, ...address, address_line2: '', latitude: 27.5, longitude: -82.5 });
     await mockConnection('customer_properties').insert({
-      id: propertyId, customer_id: customerId, active: true, is_primary: true, ...address,
+      id: propertyId, customer_id: customerId, active: true, is_primary: true, ...address, address_line2: null,
       latitude: 27.5, longitude: -82.5,
     });
     await mockConnection('scheduled_services').insert({
