@@ -1556,7 +1556,23 @@ async function buildScheduledServiceInvoiceLines(
     : null;
   if (appointmentDiscount) lineItems.push(appointmentDiscount);
 
-  const storedNetAmount = hasNumericValue(scheduled.estimated_price)
+  // Codex pre-push P1: a stamped estimated_price of 0 is not the visit's
+  // authoritative frozen net the way a stamped POSITIVE price is — it's
+  // the same "no price on this row" shape as null, and completionInvoiceAmount
+  // / predictCompletionBilling / resolveScheduledServiceCharge (billing-lane.js,
+  // admin-schedule.js) all defer to their fee/rate fallback for exactly that
+  // shape. Anchoring the reconciliation on a bare hasNumericValue(0) === true
+  // read 0 as the real net and wiped the freshly-computed fee-fallback
+  // primaryBase (above, via firstPositiveNumber — which already treats 0 the
+  // same as absent) straight back down to $0 through a "Scheduled price
+  // adjustment" line, so a $97.20 fee visit with a $40 checkout extra minted
+  // $40, not the $137.20 the checkout preview showed. `scheduledAmount`
+  // above uses the same positive-price precedence for primaryBase; mirror it
+  // here so the two never disagree on what "no price" means. The legacy
+  // callback-reconciliation shape this guards (a stale gross primary_line_price
+  // beside a genuinely-zero estimated_price AND a genuinely-zero fallbackAmount)
+  // is unaffected — both sides still resolve to 0 there.
+  const storedNetAmount = Number(scheduled.estimated_price) > 0
     ? roundMoney(scheduled.estimated_price)
     : roundMoney(fallbackAmount);
   const replayNetAmount = roundMoney(
