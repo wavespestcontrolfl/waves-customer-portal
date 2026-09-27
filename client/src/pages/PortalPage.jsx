@@ -11,7 +11,7 @@ import { PortalRefreshArea, SavedPortalRead } from '../components/portal/PortalR
 import { formatAddress } from '../utils/format-address';
 import { propertyRelationshipChip } from '../lib/contact-roles';
 import { fmtMoney } from '../lib/money';
-import { COLORS as B, TIER, FONTS, BUTTON_BASE } from '../theme-brand';
+import { COLORS as B, TIER, FONTS, BUTTON_BASE, CUSTOMER_SECTION_LABEL } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import NotificationBell from '../components/NotificationBell';
 import { showCustomerAlert, showCustomerConfirm } from '../components/brand/CustomerDialogHost';
@@ -1154,9 +1154,7 @@ function RecommendationsCard({ data, customer }) {
 
   return (
     <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 20 }}>
-      <div style={{
-        display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
-      }}>
+      <div data-glass="chip" style={CUSTOMER_SECTION_LABEL}>
         <Icon name="sparkles" size={14} strokeWidth={2} />Recommendations
       </div>
       <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>For your property</div>
@@ -1631,7 +1629,9 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
           background: 'rgba(255,255,255,0.96)',
           backdropFilter: 'blur(12px)',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
-          padding: compact ? '12px 14px' : '14px 18px',
+          padding: compact
+            ? 'calc(12px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-right, 0px)) 12px calc(14px + env(safe-area-inset-left, 0px))'
+            : '14px 18px',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -1653,7 +1653,16 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
           <ShellCloseButton onClick={guardedClose} label="Close purchase" />
         </header>
 
-        <div style={{ flex: 1, overflowY: 'auto', padding: compact ? 16 : 20, display: 'grid', gap: 14, alignContent: 'start' }}>
+        <div style={{
+          flex: 1,
+          overflowY: 'auto',
+          padding: compact
+            ? '16px calc(16px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))'
+            : 20,
+          display: 'grid',
+          gap: 14,
+          alignContent: 'start',
+        }}>
           {initError === 'stale' ? (
             <div style={softBox}>
               <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>This offer changed</div>
@@ -2548,7 +2557,7 @@ function WavesLogoTile({ compact }) {
   return (
     <span style={{
       width: compact ? 30 : 38, height: compact ? 30 : 38, borderRadius: compact ? 8 : 10, flexShrink: 0,
-      background: '#fff', border: '1px solid #E7E2D7', overflow: 'hidden',
+      background: B.wavesBlue, border: '1px solid rgba(4,57,94,0.22)', overflow: 'hidden',
       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
     }}>
       <img src="/waves-logo.png" alt="" style={{ width: '84%', height: '84%', objectFit: 'contain', display: 'block' }} />
@@ -2560,7 +2569,7 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
   if (!posts.length) return null;
   return (
     <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: compact ? 14 : 18 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, marginBottom: compact ? 10 : 14 }}>
+      <div data-glass="chip" style={{ ...CUSTOMER_SECTION_LABEL, marginLeft: 0, minWidth: 0, marginBottom: compact ? 10 : 14 }}>
         {iconTile}
         <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{title}</div>
       </div>
@@ -2919,9 +2928,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   // Whisper-white like every other tab — the warm PORTAL_SHELL.page wash
   // read as the old theme on the glass scene (portal is glass-only).
   const subtle = GLASS_SUBTLE;
-  const dashboardLabel = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
-  };
+  const dashboardLabel = CUSTOMER_SECTION_LABEL;
   const dashboardActionCard = {
     border: `1px solid ${PORTAL_SHELL.border}`,
     borderRadius: 8,
@@ -3096,7 +3103,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
           <div style={{ padding: 20, borderBottom: '1px solid #E7E2D7', display: 'flex', justifyContent: 'space-between', gap: 16 }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
               <div style={{ minWidth: 0 }}>
-                <div style={dashboardLabel}><Icon name="calendar" size={14} strokeWidth={2} />Next Visit</div>
+                <div data-glass="chip" style={dashboardLabel}><Icon name="calendar" size={14} strokeWidth={2} />Next Visit</div>
                 <div style={{ marginTop: 8, fontSize: 26, fontWeight: 700, color: B.glassNavy }}>{nextDateLabel}</div>
                 <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: B.navy }}>
                   {nextService?.serviceType || 'Request service when you need us.'}
@@ -3190,7 +3197,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
         </section>}
 
         <section data-glass="card" style={{ ...card, padding: 20 }}>
-          <div style={dashboardLabel}><Icon name="chart" size={14} strokeWidth={2} />At a glance</div>
+          <div data-glass="chip" style={dashboardLabel}><Icon name="chart" size={14} strokeWidth={2} />At a glance</div>
           <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Billing, visits, and membership in one place.</div>
           <div style={{ display: 'grid', gap: 12, marginTop: 14 }}>
             {[
@@ -3256,7 +3263,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
                 <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
                   <ShellIconTile icon="star" tone="success" size={38} />
                   <div style={{ minWidth: 0 }}>
-                    <div style={dashboardLabel}><Icon name="star" size={14} strokeWidth={2} />Visit Feedback</div>
+                    <div data-glass="chip" style={dashboardLabel}><Icon name="star" size={14} strokeWidth={2} />Visit Feedback</div>
                     <div style={{ marginTop: 4, fontSize: 17, fontWeight: 700, color: B.glassNavy }}>How was your visit?</div>
                     <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.45 }}>
                       {pendingSatisfaction.service_type || pendingSatisfaction.serviceType}
@@ -3371,7 +3378,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'flex-start' }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
               <div style={{ minWidth: 0 }}>
-                <div style={dashboardLabel}><Icon name="clock" size={14} strokeWidth={2} />Last Visit</div>
+                <div data-glass="chip" style={dashboardLabel}><Icon name="clock" size={14} strokeWidth={2} />Last Visit</div>
                 <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>{lastService.type || lastService.serviceType}</div>
                 <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
                   {fmtDate(lastService.date, { weekday: 'short', month: 'short', day: 'numeric' })}
@@ -3417,7 +3424,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
             <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
               <ScoreRing score={lawnScore} size={56} stroke={5} />
               <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={dashboardLabel}><Icon name="leaf" size={14} strokeWidth={2} />Lawn Health</div>
+                <div data-glass="chip" style={dashboardLabel}><Icon name="leaf" size={14} strokeWidth={2} />Lawn Health</div>
                 <div style={{ marginTop: 6, fontSize: 17, fontWeight: 700, color: B.glassNavy }}>
                   {lawnScore}% overall
                 </div>
@@ -3465,7 +3472,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
       />
       <HomeContentRow
         compact={compact}
-        title="From the Blog"
+        title="From the Waves Blog"
         ctaLabel="Read Post"
         iconTile={<WavesLogoTile compact={compact} />}
         posts={blogPosts.map((p) => ({
@@ -3492,7 +3499,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
       />
       <HomeContentRow
         compact={compact}
-        title="Waves Newsletter"
+        title="From the Waves Newsletter"
         ctaLabel="Read Issue"
         iconTile={<WavesLogoTile compact={compact} />}
         posts={newsletterPosts.map((p) => ({
@@ -3630,9 +3637,7 @@ function ServicesTab() {
   };
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
-  const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
-  };
+  const sectionTitle = CUSTOMER_SECTION_LABEL;
 
   // The stable key keeps an open iframe alive when the list enters saved mode.
   const previewOverlay = preview && <DocumentPreviewOverlay key="report-preview"
@@ -3772,7 +3777,7 @@ function ServicesTab() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 24 }}>
-        <div style={sectionTitle}><Icon name="checkCircle" size={14} strokeWidth={2} />Completed Visits</div>
+        <div data-glass="chip" style={sectionTitle}><Icon name="checkCircle" size={14} strokeWidth={2} />Completed Visits</div>
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
           Visit history
         </div>
@@ -3798,7 +3803,7 @@ function ServicesTab() {
           two rows of loose chips (five types, then years, then the search
           box) read as clutter on a phone (owner 08-28). */}
       <section data-glass="card" style={{ ...card, padding: 20 }}>
-        <div style={sectionTitle}><Icon name="search" size={14} strokeWidth={2} />Filter Visits</div>
+        <div data-glass="chip" style={sectionTitle}><Icon name="search" size={14} strokeWidth={2} />Filter Visits</div>
         <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Narrow by service type, year, or a note.</div>
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr 1fr' : '1fr 1fr 2fr', gap: 10, marginTop: 12 }}>
           <label style={{ display: 'block', minWidth: 0 }}>
@@ -3869,8 +3874,8 @@ function ServicesTab() {
                     boxShadow: '0 4px 14px rgba(4, 57, 94, 0.08)',
                   }}>
                     {/* Header — always visible */}
-                    <button type="button" onClick={() => toggleExpand(s)}
-                      style={{ width: '100%', padding: '16px 18px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 14, flexWrap: compact ? 'wrap' : 'nowrap', border: 'none', background: '#fff', textAlign: 'left', fontFamily: FONTS.body }}>
+                    <button type="button" onClick={() => toggleExpand(s)} data-glass="soft"
+                      style={{ width: '100%', padding: '16px 18px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 14, flexWrap: compact ? 'wrap' : 'nowrap', border: 'none', background: 'rgba(255,255,255,0.64)', textAlign: 'left', fontFamily: FONTS.body, position: 'relative' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: '1 1 280px' }}>
                         <div style={{
                           width: 50, height: 50, borderRadius: 8,
@@ -3962,7 +3967,7 @@ function ServicesTab() {
                                 />
                               ) : (
                                 <div style={{ padding: 18 }}>
-                                  <div style={sectionTitle}><Icon name="document" size={14} strokeWidth={2} />Service Report</div>
+                                  <div data-glass="chip" style={sectionTitle}><Icon name="document" size={14} strokeWidth={2} />Service Report</div>
                                   <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>{s.type}</div>
                                   <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
                                     {parseDate(s.date).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
@@ -4020,7 +4025,9 @@ function ServicesTab() {
         <div onClick={() => setLightbox(null)}
           style={{
             position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 9999,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: 'calc(20px + env(safe-area-inset-top, 0px)) calc(20px + env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) calc(20px + env(safe-area-inset-left, 0px))',
+            cursor: 'pointer',
           }}>
           <div ref={lightboxRef} role="dialog" aria-modal="true" aria-label={lightbox.caption || lightbox.type || 'Service photo'} onClick={(e) => e.stopPropagation()}
             style={{ position: 'relative', maxWidth: '95vw', maxHeight: '95vh', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
@@ -4212,7 +4219,7 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
         </button>
       </div>
       <details style={{ marginTop: 8, fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
-        <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 600, minHeight: 44, alignContent: 'center' }}>Delivery details</summary>
+        <summary data-glass="chip" style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, minHeight: 44, alignContent: 'center', width: 'fit-content', padding: '0 10px', borderRadius: 8, color: B.glassNavy, position: 'relative' }}>Delivery details</summary>
         <p style={{ margin: '4px 0 12px' }}>
           Use app notifications for appointments, reminders, technician updates, reports and requests. Alerts you have turned off stay off.
         </p>
@@ -4785,9 +4792,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   };
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
-  const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
-  };
+  const sectionTitle = CUSTOMER_SECTION_LABEL;
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: B.glassNavy,
@@ -4988,7 +4993,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
             marginTop: 14, padding: 12, borderRadius: 10,
             background: subtle, border: '1px solid #E7E2D7',
           }}>
-            <div style={{ ...sectionTitle, marginBottom: 8 }}>
+            <div data-glass="chip" style={{ ...sectionTitle, marginBottom: 8 }}>
               <Icon name="bell" size={14} strokeWidth={2} />
               You'll hear from us
             </div>
@@ -5088,7 +5093,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 24 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0, flex: compact ? '1 1 100%' : '1 1 auto' }}>
-            <div style={sectionTitle}><Icon name="calendar" size={14} strokeWidth={2} />Upcoming Visits</div>
+            <div data-glass="chip" style={sectionTitle}><Icon name="calendar" size={14} strokeWidth={2} />Upcoming Visits</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
               {upcomingOnly.length
                 ? `${upcomingOnly.length} ${upcomingOnly.length === 1 ? 'visit' : 'visits'} scheduled${multiProperty ? ` at ${currentLabel}` : ''}`
@@ -5237,7 +5242,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
       {/* Recent Completed Visits */}
       {recentCompleted.length > 0 && (
         <section data-glass="card" style={{ ...card, padding: 20, marginTop: 4 }}>
-          <div style={sectionTitle}><Icon name="clock" size={14} strokeWidth={2} />Recent Visits</div>
+          <div data-glass="chip" style={sectionTitle}><Icon name="clock" size={14} strokeWidth={2} />Recent Visits</div>
           {recentCompleted.map(s => {
             const sDate = parseDate(s.date);
             return (
@@ -5270,7 +5275,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           above stays fully usable). */}
       {prefsError && !prefs && !cancelledAccount && (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
-          <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
+          <div data-glass="chip" style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
           <div role="alert" style={{ marginTop: 10, fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px' }}>
             Your schedule is up to date, but notification preferences couldn&apos;t be loaded.
             <button data-glass-accent="" type="button" onClick={loadSchedulePreferences} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, display: 'block' }}>Try again</button>
@@ -5280,7 +5285,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
       {prefs && !cancelledAccount && (
         <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
-            <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
+            <div data-glass="chip" style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Service notifications</div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
               Texts to {formatPhoneDisplay(customer.phone)}{customer.email ? ` · Emails to ${customer.email}` : ''}
@@ -5473,7 +5478,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             {(propertyPrefs.length > 1 || perPropertyTexts) ? (
               <>
-                <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Property Notifications</div>
+                <div data-glass="chip" style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Property Notifications</div>
                 <div style={{ marginTop: 6, fontSize: 22, fontWeight: 700, color: B.glassNavy }}>Appointment notifications</div>
                 <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>Delivered by app, text, or email, as you chose under Service notifications.</div>
                 <div style={{ marginTop: 12 }}>
@@ -5516,7 +5521,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
               </>
             ) : (
               <>
-                <div style={sectionTitle}><Icon name="smartphone" size={14} strokeWidth={2} />Contacts</div>
+                <div data-glass="chip" style={sectionTitle}><Icon name="smartphone" size={14} strokeWidth={2} />Contacts</div>
                 <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>On-location contacts</div>
                 <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
                   {savedScope && properties.length > 1
@@ -6296,9 +6301,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   };
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
-  const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
-  };
+  const sectionTitle = CUSTOMER_SECTION_LABEL;
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: B.glassNavy,
@@ -6617,7 +6620,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
 
   const currentBalance = Number(balance?.currentBalance || 0);
   const balanceState = currentBalance > 0 ? 'Balance due' : 'Current';
-  const balanceTone = currentBalance > 0 ? B.orange : B.glassNavy;
+  const balanceTone = B.glassNavy;
   // Open-invoice pay links (GATE_PORTAL_PAY_NOW; server includes them only
   // while the gate is on). Each entry carries the invoice's existing
   // tokenized /pay URL — the same checkout the SMS/email links open — so
@@ -6795,8 +6798,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
             minWidth: compact ? '100%' : 190,
             padding: '14px 16px',
             borderRadius: 8,
-            background: currentBalance > 0 ? `${B.orange}10` : GLASS_SUBTLE,
-            border: `1px solid ${currentBalance > 0 ? `${B.orange}33` : '#E7E2D7'}`,
+            background: currentBalance > 0 ? `${B.yellow}18` : GLASS_SUBTLE,
+            border: `1px solid ${currentBalance > 0 ? `${B.yellow}88` : '#E7E2D7'}`,
             boxSizing: 'border-box',
           }}>
             <div style={{ fontSize: 14, color: balanceTone, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>
@@ -6929,7 +6932,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
           <div>
-            <div style={sectionTitle}><Icon name="card" size={14} strokeWidth={2} />Plan Charges</div>
+            <div data-glass="chip" style={sectionTitle}><Icon name="card" size={14} strokeWidth={2} />Plan Charges</div>
             <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 700 }}>
               {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
@@ -6992,7 +6995,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       <div id="billing-payment-methods" data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 14, flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0, flex: '1 1 100%' }}>
-            <div style={sectionTitle}><Icon name="card" size={14} strokeWidth={2} />Payment Methods</div>
+            <div data-glass="chip" style={sectionTitle}><Icon name="card" size={14} strokeWidth={2} />Payment Methods</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Saved methods</div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Cards and bank accounts on file for Auto Pay and invoices.</div>
           </div>
@@ -7132,7 +7135,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         <div data-glass-scrim="" style={{
           position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
           background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 9999, padding: 20,
+          zIndex: 9999,
+          padding: 'calc(20px + env(safe-area-inset-top, 0px)) calc(20px + env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) calc(20px + env(safe-area-inset-left, 0px))',
         }} onClick={(e) => { if (e.target === e.currentTarget) setDefaultConsentPrompt(null); }}>
           <div ref={defaultConsentDialogRef} role="dialog" aria-modal="true" aria-label="Authorize Auto Pay" data-glass="modal" style={{
             background: '#fff', borderRadius: 8, padding: 24, width: '100%', maxWidth: 460,
@@ -7177,7 +7181,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         <div data-glass-scrim="" style={{
           position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
           background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 9999, padding: 20,
+          zIndex: 9999,
+          padding: 'calc(20px + env(safe-area-inset-top, 0px)) calc(20px + env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) calc(20px + env(safe-area-inset-left, 0px))',
         }} onClick={(e) => { if (e.target === e.currentTarget) { setShowAddCard(false); paymentElementRef.current = null; elementsRef.current = null; } }}>
           <div ref={addCardDialogRef} role="dialog" aria-modal="true" aria-label="Add payment method" data-glass="modal" style={{
             background: '#fff', borderRadius: 8, padding: 24, width: '100%', maxWidth: 460,
@@ -7228,7 +7233,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
 
       {(totalCredits > 0 || credits.length > 0 || autoApplyCredit) && (
         <div data-glass="card" style={{ ...card, padding: 20 }}>
-          <div style={sectionTitle}><Icon name="coins" size={14} strokeWidth={2} />Credits</div>
+          <div data-glass="chip" style={sectionTitle}><Icon name="coins" size={14} strokeWidth={2} />Credits</div>
           <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Adjustments</div>
           <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45, marginBottom: 14 }}>Referral, service, and promo credits on your account.</div>
           {totalCredits > 0 && (
@@ -7300,7 +7305,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       )}
 
       <div data-glass="card" style={{ ...card, padding: 20 }}>
-        <div style={sectionTitle}><Icon name="chart" size={14} strokeWidth={2} />{currentYear} Summary</div>
+        <div data-glass="chip" style={sectionTitle}><Icon name="chart" size={14} strokeWidth={2} />{currentYear} Summary</div>
         <div style={{ marginTop: 8, fontSize: 28, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui }}>
           {money(ytdTotal)}
         </div>
@@ -7325,7 +7330,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       <div data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
           <div>
-            <div style={sectionTitle}><Icon name="clock" size={14} strokeWidth={2} />Payment History</div>
+            <div data-glass="chip" style={sectionTitle}><Icon name="clock" size={14} strokeWidth={2} />Payment History</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>{historyDescription}</div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Every payment and receipt, newest first.</div>
           </div>
@@ -7452,7 +7457,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
 
       {!cancelledAccount && (
       <form onSubmit={event => { event.preventDefault(); saveBillingPrefs(); }} data-glass="card" style={{ ...card, padding: 20 }}>
-        <div style={sectionTitle}><Icon name="mail" size={14} strokeWidth={2} />Billing Preferences</div>
+        <div data-glass="chip" style={sectionTitle}><Icon name="mail" size={14} strokeWidth={2} />Billing Preferences</div>
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Billing notifications</div>
         <div id="billing-channel-instructions" style={{ marginTop: 4, fontSize: 16, color: muted, lineHeight: 1.5, marginBottom: 14 }}>
           {billingChannelsAvailable ? 'Choose one or more delivery methods for each category.' : 'Choose how you receive billing updates.'}
@@ -7661,7 +7666,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
 
         {!billingChannelsAvailable && appPreferencesAvailable && (
           <details style={{ marginBottom: 14, fontSize: 16, lineHeight: 1.5, color: muted }}>
-            <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 600, minHeight: 44, alignContent: 'center' }}>Delivery details</summary>
+            <summary data-glass="chip" style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, minHeight: 44, alignContent: 'center', width: 'fit-content', padding: '0 10px', borderRadius: 8, color: B.glassNavy, position: 'relative' }}>Delivery details</summary>
             App notifications open the relevant invoice, receipt or payment settings. If they cannot be delivered, text backup follows your preferences. Existing email copies continue.
           </details>
         )}
@@ -7706,10 +7711,11 @@ function PropertySection({ title, icon = 'document', summary, defaultOpen, child
         type="button"
         onClick={() => setOpen(!open)}
         aria-expanded={open}
+        data-glass="soft"
         style={{
           width: '100%',
           border: 'none',
-          background: '#fff',
+          background: 'rgba(248,252,254,0.72)',
           padding: '16px 18px',
           cursor: 'pointer',
           display: 'flex',
@@ -7718,24 +7724,15 @@ function PropertySection({ title, icon = 'document', summary, defaultOpen, child
           gap: 12,
           textAlign: 'left',
           fontFamily: FONTS.body,
+          position: 'relative',
         }}
       >
         <span style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-          <span style={{
-            width: 34,
-            height: 34,
-            borderRadius: 8,
-            background: '#F8FCFE',
-            color: B.glassNavy,
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-          }}>
-            <Icon name={icon} size={17} strokeWidth={2} />
-          </span>
           <span style={{ minWidth: 0 }}>
-            <span style={{ display: 'block', fontSize: 15, fontWeight: 700, color: B.glassNavy }}>{title}</span>
+            <span data-glass="chip" style={{ ...CUSTOMER_SECTION_LABEL, marginLeft: 0 }}>
+              <Icon name={icon} size={15} strokeWidth={2} />
+              {title}
+            </span>
             {summary && <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: '#475569', lineHeight: 1.35 }}>{summary}</span>}
           </span>
         </span>
@@ -8303,9 +8300,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   };
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
-  const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
-  };
+  const sectionTitle = CUSTOMER_SECTION_LABEL;
   const labelStyle = {
     fontSize: 14,
     fontWeight: 700,
@@ -8680,7 +8675,7 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
               border: '1px solid #E7E2D7',
               boxSizing: 'border-box',
             }}>
-              <div style={{ ...sectionTitle, color: saveColor }}><Icon name="checkCircle" size={14} strokeWidth={2} />Status</div>
+              <div data-glass="chip" style={{ ...sectionTitle, color: saveColor }}><Icon name="checkCircle" size={14} strokeWidth={2} />Status</div>
               <div style={{ marginTop: 3, fontSize: 20, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui }}>
                 {saveText}
               </div>
@@ -9415,7 +9410,7 @@ function ContentCard({ post, large, compact }) {
   const pubDate = post.pubDate ? new Date(post.pubDate) : null;
   const sourceMeta = {
     blog: { color: B.wavesBlue, label: 'Waves', icon: 'waves' },
-    newsletter: { color: B.orange, label: 'Newsletter', icon: 'newspaper' },
+    newsletter: { color: B.wavesBlue, label: 'Newsletter', icon: 'newspaper' },
     ifas: { color: B.glassNavy, label: 'UF/IFAS', icon: 'leaf' },
     local: { color: PORTAL_SHELL.muted, label: 'Local', icon: 'map' },
   };
@@ -9595,9 +9590,7 @@ function LearnTab({ customer }) {
   };
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
-  const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
-  };
+  const sectionTitle = CUSTOMER_SECTION_LABEL;
   const secondaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: '#fff',
@@ -9609,18 +9602,7 @@ function LearnTab({ customer }) {
     fontSize: 14, minHeight: 44,
     letterSpacing: 0,
   };
-  const iconTile = {
-    width: 38,
-    height: 38,
-    borderRadius: 8,
-    background: '#F8FCFE',
-    color: B.glassNavy,
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexShrink: 0,
-  };
-  const alertColors = { urgent: B.red, seasonal: B.orange, info: B.wavesBlue };
+  const alertColors = { urgent: B.red, seasonal: B.wavesBlue, info: B.wavesBlue };
   const blogLimit = compact ? 3 : 4;
   const sortedBlogPosts = [...blogPosts]
     .sort((a, b) => new Date(b.pubDate || 0) - new Date(a.pubDate || 0));
@@ -9679,7 +9661,7 @@ function LearnTab({ customer }) {
   const renderFeedSection = (title, icon, posts, emptyText) => (
     <section data-glass="card" style={{ ...card, padding: 20, minWidth: 0 }}>
       <div style={{ marginBottom: 14 }}>
-        <div style={sectionTitle}><Icon name="newspaper" size={14} strokeWidth={2} />{title}</div>
+        <div data-glass="chip" style={sectionTitle}><Icon name="newspaper" size={14} strokeWidth={2} />{title}</div>
         <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>{FEED_HEADS[title]?.[0] || 'Latest'}</div>
         <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>{FEED_HEADS[title]?.[1] || `${posts.length} item${posts.length === 1 ? '' : 's'}.`}</div>
       </div>
@@ -9736,7 +9718,7 @@ function LearnTab({ customer }) {
             border: '1px solid #E7E2D7',
             boxSizing: 'border-box',
           }}>
-            <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Your Plan</div>
+            <div data-glass="chip" style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Your Plan</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
               {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
@@ -9807,7 +9789,7 @@ function LearnTab({ customer }) {
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
             <div>
-              <div style={sectionTitle}><Icon name="megaphone" size={14} strokeWidth={2} />SWFL Alerts</div>
+              <div data-glass="chip" style={sectionTitle}><Icon name="megaphone" size={14} strokeWidth={2} />SWFL Alerts</div>
               <div style={{ marginTop: 2, fontSize: 14, color: muted }}>Local pest and lawn notices.</div>
             </div>
           </div>
@@ -9844,7 +9826,7 @@ function LearnTab({ customer }) {
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
             <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={sectionTitle}><Icon name="bulb" size={14} strokeWidth={2} />{monthlyTip.month} Homeowner Tip</div>
+              <div data-glass="chip" style={sectionTitle}><Icon name="bulb" size={14} strokeWidth={2} />{monthlyTip.month} Homeowner Tip</div>
               <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy, lineHeight: 1.25 }}>
                 {monthlyTip.title}
               </div>
@@ -9874,7 +9856,7 @@ function LearnTab({ customer }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: compact ? '1 1 100%' : '1 1 auto', minWidth: 0 }}>
             <div>
-              <div style={sectionTitle}><Icon name="newspaper" size={14} strokeWidth={2} />Waves Pest Control Blog</div>
+              <div data-glass="chip" style={sectionTitle}><Icon name="newspaper" size={14} strokeWidth={2} />Waves Pest Control Blog</div>
               <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Latest articles</div>
               <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Seasonal tips and how-tos from the Waves team.</div>
             </div>
@@ -9931,7 +9913,7 @@ function LearnTab({ customer }) {
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: compact ? '1 1 100%' : '1 1 auto', minWidth: 0 }}>
               <div>
-                <div style={sectionTitle}><Icon name="message" size={14} strokeWidth={2} />Pest & Lawn FAQ</div>
+                <div data-glass="chip" style={sectionTitle}><Icon name="message" size={14} strokeWidth={2} />Pest & Lawn FAQ</div>
                 <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{totalFaqQuestions} answer{totalFaqQuestions === 1 ? '' : 's'} available</div>
               </div>
             </div>
@@ -9982,10 +9964,8 @@ function LearnTab({ customer }) {
 
           {filteredFaq.map(cat => (
             <div key={cat.category} style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ ...iconTile, width: 30, height: 30 }}>
-                  <Icon name={faqIconFor(cat.category)} size={15} strokeWidth={2} />
-                </span>
+              <div data-glass="chip" style={{ ...CUSTOMER_SECTION_LABEL, marginLeft: 0, marginBottom: 8 }}>
+                <Icon name={faqIconFor(cat.category)} size={15} strokeWidth={2} />
                 {cat.category}
               </div>
               {cat.questions.map((q, qi) => {
@@ -9993,16 +9973,16 @@ function LearnTab({ customer }) {
                 const isOpen = expandedFaq === faqId;
                 return (
                   <div key={qi} style={{
-                    background: isOpen ? subtle : B.white,
+                    background: 'transparent',
                     borderRadius: 8,
                     marginBottom: 8,
-                    border: `1px solid ${isOpen ? '#A7DDF8' : '#E7E2D7'}`,
                     overflow: 'hidden',
                   }}>
                     <button
                       type="button"
                       onClick={() => setExpandedFaq(isOpen ? null : faqId)}
                       aria-expanded={isOpen}
+                      data-glass="soft"
                       style={{
                         width: '100%',
                         padding: '13px 14px',
@@ -10011,10 +9991,12 @@ function LearnTab({ customer }) {
                         justifyContent: 'space-between',
                         alignItems: 'center',
                         gap: 12,
-                        border: 'none',
-                        background: 'transparent',
+                        border: `1px solid ${isOpen ? '#A7DDF8' : '#E7E2D7'}`,
+                        borderRadius: 8,
+                        background: isOpen ? subtle : 'rgba(255,255,255,0.64)',
                         textAlign: 'left',
                         fontFamily: FONTS.body,
+                        position: 'relative',
                       }}
                     >
                       <span style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, flex: 1 }}>{q.q}</span>
@@ -10238,7 +10220,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
     <section data-glass="card" style={{ ...card, padding: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' }}>
         <div style={{ minWidth: 0 }}>
-          <div style={sectionTitle}><Icon name="sparkles" size={14} strokeWidth={2} />WAVES AI</div>
+          <div data-glass="chip" style={sectionTitle}><Icon name="sparkles" size={14} strokeWidth={2} />WAVES AI</div>
           <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 700 }}>Property-aware pricing</div>
           <div style={{ marginTop: 4, color: '#475569', fontSize: 14, lineHeight: 1.5 }}>
             Pricing is calculated from this property profile and your current Waves services.
@@ -10577,7 +10559,9 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
         border: `1px solid ${PORTAL_SHELL.border}`,
         borderRadius: compact ? '8px 8px 0 0' : 8,
         boxShadow: PORTAL_SHELL.shadow,
-        padding: compact ? 16 : 20,
+        padding: compact
+          ? 'calc(16px + env(safe-area-inset-top, 0px)) calc(16px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))'
+          : 20,
         boxSizing: 'border-box',
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start' }}>
@@ -10879,6 +10863,7 @@ function PlanStationMap({ map }) {
         onClick={() => setOpen(!open)}
         aria-expanded={open}
         aria-controls={panelId}
+        data-glass="soft"
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -10888,16 +10873,17 @@ function PlanStationMap({ map }) {
           padding: '11px 12px',
           borderRadius: 8,
           border: '1px solid #E7E2D7',
-          background: '#F8FCFE',
+          background: 'rgba(248,252,254,0.72)',
           color: B.glassNavy,
           fontFamily: FONTS.body,
           fontSize: 14,
           fontWeight: 700,
           cursor: 'pointer',
           textAlign: 'left',
+          position: 'relative',
         }}
       >
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+        <span data-glass="chip" style={{ ...CUSTOMER_SECTION_LABEL, marginLeft: 0, minWidth: 0 }}>
           <Icon name="property" size={16} strokeWidth={1.9} />
           <span>{meta.title}</span>
         </span>
@@ -11332,9 +11318,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
   };
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
-  const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
-  };
+  const sectionTitle = CUSTOMER_SECTION_LABEL;
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: B.glassNavy,
@@ -11496,7 +11480,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
             <div style={{ padding: 20, borderBottom: '1px solid #E7E2D7' }}>
-              <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Included Services</div>
+              <div data-glass="chip" style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Included Services</div>
               <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 700 }}>
                 {activeTierName
                   ? `${numServices} recurring service${numServices > 1 ? 's' : ''}`
@@ -11527,33 +11511,26 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
                       type="button"
                       onClick={() => toggleExpandedService(expanded ? null : svc.id)}
                       aria-expanded={expanded}
+                      data-glass="soft"
                       style={{
-                        border: 'none',
-                        background: 'transparent',
-                        padding: 0,
+                        border: '1px solid #E7E2D7',
+                        borderRadius: 8,
+                        background: 'rgba(248,252,254,0.72)',
+                        padding: 12,
                         width: '100%',
                         textAlign: 'left',
                         cursor: 'pointer',
                         fontFamily: FONTS.body,
+                        position: 'relative',
                       }}
                     >
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'flex-start' }}>
                         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, minWidth: 0 }}>
-                          <span style={{
-                            width: 38,
-                            height: 38,
-                            borderRadius: 8,
-                            background: '#F8FCFE',
-                            color: B.glassNavy,
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            flexShrink: 0,
-                          }}>
-                            <Icon name={iconName(svc.icon)} size={20} strokeWidth={1.8} />
-                          </span>
                           <span style={{ minWidth: 0 }}>
-                            <span style={{ display: 'block', fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{detectedServiceNames[svc.id] || svc.name}</span>
+                            <span data-glass="chip" style={{ ...CUSTOMER_SECTION_LABEL, marginLeft: 0 }}>
+                              <Icon name={iconName(svc.icon)} size={15} strokeWidth={1.8} />
+                              {detectedServiceNames[svc.id] || svc.name}
+                            </span>
                             <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: muted }}>{svc.frequencies[0]}</span>
                             {svc.id === 'lawn_care' && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
                               const avg = Math.round(lawnHealth.scores.overallScore);
@@ -11724,7 +11701,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
 
         <aside style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <section data-glass="card" style={{ ...card, padding: 20 }}>
-            <div style={sectionTitle}><Icon name="calendar" size={14} strokeWidth={2} />Year At A Glance</div>
+            <div data-glass="chip" style={sectionTitle}><Icon name="calendar" size={14} strokeWidth={2} />Year At A Glance</div>
             <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 700 }}>{currentYear} service calendar</div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Scheduled, completed, and overdue visits by month.</div>
             <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
@@ -11856,7 +11833,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
 
           {tier && tierIdx >= 2 && (
             <section data-glass="card" style={{ ...card, padding: 20 }}>
-              <div style={sectionTitle}><Icon name="star" size={14} strokeWidth={2} />Loyalty</div>
+              <div data-glass="chip" style={sectionTitle}><Icon name="star" size={14} strokeWidth={2} />Loyalty</div>
               <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
                 {[
                   // Renewal-credit bullet removed: it promised a tenure-
@@ -11878,7 +11855,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
 
           {hasCancellableAccount && !cancelledAccount && (
           <section data-glass="card" style={{ ...card, padding: 20 }}>
-            <div style={sectionTitle}><Icon name="wrench" size={14} strokeWidth={2} />Account Options</div>
+            <div data-glass="chip" style={sectionTitle}><Icon name="wrench" size={14} strokeWidth={2} />Account Options</div>
             {/* C1 three-screen cancel flow (GATE_CANCEL_FLOW_V2); falls back to
                 the H0 single-step form inside the component when the gate is off. */}
             <CancelFlow
@@ -11916,7 +11893,7 @@ function TermiteAnnualPlanSection({
     <>
       {status === 'error' && (
         <section role="alert" data-glass="card" style={{ ...card, padding: 20 }}>
-          <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Annual Plan</div>
+          <div data-glass="chip" style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Annual Plan</div>
           <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.45 }}>
             Your termite annual plan couldn&rsquo;t be loaded. Your coverage is not affected.
           </div>
@@ -12012,7 +11989,7 @@ function TermiteAnnualRenewalCard({
 
   return (
     <section data-glass="card" style={{ ...card, padding: 20 }}>
-      <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Annual Plan</div>
+      <div data-glass="chip" style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Annual Plan</div>
       {propertyLabel && (
         <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>{propertyLabel}</div>
       )}
@@ -13085,9 +13062,7 @@ function ReferTab({ customer, onSwitchTab }) {
   };
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
-  const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
-  };
+  const sectionTitle = CUSTOMER_SECTION_LABEL;
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: B.glassNavy,
@@ -13312,7 +13287,7 @@ function ReferTab({ customer, onSwitchTab }) {
 
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16, alignItems: 'stretch' }}>
         <section data-glass="card" style={{ ...card, padding: 20 }}>
-          <div style={sectionTitle}><Icon name="share" size={14} strokeWidth={2} />Share Link</div>
+          <div data-glass="chip" style={sectionTitle}><Icon name="share" size={14} strokeWidth={2} />Share Link</div>
           <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Your referral code</div>
           <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
             Send the link directly or copy it into your own message.
@@ -13364,7 +13339,7 @@ function ReferTab({ customer, onSwitchTab }) {
         </section>
 
         <section data-glass="card" style={{ ...card, padding: 20 }}>
-          <div style={sectionTitle}><Icon name="smartphone" size={14} strokeWidth={2} />Send SMS Invite</div>
+          <div data-glass="chip" style={sectionTitle}><Icon name="smartphone" size={14} strokeWidth={2} />Send SMS Invite</div>
           <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Text a friend</div>
           <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
             We will send a short referral text from {customerFirstName}.
@@ -13434,7 +13409,7 @@ function ReferTab({ customer, onSwitchTab }) {
       </div>
 
       <section data-glass="card" style={{ ...card, padding: 20 }}>
-        <div style={sectionTitle}><Icon name="mail" size={14} strokeWidth={2} />Send Email Invite</div>
+        <div data-glass="chip" style={sectionTitle}><Icon name="mail" size={14} strokeWidth={2} />Send Email Invite</div>
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Email a friend</div>
         <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
           We will send a branded referral email from Waves with your link and their new-customer offer.
@@ -13505,7 +13480,7 @@ function ReferTab({ customer, onSwitchTab }) {
       <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
           <div>
-            <div style={sectionTitle}><Icon name="trophy" size={14} strokeWidth={2} />Milestone</div>
+            <div data-glass="chip" style={sectionTitle}><Icon name="trophy" size={14} strokeWidth={2} />Milestone</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
               {milestoneMeta[currentMilestone]?.label || 'Getting started'}
             </div>
@@ -13537,7 +13512,7 @@ function ReferTab({ customer, onSwitchTab }) {
       <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
           <div>
-            <div style={sectionTitle}><Icon name="gift" size={14} strokeWidth={2} />Referral Activity</div>
+            <div data-glass="chip" style={sectionTitle}><Icon name="gift" size={14} strokeWidth={2} />Referral Activity</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
               {referrals.length ? `${referrals.length} referral${referrals.length === 1 ? '' : 's'}` : 'No referrals yet'}
             </div>
@@ -13622,7 +13597,7 @@ function ReferTab({ customer, onSwitchTab }) {
       </section>
 
       <section data-glass="card" style={{ ...card, padding: 20 }}>
-        <div style={sectionTitle}><Icon name="bulb" size={14} strokeWidth={2} />How It Works</div>
+        <div data-glass="chip" style={sectionTitle}><Icon name="bulb" size={14} strokeWidth={2} />How It Works</div>
         <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Share, they start, you earn</div>
         <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Three steps from share to credit.</div>
         <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: compact ? '1fr' : `repeat(${rewardPerReferral > 0 ? 3 : 2}, 1fr)`, gap: 10 }}>
@@ -13674,7 +13649,7 @@ function TermiteBondCard({ bonds, compact, card, sectionTitle, primaryButton, se
   const termLabel = bonds.length === 1 ? `${bonds[0].termYears}-year bond` : `${bonds.length} bonds on file`;
   return (
     <section data-glass="card" style={{ ...card, padding: 20 }}>
-      <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Bond</div>
+      <div data-glass="chip" style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Bond</div>
       <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>{termLabel}</div>
       <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Your bond term and renewal date.</div>
       {bonds.map((bond, index) => {
@@ -13753,9 +13728,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
   };
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
-  const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
-  };
+  const sectionTitle = CUSTOMER_SECTION_LABEL;
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
     background: B.glassNavy,
@@ -14201,7 +14174,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         flexWrap: 'wrap',
       }}>
         <div style={{ minWidth: 0, flex: '1 1 100%' }}>
-          <div style={sectionTitle}><Icon name="clipboard" size={14} strokeWidth={2} />Service Reports</div>
+          <div data-glass="chip" style={sectionTitle}><Icon name="clipboard" size={14} strokeWidth={2} />Service Reports</div>
           <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Recent service reports</div>
           <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Every completed visit’s report is here and under Visits → Completed.</div>
         </div>
@@ -14252,7 +14225,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         flexWrap: 'wrap',
       }}>
         <div style={{ minWidth: 0, flex: '1 1 100%' }}>
-          <div style={sectionTitle}><Icon name="money" size={14} strokeWidth={2} />Invoices</div>
+          <div data-glass="chip" style={sectionTitle}><Icon name="money" size={14} strokeWidth={2} />Invoices</div>
           <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Invoices and receipts</div>
           <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Every invoice and receipt lives in Billing.</div>
         </div>
@@ -14272,7 +14245,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         flexWrap: 'wrap',
       }}>
         <div style={{ minWidth: 0, flex: '1 1 100%' }}>
-          <div style={sectionTitle}><Icon name="document" size={14} strokeWidth={2} />Document Request</div>
+          <div data-glass="chip" style={sectionTitle}><Icon name="document" size={14} strokeWidth={2} />Document Request</div>
           <div style={{ marginTop: 6, fontSize: 20, color: B.glassNavy, fontWeight: 700 }}>Request paperwork from Waves</div>
           <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>
             Tell us what you need and we will upload it to your portal.
@@ -14336,6 +14309,10 @@ function DocumentPreviewOverlay({ preview, onClose, onError }) {
     <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={doc.title || 'Document preview'} data-glass="modal" style={{
       position: 'fixed', inset: 0, zIndex: 9999, background: '#FAF8F3',
       display: 'flex', flexDirection: 'column',
+      paddingLeft: 'env(safe-area-inset-left, 0px)',
+      paddingRight: 'env(safe-area-inset-right, 0px)',
+      paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+      boxSizing: 'border-box',
     }}>
       <div data-glass="soft" style={{
         display: 'flex', alignItems: 'center', gap: 10,
@@ -14378,9 +14355,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
   const [open, setOpen] = useState(items.length > 0);
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
-  const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
-  };
+  const sectionTitle = CUSTOMER_SECTION_LABEL;
   const actionButton = {
     ...PORTAL_BUTTON_BASE,
     background: '#fff',
@@ -14407,10 +14382,11 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
         type="button"
         onClick={() => setOpen(!open)}
         aria-expanded={open}
+        data-glass="soft"
         style={{
           width: '100%',
           border: 'none',
-          background: '#fff',
+          background: 'rgba(248,252,254,0.72)',
           padding: '16px 18px',
           cursor: 'pointer',
           display: 'flex',
@@ -14419,24 +14395,12 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
           gap: 12,
           textAlign: 'left',
           fontFamily: FONTS.body,
+          position: 'relative',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{
-            width: 34,
-            height: 34,
-            borderRadius: 8,
-            background: '#F8FCFE',
-            color: B.glassNavy,
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-          }}>
-            <Icon name={section.icon} size={17} strokeWidth={2} />
-          </span>
           <span>
-            <span style={sectionTitle}><Icon name="document" size={14} strokeWidth={2} />{section.label}</span>
+            <span data-glass="chip" style={{ ...sectionTitle, marginLeft: 0 }}><Icon name={section.icon} size={14} strokeWidth={2} />{section.label}</span>
             <span style={{ display: 'block', marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
               {items.length} document{items.length === 1 ? '' : 's'}
             </span>
@@ -14944,9 +14908,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
     boxShadow: PORTAL_SHELL.shadowSoft,
     position: 'relative',
   };
-  const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
-  };
+  const sectionTitle = CUSTOMER_SECTION_LABEL;
   const helperText = {
     marginTop: 4,
     fontSize: 14,
@@ -15194,7 +15156,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
           backdropFilter: 'blur(12px)',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           // Full-screen overlay: keep the header below the iOS status bar / notch.
-          padding: compact ? 'calc(12px + env(safe-area-inset-top, 0px)) 14px 12px' : '14px 18px',
+          padding: compact
+            ? 'calc(12px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-right, 0px)) 12px calc(14px + env(safe-area-inset-left, 0px))'
+            : '14px 18px',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -15220,7 +15184,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            padding: compact ? 20 : 32,
+            padding: compact
+              ? '20px calc(20px + env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) calc(20px + env(safe-area-inset-left, 0px))'
+              : 32,
           }}>
             <div style={{ ...card, width: '100%', maxWidth: 460, padding: compact ? 24 : 30, textAlign: 'center' }}>
               <div data-request-check="" style={{ animation: 'checkPop 0.5s ease-out' }}>
@@ -15260,7 +15226,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
               minHeight: 0,
               overflowY: 'auto',
               WebkitOverflowScrolling: 'touch',
-              padding: compact ? '14px 14px 18px' : '18px 20px',
+              padding: compact
+                ? '14px calc(14px + env(safe-area-inset-right, 0px)) 18px calc(14px + env(safe-area-inset-left, 0px))'
+                : '18px 20px',
               display: 'grid',
               gap: 12,
             }}>
@@ -15286,13 +15254,13 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
                       gap: 8,
                     }}>
                       <div style={{ background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)', borderRadius: 8, padding: 10 }}>
-                        <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Plan</div>
+                        <div data-glass="chip" style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Plan</div>
                         <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 700 }}>
                           {activeTierName ? `WaveGuard ${tierName}` : 'No active plan'}
                         </div>
                       </div>
                       <div style={{ background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)', borderRadius: 8, padding: 10 }}>
-                        <div style={sectionTitle}><Icon name="clock" size={14} strokeWidth={2} />Last service</div>
+                        <div data-glass="chip" style={sectionTitle}><Icon name="clock" size={14} strokeWidth={2} />Last service</div>
                         <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 700 }}>{lastServiceDateStr || 'Checking...'}</div>
                       </div>
                     </div>
@@ -15301,7 +15269,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
               )}
 
               <section data-glass="card" style={{ ...card, padding: 16 }}>
-                <div style={sectionTitle}><Icon name="message" size={14} strokeWidth={2} />Request type</div>
+                <div data-glass="chip" style={sectionTitle}><Icon name="message" size={14} strokeWidth={2} />Request type</div>
                 <div style={helperText}>Pick the closest match so the right Waves team sees it first.</div>
                 <div style={{
                   display: 'grid',
@@ -15385,7 +15353,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
 
               {reschedulableVisits.length > 0 && (
                 <section data-glass="card" style={{ ...card, padding: 16 }}>
-                  <div style={sectionTitle}><Icon name="calendar" size={14} strokeWidth={2} />Reschedule online</div>
+                  <div data-glass="chip" style={sectionTitle}><Icon name="calendar" size={14} strokeWidth={2} />Reschedule online</div>
                   <div style={helperText}>Move a visit yourself — each link opens that visit's scheduling page. Use the form below for anything else.</div>
                   <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
                     {reschedulableVisits.map(v => (
@@ -15450,7 +15418,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
 
               {isProblemCategory && !pickerHandoffUrl && (
                 <section data-glass="card" style={{ ...card, padding: 16 }}>
-                  <div style={sectionTitle}><Icon name="zap" size={14} strokeWidth={2} />Priority</div>
+                  <div data-glass="chip" style={sectionTitle}><Icon name="zap" size={14} strokeWidth={2} />Priority</div>
                   <div style={helperText}>Routine is best for most issues. Use urgent for active interior activity or access-sensitive timing.</div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8, marginTop: 12 }}>
                     {[
@@ -15494,7 +15462,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
 
               {!pickerHandoffUrl && (
               <section data-glass="card" style={{ ...card, padding: 16 }}>
-                <label htmlFor="portal-request-description" style={sectionTitle}><Icon name="clipboard" size={14} strokeWidth={2} />Details</label>
+                <label htmlFor="portal-request-description" data-glass="chip" style={sectionTitle}><Icon name="clipboard" size={14} strokeWidth={2} />Details</label>
                 <div style={helperText}>
                   {selectedCategory
                     ? `Tell us what you are seeing for ${selectedCategory.label.toLowerCase()}.`
@@ -15543,7 +15511,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
 
               {isProblemCategory && !pickerHandoffUrl && (
                 <section data-glass="card" style={{ ...card, padding: 16 }}>
-                  <div style={sectionTitle}><Icon name="map" size={14} strokeWidth={2} />Location</div>
+                  <div data-glass="chip" style={sectionTitle}><Icon name="map" size={14} strokeWidth={2} />Location</div>
                   <div style={helperText}>Select the area where the issue is happening.</div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, marginTop: 12 }}>
                     {locationOptions.map(l => {
@@ -15578,7 +15546,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
               <section data-glass="card" style={{ ...card, padding: 16 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
                   <div>
-                    <div style={sectionTitle}><Icon name="camera" size={14} strokeWidth={2} />Photos</div>
+                    <div data-glass="chip" style={sectionTitle}><Icon name="camera" size={14} strokeWidth={2} />Photos</div>
                     <div style={helperText}>Optional, up to {photoLimit}. Photos help the technician identify the issue before arrival.</div>
                   </div>
                   <div style={{ fontSize: 14, color: muted, fontWeight: 700, whiteSpace: 'nowrap' }}>{photos.length}/{photoLimit}</div>
@@ -15712,7 +15680,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
               borderTop: '1px solid #E7E2D7',
               background: 'rgba(255,255,255,0.96)',
               backdropFilter: 'blur(12px)',
-              padding: compact ? '10px 14px max(14px, env(safe-area-inset-bottom))' : '14px 18px',
+              padding: compact
+                ? '10px calc(14px + env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px))'
+                : '14px 18px',
               display: 'grid',
               gridTemplateColumns: compact ? '1fr' : '1fr auto',
               gap: 10,
@@ -15958,7 +15928,11 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, tabs = PRIMARY
   );
   return (
     <nav aria-label="Main" data-glass="" style={{
-      position: 'fixed', bottom: 8, left: 10, right: 10, zIndex: 98,
+      position: 'fixed',
+      bottom: 8,
+      left: 'calc(10px + env(safe-area-inset-left, 0px))',
+      right: 'calc(10px + env(safe-area-inset-right, 0px))',
+      zIndex: 98,
       background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(16px)',
       border: `1px solid ${PORTAL_SHELL.border}`,
       borderRadius: 8,
@@ -16032,12 +16006,12 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
         background: PORTAL_SHELL.page,
         borderRadius: '8px 8px 0 0',
         position: 'relative',
-        padding: '12px 14px max(18px, env(safe-area-inset-bottom))',
+        padding: '12px calc(14px + env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px))',
         boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
         animation: 'moreSheetUp 0.25s ease',
         borderTop: `1px solid ${PORTAL_SHELL.border}`,
         // dvh: 100vh over-measures behind the iOS Safari toolbar.
-        maxHeight: `calc(100${DVH} - 16px)`,
+        maxHeight: `calc(100${DVH} - 16px - env(safe-area-inset-top, 0px))`,
         overflowY: 'auto',
         WebkitOverflowScrolling: 'touch',
         overscrollBehavior: 'contain',
@@ -16364,7 +16338,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
 
         <div style={{
           flexShrink: 0,
-          padding: '16px 18px',
+          padding: '16px calc(18px + env(safe-area-inset-right, 0px)) 16px calc(18px + env(safe-area-inset-left, 0px))',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           background: 'rgba(255,255,255,0.96)',
@@ -16385,7 +16359,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
           minHeight: 0,
           overflowY: 'auto',
           overscrollBehavior: 'contain',
-          padding: '16px 18px',
+          padding: '16px calc(18px + env(safe-area-inset-right, 0px)) 16px calc(18px + env(safe-area-inset-left, 0px))',
           background: 'transparent',
         }}>
           {messages.map((msg, i) => (
@@ -16451,9 +16425,9 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
 
         <div style={{
           flexShrink: 0,
-          padding: '12px 16px',
+          padding: '12px calc(16px + env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))',
           borderTop: `1px solid ${PORTAL_SHELL.border}`,
-          display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 'max(12px, env(safe-area-inset-bottom))',
+          display: 'flex', gap: 8, alignItems: 'center',
         }}>
           <input
             name="chatMessage"
@@ -16710,6 +16684,10 @@ export default function PortalPage() {
   const [requestRefreshKey, setRequestRefreshKey] = useState(0);
   const [switchingPropertyId, setSwitchingPropertyId] = useState(null);
   const menuRef = useRef(null);
+  // Pin the page at its current offset while the account menu is open. The
+  // shared lock preserves sticky-header geometry on iOS and restores the
+  // exact scroll position on close.
+  useLockBodyScroll(showMenu, { preserveSticky: true });
   // Home is the hero surface (full scene with orbs). Glass is the unconditional
   // portal theme now, so the scene always mounts.
   useGlassSurface(true);
@@ -16724,16 +16702,6 @@ export default function PortalPage() {
     return () => {
       document.removeEventListener('mousedown', onPointer);
     };
-  }, [showMenu]);
-
-  // Lock the page scroll while the account menu is open — on iOS a touch
-  // scroll on the dropdown otherwise chains to the page behind it, so the
-  // background moved while the menu stayed put.
-  useEffect(() => {
-    if (!showMenu) return;
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prevOverflow; };
   }, [showMenu]);
 
   if (!customer) return null;
@@ -16910,6 +16878,8 @@ export default function PortalPage() {
         padding: '12px max(16px, calc((100vw - 1440px) / 2 + 16px))',
         // Clear the iPhone notch/status bar in standalone PWA mode (viewport-fit=cover).
         paddingTop: 'calc(12px + env(safe-area-inset-top, 0px))',
+        paddingLeft: 'max(calc(16px + env(safe-area-inset-left, 0px)), calc((100vw - 1440px) / 2 + 16px))',
+        paddingRight: 'max(calc(16px + env(safe-area-inset-right, 0px)), calc((100vw - 1440px) / 2 + 16px))',
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         gap: 12,
         position: 'sticky', top: 0, zIndex: 100,
@@ -17017,7 +16987,7 @@ export default function PortalPage() {
                 overflow: 'hidden',
                 // dvh + safe-area: the menu sits ~60px below the notch, so a
                 // plain 100vh budget pushed the last rows off-screen on iOS.
-                maxHeight: `calc(100${DVH} - env(safe-area-inset-top, 0px) - 84px)`,
+                maxHeight: `calc(100${DVH} - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 84px)`,
                 overflowY: 'auto',
                 WebkitOverflowScrolling: 'touch',
                 // Keep the menu's scroll from chaining to the page behind it.
@@ -17162,6 +17132,7 @@ export default function PortalPage() {
                         <button
                           key={action.label}
                           type="button"
+                          data-glass-accent=""
                           onClick={() => { action.action(); setShowMenu(false); }}
                           style={sharedStyle}
                         >
@@ -17353,7 +17324,17 @@ export default function PortalPage() {
       {/* Mobile bottom padding budgets the floating nav (minHeight 58 + 8px
           float) plus the iOS home-indicator inset — a flat 92px left the last
           card underneath the bar on notched phones. */}
-      <main id="portal-main" tabIndex={-1} style={{ padding: isMobileShell ? '24px 16px calc(108px + env(safe-area-inset-bottom, 0px))' : '24px 16px 32px', maxWidth: shellMaxWidth, margin: '0 auto', outline: 'none'  }}>
+      <main id="portal-main" tabIndex={-1} style={{
+        padding: isMobileShell
+          ? '24px calc(16px + env(safe-area-inset-right, 0px)) calc(108px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))'
+          : '24px calc(16px + env(safe-area-inset-right, 0px)) 32px calc(16px + env(safe-area-inset-left, 0px))',
+        // shellMaxWidth is the content cap. Preserve the existing 760px
+        // desktop content column now that safe-area padding is border-box.
+        maxWidth: shellMaxWidth + 32,
+        margin: '0 auto',
+        outline: 'none',
+        boxSizing: 'border-box',
+      }}>
         {/* No shell-level h1: every non-dashboard tab renders its own visible
             h1, and doubling it here exposed two h1s to assistive tech. */}
         {/* Desktop tab nav (owner 2026-07-09): the portal's section nav —

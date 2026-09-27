@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
 import { useBiometricLock } from './BiometricGate';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
@@ -182,14 +183,10 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
-  // Lock the page scroll while the customer panel is open — on iOS a touch
-  // scroll on the panel otherwise chains to the page behind it.
-  useEffect(() => {
-    if (!open || type === 'admin') return;
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prevOverflow; };
-  }, [open, type]);
+  // Preserve the page's scroll offset while the customer panel is open.
+  // A bare body overflow lock turns body into a new iOS scroll container and
+  // can make the sticky portal header disappear when opened mid-scroll.
+  useLockBodyScroll(open && type !== 'admin', { preserveSticky: true });
 
   // Self-heal the push link on load and on PWA resume (admin only). iOS
   // Safari rotates/drops push endpoints, and the server deactivates a
@@ -478,8 +475,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
             // 52px matches AdminLayoutV2's mobile top bar (calc(52px + safe-area));
             // 56 left a 4px strip of page showing between header and panel.
             top: isDark ? 'calc(52px + env(safe-area-inset-top, 0px))' : 'calc(env(safe-area-inset-top, 0px) + 8px)',
-            left: isDark ? 0 : 10,
-            right: isDark ? 0 : 10,
+            left: isDark ? 0 : 'calc(10px + env(safe-area-inset-left, 0px))',
+            right: isDark ? 0 : 'calc(10px + env(safe-area-inset-right, 0px))',
             bottom: isDark ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : 'calc(env(safe-area-inset-bottom, 0px) + 78px)',
             background: '#FFFFFF', zIndex: 9999,
             borderRadius: isDark ? 0 : 24,
@@ -631,7 +628,10 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           // floating glass panel (data-glass="modal" material, inset so the
           // rounded corners read intentionally).
           <div ref={attachPanelRef} role="dialog" aria-modal="true" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
-            position: 'fixed', top: isDark ? 56 : 12, right: isDark ? 0 : 12, bottom: isDark ? 0 : 12,
+            position: 'fixed',
+            top: isDark ? 56 : 'calc(12px + env(safe-area-inset-top, 0px))',
+            right: isDark ? 0 : 'calc(12px + env(safe-area-inset-right, 0px))',
+            bottom: isDark ? 0 : 'calc(12px + env(safe-area-inset-bottom, 0px))',
             width: '100%', maxWidth: 400,
             background: colors.bg, border: `1px solid ${colors.border}`,
             borderRadius: isDark ? 0 : 24,
