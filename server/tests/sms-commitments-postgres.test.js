@@ -324,7 +324,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(matched.message).toMatchObject({ id: queue.id, created_at: sentAt, message_body: provider.message_body,
         from_phone: provider.from_phone, to_phone: provider.to_phone });
       return require('../services/sms-operational-extractor').groundExtraction({ facts: [], additional_properties: [], obligations: [{
-        party: 'waves', kind: 'callback', description: 'call', quote: provider.message_body, basis: 'promise',
+        party: 'waves', kind: 'callback', description: 'call', quote: provider.message_body, basis: 'promise', answered_by_payment: false,
         property_id: context.properties[0].id, due_text: 'tomorrow at 10 AM', due_at: null,
       }] }, matched);
     });
@@ -568,7 +568,7 @@ postgres('SMS commitments on PostgreSQL', () => {
   });
 
   test('a verdict cached under an earlier fulfillment policy is rechecked', async () => {
-    result.obligations[0] = { ...result.obligations[0], kind: 'other',
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true,
       due_at: new Date(message.created_at.getTime() + 1000).toISOString() };
     await recordMessageOperations(mockPg, message, result, context);
     const now = new Date(message.created_at.getTime() + 2000);
@@ -641,7 +641,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       to_status: 'rescheduled', transitioned_at: after });
     const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 1000));
     expect(evidence.failures).toEqual([]);
-    const sms_context = { property_id: base.property_id, source_at: message.created_at.toISOString() };
+    const sms_context = { property_id: base.property_id, source_at: message.created_at.toISOString(), money_answerable: true };
     const allowed = (kind) => evidence.records.filter((r) => admissibleWitness(r, { kind, sms_context })).map((r) => r.id).sort();
     expect(allowed('schedule_visit')).toEqual([rows[1].id, rows[4].id].sort());
     expect(allowed('technician_follow_up')).toEqual([rows[3].id]);
@@ -682,7 +682,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(ids).not.toContain(movedBeforeRequest.id);
     const record = evidence.records.find((r) => r.id === moved.id);
     expect(record.text).toContain('moved after the request');
-    const sms_context = { property_id: base.property_id, source_at: message.created_at.toISOString() };
+    const sms_context = { property_id: base.property_id, source_at: message.created_at.toISOString(), money_answerable: true };
     expect(admissibleWitness(record, { kind: 'schedule_visit', sms_context })).toBe(true);
     expect(admissibleWitness(record, { kind: 'technician_follow_up', sms_context })).toBe(false);
   });
@@ -702,7 +702,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 60000));
     const record = evidence.records.find((r) => r.type === 'visit' && r.id === visit.id);
     expect(!!record).toBe(true);
-    const sms_context = { property_id: context.properties[0].id, source_at: message.created_at.toISOString() };
+    const sms_context = { property_id: context.properties[0].id, source_at: message.created_at.toISOString(), money_answerable: true };
     expect(admissibleWitness(record, { kind: 'schedule_visit', sms_context })).toBe(admissible);
     expect(record.text.includes('moved after the request')).toBe(admissible);
   });
@@ -728,7 +728,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 60000));
     expect(evidence.failures).toEqual([]);
     const record = evidence.records.find((r) => r.type === 'visit' && r.id === visit.id);
-    const sms_context = { property_id: context.properties[0].id, source_at: message.created_at.toISOString() };
+    const sms_context = { property_id: context.properties[0].id, source_at: message.created_at.toISOString(), money_answerable: true };
     expect(Boolean(record && admissibleWitness(record, { kind: 'schedule_visit', sms_context }))).toBe(admissible);
     expect(Boolean(record?.text.includes('moved after the request'))).toBe(admissible);
   });
@@ -740,7 +740,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', created_at: after }).returning('id');
     const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 1000));
     const commitment = { kind, evidence: [{ quote: 'Please send the report and paperwork' }],
-      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString(), money_answerable: true } };
     const witness = evidence.records.find((r) => r.id === reply.id);
     expect(admissibleWitness(witness, commitment, evidence.records)).toBe(false);
     expect(groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: 'I sent the report' }, evidence, commitment))
@@ -759,7 +759,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       status: 'delivered', sent_at: after, delivered_at: after, text_snapshot: 'Your lawn estimate is attached' }).returning('id');
     const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, now);
     const commitment = { kind: 'send_estimate', evidence: [{ quote: 'Email the lawn estimate to synthetic@example.invalid' }],
-      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString(), money_answerable: true } };
     const witness = evidence.records.find((r) => r.id === email.id);
     const complete = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: 'lawn estimate' }, evidence, commitment);
     expect(complete).toMatchObject({ verdict: 'fulfilled', linked_record_type: 'estimate', linked_record_id: estimate.id });
@@ -815,7 +815,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, now);
     expect(evidence.records.filter((r) => r.type === 'email_delivery').map((r) => r.id)).toEqual([email.id]);
     const commitment = { kind: 'send_estimate', evidence: [{ quote: 'Email the proposal to synthetic@example.invalid' }],
-      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString(), money_answerable: true } };
     expect(admissibleWitness(evidence.records.find((r) => r.id === email.id), commitment, evidence.records)).toBe(true);
   });
 
@@ -845,7 +845,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(evidence.failures).toEqual([]);
     const witness = evidence.records.find((r) => r.type === 'email_delivery' && r.id === email.id);
     const commitment = { kind: 'send_estimate', evidence: [{ quote: 'Email the lawn estimate to synthetic@example.invalid' }],
-      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString(), money_answerable: true } };
     expect(admissibleWitness(witness, commitment, evidence.records)).toBe(admissible);
     const verdict = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: 'lawn estimate' }, evidence, commitment);
     expect(verdict).toMatchObject({ verdict: admissible ? 'fulfilled' : 'uncertain' });
@@ -875,7 +875,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 240000));
     expect(evidence.failures).toEqual(['visit_truncated']);
     const commitment = { kind: 'callback', evidence: [{ quote: 'Please call me back' }],
-      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString(), money_answerable: true } };
     expect(groundFulfillment({ verdict: 'fulfilled', record_ref: `call:${call.id}`, quote: 'Returned your call' }, evidence, commitment))
       .toMatchObject({ verdict: 'uncertain', reason: 'incomplete_sources', failures: ['visit_truncated'] });
   });
@@ -913,7 +913,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, now);
     expect(evidence.failures).toEqual([`${channel}_truncated`]);
     const commitment = { kind: 'callback', evidence: [{ quote: 'Please call me back' }],
-      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString(), money_answerable: true } };
     const verdict = groundFulfillment({ verdict: 'fulfilled', record_ref: `call:${call.id}`, quote: 'Returned your call' }, evidence, commitment);
     expect(verdict.verdict).toBe(fulfilled ? 'fulfilled' : 'uncertain');
     if (!fulfilled) expect(verdict).toMatchObject({ reason: 'incomplete_sources', failures: [`${channel}_truncated`] });
@@ -960,7 +960,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       await mockPg('job_status_history').insert({
         job_id: progressed.id, from_status: 'confirmed', to_status: status, transitioned_at: after,
       });
-      const commitment = { kind, sms_context: { property_id: base.property_id, source_at: message.created_at.toISOString() } };
+      const commitment = { kind, sms_context: { property_id: base.property_id, source_at: message.created_at.toISOString(), money_answerable: true } };
       const now = new Date(after.getTime() + 1000);
       const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
       expect(evidence.failures).toEqual([]);
@@ -991,7 +991,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     await mockPg('job_status_history').insert({
       job_id: visit.id, from_status: 'on_site', to_status: 'completed', transitioned_at: after,
     });
-    const commitment = { kind: 'other', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     expect(evidence.failures).toEqual([]);
     const record = evidence.records.find((r) => r.id === visit.id);
@@ -1045,7 +1045,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('R1 owner ruling 2026-09-24 (settled r10): field progress sends a NULL-due "other" ask to the model at once; a grounded verdict closes it, no bell', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, due_at: null,
       quote: 'You still coming this morning?', description: 'You still coming this morning?' };
     await recordMessageOperations(mockPg, message, result, context);
     // R5 assigns a per-kind default due_at at insert time; force this back
@@ -1075,7 +1075,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     result.facts = [];
     // "this morning" would be stated timing (Codex #4816 r20) and leave the
     // row undated; this test is about the open default window.
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, due_at: null,
       quote: 'You still coming?', description: 'You still coming?' };
     await recordMessageOperations(mockPg, message, result, context);
     const inserted = await mockPg('call_commitments').first();
@@ -1186,7 +1186,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('Codex #4816 r17: an undated row behind the due cursor is verified on the next tick after a visit event', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, basis: 'request', due_at: null, due_text: 'sometime soon',
       quote: 'You still coming?', description: 'You still coming?' };
     await recordMessageOperations(mockPg, message, result, context);
     await mockPg('call_commitments').update({ due_at: null });
@@ -1211,7 +1211,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     'a non-witness evidence source fails'])(
     'Codex #4816 r18/r19: a verdict the transaction does not persist leaves the event unseen for the next tick (%s)', async (cause) => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, basis: 'request', due_at: null, due_text: 'sometime soon',
       quote: 'You still coming?', description: 'You still coming?' };
     await recordMessageOperations(mockPg, message, result, context);
     await mockPg('call_commitments').update({ due_at: null });
@@ -1290,7 +1290,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('Codex #4816 r38: a skipped/no_show transition is not an event the page picks up', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, basis: 'request', due_at: null, due_text: 'sometime soon',
       quote: 'You still coming?', description: 'You still coming?' };
     await recordMessageOperations(mockPg, message, result, context);
     await mockPg('call_commitments').update({ due_at: null });
@@ -1323,7 +1323,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       metadata: JSON.stringify({ scheduled_service_id: visit.id, property_id: context.properties[0].id }) }).returning('id');
     // The visit is switched to another property after the notice went out.
     await mockPg('scheduled_services').where({ id: visit.id }).update({ property_id: randomUUID() });
-    const commitment = { kind: 'send_appointment_confirmation', sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'send_appointment_confirmation', sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(message.created_at.getTime() + 5000));
     const record = evidence.records.find((r) => r.id === notice.id);
     expect(String(record.linked_property_id)).toBe(String(context.properties[0].id));
@@ -1337,7 +1337,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('Codex #4816 r40: a no-show reschedule_log row (no new date) is not an event; a logged move is', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, basis: 'request', due_at: null, due_text: 'sometime soon',
       quote: 'You still coming?', description: 'You still coming?' };
     await recordMessageOperations(mockPg, message, result, context);
     await mockPg('call_commitments').update({ due_at: null });
@@ -1379,7 +1379,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('Codex #4816 r27: the event page counts activity from the effective source time, not the queue row', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, basis: 'request', due_at: null, due_text: 'sometime soon',
       quote: 'You still coming?', description: 'You still coming?' };
     await recordMessageOperations(mockPg, message, result, context);
     await mockPg('call_commitments').update({ due_at: null });
@@ -1411,7 +1411,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('Codex #4816 r28: deferred rows move behind untried rows on the event page', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, basis: 'request', due_at: null, due_text: 'sometime soon',
       quote: 'You still coming?', description: 'You still coming?' };
     await recordMessageOperations(mockPg, message, result, context);
     const seed = await mockPg('call_commitments').first();
@@ -1449,7 +1449,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('Codex #4816 r32: a provider-failure backoff reached for a previous owner does not hold after a merge', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, basis: 'request', due_at: null, due_text: 'sometime soon',
       property_id: null, quote: 'You still coming?', description: 'You still coming?' };
     await recordMessageOperations(mockPg, message, result, context);
     await mockPg('call_commitments').update({ due_at: null });
@@ -1488,7 +1488,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('Codex #4816 r28: an ownership change resets the event watermark', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, basis: 'request', due_at: null, due_text: 'sometime soon',
       property_id: null, quote: 'You still coming?', description: 'You still coming?' };
     await recordMessageOperations(mockPg, message, result, context);
     await mockPg('call_commitments').update({ due_at: null });
@@ -1561,7 +1561,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('Codex #4816 r21: a failed evidence query leaves the visit event pending for the next tick', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, basis: 'request', due_at: null, due_text: 'sometime soon',
       quote: 'You still coming?', description: 'You still coming?' };
     await recordMessageOperations(mockPg, message, result, context);
     await mockPg('call_commitments').update({ due_at: null });
@@ -1588,7 +1588,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('Codex #4816 r19/r20: the watermark never passes now minus the commit grace, and keeps microseconds', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, basis: 'request', due_at: null, due_text: 'sometime soon',
       quote: 'You still coming?', description: 'You still coming?' };
     await recordMessageOperations(mockPg, message, result, context);
     await mockPg('call_commitments').update({ due_at: null });
@@ -1699,7 +1699,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('owner ruling 2026-09-24: a NULL-due commitment with no admissible witness is never sent to the model and never bells', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, due_at: null,
       quote: 'You still coming this morning?', description: 'You still coming this morning?' };
     await recordMessageOperations(mockPg, message, result, context);
     await mockPg('call_commitments').update({ due_at: null, due_basis: null });
@@ -1738,7 +1738,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     result.facts = [];
     // Scoped to the property: an unscoped cancel ask is never answered by a
     // cancellation (Codex #4816 r27).
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null, property_id: context.properties[0].id,
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, due_at: null, property_id: context.properties[0].id,
       quote: 'Please cancel my appointment', description: 'Please cancel my appointment' };
     await recordMessageOperations(mockPg, message, result, context);
     const after = new Date(message.created_at.getTime() + 1000);
@@ -1760,7 +1760,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('R2 rules 1–3: an invoice paid via a settled payment after a payment "other" question reaches the model at once — money landing never closes an ask on its own', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null, property_id: null,
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, due_at: null, property_id: null,
       quote: 'What is the Zelle number?', description: 'What is the Zelle number?' };
     await recordMessageOperations(mockPg, message, result, context);
     await mockPg('call_commitments').update({ due_at: null, due_basis: null });
@@ -1789,7 +1789,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     // payment's own settlement, never the invoice's paid_at stamp alone.
     await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(before),
       metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: before.toISOString() }), created_at: before });
-    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
     expect(evidence.records.filter((r) => r.type === 'payment')).toHaveLength(0);
   });
@@ -1803,14 +1803,14 @@ postgres('SMS commitments on PostgreSQL', () => {
     // the webhook flips it to paid in place without touching created_at.
     await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(after),
       metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: after.toISOString() }), created_at: before, updated_at: after });
-    const commitment = { kind: 'other', description: 'Did my ACH payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did my ACH payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
     expect(evidence.records.filter((r) => r.type === 'payment' && r.payment_source === 'invoice').map((r) => r.invoice_id)).toEqual([invoice.id]);
   });
 
   test('R2 rule 4: a staff-recorded ledger prepayment with no invoice is loaded as payment evidence the model may weigh', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null, property_id: null,
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, due_at: null, property_id: null,
       quote: 'Did you receive my Zelle prepayment?', description: 'Did you receive my Zelle prepayment?' };
     await recordMessageOperations(mockPg, message, result, context);
     const after = new Date(message.created_at.getTime() + 1000);
@@ -1838,7 +1838,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: after.toISOString() }), created_at: after });
     await mockPg('payments').insert({ customer_id: message.customer_id, amount: 200, status: 'paid', payment_date: etDateString(after),
       description: 'Account credit prepayment — cash', metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'cash' }), created_at: after });
-    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
     const payments = evidence.records.filter((r) => r.type === 'payment');
     expect(payments.filter((r) => r.payment_source === 'invoice')).toHaveLength(1);
@@ -1857,7 +1857,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     // The payer column that customer-keyed payment readers exclude (waves-billing invariant 12).
     await mockPg('payments').insert({ customer_id: message.customer_id, payer_id: payer.id, amount: 200, status: 'paid',
       payment_date: etDateString(after), metadata: JSON.stringify({}), created_at: after });
-    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
     expect(evidence.records.filter((r) => r.type === 'payment')).toHaveLength(0);
   });
@@ -1865,7 +1865,7 @@ postgres('SMS commitments on PostgreSQL', () => {
   test('R2 rule 6: for a customer with a property history, a property-scoped ask needs the invoice\'s own visit property; an unlinked ledger payment cannot vouch for it', async () => {
     await giveFormerProperty(message.customer_id);
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null, property_id: context.properties[0].id,
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, due_at: null, property_id: context.properties[0].id,
       quote: 'Did you receive my payment?', description: 'Did you receive my payment?' };
     await recordMessageOperations(mockPg, message, result, context);
     const before = new Date(message.created_at.getTime() - 86400000);
@@ -1887,7 +1887,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const linked = paymentRecords.find((r) => r.payment_source === 'invoice');
     const ledger = paymentRecords.find((r) => r.payment_source === 'ledger');
     expect(linked.property_id).toBe(context.properties[0].id);
-    const scopedAsk = { kind: 'other', sms_context: { property_id: context.properties[0].id } };
+    const scopedAsk = { kind: 'other', sms_context: { property_id: context.properties[0].id, money_answerable: true } };
     expect(admissibleWitness(linked, scopedAsk)).toBe(true);
     expect(admissibleWitness(ledger, scopedAsk)).toBe(false);
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
@@ -1895,7 +1895,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('R2 rule 8: revalidation re-reads the payment under lock — a payment reversed since the check never grounds a fulfilled verdict', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, due_at: null,
       quote: 'Did you receive my payment?', description: 'Did you receive my payment?' };
     await recordMessageOperations(mockPg, message, result, context);
     await mockPg('call_commitments').update({ due_at: null, due_basis: null });
@@ -1903,7 +1903,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const now = new Date(after.getTime() + 1000);
     const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 200, status: 'paid', payment_date: etDateString(after),
       metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'cash' }), created_at: after }).returning('id');
-    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const witness = evidence.records.find((r) => r.type === 'payment');
     expect(witness).toMatchObject({ payment_source: 'ledger', id: payment.id });
@@ -1926,7 +1926,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: after }).returning('id');
     const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(after),
       metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: after }).returning('id');
-    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const witness = evidence.records.find((r) => r.type === 'payment' && r.payment_source === 'invoice');
     expect(witness).toMatchObject({ id: payment.id, invoice_id: invoice.id });
@@ -1959,7 +1959,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: evening }).returning('id');
     await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(evening),
       metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: evening.toISOString() }), created_at: evening });
-    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(evening.getTime() + 1000));
     const row = evidence.records.find((r) => r.type === 'payment' && r.payment_source === 'invoice');
     expect(row.text).toContain(`received ${etDateString(evening)}`);
@@ -1988,7 +1988,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       payment_date: etDateString(new Date()), metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'cash' }),
       created_at: new Date(Date.now() + 1000) }).returning('id');
     const commitment = { kind: 'other', description: 'Did you get my check?',
-      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(Date.now() + 60000));
     const payments = evidence.records.filter((r) => r.type === 'payment');
     const linked = payments.find((r) => r.payment_source === 'invoice');
@@ -2006,7 +2006,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       description: 'Account credit prepayment — zelle (from Pat Example 941-555-0123 pat.example@example.invalid)',
       metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'zelle' }), created_at: after });
     const commitment = { kind: 'other', description: 'Did you receive my Zelle?',
-      sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+      sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     expect(evidence.records.find((r) => r.payment_source === 'ledger').text).toBe(`Payment of $200.00 by Zelle recorded ${etDateString(after)}`);
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
@@ -2026,7 +2026,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 118.75, status: 'paid', payment_date: etDateString(settled),
       metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: settled.toISOString() }), created_at: stamped }).returning('id');
     const commitment = { kind: 'other', description: 'Did my $118.75 payment go through?',
-      sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+      sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const witness = evidence.records.find((r) => r.payment_source === 'invoice');
     expect(witness.text).toBe(`Payment of $118.75 toward invoice WPC-2026-0902 (Quarterly Pest Control) received ${etDateString(settled)}; the invoice is paid in full`);
@@ -2046,7 +2046,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const settledRow = (customerId) => ({ customer_id: customerId, amount: 125, status: 'paid', payment_date: etDateString(after),
       metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: after.toISOString() }), created_at: after });
     await mockPg('payments').insert(settledRow(otherCustomer));
-    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     expect((await loadSmsFulfillmentEvidence(mockPg, commitment, message, now)).records.filter((r) => r.type === 'payment')).toEqual([]);
     const [own] = await mockPg('payments').insert(settledRow(message.customer_id)).returning('id');
     expect((await loadSmsFulfillmentEvidence(mockPg, commitment, message, now)).records.filter((r) => r.type === 'payment'))
@@ -2068,7 +2068,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const combined = { combined_payment: true, combined_anchor_invoice_id: first.id };
     const [, , legacyPaid] = await mockPg('payments').insert([paymentRow('pi_combined', { ...combined, invoice_id: first.id }),
       paymentRow('pi_combined', { ...combined, invoice_id: second.id }), paymentRow('pi_legacy', {})]).returning('id');
-    const commitment = { kind: 'other', description: 'Did both payments go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did both payments go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     for (let read = 0; read < 2; read += 1) {
       const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
       expect(Object.fromEntries(evidence.records.filter((r) => r.type === 'payment').map((r) => [r.invoice_id, r.id])))
@@ -2092,7 +2092,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     await mockPg('estimate_deposits').insert([deposit(estimate.id, 'pending', null), deposit(estimate.id, 'refunding', after),
       deposit(estimate.id, 'refunded', after), deposit(estimate.id, 'received', before), deposit(foreign.id, 'received', after)]);
     const commitment = { kind: 'other', description: 'Did my deposit go through?',
-      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+      sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
     const deposits = evidence.records.filter((r) => r.payment_source === 'deposit');
     expect(deposits.map((r) => r.id).sort()).toEqual([received.id, credited.id].sort());
@@ -2113,7 +2113,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, status: 'accepted', service_interest: 'Termite' }).returning('id');
     const [deposit] = await mockPg('estimate_deposits').insert({ estimate_id: estimate.id, amount: 150, status: 'received', received_at: after,
       stripe_payment_intent_id: `pi_deposit_${randomUUID()}` }).returning('id');
-    const commitment = { kind: 'other', description: 'Did my deposit go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did my deposit go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const witness = evidence.records.find((r) => r.payment_source === 'deposit');
     const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
@@ -2145,7 +2145,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       stripe_payment_intent_id: `pi_deposit_${seconds}` });
     await mockPg('payments').insert(Array.from({ length: 50 }, (_, i) => ledger(10 + i)));
     await mockPg('estimate_deposits').insert([1, 2, 3, 70, 71, 72].map(deposit));
-    const commitment = { kind: 'other', description: 'Did my payments go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did my payments go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const now = at(120);
     const complete = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     expect(complete.failures).toEqual([]);
@@ -2169,7 +2169,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const installment = (amount, at) => ({ customer_id: message.customer_id, amount, status: 'paid', payment_date: etDateString(at),
       metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: at });
     const [first, second] = await mockPg('payments').insert([installment(100, after), installment(150, new Date(after.getTime() + 30000))]).returning('id');
-    const commitment = { kind: 'other', description: 'Did you get my $100 payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did you get my $100 payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const witnesses = evidence.records.filter((r) => r.payment_source === 'invoice');
     expect(witnesses.map((r) => r.id)).toEqual([second.id, first.id]);
@@ -2192,7 +2192,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, status: 'accepted', service_interest: 'Termite' }).returning('id');
     await mockPg('estimate_deposits').insert({ estimate_id: estimate.id, amount: 150, refunded_amount: 50, status: 'received', received_at: after,
       stripe_payment_intent_id: 'pi_deposit_partly_refunded' });
-    const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const payments = evidence.records.filter((r) => r.type === 'payment');
     expect(payments.map((r) => r.payment_source).sort()).toEqual(['deposit', 'invoice']);
@@ -2217,7 +2217,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'sent' }).returning('id');
     const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 50, status: 'paid', payment_date: etDateString(after),
       metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: after }).returning('id');
-    const commitment = { kind: 'other', description: 'Did you get my $50?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did you get my $50?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const witness = evidence.records.find((r) => r.payment_source === 'invoice');
     expect(witness).toMatchObject({ id: payment.id, invoice_id: invoice.id,
@@ -2244,7 +2244,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     // A staff-recorded payment whose method was typed free-form: counted, but the text never carries the typed method.
     await mockPg('payments').insert({ customer_id: message.customer_id, amount: 40, status: 'paid', payment_date: etDateString(after),
       metadata: JSON.stringify({ method: 'Zelle from Pat Example 941-555-0123' }), created_at: after });
-    const commitment = { kind: 'other', description: 'Did you get my cash payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did you get my cash payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const payments = evidence.records.filter((r) => r.type === 'payment');
     expect(payments.map((r) => r.payment_source)).toEqual(['ledger']);
@@ -2273,7 +2273,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       card({ amount: 60, stripe_payment_intent_id: 'pi_bank', card_last_four: '6789', metadata: JSON.stringify({ payment_method: 'us_bank_account' }) }),
       // A bank autopay charge on a saved ACH method: the digits live in the method's own bank column (Codex #4996 r12).
       card({ amount: 45, stripe_payment_intent_id: 'pi_saved_bank', payment_method_id: savedBank.id, metadata: JSON.stringify({ billed_month: '2026-09' }) })]).returning('id');
-    const commitment = { kind: 'other', description: 'Did my $100 termite payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did my $100 termite payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     expect(evidence.records.find((r) => r.payment_source === 'invoice').text)
       .toBe(`Payment of $102.90 ($100.00 plus a $2.90 card surcharge) by Visa ending 4242 toward invoice WPC-2026-1001 (Termite Treatment) received ${etDateString(after)}; the invoice is paid in full`);
@@ -2303,7 +2303,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       row(125, at(2), { invoice_id: reconciled.id, source: 'admin_payment_reconcile' }),
       row(50, at(1), { invoice_id: installments.id }),
       row(75, at(3), {})]).returning('id');
-    const commitment = { kind: 'other', description: 'Did you get my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did you get my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const text = Object.fromEntries(evidence.records.filter((r) => r.type === 'payment').map((r) => [r.id, r.text]));
     expect(text[reconciledPaid.id]).toContain('Payment of $125.00 by Zelle toward invoice WPC-2026-0997');
@@ -2325,7 +2325,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       source_estimate_id: estimate.id, prepay_invoice_id: invoice.id }).returning('id');
     const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 600, status: 'paid', payment_date: etDateString(after),
       created_at: after, metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: after.toISOString() }) }).returning('id');
-    const commitment = { kind: 'other', description: 'Did my annual payment go through?', sms_context: { property_id: propertyId, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did my annual payment go through?', sms_context: { property_id: propertyId, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const witness = evidence.records.find((r) => r.id === payment.id);
     expect(witness).toMatchObject({ invoice_id: invoice.id, property_id: propertyId });
@@ -2357,7 +2357,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     await mockPg('setup_fee_claims').insert({ invoice_id: invoice.id, scheduled_service_id: seriesRoot.id, amount: 99 });
     const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 480, status: 'paid', payment_date: etDateString(after),
       created_at: after, metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: after.toISOString() }) }).returning('id');
-    const commitment = { kind: 'other', description: 'Did my prepayment go through?', sms_context: { property_id: propertyId, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did my prepayment go through?', sms_context: { property_id: propertyId, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const witness = evidence.records.find((r) => r.id === payment.id);
     expect(witness).toMatchObject({ invoice_id: invoice.id, property_id: propertyId });
@@ -2383,7 +2383,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       created_at: after, metadata: JSON.stringify({ ...metadata, settled_event_at: after.toISOString() }) });
     const [office, autopay] = await mockPg('payments').insert([row(95, { invoice_id: invoice.id }),
       row(89, { billed_month: '2026-09' })]).returning('id');
-    const scoped = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: propertyId, source_at: message.created_at.toISOString() } };
+    const scoped = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: propertyId, source_at: message.created_at.toISOString(), money_answerable: true } };
     const unscoped = { ...scoped, sms_context: { property_id: null, source_at: scoped.sms_context.source_at } };
     const payments = async (commitment) => Object.fromEntries((await loadSmsFulfillmentEvidence(mockPg, commitment, message, now)).records
       .filter((r) => r.type === 'payment').map((r) => [r.id, r]));
@@ -2414,7 +2414,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     await mockPg('invoices').insert([invoiceRow(stamped, 'WPC-2026-0999', { payment_recorded_at: at }), invoiceRow(named, 'WPC-2026-1000', {})]);
     const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(at),
       created_at: at, metadata: JSON.stringify({ invoice_id: named, source: 'admin_payment_reconcile' }) }).returning('id');
-    const commitment = { kind: 'other', description: 'Did you get my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did you get my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     expect(evidence.records.filter((r) => r.type === 'payment').map((r) => [r.id, r.invoice_id])).toEqual([[payment.id, named]]);
   });
@@ -2431,7 +2431,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     // Money staff record at the same moment lands when it is recorded.
     const [cash] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 40, status: 'paid', payment_date: etDateString(repaired),
       created_at: repaired, metadata: JSON.stringify({ method: 'cash' }) }).returning('id');
-    const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const ids = async () => (await loadSmsFulfillmentEvidence(mockPg, commitment, message, now)).records.filter((r) => r.type === 'payment').map((r) => r.id);
     expect(await ids()).toEqual([cash.id]);
     // The succeeded webhook stamps Stripe's moment: before the question, so it still never counts.
@@ -2461,7 +2461,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       // A fee's partial-refund marker names no invoice; it is still a fee.
       payment({ purpose: 'appointment_card_no_show_fee' }),
       payment({ invoice_id: service.id })]).returning('id');
-    const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     expect(evidence.records.filter((r) => r.type === 'payment').map((r) => [r.id, r.payment_source])).toEqual([[paid.id, 'invoice']]);
   });
@@ -2474,7 +2474,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const metadata = { invoice_id: invoice.id, settled_event_at: after.toISOString() };
     const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(after),
       processor: 'stripe', stripe_payment_intent_id: 'pi_refund_in_flight', created_at: after, metadata: JSON.stringify(metadata) }).returning('id');
-    const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const witness = evidence.records.find((r) => r.id === payment.id);
     const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
@@ -2510,7 +2510,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       created_at: after, metadata: JSON.stringify({ invoice_id: invoiceId, settled_event_at: after.toISOString() }) });
     const [visitPaid, setupPaid] = await mockPg('payments').insert([paymentRow(visitInvoice.id), paymentRow(setupInvoice.id)]).returning('id');
     const closer = (sms_context, paymentId) => async () => {
-      const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { ...sms_context, source_at: message.created_at.toISOString() } };
+      const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { ...sms_context, source_at: message.created_at.toISOString(), money_answerable: true } };
       const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
       const witness = evidence.records.find((r) => r.id === paymentId);
       const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
@@ -2547,7 +2547,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     await mockPg('setup_fee_claims').insert({ invoice_id: invoice.id, estimate_id: estimate.id, amount: 199 });
     await mockPg('payments').insert({ customer_id: message.customer_id, amount: 199, status: 'paid', payment_date: etDateString(after),
       metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: after });
-    const commitment = { kind: 'other', description: 'Did the setup payment go through?', sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'Did the setup payment go through?', sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const witness = evidence.records.find((r) => r.payment_source === 'invoice');
     expect(witness).toMatchObject({ invoice_id: invoice.id, property_id: context.properties[0].id });
@@ -2569,7 +2569,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       stripeRow('pi_autopay', { base_amount: 89, card_surcharge: 0, idempotency_key: 'monthly:synthetic:2026-08', billed_month: '2026-08' }),
       stripeRow('pi_invoice', {}),
       stripeRow('pi_disputed', { dispute_id: 'dp_synthetic', dispute_invoice_id: disputed.id })]).returning('id');
-    const commitment = { kind: 'other', description: "Did this month's autopay go through?", sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: "Did this month's autopay go through?", sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const ledger = evidence.records.filter((r) => r.payment_source === 'ledger');
     expect(ledger.map((r) => r.id)).toEqual([autopay.id]);
@@ -2592,7 +2592,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     };
     beforeEach(async () => {
       result.facts = [];
-      result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon', property_id: null,
+      result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, basis: 'request', due_at: null, due_text: 'sometime soon', property_id: null,
         quote: 'Did you get my payment?', description: 'Did you get my payment?' };
       await recordMessageOperations(mockPg, message, result, context);
       await mockPg('call_commitments').update({ due_at: null });
@@ -2649,7 +2649,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       const refundText = { ...message, id: randomUUID(), message_body: 'Please refund the double charge' };
       await mockPg('sms_log').insert(refundText);
       await recordMessageOperations(mockPg, refundText, { dropped: 0, facts: [], obligations: [{ ...result.obligations[0],
-        quote: 'Please refund the double charge', description: 'Refund the double charge' }] }, await loadMessageContext(mockPg, refundText));
+        quote: 'Please refund the double charge', description: 'Refund the double charge', answered_by_payment: false }] }, await loadMessageContext(mockPg, refundText));
       const refund = await mockPg('call_commitments').where({ sms_log_id: refundText.id }).first();
       expect(refund.sms_context).toMatchObject({ money_answerable: false });
       await mockPg('call_commitments').update({ due_at: null });
@@ -2657,6 +2657,13 @@ postgres('SMS commitments on PostgreSQL', () => {
         metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'zelle' }), created_at: minutes(2), updated_at: minutes(2) });
       expect(await tick(minutes(3))).toMatchObject({ scanned: 1 });
       expect(verify.mock.calls.map(([row]) => row.id)).toEqual([target]);
+    });
+
+    test('an ask recorded without the extraction\'s judgement is never woken by money', async () => {
+      await mockPg('call_commitments').where({ id: target }).update({ sms_context: mockPg.raw("sms_context - 'money_answerable'") });
+      await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(minutes(2)),
+        metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'zelle' }), created_at: minutes(2), updated_at: minutes(2) });
+      expect(await tick(minutes(3))).toMatchObject({ scanned: 0 });
     });
 
     test('another customer\'s payment, a fee, a refund in flight, and a deposit being refunded, are not events', async () => {
@@ -2674,9 +2681,9 @@ postgres('SMS commitments on PostgreSQL', () => {
     });
   });
 
-  test('R2 rule 2: a non-payment "other" question is never system-closed by an unrelated invoice payment; the model weighs it', async () => {
+  test('R2 rule 2: a non-payment "other" question is never answered by an unrelated invoice payment — the extraction did not mark it, so the payment is no witness and costs no model call', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null, property_id: null,
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: false, due_at: null, property_id: null,
       quote: 'Can my son be there for the visit?', description: 'Can my son be there for the visit?' };
     await recordMessageOperations(mockPg, message, result, context);
     await mockPg('call_commitments').update({ due_at: null, due_basis: null });
@@ -2687,9 +2694,10 @@ postgres('SMS commitments on PostgreSQL', () => {
     await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(after),
       metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: after.toISOString() }), created_at: after });
     const verify = jest.fn(async () => ({ verdict: 'open', reason: 'unrelated_payment', evidence_hash: 'x', retry_after: null }));
+    expect((await mockPg('call_commitments').first()).sms_context).toMatchObject({ money_answerable: false });
     const outcome = await refreshSmsCommitments({ conn: mockPg, now, verify });
-    expect(verify).toHaveBeenCalledTimes(1);
-    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0, skipped_no_witness: 0 });
+    expect(verify).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
     expect((await mockPg('call_commitments').first()).status).toBe('open');
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
@@ -2700,7 +2708,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: before }).returning('id');
     await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(before),
       metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: before.toISOString() }), created_at: before });
-    const commitment = { kind: 'other', description: 'What is the Zelle number?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const commitment = { kind: 'other', description: 'What is the Zelle number?', sms_context: { property_id: null, source_at: message.created_at.toISOString(), money_answerable: true } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(message.created_at.getTime() + 2000));
     expect(evidence.records.filter((r) => r.type === 'payment')).toHaveLength(0);
   });
@@ -2712,7 +2720,7 @@ postgres('SMS commitments on PostgreSQL', () => {
   ])('Codex #4816 r14–r27: a cancellation answers a cancel ask only when its property was resolved (%s)',
     async (label, scope, admissible) => {
       result.facts = [];
-      result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
+      result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, due_at: null,
         property_id: scope === 'scoped' ? context.properties[0].id : null,
         quote: 'Please cancel my appointment', description: 'Please cancel my appointment' };
       if (label.includes('two active')) {
@@ -2738,7 +2746,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('R3 owner ruling 2026-09-24: a delivered staff SMS reply no longer closes an "other" ask (the split-billing ask "separate the charges")', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true, due_at: null,
       quote: 'Can you separate the charges under two payment methods?',
       description: 'Can you separate the charges under two payment methods?' };
     await recordMessageOperations(mockPg, message, result, context);
@@ -2758,7 +2766,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('R3: a DUE "other" ask answered only by a staff SMS reaches the model, finds no admissible witness, and bells as today', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other',
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', answered_by_payment: true,
       due_at: new Date(message.created_at.getTime() + 1000).toISOString(),
       quote: 'Can you separate the charges under two payment methods?',
       description: 'Can you separate the charges under two payment methods?' };
