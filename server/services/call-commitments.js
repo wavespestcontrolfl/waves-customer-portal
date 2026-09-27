@@ -1962,10 +1962,15 @@ function selectOverdue(rows, { now = new Date() } = {}) {
   return (rows || []).filter((r) => isOverdue(r, now));
 }
 
-// The customer / lead scope of a commitments read, over the `cl` call_log
-// alias. Shared by the queue query and callback preparation so a filtered
-// read prepares exactly the rows it returns.
-function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSid = null } = {}) {
+// The customer / lead / phone scope of a commitments read, over the `cl`
+// call_log alias. Shared by the queue query and callback preparation so a
+// filtered read prepares exactly the rows it returns.
+// `phone`: matches the CONTACT number of the promise's own call — the
+// dialed number on an outbound call, the caller ID on an inbound one (the
+// same rule contactPhoneOf applies) — for a caller with no customerId/leadId
+// yet (the promise-chaser bell's own case: a lead calling back before any
+// link exists).
+function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSid = null, phone = null } = {}) {
   if (customerId) builder.where('cl.customer_id', customerId);
   if (leadId) {
     builder.where(function leadScope() {
@@ -1976,6 +1981,14 @@ function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSi
       if (leadSid) this.orWhere('cl.twilio_call_sid', leadSid);
     });
   }
+  if (phone) {
+    const key = phoneDigits(phone);
+    if (!key) { builder.whereRaw('false'); return builder; }
+    builder.whereRaw(
+      `regexp_replace(COALESCE(CASE WHEN cl.direction LIKE 'outbound%' THEN cl.to_phone ELSE cl.from_phone END, ''), '[^0-9]', '', 'g') IN (?, ?)`,
+      [key, `1${key}`],
+    );
+  }
   return builder;
 }
 
@@ -1983,7 +1996,7 @@ function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSi
 // callback cards (deadline, default owner, audit row) as they read; every
 // other caller — the Intelligence Bar's read-only tool, the integrations
 // worker — gets a pure read and sees whatever those paths persisted.
-async function listOpenCommitments(conn, { party = null, kind = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null } = {}) {
+async function listOpenCommitments(conn, { party = null, kind = null, customerId = null, leadId = null, phone = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null } = {}) {
   let leadSid = null;
   if (leadId) {
     // No local catch: a failed lookup must reach the route's error handler
@@ -2006,7 +2019,7 @@ async function listOpenCommitments(conn, { party = null, kind = null, customerId
     .modify((b) => {
       if (party === 'waves' || party === 'customer') b.where('cc.party', party);
       if (kind) b.where('cc.kind', kind);
-      scopeCommitmentRows(b, { customerId, leadId, leadSid });
+      scopeCommitmentRows(b, { customerId, leadId, leadSid, phone });
       if (!includeHints) b.whereNull('cc.fulfillment');
       // activeSince (the follow-up pager): only promises made, dated or
       // snoozed since then — a large historical backlog must not page

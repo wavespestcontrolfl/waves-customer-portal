@@ -55,6 +55,12 @@ function scheduleRecordingRecovery(callSid) {
       } catch (err) {
         logger.warn(`[call-status] repeat-caller bell failed for ${maskSid(callSid)}: ${err.message}`);
       }
+      // A lead calling back on an open promise rings the same way.
+      try {
+        await require('../services/promise-chaser-bell').ringPromiseChaserIfNeeded(callSid);
+      } catch (err) {
+        logger.warn(`[call-status] promise-chaser bell failed for ${maskSid(callSid)}: ${err.message}`);
+      }
     }, 3 * 60 * 1000);
   }, 2 * 60 * 1000);
 }

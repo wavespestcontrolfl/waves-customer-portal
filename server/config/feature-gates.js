@@ -1445,6 +1445,14 @@ const gates = {
   // everything missed in the last 24 hours. Internal only. Needs
   // callCommitments. Off → no-op. See services/followup-sla-watcher.js.
   followupSlaAlerts: process.env.GATE_FOLLOWUP_SLA_ALERTS === 'true',
+  // Admin bell when a LEAD calls back on a number that still carries an
+  // open, unkept Waves promise (a callback, a quote, a time to come out)
+  // from an earlier unbooked call — the repeat-caller bell above only rings
+  // on 3+ calls in 3 hours and misses a single, hours-later callback (owner
+  // audit 2026-09-26: 41 such leads in 60 days). Needs callCommitments.
+  // Bell only — no customer comms. Ships dark. See
+  // services/promise-chaser-bell.js.
+  promiseChaserBell: process.env.GATE_PROMISE_CHASER_BELL === 'true',
   // Call reschedule apply: a matched existing customer's agent-committed move
   // of a visit already on the books (V2 reschedule_requested + confirmed
   // start) is applied to that visit through the rebooker, the access note

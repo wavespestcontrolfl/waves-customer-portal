@@ -425,6 +425,21 @@ const TRIGGER_REGISTRY = {
       link: '/admin/communications#tab=calls',
     }),
   },
+  // A lead calls back while a Waves promise from an earlier unbooked call
+  // (a callback, a quote, a time to come out) is still open — gated by
+  // GATE_PROMISE_CHASER_BELL. See services/promise-chaser-bell.js.
+  promise_chaser: {
+    label: 'Lead calling back — promise still owed',
+    category: 'missed_call',
+    priority: 'high',
+    group: 'Communication',
+    allowContactDetails: true,
+    build: (p) => ({
+      title: `Calling back — still owe them a ${p.what || 'follow-up'}`,
+      body: `${p.name || p.phone || 'A lead'} is calling in now. We still owe them a ${p.what || 'follow-up'} promised ${p.when || 'earlier'}.`,
+      link: '/admin/communications#tab=calls',
+    }),
+  },
   // Fired by estimate-converter when a paid acceptance deposit could not be
   // credited to the first invoice — the money sits on the deposit ledger
   // until someone reconciles it manually.
@@ -880,6 +895,11 @@ function pushTagFor(triggerKey, payload = {}) {
     // The persisted delivery identity survives a newer call reclaiming a
     // push-only attempt. Different caller windows still have distinct tags.
     return `waves-repeat_caller-${payload.repeatCallerDeliveryId || payload.callLogId || 'unknown-call'}`;
+  }
+  if (triggerKey === 'promise_chaser') {
+    // Per-promise tag: two different open promises calling back before the
+    // first push is dismissed must not collapse into one banner.
+    return `waves-promise_chaser-${payload.commitmentId || payload.callLogId || 'unknown-call'}`;
   }
   if (triggerKey === 'payment_failed' && (payload.attemptId || payload.paymentIntentId)) {
     // Per-attempt tag: the service worker replaces same-tag pushes with
