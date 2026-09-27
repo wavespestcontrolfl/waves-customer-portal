@@ -329,6 +329,20 @@ describe('inventoryUnitForNewProduct — the stock unit is also a valid applicat
   });
 });
 
+describe('classifyDecision — a catalog-matched line is never waved off (Codex round 12)', () => {
+  test('not_stock or equipment for a line the catalog matched holds for a person', () => {
+    for (const kind of ['not_stock', 'equipment']) {
+      expect(classifyDecision({ kind, reason: 'looks personal' }, ctx({ rawTitle: 'Demand CS Insecticide 8 oz', matchedProductId: 'p-demand' })))
+        .toMatchObject({ kind: 'unsure', status: 'agent_unsure', reason: expect.stringMatching(/catalog matches this title to a stocked product/) });
+    }
+  });
+
+  test('with no catalog match, not_stock and equipment keep their own outcomes', () => {
+    expect(classifyDecision({ kind: 'not_stock', reason: 'a phone case' }, ctx({ rawTitle: 'Phone Case' }))).toMatchObject({ status: 'agent_ignored' });
+    expect(classifyDecision({ kind: 'equipment', reason: 'a sprayer' }, ctx({ rawTitle: 'Backpack Sprayer' }))).toMatchObject({ status: 'agent_equipment' });
+  });
+});
+
 describe('containerAgreement — measured and count containers', () => {
   test('the per-unit size equals the container: the pack multiplies containers', () => {
     expect(containerAgreement(78, 2, 78)).toBe(156);

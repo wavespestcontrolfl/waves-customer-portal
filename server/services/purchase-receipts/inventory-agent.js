@@ -704,6 +704,13 @@ function validateNewProduct(raw, ctx) {
 // falls back to 'unsure'; nothing in between.
 function classifyDecision(raw, ctx) {
   const kind = raw && raw.kind;
+  // A title the catalog already matched (needs_size/size_mismatch) is a known
+  // stocked product: the model may resolve it or be unsure, never wave it off
+  // as not-stock or equipment — not_stock would close it with no bell and
+  // silently drop a real purchase (Codex round 12).
+  if ((kind === 'not_stock' || kind === 'equipment') && ctx.matchedProductId) {
+    return unsureResult(`the catalog matches this title to a stocked product, but the agent read it as ${kind === 'not_stock' ? 'not stock' : 'equipment'}`);
+  }
   if (kind === 'not_stock') return { kind, status: 'agent_ignored', reason: (raw.reason || 'Not a stock item.').slice(0, 500) };
   if (kind === 'equipment') return { kind, status: 'agent_equipment', reason: (raw.reason || 'Looks like equipment, not stock.').slice(0, 500) };
   if (kind === 'existing') return validateExisting(raw, ctx);
@@ -1336,6 +1343,13 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
     const byRules = await postThroughRules(trx, { locked: line, email, notifyAdmin });
     if (byRules) return { applied: true, status: byRules.status };
 
+    // classifyDecision refuses not_stock/equipment for a line the catalog
+    // matched when the model decided; a match that landed since (a product
+    // or alias added meanwhile, still unsized so the rules above can't log
+    // it) is re-checked here, under the locks (Codex round 12).
+    const matchedSince = await catalogMatchedHold(trx, { line, decision });
+    if (matchedSince) return recordHold(trx, { line, lineId, email, decision: matchedSince.decision, hold: matchedSince.hold }, notifyAdmin);
+
     const terminal = await settleTerminalKind(trx, { lineId, line, email, decision }, notifyAdmin);
     if (terminal) return terminal;
 
@@ -1534,6 +1548,22 @@ async function postThroughRules(trx, { locked, email, notifyAdmin }) {
     trx,
   });
   return { status: outcome.status };
+}
+
+// A not_stock/equipment answer for a title the catalog now matches holds for
+// a person instead of closing quietly: returns the hold to record, or null.
+async function catalogMatchedHold(trx, { line, decision }) {
+  if (decision.kind !== 'not_stock' && decision.kind !== 'equipment') return null;
+  const now = await classifyItem({ title: line.raw_title, quantity: Number(line.quantity) }, trx);
+  if (!now.productId) return null;
+  const reason = 'the catalog matches this title to a stocked product';
+  return {
+    decision: { kind: 'unsure', reason },
+    hold: {
+      status: 'agent_unsure', reason,
+      body: `the catalog matches it to ${now.product?.name || 'a stocked product'}, so it wasn't ignored. Log it by hand if it's stock.`,
+    },
+  };
 }
 
 // Takes the line + shipment locks itself, checks for a shipment hand-off,

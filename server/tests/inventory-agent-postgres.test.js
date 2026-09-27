@@ -413,6 +413,36 @@ jest.setTimeout(30000);
     expect(await mockConn('products_catalog').where({ name: 'Demand CS' })).toHaveLength(0);
   });
 
+  // Codex round 12: not_stock on a known catalog product closed it with no
+  // bell, silently dropping a real purchase.
+  test('a catalog-matched (needs_size) line the model calls not_stock holds for a person with a bell', async () => {
+    const [demand] = await mockConn('products_catalog').insert({
+      name: 'Demand CS', active: true, category: 'insecticide', container_size: null, inventory_unit: null, inventory_on_hand: null,
+    }).returning('*');
+    const line = await pendingLine({ raw_title: 'Demand CS Insecticide 8 oz', product_id: demand.id, quantity: 1, shipment_key: 'ship-matched-not-stock' });
+    const result = await run({ ok: true, json: { kind: 'not_stock', reason: 'looks personal' } });
+    expect(result).toMatchObject({ held: 1, ignored: 0 });
+    expect(await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).toMatchObject({ status: 'agent_unsure' });
+    expect(await bellsFor(line.id)).toHaveLength(1);
+  });
+
+  test('a catalog match that lands while the model decides turns its not_stock into a hold too', async () => {
+    const line = await pendingLine({ raw_title: 'Demand CS Insecticide 8 oz', quantity: 1, shipment_key: 'ship-matched-since' });
+    const llm = async () => {
+      // Matches the title by name but carries no container size, so the
+      // receipt rules can't log it at apply time either.
+      await mockConn('products_catalog').insert({ name: 'Demand CS', active: true, category: 'insecticide', container_size: null });
+      return { ok: true, json: { kind: 'not_stock', reason: 'looks personal' } };
+    };
+    const result = await runInventoryAgent({ conn: mockConn, llm, notifyAdmin });
+    expect(result).toMatchObject({ held: 1, ignored: 0 });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'agent_unsure' });
+    expect(saved.agent_decision.reason).toMatch(/catalog matches this title to a stocked product/);
+    const [bell] = await bellsFor(line.id);
+    expect(bell.body).toMatch(/matches it to Demand CS, so it wasn't ignored/);
+  });
+
   test('the logged bell warns to cancel a live restock request instead of receiving it', async () => {
     await mockConn('product_restock_requests').insert({
       product_id: taurus.id, status: 'open', requested_quantity: 78, unit: 'fl_oz', source: 'auto_reorder',
