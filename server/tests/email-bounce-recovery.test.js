@@ -942,13 +942,15 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     }));
   });
 
-  test('an invalid stored billing replay cannot fall back to a direct recovery send', async () => {
+  test.each([false, true])('a refused billing replay never sends; temporary failure is surfaced (%s)', async (retryable) => {
     const messageRow = { id: 'msg-billing-invalid', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', subject_snapshot: 'Billing update', send_attempt_token: 'recovery-attempt' };
     const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
     db.mockImplementation(mockDb);
     billingReplay.isBillingEmailProviderReplay.mockReturnValue(true);
+    const reason = retryable ? 'Billing email authority could not be verified'
+      : 'Stored billing replay context does not match the email message';
     billingReplay.runBillingEmailProviderReplayHandoff.mockResolvedValueOnce({
-      handled: true, allowed: false, reason: 'Stored billing replay context does not match the email message',
+      handled: true, allowed: false, reason, retryable,
     });
 
     await expect(recovery.attemptRecovery({
@@ -957,14 +959,16 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
       suppression_group_key_snapshot: 'transactional_required', categories: ['email_template', 'billing'],
       trigger_event_id: 'precharge:c1:2030-06-10', payload_snapshot: { __billing_replay_context: null },
       html_snapshot: '<p>Billing update</p>', text_snapshot: 'Billing update',
-    }, { event: 'bounce', type: 'bounce' })).resolves.toEqual({
-      skipped: 'Stored billing replay context does not match the email message',
-    });
+    }, { event: 'bounce', type: 'bounce' })).resolves.toEqual(retryable ? { error: reason } : { skipped: reason });
 
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     expect(mockDb._calls).toContainEqual(expect.objectContaining({
-      table: 'email_messages', data: expect.objectContaining({ status: 'blocked' }),
+      table: 'email_messages', data: expect.objectContaining({ status: retryable ? 'failed' : 'blocked' }),
     }));
+    if (retryable) expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'alert', 'Email bounced — needs a correct address', expect.stringContaining('re-sending'),
+      expect.objectContaining({ metadata: expect.objectContaining({ status: 'send_failed' }) }),
+    );
   });
 
   test('round 9 structural fix (P1): a bounce-recovered deposit.receipt whose stored content still carries a withheld link is rewritten by sendOne and re-sent — the recovery row snapshot is updated to match', async () => {

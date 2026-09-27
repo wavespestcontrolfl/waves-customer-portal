@@ -602,6 +602,9 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
             } : { ok: true }),
         },
       );
+      // Bounce recovery is one-shot and excluded from provider retries. An
+      // unavailable authority must reach its existing manual-failure alert.
+      if (handoff.retryable) throw new Error(handoff.reason);
       // The replay contract always supplies a reason for a refusal. An allowed
       // handoff has already populated result, so an absent reason is ignored.
       authorityRefusal = handoff.reason;
