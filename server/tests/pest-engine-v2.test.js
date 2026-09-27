@@ -586,11 +586,12 @@ describe('mapToV1', () => {
     expect(v1.report_contract.urgency).toBe('high');
   });
 
-  test('an unapproved/climbed answer (no named entry at all) maps to the fully generic v1 default', () => {
+  test('an unapproved/climbed answer keeps its selected catalog category with generic v1 service defaults', () => {
     const built = buildAnswer(baseCtx({ candidates: [cand('unreviewed-ant', 0.95)] }));
     const v1 = mapToV1({ ...built, disagreed: false });
     expect(v1.species_slug).toBeNull();
-    expect(v1.category).toBe('other');
+    expect(v1.category).toBe('insect');
+    expect(v1.report_contract.identification.category).toBe('insect');
     expect(v1.report_contract.service.inspection_required).toBe(true);
   });
 

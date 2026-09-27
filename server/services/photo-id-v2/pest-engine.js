@@ -1004,10 +1004,12 @@ const V1_BY_ENTRY = new Map([['honey-bee-swarm', 'honey-bee'], ['honey-bee-wall-
  * mapping, else the nearest ancestor mapped to an inheritable v1 slug
  * (`aedes-mosquito` -> `mosquitoes` -> v1 "mosquito"). Anything else stays
  * unmatched rather than borrowing a v1 identity that isn't true of it. */
-function v1IdentityFor(v2Slug) {
+function v1IdentityFor(v2Slug, { inheritableDirectOnly = false } = {}) {
   if (!v2Slug) return null;
   const own = V2_TO_V1_SLUG.get(v2Slug) || V1_BY_ENTRY.get(v2Slug);
-  if (own && V1_BY_SLUG.has(own)) return { slug: own, inherited: false };
+  if (own && V1_BY_SLUG.has(own) && (!inheritableDirectOnly || V1_INHERITABLE.has(own))) {
+    return { slug: own, inherited: false };
+  }
   const ancestors = catalog.lineage(v2Slug).slice().reverse().slice(1);
   for (const rung of ancestors) {
     const v1 = V2_TO_V1_SLUG.get(rung.id);
@@ -1017,9 +1019,8 @@ function v1IdentityFor(v2Slug) {
 }
 
 function categoryForV2Slug(slug) {
-  const entry = catalog.getEntry(slug);
-  const group = entry ? catalog.getGroup(entry.group) : null;
-  return (group && group.category) || 'other';
+  const category = catalog.lineage(slug).find((rung) => rung.level === 'category');
+  return category?.id || 'other';
 }
 
 function v1SafetyFallback(entry) {
@@ -1038,17 +1039,22 @@ const DEFAULT_SAFETY = { stinging: false, venomous: false, disease_vector: false
  * `pestNextStepKindFromRow`/`pestReserviceLane` — all of which read
  * `report_contract` through v1's OWN `PEST_LIBRARY`/`GROUP_GENERIC`
  * vocabulary — keep working unchanged. When the v2 entry has no v1 legacy
- * slug (a new catalog entry v1 never had), this degrades exactly the way
- * v1's own unmatched-identification path already does: `identification.slug
- * = null`, generic category/service, `inspection_required: true` — never a
- * fabricated v1 identity.
+ * slug (a new catalog entry v1 never had), this keeps the selected catalog
+ * node's category while otherwise degrading exactly the way v1's own
+ * unmatched-identification path does: `identification.slug = null`, generic
+ * service, `inspection_required: true` — never a fabricated v1 identity.
  */
 function mapToV1(built) {
+  // A climbed node may use a generic legacy identity only when that v1 label
+  // is true of every descendant. Thus widow-spiders -> "Widow Spiders" and
+  // aedes -> "Mosquitoes", while bees never becomes "Honey Bees" and the
+  // whole tiny-plant-pests group never becomes "Aphids / Scale Insects".
   const topEntrySlug = built.topEntrySlug;
-  const v1Identity = v1IdentityFor(topEntrySlug) || {};
+  const selectedNodeId = topEntrySlug || built.answer.node_id;
+  const v1Identity = v1IdentityFor(selectedNodeId, { inheritableDirectOnly: !topEntrySlug }) || {};
   const v1Slug = v1Identity.slug || null;
   const v1Item = v1Slug ? V1_BY_SLUG.get(v1Slug) : null;
-  const v2Entry = topEntrySlug ? catalog.getEntry(topEntrySlug) : null;
+  const v2Entry = catalog.getEntry(topEntrySlug);
   const legacyItem = v1Item || {};
   const namedEntry = v2Entry || { service: {} };
   const namedService = namedEntry.service || {};
@@ -1057,7 +1063,7 @@ function mapToV1(built) {
     ? { serviceKey: namedService.key, serviceLabel: namedService.label }
     : { serviceKey: null, serviceLabel: 'Pest Consultation' };
 
-  const category = legacyItem.category || categoryForV2Slug(topEntrySlug);
+  const category = legacyItem.category || categoryForV2Slug(selectedNodeId);
   const wordingConfidence = { pretty_sure: 'high', likely: 'moderate' }[built.answer.wording] || 'low';
   let confidence = wordingConfidence;
   if (built.tier === 'needs_more_evidence' && confidence === 'high') confidence = 'moderate';

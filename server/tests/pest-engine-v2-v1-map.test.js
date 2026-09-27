@@ -28,17 +28,64 @@ describe('v1IdentityFor on the real catalog', () => {
 });
 
 describe('inherited v1 identity keeps the named v2 entry service contract', () => {
-  const approvedCandidate = (slug) => {
-    const entry = { ...catalog.getEntry(slug), review: { status: 'owner_approved', notes: '' }, verification: [] };
+  const candidate = (slug, { approved = true } = {}) => {
+    const entry = {
+      ...catalog.getEntry(slug),
+      review: { status: approved ? 'owner_approved' : 'draft', notes: '' },
+      verification: [],
+    };
     return {
       slug, offCatalogName: null, groupId: entry.group, confidence: 0.85, entry,
       traitsVisible: [1], traitsNotVisible: [], checked: true, verified: true,
     };
   };
-  const answerFor = (slug) => buildAnswer({
-    candidates: [approvedCandidate(slug)], disagreed: false, disagreementNode: null,
+  const answerFor = (slug, options) => buildAnswer({
+    candidates: [candidate(slug, options)], disagreed: false, disagreementNode: null,
     escalationTriggered: false, openaiAnswered: false, openaiStoodInAlone: false,
     qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+  });
+
+  test.each([
+    ['black-widow', 'widow-spiders', 'black-widow', 'arachnid', { venomous: true }],
+    ['aedes-mosquito', 'aedes', 'mosquito', 'insect', { disease_vector: true }],
+  ])('a draft %s climb maps the selected lineage node to its legitimate generic v1 identity',
+    (slug, nodeId, legacySlug, category, safety) => {
+      const built = answerFor(slug, { approved: false });
+      expect(built.topEntrySlug).toBeNull();
+      expect(built.answer.node_id).toBe(nodeId);
+
+      const mapped = mapToV1(built);
+      expect(mapped).toMatchObject({ species_slug: legacySlug, category });
+      expect(mapped.report_contract).toMatchObject({
+        identification: { slug: legacySlug, category },
+        safety,
+      });
+    });
+
+  test.each([
+    ['carpenter-bee', 'honey-bee', 'bees', 'insect'],
+    ['aphid', 'aphid-scale', 'plant-pests-small', 'insect'],
+  ])('a draft %s climb preserves category but never borrows the narrower %s identity',
+    (slug, forbiddenLegacySlug, nodeId, category) => {
+      const built = answerFor(slug, { approved: false });
+      expect(built.topEntrySlug).toBeNull();
+      expect(built.answer.node_id).toBe(nodeId);
+
+      const mapped = mapToV1(built);
+      expect(mapped.species_slug).toBeNull();
+      expect(mapped.species_slug).not.toBe(forbiddenLegacySlug);
+      expect(mapped.category).toBe(category);
+      expect(mapped.report_contract.service).toMatchObject({
+        key: null, label: 'Pest Consultation', inspection_required: true,
+      });
+    });
+
+  test('an unmatched draft spider climb preserves the selected spiders category', () => {
+    const built = answerFor('southern-house-spider', { approved: false });
+    expect(built.answer.node_id).toBe('spiders');
+    const mapped = mapToV1(built);
+    expect(mapped).toMatchObject({ species_slug: null, category: 'arachnid', service_line: 'pest' });
+    expect(mapped.report_contract.identification).toMatchObject({ slug: null, category: 'arachnid' });
   });
 
   test.each([

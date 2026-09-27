@@ -377,6 +377,15 @@ describe('name collisions', () => {
     expect(result.node).toMatchObject({ level: 'subgroup', id: 'bees' });
   });
 
+  test('bare rat-snake names stay generic while qualified species names remain specific', () => {
+    for (const name of ['rat snake', 'rat snakes', 'I found a rat snake']) {
+      expect(catalog.resolveName(name).node).toMatchObject({ level: 'group', id: 'snakes' });
+    }
+    expect(catalog.resolveName('eastern rat snake').node.slug).toBe('eastern-rat-snake');
+    expect(catalog.resolveName('yellow rat snake').node.slug).toBe('eastern-rat-snake');
+    expect(catalog.resolveName('red rat snake').node.slug).toBe('corn-snake');
+  });
+
   test('a shared adult and larval binomial resolves stage-neutral while qualified names stay specific', () => {
     expect(catalog.resolveName('Syntomeida epilais')).toMatchObject({
       via: 'scientific', node: { level: 'group', id: 'caterpillars-moths' },
@@ -695,6 +704,11 @@ describe('loader API surface', () => {
     ['saddleback-caterpillar', 'subgroup', 'stinging-caterpillars', /Do not approach, touch, or handle/i],
     ['black-widow', 'subgroup', 'widow-spiders', /Do not approach, disturb, or handle/i],
     ['mud-dauber', 'subgroup', 'solitary-wasps', /without approaching or disturbing/i],
+    ['yellowjacket', 'subgroup', 'social-wasps', /without approaching or disturbing/i],
+    ['paper-wasp', 'subgroup', 'social-wasps', /without approaching or disturbing/i],
+    ['brown-recluse', 'group', 'spiders', /only surfaces already visible.*do not approach, disturb, turn over, or handle/i],
+    ['cane-toad', 'subgroup', 'toads', /do not approach, touch, or handle/i],
+    ['cuban-treefrog', 'subgroup', 'treefrogs', /do not approach, touch, or handle/i],
   ])('the actual draft %s fallback never asks the customer to approach or handle it', (slug, level, nodeId, distanceRule) => {
     const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
     expect(catalog.getEntry(slug).review.status).toBe('draft');
@@ -705,6 +719,33 @@ describe('loader API surface', () => {
     expect(built.nextPhoto.ask).toMatch(distanceRule);
     expect(built.nextPhoto.ask).not.toMatch(/next to a coin|close-up/i);
     expect(built.nextPhoto.photo_can_confirm).toBe(true);
+  });
+
+  test.each(['aedes-mosquito', 'asian-tiger-mosquito', 'southern-house-mosquito', 'saltmarsh-mosquito'])(
+    'the actual draft %s fallback asks for a non-contact surface', (slug) => {
+      const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
+      const candidate = { ...resolveCandidate({ slug, confidence: 0.95 }), checked: true, verified: true };
+      const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
+      expect(built.entry).toBeNull();
+      expect(built.nextPhoto.ask).toMatch(/wall or another non-contact surface/i);
+      expect(built.nextPhoto.ask).toMatch(/do not use your skin.*or allow it to bite/i);
+      expect(built.nextPhoto.ask).not.toMatch(/rests? on skin|on skin or a wall/i);
+    },
+  );
+
+  test('all medically significant or irritating draft fallbacks retain safe-distance photo guidance', () => {
+    const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
+    const riskyDrafts = catalog.listEntries().filter((entry) => entry.review.status === 'draft'
+      && (['medical', 'irritant'].includes(entry.risk) || entry.safety.venomous || entry.safety.toxic_to_pets));
+    expect(riskyDrafts.length).toBeGreaterThan(30);
+    for (const entry of riskyDrafts) {
+      const candidate = { ...resolveCandidate({ slug: entry.slug, confidence: 0.95 }), checked: true, verified: true };
+      const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
+      expect({ slug: entry.slug, ask: built.nextPhoto.ask }).toEqual({
+        slug: entry.slug, ask: expect.stringMatching(/safe distance/i),
+      });
+      expect(built.nextPhoto.ask).not.toMatch(/close-up|next to a coin|a few feet|several feet|rests? on skin/i);
+    }
   });
 
   test.each(['ground wasp', 'centipede'])('the generic %s fallback asks for distance instead of handling or approaching', (name) => {
