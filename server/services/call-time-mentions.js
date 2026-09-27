@@ -1,17 +1,17 @@
 /**
- * Day and hour references in a labelled call transcript ("Agent: ..." /
- * "Caller: ..." lines), used by the call reschedule applier to check that
- * the extraction's agreed-slot and moved-appointment quotes name the dates and
- * hours it claims (call-reschedule-agreement.js).
+ * Day references in a labelled call transcript ("Agent: ..." / "Caller: ..."
+ * lines), used by the call reschedule applier to check that the words the
+ * extraction recorded for the agreed day and the moved appointment name the
+ * dates it claims (call-reschedule-agreement.js). Hours are not read here:
+ * the extraction records the agreed hour's words itself (schema 1.17.0).
  *
- * A day mention carries every calendar date it could mean: today, tomorrow
- * and the day after name one; a month and day ("October 8", "the 8th of
- * October") names this year's and next year's; a weekday or "next <weekday>"
- * names this week's and next week's, and "the 8th" alone this month's or
- * next month's, since ordinary speech uses both. An hour mention carries its 24-hour value
- * and whether minutes put it off the hour. Mentions come back in the order
- * they were spoken. Dates are ET calendar
- * days (server/utils/datetime-et.js), relative to when the call started.
+ * A day mention carries every calendar date it could mean: today, tonight,
+ * tomorrow and the day after name one; a month and day ("October 8", "the
+ * 8th of October") names this year's and next year's; a weekday or "next
+ * <weekday>" names this week's and next week's, and "the 8th" alone this
+ * month's or next month's, since ordinary speech uses both. Mentions come
+ * back in the order they were spoken. Dates are ET calendar days
+ * (server/utils/datetime-et.js), relative to when the call started.
  */
 'use strict';
 
@@ -20,7 +20,7 @@ const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
   'august', 'september', 'october', 'november', 'december'];
-const RELATIVE_DAYS = { today: 0, tomorrow: 1 };
+const RELATIVE_DAYS = { today: 0, tonight: 0, tomorrow: 1 };
 // A month token: its full name or its first three letters, plus "sept" —
 // the set reschedule-date-evidence.js reads ("Dec. 24" normalizes to "dec 24").
 function monthIndexOf(tok) {
@@ -32,14 +32,11 @@ const DAY_OF_MONTH = /^(\d{1,2})(?:st|nd|rd|th)?$/;
 // a bare "the 8" is too often something else.
 const ORDINAL_DAY = /^(\d{1,2})(?:st|nd|rd|th)$/;
 
-// "a.m." / "p.m." as single tokens, so neither the sentence splitter nor
-// punctuation stripping can break "9 a.m." apart; "2pm" written together
-// keeps its hour as a token of its own.
-// A clock time written with a dot ("2.30") keeps its minutes: read as
-// "2:30", so the sentence splitter cannot cut it into "at 2" and "30".
+// "a.m." / "p.m." as single tokens, so punctuation stripping cannot break
+// "9 a.m." apart and a quote matches its turn however either was punctuated;
+// "2pm" written together keeps its hour as a token of its own.
 function joinMeridiem(s) {
   return String(s || '')
-    .replace(/\b(\d{1,2})\.(\d{2})\b/g, '$1:$2')
     .replace(/\b([ap])\.\s?m\b\.?/gi, '$1m')
     .replace(/(\d)([ap]m)\b/gi, '$1 $2');
 }
@@ -189,284 +186,6 @@ function parseDayMentions(turnText, started) {
   return mentions;
 }
 
-const SPELLED_NUMBERS = {
-  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6,
-  seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
-};
-const NAMED_HOURS = { noon: 12, midnight: 0 };
-// A part of the day said right after an hour is its am/pm ("two in the
-// afternoon"). Said elsewhere in the sentence it sets the am/pm of an hour
-// marked some other way ("Thursday evening at eight" is 8 PM), and never makes
-// a number an hour by itself.
-const DAY_PART_PERIODS = { morning: 'am', afternoon: 'pm', evening: 'pm', tonight: 'pm' };
-// Minute words that, after an hour, put a spoken time off the hour.
-const MINUTE_WORDS = new Set(['fifteen', 'twenty', 'thirty', 'forty', 'fifty']);
-// Words right before a number that make it a clock time: "at two".
-const HOUR_LEADS = new Set(['at', 'around', 'about']);
-// Words right before an hour that make it a bound, not the hour: "before
-// noon", "by two", "after 2 pm", "until two".
-const RELATIVE_HOUR_LEADS = new Set(['before', 'by', 'after', 'until', 'till', 'til']);
-// Words right after an hour that make it a bound or one of several: "two or
-// later", "two or four", "noon at the latest".
-const TRAILING_BOUNDS = [['or'], ['at', 'the', 'latest'], ['at', 'the', 'earliest']];
-// "Two o'clock" normalizes to "two o clock" or "two oclock".
-const OCLOCK = new Set(['o', 'oclock']);
-// A number running into a unit of time is a length, and one running into a
-// counted thing a quantity ("at two properties"), not a clock time.
-const DURATION_UNITS = new Set([
-  'hour', 'hours', 'hr', 'hrs', 'minute', 'minutes', 'min', 'mins', 'day', 'days', 'week', 'weeks', 'month', 'months', 'year', 'years',
-  'property', 'properties', 'house', 'houses', 'home', 'homes', 'location', 'locations', 'unit', 'units', 'building', 'buildings',
-  'option', 'options', 'people', 'dogs', 'cats', 'kids', 'children', 'room', 'rooms', 'bedrooms', 'bathrooms', 'spots', 'places',
-  'addresses', 'lots', 'acres', 'visits', 'services', 'treatments', 'trees', 'palms', 'times',
-]);
-const DURATION_FILLER = new Set(['and', 'a', 'half', 'or', 'to', 'through', 'quarter']);
-// Said right after an hour, part of it: "2 pm", "2 00 pm", "two o clock".
-const CLOCK_TAIL = new Set(['am', 'pm', 'o', 'clock', 'oclock', '00']);
-// Said between an hour and a range joiner ("2 pm to 4 pm").
-const HOUR_FILLER = new Set(['at', 'around', 'about', 'am', 'pm', 'o', 'clock', 'oclock', '00']);
-
-// Sentences WITHIN one turn (on . ! ?): an hour's minutes, am/pm or range
-// never run across a sentence end.
-function splitTurnSentences(turnText) {
-  return joinMeridiem(turnText).split(/[.!?]+/).map((x) => x.trim()).filter(Boolean);
-}
-
-// A number 1-12, as digits or a word, else null.
-function hourNumber(t) {
-  const n = /^\d{1,2}$/.test(t || '') ? Number(t) : (Object.hasOwn(SPELLED_NUMBERS, t) ? SPELLED_NUMBERS[t] : null);
-  return n >= 1 && n <= 12 ? n : null;
-}
-
-// A token that, right after an hour, is its minutes: a number 1-59 ("2 10",
-// "2:30" read as "2 30"), a spelled number or a minute word ("two ten",
-// "two thirty").
-function isMinuteToken(t) {
-  return (/^\d{1,2}$/.test(t || '') && Number(t) >= 1 && Number(t) <= 59) || MINUTE_WORDS.has(t) || Object.hasOwn(SPELLED_NUMBERS, t);
-}
-
-// How many tokens after the hour at `i` are its minutes: "two ten", "2 30",
-// "two oh five", "two thirty five".
-function minuteTokensAfter(toks, i) {
-  if ((toks[i + 1] === 'oh' || toks[i + 1] === 'o') && isMinuteToken(toks[i + 2])) return 2;
-  if (!isMinuteToken(toks[i + 1])) return 0;
-  return MINUTE_WORDS.has(toks[i + 1]) && Object.hasOwn(SPELLED_NUMBERS, toks[i + 2]) ? 2 : 1;
-}
-
-// "Two to four", "2 pm to 4 pm", "between two and four": a range whose start
-// is the hour at `i`, its minutes ending at `after`. The index of its end, or
-// -1.
-// Minute counts said before "to" an hour ("at ten to two" is 1:50).
-const MINUTES_TO = new Set(['five', 'ten', 'twenty', 'quarter', '5', '10', '20', '25']);
-
-function rangeEndAfter(toks, i, after) {
-  let j = after;
-  while (HOUR_FILLER.has(toks[j])) j += 1;
-  // "Ten to two" is a time a few minutes before two, not a range from ten.
-  if (toks[j] === 'to' && MINUTES_TO.has(toks[i])) return -1;
-  const joined = toks[j] === 'to' || toks[j] === 'through' || (toks[j] === 'and' && toks[i - 1] === 'between');
-  return joined && (hourNumber(toks[j + 1]) != null || Object.hasOwn(NAMED_HOURS, toks[j + 1])) ? j + 1 : -1;
-}
-
-// "Two hours", "two and a half hours", "two or three hours", "two to three
-// hours": the numbers from `j` on run into a unit of time.
-function runsIntoDuration(toks, j) {
-  let k = j;
-  while (DURATION_FILLER.has(toks[k]) || hourNumber(toks[k]) != null) k += 1;
-  return DURATION_UNITS.has(toks[k]);
-}
-
-// A part of the day said at `k`, right after an hour ("in the afternoon",
-// "this morning", "tonight"): { period, len } with its token count; period
-// null and len 0 when none is said there.
-function dayPartAt(toks, k) {
-  const lead = toks[k] === 'in' && toks[k + 1] === 'the' ? 2 : (toks[k] === 'this' ? 1 : 0);
-  const part = toks[k + lead] || '';
-  return Object.hasOwn(DAY_PART_PERIODS, part) && (lead > 0 || part === 'tonight') ? { period: DAY_PART_PERIODS[part], len: lead + 1 } : { period: null, len: 0 };
-}
-
-// The am/pm said after an hour and its minutes, past any "00" or "o'clock"
-// ("2 pm", "2 00 pm", "two o clock pm", "two in the afternoon"), or null.
-function periodAfter(toks, j) {
-  let k = j;
-  while (toks[k] === '00' || toks[k] === 'clock' || OCLOCK.has(toks[k])) k += 1;
-  return toks[k] === 'am' || toks[k] === 'pm' ? toks[k] : dayPartAt(toks, k).period;
-}
-
-// Is the hour at `i`, its mention ending at `end`, inexact: minutes before
-// it ("half past two", "twenty past two", "ten minutes past two", "ten to
-// two"), a bound before it ("before noon", "by two", "until two"), or a bound
-// or an alternative after it ("two or later", "two or four", "noon at the
-// latest")? Such a mention never grounds an on-the-hour slot. A range's end
-// ("one to two") never reaches here.
-function inexactAt(toks, i, end) {
-  return (['past', 'after', 'to', 'til', 'till'].includes(toks[i - 1])
-    && (['half', 'quarter', 'minute', 'minutes'].includes(toks[i - 2]) || isMinuteToken(toks[i - 2])))
-    || RELATIVE_HOUR_LEADS.has(toks[i - 1])
-    || TRAILING_BOUNDS.some((bound) => toks.slice(end, end + bound.length).join(' ') === bound.join(' '));
-}
-
-function clockHour(n, period) {
-  return (n % 12) + (period === 'pm' ? 12 : 0);
-}
-
-// An hour with no am/pm of its own. A range's start takes its time from the
-// end's stated am/pm and the range's length ("eight to ten pm" is 8 PM, "11
-// to 1 pm" is 11 AM, "10 to noon" is 10 AM); otherwise it reads as business
-// hours: 7-11 in the morning, 12 and 1-6 in the afternoon.
-function rangeStartHour(toks, n, rangeEnd) {
-  const endPeriod = rangeEndPeriod(toks, rangeEnd);
-  if (!endPeriod) return clockHour(n, n >= 7 && n <= 11 ? 'am' : 'pm');
-  const end = hourNumber(toks[rangeEnd]) ?? 12;
-  return (clockHour(end, endPeriod) - ((end - n + 12) % 12) + 24) % 24;
-}
-
-// The am/pm a range's end states: its own ("to 4 pm"), or noon's or
-// midnight's ("between 10 and noon"); null when it states none.
-function rangeEndPeriod(toks, rangeEnd) {
-  if (rangeEnd <= 0) return null;
-  if (Object.hasOwn(NAMED_HOURS, toks[rangeEnd])) return NAMED_HOURS[toks[rangeEnd]] === 12 ? 'pm' : 'am';
-  return periodAfter(toks, rangeEnd + 1);
-}
-
-// Words before "one" that make it a pronoun ("that one"), not a number.
-const ONE_PRONOUN_LEADS = new Set(['that', 'this', 'the', 'which', 'each', 'any', 'every', 'no', 'another', 'other', 'first', 'last', 'next']);
-// Tokens right after an hour that carry no period of their own.
-const PERIOD_ATTACHED_PREV = new Set(['00', 'o', 'clock', 'oclock']);
-
-// The am/pm a sentence states apart from any one hour: a part of the day
-// ("Thursday evening at eight") or an am/pm that follows no hour ("Thursday
-// PM at 10"; "am" only after a day, see below). Returns the set of periods
-// said.
-function sentencePeriods(toks) {
-  return new Set(toks.flatMap((t, i) => {
-    if (Object.hasOwn(DAY_PART_PERIODS, t)) return [DAY_PART_PERIODS[t]];
-    const prev = toks[i - 1] || '';
-    const attached = hourNumber(prev) != null || /^\d+$/.test(prev) || PERIOD_ATTACHED_PREV.has(prev) || isMinuteToken(prev);
-    // "Am" is also the verb ("I am moving you"): on its own it marks the
-    // morning only right after a day ("Thursday AM") or beside "or" ("AM or
-    // PM"); "pm" has no other sense.
-    const meridiemAm = WEEKDAY_NAMES.includes(prev) || Object.hasOwn(RELATIVE_DAYS, prev) || ORDINAL_DAY.test(prev)
-      || prev === 'or' || toks[i + 1] === 'or';
-    if (attached) return [];
-    return (t === 'pm' || (t === 'am' && meridiemAm)) ? [t] : [];
-  }));
-}
-
-// Is this token a number said on its own, outside any day or hour: a digit
-// run, a spelled number or a minute word ("that one" is a pronoun)?
-function isLooseNumber(toks, i) {
-  const t = toks[i];
-  if (t === 'one' && ONE_PRONOUN_LEADS.has(toks[i - 1])) return false;
-  return /^\d+$/.test(t) || Object.hasOwn(SPELLED_NUMBERS, t) || MINUTE_WORDS.has(t);
-}
-
-// The number at `i` read as a clock time: { hour24, offHour, end } with
-// `end` the token after its minutes, range end and am/pm; 'length' when it
-// runs into a unit of time; null when nothing marks it as a time. `said` is
-// the sentence's stated period (see sentencePeriods): { period, disagrees }.
-function hourAt(toks, i, n, said) {
-  const after = i + 1 + minuteTokensAfter(toks, i);
-  if (runsIntoDuration(toks, after)) return 'length';
-  const rangeEnd = rangeEndAfter(toks, i, after);
-  let end = Math.max(after, rangeEnd + 1);
-  while (CLOCK_TAIL.has(toks[end])) end += 1;
-  end += dayPartAt(toks, end).len;
-  const ownPeriod = periodAfter(toks, after);
-  // A range with no am/pm said anywhere ("2 to 4") leaves its half of the
-  // day open, and "two-ish" is approximate: neither is an agreed hour.
-  const openRange = rangeEnd > 0 && !ownPeriod && !said.period && !rangeEndPeriod(toks, rangeEnd);
-  const offHour = after > i + 1 || inexactAt(toks, i, end) || said.disagrees(ownPeriod) || openRange || toks[end] === 'ish';
-  const marked = offHour || rangeEnd > 0 || ownPeriod || OCLOCK.has(toks[after]) || HOUR_LEADS.has(toks[i - 1]) || toks[i + 1] === 'ish';
-  if (!marked) return null;
-  const period = ownPeriod || said.period;
-  return { hour24: period ? clockHour(n, period) : rangeStartHour(toks, n, rangeEnd), offHour, end };
-}
-
-// One pass over a turn's sentences: the hour mentions (see
-// extractHourMentions) and the numbers that are neither a day, an hour nor a
-// length ("at two, actually three": the three).
-function scanHours(turnText, started) {
-  const dateTokens = new Set(parseDayMentions(turnText, started)
-    .flatMap((d) => Array.from({ length: d.end - d.pos }, (_, k) => d.pos + k)));
-  const mentions = [];
-  const unexplained = [];
-  const sentences = [];
-  let offset = 0; // token offset of this sentence within the whole turn
-  for (const sentence of splitTurnSentences(turnText)) {
-    const toks = normalize(sentence).split(' ').filter(Boolean);
-    sentences.push({ from: offset, to: offset + toks.length });
-    const periods = sentencePeriods(toks);
-    const said = {
-      period: periods.size === 1 ? [...periods][0] : null,
-      // Two periods said ("morning or afternoon", "AM ... PM") state none, and
-      // an hour whose own am/pm disagrees with the sentence's is inexact.
-      disagrees: (own) => periods.size > 1 || (own != null && periods.size === 1 && !periods.has(own)),
-    };
-    for (let i = 0; i < toks.length; i += 1) {
-      if (dateTokens.has(offset + i)) continue;
-      if (Object.hasOwn(NAMED_HOURS, toks[i])) {
-        const hour24 = NAMED_HOURS[toks[i]];
-        const offHour = inexactAt(toks, i, i + 1) || said.disagrees(hour24 === 12 ? 'pm' : 'am') || toks[i + 1] === 'ish';
-        mentions.push({ hour24, offHour, pos: offset + i, end: offset + i + 1 });
-        continue;
-      }
-      const n = hourNumber(toks[i]);
-      const hit = n == null ? null : hourAt(toks, i, n, said);
-      if (hit && hit !== 'length') {
-        mentions.push({ hour24: hit.hour24, offHour: hit.offHour, pos: offset + i, end: offset + hit.end });
-        // Past the whole mention: its minutes, a range's end, its am/pm.
-        i = hit.end - 1;
-      } else if (!hit && isLooseNumber(toks, i) && !runsIntoDuration(toks, i + 1)) {
-        unexplained.push(offset + i);
-      }
-    }
-    offset += toks.length;
-  }
-  return { mentions, unexplained, sentences };
-}
-
-/**
- * Hour mentions in one turn, in spoken order: { hour24, offHour, pos, end },
- * the turn-level token span of the number, its minutes and am/pm (a range's
- * whole span). `started` is the call's start (a Date), for the turn's day
- * mentions: a day's own number ("October 2", "10/2") is never an hour. A
- * number is a clock time only when something marks it as one: "at",
- * "around" or "about" before it; "ish", am/pm, o'clock or a part of the day
- * ("in the afternoon", "this morning", "tonight") after it; being a range's
- * start ("two to four", "between eight and nine" — the end belongs to the
- * range); or minutes ("two ten", "2:30", "2.30", "two oh five") or a
- * half/quarter lead-in ("half past two"), both of which put it off the hour
- * — a slot is always on the hour, so such a mention can only disagree with
- * one. So is an approximate time ("two-ish", "noon-ish"), and a range
- * with no am/pm said anywhere in its sentence ("2 to 4"), whose half of the
- * day is open. A number running into a unit of time is a length ("about two
- * hours"). With no am/pm said with it, an hour takes the period its sentence
- * states — a part of the day ("Thursday evening at eight") or an am/pm that
- * follows no hour ("Thursday PM at 10") — else a range's start its end's
- * am/pm, else business hours (7-11 morning; 12 and 1-6 afternoon): a period
- * said about another time ("my 9 AM visit") says nothing about it. Periods
- * that disagree ("morning or afternoon", "AM at noon", "this morning at 2
- * pm") make the sentence's hours inexact.
- */
-function extractHourMentions(turnText, started) {
-  return scanHours(turnText, started).mentions;
-}
-
-/**
- * Everything one turn says about days and hours, in turn-level token
- * positions (the tokens of normalize(turnText)): { days, hours, unexplained,
- * sentences } with each sentence's { from, to } span
- * — parseDayMentions, extractHourMentions, and the positions of the numbers
- * are neither a day, an hour nor a length of time — a corrected hour
- * said without a marker ("at two, actually three") or any stray figure. For judging a quote INSIDE the turn, so a
- * quote that stops partway through a time ("at 2" of "at 2:30 PM") is read
- * with the rest of that time.
- */
-function readTurn(turnText, started) {
-  const { mentions, unexplained, sentences } = scanHours(turnText, started);
-  return { days: parseDayMentions(turnText, started), hours: mentions, unexplained, sentences };
-}
-
 module.exports = {
-  normalize, parseTurns, parseDayMentions, extractHourMentions, readTurn,
+  normalize, parseTurns, parseDayMentions,
 };

@@ -46,6 +46,15 @@ const quoteFor = (startAt) => {
   const weekday = WEEKDAYS[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
   return `We will see you on ${weekday} ${MONTHS[month - 1]} ${day} at ${hour % 12 || 12} ${hour < 12 ? 'AM' : 'PM'}.`;
 };
+// The words the extraction records for that slot (schema 1.17.0), each
+// verbatim in quoteFor's sentence.
+const wordsFor = (startAt) => {
+  const m = String(startAt).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})/);
+  if (!m) return null;
+  const [year, month, day, hour] = m.slice(1).map(Number);
+  const weekday = WEEKDAYS[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+  return { day: `${weekday} ${MONTHS[month - 1]} ${day}`, hour: String(hour % 12 || 12), period: hour < 12 ? 'AM' : 'PM' };
+};
 
 function v2(overrides = {}) {
   const base = {
@@ -63,6 +72,9 @@ function v2(overrides = {}) {
     property: { access_notes: 'Caller requested that the interior be serviced as well.' },
   };
   const merged = deepMerge(base, overrides);
+  if (!Object.hasOwn(overrides.scheduling || {}, 'agreed_slot_words')) {
+    merged.scheduling.agreed_slot_words = wordsFor(merged.scheduling.confirmed_start_at);
+  }
   // The extraction's pinned quotes: the agent's commitment naming the slot
   // (also the agreed-slot quote) and the caller's acceptance.
   if (!Object.hasOwn(overrides, 'evidence')) {
@@ -215,7 +227,9 @@ describe('planRescheduleFromCall', () => {
     const plan = (startAt, movedDate, movedQuote, extra = {}) => {
       const slot = quoteFor(startAt);
       return planRescheduleFromCall({ customer: customer(), candidates: [visit(), december], now: NOW,
-        v2: v2({ scheduling: { confirmed_start_at: startAt, moved_appointment_date: movedDate }, evidence: [
+        v2: v2({ scheduling: {
+          confirmed_start_at: startAt, moved_appointment_date: movedDate, moved_appointment_words: movedQuote.replace(/^my | visit$/g, ''),
+        }, evidence: [
           { field_path: '/scheduling/agent_committed_booking', speaker: 'agent', quote: slot },
           { field_path: '/scheduling/confirmed_start_at', speaker: 'agent', quote: slot },
           { field_path: '/scheduling/caller_accepted_slot', speaker: 'caller', quote: ACCEPT },

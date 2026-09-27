@@ -1,14 +1,14 @@
 // Day references in labelled call transcripts. Fixtures are fictitious.
-const { parseDayMentions, extractHourMentions, readTurn } = require('../services/call-time-mentions');
+const { parseDayMentions } = require('../services/call-time-mentions');
 
 // Sat Sep 26, 2026, 11:51 AM ET.
 const STARTED = new Date('2026-09-26T15:51:18Z');
 const datesIn = (text) => parseDayMentions(text, STARTED).map((m) => [...m.candidates].sort());
 
 describe('parseDayMentions', () => {
-  test('today, tomorrow and the day after name one date; a month and day names it this year and next', () => {
-    expect(datesIn('You are on October 2nd. Could it be tomorrow, or the day after tomorrow? Today is full.'))
-      .toEqual([['2026-10-02', '2027-10-02'], ['2026-09-27'], ['2026-09-28'], ['2026-09-26']]);
+  test('today, tonight, tomorrow and the day after name one date; a month and day names it this year and next', () => {
+    expect(datesIn('You are on October 2nd. Could it be tomorrow, or the day after tomorrow? Today is full, tonight too.'))
+      .toEqual([['2026-10-02', '2027-10-02'], ['2026-09-27'], ['2026-09-28'], ['2026-09-26'], ['2026-09-26']]);
   });
 
   test('a date written as numbers is a month and day, of its stated year only; a fraction of a unit is not a date', () => {
@@ -50,82 +50,5 @@ describe('parseDayMentions', () => {
   test('mentions come back in spoken order with their token spans', () => {
     expect(parseDayMentions('not friday we will see you tomorrow', STARTED).map((m) => [m.kind, m.pos, m.end]))
       .toEqual([['weekday', 1, 2], ['tomorrow', 6, 7]]);
-  });
-});
-
-describe('extractHourMentions', () => {
-  const hours = (text) => extractHourMentions(text, STARTED).map((m) => [m.hour24, m.offHour]);
-
-  test('a number is a clock time only when something marks it as one', () => {
-    expect(hours('Can we do Thursday at two? Two people will be home.')).toEqual([[14, false]]);
-    expect(hours('Around 9 works. So does 3 pm. Four o clock. Noon.')).toEqual([[9, false], [15, false], [16, false], [12, false]]);
-  });
-
-  test('a bare hour reads as business hours whatever am/pm the call said elsewhere', () => {
-    expect(hours('My 9 AM visit is too early, can we do Thursday at two?')).toEqual([[9, false], [14, false]]);
-    expect(hours('At 7. At 12. At 6.')).toEqual([[7, false], [12, false], [18, false]]);
-  });
-
-  test('a part of the day in the sentence sets an hour\'s am/pm', () => {
-    expect(hours('We will see you Thursday evening at eight. Tomorrow morning at 6.')).toEqual([[20, false], [6, false]]);
-  });
-
-  test('an am/pm that follows no hour is the sentence\'s period, and periods that disagree make its hours inexact', () => {
-    expect(hours('We will see you Thursday PM at 10.')).toEqual([[22, false]]);
-    // "Am" the verb is not a period.
-    expect(hours('I am moving you to Thursday at two. I am moving you to Thursday at 2 PM.')).toEqual([[14, false], [14, false]]);
-    expect(hours('Thursday AM at noon. Morning or afternoon, at two? This morning at 2 pm. AM or PM, at ten.'))
-      .toEqual([[12, true], [14, true], [14, true], [10, true]]);
-  });
-
-  test('a clock time written with a dot keeps its minutes across the sentence split', () => {
-    expect(hours('We will see you Thursday at 2.30 PM.')).toEqual([[14, true]]);
-  });
-
-  test('a part of the day marks only the number it follows, and a day\'s own number is never an hour', () => {
-    expect(hours('Two in the afternoon. Nine this morning. Eight tonight.')).toEqual([[14, false], [9, false], [20, false]]);
-    expect(hours('Two of us will be home in the afternoon. October 2 in the afternoon. Oct. 2 in the morning. 10/2 in the evening.')).toEqual([]);
-    // The date's 2 is neither the hour nor the window's minutes.
-    expect(hours('October 2, 2 pm to 4.')).toEqual([[14, false]]);
-  });
-
-  test('a range counts its start, reading the end\'s am/pm across noon', () => {
-    expect(hours('Between eight and ten pm. 11 to 1 pm. 2 pm to 4 pm. Between 10 and noon. Two to four this afternoon.'))
-      .toEqual([[20, false], [11, false], [14, false], [10, false], [14, false]]);
-  });
-
-  test('a range with no am/pm said anywhere leaves its half of the day open', () => {
-    expect(hours('Tuesday, 2 to 4. Between eight and ten.')).toEqual([[14, true], [8, true]]);
-  });
-
-  test('an approximate time is not an agreed hour', () => {
-    expect(hours('Tomorrow at two-ish. Noon-ish. 2 pm ish.')).toEqual([[14, true], [12, true], [14, true]]);
-  });
-
-  test('minutes or a half/quarter lead-in put a time off the hour', () => {
-    expect(hours('At two ten, 2:30, two oh five, half past two.').map(([, off]) => off)).toEqual([true, true, true, true]);
-  });
-
-  test('a bound, or an alternative after it, puts a time off the hour', () => {
-    expect(hours('Before noon. By two. At two or later. Two or four. Three or so. Noon at the latest.'))
-      .toEqual([[12, true], [14, true], [14, true], [14, true], [15, true], [12, true]]);
-  });
-
-  test('an hour mention spans its am/pm and o\'clock', () => {
-    expect(extractHourMentions('We will see you at 2 pm sharp, or at two o clock.', STARTED).map((m) => [m.pos, m.end])).toEqual([[5, 7], [10, 13]]);
-    expect(extractHourMentions('See you at two in the afternoon or later.', STARTED).map((m) => [m.pos, m.end, m.offHour])).toEqual([[3, 7, true]]);
-  });
-
-  test('a number that is neither a day, an hour nor a length is unexplained', () => {
-    const loose = (text) => readTurn(text, STARTED).unexplained.length > 0;
-    expect(loose('We can see you Thursday at two, actually three.')).toBe(true);
-    expect(loose('Thursday at 2, 45 minutes early is fine, 123 Main.')).toBe(true);
-    expect(loose('We will see you Thursday, October 2 at 2 pm for about two hours, at two properties.')).toBe(false);
-    expect(loose('That one works, Thursday at two.')).toBe(false);
-    expect(loose('Thursday at two, the tech needs 45 minutes, thirty minutes to spray.')).toBe(false);
-  });
-
-  test('a length of time is not a clock time', () => {
-    expect(hours('It takes about two hours, about two and a half hours, three to four hours. The service should last for two.')).toEqual([]);
   });
 });

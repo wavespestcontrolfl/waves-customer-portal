@@ -94,7 +94,10 @@ describe('reviewed request planner', () => {
 
   test('the automatic path keeps confirmed_start_at authoritative', () => {
     const v2 = {
-      ...requestExtraction({ agent_committed_booking: true, caller_accepted_slot: true, confirmed_start_at: CONFIRMED }),
+      ...requestExtraction({
+        agent_committed_booking: true, caller_accepted_slot: true, confirmed_start_at: CONFIRMED,
+        agreed_slot_words: { day: 'Friday September 11', hour: '4', period: 'PM' },
+      }),
       confidence: { scheduling_window: 0.99 },
       service_request: { specific_service_name: 'Quarterly Pest Control Service' },
       evidence: [

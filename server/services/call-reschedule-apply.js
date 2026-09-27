@@ -21,8 +21,10 @@
  *     own judgement that the caller accepted the final slot
  *     (scheduling.caller_accepted_slot, schema 1.16.0), grounded by
  *     call-reschedule-agreement.js: the agent's commitment, the caller's
- *     acceptance and an agreed-slot quote naming the slot each appear word
- *     for word in a turn of their speaker
+ *     acceptance and the agreed-slot quote each appear word for word in a
+ *     turn of their speaker, and the words the extraction recorded for the
+ *     agreed time (scheduling.agreed_slot_words, schema 1.17.0) sit in that
+ *     quote and state the slot
  *   - confirmed_start_at is a real future instant exactly on the hour
  *   - exactly ONE upcoming live visit (pending or confirmed — a row parked
  *     at 'rescheduled' awaits a real rebook and stays a card; not dispatch-
