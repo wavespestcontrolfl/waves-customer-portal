@@ -543,7 +543,7 @@ function billingCandidateStranded(candidate, appAvailable) {
     && Boolean(String(candidate.customer?.phone || '').trim());
   return candidate.keys.some((key) => (key === 'paymentConfirmationChannels'
     && candidate.prefs.payment_receipt === false) || !candidate.channels[key].some((channel) =>
-    (channel === 'email' && candidate.emailAvailable && candidate.prefs.email_enabled !== false)
+    (channel === 'email' && candidate.emailAvailable)
     || (channel === 'sms' && textAvailable
       && (key !== 'paymentConfirmationChannels' || candidate.prefs.payment_confirmation_sms !== false))
     || (channel === 'push' && appAvailable)));
@@ -560,7 +560,9 @@ async function billingAvailabilityError({ req, trx, updates, propertyDbUpdates, 
   const prefsById = new Map(prefsRows.map((row) => [String(row.customer_id), row]));
   const customerById = new Map(customers.map((row) => [String(row.id), row]));
   const primaryPrefs = { ...(prefsById.get(String(primaryId)) || {}), ...channelDbUpdates };
-  const disabledChannels = [['emailEnabled', 'email'], ['smsEnabled', 'sms'], ['pushEnabled', 'push']]
+  // Turning email off never strands a billing category: payment emails are
+  // not governed by the portal-wide email switch (owner ruling 2026-09-26).
+  const disabledChannels = [['smsEnabled', 'sms'], ['pushEnabled', 'push']]
     .filter(([key]) => updates[key] === false).map(([, channel]) => channel);
   const candidates = [];
 
@@ -583,9 +585,8 @@ async function billingAvailabilityError({ req, trx, updates, propertyDbUpdates, 
       addsEmail: adds('email'), addsPush: adds('push') });
   }
 
-  if (candidates.some(({ addsEmail, emailAvailable, prefs }) => addsEmail
-    && (!emailAvailable || prefs.email_enabled === false))) {
-    return 'Add a billing email and enable email notifications before choosing Email.';
+  if (candidates.some(({ addsEmail, emailAvailable }) => addsEmail && !emailAvailable)) {
+    return 'Add a billing email before choosing Email.';
   }
   const needsApp = candidates.some(({ channels, keys, addsPush }) => addsPush
     || keys.some((key) => channels[key].includes('push')));
