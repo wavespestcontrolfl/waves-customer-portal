@@ -705,16 +705,19 @@ describe("catalogUnitOption", () => {
   });
 });
 
-describe("default pest tank mix (owner 2026-08-29)", () => {
+describe("default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29)", () => {
   const CATALOG = [
     { id: 1, name: "Advion Ant Bait Gel" },
     { id: 2, name: "LESCO 90/10 Nonionic Surfactant" },
     { id: 3, name: "Taurus SC" },
-    { id: 4, name: "Talstar P" },
+    { id: 4, name: "Atticus Talak 7.9 F" },
+    // The old bare surfactant identity — must never be substituted in.
     { id: 5, name: "Non-ionic Surfactant", category: "adjuvant" },
+    // The retired Talstar P row (inactive in prod) — must never resolve.
+    { id: 6, name: "Talstar P" },
   ];
 
-  it("seeds every canonical recurring general-pest alias and pest re-services", () => {
+  it("seeds every canonical recurring general-pest alias, one-time pest, and pest re-services", () => {
     // The recurring vocabulary mirrors the 20260514000009 alias set —
     // all three naming generations plus the legacy forms (codex P1 on
     // #3611: Semiannual and "Recurring Pest Control" were missed).
@@ -736,6 +739,10 @@ describe("default pest tank mix (owner 2026-08-29)", () => {
       "Recurring Pest Control",
       "Pest Re-Service",
       "Pest Control Re-Service",
+      // Owner 2026-09-26: the one-time visit joins the mix too — the
+      // 2026-08-29 list deliberately left it off.
+      "One-Time Pest Control Service",
+      "One Time Pest Control",
     ].forEach((serviceType) =>
       expect(isPestDefaultMixVisit({ serviceType }), serviceType).toBe(true),
     );
@@ -744,9 +751,9 @@ describe("default pest tank mix (owner 2026-08-29)", () => {
     expect(isPestDefaultMixVisit({ serviceType: "Pest Control Service", isCallback: true })).toBe(true);
   });
 
-  it("stays off one-time and specialty pest lanes, and off other lines", () => {
+  it("stays off the bare one-time job and specialty pest lanes, and off other lines", () => {
     [
-      "Pest Control Service", // bare = the one-time job (alias-list exclusion)
+      "Pest Control Service", // bare = a different, unnamed job (alias-list exclusion — unaffected by the one-time addition, which names "…pest control…" explicitly)
       "General Pest Control (Initial)", // initial scope differs (alias-list exclusion)
       "General Pest Control + Lawn Care", // combo (alias-list exclusion)
       "Initial Pest Cleanout",
@@ -763,13 +770,14 @@ describe("default pest tank mix (owner 2026-08-29)", () => {
     );
   });
 
-  it("resolves Taurus SC, Talstar P, and the pest surfactant with the house totals", () => {
+  it("resolves Taurus SC, Atticus Talak 7.9 F, and the LESCO 90/10 surfactant with the house totals", () => {
     const selections = pestDefaultMixSelections(CATALOG);
     expect(selections.map((s) => [s.product.name, s.totalAmount])).toEqual([
       ["Taurus SC", 4],
-      ["Talstar P", 4],
-      // Exact identity only — the LESCO lawn surfactant is never eligible.
-      ["Non-ionic Surfactant", 0.25],
+      ["Atticus Talak 7.9 F", 4],
+      // Exact identity only — the bare "Non-ionic Surfactant" and the
+      // retired "Talstar P" rows are never eligible.
+      ["LESCO 90/10 Nonionic Surfactant", 0.25],
     ]);
   });
 
@@ -777,14 +785,20 @@ describe("default pest tank mix (owner 2026-08-29)", () => {
     expect(
       pestDefaultMixSelections(CATALOG.filter((p) => p.name !== "Taurus SC"))
         .map((s) => s.product.name),
-    ).toEqual(["Talstar P", "Non-ionic Surfactant"]);
-    // With the intended surfactant retired, the LESCO lawn surfactant must
-    // NOT be auto-recorded in its place (codex P1 on #3611) — the entry is
-    // skipped.
+    ).toEqual(["Atticus Talak 7.9 F", "LESCO 90/10 Nonionic Surfactant"]);
+    // With the intended surfactant retired, the bare lawn/legacy surfactant
+    // must NOT be auto-recorded in its place (codex P1 on #3611) — the
+    // entry is skipped.
     expect(
-      pestDefaultMixSelections(CATALOG.filter((p) => p.name !== "Non-ionic Surfactant"))
+      pestDefaultMixSelections(CATALOG.filter((p) => p.name !== "LESCO 90/10 Nonionic Surfactant"))
         .map((s) => s.product.name),
-    ).toEqual(["Taurus SC", "Talstar P"]);
+    ).toEqual(["Taurus SC", "Atticus Talak 7.9 F"]);
+    // Talstar P being in the catalog (inactive rows can still be loaded)
+    // never substitutes for Talak.
+    expect(
+      pestDefaultMixSelections(CATALOG.filter((p) => p.name !== "Atticus Talak 7.9 F"))
+        .map((s) => s.product.name),
+    ).toEqual(["Taurus SC", "LESCO 90/10 Nonionic Surfactant"]);
   });
 });
 

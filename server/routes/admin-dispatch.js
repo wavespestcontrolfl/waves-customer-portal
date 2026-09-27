@@ -3078,6 +3078,29 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dispatch/:serviceId/default-products (owner ruling
+// 2026-09-26): the Complete Service drawer's product list, for a non-lawn
+// spray/granule/bait service, prefilled from the service's protocol visit
+// (server/config/protocols.json visit.completionDefaultProducts) or,
+// failing that, the service library's default_products — see
+// server/services/completion-product-defaults.js for the precedence and
+// catalog-name resolution. Read-only and fail-soft: any resolution error
+// answers an empty product list (never 500s the drawer open).
+//
+// Response: { serviceId, programKey, matchedVisit: {visit, reason, matched},
+//   source: 'protocol_visit' | 'service_default_products' | 'excluded_lawn' | 'none',
+//   products: [{ id, name, category, formulation, defaultRatePer1000,
+//     rateUnit, defaultRate, defaultUnit, applicationMethod, epaRegNumber,
+//     source: { programKey, visit, origin } }],
+//   unresolved: ['<name with no matching active catalog row>'] }
+router.get('/:serviceId/default-products', async (req, res, next) => {
+  try {
+    const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
+    const result = await resolveCompletionProductDefaults({ db, serviceId: req.params.serviceId });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 // Lightweight side-effects poll for the completion panel (codex P1 #3187
 // r11): while a committed completion's side effects run, the client polls
 // THIS read-only status instead of replaying the media-bearing completion

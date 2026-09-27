@@ -202,12 +202,13 @@ export default function ServiceRecapModal({
             setRates(seededRates);
           }
         }
-        // Default pest tank mix (owner 2026-08-29, shared with
-        // CompletionPanel via lib/pest-default-mix — codex P1 on #3611):
-        // a FRESH recurring general-pest or pest re-service recap
-        // pre-selects Taurus SC, Talstar P, and the non-ionic surfactant
-        // so the primary field-tech completion starts from the house mix
-        // too. Rates seed exactly as a manual tap would; this lane
+        // Default pest tank mix (shared with CompletionPanel via
+        // lib/pest-default-mix — codex P1 on #3611; product list per the
+        // 2026-09-26 owner ruling superseding 2026-08-29): a FRESH
+        // recurring general-pest, one-time pest, or pest re-service recap
+        // pre-selects Taurus SC, Atticus Talak 7.9 F, and the LESCO 90/10
+        // Nonionic Surfactant so the primary field-tech completion starts
+        // from the house mix too. Rates seed exactly as a manual tap would; this lane
         // records no amounts, so the 4/4/0.25-oz totals live only on the
         // full completion form. Never seeds over an existing record
         // (reopen/resend must preserve what was applied) and fails

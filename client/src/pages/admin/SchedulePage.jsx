@@ -75,6 +75,9 @@ import {
   pestDefaultMixSelections,
 } from "../../lib/pest-default-mix";
 import {
+  protocolCompletionDefaultSelections,
+} from "../../lib/protocol-completion-defaults";
+import {
   exclusiveProtocolProductConflict,
   exclusiveProtocolSelectionConflict,
   reconcileDependentFindingSelections,
@@ -13576,9 +13579,10 @@ export function CompletionPanel({
       ));
     }
   }, [areasTreatedHidden, areasServiced, selectedProducts, typedTreatmentArea?.key]);
-  // Default pest tank mix (owner 2026-08-29): recurring general-pest and
-  // pest re-service completions open with Taurus SC + Talstar P + the
-  // non-ionic surfactant already on the Products list, totals prefilled
+  // Default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29):
+  // recurring general-pest, one-time pest, and pest re-service completions
+  // open with Taurus SC + Atticus Talak 7.9 F + the LESCO 90/10 Nonionic
+  // Surfactant already on the Products list, totals prefilled
   // (4 oz / 4 oz / 0.25 oz, marked manual so a rate/area edit can't
   // recompute them). Seeds ONCE per panel open, only into an empty list —
   // a restored draft or a hand-built list is never touched, and a default
@@ -13609,6 +13613,45 @@ export function CompletionPanel({
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
   }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit]);
+  // Server-curated protocol/default-products prefill (owner ruling
+  // 2026-09-26) for every non-lawn, non-pest program the server has a
+  // curated product list for — cockroach today (Alpine WSG + Gentrol IGR +
+  // Advion Cockroach Gel Bait), more as protocols.json grows
+  // completionDefaultProducts entries. Lawn and pest already seed
+  // themselves through their own mechanisms; lib/protocol-completion-
+  // defaults.js keeps this hook out of their way.
+  const [protocolCompletionDefaults, setProtocolCompletionDefaults] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    setProtocolCompletionDefaults(null);
+    if (!service.id) return undefined;
+    adminFetch(`/admin/dispatch/${service.id}/default-products`)
+      .then((data) => { if (!cancelled) setProtocolCompletionDefaults(data); })
+      // Fail-soft on the client too: a failed lookup just means no prefill,
+      // never a blocked drawer.
+      .catch(() => { if (!cancelled) setProtocolCompletionDefaults(null); });
+    return () => { cancelled = true; };
+  }, [service.id]);
+  const protocolCompletionDefaultsSeededRef = useRef(false);
+  useEffect(() => {
+    if (protocolCompletionDefaultsSeededRef.current) return;
+    if (isTypedFindings || isBedBugVisit || isLawn) return;
+    // "Completed" only — a declined or inspection-only visit applied no
+    // products, so it must not seed a Products list that implies it did.
+    if (visitOutcome !== "completed") return;
+    // No restored draft in flight: a draft carries its own rows/removals,
+    // and this must never race it into a double seed.
+    if (!draftReadyRef.current || draftLoading || showDraftPrompt) return;
+    if (!Array.isArray(products) || products.length === 0) return;
+    if (selectedProducts.length) {
+      protocolCompletionDefaultsSeededRef.current = true;
+      return;
+    }
+    const rows = protocolCompletionDefaultSelections(protocolCompletionDefaults, products, buildSelectedProduct);
+    if (!rows.length) return;
+    protocolCompletionDefaultsSeededRef.current = true;
+    setSelectedProducts(rows);
+  }, [protocolCompletionDefaults, products, service, isTypedFindings, isBedBugVisit, isLawn, visitOutcome, selectedProducts, draftLoading, showDraftPrompt]);
   const lawnDefaultMixSeededRef = useRef(false);
   const lawnDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
