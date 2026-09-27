@@ -176,12 +176,10 @@ async function lockVisitContext(trx, customerId, prelocked, {
     || roots.some((row, index) => String(row.id) !== prelocked.rootIds[index]);
   if (changed) throw retry();
 
-  if (groups.length) {
-    const lockedById = new Map(visits.map(row => [String(row.id), row]));
-    if (groups.some(group => group.memberIds.some(id => isProtected(lockedById.get(id))
-      || !rowIsEligible(lockedById.get(id), customer, primary, true)))) {
-      throw retry('A grouped visit is no longer eligible for this location update. Reload and review it.');
-    }
+  const lockedById = new Map(visits.map(row => [String(row.id), row]));
+  if (groups.some(group => group.memberIds.some(id => isProtected(lockedById.get(id))
+    || !rowIsEligible(lockedById.get(id), customer, primary, true)))) {
+    throw retry('A grouped visit is no longer eligible for this location update. Reload and review it.');
   }
   if (verifyPin) {
     const plannedIds = new Set(groups.flatMap(group => group.memberIds));
