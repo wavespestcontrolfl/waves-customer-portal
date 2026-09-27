@@ -2931,13 +2931,23 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     const unitTechChanges = Object.prototype.hasOwnProperty.call(options, 'technicianId')
       && (options.technicianId || null) !== (target.expect.technician_id || null);
     const noticeOpts = unitTechChanges ? { suppressTechNotice: true } : {};
+    // deferSiblingDivergenceAlert (Codex pre-push finding, this branch's
+    // own redesign): every member below moves through its OWN rebooker
+    // call, each its own committed transaction — a grouped move that lands
+    // BOTH siblings on the SAME new day would otherwise raise a false
+    // billing alert off the FIRST member's commit (the second one is still
+    // on the old day at that moment), even though the group ends up
+    // perfectly realigned moments later. Suppressed on every per-member
+    // call here; this function raises the alert itself, once, after the
+    // whole loop below finishes, judged on the group's FINAL state (see
+    // the reconciliation call after the loop).
     const memberOpts = target.isPrimary
-      ? { ...primaryBase, ...noticeOpts, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
+      ? { ...primaryBase, ...noticeOpts, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect, deferSiblingDivergenceAlert: true }
       // A sibling is ALWAYS a single-row move (codex r4): the dispatch
       // surface previewed/acknowledged series scope for the tapped row
       // only, so a recurring sibling must never shift its own future
       // series undisclosed.
-      : { ...siblingBase, ...noticeOpts, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
+      : { ...siblingBase, ...noticeOpts, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect, deferSiblingDivergenceAlert: true };
     // Callers sync reminders for the tapped row only (r2): every moved
     // sibling gets its reminder row synced here, notice suppressed — the
     // visit's one reminder text is the primary's. A sibling's own series
@@ -3153,6 +3163,27 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       }
       await failSibling(target, err, err.message);
     }
+  }
+
+  // Same-trip first-application billing alert (owner ruling, #5021
+  // redesign — "alert only, no hold") — the reconciliation every
+  // per-member call above deferred (deferSiblingDivergenceAlert): judged
+  // ONCE here, on the group's FINAL landed state, rather than per-member
+  // mid-batch, so a grouped move that lands every sibling on the SAME new
+  // day never raises a false alarm off an earlier member's own commit. Any
+  // member id reaches the same estimate-accept group; `serviceId` (the
+  // primary's original id) is always available here — the loop above only
+  // exits early (skipping this) when the primary itself never moved at
+  // all (nothing landed for the group, so there is nothing to reconcile).
+  // Best-effort: every member already committed its own move by this
+  // point, so there is nothing left to roll back on a failure here — logged
+  // and swallowed, same posture as this function's other post-commit tail
+  // work (syncSiblingReminder, tech-visit-notifications) above.
+  try {
+    await db.transaction((trx) => require('./first-application-sibling-split')
+      .flagFirstApplicationSiblingDivergence(trx, serviceId));
+  } catch (err) {
+    logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: final billing-alert reconciliation failed (non-blocking, every member already landed): ${err.message}`);
   }
 
   // ---- 3. retarget the parent from the rows that actually landed ----

@@ -56,11 +56,20 @@ jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.f
 jest.mock('../services/scheduling/occupancy', () => ({ findConflictingVisits: jest.fn().mockResolvedValue([]), acquireOccupancyLock: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../services/dispatch-assignment', () => ({ assignDispatchJob: jest.fn().mockResolvedValue({ changed: true }) }));
 jest.mock('../services/tech-visit-notifications', () => ({ notifyVisitRescheduled: jest.fn(), notifyTechVisitChange: jest.fn(), notifyAssignmentChange: jest.fn() }));
+// Same-trip first-application billing alert (#5021 redesign, Codex
+// pre-push finding): every per-member rebooker call below defers its own
+// alert (deferSiblingDivergenceAlert) so moveVisitAsUnit can judge the
+// group's FINAL landed state itself, once, after the loop — see the
+// dedicated describe block below for the coverage.
+jest.mock('../services/first-application-sibling-split', () => ({
+  flagFirstApplicationSiblingDivergence: jest.fn().mockResolvedValue({ action: 'skipped' }),
+}));
 
 const db = require('../models/db');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { assignDispatchJob } = require('../services/dispatch-assignment');
 const { moveVisitAsUnit, _test: { shiftClock, expectMatchesRow } } = require('../services/visit-groups');
+const siblingSplit = require('../services/first-application-sibling-split');
 
 const VISIT = { id: 'v1', status: 'open', stop_base_key: 'p1:2026-08-30', scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', technician_id: 't1', window_start: '09:00', window_end: '11:00' };
 const member = (id, over = {}) => ({ id, status: 'confirmed', technician_id: 't1', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', ...over });
@@ -517,6 +526,42 @@ describe('moveVisitAsUnit', () => {
     await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' }))
       .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: 'b' });
     expect(rebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  // Same-trip first-application billing alert (#5021 redesign, Codex
+  // pre-push finding): every member moves through its OWN rebooker call,
+  // each its own committed transaction — without deferSiblingDivergenceAlert,
+  // member 1's own commit would see member 2 still on the OLD day and raise
+  // a false alarm, even though the group ends up perfectly realigned once
+  // member 2 lands moments later. This suite's fakeRebooker bypasses
+  // rebooker.js's real implementation, so it can only prove the CONTRACT
+  // this fix depends on: every member opts out of its own per-call alert,
+  // and moveVisitAsUnit itself raises the alert exactly once, after every
+  // member has landed.
+  test('every member call defers its own billing-alert check; moveVisitAsUnit raises it itself, once, after the whole group has landed', async () => {
+    db.__script = script({ members: [member('a'), member('b')] });
+    const rebooker = fakeRebooker();
+    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(rebooker.reschedule).toHaveBeenCalledTimes(2);
+    for (const call of rebooker.reschedule.mock.calls) {
+      expect(call[5]).toMatchObject({ deferSiblingDivergenceAlert: true });
+    }
+    expect(siblingSplit.flagFirstApplicationSiblingDivergence).toHaveBeenCalledTimes(1);
+    expect(siblingSplit.flagFirstApplicationSiblingDivergence).toHaveBeenCalledWith(expect.anything(), 'a');
+  });
+
+  test('the primary failing to move at all never reaches the final billing-alert reconciliation — nothing landed, nothing to judge', async () => {
+    db.__script = script({ members: [member('a'), member('b')] });
+    await expect(moveVisitAsUnit({ rebooker: fakeRebooker({ a: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' }))
+      .rejects.toThrow('member a boom');
+    expect(siblingSplit.flagFirstApplicationSiblingDivergence).not.toHaveBeenCalled();
+  });
+
+  test('a failing billing-alert reconciliation never fails the unit move — every member already landed by that point', async () => {
+    db.__script = script({ members: [member('a'), member('b')] });
+    siblingSplit.flagFirstApplicationSiblingDivergence.mockRejectedValueOnce(new Error('injected reconciliation failure'));
+    const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(out.visitMove.moved).toEqual(['a', 'b']);
   });
 });
 
