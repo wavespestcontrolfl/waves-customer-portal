@@ -643,6 +643,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
           animation: 'photoIdSheetUp 0.25s ease',
           borderTop: `1px solid ${SHELL.border}`,
           maxHeight: 'calc(100dvh - 16px - env(safe-area-inset-top, 0px))',
+          boxSizing: 'border-box',
           overflowY: 'auto',
           WebkitOverflowScrolling: 'touch',
           overscrollBehavior: 'contain',

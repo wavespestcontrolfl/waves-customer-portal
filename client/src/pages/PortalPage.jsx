@@ -10465,6 +10465,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
   // Rendered only while open — lock the page behind the modal.
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, onClose);
+  const narrowGrid = useIsMobile(900);
   const currentTier = TIER_ORDER.includes(currentTierName) ? currentTierName : 'Bronze';
   const currentIdx = Math.max(0, TIER_ORDER.indexOf(currentTier));
   const nextTier = TIER_ORDER[Math.min(TIER_ORDER.length - 1, currentIdx + 1)] || currentTier;
@@ -10561,7 +10562,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
         boxShadow: PORTAL_SHELL.shadow,
         padding: compact
           ? 'calc(16px + env(safe-area-inset-top, 0px)) calc(16px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))'
-          : 20,
+          : '20px calc(20px + env(safe-area-inset-right, 0px)) 20px calc(20px + env(safe-area-inset-left, 0px))',
         boxSizing: 'border-box',
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start' }}>
@@ -10641,7 +10642,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                   minHeight: 142,
                 }}
               >
-                <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
+                <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: narrowGrid ? 'wrap' : 'nowrap' }}>
                   <span style={{ fontSize: 16, color: B.glassNavy, fontWeight: 700 }}>WaveGuard {tierName}</span>
                   {isCurrent && <span style={{ color: B.glassNavy, fontSize: 14, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>Current</span>}
                 </span>
@@ -16012,6 +16013,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
         borderTop: `1px solid ${PORTAL_SHELL.border}`,
         // dvh: 100vh over-measures behind the iOS Safari toolbar.
         maxHeight: `calc(100${DVH} - 16px - env(safe-area-inset-top, 0px))`,
+        boxSizing: 'border-box',
         overflowY: 'auto',
         WebkitOverflowScrolling: 'touch',
         overscrollBehavior: 'contain',
