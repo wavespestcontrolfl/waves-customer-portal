@@ -500,3 +500,33 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
     expect(screen.getByRole('button', { name: /price needs a refresh/i })).toBeDisabled();
   });
 });
+
+describe('MobileCheckoutSheet priced-visit sibling review', () => {
+  it('disables Charge on a PRICED visit the server marks review (voided combined invoice, sibling billed separately)', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          estimatedPrice: 153.6,
+          billingLane: {
+            siblingCoverage: { state: 'review', reason: 'sibling_already_invoiced_after_void' },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    const button = screen.getByRole('button', { name: /Needs review on Customer 360/ });
+    expect(button).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /Charge \$/ })).not.toBeInTheDocument();
+  });
+
+  it('leaves a priced visit with a none verdict chargeable', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{ ...BASE_SERVICE, billingLane: { siblingCoverage: { state: 'none' } } }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Charge $115.00' })).toBeEnabled();
+  });
+});

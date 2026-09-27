@@ -315,12 +315,15 @@ export default function MobileCheckoutSheet({
   // (round-8 P1: no extras-only invoice on a covered visit at all) — Charge
   // stays disabled for EVERY non-'none' state, not only 'review'.
   const siblingCoverageVerdict = service.billingLane?.siblingCoverage || null;
-  const siblingNeedsReview = !hasOwnPrice && siblingCoverageVerdict?.state === 'review';
+  // Not scoped to `!hasOwnPrice`: the server also marks a PRICED visit
+  // 'review' when its voided combined invoice's sibling was billed
+  // separately (pricedSiblingCoverageVerdict), and Charge Now 409s it.
+  const siblingNeedsReview = siblingCoverageVerdict?.state === 'review';
   const siblingCoverage = !hasOwnPrice && predictionKind === 'covered_sibling_invoice'
     ? siblingCoverageCopy(siblingCoverageVerdict, { siblingServiceType: service.billingLane?.prediction?.siblingServiceType || null })
     : null;
   const siblingCollectible = !!siblingCoverage?.collectible;
-  const siblingBlocksCharge = !hasOwnPrice && !!siblingCoverageVerdict && siblingCoverageVerdict.state !== 'none';
+  const siblingBlocksCharge = !!siblingCoverageVerdict && siblingCoverageVerdict.state !== 'none';
   const openVisitInvoice = !payerBilled && inv && inv.open && inv.total > 0 ? inv : null;
   // A processing invoice is money already in flight (e.g. a pending ACH
   // debit) — the payment routes reject it, so block charging outright
