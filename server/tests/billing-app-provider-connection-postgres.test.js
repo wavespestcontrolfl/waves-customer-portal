@@ -3,6 +3,7 @@
 let mockPg;
 jest.mock('../models/db', () => {
   const database = (...args) => mockPg(...args);
+  database.raw = (...args) => mockPg.raw(...args);
   database.transaction = (...args) => mockPg.transaction(...args);
   return database;
 });
@@ -36,12 +37,23 @@ postgres('billing App quote guard under the scheduler connection limit', () => {
       pool: { min: 0, max: 2 }, acquireConnectionTimeout: 1500 });
     await mockPg.schema.createTable('invoices', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id'); table.integer('due_cents');
+      table.text('status'); table.timestamp('sms_sent_at'); table.timestamp('email_sent_at'); table.timestamp('updated_at');
     });
     await mockPg.schema.createTable('notifications', (table) => {
-      table.increments('id'); table.uuid('recipient_id'); table.jsonb('metadata');
+      table.increments('id'); table.uuid('recipient_id'); table.jsonb('metadata'); table.timestamp('created_at').defaultTo(mockPg.fn.now());
       for (const key of ['recipient_type', 'category', 'title', 'body', 'icon', 'link']) table.text(key);
     });
-    await mockPg('invoices').insert({ id: invoiceId, customer_id: customerId, due_cents: 4900 });
+    await mockPg.schema.createTable('collections_contact_ledger', table => {
+      table.uuid('id').primary().defaultTo(mockPg.raw('gen_random_uuid()')); table.jsonb('metadata'); table.timestamp('occurred_at');
+      table.text('idempotency_key').unique(); table.uuid('customer_id'); table.jsonb('invoice_ids');
+      for (const key of ['channel', 'purpose', 'source']) table.text(key);
+    });
+    await mockPg.schema.createTable('email_messages', table => { table.text('idempotency_key'); table.text('status'); });
+    await mockPg.schema.createTable('sms_log', table => {
+      for (const key of ['id', 'direction', 'status', 'twilio_sid', 'from_phone']) table.text(key);
+      table.jsonb('metadata');
+    });
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: customerId, due_cents: 4900, status: 'sent' });
   }, 30000);
   afterAll(async () => {
     await mockPg?.destroy();
@@ -77,4 +89,30 @@ postgres('billing App quote guard under the scheduler connection limit', () => {
       }
     } finally { await scheduler.rollback(); }
   }, 15000);
+  test('an interrupted deferred contact refreshes its window before later delivery', async () => {
+    const ContactLedger = require('../services/collections/contact-ledger');
+    const originalAt = new Date(Date.now() - 2 * 86400000);
+    const deliveredAt = new Date();
+    const args = { customerId, channel: 'sms', purpose: 'late_payment', source: 'invoice_followup_replay',
+      idempotencyKey: `followup-replay:${invoiceId}` };
+    await ContactLedger.recordContact({ ...args, occurredAt: originalAt });
+    const resumed = await ContactLedger.recordContact({ ...args, occurredAt: deliveredAt });
+    expect(resumed.occurred_at).toEqual(deliveredAt);
+    expect(await ContactLedger.markDelivered(resumed)).toBe(true);
+    const settled = await ContactLedger.recordContact({ ...args, occurredAt: new Date(deliveredAt.getTime() + 86400000) });
+    expect(settled.occurred_at).toEqual(deliveredAt);
+    expect((await mockPg('collections_contact_ledger').where({ id: resumed.id }).first()).occurred_at).toEqual(deliveredAt);
+  });
+  test('a committed current bell settles invoice replay even without native proof', async () => {
+    const key = `invoice:${invoiceId}:sent`;
+    PushService.sendToCustomer.mockRejectedValueOnce(new Error('native delivery failed'));
+    const bell = await NotificationService.notifyCustomer(customerId, 'invoice', 'Invoice ready', 'Open invoice', { dedupeKey: key, awaitPush: true });
+    expect(bell.push.accepted).toBeUndefined();
+    expect(await mockPg('sms_log')).toHaveLength(0);
+    await require('../services/messaging/deferred-replay-registry').finalizeDeferredReplay('invoice_send_deferred', {
+      invoice_id: invoiceId, partial_fanout_retry: true,
+    });
+    expect((await mockPg('invoices').where({ id: invoiceId }).first()).sms_sent_at).toEqual(bell.created_at);
+  });
+
 });

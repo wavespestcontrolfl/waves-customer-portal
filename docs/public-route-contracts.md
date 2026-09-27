@@ -1075,7 +1075,7 @@ payload via buildPublicPestReport, generic 404, plus a set-once
 GATE_PEST_IDENTIFIER: sent reports are owner-initiated communications
 (admin manual send works pre-launch), and an invalid token 404s exactly
 like the dark surface — only analyze/claim are gated.)
-`/api/public/pest-forecast` (+ `/pest-forecast/locations`) (read-only,
+`/api/public/pest-forecast` (+ `/pest-forecast/locations`, `/pest-forecast/nearest`) (read-only,
 no auth, no DB writes, no PII — returns a deterministic Florida
 pest-pressure model keyed only on a curated city slug / FL ZIP plus
 public NWS weather and NOAA MRMS radar rainfall (via the Iowa
@@ -1091,10 +1091,18 @@ available yet (IEM backfills late), and never past the next ET midnight
 the seconds left until that instant, measured when the response is sent,
 so a result computed before ET midnight and sent after it carries
 `max-age=0, s-maxage=0`; `/locations` stays `public, max-age=86400`.
-Note: unlike the token-gated read routes, this surface
-is deliberately cacheable and indexable — it exposes only modeled,
-non-sensitive forecast data, so `no-store`/`noindex` privacy headers do
-NOT apply here).
+`/nearest` returns only `{ location: <curated slug> | null }`, derived
+from Cloudflare's visitor-location request headers (`cf-ipcountry`,
+`cf-region-code`, `cf-iplatitude`, `cf-iplongitude`; zone Managed
+Transform "Add visitor location headers"): a visitor geolocated in
+Florida gets the nearest curated city, anyone else `null`. The location
+values are never logged or stored, and it carries
+`Cache-Control: private, no-store` (per visitor).
+Note: unlike the token-gated read routes, the forecast and `/locations`
+responses are deliberately cacheable and indexable — they expose only
+modeled, non-sensitive forecast data, so `no-store`/`noindex` privacy
+headers do NOT apply to them. `/nearest` is the exception: its answer is
+per visitor, so it stays `private, no-store`).
 `/api/public/ui-flags` (read-only, no auth, no token, no params, no DB
 access, no PII — compatibility shim that always returns
 `{ portalGlass: true }`. The glass release gate is retired and current
@@ -1418,7 +1426,36 @@ The check is the intake-local topic chokepoint in `ask-waves-intake.js`
 (`intakeSafetyClaimSupplement`), run on typography-folded text; the shared
 `reentrySafetyClaimFinding` is deliberately NOT called on this per-turn path
 (its worst case blocks the event loop, #4905). Safety wording is judged by
-topic, not grammatical subject, so it over-blocks by design. NOT CORS-open — credentialed allowlist
+topic, not grammatical subject, so it over-blocks by design.
+With `GATE_ASK_WAVES_TOPIC_ROUTING` on (dark; read at call time through
+`askWavesTopicRoutingLive()`), the model also returns a `topic`
+(`medical_emergency` / `product_safety` / `reentry_timing` / `none`; the field
+and its rules are sent only while the gate is on), and routing on that topic
+runs before the claim chokepoint:
+- `medical_emergency` → the emergency script (no quote CTA). Poison Control /
+  veterinary lines follow the visitor's words as in `emergencyGuidance`, and
+  any `PET_WORD` animal in the conversation or a vet / animal-hospital question
+  adds the veterinary line.
+- `product_safety` / `reentry_timing` → the reviewed "follow the product label"
+  copy (EN/ES), keeping the model's validated quote fields (restored when the
+  model also labeled the turn "emergency"); it becomes the emergency script
+  instead only on qualified evidence in the conversation (`qualifiedEmergencyIn`
+  — a product exposure, a symptom after a treatment, or trouble breathing),
+  never on the broad detector's other phrases (#4899).
+- `none`, or a missing / unknown topic, keeps the model's answer, which still
+  goes through the claim chokepoint and the price scrub. The broad emergency
+  detector is not consulted on this path: a flagged claim, a reassurance or
+  price talk becomes the emergency script only on qualified evidence
+  (`qualifiedEmergencyIn`) or when the model's own reply directs to emergency
+  care; otherwise a claim gets the reviewed label copy and price talk the
+  price redirect. There is no regex floor on the visitor's words: routing
+  follows the model's classification only.
+The model also returns `language` (`en` / `es`, the language of its reply,
+sent only while the gate is on); the reviewed copy follows it, and a missing
+value falls back to the Spanish-word detector on the visitor's active message,
+then the reply.
+The provider-failure fallback is unchanged (there is no model topic). Gate off:
+prompt, schema and replies are unchanged. NOT CORS-open — credentialed allowlist
 origins only (hub site)).
 `/api/public/experiments` (`GET /status` + `POST /exposure`) (client-side
 GrowthBook experimentation surface — no auth, anonymous visitors are the
