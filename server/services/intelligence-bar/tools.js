@@ -2494,7 +2494,23 @@ async function memberOneOffDiscount({ customer, catalogRow, listPrice, conn = db
   // percentage type AND the booked service is excluded — the WDO free perk
   // (waveguard_member_wdo, also `percentage`) survives because wdo_inspection
   // itself is not an excluded family.
-  const { lineExcludedFromPercentDiscount, isPercentDiscountType } = require('../../routes/admin-schedule');
+  const {
+    lineExcludedFromPercentDiscount, isPercentDiscountType,
+    assertPercentExclusionCatalogReady, primePercentDiscountExclusions,
+  } = require('../../routes/admin-schedule');
+  // The in-router calculators get this catalog primed for free (the
+  // admin-schedule router awaits primePercentDiscountExclusions before any
+  // handler runs, then calls assertPercentExclusionCatalogReady synchronously)
+  // — this path has no such middleware, so without awaiting the prime here a
+  // variant key excluded ONLY via the catalog's engine_keys link (e.g.
+  // bed_bug_treatment, not a literal WAVEGUARD family key) would resolve
+  // against an empty/stale catalog and wrongly qualify for the automatic
+  // 15% (Codex r3 on #5093, P1: "first booking after boot"). Await the same
+  // prime the middleware runs, then assert the same readiness the
+  // calculators do — fail closed (refuse the automatic discount lookup)
+  // rather than price it against a catalog that never loaded.
+  await primePercentDiscountExclusions();
+  assertPercentExclusionCatalogReady();
   const serviceExcluded = lineExcludedFromPercentDiscount(catalogRow.service_key || null);
   const context = { subtotal: listPrice, serviceKey: catalogRow.service_key || null, serviceCategory: catalogRow.category || null };
   const firstEligible = async (recurringMembershipBooking) => {
@@ -2667,6 +2683,7 @@ function bookingDiscountFingerprint(booking) {
   return {
     listPrice: discount ? Number(booking.pricing.primaryBase) : null,
     discountId: discount?.discountId ?? null,
+    discountName: discount?.discountName ?? null,
     discountType: discount?.discountType ?? null,
     discountAmount: discount ? Number(discount.discountAmount) : null,
   };
@@ -2674,9 +2691,16 @@ function bookingDiscountFingerprint(booking) {
 
 // True when two fingerprints (or a fingerprint and the proposal's pinned
 // fields) name the SAME discount at the SAME terms on the SAME gross price.
+// discountName rides the comparison too (Codex r3 on #5093, P2): id/type/
+// amount alone miss a preset RENAMED between the proposal read and the
+// locked recheck (resolveLineDiscount re-reads the row fresh each pass) —
+// the card would show the old name while the stamped line_discount_name
+// carries the new one, an undisclosed drift the id/type/amount match alone
+// would let through.
 function sameBookingDiscount(a, b) {
   return sameBookingPrice(a.listPrice, b.listPrice)
     && String(a.discountId || '') === String(b.discountId || '')
+    && String(a.discountName || '') === String(b.discountName || '')
     && String(a.discountType || '') === String(b.discountType || '')
     && sameBookingPrice(a.discountAmount, b.discountAmount);
 }
@@ -2815,6 +2839,7 @@ async function createAppointment(input, actionContext = {}) {
   const approvedDiscount = {
     listPrice: input._booking_list_price === undefined ? null : input._booking_list_price,
     discountId: input._booking_discount_id === undefined ? null : input._booking_discount_id,
+    discountName: input._booking_discount_name === undefined ? null : input._booking_discount_name,
     discountType: input._booking_discount_type === undefined ? null : input._booking_discount_type,
     discountAmount: input._booking_discount_amount === undefined ? null : input._booking_discount_amount,
   };
@@ -3096,6 +3121,12 @@ async function createAppointment(input, actionContext = {}) {
   // Best-effort like the admin path: a registration failure must not fail
   // the already-committed insert (registerAppointment also self-alerts).
   let reminderWarning = null;
+  // Set only when the visit turned terminal (cancelled/completed/skipped/
+  // no_show) in the window between the insert commit and registration
+  // finishing — same race window admin-schedule.js:~1468-1488 covers for
+  // spawned visits (Codex r3 on #5093, P1: this create path registers a
+  // reminder post-commit too, and had no equivalent recheck).
+  let visitWentTerminal = false;
   const AppointmentReminders = require('../appointment-reminders');
   try {
     // The Schedule create's own options: fromCommittedRow reads the time
@@ -3110,6 +3141,13 @@ async function createAppointment(input, actionContext = {}) {
     // registerAppointment reports its own failures as null (it alerts and
     // never rejects) — the same partial failure as a throw.
     if (!registered) throw new Error('registerAppointment returned no reminder row');
+    // Reuse the canonical spawned-visit recheck (admin-schedule.js) rather
+    // than a parallel copy: it re-reads the visit's current status and, if
+    // terminal, cancels the fresh reminder row itself — the same cleanup a
+    // series cancel landing in this window gets on every other registration
+    // path.
+    const { cancelSpawnedReminderIfVisitTerminal } = require('../../routes/admin-schedule');
+    visitWentTerminal = await cancelSpawnedReminderIfVisitTerminal(db, appointment.id, 'intelligence-bar');
   } catch (err) {
     logger.error(`[intelligence-bar] reminder registration failed for appointment ${appointment.id}: ${err.message}`);
     // Surfaced on the confirm card as a partial-failure warning (W0B): the
@@ -3122,8 +3160,11 @@ async function createAppointment(input, actionContext = {}) {
 
   // The booking confirmation text, deferred past the result exactly as the
   // Schedule create defers it (the landline lookup + send are slow). A
-  // failed registration has no row to send from, so nothing is attempted.
-  if (!reminderWarning) {
+  // failed registration has no row to send from, so nothing is attempted;
+  // neither does a visit that turned terminal in the registration window —
+  // sending "see you then" for an already-cancelled/completed visit is
+  // exactly what the recheck above exists to prevent.
+  if (!reminderWarning && !visitWentTerminal) {
     setImmediate(async () => {
       try {
         await AppointmentReminders.sendConfirmation(appointment.id);

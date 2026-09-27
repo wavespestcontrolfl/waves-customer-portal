@@ -1062,6 +1062,10 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       // commit, refusing on drift the same way it already does for price.
       expect(stored.params._booking_list_price).toBe(250);
       expect(stored.params._booking_discount_id).toBe('disc-member');
+      // The discount's NAME rides the pin too (Codex r3 on #5093, P2): id/
+      // type/amount alone miss a preset renamed between this proposal and
+      // the commit — the executor's fingerprint compares the name as well.
+      expect(stored.params._booking_discount_name).toBe('WaveGuard Member Discount');
       expect(stored.params._booking_discount_type).toBe('percentage');
       expect(stored.params._booking_discount_amount).toBe(15);
       expect(body.pendingActions[0].params.price).toBe('$212.50 (catalog price $250.00 less 15% WaveGuard Member Discount) — invoiced when the visit is completed');

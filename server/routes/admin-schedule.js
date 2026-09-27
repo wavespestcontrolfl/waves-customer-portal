@@ -1486,9 +1486,14 @@ async function registerSpawnedVisitReminder({ scheduledServiceId, customerId, sc
 // status is already committed and visible here. Terminal set mirrors the
 // reminder cron's SELF_HEAL_TERMINAL_STATUSES (keep in sync);
 // 'rescheduled' stays armed for the rebook, same as the cron's live-status
-// guard. Best-effort: never fails the caller.
+// guard. Best-effort: never fails the caller. Returns true when the visit
+// was found terminal (and its reminder cancelled) — a caller that also
+// schedules a confirmation SMS off the same registration (the IB create
+// path, tools.js) uses this to skip sending one for a visit that is no
+// longer live (Codex r3 on #5093, P1). Existing callers (spawned/extension
+// visits, which send no confirmation) ignore the return value.
 async function cancelSpawnedReminderIfVisitTerminal(conn, scheduledServiceId, logContext) {
-  if (!scheduledServiceId) return;
+  if (!scheduledServiceId) return false;
   try {
     const visitNow = await conn('scheduled_services')
       .where({ id: scheduledServiceId })
@@ -1499,8 +1504,13 @@ async function cancelSpawnedReminderIfVisitTerminal(conn, scheduledServiceId, lo
         .where({ scheduled_service_id: scheduledServiceId, cancelled: false })
         .update({ cancelled: true, updated_at: new Date() });
       logger.info(`[${logContext}] Spawned-visit reminder cancelled — visit ${scheduledServiceId} turned ${visitNow ? statusNow : 'missing'} while its reminder was being registered`);
+      return true;
     }
-  } catch (e) { logger.warn(`[${logContext}] Post-registration cancel re-check failed (non-blocking): ${e.message}`); }
+    return false;
+  } catch (e) {
+    logger.warn(`[${logContext}] Post-registration cancel re-check failed (non-blocking): ${e.message}`);
+    return false;
+  }
 }
 
 // Void any still-open invoices minted for a now-cancelled scheduled service
@@ -24845,6 +24855,22 @@ module.exports.buildAppointmentPricing = buildAppointmentPricing;
 // block above, but an automatically-applied one had no equivalent gate.
 module.exports.lineExcludedFromPercentDiscount = lineExcludedFromPercentDiscount;
 module.exports.isPercentDiscountType = isPercentDiscountType;
+// The catalog's own readiness gate + prime trigger — every in-router
+// calculator gets the catalog primed for free (router.use above awaits
+// primePercentDiscountExclusions before any handler runs), but the IB
+// booking path has no such middleware, so its automatic member discount
+// (tools.js memberOneOffDiscount) awaits priming and asserts readiness
+// itself before consulting lineExcludedFromPercentDiscount (Codex r3 on
+// #5093, P1) — the same fail-closed contract the in-router calculators get.
+module.exports.assertPercentExclusionCatalogReady = assertPercentExclusionCatalogReady;
+module.exports.primePercentDiscountExclusions = primePercentDiscountExclusions;
+// The spawned-visit post-registration terminal recheck — also consumed by
+// the IB create_appointment executor (tools.js) after ITS OWN reminder
+// registration, so a series cancel (or any other terminal flip) landing in
+// the registration window cancels the fresh reminder and skips the
+// confirmation text the same way the canonical spawned-visit paths do
+// (Codex r3 on #5093, P1).
+module.exports.cancelSpawnedReminderIfVisitTerminal = cancelSpawnedReminderIfVisitTerminal;
 // Completion reruns the visit-scoped trade-name screen with the SAME typed
 // product-field classification generation used (codex r49 #3420).
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;

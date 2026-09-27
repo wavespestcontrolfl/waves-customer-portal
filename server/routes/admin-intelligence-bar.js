@@ -995,6 +995,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params._booking_service_id = booking.serviceId;
       params._booking_list_price = booking.listPrice;
       params._booking_discount_id = booking.discountId;
+      params._booking_discount_name = booking.discountName;
       params._booking_discount_type = booking.discountType;
       params._booking_discount_amount = booking.discountAmount;
       preview = {

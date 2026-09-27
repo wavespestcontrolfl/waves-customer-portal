@@ -265,6 +265,64 @@ describe('create_appointment', () => {
     expect(AppointmentReminders.sendConfirmation).not.toHaveBeenCalled();
   });
 
+  test('a visit that goes terminal between commit and reminder registration gets its reminder cancelled and no confirmation text (admin-schedule.js:~1468-1488 parity, Codex r3 on #5093, P1)', async () => {
+    // registerSpawnedVisitReminder's own race (admin-schedule.js): the
+    // reminder writer runs on its own connection AFTER the visit insert
+    // commits, so a cancel can land in that window. This create path
+    // registers post-commit too and must re-check the SAME way (reusing
+    // cancelSpawnedReminderIfVisitTerminal) — a terminal visit gets its
+    // fresh reminder row cancelled and skips the deferred confirmation text
+    // (sending "see you then" for an already-cancelled visit would be
+    // exactly the surprise the recheck exists to prevent).
+    const reminderCancelUpdate = jest.fn().mockImplementation(() => Promise.resolve(1));
+    const terminalRow = () => chain({ first: jest.fn().mockResolvedValue({ status: 'cancelled' }) });
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) })],
+      // probe, the insert, then EVERY 'scheduled_services' touch this test
+      // sees after commit (inspection-credit's own best-effort live-status
+      // lookup ahead of the recheck, this test's real target — the
+      // post-registration recheck — and inspection-credit's deferred
+      // evidence-recovery retry, queued via setImmediate off the savepoint
+      // this test's incomplete table wiring makes fail) all read the SAME
+      // terminal row: identical data whichever of these incidental readers
+      // happens to land on which queue slot, so the recheck sees "cancelled"
+      // regardless of ordering.
+      scheduled_services: [chain(), chain(), terminalRow(), terminalRow(), terminalRow(), terminalRow()],
+      appointment_reminders: [chain({ update: reminderCancelUpdate }), chain({ update: reminderCancelUpdate })],
+    });
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '9:00 AM',
+    });
+    expect(result.success).toBe(true);
+    expect(reminderCancelUpdate).toHaveBeenCalledWith(expect.objectContaining({ cancelled: true }));
+    // No warning either — the recheck is a silent, best-effort cleanup, not
+    // a failure the operator needs to see.
+    expect(result.warning).toBeUndefined();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(AppointmentReminders.sendConfirmation).not.toHaveBeenCalled();
+  });
+
+  test('a visit that is still live after registration sends its confirmation normally (the recheck found nothing terminal)', async () => {
+    const liveRow = () => chain({ first: jest.fn().mockResolvedValue({ status: 'pending' }) });
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) })],
+      // Same padding rationale as the terminal-case test above — every
+      // incidental post-commit 'scheduled_services' reader sees the SAME
+      // still-live row, so this stays deterministic regardless of exactly
+      // which reader lands on which queue slot.
+      scheduled_services: [chain(), chain(), liveRow(), liveRow(), liveRow(), liveRow()],
+    });
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '9:00 AM',
+    });
+    expect(result.success).toBe(true);
+    expect(result.warning).toBeUndefined();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(AppointmentReminders.sendConfirmation).toHaveBeenCalledWith('appt-1');
+  });
+
   test('success log carries ids only — never the customer name (no-PII-in-logs rule)', async () => {
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }),
@@ -710,7 +768,8 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       const insertChain = wireMember({ rows: [ONE_TIME_PEST], listed: [GENERIC], picked: GENERIC });
       const result = await book({
         _booking_price: 212.5, _booking_service_id: 'svc-otp',
-        _booking_list_price: 250, _booking_discount_id: 'disc-member', _booking_discount_type: 'percentage', _booking_discount_amount: 15,
+        _booking_list_price: 250, _booking_discount_id: 'disc-member', _booking_discount_name: 'WaveGuard Member Discount',
+        _booking_discount_type: 'percentage', _booking_discount_amount: 15,
       });
       expect(result).toMatchObject({ success: true, price: 212.5 });
       expect(insertChain.insert.mock.calls[0][0]).toMatchObject({
@@ -762,12 +821,36 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       expect(db.transaction).not.toHaveBeenCalled();
     });
 
+    test('a discount RENAMED since the card was shown is refused even though the id/type/amount all still match (Codex r3 on #5093, P2)', async () => {
+      // Same row (disc-member), same type/amount — only the NAME drifted
+      // (an admin edited the preset's display name in the discounts admin
+      // between the card and the confirm). id/type/amount alone would let
+      // this straight through: the card showed "WaveGuard Member Discount"
+      // but the visit would stamp line_discount_name from the row AS IT
+      // RESOLVES NOW — a disclosure drift the net-price/id match hides.
+      const RENAMED = { ...GENERIC, name: 'Loyalty Member Perk (renamed)' };
+      wireDb({
+        customers: [chain({ first: jest.fn().mockResolvedValue(MEMBER) })],
+        services: [catalog([ONE_TIME_PEST])],
+        discounts: [listing([RENAMED]), chain({ first: jest.fn().mockResolvedValue(RENAMED) })],
+      });
+      const result = await book({
+        _booking_price: 212.5, _booking_service_id: 'svc-otp',
+        _booking_list_price: 250, _booking_discount_id: 'disc-member', _booking_discount_name: 'WaveGuard Member Discount',
+        _booking_discount_type: 'percentage', _booking_discount_amount: 15,
+      });
+      expect(result).toMatchObject({ preview_changed: true });
+      expect(result.error).toMatch(/price or catalog service changed since the card was shown/);
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+
     test('the catalog\'s own member row wins by priority: a WDO inspection is free for members — a real $0, nothing invoiced', async () => {
       const wdo = { ...ONE_TIME_PEST, id: 'svc-wdo', name: 'WDO Inspection Service', service_key: 'wdo_inspection', base_price: '250.00', category: 'termite' };
       const insertChain = wireMember({ rows: [wdo], listed: [WDO_FREE, GENERIC], picked: WDO_FREE });
       const result = await book({
         service_type: 'WDO Inspection Service', _booking_price: 0, _booking_service_id: 'svc-wdo',
-        _booking_list_price: 250, _booking_discount_id: 'disc-wdo', _booking_discount_type: 'percentage', _booking_discount_amount: 100,
+        _booking_list_price: 250, _booking_discount_id: 'disc-wdo', _booking_discount_name: 'WaveGuard Member Discount (Termite Inspection)',
+        _booking_discount_type: 'percentage', _booking_discount_amount: 100,
       });
       expect(result.success).toBe(true);
       expect(insertChain.insert.mock.calls[0][0]).toMatchObject({
@@ -792,7 +875,8 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       });
       const result = await book({
         _booking_price: 212.5, _booking_service_id: 'svc-otp',
-        _booking_list_price: 250, _booking_discount_id: 'disc-member', _booking_discount_type: 'percentage', _booking_discount_amount: 15,
+        _booking_list_price: 250, _booking_discount_id: 'disc-member', _booking_discount_name: 'WaveGuard Member Discount',
+        _booking_discount_type: 'percentage', _booking_discount_amount: 15,
       });
       expect(result).toMatchObject({ success: true, price: 212.5 });
       expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 212.5, line_discount_id: 'disc-member' });
@@ -810,7 +894,8 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       const insertChain = wireMember({ rows: [plan], listed: [GENERIC], picked: GENERIC, customer: perAppMember });
       const result = await book({
         service_type: plan.name, _booking_price: 124.1, _booking_service_id: 'svc-plan',
-        _booking_list_price: 146, _booking_discount_id: 'disc-member', _booking_discount_type: 'percentage', _booking_discount_amount: 15,
+        _booking_list_price: 146, _booking_discount_id: 'disc-member', _booking_discount_name: 'WaveGuard Member Discount',
+        _booking_discount_type: 'percentage', _booking_discount_amount: 15,
       });
       expect(result.success).toBe(true);
       expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 124.1, primary_line_price: 146, line_discount_id: 'disc-member' });
