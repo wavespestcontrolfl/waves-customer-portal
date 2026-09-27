@@ -206,6 +206,8 @@
       "label": "Wasps, bees & hornets",
       "generic": "a wasp or bee",
       "aliases": [
+        "bee",
+        "bees",
         "ground wasp",
         "ground wasps"
       ],

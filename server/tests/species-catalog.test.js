@@ -483,6 +483,16 @@ describe('name collisions', () => {
     },
   );
 
+  test.each(['bee', 'bees', 'I found a bee', 'There are bees outside'])(
+    '%s retains the broad stinging-insect node without assuming honey bees', (name) => {
+      const { node } = catalog.resolveName(name);
+      expect(node).toMatchObject({ level: 'group', id: 'wasps-bees', generic: 'a wasp or bee' });
+      expect(catalog.genericGuidance(node.id)).toEqual({
+        compatibility: { safety: { stinging: true } },
+      });
+    },
+  );
+
   test('the wall-colony situation nests under the neutral honey-bee parent', () => {
     expect(catalog.lineage('honey-bee-wall-colony').map((node) => node.id)).toEqual([
       'insect', 'wasps-bees', 'bees', 'structure-bee-colonies', 'honey-bee-wall-colony',
