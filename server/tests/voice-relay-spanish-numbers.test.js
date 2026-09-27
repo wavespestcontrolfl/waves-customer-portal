@@ -118,6 +118,7 @@ describe('normalizeSpanishSpokenText — spelled prices in every price context',
     ['por aplicación pagará ciento diecinueve', 'por aplicación pagará 119'],
     ['por aplicación pagaríamos ciento diecinueve', 'por aplicación pagaríamos 119'],
     ['por aplicación pagaré ciento diecinueve', 'por aplicación pagaré 119'],
+    ['tendrá que pagar ciento cincuenta', 'tendrá que pagar 150'],
   ])('%s -> %s', (input, expected) => {
     expect(normalizeSpanishSpokenText(input)).toBe(expected);
   });

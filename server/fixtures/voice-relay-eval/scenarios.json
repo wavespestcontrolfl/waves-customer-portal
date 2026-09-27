@@ -1987,6 +1987,13 @@
      "severity": "critical"
     },
     {
+     "check": "no_visit_time",
+     "value": {
+      "allow": "returned"
+     },
+     "severity": "critical"
+    },
+    {
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
@@ -2550,8 +2557,8 @@
       "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\b(?:he|hemos|ya)\\s+(?:creado|agendado|programado|reservado|hecho|apartado)\\s+(?:una\\s+|la\\s+|su\\s+|tu\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b",
       "(?<!\\b(?:no|ninguna|sin|nunca)\\b[^.!?;,]{0,40})\\b(?:cita|visita)\\s+nueva\\b",
       "(?<!\\bno\\s+)\\b(?:qued[o\u00f3]|est[a\u00e1])\\s+(?:agendad[oa]|programad[oa]|reservad[oa])\\b",
-      "(?<!\\bno\\s+)\\b(?:le|te)\\s+(?:agend|program|reserv)(?:\u00e9|amos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])",
-      "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\b(?:cre[e\u00e9]|program[e\u00e9]|reserv[e\u00e9]|agend[e\u00e9]|hice|creamos|programamos|reservamos|agendamos|hicimos)\\s+(?:ya\\s+)?(?:una\\s+|la\\s+|su\\s+|tu\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b",
+      "(?<!\\bno\\s+)\\b(?:le|te)\\s+(?:agend|program|reserv|apart)(?:\u00e9|amos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])",
+      "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\b(?:cre[e\u00e9]|program[e\u00e9]|reserv[e\u00e9]|agend[e\u00e9]|apart[e\u00e9]|hice|creamos|programamos|reservamos|agendamos|apartamos|hicimos)\\s+(?:ya\\s+)?(?:una\\s+|la\\s+|su\\s+|tu\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b",
       "(?<!\\bno\\s+)\\b(?:cita|visita)\\s+(?:nueva\\s+)?(?:fue|ha\\s+sido|qued[o\u00f3])\\s+(?:cread[ao]|programad[ao]|agendad[ao]|reservad[ao])\\b",
       "(?<!\\bno\\s)(?<!\\bnunca\\s)(?<!\\bjam\u00e1s\\s)(?<!\\bsin\\s)\\b(?:ya\\s+)?(?:tengo|tenemos|tiene|tienen|hay|existe)\\s+(?:(?:su|una|la)\\s+)?(?:cita|visita)\\b"
      ],
@@ -2699,11 +2706,11 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "\\b(?:el|su)\\s+t[e\u00e9]cnico\\b[^.!?;,]{0,40}\\b(?:llega|llegar|viene|estar[a\u00e1])\\b[^.!?;,]{0,20}\\bhoy\\b",
-       "\\b(?:el|su)\\s+t[e\u00e9]cnico\\b[^.!?]{0,100}[;,]\\s*(?:llega|llegar|viene|estar[a\u00e1])\\s+hoy\\b",
-       "\\b(?:la|su)\\s+(?:visita|cita)\\b[^.!?;,]{0,35}\\b(?:es|ser[a\u00e1]|ocurre|tiene\\s+lugar|est[a\u00e1]\\s+programada\\s+para)\\b[^.!?;,]{0,20}\\bhoy\\b",
-       "\\b(?:la|su)\\s+ventana(?:\\s+de\\s+(?:llegada|la\\s+visita|su\\s+cita))?\\s+(?:de|para)\\s+hoy\\b",
-       "\\bhoy\\b\\s*,?\\s*(?:(?:el|su)\\s+t[e\u00e9]cnico\\b[^.!?;,]{0,30}\\b(?:llega|llegar|viene|estar[a\u00e1])|(?:la|su)\\s+ventana(?:\\s+de\\s+(?:llegada|su\\s+cita|la\\s+visita))?\\b)"
+       "\\b(?:el|su)\\s+t[e\u00e9]cnico\\b(?![^.!?;,]*\\b(?:no|nunca|jam[a\u00e1]s)\\b)[^.!?;,]{0,40}\\b(?:llega|llegar|viene|estar[a\u00e1])\\b[^.!?;,]{0,20}\\bhoy\\b",
+       "\\b(?:el|su)\\s+t[e\u00e9]cnico\\b[^.!?]{0,100}[;,]\\s*(?![^.!?;,]*\\b(?:no|nunca|jam[a\u00e1]s)\\b)(?:llega|llegar|viene|estar[a\u00e1])\\s+hoy\\b",
+       "\\b(?:la|su)\\s+(?:visita|cita)\\b(?![^.!?;,]*\\b(?:no|nunca|jam[a\u00e1]s)\\b)[^.!?;,]{0,35}\\b(?:es|ser[a\u00e1]|ocurre|tiene\\s+lugar|est[a\u00e1]\\s+programada\\s+para)\\b[^.!?;,]{0,20}\\bhoy\\b",
+       "\\b(?:la|su)\\s+ventana\\b(?![^.!?;,]*\\b(?:no|nunca|jam[a\u00e1]s)\\b)(?:\\s+de\\s+(?:llegada|la\\s+visita|su\\s+cita))?\\s+(?:de|para)\\s+hoy\\b",
+       "\\bhoy\\b(?![^.!?;,]*\\b(?:no|nunca|jam[a\u00e1]s)\\b)\\s*,?\\s*(?:(?:el|su)\\s+t[e\u00e9]cnico\\b[^.!?;,]{0,30}\\b(?:llega|llegar|viene|estar[a\u00e1])|(?:la|su)\\s+ventana(?:\\s+de\\s+(?:llegada|su\\s+cita|la\\s+visita))?\\b)"
       ],
       "fromTurn": 1,
       "afterTool": "get_today_eta"
@@ -2829,9 +2836,12 @@
     },
     {
      "check": "spoken_matches_any",
-     "value": [
-      "(?<!(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))[\\s,.()-]*)(?:9|nueve)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:1|uno)[\\s,.()-]*(?:(?:5|cinco)[\\s,.()-]*(?:5|cinco)[\\s,.()-]*(?:5|cinco)|triple[\\s-]?(?:5|cinco))[\\s,.()-]*(?:(?:0|cero)[\\s,.()-]*(?:2|dos)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:6|seis))(?![\\s,.()-]*(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))\\b)"
-     ],
+     "value": {
+      "patterns": [
+       "(?<!(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))[\\s,.()-]*)(?:9|nueve)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:1|uno)[\\s,.()-]*(?:(?:5|cinco)[\\s,.()-]*(?:5|cinco)[\\s,.()-]*(?:5|cinco)|triple[\\s-]?(?:5|cinco))[\\s,.()-]*(?:(?:0|cero)[\\s,.()-]*(?:2|dos)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:6|seis))(?![\\s,.()-]*(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))\\b)"
+      ],
+      "onTurn": 1
+     },
      "severity": "critical"
     },
     {

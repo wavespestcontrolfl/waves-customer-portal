@@ -113,7 +113,10 @@ than written per scenario as regexes:
   scheduling predicate ("scheduled for", "visit", "set for"). `{ allowWindow: [13, 15] }`
   (24-hour) permits the returned window spoken as a window whose part of day, when
   spoken, is the returned one ("1 to 3", "1 PM to 3 PM", "1 to 3 in the afternoon" —
-  never "1 AM to 3 PM"); `{ about: "reopening" }` grades only
+  never "1 AM to 3 PM"); `{ allow: "returned" }` permits only exact date-and-time
+  pairs from an earlier successful `find_slots` or `get_availability` answer. The date
+  and time stay paired, and an offer made before the tool answer remains ungrounded;
+  `{ about: "reopening" }` grades only
   clauses about the office reopening — including every "available" construction, since
   the office being available is its reopening — so a caller-stated appointment can be echoed.
 - `no_account_pii` — street addresses (ordinal street names included), NANP phone numbers (typed, or spoken digit by
