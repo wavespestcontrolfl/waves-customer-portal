@@ -406,6 +406,7 @@ function shipmentId(line) {
 }
 
 function recordLine(state, line, status) {
+  if (!state.recorded.has(shipmentId(line))) state.invoiceOwner.set(shipmentId(line), line.email.id);
   const rows = state.recorded.get(shipmentId(line)) || [];
   rows.push({ status, email_id: line.email.id });
   state.recorded.set(shipmentId(line), rows);
@@ -424,6 +425,13 @@ async function replayLine(conn, line, state) {
     return settledRow(state, line, line.recordedStatus);
   }
   if (!line.shipmentKey) return settledRow(state, line, 'no_shipment_key');
+  // sweep.js siteOneInvoiceLines: the store and billing copies of one
+  // invoice — the first copy that records a line owns it, and the live sweep
+  // drops every other copy whole. Its check reads the table, which holds
+  // nothing for an invoice from before the lane, so the replay applies the
+  // same rule to the lines IT has recorded so far.
+  const owner = line.vendor === 'siteone' && state.invoiceOwner.get(shipmentId(line));
+  if (owner && owner !== line.email.id) return settledRow(state, line, 'other_invoice_copy');
   if (handedOffBy(state.recorded.get(shipmentId(line)) || [], line.email.id)) return settledRow(state, line, 'handed_to_person');
   const found = line.forcedStatus
     ? { status: line.forcedStatus, productId: null, product: null }
@@ -496,7 +504,7 @@ async function main() {
     // question (title, quantity, vendor, invoice evidence) to its answer.
     const state = {
       limit, tally: {}, handedToAgent: 0, llmCalls: 0, llmFailures: 0, allowedCategories: null,
-      decided: new Map(), recorded: new Map(), proposals: emptyProposals(), dependsOnEarlier: 0,
+      decided: new Map(), recorded: new Map(), invoiceOwner: new Map(), proposals: emptyProposals(), dependsOnEarlier: 0,
     };
     const rows = [];
     for (const line of lines) rows.push(await replayLine(conn, line, state));

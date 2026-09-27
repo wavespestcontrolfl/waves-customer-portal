@@ -199,7 +199,7 @@ test('the telemetry gates stay set to false once the server modules have loaded'
 // recorded so far, in order — never to today's table, which already holds
 // the replayed line itself (a placeholder would otherwise hand itself off).
 describe('replayLine hand-offs', () => {
-  const state = () => ({ tally: {}, recorded: new Map(), proposals: emptyProposals() });
+  const state = () => ({ tally: {}, recorded: new Map(), invoiceOwner: new Map(), proposals: emptyProposals() });
   const line = (emailId, extra = {}) => ({
     vendor: 'amazon', orderNumber: '111', shipmentKey: 'S1', lineNo: 1, email: { id: emailId }, item: { title: 'x', quantity: 1 }, ...extra,
   });
@@ -209,6 +209,16 @@ describe('replayLine hand-offs', () => {
     expect((await replayLine(null, line('e1', { forcedStatus: 'no_items' }), s)).status).toBe('no_items');
     expect((await replayLine(null, line('e2', { forcedStatus: 'no_items' }), s)).status).toBe('handed_to_person');
     expect(s.tally).toEqual({ no_items: 1, handed_to_person: 1 });
+  });
+
+  // Codex round 8: the first SiteOne copy to record a line owns the
+  // invoice; the live sweep drops the other copy whole, extra lines and all.
+  test('a second SiteOne copy of an invoice the replay already recorded is dropped whole', async () => {
+    const s = state();
+    const siteOne = (emailId, lineNo) => line(emailId, { vendor: 'siteone', shipmentKey: 'INV1', lineNo, forcedStatus: 'unreadable' });
+    expect((await replayLine(null, siteOne('store', 1), s)).status).toBe('unreadable');
+    expect((await replayLine(null, siteOne('billing', 2), s)).status).toBe('other_invoice_copy');
+    expect((await replayLine(null, siteOne('store', 2), s)).status).toBe('handed_to_person');
   });
 
   test('an undelivered-shipment hold hands off a later email for that shipment only', async () => {
