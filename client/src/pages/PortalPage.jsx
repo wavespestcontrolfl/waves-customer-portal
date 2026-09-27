@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
+import { Fragment, useState, useEffect, useRef, useCallback, useId, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, tokenCustomerId } from '../hooks/useAuth';
@@ -4176,7 +4176,29 @@ function GoldSwitch({ on, onChange, label, disabled = false, locked = false }) {
   );
 }
 
+function NotificationChannelSelect({ children, disabled, ...props }) {
+  return (
+    <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+      <select {...props} disabled={disabled} style={{
+        appearance: 'none', WebkitAppearance: 'none',
+        fontSize: 16, fontWeight: 700, color: B.glassNavy, fontFamily: 'inherit',
+        border: '1px solid #D8D0C0', borderRadius: 8, background: GLASS_SUBTLE,
+        padding: '7px 32px 7px 12px', height: 44, minHeight: 44,
+        cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.4 : 1,
+      }}>
+        {children}
+      </select>
+      <Icon name="chevronDown" size={16} strokeWidth={2} style={{
+        position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)',
+        pointerEvents: 'none', zIndex: 3, color: B.glassNavy, opacity: disabled ? 0.4 : 1,
+      }} />
+    </span>
+  );
+}
+
 function AppNotificationSettings({ prefs, app, saving, onSave }) {
+  const [expanded, setExpanded] = useState(false);
+  const settingsId = useId();
   if (!prefs.appPreferencesAvailable) return null;
   const connectionCopy = {
     checking: 'Checking this device…',
@@ -4191,48 +4213,62 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
     web: 'Open the Waves app on your phone to connect a device.',
   };
   const connected = app.status?.fresh === true;
+  const needsSetup = prefs.pushEnabled === false || (app.deviceState !== 'checking' && !app.ready);
+  const showSettings = expanded || needsSetup;
   return (
-    <div style={{ marginTop: 16, padding: 16, background: GLASS_SUBTLE, border: '1px solid #E7E2D7', borderRadius: 8 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center' }}>
-        <div>
-          <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>App notifications</div>
-          <div role="status" style={{ marginTop: 4, fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
-            {app.deviceState === 'web' && connected ? 'Connected to your Waves app.' : connectionCopy[app.deviceState] || connectionCopy.registration_unavailable}
-          </div>
+    <div style={{ marginTop: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <div role="status" style={{ fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
+          {prefs.pushEnabled === false ? 'App notifications are off.'
+            : app.deviceState === 'web' && connected ? 'Connected to your Waves app.'
+              : connectionCopy[app.deviceState] || connectionCopy.registration_unavailable}
         </div>
-        <GoldSwitch on={prefs.pushEnabled !== false} onChange={() => onSave({ pushEnabled: prefs.pushEnabled === false })} label="App notifications for my account" disabled={saving} />
-      </div>
-      {(prefs.pushEnabled === false || (!connected && app.status?.registered)) && (
-        <p style={{ margin: '8px 0 0', fontSize: 16, color: B.grayDark, lineHeight: 1.5 }}>
-          {prefs.pushEnabled === false ? 'App notifications are off. Your notification history is still available.'
-            : 'Open the app to refresh its connection.'}
-        </p>
-      )}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
-        {isNativeApp() && app.deviceState !== 'granted' && (
-          <button type="button" data-glass-accent="" disabled={app.busy} onClick={app.enable} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>
-            {app.busy ? 'Connecting…' : 'Connect this device'}
+        {!needsSetup && (
+          <button type="button" data-glass="chip" aria-expanded={expanded} aria-controls={settingsId}
+            aria-label={`${expanded ? 'Hide' : 'Manage'} app notification settings`}
+            onClick={() => setExpanded((previous) => !previous)}
+            style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, flexShrink: 0 }}>
+            {expanded ? 'Hide' : 'Manage'}
           </button>
         )}
-        <button type="button" data-glass-accent="" disabled={saving || !app.ready} onClick={() => onSave(Object.fromEntries(VISIT_APP_CHANNEL_KEYS.map((key) => [key, 'push'])))} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, opacity: app.ready ? 1 : 0.5 }}>
-          Use app for visit updates
-        </button>
       </div>
-      <details style={{ marginTop: 8, fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
-        <summary data-glass="chip" style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, minHeight: 44, alignContent: 'center', width: 'fit-content', padding: '0 10px', borderRadius: 8, color: B.glassNavy, position: 'relative' }}>Delivery details</summary>
-        <p style={{ margin: '4px 0 12px' }}>
-          Use app notifications for appointments, reminders, technician updates, reports and requests. Alerts you have turned off stay off.
-        </p>
-        <p style={{ margin: '0 0 12px' }}>
-          If an app notification cannot be delivered, we may use text or email where available, following your preferences.
-          {prefs.smsEnabled === false ? ' Text backup is off.' : ''}
-          {prefs.emailEnabled === false ? ' Email backup is off.' : ''}
-        </p>
-        <p style={{ margin: '0 0 12px' }}>
-          Request confirmations continue by email. Manage invoices and payment notifications in Billing. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
-        </p>
-        <button type="button" data-glass-accent="" onClick={app.refresh} disabled={app.busy} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>Check connection</button>
-      </details>
+      <div id={settingsId} hidden={!showSettings} style={{ marginTop: 12, padding: 16, background: GLASS_SUBTLE, border: '1px solid #E7E2D7', borderRadius: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center' }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Allow app notifications</div>
+          <GoldSwitch on={prefs.pushEnabled !== false} onChange={() => onSave({ pushEnabled: prefs.pushEnabled === false })} label="App notifications for my account" disabled={saving} />
+        </div>
+        {(prefs.pushEnabled === false || (!connected && app.status?.registered)) && (
+          <p style={{ margin: '8px 0 0', fontSize: 16, color: B.grayDark, lineHeight: 1.5 }}>
+            {prefs.pushEnabled === false ? 'Your notification history is still available.'
+              : 'Open the app to refresh its connection.'}
+          </p>
+        )}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
+          {isNativeApp() && app.deviceState !== 'granted' && (
+            <button type="button" data-glass-accent="" disabled={app.busy} onClick={app.enable} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>
+              {app.busy ? 'Connecting…' : 'Connect this device'}
+            </button>
+          )}
+          <button type="button" data-glass-accent="" disabled={saving || !app.ready} onClick={() => onSave(Object.fromEntries(VISIT_APP_CHANNEL_KEYS.map((key) => [key, 'push'])))} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, opacity: app.ready ? 1 : 0.5 }}>
+            Use app for visit updates
+          </button>
+        </div>
+        <details style={{ marginTop: 8, fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
+          <summary data-glass="chip" style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, minHeight: 44, alignContent: 'center', width: 'fit-content', padding: '0 10px', borderRadius: 8, color: B.glassNavy, position: 'relative' }}>Delivery details</summary>
+          <p style={{ margin: '4px 0 12px' }}>
+            Use app notifications for appointments, reminders, technician updates, reports and requests. Alerts you have turned off stay off.
+          </p>
+          <p style={{ margin: '0 0 12px' }}>
+            If an app notification cannot be delivered, we may use text or email where available, following your preferences.
+            {prefs.smsEnabled === false ? ' Text backup is off.' : ''}
+            {prefs.emailEnabled === false ? ' Email backup is off.' : ''}
+          </p>
+          <p style={{ margin: '0 0 12px' }}>
+            Request confirmations continue by email. Manage invoices and payment notifications in Billing. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
+          </p>
+          <button type="button" data-glass-accent="" onClick={app.refresh} disabled={app.busy} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>Check connection</button>
+        </details>
+      </div>
     </div>
   );
 }
@@ -5364,16 +5400,15 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
               const propertyOwned = perPropertyTexts && PROPERTY_OWNED_PREF_KEYS.includes(p.key);
               return (
                 <div key={p.key} data-reminder-row="" style={{
-                  // Keep paired controls together on compact screens. A
-                  // property-owned alert has only a select here, so it fits
-                  // beside its label without repeating the property hint.
+                  // Let each label and its controls share a row while they
+                  // fit, then wrap the control group together on narrow screens.
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                   flexWrap: 'wrap',
                   padding: '12px 0',
                   borderBottom: i < items.length - 1 ? '1px solid #E7E2D7' : 'none',
                   gap: 12,
                 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: propertyOwned ? '1 1 140px' : '1 1 160px', minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 140px', minWidth: 0 }}>
                     <span style={{ width: 34, height: 34, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', color: B.glassNavy, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                       <Icon name={p.icon} size={18} strokeWidth={1.75} />
                     </span>
@@ -5389,9 +5424,9 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                       the controls across lines. */}
                   <div style={{
                     display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
-                    marginLeft: compact ? 0 : 'auto',
-                    flex: compact && p.channelKey && !propertyOwned ? '1 0 100%' : '0 0 auto',
-                    justifyContent: compact ? 'flex-end' : undefined,
+                    marginLeft: 'auto',
+                    flex: '0 0 auto',
+                    justifyContent: 'flex-end',
                   }}>
                   {p.channelKey && (() => {
                     // Email/Both can only be offered once an email is on file —
@@ -5416,22 +5451,16 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                       : isOn;
                     const selectable = alertOn && opts.length > 1;
                     return (
-                      <select
+                      <NotificationChannelSelect
                         data-testid={propertyOwned ? `per-property-${p.key}` : undefined}
                         value={prefs[p.channelKey] === 'push' || hasEmail ? (prefs[p.channelKey] || 'sms') : 'sms'}
                         onChange={(e) => handleChannelChange(p.channelKey, e.target.value)}
                         disabled={!selectable || !!prefsLocked[p.channelKey]}
                         aria-label={`Delivery method for ${p.label}`}
                         aria-describedby={propertyOwned ? 'appointment-delivery-note' : undefined}
-                        style={{
-                          fontSize: 16, fontWeight: 700, color: B.glassNavy,
-                          border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 44,
-                          background: '#fff', fontFamily: 'inherit', flexShrink: 0,
-                          cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
-                        }}
                       >
                         {opts.map(o => <option key={o.value} value={o.value} disabled={o.value === 'push' && !app.ready}>{o.label}</option>)}
-                      </select>
+                      </NotificationChannelSelect>
                     );
                   })()}
                   {!propertyOwned && (
@@ -5453,12 +5482,11 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                   <GlassTile name="mail" size={34} />
                   <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Request updates</div>
                 </div>
-                <select aria-label="Delivery method for request updates" value={prefs.requestChannel || 'email'}
-                  disabled={!!prefsLocked.requestChannel} onChange={(e) => handleChannelChange('requestChannel', e.target.value)}
-                  style={{ fontSize: 16, fontWeight: 700, fontFamily: 'inherit', padding: '7px 10px', minHeight: 44, borderRadius: 8, border: '1px solid #D8D0C0', background: '#fff', color: B.glassNavy, marginLeft: 'auto' }}>
+                <NotificationChannelSelect aria-label="Delivery method for request updates" value={prefs.requestChannel || 'email'}
+                  disabled={!!prefsLocked.requestChannel} onChange={(e) => handleChannelChange('requestChannel', e.target.value)}>
                   <option value="email">Email</option>
                   <option value="push" disabled={!app.ready && prefs.requestChannel !== 'push'}>App</option>
-                </select>
+                </NotificationChannelSelect>
               </div>
             )}
           </div>
