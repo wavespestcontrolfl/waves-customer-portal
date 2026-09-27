@@ -594,7 +594,19 @@ async function listCustomerPrepaidPlans(db, customerId) {
   return plans.sort((a, b) => (b.remainingVisits || 0) - (a.remainingVisits || 0));
 }
 
+// When a visit's prepayment was received, for a single-visit or bulk stamp.
+// An edit that records no more money than the stamp already held (a note,
+// method or amount correction) keeps the original time; a larger amount, or a
+// fresh stamp, is money received now. SMS payment evidence dates a prepayment
+// by this stamp, so an edit must not pass an old payment off as new
+// (Codex #4996 r7). Series restamps are deliberate amendments and keep their
+// own allocation time (stampSeriesPrepaid).
+function prepaidAtFor(knex, amount) {
+  return knex.raw('CASE WHEN prepaid_at IS NOT NULL AND COALESCE(prepaid_amount, 0) >= ? THEN prepaid_at ELSE now() END', [amount]);
+}
+
 module.exports = {
+  prepaidAtFor,
   TERMINAL_STATUSES,
   ANNUAL_PREPAY_METHOD,
   hasAnnualCoverage,

@@ -54,6 +54,28 @@ postgres('prepaid series integrity against migrated PostgreSQL', () => {
     return row;
   }
 
+  test('Codex #4996 r7: a stamp edit that records no more money keeps the time the money came in; more money, or a fresh stamp, is received now', async () => {
+    const { prepaidAtFor } = require('../services/prepaid-series');
+    const receivedAt = new Date('2040-01-05T16:00:00Z');
+    const row = await visit({ prepaid_amount: 100, prepaid_method: 'cash', prepaid_at: receivedAt });
+    const stampedAt = async (id) => (await trx('scheduled_services').where({ id }).first('prepaid_at')).prepaid_at;
+    // A method or note correction, then a lower amount: still the original receipt.
+    await trx('scheduled_services').where({ id: row.id }).update({ prepaid_amount: 100, prepaid_method: 'check', prepaid_note: 'fixed', prepaid_at: prepaidAtFor(trx, 100) });
+    expect((await stampedAt(row.id)).getTime()).toBe(receivedAt.getTime());
+    await trx('scheduled_services').where({ id: row.id }).update({ prepaid_amount: 80, prepaid_at: prepaidAtFor(trx, 80) });
+    expect((await stampedAt(row.id)).getTime()).toBe(receivedAt.getTime());
+    // More money than the stamp held is money received now.
+    await trx('scheduled_services').where({ id: row.id }).update({ prepaid_amount: 180, prepaid_at: prepaidAtFor(trx, 180) });
+    expect((await stampedAt(row.id)).getTime()).not.toBe(receivedAt.getTime());
+    const fresh = await visit();
+    await trx('scheduled_services').where({ id: fresh.id }).update({ prepaid_amount: 50, prepaid_at: prepaidAtFor(trx, 50) });
+    expect(await stampedAt(fresh.id)).not.toBeNull();
+    // Both manual writers (the single-visit route and the bulk action) stamp through it.
+    const routes = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    expect(routes.match(/prepaid_at: prepaidAtFor\(db, amt\)/g)).toHaveLength(2);
+    expect(routes).not.toMatch(/prepaid_amount: amt,[\s\S]{0,200}prepaid_at: (?:new Date\(\)|db\.fn\.now\(\))/);
+  });
+
   test('the watchdog distinguishes single-visit payments from incomplete manual series coverage', async () => {
     const { runInner } = require('../services/schedule-integrity-watchdog');
     const paidAt = new Date('2040-01-05T16:00:00Z');

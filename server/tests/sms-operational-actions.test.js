@@ -1278,7 +1278,8 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     // Naming the tender, or a bare split/separate, describes a payment — not a change request.
     for (const description of ['Did my card payment go through?', 'Was the autopay charged this month?',
       'I split the payment into two charges; did both payments go through?', 'Did you receive the separate payment?',
-      'Did that payment method work?', 'Was this payment method charged?', 'Did my setup payment go through?']) {
+      'Did that payment method work?', 'Was this payment method charged?', 'Did my setup payment go through?',
+      'Did you add my cash payment?', 'Can you update me on my payment?']) {
       expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(true);
     }
     // Codex #4996 r2: a term the customer negates in its own clause is not the request.

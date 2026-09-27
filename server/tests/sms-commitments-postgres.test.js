@@ -2061,6 +2061,11 @@ postgres('SMS commitments on PostgreSQL', () => {
       const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
       expect(Object.fromEntries(evidence.records.filter((r) => r.payment_source === 'invoice').map((r) => [r.invoice_id, r.id])))
         .toEqual({ [first.id]: firstPaid.id, [second.id]: secondPaid.id, [legacy.id]: legacyPaid.id });
+      // Each allocation of the combined charge carries the whole charge (Codex #4996 r7).
+      const text = Object.fromEntries(evidence.records.filter((r) => r.payment_source === 'invoice').map((r) => [r.id, r.text]));
+      expect(text[firstPaid.id]).toContain('; part of one $120.00 charge covering 2 invoices');
+      expect(text[secondPaid.id]).toContain('; part of one $120.00 charge covering 2 invoices');
+      expect(text[legacyPaid.id]).not.toContain('part of one');
     }
   });
 
@@ -2265,6 +2270,29 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(record.text).toMatch(/^Prepayment of \$100\.00 recorded \S+ for the Quarterly Pest Control visit on \S+ — part of \$300\.00 prepaid across 3 visits$/);
     }
     expect(JSON.stringify(evidence.records)).not.toContain('941-555-0123');
+  });
+
+  test('Codex #4996 r7: a no-show or cancellation fee takes its property from the visit or estimate its payment row names', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [visit] = await mockPg('scheduled_services').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
+      service_type: 'Quarterly Pest Control', scheduled_date: etDateString(message.created_at), window_start: '09:00:00', status: 'no_show',
+      created_at: new Date(message.created_at.getTime() - 86400000) }).returning('id');
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
+      status: 'accepted', service_interest: 'Termite' }).returning('id');
+    const feeInvoice = (number) => ({ customer_id: message.customer_id, token: randomUUID(), invoice_number: number,
+      title: 'No-show fee', total: 50, subtotal: 50, line_items: '[]', status: 'paid', paid_at: after });
+    const [visitFee, estimateFee] = await mockPg('invoices').insert([feeInvoice('WPC-2026-0991'), feeInvoice('WPC-2026-0992')]).returning('id');
+    const feePayment = (invoiceId, metadata) => ({ customer_id: message.customer_id, amount: 50, status: 'paid', payment_date: etDateString(after),
+      processor: 'stripe', stripe_payment_intent_id: `pi_fee_${invoiceId}`, created_at: after,
+      metadata: JSON.stringify({ purpose: 'card_hold_no_show_fee', invoice_id: invoiceId, ...metadata }) });
+    await mockPg('payments').insert([feePayment(visitFee.id, { scheduled_service_id: visit.id }), feePayment(estimateFee.id, { estimate_id: estimate.id })]);
+    const commitment = { kind: 'other', description: 'Did the fee go through?', sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const fees = evidence.records.filter((r) => r.payment_source === 'invoice');
+    expect(Object.fromEntries(fees.map((r) => [r.invoice_id, r.property_id])))
+      .toEqual({ [visitFee.id]: context.properties[0].id, [estimateFee.id]: context.properties[0].id });
+    for (const fee of fees) expect(admissibleWitness(fee, commitment)).toBe(true);
   });
 
   test('Codex #4996 r5: a setup-only invoice from an estimate is scoped to the estimate\'s property through its setup-fee claim', async () => {

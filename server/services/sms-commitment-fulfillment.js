@@ -116,11 +116,13 @@ const WITNESS_TRANSITION_STATUSES = Object.freeze(['confirmed', 'rescheduled', '
 // tender/method word counts, "did my card payment go through?" merely names
 // the tender — and money going the OTHER way (refund, dispute, chargeback).
 // Bare "split"/"separate" are not here: "did the separate payment go
-// through?" describes a payment. Nor is the noun "setup": "did my setup
-// payment go through?" asks about a setup fee (Codex #4996 r5 test). Nor is a bare "payment method" ("did that
+// through?" describes a payment. Nor is a bare "payment method" ("did that
 // payment method work?" is a settlement question): billing across TWO
-// methods/cards is the split request.
-const NOT_ANSWERED_BY_PAYMENT = /\b(?:(?:two|2|multiple)\s+(?:payment\s+)?(?:methods|cards)|(?:update|change|switch|replace|remove|add|set up|cancel|turn (?:on|off))\s+(?:\w+\s+){0,3}?(?:card|method|autopay|auto ?pay|payment|billing)|setup\s+(?:autopay|auto ?pay)|refund\w*|disput\w*|chargeback\w*|overcharg\w*|double[- ]?charg\w*)\b/gi;
+// methods/cards is the split request. Nor is the noun "setup" ("did my setup
+// payment go through?" asks about a setup fee, Codex #4996 r5), nor a payment
+// as the thing changed ("did you add my cash payment?" asks whether it was
+// recorded, r7): the change must be to a card, method, autopay or billing.
+const NOT_ANSWERED_BY_PAYMENT = /\b(?:(?:two|2|multiple)\s+(?:payment\s+)?(?:methods|cards)|(?:update|change|switch|replace|remove|add|set up|cancel|turn (?:on|off))\s+(?:\w+\s+){0,3}?(?:cards?|methods?|autopay|auto ?pay|billing)|setup\s+(?:autopay|auto ?pay)|refund\w*|disput\w*|chargeback\w*|overcharg\w*|double[- ]?charg\w*)\b/gi;
 // A term the customer negates names what they are NOT asking for: "Don't
 // refund it, did my payment go through?", "I don't want to change my card —
 // did the charge land?" (Codex #4996 r2). A negation counts only inside the
@@ -157,6 +159,9 @@ const namesNoInvoice = (alias) => INVOICE_KEYS.map((key) => `COALESCE(${alias}.m
 // refund is shown to the model and changes the evidence, so a refund racing
 // a close fails the recheck (pre-push audit).
 const NOT_FULLY_REFUNDED = (t) => `COALESCE(${t}.refund_amount, 0) < ${t}.amount`;
+// A metadata id as a uuid for an indexed join, or NULL when it is not one.
+const metadataUuid = (t, key) => `CASE WHEN ${t}.metadata::jsonb ->> '${key}' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  THEN (${t}.metadata::jsonb ->> '${key}')::uuid END`;
 const refundNote = (refunded) => (Number(refunded) > 0 ? `; $${Number(refunded).toFixed(2)} of it refunded` : '');
 // A method is shown only as one of these; the free-form method some writers
 // accept (the /prepaid route) never reaches the model.
@@ -269,10 +274,20 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         // a delivered notice, #4816 r49). A row matching two invoices (a
         // PaymentIntent naming none, shared by both) counts once, exact or
         // manual links first.
-        conn.select('*').from(conn('payments as p')
+        // A combined-balance charge books one row per invoice it covers
+        // (pay-combined.js); each carries the whole charge's total, so a
+        // question about the full amount has one record to quote (Codex
+        // #4996 r7).
+        conn.select('*', conn.raw('SUM(payment_amount) OVER (PARTITION BY charge_key) AS charge_total'),
+          conn.raw('COUNT(*) OVER (PARTITION BY charge_key) AS charge_invoices')).from(conn('payments as p')
           .joinRaw(`JOIN invoices pinv ON pinv.customer_id = p.customer_id AND pinv.payer_id IS NULL
             AND (${exactMatchSql} OR ${manualMatchSql} OR ${sharedPiSql})`)
           .leftJoin('scheduled_services as pinv_visit', 'pinv_visit.id', 'pinv.scheduled_service_id')
+          // A no-show or cancellation fee invoice has no visit; its payment
+          // row keeps the visit and estimate (estimate-card-holds.js,
+          // appointment-card-request.js), and so the property (r7).
+          .joinRaw(`LEFT JOIN scheduled_services fee_visit ON fee_visit.id = ${metadataUuid('p', 'scheduled_service_id')}`)
+          .joinRaw(`LEFT JOIN estimates fee_estimate ON fee_estimate.id = ${metadataUuid('p', 'estimate_id')}`)
           // A setup-only invoice from an estimate has no visit; its setup-fee
           // claim keeps the estimate, and so the property (Codex #4996 r5).
           .leftJoin('setup_fee_claims as sfc', 'sfc.invoice_id', 'pinv.id')
@@ -286,7 +301,9 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .whereRaw(`${settledAtSql} > ? AND ${settledAtSql} <= ?`, [after, now])
           .distinctOn('p.id').orderBy('p.id').orderByRaw(`(${exactMatchSql} OR ${manualMatchSql}) DESC, pinv.id`)
           .select('p.id', 'p.amount as payment_amount', 'p.refund_amount', conn.raw(`${settledAtSql} AS settled_at`), 'pinv.id as invoice_id',
-            'pinv.title', 'pinv.invoice_number', conn.raw('COALESCE(pinv_visit.property_id, sfc_estimate.property_id) AS property_id'),
+            'pinv.title', 'pinv.invoice_number',
+            conn.raw('COALESCE(pinv_visit.property_id, fee_visit.property_id, fee_estimate.property_id, sfc_estimate.property_id) AS property_id'),
+            conn.raw('COALESCE(p.stripe_payment_intent_id, p.id::text) AS charge_key'),
             conn.raw('pinv.paid_at IS NOT NULL AS paid_in_full'))
           .as('invoice_payments'))
           .orderBy([{ column: 'settled_at', order: 'desc' }, { column: 'id', order: 'desc' }]).limit(LIMIT + 1),
@@ -349,10 +366,12 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
             conn.raw('COUNT(*) OVER (PARTITION BY pv.prepaid_at) AS prepaid_visits')),
       ]).then(([invoicePayments, ledger, deposits, prepaidVisits]) => {
         const legs = [
-          invoicePayments.map(({ paid_in_full: paidInFull, ...row }) => ({ ...row, payment_source: 'invoice',
+          invoicePayments.map(({ paid_in_full: paidInFull, charge_key: _charge, charge_total: chargeTotal, charge_invoices: chargeInvoices, ...row }) => ({
+            ...row, payment_source: 'invoice',
             text: `Payment of $${Number(row.payment_amount).toFixed(2)} toward invoice ${row.invoice_number || row.invoice_id}`
               + `${row.title ? ` (${row.title})` : ''} received ${etDateString(new Date(row.settled_at))}${refundNote(row.refund_amount)}`
-              + `${paidInFull ? '; the invoice is paid in full' : ''}` })),
+              + `${paidInFull ? '; the invoice is paid in full' : ''}`
+              + `${Number(chargeInvoices) > 1 ? `; part of one $${Number(chargeTotal).toFixed(2)} charge covering ${chargeInvoices} invoices` : ''}` })),
           ledger.map(({ method, billed_month: billedMonth, ...row }) => ({ ...row, payment_source: 'ledger', property_id: null,
             text: `Payment of $${Number(row.amount).toFixed(2)} recorded ${dateOnlyString(row.payment_date)}${tender(method)}`
               + `${/^\d{4}-\d{2}$/.test(billedMonth || '') ? ` (monthly plan charge for ${billedMonth})` : ''}${refundNote(row.refund_amount)}` })),
