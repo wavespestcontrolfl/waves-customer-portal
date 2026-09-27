@@ -1,5 +1,5 @@
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
-const { hasCreditableWaterIn, normalizeLawnAftercare } = require('./lawn-aftercare');
+const { hasCreditableWaterIn, normalizeLawnAftercare, wateringRestrictionAction } = require('./lawn-aftercare');
 
 const { WAVES_SUPPORT_PHONE_DISPLAY: WAVES_PHONE_DISPLAY } = require('../../constants/business');
 
@@ -35,7 +35,7 @@ const FINDINGS_VERB_RE = /\b(find|found|finding|findings|see|saw|notice|noticed|
 // you notice…", "found", "findings") — not lookups ("Can I see my next
 // appointment?") or trend checks ("Did you notice the lawn improving?").
 const OBSERVATION_QUESTION_RE = /\b(?:what|which|anything)\b[^?.!]{0,20}\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\b(?:found|findings|observed|spotted)\b/;
-const WATERING_ADVICE_QUESTION_RE = /\b(?:how\s+(?:much|long|often|should)|when\s+(?:should|can|do)|(?:should|can|could|do)\s+i|what\s+is\s+(?:my|the)\s+(?:watering|irrigation)\s+plan)\b/;
+const WATERING_ADVICE_QUESTION_RE = /\b(?:(?:how(?:\s+(?:much|long|often))?|when)\s+(?:(?:should|can|could|do)\s+(?:i|we)\s+)?|(?:should|can|could|do)\s+(?:i|we)\s+)(?:water\w*|irrigat\w*|run\s+(?:(?:the|my|each)\s+)?(?:sprinklers?|zones?|irrigation))\b|\bwhat\s+is\s+(?:my|the)\s+(?:watering|irrigation)\s+plan\b/;
 // Future treatment timing ("When are you spraying next?", "What are you
 // treating next?", "When is the next treatment?") is a scheduling question.
 const FUTURE_TREATMENT_RE = /\b(?:next|again|upcoming|will\s+you|are\s+you\s+(?:going\s+to|coming)|when\s+(?:are|will|do|does|is|can|could|would|should)\b)/;
@@ -387,6 +387,7 @@ function targetsFromApplications(applications = []) {
 }
 
 function answerNextSteps({ data = {}, nextAppointment } = {}) {
+  const wateringTask = wateringRestrictionAction(normalizeLawnAftercare(data.reportV2?.aftercare));
   const dynamic = data.dynamicContext || {};
   const lawnAssessment = data.lawnAssessment || null;
   if (data.serviceLine === 'lawn' && lawnAssessment?.snapshot) {
@@ -403,6 +404,7 @@ function answerNextSteps({ data = {}, nextAppointment } = {}) {
       ? `Visible improvement usually takes ${expected.minDays}-${expected.maxDays} days, depending on irrigation, mowing, rainfall, and site conditions.`
       : '';
     return [
+      wateringTask,
       cardLines.length ? `Recommended next step: ${cardLines[0]}` : '',
       cardLines.length > 1 ? `Also noted: ${cardLines.slice(1).join(' ')}` : '',
       watchItems.length ? `What we are watching: ${watchItems.slice(0, 2).join(' ')}` : '',
@@ -424,6 +426,7 @@ function answerNextSteps({ data = {}, nextAppointment } = {}) {
 
   if (primaryMove || recommendations.length) {
     return [
+      wateringTask,
       primaryMove ? `Priority next step: ${primaryMove}` : `Recommended next step: ${recommendations[0]}`,
       recommendations.length > 1 ? `Also noted: ${recommendations.slice(1, 3).join(' ')}` : '',
       reentry ? `Re-entry: ${reentry}` : '',
@@ -444,7 +447,7 @@ function answerNextSteps({ data = {}, nextAppointment } = {}) {
     : '';
 
   return [
-    'No special repair or prep was flagged for you on this report.',
+    wateringTask || 'No special repair or prep was flagged for you on this report.',
     scopeLine,
     reentry ? `Re-entry: ${reentry}` : '',
     rinseLine,
@@ -587,7 +590,7 @@ function questionRoutingRules({
     // Explicit observation intent outranks incidental watering vocabulary:
     // "What did you find by the sprinkler?" still asks about findings.
     { test: (q) => OBSERVATION_QUESTION_RE.test(q) && !EFFECTIVENESS_RE.test(q) && !APPOINTMENT_RE.test(q)
-      && !(wateringIntent && (ADVICE_RE.test(q) || WATERING_ADVICE_QUESTION_RE.test(q))), answer: () => answerFindings({ data }) },
+      && !ADVICE_RE.test(q) && !WATERING_ADVICE_QUESTION_RE.test(q), answer: () => answerFindings({ data }) },
     // Preserve unverified or restricted aftercare before any watering plan.
     {
       test: () => wateringIntent

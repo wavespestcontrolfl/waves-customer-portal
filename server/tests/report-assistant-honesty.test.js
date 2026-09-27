@@ -225,9 +225,27 @@ describe('watering questions answer with the weekly plan when the report carries
       expect(answer).toMatch(expected);
       expect(answer).not.toMatch(/This week:|re-entry guidance/);
     }
-    const findingsAnswer = answerServiceReportQuestion({ question: 'What did you find by the sprinkler?', data });
-    expect(findingsAnswer).toMatch(/Sprinkler area checked/);
-    expect(findingsAnswer).not.toMatch(expected);
+    for (const question of ['What did you find by the sprinkler?', 'How much fungus did you find by the sprinkler?']) {
+      const findingsAnswer = answerServiceReportQuestion({ question, data });
+      expect(findingsAnswer).toMatch(/Sprinkler area checked/);
+      expect(findingsAnswer).not.toMatch(expected);
+    }
+  });
+
+  test.each(['snapshot', 'recommendation', 'fallback'])('generic next-step questions retain mandatory aftercare in the %s answer', (source) => {
+    const mowing = 'Keep mowing at 3.5 inches.';
+    const data = {
+      serviceLine: 'lawn',
+      dynamicContext: source === 'recommendation' ? { aiSummary: { recommendedNextStep: { text: mowing } } } : {},
+      lawnAssessment: source === 'snapshot' ? { snapshot: {}, recommendationCards: [{ customerCopy: mowing }] } : {},
+      findings: [{ title: 'Mushrooms observed' }],
+      reportV2: { aftercare: { watering: 'Product note.', needsReview: true, evidenceSource: 'legacy_unverified_instruction' } },
+    };
+    for (const question of ['What should I do next?', 'What should I do about the mushrooms I observed?', 'What do you recommend based on what you spotted?']) {
+      const answer = answerServiceReportQuestion({ question, data });
+      expect(answer).toMatch(/^Confirm the product watering directions/);
+      if (source !== 'fallback') expect(answer).toContain(mowing);
+    }
   });
 });
 

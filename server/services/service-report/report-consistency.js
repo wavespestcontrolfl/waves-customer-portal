@@ -16,6 +16,8 @@
  * Pure + best-effort: returns null when there's nothing to reconcile.
  */
 
+const { normalizeLawnAftercare, wateringRestrictionAction } = require('./lawn-aftercare');
+
 // Customer-facing lead extraction for the today's-result hero. Unlike
 // firstSentence (whose callers want a short excerpt and tolerate a "…"),
 // the hero must be a COMPLETE sentence: the boundary logic skips periods
@@ -688,7 +690,8 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
       scheduled: true,
       headline: 'Follow-up already planned',
       reason: firstSentence(focus) || 'We’ll recheck the areas we flagged and compare them against today’s photos.',
-      customerAction: 'No action is needed from you before then unless the area changes quickly.',
+      customerAction: wateringRestrictionAction(normalizeLawnAftercare(reportV2?.aftercare))
+        || 'No action is needed from you before then unless the area changes quickly.',
     };
   }
 

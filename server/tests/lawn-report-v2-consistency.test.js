@@ -83,6 +83,12 @@ describe('unconfirmed product directions take precedence throughout the report',
     expect(report.snapshot.rootCause).toBeNull();
     expect(report.water.explanation).toMatch(/Confirm the product watering directions/);
     expect(report.snapshot.customerAction).not.toMatch(/follow it as written|a bit more even watering|Add a little irrigation time/);
+    const reconciled = reconcileLawnReport({
+      data: { lawnAssessment: { ...assessment, recommendations: { nextVisitFocus: 'Recheck the recorded lawn areas next visit.' } } },
+      reportV2: report,
+    });
+    expect(reconciled.followUp.customerAction).toMatch(/Confirm the product watering directions/);
+    expect(reconciled.followUp.customerAction).not.toMatch(/No action is needed/);
   });
 });
 
