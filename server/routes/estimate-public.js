@@ -5597,16 +5597,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // (serviceMixMakesNoGuaranteeClaim, decided by the route from the
   // estimate's rows): the card keeps the payment-option refund details but
   // does not promise no-contract terms, anytime cancellation, or a guarantee.
-  const planTermsNoGuarantee = noGuaranteeClaims;
-  // The guarantee heading and item cover the whole plan, so they need every
-  // service to carry the plan terms (a rodent or commercial service does not).
-  const planTermsNoMoneyBack = planTermsNoGuarantee || estimate?.noEstimateWideGuarantee === true;
+  // Every generic plan term on this card (no contract, cancel anytime, the
+  // guarantee) covers the whole plan, so it needs every service to carry the
+  // plan terms: termite, unknown, rodent or commercial work anywhere leaves
+  // only the factual refund details (AGENTS.md estimate truth scope).
+  const planTermsNeutral = noGuaranteeClaims || estimate?.noEstimateWideGuarantee === true;
   const planTermsCardHtml = showBillingCard ? `
   <section class="card plan-terms-card"${billingModeAttr}>
-    <h2>${planTermsNoMoneyBack ? 'Cancel &amp; refunds' : 'Cancel, refunds &amp; our guarantee'}</h2>
-    <p class="billing-lede">${planTermsNoGuarantee ? 'Your written service scope and terms apply.' : 'No contracts and no lock-in. Here&rsquo;s exactly where you stand if your plans change.'}</p>
+    <h2>${planTermsNeutral ? 'Cancel &amp; refunds' : 'Cancel, refunds &amp; our guarantee'}</h2>
+    <p class="billing-lede">${planTermsNeutral ? 'Your written service scope and terms apply.' : 'No contracts and no lock-in. Here&rsquo;s exactly where you stand if your plans change.'}</p>
     <ul class="plan-terms-list">
-      ${planTermsNoGuarantee ? '' : `<li class="plan-terms-item">
+      ${planTermsNeutral ? '' : `<li class="plan-terms-item">
         <span class="plan-terms-term">Cancel anytime &mdash; no contract</span>
         <span class="plan-terms-detail">No long-term commitment. Stop after any visit, with no cancellation fee.</span>
       </li>`}
@@ -5616,9 +5617,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       </li>` : ''}
       ${showAnnualPrepayOption ? `<li class="plan-terms-item">
         <span class="plan-terms-term">Annual prepay is prorated</span>
-        <span class="plan-terms-detail">${planTermsNoGuarantee ? 'Unused applications on the 12-month prepay plan are refunded on a prorated basis.' : 'On the 12-month prepay plan, cancel anytime and we refund every application you haven&rsquo;t used yet, prorated.'}</span>
+        <span class="plan-terms-detail">${planTermsNeutral ? 'Unused applications on the 12-month prepay plan are refunded on a prorated basis.' : 'On the 12-month prepay plan, cancel anytime and we refund every application you haven&rsquo;t used yet, prorated.'}</span>
       </li>` : ''}
-      ${planTermsNoMoneyBack ? '' : `<li class="plan-terms-item">
+      ${planTermsNeutral ? '' : `<li class="plan-terms-item">
         <span class="plan-terms-term">Money-back guarantee</span>
         <span class="plan-terms-detail">If a covered problem comes back between visits, we re-treat free. If we can&rsquo;t solve it, we refund your most recent service payment.</span>
       </li>`}
@@ -17669,7 +17670,11 @@ function normalizeOneTimeBreakdown(estData) {
         manualReviewReasons: Array.isArray(item.manualReviewReasons) ? item.manualReviewReasons : [],
         measurementWarnings: Array.isArray(item.measurementWarnings) ? item.measurementWarnings : [],
         warrantyStatus: item.warrantyStatus || null,
-        warrantyExtendedSelected: item.warrantyExtendedSelected === true,
+        // Absent stays absent: a legacy row without the engine flag reads its
+        // status text (preSlabExtendedWarrantySelected).
+        ...(Object.prototype.hasOwnProperty.call(item, 'warrantyExtendedSelected')
+          ? { warrantyExtendedSelected: item.warrantyExtendedSelected === true }
+          : {}),
         offerKey: item.offerKey || null,
         visits: item.visits || null,
         // Verified catalog identity frozen on a keyed public line (the

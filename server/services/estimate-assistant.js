@@ -9,6 +9,7 @@ const { isMistingSystemService } = require('../utils/mosquito-misting-system');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const { GUARANTEE_COPY, resolveOneTimeServiceCopy } = require('./estimate-one-time-copy');
 const {
+  collapseMirroredRows,
   hasPurchasedTrenchingWarranty,
   isPreSlabTreatmentItem,
   preSlabExtendedWarrantySelected,
@@ -217,7 +218,10 @@ function rawRecurringServiceRows(estData = {}) {
           return service.startsWith('termite_bond')
             || (service === 'termite_bait' && Object.prototype.hasOwnProperty.call(row, 'selectedBondTerm'))
             || (commercial && (recurringValue || row.quoteRequired === true || row.requiresManualReview === true))
-            || (recurringValue && lanes.includes('rodent'));
+            || (recurringValue && lanes.includes('rodent'))
+            // Ordinary termite work (no bond decision) still names its own
+            // service in the per-service terms, as "No guarantee.".
+            || (recurringValue && lanes.some((lane) => TERMITE_LANES.has(lane)));
         })
         : []),
     ];
@@ -526,13 +530,10 @@ function oneTimeRowsFromResult(result = {}) {
   const nestedOneTime = result.results?.oneTime && typeof result.results.oneTime === 'object'
     ? result.results.oneTime
     : {};
-  const items = [
-    ...(Array.isArray(oneTime.items) ? oneTime.items : []),
-    ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
-    ...(Array.isArray(nestedOneTime.items) ? nestedOneTime.items : []),
-    ...(Array.isArray(nestedOneTime.specItems) ? nestedOneTime.specItems : []),
-    ...(Array.isArray(result.specItems) ? result.specItems : []),
-  ];
+  // A row mirrored across containers is one job (collapseMirroredRows).
+  const items = collapseMirroredRows([
+    oneTime.items, oneTime.specItems, nestedOneTime.items, nestedOneTime.specItems, result.specItems,
+  ]);
   return items
     .filter((item) => item && item.onProg !== true && item.includedOnProgram !== true)
     .map((item) => ({ item, amount: Number(item.price ?? item.amount ?? item.total) }))
@@ -929,7 +930,13 @@ function buildEstimateAssistantContext({
       : {
         ...guarantees,
         serviceTerms: serviceTermsFromRows(
-          [servicesContext, recurringServicesContext, oneTimeItemsContext || []],
+          [
+            servicesContext, recurringServicesContext, oneTimeItemsContext || [],
+            // Termite rows the display merge left out (a raw engine row behind
+            // a frozen pest projection) still state their own terms.
+            estimateRecurringRows.filter((row) => (row.guaranteeLanes || []).some((lane) => TERMITE_LANES.has(lane))
+              && !recurringServices.some((merged) => merged.label === row.label)),
+          ],
           oneTimeItemsContext || [],
         ),
       },
@@ -1668,8 +1675,14 @@ const GUARANTEE_QUESTION_PATTERN = new RegExp(
   + '|treat(?:ed|ing)?\\s+(?:it|them|the\\s+\\w+)\\s+again)\\b',
   'i',
 );
+// A price question gets the price: "How much does the 5-year bond cost?"
+// names a coverage product, but it asks what that product costs. Only real
+// price intent counts; a dollar figure that names a job ("Does the $700
+// trenching include a guarantee?") is still a guarantee question.
+const PRICE_QUESTION_PATTERN = /\bhow much\b|\bwhat (?:does|do|is|would|will|'s)\b[^?.!]*\b(?:cost|price)s?\b/i;
 function answersWithServiceTerms(question, context = {}) {
-  return withoutEstimateWideTerms(context) && GUARANTEE_QUESTION_PATTERN.test(cleanText(question));
+  const q = cleanText(question);
+  return withoutEstimateWideTerms(context) && GUARANTEE_QUESTION_PATTERN.test(q) && !PRICE_QUESTION_PATTERN.test(q);
 }
 
 // On an estimate without estimate-wide terms, a model answer that makes a

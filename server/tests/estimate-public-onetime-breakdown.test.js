@@ -4642,6 +4642,9 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('<h2>Cancel &amp; refunds</h2>');
     expect(html).not.toContain('Money-back guarantee');
     expect(html).not.toContain('our guarantee');
+    // Rodent is terms-neutral: no generic contract or cancellation promise either.
+    expect(html).not.toContain('No contracts and no lock-in');
+    expect(html).not.toContain('Cancel anytime &mdash; no contract');
   });
 
   test('server-rendered recurring estimates surface cancel/refund/guarantee terms', () => {

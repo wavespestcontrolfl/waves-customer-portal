@@ -45,19 +45,45 @@ function trenchingWarrantyDecision(item = {}) {
   return 'unset';
 }
 
+function stableContentKey(value) {
+  if (Array.isArray(value)) return `[${value.map(stableContentKey).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableContentKey(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
+// Mapped estimates mirror one specialty row into several containers (for
+// example oneTime.specItems and top-level specItems) as separate objects once
+// persisted, so rows collapse by content. Each distinct row appears as many
+// times as the most any ONE container holds it: two identical jobs in one
+// container stay two, while a cross-container mirror never adds a phantom
+// peer that would make real purchase evidence look ambiguous.
+function collapseMirroredRows(lists = []) {
+  const containers = lists
+    .map((list) => (Array.isArray(list) ? list.filter((item) => item && typeof item === 'object') : []));
+  const byContent = new Map();
+  for (const list of containers) {
+    const inList = new Map();
+    for (const item of list) {
+      const key = stableContentKey(item);
+      inList.set(key, [...(inList.get(key) || []), item]);
+    }
+    for (const [key, items] of inList) {
+      if (!byContent.has(key) || items.length > byContent.get(key).length) byContent.set(key, items);
+    }
+  }
+  return [...byContent.values()].flat();
+}
+
 function rawOneTimeWarrantyEvidenceItems(result = {}) {
   const oneTime = result.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
   const nested = result.results?.oneTime && typeof result.results.oneTime === 'object'
     ? result.results.oneTime
     : {};
-  return [...new Set([
-    ...(Array.isArray(oneTime.items) ? oneTime.items : []),
-    ...(Array.isArray(nested.items) ? nested.items : []),
-    ...(Array.isArray(result.specItems) ? result.specItems : []),
-    ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
-    ...(Array.isArray(nested.specItems) ? nested.specItems : []),
-    ...(Array.isArray(result.lineItems) ? result.lineItems : []),
-  ].filter((item) => item && typeof item === 'object'))];
+  return collapseMirroredRows([
+    oneTime.items, nested.items, result.specItems, oneTime.specItems, nested.specItems, result.lineItems,
+  ]);
 }
 
 function matchingTrenchingWarrantyRow(target, rows = [], targets = [target]) {
@@ -189,7 +215,10 @@ function isPreSlabTreatmentItem(item = {}) {
 // flag, else its warranty status text.
 function preSlabExtendedWarrantySelected(item = {}) {
   if (!item || typeof item !== 'object') return false;
-  if (item.warrantyExtendedSelected === true) return true;
+  // The engine's flag decides whenever the row carries it, true or false, so
+  // stale prose never outlives a removal. Legacy rows without it fall back
+  // to their status text.
+  if (typeof item.warrantyExtendedSelected === 'boolean') return item.warrantyExtendedSelected;
   const raw = [item.warrantyStatus, item.detail, item.det]
     .filter(Boolean)
     .join(' ')
@@ -208,6 +237,7 @@ function preSlabSelectedWarrantyPart(item = {}) {
 }
 
 module.exports = {
+  collapseMirroredRows,
   isPreSlabTreatmentItem,
   preSlabExtendedWarrantySelected,
   preSlabSelectedWarrantyPart,

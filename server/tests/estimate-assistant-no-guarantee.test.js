@@ -1048,6 +1048,61 @@ describe('estimate assistant no-guarantee context', () => {
       .toContain('Termite Service: No guarantee.');
   });
 
+  test('a bond price question keeps its pricing answer (Codex #4982)', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 45 },
+      pricingBundle: { frequencies: [{ key: 'quarterly', monthly: 45, included: [
+        { service: 'termite_bait', label: 'Termite Bait Monitoring' },
+      ] }] },
+      noGuaranteeClaims: true,
+    });
+    const termsAnswer = answerEstimateQuestionFallback('What guarantee comes with the bond?', context);
+    expect(termsAnswer).toContain('No guarantee.');
+    expect(answerEstimateQuestionFallback('How much does the 5-year termite bond cost?', context)).not.toBe(termsAnswer);
+  });
+
+  test('a raw termite row behind a pest projection still states its own terms (Codex #4982)', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 85 },
+      estData: {
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 55 }] } },
+        engineResult: { lineItems: [{ service: 'termite_bait', name: 'Termite Bait Monitoring', monthly: 30 }] },
+      },
+      pricingBundle: { frequencies: [{ key: 'quarterly', monthly: 85, included: [
+        { service: 'pest_control', label: 'Pest Control' },
+      ] }] },
+      noGuaranteeClaims: true,
+    });
+    expect(context.guarantees.serviceTerms.map((entry) => entry.terms[0])).toContain('No guarantee.');
+    expect(answerEstimateQuestionFallback('Is there a guarantee?', context)).toMatch(/Termite[^:]*: No guarantee\./);
+  });
+
+  test('a trenching purchase mirrored into two saved containers is still proven (Codex #4982)', () => {
+    const row = { service: 'trenching', label: 'Termite Trenching', amount: 1200, price: 1200,
+      warrantyTier: 'one_year_retreat', warrantyAdder: 0 };
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 1200 },
+      estData: { result: {
+        oneTime: { specItems: [JSON.parse(JSON.stringify(row))] },
+        specItems: [JSON.parse(JSON.stringify(row))],
+      } },
+      serviceMode: 'one_time',
+      noGuaranteeClaims: true,
+    });
+    expect(context.oneTime.items.flatMap((item) => item.purchasedTerms || []))
+      .toContain('Annual inspection during the warranty period');
+  });
+
+  test('an explicit "no extended warranty" beats stale pre-slab prose (Codex #4982)', () => {
+    const item = { service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment', amount: 950,
+      warrantyExtendedSelected: false, detail: '1,850 sf | Termidor SC | Extended 5-yr warranty' };
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 950 }, serviceMode: 'one_time', noGuaranteeClaims: true, estData: {},
+      pricingBundle: { anchorOneTimePrice: 950, oneTimeBreakdown: { total: 950, items: [item] } },
+    });
+    expect(context.guarantees.serviceTerms[0].terms[0]).toMatch(/No extended warranty selected/);
+  });
+
   test('matching legacy bond snapshots retain purchased coverage without a selector', () => {
     const context = buildEstimateAssistantContext({
       estimate: { monthly_total: 18 },
