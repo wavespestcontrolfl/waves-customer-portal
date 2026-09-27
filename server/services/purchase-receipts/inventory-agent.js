@@ -34,7 +34,7 @@ const inventoryOperations = require('../inventory-operations');
 const {
   classifyItem, findPossibleDuplicateMovement, lockShipment, SOURCES,
   TITLE_SIZE_RE, sizeUnit, parseSizeNumber, sizesAgree, round4,
-  parseMultipack, PACK_CLAIM_RE,
+  parseMultipack, PACK_CLAIM_RE, PLURAL_CONTAINER_RE,
 } = require('./receipt-processor');
 
 const GATE = 'GATE_INVENTORY_AGENT';
@@ -189,6 +189,13 @@ function validateReading(reading, { rawTitle, lineQuantity }) {
   // amountPerItem's own ambiguity guard.
   const leftover = stripFirstOccurrence(afterMultipack, matchedClaim.matchText);
   if (PACK_CLAIM_RE.test(leftover)) return { ok: false, reason: 'leftover_pack_wording' };
+  // Plural containers with no pack marker ("4 tubes / 30 g") mean several
+  // containers in a form this lane doesn't count, as amountPerItem holds
+  // them. A count size is exempt: in "25 cartridges" the plural IS the
+  // counted item, not a second quantity.
+  if (!multipack && matchedClaim.unit !== 'each' && PLURAL_CONTAINER_RE.test(leftover)) {
+    return { ok: false, reason: 'plural_containers_without_pack_marker' };
+  }
 
   const lineQty = Number(lineQuantity);
   if (!Number.isFinite(lineQty) || lineQty <= 0) return { ok: false, reason: 'bad_line_quantity' };
@@ -513,6 +520,7 @@ function decisionRecord(decision, extra = {}) {
     reading: decision.reading || null,
     createdProductId: extra.createdProductId || null,
     createdAliasId: extra.createdAliasId || null,
+    productRowVersion: extra.productRowVersion || null,
   };
 }
 
@@ -656,10 +664,17 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
       extraMetadata: { inventoryAgent: true, orderNumber: line.order_number, emailId: email.id, rawTitle: line.raw_title, reading: decision.reading || null },
       trx,
     });
+    // The product row's version right after this write, taken under the
+    // product lock. The undo CLI reverses only while the row still carries
+    // this exact version: any later stock write (count, usage, restock)
+    // updates the row, and movement timestamps can't order that (created_at
+    // is the transaction's start, not the moment its write landed).
+    const { row_version: productRowVersion } = await trx('products_catalog').where({ id: productId })
+      .first(trx.raw('updated_at::text as row_version'));
 
     await trx('purchase_receipt_lines').where({ id: lineId }).update({
       status: 'logged', product_id: productId, received_qty: decision.amount, received_unit: decision.unit, movement_id: result.movement.id,
-      agent_decision: decisionRecord(decision, { createdProductId, createdAliasId }), agent_decided_at: new Date(),
+      agent_decision: decisionRecord(decision, { createdProductId, createdAliasId, productRowVersion }), agent_decided_at: new Date(),
       agent_created_product_id: createdProductId, agent_created_alias_id: createdAliasId,
     });
 
@@ -683,6 +698,27 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
 // everything else here. `reason` is a short machine-readable tag
 // ('llm_unavailable', an LLM failure reason, or an error message) stored in
 // agent_decision and folded into the bell's copy on the 3rd try.
+// Undo safety (ops/agents/inventory-agent-undo.js): is the product row still
+// exactly as the agent left it? The agent records
+// the row's version (updated_at::text) right after its own restock, under the
+// product lock. Any later stock write updates the row, so a changed version
+// (or a stock level that no longer equals the movement's stock_after) means
+// something followed the agent and a reversal would not restore a true
+// count. Movement timestamps can't answer this: created_at is the start of
+// the writing transaction, not the moment its write landed.
+async function productUnchangedSinceAgent(conn, line, movement) {
+  const recorded = line.agent_decision?.productRowVersion;
+  if (!recorded) return { ok: false, why: 'the line has no recorded product version' };
+  const row = await conn('products_catalog').where({ id: line.product_id })
+    .first('inventory_on_hand', conn.raw('updated_at::text as row_version'));
+  if (!row) return { ok: false, why: 'the product row is gone' };
+  if (row.row_version !== recorded) return { ok: false, why: 'the product changed after the agent\'s restock' };
+  if (Number(row.inventory_on_hand) !== Number(movement.stock_after)) {
+    return { ok: false, why: `stock is ${row.inventory_on_hand}, not the ${movement.stock_after} the agent left` };
+  }
+  return { ok: true };
+}
+
 async function recordAttemptFailure(conn, lineId, notifyAdmin, reason = 'unknown_error') {
   const reasonText = String(reason || 'unknown_error').slice(0, 300);
   return conn.transaction(async (trx) => {
@@ -797,6 +833,7 @@ async function runInventoryAgent({ conn = db, llm, notifyAdmin, limit = BATCH_LI
 
 module.exports = {
   runInventoryAgent,
+  productUnchangedSinceAgent,
   // Exported for unit tests — see server/tests/inventory-agent.test.js.
   // The first line is pure (no I/O); recordAttemptFailure is the one small
   // DB-touching unit worth testing without a full Postgres suite.

@@ -353,6 +353,6 @@ module.exports = {
   // duplicated) by inventory-agent.js's deterministic reading validation —
   // see this module's header for what each one does.
   TITLE_SIZE_RE, SIZE_UNITS, sizeUnit, parseSizeNumber, sizesAgree, round4,
-  MULTIPACK_PATTERNS, parseMultipack, PACK_CLAIM_RE,
+  MULTIPACK_PATTERNS, parseMultipack, PACK_CLAIM_RE, PLURAL_CONTAINER_RE,
   AGENT_HANDOFF_STATUSES,
 };

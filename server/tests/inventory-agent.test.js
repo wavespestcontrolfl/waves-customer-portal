@@ -40,6 +40,15 @@ describe('validateReading — grounded vs invented numbers (complete title token
       .toMatchObject({ ok: false, reason: 'size_not_a_full_title_claim' });
   });
 
+  test('plural containers with no pack marker never validate a single container', () => {
+    expect(validateReading({ size_number: 30, size_unit: 'g', pack_count: 1 }, { rawTitle: 'Advion Cockroach Gel Bait 4 tubes / 30 g', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'plural_containers_without_pack_marker' });
+    expect(validateReading({ size_number: 30, size_unit: 'g', pack_count: 4 }, { rawTitle: 'Advion Cockroach Gel Bait 4 x 30 g Tubes', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, sizeNumber: 30, unit: 'g', packCount: 4, amount: 120 });
+    expect(validateReading({ size_number: 25, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Trelona Compressed Termite Bait Cartridges 25 cartridges', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, sizeNumber: 25, unit: 'each' });
+  });
+
   test('a title stating two different sizes of one kind is ambiguous and never validates', () => {
     expect(validateReading({ size_number: 1, size_unit: 'gal', pack_count: 1 }, { rawTitle: 'Bifen XTS Insecticide 1 gal / 2.5 gal', lineQuantity: 1 }))
       .toMatchObject({ ok: false, reason: 'conflicting_size_claims' });

@@ -11,9 +11,11 @@
 //     the agent merely restocked), but ONLY when, after the reversal, it
 //     carries no other movement;
 //   - marks the line 'agent_unsure' with agent_decision.undoneAt.
-// Refuses — dry run or --execute — when a movement on the product landed
-// AFTER the agent's own: usage, another restock, a manual count. Reversing
-// past that point would not cleanly restore the pre-agent state.
+// Refuses — dry run or --execute — when anything wrote the product row
+// after the agent's own restock (usage, another restock, a manual count, an
+// edit): the row's version must still equal the one the agent recorded, and
+// stock must still equal the movement's stock_after. Reversing past a later
+// write would not cleanly restore the pre-agent state.
 //
 //   railway run --service Postgres node ops/agents/inventory-agent-undo.js --line=<id|8-char-prefix>            # dry run
 //   railway run --service Postgres node ops/agents/inventory-agent-undo.js --line=<id|8-char-prefix> --execute  # apply
@@ -28,6 +30,7 @@ process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
 const path = require('path');
 const db = require(path.join(__dirname, '..', '..', 'server', 'models', 'db'));
 const { adjustStock } = require(path.join(__dirname, '..', '..', 'server', 'services', 'inventory-operations'));
+const { productUnchangedSinceAgent } = require(path.join(__dirname, '..', '..', 'server', 'services', 'purchase-receipts', 'inventory-agent'));
 
 function arg(name) {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -55,13 +58,12 @@ async function findLine(conn) {
   return matches[0] || null;
 }
 
-// Any movement on this product strictly after the agent's own — other than
-// `excludeIds` (the agent's own movement, and, once inserted, the reversal
-// correction itself) — makes a clean reversal unsafe.
-async function laterMovements(conn, productId, afterCreatedAt, excludeIds) {
-  return conn('product_inventory_movements')
-    .where({ product_id: productId }).whereNotIn('id', excludeIds).where('created_at', '>', afterCreatedAt);
+// Movements on this product other than `excludeIds`.
+async function otherMovements(conn, productId, excludeIds) {
+  return conn('product_inventory_movements').where({ product_id: productId }).whereNotIn('id', excludeIds);
 }
+
+
 
 async function main() {
   const line = await findLine(db);
@@ -87,10 +89,9 @@ async function main() {
     console.error(`Movement ${line.movement_id} referenced by the line no longer exists.`);
     process.exit(2);
   }
-  const later = await laterMovements(db, line.product_id, movement.created_at, [movement.id]);
-  if (later.length) {
-    console.error(`Refusing: ${later.length} later movement(s) on this product since the agent's own restock — reversing now `
-      + `would not cleanly restore the pre-agent count. Movement id(s): ${later.map((m) => m.id).join(', ')}`);
+  const unchanged = await productUnchangedSinceAgent(db, line, movement);
+  if (!unchanged.ok) {
+    console.error(`Refusing: ${unchanged.why}. Reversing now would not cleanly restore the pre-agent count; fix the stock by hand.`);
     process.exit(1);
   }
 
@@ -114,8 +115,8 @@ async function main() {
       throw new Error('The line changed since the dry run — re-run to see the current state before undoing.');
     }
     await trx('products_catalog').where({ id: line.product_id }).forUpdate().first('id');
-    const stillLater = await laterMovements(trx, line.product_id, movement.created_at, [movement.id]);
-    if (stillLater.length) throw new Error('A later movement landed since the dry run — refusing to reverse.');
+    const stillUnchanged = await productUnchangedSinceAgent(trx, line, movement);
+    if (!stillUnchanged.ok) throw new Error(`Refusing to reverse: ${stillUnchanged.why}.`);
 
     const reversal = await adjustStock(line.product_id, { movementType: 'correction', quantity: -Number(line.received_qty), unit: line.received_unit }, {
       source: 'inventory_agent_undo', extraMetadata: { undoOfLineId: line.id, undoOfMovementId: movement.id }, trx,
@@ -124,7 +125,7 @@ async function main() {
     if (alias) await trx('product_aliases').where({ id: alias.id }).del();
 
     if (isAgentCreatedProduct) {
-      const stillHasMovements = await laterMovements(trx, line.product_id, new Date(0), [movement.id, reversal.movement.id]);
+      const stillHasMovements = await otherMovements(trx, line.product_id, [movement.id, reversal.movement.id]);
       if (stillHasMovements.length === 0) {
         await trx('products_catalog').where({ id: line.product_id }).update({ active: false, updated_at: new Date() });
       }

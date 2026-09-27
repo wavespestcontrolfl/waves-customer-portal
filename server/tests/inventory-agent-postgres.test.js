@@ -20,7 +20,8 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { runInventoryAgent } = require('../services/purchase-receipts/inventory-agent');
+const { runInventoryAgent, productUnchangedSinceAgent } = require('../services/purchase-receipts/inventory-agent');
+const inventoryOperations = require('../services/inventory-operations');
 const notifications = require('../services/notification-service');
 
 const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails', 'email_attachments'];
@@ -105,6 +106,25 @@ jest.setTimeout(30000);
     expect(movement.metadata).toMatchObject({ source: 'amazon_delivery', inventoryAgent: true, rawTitle: 'Bifen XTS Insecticide 96 oz' });
 
     expect(await bellsFor(line.id)).toHaveLength(1);
+  });
+
+  test('undo safety: the product row version recorded after the agent restock holds until any later stock write', async () => {
+    const line = await pendingLine();
+    const decision = {
+      kind: 'new_product', reason: 'not in the catalog', product_id: null,
+      new_product: { name: 'Bifen XTS', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    await run({ ok: true, json: decision });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    const movement = await mockConn('product_inventory_movements').where({ id: saved.movement_id }).first();
+    expect(saved.agent_decision.productRowVersion).toEqual(expect.any(String));
+    expect(await productUnchangedSinceAgent(mockConn, saved, movement)).toEqual({ ok: true });
+
+    // A later count on the product, whatever its created_at, changes the row.
+    await inventoryOperations.adjustStock(saved.product_id, { movementType: 'correction', setTotal: 150, unit: 'oz' }, { source: 'admin_manual_adjustment' });
+    const after = await productUnchangedSinceAgent(mockConn, saved, movement);
+    expect(after.ok).toBe(false);
   });
 
   test('a needs_size line: the model reads the title\'s size, the catalog container is set once, and the line logs', async () => {
