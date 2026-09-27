@@ -135,7 +135,11 @@ const POLICY_SELECTOR = {
 //   T(tier, { parse, fallbackModel }) — `parse` only for a call site that
 //                      validates the tier's value itself (voice_relay: the
 //                      relay's Anthropic allowlist); a value it refuses shows
-//                      as the call site's own `fallbackModel`, as it runs.
+//                      as the call site's own `fallbackModel()`, as it runs.
+//                      A thunk, read at resolve time: this module also loads
+//                      under narrow config/models stubs (via agent-control's
+//                      lane-id check), so nothing here may dereference
+//                      MODELS.DEFAULTS at load.
 const T = (tier, opts = {}) => ({ kind: 'tier', key: tier, parse: opts.parse || null, fallbackModel: opts.fallbackModel || null });
 const R = (route) => ({ kind: 'route', key: route });
 const P = (policy, leg) => ({ kind: 'policy', key: policy, leg });
@@ -393,7 +397,7 @@ const LANES = [
   // it would draft an env value inboundOverrideParse() (and the runtime's own
   // resolveSessionModel) reject outright, falling back after the restart the
   // owner thought would apply it.
-  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
+  L('voice_relay', 'Inbound voice relay (Sandy)', 'voice-agent/relay-conversation.js', 'voice', E('VOICE_RELAY_INBOUND_MODEL', E('VOICE_RELAY_MODEL', T('VOICE', { parse: inboundSharedModelParse, fallbackModel: () => MODELS.DEFAULTS.VOICE }), { parse: inboundSharedModelParse }), { parse: inboundOverrideParse, catalogOnly: true, allowed: inboundOverrideAllowed }), null, { note: 'sandbox test calls (VOICE_RELAY_SANDBOX_NUMBER) prefer VOICE_RELAY_SANDBOX_MODEL ahead of this chain; an unknown override id falls back with a logged warning + model_fallback_reason stamp — allowlist is config/models.js MODEL_CATALOG, Anthropic text models only, excluding requires:"deep" ids' }),
   L('voice_relay_collections', 'Collections outbound calls', 'collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE')), null, { note: 'shares VOICE_RELAY_MODEL with inbound; VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL are inbound-only and never reach this lane' }),
   L('outreach_drafter', 'Backlink outreach drafting', 'seo/backlink-outreach-drafter.js', 'voice', E('MODEL_OUTREACH_DRAFTER', T('WORKHORSE'))),
 
@@ -923,7 +927,7 @@ function resolveRef(ref) {
       const sel = SELECTOR_BY_KEY[ref.key];
       const current = MODELS[ref.key];
       const refused = !!ref.parse && !ref.parse(current);
-      return { model: refused ? ref.fallbackModel : current, selector: ref.key, via: refused ? `${ref.key} rejected → code default` : ref.key, pinEnv: null, pinned: false, live: false, accepts: sel ? sel.accepts : null };
+      return { model: refused ? ref.fallbackModel() : current, selector: ref.key, via: refused ? `${ref.key} rejected → code default` : ref.key, pinEnv: null, pinned: false, live: false, accepts: sel ? sel.accepts : null };
     }
     case 'route':
       return resolveAttributed(MODELS.ROUTES[ref.key]?.model, ROUTE_SELECTOR[ref.key], `ROUTES.${ref.key}`);

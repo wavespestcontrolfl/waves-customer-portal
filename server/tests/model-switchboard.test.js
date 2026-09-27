@@ -511,6 +511,22 @@ describe('model-switchboard', () => {
   });
 });
 
+// agent-control's lane-id check (services/agent-control/context.js) loads
+// this module inside every ledgerCall, including suites that stub
+// config/models with only the tiers they use — so nothing here may
+// dereference a registry field at load (the voice_relay row's code-default
+// fallback is a thunk for exactly this reason).
+describe('loads under a narrow config/models stub', () => {
+  it('requires cleanly with a stub that has no DEFAULTS or catalog', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../config/models', () => ({ DEEP: 'test-model', FLAGSHIP: 'test-model' }));
+      expect(() => require('../services/model-switchboard')).not.toThrow();
+      expect(require('../services/model-switchboard').LANES.some((l) => l.id === 'voice_relay')).toBe(true);
+    });
+    jest.dontMock('../config/models');
+  });
+});
+
 describe('voice_relay — picker vs runtime allowlist, and blast-radius attribution', () => {
   const ENV_KEYS = ['VOICE_RELAY_INBOUND_MODEL', 'VOICE_RELAY_MODEL'];
   let SAVED;
