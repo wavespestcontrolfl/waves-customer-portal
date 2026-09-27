@@ -1653,6 +1653,27 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Automatic booking-link text after a call (GATE_CALL_BOOKING_LINK_TEXT) —
+  // same 5-minute cadence as reschedule-link-promises: stages newly-extracted
+  // calls and dispatches whatever 2-hour/8am-ET delay has elapsed.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!isEnabled('callBookingLinkText')) return;
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const result = await runExclusive('call-booking-link-text', () => require('./call-booking-link-text').sweep());
+      if (result?.skipped && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Booking-link text tick skipped: ${result.reason || 'no_connection'}`);
+        await recordJobStart('call-booking-link-text').catch(() => {});
+        await recordJobEnd('call-booking-link-text', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[call-booking-link-text] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // While the follow-up pager is live, the overdue watchdog takes each
   // promise over once it ages off the pager's 24-hour list. With callback
   // cards on it already runs every 5 minutes; with cards off its cadence is
