@@ -187,7 +187,7 @@ const CONTACT_EXPOSURE_RE = new RegExp(`\\b${PRODUCT_NOUN}(?![a-zñáéíóú])\
 const NEGATED_ALLERGY_RE = /\b(?:not|no|never|isn'?t|aren'?t|wasn'?t|weren'?t|without|none|no\s+es|no\s+hubo|no\s+tuvo|no\s+tiene|sin|nunca)\s+(?:(?:an?|any|real|serious|major|known|signs?\s+of|ninguna?|alguna?)\s+){0,2}(?:allergic(?:\s+reactions?)?|allerg(?:y|ies)|reactions?|al[eé]rgic[oa]s?|alergias?|reacci[oó]n(?:es)?(?:\s+al[eé]rgicas?)?)(?![a-zñáéíóú])/gi;
 
 // "I don't need a doctor" / "No necesito un médico" is a denial, not a request.
-const NEGATED_NEED_RE = /\b(?:don'?t|do\s+not|doesn'?t|does\s+not|no|not|never|won'?t)\s+(?:\w+\s+)?need\s+(?:a\s+|an\s+|the\s+|to\s+(?:see|go\s+to|call)\s+(?:a\s+|an\s+|the\s+)?)?(?:doctor|hospital|ambulance|er|medical\s+\w+|poison\s+control)\b|\bno\s+(?:\w+\s+)?necesit\w*\s+(?:un\s+|una\s+|ir\s+al\s+)?(?:m[eé]dico|doctor|hospital|ambulancia)(?![a-zñáéíóú])/gi;
+const NEGATED_NEED_RE = /\b(?:don'?t|do\s+not|doesn'?t|does\s+not|no|not|never|won'?t)\s+(?:\w+\s+)?need\s+(?:a\s+|an\s+|the\s+|to\s+(?:see|go\s+to|call)\s+(?:a\s+|an\s+|the\s+)?)?(?:doctor|hospital|ambulance|er|medical\s+\w+|poison\s+control)\b|\bno\s+(?:\w+\s+)?necesit\w*\s+(?:un\s+|una\s+|ir\s+al\s+|llamar\s+(?:a\s+|al\s+)?)?(?:el\s+)?(?:m[eé]dico|doctor|hospital|ambulancia|control\s+de\s+envenenamientos?|centro\s+de\s+toxicolog[ií]a)(?![a-zñáéíóú])/gi;
 
 // A symptom tied to a treatment or product is a reaction ("My child is
 // vomiting after the pesticide treatment", "rash after the lawn chemicals").
@@ -612,7 +612,11 @@ const DRYING_WORD_RE = /\b(?:dry|dries|dried|drying|wet|damp|sec[oa]s?|secar\w*|
 // two weeks", "Your technician will come back in 21 days") is a visit, and
 // "come back to us / to this chat" is not a place.
 const NOT_BACK_TO_US = "(?!\\s+(?:to|with)\\s+(?:you|us|y'?all|this|the\\s+(?:chat|page|site|website|office|form|quote)))(?!\\s+in\\s+touch)";
-const REPLY_OCCUPANT_RETURN_RE = new RegExp(`(?:^|[.!?;]\\s+|\\b(?:please|just)\\s+)(?:come|go|head|get)\\s+back\\b${NOT_BACK_TO_US}|\\b${HOUSEHOLD}(?:\\s+(?:can|may|could|should)|\\s+(?:are|is)\\s+(?:free|ok|okay|fine|good|welcome)\\s+to|(?:'ll|\\s+will)\\s+be\\s+able\\s+to)?\\s+(?:(?:come|go|head|get|move)\\s+back|return)\\b${NOT_BACK_TO_US}`, 'i');
+// Spanish imperatives ("Regrese en 30 minutos", "Vuelva a entrar en 2 horas")
+// — never "entre", which is also "between" ("Entre las 8 y las 10…"), and
+// never "vuelva a llamarnos".
+const VUELVA = "(?:vuelva|vuelvan|vuelve|regrese|regresen|regresa)(?![a-zñáéíóú])(?!\\s+a\\s+(?:llamar\\w*|escribir\\w*|contactar\\w*|consultar\\w*|preguntar\\w*|programar\\w*|agendar\\w*|intentar\\w*))";
+const REPLY_OCCUPANT_RETURN_RE = new RegExp(`(?:^|[.!?;¡¿]\\s*|\\bpor\\s+favor\\s+)${VUELVA}|(?:^|[.!?;]\\s+|\\b(?:please|just)\\s+)(?:come|go|head|get)\\s+back\\b${NOT_BACK_TO_US}|\\b${HOUSEHOLD}(?:\\s+(?:can|may|could|should)|\\s+(?:are|is)\\s+(?:free|ok|okay|fine|good|welcome)\\s+to|(?:'ll|\\s+will)\\s+be\\s+able\\s+to)?\\s+(?:(?:come|go|head|get|move)\\s+back|return)\\b${NOT_BACK_TO_US}`, 'i');
 function fixedTimingClaim(reply, contextText, treatmentContext, activeMessage = contextText) {
   const text = String(reply || '');
   // Topic, not proximity: when the reply or the visitor's question is about

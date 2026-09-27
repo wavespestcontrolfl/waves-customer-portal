@@ -452,6 +452,8 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Go ahead and let the kids play outside.', 'What should I do after the treatment?'],
     ['Come back once 30 minutes have elapsed.', 'What should I do after the treatment?'],
     ['Please come back inside after an hour.', 'What should I do after the treatment?'],
+    ['Regrese en 30 minutos.', '¿Qué hago después del tratamiento?'],
+    ['Vuelva a entrar en 2 horas.', '¿Qué hago después del tratamiento?'],
   ])('flags: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
   });
@@ -485,6 +487,8 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['We can go inside to treat the kitchen.', 'What should I do after the treatment?'],
     ["We'll come back in two weeks for a follow-up treatment.", 'What should I do after the treatment?'],
     ['Come back to this chat anytime with questions.', 'What should I do after the treatment?'],
+    ['Entre las 8 y las 10 llegará el técnico.', '¿Cuándo es la cita?'],
+    ['Vuelva a llamarnos mañana si ve hormigas.', '¿Qué hago después del tratamiento?'],
   ])('leaves alone: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });
@@ -2276,6 +2280,7 @@ describe('looksLikeEmergency', () => {
     'I think a raccoon ate the bait',
     'My son says the rats ate the bait',
     "I don't need poison control, just an ant treatment",
+    'No necesito el control de envenenamientos, solo control de hormigas',
     'The ants choked on the bait',
     'The rats were poisoned by spray',
     'The roaches were poisoned by the product',
