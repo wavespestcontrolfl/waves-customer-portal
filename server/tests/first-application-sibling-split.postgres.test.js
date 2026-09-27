@@ -35,9 +35,10 @@ suite('first-application-sibling-split — same-trip billing review on date chan
   const {
     flagFirstApplicationInvoiceReviewOnDateChange,
     flagFirstApplicationInvoiceReviewOnDateChangeSafely,
+    clearBillingReview,
     dateOnly,
   } = require('../services/first-application-sibling-split');
-  const { assertInvoiceCollectible } = require('../services/invoice-helpers');
+  const { assertInvoiceCollectible, billingReviewVersion } = require('../services/invoice-helpers');
   const InvoiceService = require('../services/invoice');
 
   beforeAll(() => { db = require('knex')({ client: 'pg', connection: testUrl }); });
@@ -204,11 +205,16 @@ suite('first-application-sibling-split — same-trip billing review on date chan
     // once combined with the still-uncollapsed shared invoice. A date-
     // changing write on some OTHER member of the group (simulated here by
     // calling the entry point directly on the now-priced sibling) must
-    // still see this as unresolved, not auto-clear.
+    // still see this as unresolved, not auto-clear. #5021 round-3:
+    // divergingSiblings no longer excludes a priced sibling (a sibling can
+    // diverge AND carry its own price in the same write, and that must
+    // still open/keep a review) — the sibling is still date-diverged, so
+    // this re-flags the (already open) review rather than reaching
+    // maybeAutoClearBillingReview at all; either way it is never resolved.
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ estimated_price: 56.40 });
     const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
-    expect(result.action).toBe('skipped');
-    expect(result.reason).toBe('review_open_requires_manual_clear');
+    expect(result.action).toBe('review_opened');
+    expect(result.opened).toBe(false); // already open — still unresolved, never auto-cleared
     expect((await readState(trx, ids)).invoice.billing_review_opened_at).toBeTruthy();
   }));
 
@@ -432,6 +438,208 @@ suite('first-application-sibling-split — same-trip billing review on date chan
 
     test('the plain function throws (no savepoint) on the same bad id', () => rollbackTest(async (trx) => {
       await expect(flagFirstApplicationInvoiceReviewOnDateChange(trx, 'not-a-valid-uuid')).rejects.toThrow();
+    }));
+  });
+
+  // ---------------------------------------------------------------------
+  // Round-3 redesign (#5021 round-3 P1s): the hold only ever protects an
+  // UNDELIVERED invoice; a delivered invoice gets the same durable review +
+  // admin alert, never a block. Plus the round-3 findings themselves:
+  // priced-but-still-diverged flagging, the stale-clear 409, the bell
+  // reopening on recurrence, the live/canceled/refunded selection, and the
+  // preclaimed-send recheck.
+  // ---------------------------------------------------------------------
+  describe('round-3: the hold is scoped to undelivered invoices only', () => {
+    test('a DRAFT invoice\'s review is HELD — assertInvoiceCollectible refuses, reason is sibling_date_diverged', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { invoiceStatus: 'draft' });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      const state = await readState(trx, ids);
+      expect(state.invoice.billing_review_reason).toBe('sibling_date_diverged');
+      expect(() => assertInvoiceCollectible(state.invoice)).toThrow(/billing review/i);
+    }));
+
+    test('an already-DELIVERED (sent) invoice\'s review is an ALERT ONLY — assertInvoiceCollectible does NOT refuse, reason is sibling_date_diverged_after_delivery', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { invoiceStatus: 'sent', invoiceExtra: { sent_at: new Date(), token: randomUUID() } });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(result.action).toBe('review_opened');
+      const state = await readState(trx, ids);
+      // The durable record + bell still fire — same as the draft case —
+      // but nothing about the invoice's own money or status changed, and
+      // collection is never refused for it.
+      expect(state.invoice.billing_review_opened_at).toBeTruthy();
+      expect(state.invoice.billing_review_reason).toBe('sibling_date_diverged_after_delivery');
+      expect(state.invoice.status).toBe('sent');
+      expect(() => assertInvoiceCollectible(state.invoice)).not.toThrow();
+      const bell = await trx('notifications').where({ recipient_type: 'admin', category: 'billing' })
+        .whereRaw("metadata->>'dedupeKey' = ?", [`first_application_billing_review:${ids.invoiceId}`]).first();
+      expect(bell).toBeTruthy();
+      expect(bell.body).toMatch(/already sent/i);
+      expect(bell.body).toMatch(/nothing is on hold/i);
+      expect(bell.body).not.toMatch(/automatic collection.*is on hold/i);
+    }));
+
+    test('a delivered invoice\'s review never blocks a resend through claimInvoiceForSend', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { invoiceStatus: 'sent', invoiceExtra: { sent_at: new Date() } });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect((await readState(trx, ids)).invoice.billing_review_opened_at).toBeTruthy();
+      const claim = await InvoiceService.claimInvoiceForSend(ids.invoiceId, { database: trx });
+      expect(claim.claimed).toBe(true);
+    }));
+  });
+
+  describe('round-3: priced-but-still-diverged still opens the review', () => {
+    test('update-details setting date AND price in the same write still opens a review — divergence alone is enough', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      // A single write moving the date and pricing the sibling at once
+      // (exactly what admin-schedule.js's update-details route can do).
+      await trx('scheduled_services').where({ id: ids.lawnId })
+        .update({ scheduled_date: '2026-10-02', estimated_price: 56.40 });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(result.action).toBe('review_opened');
+      const state = await readState(trx, ids);
+      expect(state.invoice.billing_review_context.divergingSiblingIds).toEqual([ids.lawnId]);
+      // And it must NOT auto-clear later just because the sibling has a
+      // price — auto-clear still requires estimated_price == null too.
+      const again = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(again.action).toBe('review_opened');
+      expect(again.opened).toBe(false);
+    }));
+  });
+
+  describe('round-3: invoice selection reuses the authoritative live/canceled/refunded precedence', () => {
+    test('a newer CANCELED replacement invoice never shadows an older LIVE invoice', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { invoiceStatus: 'draft' });
+      // A second, NEWER invoice for the SAME invoice-holding row — minted
+      // in error and immediately canceled. Under the old
+      // orderBy(created_at desc).find(...) selection this newer row would
+      // be picked outright; selectFirstApplicationInvoiceMatch must skip
+      // it and fall through to the older LIVE one.
+      const canceledId = randomUUID();
+      await trx('invoices').insert({
+        id: canceledId, customer_id: ids.customerId, scheduled_service_id: ids.pestId,
+        token: randomUUID(), invoice_number: `QA-${randomUUID().slice(0, 20)}`,
+        status: 'canceled', title: 'First Service Application',
+        notes: `Auto-generated from accepted estimate #${ids.estimateId}. Customer selected pay per application — first application only.`,
+        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 153.60, amount: 153.60 }]),
+        subtotal: 153.60, total: 153.60,
+        created_at: new Date(Date.now() + 60000), // strictly newer than the fixture's own invoice
+      });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(result.action).toBe('review_opened');
+      expect(result.invoiceId).toBe(ids.invoiceId); // the OLDER live invoice, not the newer canceled one
+      const canceled = await trx('invoices').where({ id: canceledId }).first();
+      expect(canceled.billing_review_opened_at).toBeNull(); // untouched
+    }));
+  });
+
+  describe('round-3: bell reopens on a later, separate recurrence', () => {
+    test('a review that auto-cleared and then recurs re-bells unread, even though the text is identical to the first opening', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      const dedupeKey = `first_application_billing_review:${ids.invoiceId}`;
+      const firstBell = await trx('notifications').where({ recipient_type: 'admin', category: 'billing' })
+        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first();
+      expect(firstBell.read_at).toBeNull();
+
+      // Realigns and the invoice was never touched — auto-clears, and the
+      // bell is marked read (existing behavior).
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: SAME_DATE });
+      const cleared = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(cleared.action).toBe('review_auto_cleared');
+      const readBell = await trx('notifications').where({ id: firstBell.id }).first();
+      expect(readBell.read_at).toBeTruthy();
+
+      // The SAME sibling diverges again — same estimate, same invoice,
+      // same eventual message text — but this is a NEW opening (a fresh
+      // billing_review_opened_at) and must re-bell unread, not stay
+      // silently deduped against the read row above.
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-03' });
+      const reopened = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(reopened.action).toBe('review_opened');
+      expect(reopened.opened).toBe(true);
+      const bellAgain = await trx('notifications').where({ id: firstBell.id }).first();
+      expect(bellAgain.read_at).toBeNull();
+    }));
+  });
+
+  describe('round-3: stale clear is refused with a version mismatch', () => {
+    test('clearBillingReview refuses a stale version — a NEW divergence landed after the operator read the page', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      // The operator's page reads the invoice and captures this version.
+      const seenInvoice = await trx('invoices').where({ id: ids.invoiceId }).first();
+      const staleVersion = billingReviewVersion(seenInvoice);
+      expect(staleVersion).toEqual(expect.any(String));
+
+      // A THIRD member of the group diverges too, in the meantime —
+      // appends to the SAME still-open review (accumulates, never
+      // replaces — see openBillingReview), which changes the context and
+      // therefore the version.
+      const thirdId = randomUUID();
+      await trx('scheduled_services').insert({
+        id: thirdId, customer_id: ids.customerId, source_estimate_id: ids.estimateId, scheduled_date: SAME_DATE,
+        service_type: 'Tree & Shrub', status: 'confirmed', is_recurring: true, estimated_price: null,
+      });
+      await trx('scheduled_services').where({ id: thirdId }).update({ scheduled_date: '2026-10-03' });
+      await flagFirstApplicationInvoiceReviewOnDateChange(trx, thirdId);
+
+      // The operator's Clear click, built from the STALE version, is refused.
+      const stale = await clearBillingReview(ids.invoiceId, staleVersion, trx);
+      expect(stale.code).toBe('stale');
+      expect((await readState(trx, ids)).invoice.billing_review_opened_at).toBeTruthy(); // still open
+
+      // The correct, freshly-read version clears it.
+      const freshInvoice = await trx('invoices').where({ id: ids.invoiceId }).first();
+      const freshVersion = billingReviewVersion(freshInvoice);
+      const cleared = await clearBillingReview(ids.invoiceId, freshVersion, trx);
+      expect(cleared.code).toBe('cleared');
+      expect((await readState(trx, ids)).invoice.billing_review_opened_at).toBeNull();
+    }));
+
+    test('clearBillingReview is idempotent (no review open) and 404s on a missing invoice', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      const idempotent = await clearBillingReview(ids.invoiceId, 'whatever-version', trx);
+      expect(idempotent.code).toBe('idempotent');
+      const missing = await clearBillingReview(randomUUID(), 'whatever-version', trx);
+      expect(missing.code).toBe('not_found');
+    }));
+  });
+
+  describe('round-3: a review can open WHILE a preclaimed send holds the row at \'sending\'', () => {
+    // The actual provider-handoff recheck (the last step before dispatch,
+    // catching a review that opens AFTER a preclaim) lives in invoice.js's
+    // sendViaSMS and invoice-email.js's sendInvoiceEmail — their own
+    // withInvoiceDepositSettlement callbacks, exercised with mocks in
+    // invoice-sms-provider-handoff.test.js ("refuses the preclaimed
+    // handoff when a billing review opened after the claim, right before
+    // the provider is called") since a real send needs a live SMS/email
+    // provider this PG suite does not have. What this module owns, and
+    // what a real PostgreSQL run proves here: the review genuinely CAN
+    // open while the invoice sits claimed at 'sending' (status alone
+    // never blocks the flag write), and the resulting row is exactly the
+    // shape that recheck depends on (billing_review_opened_at set, status
+    // inside UNDELIVERED_INVOICE_STATUSES).
+    test('a review opens normally on a row already claimed at \'sending\', and assertInvoiceCollectible reads it as held', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { invoiceStatus: 'draft' });
+      // Simulate the scheduled-send worker's own preclaim: it already
+      // flipped 'scheduled' -> 'sending' and holds a claim token.
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'sending', send_claim_token: randomUUID() });
+      // A CONCURRENT date-diverging move opens the review while the row
+      // sits claimed at 'sending' — before the worker calls back in with
+      // allowClaimed:true to actually hand off to the provider.
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(result.action).toBe('review_opened');
+      const invoice = (await readState(trx, ids)).invoice;
+      expect(invoice.billing_review_opened_at).toBeTruthy();
+      expect(invoice.status).toBe('sending');
+      expect(() => assertInvoiceCollectible(invoice)).toThrow(/billing review/i);
     }));
   });
 });

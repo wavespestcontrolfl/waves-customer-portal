@@ -2650,6 +2650,14 @@ function InvoiceList({
                             </Badge>
                           )}
                         </div>{" "}
+                        <BillingReviewBanner
+                          invoice={inv}
+                          showToast={showToast}
+                          onCleared={() => {
+                            load();
+                            onRefresh();
+                          }}
+                        />
                         <InvoiceTimeline invoice={inv} />{" "}
                         {/* Mounted only for the expanded row so attachment fetches stay lazy. */}
                         <InvoiceAttachmentsPanel
@@ -3515,6 +3523,84 @@ function InvoiceTimeline({ invoice }) {
           </div>
         ))}
       </div>{" "}
+    </div>
+  );
+}
+// Same-trip first-application billing review (server/services/
+// first-application-sibling-split.js; owner ruling, #5021 round-3 redesign
+// — "flag, don't auto-split"): a diverging sibling's move opens a durable
+// review on the shared invoice. `invoice.billing_review` (InvoiceService.
+// getById/.list's billingReviewSummary) is null when nothing is open.
+// `held` mirrors the server's own UNDELIVERED_INVOICE_STATUSES check —
+// draft/scheduled/sending invoices are actually blocked from automatic
+// collection; an already-delivered invoice gets the same banner worded as
+// an alert only (nothing to hold — the customer already has it).
+function BillingReviewBanner({ invoice, showToast, onCleared }) {
+  const [clearing, setClearing] = useState(false);
+  const review = invoice?.billing_review;
+  if (!review) return null;
+  const clear = async () => {
+    if (clearing) return;
+    setClearing(true);
+    try {
+      await adminFetch(`/admin/invoices/${invoice.id}/billing-review/clear`, {
+        method: "POST",
+        body: JSON.stringify({ version: review.version }),
+      });
+      showToast("Billing review cleared");
+      onCleared();
+    } catch (err) {
+      if (err.code === "billing_review_stale") {
+        // A new divergence landed on this review since the page loaded —
+        // never clear on stale information (Codex #5021 round-3 P1).
+        // Refresh so the operator sees the current state before retrying.
+        showToast(
+          "This invoice's billing review changed since you loaded it — refreshed, take another look.",
+          "error",
+        );
+        onCleared();
+      } else {
+        showToast(`Could not clear the billing review: ${err.message}`, "error");
+      }
+    } finally {
+      setClearing(false);
+    }
+  };
+  return (
+    <div
+      style={{
+        margin: "4px 0 16px",
+        padding: "12px 14px",
+        border: "1px solid #C8312F",
+        borderRadius: 6,
+        lineHeight: 1.45,
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 12,
+        alignItems: "center",
+        justifyContent: "space-between",
+      }}
+    >
+      <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+        <div className="text-ui-body font-medium text-alert-fg">
+          {review.held
+            ? "Billing review: visits on this invoice moved to different days"
+            : "Billing review: invoice already sent — visits moved to different days"}
+        </div>
+        <div
+          style={{
+            marginTop: 4,
+          }}
+          className="text-ui-body text-ink-secondary"
+        >
+          {review.held
+            ? "Automatic collection is on hold. Split this invoice by hand, then Clear."
+            : "The customer already has this invoice — nothing is on hold. Review the split by hand, then Clear."}
+        </div>
+      </div>
+      <Button onClick={clear} disabled={clearing} variant="secondary" className="min-w-11">
+        {clearing ? "Clearing…" : "Clear"}
+      </Button>
     </div>
   );
 }

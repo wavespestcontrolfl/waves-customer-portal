@@ -29,15 +29,47 @@
 // OWNER RULING: never touch the invoice on a date-diverging move. Instead,
 // in the SAME transaction as the date write, open a durable billing-review
 // item on the invoice (idempotent, keyed by invoice id — see
-// invoices.billing_review_opened_at) and HOLD automatic collection of that
-// invoice while the review is open (server/services/invoice-helpers.js's
-// assertInvoiceCollectible — the one gate every charge/send seam already
-// calls — refuses while billing_review_opened_at is set). The office
-// resolves the review by editing the invoice/prices by hand, then clears it
-// (POST /admin/invoices/:id/billing-review/clear), which releases the hold.
-// A move that lands the diverging members BACK on the same date, with the
-// invoice never touched since the review opened, clears itself.
+// invoices.billing_review_opened_at) — ALWAYS, regardless of the invoice's
+// own delivery state, so the office always gets ONE record + ONE clear
+// mechanism (admin-invoices.js's POST /:id/billing-review/clear) for this
+// class of problem.
+//
+// ROUND-3 REDESIGN (#5021, Codex round-3 — the hold's blast radius was
+// unbounded): the FIRST design held automatic collection unconditionally
+// (server/services/invoice-helpers.js's assertInvoiceCollectible, the one
+// gate every charge/send seam already calls) — but "every charge/send
+// seam" turned out not to include an already-issued Stripe PaymentIntent a
+// customer's own pay-page load can still confirm directly with Stripe, nor
+// the invoice-followups.js dunning engine, nor any other seam nobody has
+// enumerated yet. That surface is unbounded FOR A DELIVERED INVOICE — the
+// customer already has it, and recalling money already in motion is not
+// what a same-trip date divergence calls for.
+//
+// So the hold is now scoped to UNDELIVERED invoices only —
+// invoice-helpers.js's UNDELIVERED_INVOICE_STATUSES ('draft': never sent;
+// 'scheduled': queued, not yet sent; 'sending': claimed for an in-flight
+// send, provider not yet called). A draft/scheduled/sending invoice has NO
+// pay link out, NO PaymentIntent a customer could confirm, and NO dunning
+// sequence (dunning only ever runs on a DELIVERED invoice) — the only
+// money seams that can reach it are the ones that already gate on
+// assertInvoiceCollectible or the two send-claim predicates, which is
+// exactly the bounded set this hold protects. Once an invoice reaches
+// 'sent'/'viewed'/'overdue' (or any terminal status — paid, etc.), this
+// module still opens the SAME durable review + admin alert, but
+// assertInvoiceCollectible and the send-claim predicates never block it —
+// the alert instead reads "already sent — review the split by hand", and
+// the office resolves the mismatch out-of-band (adjust by hand, credit,
+// or bill the sibling separately) rather than through an automatic hold.
+//
+// The office resolves either case by editing the invoice/prices by hand,
+// then clears the review (POST /admin/invoices/:id/billing-review/clear —
+// releases the hold when one was in effect, and is a no-op on enforcement
+// either way for the alert-only case). A move that lands the diverging
+// members BACK on the same date, with the invoice never touched since the
+// review opened, clears itself (undelivered or not).
 const logger = require('./logger');
+const db = require('../models/db');
+const { UNDELIVERED_INVOICE_STATUSES, billingReviewVersion } = require('./invoice-helpers');
 
 function dateOnly(value) {
   if (!value) return null;
@@ -75,13 +107,22 @@ async function loadLockedEstimateGroup(trx, scheduledServiceId) {
 }
 
 // Locates the locked first-application invoice linked to any member of this
-// group, or a terminal skip. A void invoice is a dead artifact (its charge
-// was never collected and a replacement, if any, is a separate row) and is
-// excluded; every other status is considered — this module never mutates
-// the invoice, so there is no "safe to retotal" judgment to make here, only
-// "does a shared invoice exist and does anything diverge from its date".
+// group, or a terminal skip. Reuses estimate-first-application-invoice.js's
+// selectFirstApplicationInvoiceMatch — the SAME authoritative live/
+// refunded/canceled precedence findFirstApplicationInvoiceForEstimateService
+// applies for its own coverage lookup (#5021 round-3 P1: a plain
+// `orderBy(created_at desc).find(...)` here used to let a newer CANCELED
+// replacement invoice shadow an older LIVE invoice that is still the one
+// actually collectible — the review would then anchor on a dead row while
+// the real invoice stayed unreviewed and fully chargeable). A void invoice
+// is excluded up front (never a candidate at all — its charge was never
+// collected and a replacement, if any, is a separate row); among the rest,
+// prefer the LIVE match (liveBeside when a refunded row also exists,
+// otherwise the selector's own `invoice`) — a purely refunded/canceled
+// group (no live invoice at all) has nothing left to protect or alert on
+// and is skipped, same as "no first-application invoice".
 async function findLockedFirstApplicationInvoice(trx, moved, members) {
-  const { isAutoGeneratedPayPerApplicationInvoice } = require('./estimate-first-application-invoice');
+  const { selectFirstApplicationInvoiceMatch } = require('./estimate-first-application-invoice');
   const memberIds = members.map((m) => m.id);
   const candidates = await trx('invoices')
     .whereIn('scheduled_service_id', memberIds)
@@ -89,7 +130,8 @@ async function findLockedFirstApplicationInvoice(trx, moved, members) {
     .orderBy('created_at', 'desc')
     .forUpdate()
     .select('*');
-  const invoice = candidates.find((inv) => isAutoGeneratedPayPerApplicationInvoice(inv));
+  const { invoice: selected, liveBeside } = selectFirstApplicationInvoiceMatch(candidates);
+  const invoice = liveBeside || selected || null;
   if (!invoice) return { skip: { action: 'skipped', reason: 'no_first_application_invoice', moved } };
 
   const invoiceRow = members.find((m) => String(m.id) === String(invoice.scheduled_service_id));
@@ -127,15 +169,26 @@ function parseLineItems(raw) {
   }
 }
 
-// Members that have diverged from the invoice-holding row's date and are
-// still relying on it (never priced their own share, never completed — a
-// completed row's billing outcome is already a settled fact this move
-// cannot change). Pure filter, no DB reads.
-function divergingUnpricedSiblings(invoiceRow, members) {
+// Members that have diverged from the invoice-holding row's date and have
+// not completed (a completed row's billing outcome is already a settled
+// fact this move cannot change). Pure filter, no DB reads.
+//
+// Deliberately does NOT require estimated_price == null (#5021 round-3 P1:
+// it used to, dropping a sibling from review the instant it carried ANY
+// price). update-details can set a date and a price in the SAME write —
+// divergence alone must open the review regardless of whether the sibling
+// was ever priced: the shared invoice's total was never reduced either
+// way, so a now-priced-but-still-diverged sibling would otherwise complete
+// AND bill its own new price while the invoice-holder's invoice still
+// carries the full original combined total — a double bill with no
+// review to catch it. maybeAutoClearBillingReview's own notResolved check
+// already treats a recorded sibling that picked up a price as unresolved
+// (fails closed, requires the manual clear) regardless of how it entered
+// the record, so widening this filter cannot make auto-clear too lenient.
+function divergingSiblings(invoiceRow, members) {
   const invoiceDate = dateOnly(invoiceRow.scheduled_date);
   return members.filter((m) => String(m.id) !== String(invoiceRow.id)
     && !m.completed_at
-    && m.estimated_price == null
     && dateOnly(m.scheduled_date) !== invoiceDate);
 }
 
@@ -150,15 +203,42 @@ function divergingUnpricedSiblings(invoiceRow, members) {
 // to the durable invoice-row flag the collection gate reads. Runs in its own
 // savepoint off the caller's trx — a notification failure must never poison
 // a transaction that otherwise just committed the date write cleanly.
-async function raiseBillingReviewAlert(trx, invoice, moved, diverging) {
+//
+// `held` (round-3): whether the invoice was still UNDELIVERED at the moment
+// this review opened (invoice.status ∈ UNDELIVERED_INVOICE_STATUSES) — the
+// only case where assertInvoiceCollectible / the send-claim predicates
+// actually hold collection. A delivered invoice (sent/viewed/overdue) or a
+// terminal one gets the SAME durable record and bell, worded as an alert
+// only: the customer already has it, nothing is on hold, and the office
+// resolves the mismatch by hand (adjust the invoice, credit, or bill the
+// sibling separately).
+//
+// `dedupeVersion` (Codex #5021 round-3 P1: the bell never reopened on a
+// RECURRING divergence): notifyAdmin's refreshOnDedupe only resets read_at
+// when the content changed OR this version differs from what the standing
+// row last stored. Every opening call here passes the SAME openedAt this
+// invocation is about to stamp on invoices.billing_review_opened_at — a
+// fresh open (after a prior review auto-cleared or was cleared by hand)
+// gets a NEW openedAt and therefore a new version, so a recurrence always
+// re-bells even though the title/body/link text is otherwise identical to
+// the first opening. Accumulating a further sibling while STILL open keeps
+// the ORIGINAL openedAt (see openBillingReview) and so the same version —
+// deliberate: that is one continuous, still-unread review, not a new one.
+async function raiseBillingReviewAlert(trx, invoice, moved, diverging, { held, dedupeVersion }) {
   try {
     const divergingDetail = diverging.length
-      ? ` Sibling visit(s) diverged and are unpriced: ${diverging.map((d) => d.id).join(', ')}.`
+      ? ` Sibling visit(s) diverged: ${diverging.map((d) => d.id).join(', ')}.`
       : '';
+    const title = held
+      ? 'First-application invoice needs manual review — a same-trip visit moved days'
+      : 'First-application invoice already sent — a same-trip visit moved days, review the split by hand';
+    const body = held
+      ? `Estimate #${moved.source_estimate_id}: a visit shared a first-application invoice (${invoice.invoice_number || invoice.id}) with a sibling that just moved to a different day.${divergingDetail} The invoice-holding visit still bills the FULL combined amount at its own completion; a diverging sibling with no price of its own will complete WITHOUT billing unless the office prices it by hand, and one that WAS given its own price still leaves the shared invoice's total unreduced — either way this is a mismatch. Automatic collection on this invoice (auto-charge, saved-card charge, scheduled send) is on hold until the office resolves this by hand and clears the review (Admin → Invoices → this invoice).`
+      : `Estimate #${moved.source_estimate_id}: a visit shared a first-application invoice (${invoice.invoice_number || invoice.id}) with a sibling that just moved to a different day, AFTER that invoice was already sent to the customer.${divergingDetail} The invoice already reached the customer at its combined total — nothing is on hold — but the split is now wrong: review it by hand (adjust the invoice, credit, or bill the sibling separately), then clear the review (Admin → Invoices → this invoice).`;
     await trx.transaction((logTrx) => require('./notification-service').notifyAdmin(
       'billing',
-      'First-application invoice needs manual review — a same-trip visit moved days',
-      `Estimate #${moved.source_estimate_id}: a visit shared a first-application invoice (${invoice.invoice_number || invoice.id}) with a sibling that just moved to a different day.${divergingDetail} The invoice-holding visit still bills the FULL combined amount at its own completion, and the diverging sibling's price is unset and now uncovered — it will complete WITHOUT billing unless the office prices it by hand. Automatic collection on this invoice (auto-charge, saved-card charge, scheduled send, autopay/dunning) is on hold until the office resolves this by hand and clears the review (Admin → Invoices → this invoice).`,
+      title,
+      body,
       {
         link: `/admin/invoices?invoice=${invoice.id}`,
         bell: true,
@@ -167,8 +247,10 @@ async function raiseBillingReviewAlert(trx, invoice, moved, diverging) {
           invoiceId: invoice.id,
           movedScheduledServiceId: moved.id,
           divergingSiblingIds: diverging.map((d) => d.id),
+          held,
         },
         dedupeKey: `first_application_billing_review:${invoice.id}`,
+        dedupeVersion,
         refreshOnDedupe: true,
         trx: logTrx,
       },
@@ -193,6 +275,17 @@ async function openBillingReview(trx, invoice, moved, diverging) {
     try { existingContext = JSON.parse(existingContext); } catch { existingContext = null; }
   }
   const alreadyOpen = !!invoice.billing_review_opened_at;
+  // The SAME openedAt this call is about to stamp (or, if already open,
+  // the ORIGINAL one it is about to leave untouched) — used for both the
+  // column write and the alert's dedupeVersion, so a fresh open and its
+  // bell always agree on what "this opening" means (round-3 P1: computing
+  // `new Date()` twice, once per use, could let the two drift by a tick).
+  const openedAt = invoice.billing_review_opened_at ? new Date(invoice.billing_review_opened_at) : new Date();
+  // Round-3: only an UNDELIVERED invoice is actually held — see the module
+  // header and invoice-helpers.js's UNDELIVERED_INVOICE_STATUSES. A review
+  // that opens after delivery gets the identical record and bell, worded
+  // as an alert only (raiseBillingReviewAlert).
+  const held = UNDELIVERED_INVOICE_STATUSES.includes(invoice.status);
   const priorSiblingIds = Array.isArray(existingContext?.divergingSiblingIds) ? existingContext.divergingSiblingIds : [];
   const mergedSiblingIds = [...new Set([...priorSiblingIds, ...diverging.map((d) => String(d.id))])];
   const context = {
@@ -212,11 +305,11 @@ async function openBillingReview(trx, invoice, moved, diverging) {
   await trx('invoices')
     .where({ id: invoice.id })
     .update({
-      billing_review_opened_at: invoice.billing_review_opened_at || new Date(),
-      billing_review_reason: invoice.billing_review_reason || 'sibling_date_diverged',
+      billing_review_opened_at: openedAt,
+      billing_review_reason: invoice.billing_review_reason || (held ? 'sibling_date_diverged' : 'sibling_date_diverged_after_delivery'),
       billing_review_context: JSON.stringify(context),
     });
-  await raiseBillingReviewAlert(trx, invoice, moved, diverging);
+  await raiseBillingReviewAlert(trx, invoice, moved, diverging, { held, dedupeVersion: openedAt.toISOString() });
   return { action: 'review_opened', invoiceId: invoice.id, opened: !alreadyOpen };
 }
 
@@ -247,6 +340,36 @@ async function resolveBillingReviewAlert(trx, invoiceId) {
   }
 }
 
+// The office's manual clear (POST /admin/invoices/:id/billing-review/clear
+// — admin-invoices.js delegates here so the route and the tests share the
+// ONE chokepoint). `expectedVersion` is billingReviewVersion(invoice) as
+// the operator's page last read it (InvoiceService.getById/.list's
+// billingReviewSummary): recomputed and compared HERE, under the row's own
+// FOR UPDATE lock, so a review that changed since the operator loaded the
+// page — most commonly a NEW sibling diverging into the same still-open
+// review — is caught even if it happened between the page load and this
+// call (Codex #5021 round-3 P1: clearing on stale information would
+// silently drop that later divergence). Runs as its OWN transaction (a
+// savepoint when `database` is already inside one, e.g. a test's
+// rollbackTest wrapper) so the lock, the version check, and the clear are
+// atomic — no window where a concurrent open lands between the check and
+// the write.
+async function clearBillingReview(invoiceId, expectedVersion, database = db) {
+  return database.transaction(async (trx) => {
+    const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+    if (!invoice) return { code: 'not_found' };
+    if (!invoice.billing_review_opened_at) return { code: 'idempotent', invoice };
+    if (billingReviewVersion(invoice) !== expectedVersion) return { code: 'stale', invoice };
+    const [updated] = await trx('invoices')
+      .where({ id: invoiceId })
+      .whereNotNull('billing_review_opened_at')
+      .update({ billing_review_opened_at: null, billing_review_reason: null, billing_review_context: null })
+      .returning('*');
+    await resolveBillingReviewAlert(trx, invoiceId);
+    return { code: 'cleared', invoice: updated };
+  });
+}
+
 // The trivial auto-clear (owner ruling): EVERY sibling this review recorded
 // as diverging at open time (billing_review_context.divergingSiblingIds) is
 // now back on the invoice-holding row's date, AND the invoice's own money
@@ -255,11 +378,11 @@ async function resolveBillingReviewAlert(trx, invoiceId) {
 // clear.
 //
 // Deliberately checks the RECORDED sibling ids against the invoice-holder's
-// CURRENT date directly — never divergingUnpricedSiblings's current
+// CURRENT date directly — never divergingSiblings's current
 // (empty) output (Claude fallback-auditor P0, this branch's own second
 // push): that filter also drops a sibling the office manually priced BY
 // HAND without moving its date back, or one that simply completed on its
-// still-diverged date. Either would make divergingUnpricedSiblings return
+// still-diverged date. Either would make divergingSiblings return
 // empty while the invoice-holder's invoice still carries the FULL combined
 // total — auto-clearing on that alone would resume automatic collection on
 // a still-double-billing invoice, exactly the gap this module exists to
@@ -347,7 +470,7 @@ async function flagFirstApplicationInvoiceReviewOnDateChange(trx, scheduledServi
   if (located.skip) return located.skip;
   const { invoice, invoiceRow } = located;
 
-  const diverging = divergingUnpricedSiblings(invoiceRow, members);
+  const diverging = divergingSiblings(invoiceRow, members);
   if (diverging.length) {
     return openBillingReview(trx, invoice, moved, diverging);
   }
@@ -380,9 +503,10 @@ async function flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, schedule
 module.exports = {
   flagFirstApplicationInvoiceReviewOnDateChange,
   flagFirstApplicationInvoiceReviewOnDateChangeSafely,
+  clearBillingReview,
   dateOnly,
   // Exported for direct unit coverage of the lookup/classification pieces.
   loadLockedEstimateGroup,
   findLockedFirstApplicationInvoice,
-  divergingUnpricedSiblings,
+  divergingSiblings,
 };

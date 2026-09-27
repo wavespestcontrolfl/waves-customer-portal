@@ -24,8 +24,10 @@ const { customerSafeServiceNotes } = require("./project-types");
 const {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
+  UNDELIVERED_INVOICE_STATUSES,
   isStaleClaimReviewHold,
   staleClaimReviewHoldError,
+  billingReviewSummary,
 } = require("./invoice-helpers");
 
 // Customer-facing presign TTL: photo URLs mint per page-load, so the TTL must
@@ -2339,6 +2341,22 @@ async function refuseZeroDuePreclaimedInvoice(invoiceId, current, database) {
   throw err;
 }
 
+// Same-trip first-application billing review (#5021 round-3 P1: the
+// preclaimed send path never rechecked this at all — a concurrent
+// date-diverging move could open the review AFTER the scheduled-send
+// worker's own preclaim flips the row to 'sending', and nothing caught it
+// before the provider handoff). The recheck itself lives at the ACTUAL
+// provider-handoff boundary instead of here — see the
+// withInvoiceDepositSettlement callbacks in sendViaSMS below and
+// invoice-email.js's sendInvoiceEmail, both of which already re-read the
+// row fresh, under its own lock, as literally the last step before
+// `dispatch()` runs. Checking there (not here) covers BOTH claim paths —
+// preclaimed AND a fresh claim — with the SAME code, and needs no EXTRA
+// read: those callbacks already carry a freshly re-read `current` row for
+// the identical reason (the INVOICE_BALANCE_CHANGED check right beside
+// it). An extra read here would also be redundant with that one, taken
+// only moments earlier.
+
 // Settle (prepaid, system:zero_balance) or report the RECOGNIZED business
 // reason settleZeroBalance itself returned for not settling (in-flight
 // reconciliation, existing payment work, and similar — every `skip(...)`
@@ -2856,15 +2874,22 @@ async function claimInvoiceForSend(invoiceId, {
     );
   }
   // Same-trip first-application billing review (owner ruling, #5021
-  // redesign): a diverging sibling's move opens a durable review on this
-  // invoice (first-application-sibling-split.js, invoices.
-  // billing_review_opened_at) rather than touching its money — but a
-  // scheduled or operator-initiated send still delivers whatever total the
-  // invoice currently carries, which is exactly the wrong-total risk the
-  // review exists to hold. No override switch here (unlike the stale-claim
-  // review hold above): the release valve is clearing the review itself
-  // (POST /admin/invoices/:id/billing-review/clear), not a per-send flag.
-  claimFlip.whereNull("billing_review_opened_at");
+  // round-3 redesign): a diverging sibling's move opens a durable review on
+  // this invoice (first-application-sibling-split.js, invoices.
+  // billing_review_opened_at) rather than touching its money — but only an
+  // UNDELIVERED invoice (current.status here, since the flip is gated on
+  // matching it) is ever actually held: current.status can also be
+  // sent/viewed/overdue (an operator resend of an already-delivered
+  // invoice), and for those the customer already has the invoice — the
+  // review is a durable item + admin alert only, never a block, so this
+  // predicate must not apply to them (round-3 P1: blocking a resend of a
+  // delivered invoice was never the design). No override switch here
+  // (unlike the stale-claim review hold above): the release valve is
+  // clearing the review itself (POST /admin/invoices/:id/billing-review/
+  // clear), not a per-send flag.
+  if (UNDELIVERED_INVOICE_STATUSES.includes(current.status)) {
+    claimFlip.whereNull("billing_review_opened_at");
+  }
   const [invoice] = await claimFlip
     .update({ status: "sending", send_claim_token: freshClaimToken, updated_at: new Date() })
     .returning("*");
@@ -2872,8 +2897,11 @@ async function claimInvoiceForSend(invoiceId, {
     const latest = await database("invoices").where({ id: invoiceId }).first();
     // Same-trip first-application billing review: report this specific
     // reason rather than the generic "not sendable" — see the claimFlip
-    // predicate above.
-    if (latest?.billing_review_opened_at) {
+    // predicate above. Scoped the same way: a billing_review_opened_at on
+    // an already-delivered/terminal latest row never explains a claim
+    // miss here (that predicate never ran for it), so falling through to
+    // the ordinary diagnostics below is correct.
+    if (latest?.billing_review_opened_at && UNDELIVERED_INVOICE_STATUSES.includes(latest.status)) {
       const err = new Error(`Invoice ${invoiceId} has an open billing review — resolve and clear it before sending`);
       err.code = "billing_review_open";
       throw err;
@@ -5231,6 +5259,21 @@ const InvoiceService = {
                     code: "INVOICE_BALANCE_CHANGED", error: "Invoice balance changed while preparing delivery; retry send",
                     validator: "check_invoice_deposit_settlement" };
                 }
+                // Same-trip first-application billing review (#5021
+                // round-3 P1): `current` is this exact re-read, under the
+                // invoice's own lock, taken as the LAST step before
+                // provider handoff — the one point a review opened AFTER
+                // the claim (whether this send was preclaimed or claimed
+                // fresh moments ago) is still guaranteed to be caught.
+                // Scoped to UNDELIVERED_INVOICE_STATUSES like every other
+                // billing-review gate: an already-delivered invoice was
+                // never held in the first place, so this never refuses a
+                // legitimate resend of one.
+                if (current.billing_review_opened_at && UNDELIVERED_INVOICE_STATUSES.includes(current.status)) {
+                  return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+                    code: "billing_review_open", error: "This invoice has an open billing review — resolve and clear it before sending",
+                    validator: "check_invoice_billing_review" };
+                }
                 providerStarted = true;
                 dispatchedOutcome = await dispatch();
                 return dispatchedOutcome;
@@ -7017,6 +7060,11 @@ const InvoiceService = {
       // guess at the error text — isStaleClaimReviewHold is the one source
       // of truth for both.
       review_hold: isStaleClaimReviewHold(invoice),
+      // #5021 round-3 P1: the admin invoice detail surface had no way to
+      // see or clear a same-trip billing review — billingReviewSummary is
+      // the one source of truth for the banner AND for POST .../clear's
+      // own stale-version check (the client echoes back `version`).
+      billing_review: billingReviewSummary(invoice),
     };
   },
 
@@ -7214,7 +7262,11 @@ const InvoiceService = {
     // from the SAME predicate (isStaleClaimReviewHold) — one source of
     // truth for the list AND detail rows the Send modal reads.
     return {
-      invoices: invoices.map((invoice) => ({ ...invoice, review_hold: isStaleClaimReviewHold(invoice) })),
+      invoices: invoices.map((invoice) => ({
+        ...invoice,
+        review_hold: isStaleClaimReviewHold(invoice),
+        billing_review: billingReviewSummary(invoice),
+      })),
       total: parseInt(count, 10),
     };
   },

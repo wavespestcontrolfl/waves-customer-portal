@@ -11,7 +11,7 @@
 const { isDeepStrictEqual } = require('node:util');
 const logger = require('./logger');
 const db = require('../models/db');
-const { invoiceAmountDue, SEND_FINALIZABLE_STATUSES } = require('./invoice-helpers');
+const { invoiceAmountDue, SEND_FINALIZABLE_STATUSES, UNDELIVERED_INVOICE_STATUSES } = require('./invoice-helpers');
 const { buildInvoicePDFBuffer, buildReceiptPDFBuffer } = require('./pdf/invoice-pdf');
 const { loadInvoiceAnnualPrepay } = require('./invoice-prepay');
 const { wrapEmail, ctaButton, currency, formatDate, plainText, colors, stripeFooterLine } = require('./email-template');
@@ -389,6 +389,17 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
             || invoiceAmountDue(current) !== amountDue
             || !isDeepStrictEqual(current.line_items || [], invoice.line_items || [])) {
             return { ok: false, reason: 'Invoice balance changed while preparing email; retry delivery' };
+          }
+          // Same-trip first-application billing review (#5021 round-3
+          // P1): `current` is this exact re-read, under the invoice's own
+          // lock, taken as the LAST step before provider handoff — the
+          // email leg's own version of invoice.js's sendViaSMS check just
+          // above, so a review opened after the claim (preclaimed or
+          // fresh) is caught here too, not just on the SMS leg. Scoped to
+          // UNDELIVERED_INVOICE_STATUSES: an already-delivered invoice was
+          // never held, so this never refuses a legitimate resend.
+          if (current.billing_review_opened_at && UNDELIVERED_INVOICE_STATUSES.includes(current.status)) {
+            return { ok: false, reason: 'This invoice has an open billing review — resolve and clear it before sending', code: 'billing_review_open' };
           }
           if (!effectiveOverride) {
             const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, trx)();
