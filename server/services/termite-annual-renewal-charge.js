@@ -111,6 +111,28 @@
 // termiteRenewalGraceCovered branch, sharing the exact same cutoff formula
 // this file's grace-lapse pass voids on.
 //
+// Codex #4971 round-3 — five invariants, each enforced at ONE chokepoint
+// rather than per call site (earlier rounds kept finding the next site):
+//   A. payment evidence — classifyRenewalInvoice / invoiceSettledNotRevoked
+//      and their SQL twins (whereInvoiceSettledNotRevoked,
+//      whereInvoiceDelivered, whereAttemptSubmitted): every scan and
+//      eligibility check here, and the parent-renewed backstop, read money
+//      through these.
+//   B. parent-state serialization — every writer that can move a termite
+//      term out of charge-eligible state takes the parent-decision lock
+//      (annual-prepay-renewals.js lockTermiteTermForStatusWrite), which the
+//      charge holds across its last re-check and the Stripe submission.
+//   C. successor lifecycle — a successor that must never be charged, billed
+//      or lapsed leaves payment_pending only through
+//      retireUnpresentedSuccessor (void + cancel, staff bell), never by
+//      being stamped "handled".
+//   D. scan fairness — every bounded recovery scan orders by
+//      renewal_sweep_deferred_at NULLS FIRST (stampSweepDeferred), and a
+//      lapse that needs a human is held as renewal_lapse_outcome=
+//      'manual_review', which the recovery scan excludes.
+//   E. the successor's window is fixed at mint — a late payment never
+//      slides it (annual-prepay-renewals.js windowFixedAtCreation).
+//
 // Design choices (see the lane's own commit message / PR description for
 // the full rationale):
 //   - The successor's renewal invoice charges EXACTLY parent.prepay_amount
@@ -301,28 +323,56 @@ async function stampRenewalExceptionBelled(term, kind, conn = db) {
   }
 }
 
-// Codex round-7 P1: the SAME "paid AND not fully refunded" ledger evidence
-// coveredTermsAsOf's decidedCoveredAndPaid branch reads for a DECIDED term
-// (annual-prepay-renewals.js ~2706-2744) — status alone is not proof of
-// live coverage, because a full refund can record its `payments` row
-// (status='refunded' or refund_status='full') BEFORE the term's own sync
-// runs, or the sync itself can simply fail and never runs at all, leaving
-// the term's status stuck reading 'active'/'renewed' long after the money
-// actually came back. Vacuously true when the parent carries no linked
-// invoice at all (a legacy manual term — historically covered, matching
-// coveredTermsAsOf's own carve-out).
-async function parentInvoicePaidAndNotFullyRefunded(trx, invoiceId) {
-  if (!invoiceId) return true;
-  const invoice = await trx('invoices').where({ id: invoiceId })
-    .first('status', 'paid_at', 'stripe_payment_intent_id', 'stripe_charge_id');
-  if (!invoice) return true;
-  const invStatus = String(invoice.status || '').toLowerCase();
-  const paidByStatus = invStatus === 'paid' || Boolean(invoice.paid_at);
-  if (!paidByStatus) return false;
-  // The exact refund-ledger check coveredTermsAsOf runs (same table, same
-  // shape) — a lost dispute or a full refund is recorded on `payments`
-  // independently of the invoice's own status column.
-  const refunded = await trx('payments')
+// ---- chokepoint A: renewal payment evidence ----------------------------
+//
+// Codex #4971 round-3 (items 3, 6, 7): every question this sweep asks about
+// an invoice's money — "is the parent's year still paid?", "is the
+// successor's invoice still open to charge?", "did the renewal ever reach
+// the customer?", "did a charge attempt ever reach Stripe?", "is the
+// renewal settled, or still clearing?" — is answered HERE, once, in two
+// agreeing forms: a pure/JS read for the per-row decisions, and a SQL twin
+// for the bounded scans (so a scan can never select a row the per-row check
+// then classifies differently). Earlier rounds re-derived these per call
+// site, and each round found another site that had drifted.
+//
+//   paid evidence   status paid/prepaid, or paid_at set
+//   settled         paid evidence, NOT a cancelled/void/refunded status, and
+//                   NO full refund on the payments ledger against the
+//                   invoice's Stripe identity — a full refund (or a lost
+//                   dispute) lands there before, or without, any status sync
+//                   (the SAME ledger shape coveredTermsAsOf reads)
+//   processing      an ACH debit still clearing — neither paid nor unpaid
+//   delivered       not a never-sent draft: status past 'draft', or a
+//                   sent_at/sms_sent_at/email_sent_at stamp
+//   reached Stripe  a stripe_invoice_charge_attempts row WITH durable
+//                   submission evidence (submitted_at, or a PaymentIntent
+//                   id). The attempt row itself is committed BEFORE the
+//                   provider call (stripe.js's claim), so bare row existence
+//                   proves nothing — a crash, or a guard refusal, between
+//                   the claim and the submission leaves an unsubmitted row
+//                   (stripe.js's own savedCardClaimWasSubmitted test).
+
+const PAID_INVOICE_STATUSES = ['paid', 'prepaid'];
+const INVOICE_EVIDENCE_COLUMNS = [
+  'status', 'paid_at', 'sent_at', 'sms_sent_at', 'email_sent_at', 'stripe_payment_intent_id', 'stripe_charge_id',
+];
+
+function classifyRenewalInvoice(invoice) {
+  if (!invoice) return { exists: false };
+  const status = invoice.status == null ? null : String(invoice.status).toLowerCase();
+  return {
+    exists: true,
+    status,
+    cancelled: INVOICE_CANCELLED_STATUSES.has(status),
+    paidEvidence: PAID_INVOICE_STATUSES.includes(status) || Boolean(invoice.paid_at),
+    processing: status === 'processing',
+    delivered: (status !== null && status !== 'draft')
+      || Boolean(invoice.sent_at || invoice.sms_sent_at || invoice.email_sent_at),
+  };
+}
+
+async function invoiceFullyRefundedOnLedger(conn, invoice) {
+  const refunded = await conn('payments')
     .whereRaw(
       `(status = 'refunded' or refund_status = 'full')
        and (
@@ -332,51 +382,102 @@ async function parentInvoicePaidAndNotFullyRefunded(trx, invoiceId) {
       [invoice.stripe_payment_intent_id || null, invoice.stripe_charge_id || null],
     )
     .first('id');
-  return !refunded;
+  return Boolean(refunded);
+}
+
+// JS form of "settled" (see the table above). SQL twin:
+// whereInvoiceSettledNotRevoked, below.
+async function invoiceSettledNotRevoked(conn, invoice) {
+  const evidence = classifyRenewalInvoice(invoice);
+  if (!evidence.paidEvidence || evidence.cancelled) return false;
+  return !(await invoiceFullyRefundedOnLedger(conn, invoice));
+}
+
+function whereInvoiceSettledNotRevoked(builder, alias) {
+  const cancelled = [...INVOICE_CANCELLED_STATUSES];
+  const col = (name) => `${alias}.${name}`;
+  return builder
+    .where(function paidEvidence() {
+      this.whereRaw(`lower(??) in (${PAID_INVOICE_STATUSES.map(() => '?').join(', ')})`, [col('status'), ...PAID_INVOICE_STATUSES])
+        .orWhereNotNull(col('paid_at'));
+    })
+    .whereRaw(`lower(coalesce(??, '')) not in (${cancelled.map(() => '?').join(', ')})`, [col('status'), ...cancelled])
+    .whereNotExists(function noFullRefund() {
+      this.select(1).from('payments as rp')
+        .whereRaw("(rp.status = 'refunded' or rp.refund_status = 'full')")
+        .whereRaw(
+          '((rp.stripe_payment_intent_id is not null and rp.stripe_payment_intent_id = ??) or (rp.stripe_charge_id is not null and rp.stripe_charge_id = ??))',
+          [col('stripe_payment_intent_id'), col('stripe_charge_id')],
+        );
+    });
+}
+
+// SQL form of "delivered". JS twin: classifyRenewalInvoice(...).delivered.
+function whereInvoiceDelivered(builder, alias) {
+  return builder.where(function delivered() {
+    this.whereNot(`${alias}.status`, 'draft')
+      .orWhereNotNull(`${alias}.sent_at`)
+      .orWhereNotNull(`${alias}.sms_sent_at`)
+      .orWhereNotNull(`${alias}.email_sent_at`);
+  });
+}
+
+// SQL form of "reached Stripe": narrows a stripe_invoice_charge_attempts
+// query (aliased `a`) to attempts with durable submission evidence. The
+// grace-lapse "presented" scan (EXISTS), leg 7b (NOT EXISTS) and the JS
+// renewalWasPresented read all go through this ONE definition, so the two
+// scans can never be each other's imperfect inverse again (items 6/7).
+function whereAttemptSubmitted(attempts) {
+  return attempts.where(function submissionEvidence() {
+    this.whereNotNull('a.submitted_at').orWhereNotNull('a.stripe_payment_intent_id');
+  });
+}
+
+// Kept for its callers and tests: the parent's year is still paid (settled,
+// above). Vacuously true with no linked invoice at all (a legacy manual
+// term — historically covered, matching coveredTermsAsOf's carve-out).
+async function parentInvoicePaidAndNotFullyRefunded(trx, invoiceId) {
+  if (!invoiceId) return true;
+  const invoice = await trx('invoices').where({ id: invoiceId }).first(...INVOICE_EVIDENCE_COLUMNS);
+  if (!invoice) return true;
+  return invoiceSettledNotRevoked(trx, invoice);
 }
 
 // Codex round-4 P0 (round-7 P1: extended to the active/renewal_pending
 // branch too): an ALLOW-list, never a deny-list, for whether a PARENT term
 // is still in a state that authorizes minting a successor against it, or
-// charging one already minted. "Eligible" is exactly:
-//   - still undecided and live (RENEWABLE_STATUSES — active/
-//     renewal_pending), OR already decided 'renewed' with
-//     renewal_decision === 'renew' (the theoretical race where the
-//     successor's OWN payment already flipped its parent by the time this
-//     re-checks) — EITHER WAY, if the parent carries a linked invoice, that
-//     invoice must still show paid-and-not-fully-refunded evidence
-//     (parentInvoicePaidAndNotFullyRefunded, above). The pre-fix shape
-//     accepted 'active' on status alone, reasoning that status is
-//     reachable ONLY through a paid invoice — true at the MOMENT of the
-//     transition, but a full refund can record its payments-ledger row
-//     BEFORE the term's own sync runs (or the sync can simply fail), so
-//     status can keep reading 'active' long after the money reversed.
+// charging one already minted. "Eligible" is exactly: still undecided and
+// live (RENEWABLE_STATUSES), or already decided 'renewed' with
+// renewal_decision === 'renew' — EITHER WAY, a linked invoice must still be
+// settled (chokepoint A). Everything else is refused: 'cancelled' in either
+// shape (moves 9 and 13 leave renewal_decision NULL), legacy
+// 'canceled'/'refunded', 'payment_pending' (move 10), 'switch_plan', or no
+// parent row at all.
 //
-// Everything else is refused: 'cancelled' in EITHER shape (a staff
-// void/refund via move 9, or the unguarded DELETE /:id/annual-prepay flag
-// removal via move 13 — both leave renewal_decision NULL), 'canceled'/
-// 'refunded' (legacy names), 'payment_pending' (a dispute on the parent's
-// OWN invoice reopened it, move 10), 'switch_plan', or no parent row at
-// all. The pre-fix shape checked ONLY renewal_decision — a cancelled
-// parent with renewal_decision IS NULL (exactly moves 9 and 13's shape)
-// slipped straight through undetected.
-// Codex round-7 P1: ONE function returning both the verdict and (on
-// refusal) the reason together — the paid-and-not-refunded ledger check
-// only ever runs when the status gate ALREADY passed and an invoice is
-// actually linked, never wastefully for an already-ineligible-status
-// parent (or a parent with no linked invoice at all). `trx` is only ever
-// touched in that one branch.
+// Codex #4971 round-3 P1 (item 1): a refusal also says whether it is
+// DURABLE. Only one shape can still come back on its own: a dispute on the
+// parent's OWN invoice (move 10 demotes it to payment_pending with no
+// decision, and reopens the invoice unpaid) — a won dispute restores it.
+// Every other refusal (a decision, a cancel/void/refund, a switch, a
+// missing row, a revoked invoice) never un-happens, and the caller must
+// then terminalize the successor rather than leave it pending.
 async function resolveParentEligibility(trx, parent) {
-  if (!parent) return { eligible: false, reason: 'parent_missing' };
+  if (!parent) return { eligible: false, reason: 'parent_missing', durable: true };
   const statusOk = RENEWABLE_STATUSES.includes(parent.status)
     || (parent.status === 'renewed' && parent.renewal_decision === 'renew');
   if (!statusOk) {
     const reason = parent.renewal_decision ? `parent_decided_${parent.renewal_decision}` : `parent_status_${parent.status}`;
-    return { eligible: false, reason };
+    return { eligible: false, reason, durable: Boolean(parent.renewal_decision) || parent.status !== PAYMENT_PENDING_STATUS };
   }
   if (!parent.prepay_invoice_id) return { eligible: true };
-  const paidOk = await parentInvoicePaidAndNotFullyRefunded(trx, parent.prepay_invoice_id);
-  return paidOk ? { eligible: true } : { eligible: false, reason: 'parent_invoice_unpaid_or_refunded' };
+  const invoice = await trx('invoices').where({ id: parent.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS);
+  if (!invoice || (await invoiceSettledNotRevoked(trx, invoice))) return { eligible: true };
+  // Paid evidence that is nonetheless not settled = revoked (a cancelled/
+  // refunded status or a full ledger refund) — durable. No paid evidence at
+  // all = unpaid, which on a live parent means a reopened (disputed)
+  // invoice — not durable.
+  const evidence = classifyRenewalInvoice(invoice);
+  return { eligible: false, reason: 'parent_invoice_unpaid_or_refunded', durable: evidence.cancelled || evidence.paidEvidence };
 }
 
 // ---- shared queries ---------------------------------------------------
@@ -745,54 +846,19 @@ async function mintRenewalSuccessor(parentTermId, conn = db) {
 //     that left it cancelled with NO decision recorded (Codex round-4 P0),
 //     or a missing parent row all wins over an in-flight charge, even one
 //     racing in right after the mint
-//   - its own renewal invoice is not void/cancelled/refunded/already paid
+//   - its own renewal invoice is still open (chokepoint A: not void/
+//     cancelled/refunded, no paid/prepaid/paid_at evidence, not clearing)
 //   - today is still within the successor's OWN grace deadline (the SAME
 //     GRACE_DAYS window minting itself is bounded to, P1-2) — a long
 //     outage that leaves the recovery leg running weeks late must bell
 //     staff, never fire a months-overdue charge.
 // Returns { eligible: true } with the fence ALREADY claimed, or
-// { eligible: false, reason } with nothing claimed and nothing charged.
+// { eligible: false, reason, retire?, defer? } (see successorActionBlocker)
+// with nothing claimed and nothing charged.
 async function resolveChargeEligibility(successorId, conn = db) {
   return conn.transaction(async (trx) => {
-    const freshSuccessor = await trx('annual_prepay_terms').where({ id: successorId }).forUpdate().first();
-    if (!freshSuccessor) return { eligible: false, reason: 'successor_not_found' };
-    if (freshSuccessor.status !== PAYMENT_PENDING_STATUS) {
-      return { eligible: false, reason: `successor_status_${freshSuccessor.status}` };
-    }
-    if (freshSuccessor.renewal_charge_attempted_at) return { eligible: false, reason: 'already_attempted' };
-
-    if (freshSuccessor.renewed_from_term_id) {
-      const parent = await trx('annual_prepay_terms').where({ id: freshSuccessor.renewed_from_term_id }).forUpdate().first();
-      // Codex round-4 P0: an ALLOW-list (resolveParentEligibility), not a
-      // deny-list on renewal_decision alone. The pre-fix check only
-      // rejected an explicit non-'renew' decision, so a parent moved to
-      // 'cancelled' with renewal_decision IS NULL by an UNRELATED path —
-      // the existing refund/void sync (move 9) or the unguarded annual-
-      // prepay-flag removal (move 13) — passed straight through and could
-      // still get auto-charged after the fact. A missing parent row is
-      // also refused rather than silently treated as fine. Codex round-7
-      // P1: the paid-and-not-fully-refunded ledger check now runs for an
-      // 'active'/'renewal_pending' parent too, not just a decided
-      // 'renewed' one — a full refund's payments-ledger row can land
-      // before the parent's own status sync runs, or that sync can simply
-      // fail, leaving status stuck reading 'active' long after the money
-      // reversed.
-      const parentEligibility = await resolveParentEligibility(trx, parent);
-      if (!parentEligibility.eligible) return { eligible: false, reason: parentEligibility.reason };
-    }
-
-    const deadline = graceDeadlineFor(freshSuccessor);
-    if (deadline && etDateString() > deadline) {
-      return { eligible: false, reason: 'past_grace_deadline' };
-    }
-
-    if (freshSuccessor.prepay_invoice_id) {
-      const invoice = await trx('invoices').where({ id: freshSuccessor.prepay_invoice_id }).first('status');
-      const invStatus = String(invoice?.status || '').toLowerCase();
-      if (invoice && (INVOICE_CANCELLED_STATUSES.has(invStatus) || invStatus === 'paid')) {
-        return { eligible: false, reason: `invoice_${invStatus}` };
-      }
-    }
+    const blocker = await successorActionBlocker(trx, successorId, { lock: true });
+    if (blocker) return { eligible: false, ...blocker };
 
     // The ONE Stripe-attempt fence: claimed in the SAME transaction as
     // every check above, atomically, and never re-checked afterward. A
@@ -806,6 +872,179 @@ async function resolveChargeEligibility(successorId, conn = db) {
     if (!claimed) return { eligible: false, reason: 'already_attempted' };
     return { eligible: true };
   });
+}
+
+// The ONE definition of "may this successor still be acted on" — shared by
+// resolveChargeEligibility (locked, right before the fence) and
+// checkStillEligibleForRenewalAction (unlocked, before any customer-facing
+// fallback), which used to be two hand-kept copies. Returns null when
+// eligible, else { reason } plus at most one of:
+//   retire — a DURABLE refusal (resolveParentEligibility's `durable`, or the
+//            successor's own grace window closed): the caller terminalizes
+//            the successor (retireUnpresentedSuccessor), never merely marks
+//            it handled (Codex #4971 round-3 P1, item 1)
+//   defer  — a refusal that can clear on its own (a parent in dispute): the
+//            caller leaves the successor for the next tick, rotated to the
+//            back of its scan (stampSweepDeferred)
+// A refusal with neither is already resolved elsewhere (paid, voided, no
+// longer payment_pending, already attempted).
+async function successorActionBlocker(conn, successorId, { lock = false } = {}) {
+  const read = (query) => (lock ? query.forUpdate() : query);
+  const fresh = await read(conn('annual_prepay_terms').where({ id: successorId })).first();
+  if (!fresh) return { reason: 'successor_not_found' };
+  if (fresh.status !== PAYMENT_PENDING_STATUS) return { reason: `successor_status_${fresh.status}` };
+  if (fresh.renewal_charge_attempted_at) return { reason: 'already_attempted' };
+
+  if (fresh.renewed_from_term_id) {
+    const parent = await read(conn('annual_prepay_terms').where({ id: fresh.renewed_from_term_id })).first();
+    const parentEligibility = await resolveParentEligibility(conn, parent);
+    if (!parentEligibility.eligible) {
+      return parentEligibility.durable
+        ? { reason: parentEligibility.reason, retire: true }
+        : { reason: parentEligibility.reason, defer: true };
+    }
+  }
+
+  // Still within the successor's OWN grace deadline (the SAME GRACE_DAYS
+  // window minting itself is bounded to, P1-2) — a long outage that leaves
+  // the recovery leg running weeks late must never fire a months-overdue
+  // charge or bill. Durable: that window never reopens.
+  const deadline = graceDeadlineFor(fresh);
+  if (deadline && etDateString() > deadline) return { reason: 'past_grace_deadline', retire: true };
+
+  // Chokepoint A: the invoice must still be OPEN — not cancelled/void/
+  // refunded, no paid evidence (paid/prepaid/paid_at: settled by card, ACH
+  // or account credit), and not an ACH debit still clearing.
+  if (fresh.prepay_invoice_id) {
+    const invoice = classifyRenewalInvoice(await conn('invoices').where({ id: fresh.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS));
+    if (invoice.exists && (invoice.cancelled || invoice.paidEvidence || invoice.processing)) {
+      return { reason: `invoice_${invoice.status}` };
+    }
+  }
+  return null;
+}
+
+// ---- chokepoints C + D: successor lifecycle, scan fairness --------------
+
+// Chokepoint D (Codex #4971 round-3 P2, item 4): every bounded recovery
+// scan here orders by renewal_sweep_deferred_at NULLS FIRST ahead of its own
+// order (migration 20260927010000). A row a pass must leave for a later
+// tick — a condition that clears on its own — is stamped here, so it
+// rotates to the back instead of re-occupying the same oldest page forever
+// and starving rows behind it. Ordering only; best-effort (a failed stamp
+// just leaves the row where it was).
+async function stampSweepDeferred(term, conn = db) {
+  try {
+    await conn('annual_prepay_terms').where({ id: term.id }).update({ renewal_sweep_deferred_at: new Date() });
+  } catch (err) {
+    logger.error(`[termite-annual-renewal] failed to stamp renewal_sweep_deferred_at for term ${term.id}: ${err.message}`);
+  }
+}
+
+// How a void refusal from voidInvoice's requireUnsettled chokepoint must be
+// handled — shared by the grace lapse and retireUnpresentedSuccessor, so the
+// two can never disagree about what a refusal means:
+//   settled       durable settlement (cash, or account credit covering the
+//                 total) — never void it
+//   manual_review a partial account credit: money is committed against the
+//                 invoice but it is not settled — a human decides
+//   transient     still clearing / in flight / mid-send / an ambiguous or
+//                 in-progress Stripe charge — retry on a later tick
+// Anything else (null) is an unexpected failure the caller rethrows.
+const VOID_REFUSALS = {
+  INVOICE_ALREADY_PAID: 'settled',
+  INVOICE_SETTLED_REFUSE_VOID: 'settled',
+  INVOICE_PARTIAL_CREDIT_REFUSE_VOID: 'manual_review',
+  INVOICE_PAYMENT_IN_FLIGHT: 'transient',
+  INVOICE_PROCESSING_REFUSE_VOID: 'transient',
+  INVOICE_SEND_IN_PROGRESS: 'transient',
+  STRIPE_AMBIGUOUS_OUTCOME: 'transient',
+  STRIPE_CHARGE_IN_PROGRESS: 'transient',
+};
+function classifyVoidRefusal(err) {
+  return Object.prototype.hasOwnProperty.call(VOID_REFUSALS, err?.code) ? VOID_REFUSALS[err.code] : null;
+}
+
+// Chokepoint A, JS form of "presented": the renewal reached the customer —
+// its invoice was delivered, or a charge attempt against it reached Stripe
+// (the same two facts the grace-lapse scan's SQL selects on).
+async function renewalWasPresented(conn, successor) {
+  if (!successor.prepay_invoice_id) return false;
+  const invoice = classifyRenewalInvoice(await conn('invoices').where({ id: successor.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS));
+  if (invoice.delivered) return true;
+  const reached = await whereAttemptSubmitted(
+    conn('stripe_invoice_charge_attempts as a').where('a.invoice_id', successor.prepay_invoice_id),
+  ).first('a.id');
+  return Boolean(reached);
+}
+
+// Codex #4971 round-3 P1 (item 1) — chokepoint C: THE one way a successor
+// that must never be charged, billed or lapsed leaves payment_pending: its
+// parent is durably ineligible (declined, cancelled, refunded, switched,
+// gone), or its grace window closed before it was ever presented. The old
+// branch only stamped renewal_charge_skipped_at, leaving a payment_pending
+// row with an open draft that NO pass would ever touch again — leg 7a
+// excluded it (skipped), leg 7b excluded it (no attempt), the grace-lapse
+// scan excluded it (never presented) — while coveredTermsAsOf granted it 30
+// days of grace coverage and the overlap guard refused every future annual
+// prepay for the customer. Now: void its invoice through voidInvoice's
+// requireUnsettled chokepoint (under the invoice's own row lock it refuses
+// anything settled, in flight or partially credited), whose own sync
+// cancels the successor (move 9); a sync that failed after the void
+// committed is completed here. NEVER raises station retrieval and NEVER
+// decides the parent — nothing was presented to the customer, and the
+// parent's state is exactly why this ran. Staff get one bell.
+// A PRESENTED renewal is never retired here: the grace-lapse pass owns it
+// (void + retrieval + the parent's decided lapse, or a manual-review hold).
+// Returns 'retired', 'presented', 'deferred' (transient refusal, rotated),
+// 'settled' or 'manual_review' (belled — staff decide).
+async function retireUnpresentedSuccessor(successor, reason, conn = db) {
+  if (await renewalWasPresented(conn, successor)) {
+    await ringRenewalBell(successor, 'ineligible', `${reason} — the renewal was already presented to the customer, so the grace-lapse pass will resolve it`);
+    return 'presented';
+  }
+  if (successor.prepay_invoice_id) {
+    try {
+      await require('./invoice').voidInvoice(successor.prepay_invoice_id, { requireUnsettled: true });
+    } catch (err) {
+      const refusal = classifyVoidRefusal(err);
+      if (!refusal) throw err;
+      if (refusal === 'transient') {
+        await stampSweepDeferred(successor, conn);
+        return 'deferred';
+      }
+      await ringRenewalBell(successor, 'retire_refused', `${reason}; its renewal invoice could not be voided (${err.message})`);
+      return refusal;
+    }
+  }
+  const fresh = await conn('annual_prepay_terms').where({ id: successor.id }).first('status');
+  if (fresh?.status === PAYMENT_PENDING_STATUS) {
+    await require('./annual-prepay-renewals').cancelTermWithRestorations(successor.id, conn);
+  }
+  await ringRenewalBell(successor, 'retired_unpresented', reason);
+  return 'retired';
+}
+
+// decideAndCharge's single answer to a refusal from successorActionBlocker
+// (either the unlocked pre-check or the locked fence claim).
+async function handleChargeRefusal(successor, refusal, conn) {
+  if (refusal.reason === 'already_attempted') return { status: 'already_attempted' };
+  if (refusal.retire) {
+    const retired = await retireUnpresentedSuccessor(successor, refusal.reason, conn);
+    // Anything but a retry leaves the row decided — keep leg 7a off it.
+    if (retired !== 'deferred' && retired !== 'retired') await stampRenewalChargeSkip(successor, `ineligible:${refusal.reason}`, conn);
+    return { status: 'ineligible', reason: refusal.reason, retired };
+  }
+  await ringRenewalBell(successor, 'ineligible', refusal.reason);
+  if (refusal.defer) {
+    // Not stamped skipped: leg 7a re-runs decideAndCharge on a later tick
+    // (rotated to the back of its page) until the parent's dispute
+    // resolves either way, or the grace window closes and it retires.
+    await stampSweepDeferred(successor, conn);
+    return { status: 'deferred', reason: refusal.reason };
+  }
+  await stampRenewalChargeSkip(successor, `ineligible:${refusal.reason}`, conn);
+  return { status: 'ineligible', reason: refusal.reason };
 }
 
 // Codex round-4 P1: persisted provenance for decideAndCharge's own
@@ -856,6 +1095,9 @@ async function deliverInvoiceAndStampSkip(successor, kind, explanation, conn) {
   await ringRenewalBell(successor, kind, `${explanation} ${deliveryNote}`);
   if (delivered?.ok) {
     await stampRenewalChargeSkip(successor, kind, conn);
+  } else {
+    // Retried by leg 7a — rotated behind rows it has not tried yet (D).
+    await stampSweepDeferred(successor, conn);
   }
   return delivered;
 }
@@ -875,32 +1117,8 @@ async function deliverInvoiceAndStampSkip(successor, kind, explanation, conn) {
 // the fallback paths specifically and is deliberately NOT a substitute for
 // that later, authoritative one.
 async function checkStillEligibleForRenewalAction(successorId, conn = db) {
-  const freshSuccessor = await conn('annual_prepay_terms').where({ id: successorId }).first();
-  if (!freshSuccessor) return { eligible: false, reason: 'successor_not_found' };
-  if (freshSuccessor.status !== PAYMENT_PENDING_STATUS) {
-    return { eligible: false, reason: `successor_status_${freshSuccessor.status}` };
-  }
-  if (freshSuccessor.renewal_charge_attempted_at) return { eligible: false, reason: 'already_attempted' };
-
-  if (freshSuccessor.renewed_from_term_id) {
-    const parent = await conn('annual_prepay_terms').where({ id: freshSuccessor.renewed_from_term_id }).first();
-    const parentEligibility = await resolveParentEligibility(conn, parent);
-    if (!parentEligibility.eligible) return { eligible: false, reason: parentEligibility.reason };
-  }
-
-  const deadline = graceDeadlineFor(freshSuccessor);
-  if (deadline && etDateString() > deadline) {
-    return { eligible: false, reason: 'past_grace_deadline' };
-  }
-
-  if (freshSuccessor.prepay_invoice_id) {
-    const invoice = await conn('invoices').where({ id: freshSuccessor.prepay_invoice_id }).first('status');
-    const invStatus = String(invoice?.status || '').toLowerCase();
-    if (invoice && (INVOICE_CANCELLED_STATUSES.has(invStatus) || invStatus === 'paid')) {
-      return { eligible: false, reason: `invoice_${invStatus}` };
-    }
-  }
-  return { eligible: true };
+  const blocker = await successorActionBlocker(conn, successorId);
+  return blocker ? { eligible: false, ...blocker } : { eligible: true };
 }
 
 // Everything after the mint transaction commits: resolve consent + a
@@ -944,12 +1162,7 @@ async function wouldSurchargeExceedFlatFee(successor, method, prepayAmountCents)
 
 async function decideAndCharge(successor, parentTerm, conn = db) {
   const upfront = await checkStillEligibleForRenewalAction(successor.id, conn);
-  if (!upfront.eligible) {
-    if (upfront.reason === 'already_attempted') return { status: 'already_attempted' };
-    await ringRenewalBell(successor, 'ineligible', upfront.reason);
-    await stampRenewalChargeSkip(successor, `ineligible:${upfront.reason}`, conn);
-    return { status: 'ineligible', reason: upfront.reason };
-  }
+  if (!upfront.eligible) return handleChargeRefusal(successor, upfront, conn);
 
   if (!parentTerm.renewal_charge_consent_at) {
     await deliverInvoiceAndStampSkip(successor, 'no_consent', 'The prior term never recorded renewal-charge (Auto Pay) consent.', conn);
@@ -983,12 +1196,7 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
   // racing in between the mint and this exact instant can never reach
   // Stripe from either caller.
   const eligibility = await resolveChargeEligibility(successor.id, conn);
-  if (!eligibility.eligible) {
-    if (eligibility.reason === 'already_attempted') return { status: 'already_attempted' };
-    await ringRenewalBell(successor, 'ineligible', eligibility.reason);
-    await stampRenewalChargeSkip(successor, `ineligible:${eligibility.reason}`, conn);
-    return { status: 'ineligible', reason: eligibility.reason };
-  }
+  if (!eligibility.eligible) return handleChargeRefusal(successor, eligibility, conn);
 
   const StripeService = require('./stripe');
   const submitCharge = () => StripeService.chargeInvoiceWithSavedCard(successor.prepay_invoice_id, method.paymentMethodRowId, {
@@ -1018,19 +1226,22 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
       const outcome = await AnnualPrepayRenewals.withParentDecisionLock(successor.renewed_from_term_id, async () => {
         const freshParent = await conn('annual_prepay_terms').where({ id: successor.renewed_from_term_id }).first();
         const parentEligibility = await resolveParentEligibility(conn, freshParent);
-        if (!parentEligibility.eligible) return { blocked: true, reason: parentEligibility.reason };
+        if (!parentEligibility.eligible) return { blocked: true, ...parentEligibility };
         return { blocked: false, result: await submitCharge() };
       });
-      if (outcome.blocked) {
-        await ringRenewalBell(successor, 'ineligible', `the parent was decided elsewhere immediately before the charge attempt (${outcome.reason})`);
-        return { status: 'ineligible', reason: outcome.reason };
-      }
+      if (outcome.blocked) return handleRefusalAtSubmission(successor, outcome, conn);
       chargeResult = outcome.result;
     } else {
       chargeResult = await submitCharge();
     }
   } catch (err) {
-    await handleChargeFailure(successor, err);
+    // Codex #4971 round-3 (item 7 follow-through): leg 7b now treats an
+    // attempt row WITHOUT submission evidence as "never reached Stripe" —
+    // which a guard refusal inside chargeInvoiceWithSavedCard (Auto Pay off,
+    // method changed, payer-billed) also leaves behind. This failure path
+    // has already belled staff and, where allowed, sent the pay link, so
+    // once it did, mark the leg handled; otherwise 7b retries it.
+    if (await handleChargeFailure(successor, err)) await stampNeverReachedStripeHandled(successor, conn);
     return { status: 'failed', reason: err.message };
   }
 
@@ -1065,6 +1276,25 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
   }
 }
 
+// The parent re-check under withParentDecisionLock refused AFTER the
+// Stripe-attempt fence was claimed — the card is never tried for this
+// successor again (at-most-once). A DURABLE refusal terminalizes the
+// successor right here (chokepoint C, item 1). A transient one (the
+// parent's own invoice in dispute) is left exactly as leg 7b selects it
+// (attempted, never submitted): 7b re-checks the parent each tick, sends
+// the pay link once the dispute resolves in the parent's favour, and
+// retires the successor if it resolves the other way or its grace window
+// closes first.
+async function handleRefusalAtSubmission(successor, refusal, conn) {
+  const reason = `the parent was decided elsewhere immediately before the charge attempt (${refusal.reason})`;
+  if (refusal.durable) {
+    const retired = await retireUnpresentedSuccessor(successor, reason, conn);
+    return { status: 'ineligible', reason: refusal.reason, retired };
+  }
+  await ringRenewalBell(successor, 'ineligible', reason);
+  return { status: 'ineligible', reason: refusal.reason };
+}
+
 async function handleChargeFailure(successor, err) {
   const { classifyChargeError } = require('./termite-annual-signature-charge')._private;
   const classification = classifyChargeError(err);
@@ -1080,21 +1310,19 @@ async function handleChargeFailure(successor, err) {
     // Money may be moving — no pay link beside a possibly-successful
     // charge (mirrors the sibling's own ambiguous handling: bell only,
     // never a second collection rail).
-    await ringRenewalBell(successor, 'ambiguous', classification.reason);
-    return;
+    return Boolean(await ringRenewalBell(successor, 'ambiguous', classification.reason));
   }
   if (classification.status === 'deferred') {
     // Payer-billed guard (a payer was assigned after the mint): neither
     // the homeowner's card NOR the homeowner's pay link may collect a
     // payer's AR — staff route it by hand, exactly like the sibling.
-    await ringRenewalBell(successor, 'refused', classification.reason);
-    return;
+    return Boolean(await ringRenewalBell(successor, 'refused', classification.reason));
   }
   // Every other refusal — a genuine Stripe decline, or a guard error (Auto
   // Pay inactive, the default method changed, a different active payment
   // in flight) — gets the pay link so the customer can still pay.
-  await deliverRenewalInvoice(successor);
-  await ringRenewalBell(successor, isGenuineDecline ? 'declined' : 'refused', classification.reason);
+  const delivery = await deliverRenewalInvoice(successor);
+  const belled = await ringRenewalBell(successor, isGenuineDecline ? 'declined' : 'refused', classification.reason);
   if (isGenuineDecline) {
     // Best-effort customer notice — never blocks the bell/pay-link
     // fallback above, which are the load-bearing parts of this path.
@@ -1102,6 +1330,8 @@ async function handleChargeFailure(successor, err) {
       logger.warn(`[termite-annual-renewal] charge-failed customer notice failed for term ${successor.id}: ${noticeErr.message}`);
     });
   }
+  // Handled only once staff were told AND the pay link actually went out.
+  return Boolean(belled) && Boolean(delivery?.ok);
 }
 
 const RENEWAL_BELL_COPY = {
@@ -1142,6 +1372,22 @@ const RENEWAL_BELL_COPY = {
   ineligible: (successor, reason) => ({
     title: 'Termite annual renewal — charge skipped, no longer eligible',
     body: `The renewal charge for customer ${successor.customer_id}'s termite annual renewal (invoice for $${Number(successor.prepay_amount).toFixed(2)}) was skipped without attempting the card: ${reason}. Check the account — this usually means the renewal was declined or has lapsed since it was minted. The card was NOT charged.`,
+  }),
+  // Codex #4971 round-3 P1 (item 1, chokepoint C): the successor was
+  // withdrawn — never charged, never presented — because its parent became
+  // durably ineligible (declined, cancelled, refunded, switched) or its
+  // grace window closed first. Its invoice was voided and the renewal term
+  // cancelled; no station retrieval and no decision on the prior term.
+  retired_unpresented: (successor, reason) => ({
+    title: 'Termite annual renewal — withdrawn before it was charged or sent',
+    body: `The renewal for customer ${successor.customer_id} (invoice for $${Number(successor.prepay_amount).toFixed(2)}) was withdrawn without charging the card or sending the invoice: ${reason}. Its renewal invoice was voided and the renewal term cancelled. No station retrieval was requested and the prior term was left as it is — review the account and renew or cancel it by hand.`,
+  }),
+  // The same withdrawal, refused at the void: money is already committed
+  // against the renewal invoice (settled, or partially covered by account
+  // credit). Nothing was voided.
+  retire_refused: (successor, reason) => ({
+    title: 'Termite annual renewal — could not be withdrawn, needs review',
+    body: `The renewal for customer ${successor.customer_id} (invoice for $${Number(successor.prepay_amount).toFixed(2)}) should be withdrawn (${reason}). It was NOT voided — check the payment and the prior term, then resolve the renewal by hand.`,
   }),
   // Codex round-2 P0: the grace-lapse pass refused to void this successor's
   // invoice because a Stripe charge reconciliation is still pending on it —
@@ -1282,6 +1528,10 @@ async function processRenewalCandidates({ conn = db, limit = 200, today = etDate
       whereAnchoredOrSuccessor(whereNoticeWitnessed(whereDueForRenewal(conn('annual_prepay_terms as t'), today))),
       today,
     )
+      // Chokepoint D: a parent the mint keeps refusing (ineligible under
+      // lock, an overlapping third-party term, an invalid fee) rotates to
+      // the back instead of re-occupying this page ahead of newer parents.
+      .orderByRaw('t.renewal_sweep_deferred_at asc nulls first')
       .orderBy('t.term_end', 'asc')
       .select('t.*')
       .limit(limit);
@@ -1289,7 +1539,7 @@ async function processRenewalCandidates({ conn = db, limit = 200, today = etDate
     for (const parent of candidates) {
       try {
         const mint = await mintRenewalSuccessor(parent.id, conn);
-        if (!mint) { counts.skipped += 1; continue; }
+        if (!mint) { counts.skipped += 1; await stampSweepDeferred(parent, conn); continue; }
         if (!mint.minted) { counts.skipped += 1; continue; } // another run already minted + decided this one
         counts.minted += 1;
         const outcome = await decideAndCharge(mint.successor, parent, conn);
@@ -1299,6 +1549,7 @@ async function processRenewalCandidates({ conn = db, limit = 200, today = etDate
       } catch (err) {
         counts.failed += 1;
         logger.error(`[termite-annual-renewal] renewal processing failed for parent term ${parent.id}: ${err.message}`);
+        await stampSweepDeferred(parent, conn);
       }
     }
   } catch (err) {
@@ -1379,32 +1630,22 @@ async function processGraceLapses({ conn = db, limit = 200, counts }) {
       .whereNull('t.renewal_lapse_started_at')
       .whereRaw(`${deadlineSql} < ?`, [etDateString()])
       .where(function presented() {
-        // Codex round-7 P1: renewal_charge_attempted_at IS NOT NULL alone
-        // is NOT evidence the customer was ever told anything — the fence
-        // is claimed BEFORE the Stripe call, so a crash between the two
-        // (reconcileStuckSuccessors' leg 7b) leaves attempted_at set on a
-        // successor whose invoice is still an undelivered draft. Verified
-        // evidence is required: EITHER the attempt actually reached Stripe
-        // (a stripe_invoice_charge_attempts row exists for the invoice —
-        // the customer's card was genuinely tried), OR the invoice carries
-        // its OWN persisted delivery proof (not draft, or a sent_at/
-        // sms_sent_at/email_sent_at stamp) from a pay-link send. Without
-        // this, a successor that fell through every notification path (a
-        // crash before decideAndCharge ever ran, OR one that claimed the
-        // fence but never reached Stripe) would lapse and trigger station
-        // retrieval against a customer who was never actually warned.
+        // Chokepoint A: "presented" = a charge attempt that genuinely
+        // REACHED Stripe (whereAttemptSubmitted — Codex #4971 round-3 P1,
+        // item 6: the attempt row is committed BEFORE the provider call, so
+        // a bare row proves nothing; a crash or guard refusal before
+        // submission leaves one behind), OR the invoice's own persisted
+        // delivery proof (whereInvoiceDelivered). Without verified
+        // evidence, a successor that fell through every notification path
+        // would lapse — and trigger station retrieval — against a customer
+        // who was never actually warned.
         this.where(function attemptReachedStripe() {
           this.whereNotNull('t.renewal_charge_attempted_at')
             .whereExists(function reachedStripe() {
-              this.select(1).from('stripe_invoice_charge_attempts as a').whereRaw('a.invoice_id = t.prepay_invoice_id');
+              whereAttemptSubmitted(this.select(1).from('stripe_invoice_charge_attempts as a').whereRaw('a.invoice_id = t.prepay_invoice_id'));
             });
         })
-          .orWhere(function invoiceDelivered() {
-            this.whereNot('i.status', 'draft')
-              .orWhereNotNull('i.sent_at')
-              .orWhereNotNull('i.sms_sent_at')
-              .orWhereNotNull('i.email_sent_at');
-          });
+          .orWhere(function invoiceDelivered() { whereInvoiceDelivered(this, 'i'); });
       })
       .orderByRaw(`${deadlineSql} asc`) // most overdue first
       .select('t.*')
@@ -1499,7 +1740,7 @@ async function resolveLapseVoidEligibility(term, conn = db) {
 
     let invoice = null;
     if (fresh.prepay_invoice_id) {
-      invoice = await trx('invoices').where({ id: fresh.prepay_invoice_id }).first('status', 'paid_at');
+      invoice = await trx('invoices').where({ id: fresh.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS);
     }
 
     // Codex round-7 P1: a crash right after voidInvoice's OWN sync flips
@@ -1532,22 +1773,22 @@ async function resolveLapseVoidEligibility(term, conn = db) {
       // lapse ever recorded. Checked FIRST, ahead of any retire decision:
       // still processing means DEFER (retry next tick, same bucket as a
       // pending Stripe charge reconciliation below), never retire.
-      const invoiceStatusKey = invoice ? String(invoice.status || '').toLowerCase() : null;
-      if (invoiceStatusKey === 'processing') {
+      const evidence = classifyRenewalInvoice(invoice);
+      if (evidence.processing) {
         return {
           outcome: 'deferred',
           kind: 'reconciliation_pending',
           reason: `the invoice reads processing — the ACH payment has not durably cleared yet on invoice ${fresh.prepay_invoice_id}`,
         };
       }
-      // Retire only on DURABLE paid/prepaid evidence — paid_at set, or the
-      // status itself already reads paid/prepaid. A genuinely
-      // void/refunded/canceled invoice (not this lapse's OWN void — that
-      // shape is voidAlreadyRan, handled above) falls through instead of
-      // retiring here: voidInvoice's own re-entry self-heals as a no-op on
-      // an already-settled invoice, so proceeding is safe either way and
-      // never wrongly skips a genuinely owed void.
-      if (invoice && (invoice.paid_at || invoiceStatusKey === 'paid' || invoiceStatusKey === 'prepaid')) {
+      // Retire only on DURABLE paid evidence (chokepoint A: paid/prepaid
+      // status or paid_at). A genuinely void/refunded/canceled invoice (not
+      // this lapse's OWN void — that shape is voidAlreadyRan, handled
+      // above) falls through instead of retiring here: voidInvoice's own
+      // re-entry self-heals as a no-op on an already-settled invoice, so
+      // proceeding is safe either way and never wrongly skips a genuinely
+      // owed void.
+      if (evidence.paidEvidence) {
         const paidNote = invoice.paid_at ? ' (paid_at set)' : '';
         return { outcome: 'retired', reason: `the invoice already reads ${invoice.status}${paidNote}` };
       }
@@ -1757,114 +1998,113 @@ async function raiseGraceLapseRetrievalTask(term, conn, today = etDateString()) 
   return !!taskRow;
 }
 
+// Chokepoint D (Codex #4971 round-3 P2, item 4): how a lapse that cannot
+// finish this tick is left. A condition that needs a HUMAN — the parent
+// decided some other way (renew/switch_plan, or cancelled by a refund/void
+// with no decision), or a partial account credit on the invoice — is
+// persisted as renewal_lapse_outcome='manual_review' (completed_at stays
+// null: the lapse did not complete), which reconcileMissedLapseEffects
+// excludes, so it can never pin that bounded page; staff get the bell once.
+// Anything that clears on its own (a charge reconciliation, an ACH still
+// clearing, a retrieval task not yet confirmed, a parent write that failed)
+// stays in the recovery scan, rotated to the back (stampSweepDeferred).
+async function holdLapse(term, conn, { manualReview, kind, reason }) {
+  logger.warn(`[termite-annual-renewal] grace lapse for term ${term.id} deferred (${kind}) — ${reason}`);
+  if (kind) await ringRenewalBell(term, kind, reason);
+  if (manualReview) {
+    await conn('annual_prepay_terms').where({ id: term.id }).whereNull('renewal_lapse_completed_at')
+      .update({ renewal_lapse_outcome: 'manual_review' });
+  } else {
+    await stampSweepDeferred(term, conn);
+  }
+  return 'deferred';
+}
+
+async function retireSettledLapse(term, conn, reason) {
+  await conn('annual_prepay_terms').where({ id: term.id })
+    .update({ renewal_lapse_completed_at: new Date(), renewal_lapse_outcome: 'retired_settled' });
+  await ringRenewalBell(term, 'lapse_retired_settled', reason);
+  return 'retired';
+}
+
+// The void step. Codex round-3 audit P0: resolveLapseVoidEligibility's own
+// re-check already committed and released its row lock by the time this
+// runs — apply-credit (or any other settlement) takes NO parent advisory
+// lock before committing, so it can settle the invoice in that exact gap.
+// voidInvoice's own `requireUnsettled` precondition re-verifies "genuinely
+// still unpaid, no reconciliation pending" a SECOND time under the
+// INVOICE'S OWN row lock, right where the void commits. A refusal is read
+// through classifyVoidRefusal (shared with retireUnpresentedSuccessor):
+// settled retires the lapse; a partial credit is a manual-review hold;
+// anything still clearing defers. Returns null when the void went through.
+async function voidLapsedInvoice(term, conn) {
+  if (!term.prepay_invoice_id) return null;
+  try {
+    await require('./invoice').voidInvoice(term.prepay_invoice_id, { requireUnsettled: true });
+    return null;
+  } catch (err) {
+    const refusal = classifyVoidRefusal(err);
+    if (refusal === 'settled') {
+      logger.warn(`[termite-annual-renewal] grace lapse for term ${term.id} retired at the void chokepoint — invoice ${term.prepay_invoice_id} settled between the eligibility re-check and the void: ${err.message}`);
+      return retireSettledLapse(term, conn, err.message);
+    }
+    if (refusal) {
+      return holdLapse(term, conn, { manualReview: refusal === 'manual_review', kind: 'lapse_reconciliation_pending', reason: err.message });
+    }
+    throw err;
+  }
+}
+
 async function processGraceLapseSequence(term, conn) {
   const eligibility = await resolveLapseVoidEligibility(term, conn);
   if (eligibility.outcome === 'deferred') {
-    if (eligibility.kind === 'parent_decided_elsewhere') {
-      logger.warn(`[termite-annual-renewal] grace lapse for term ${term.id} deferred — ${eligibility.reason}`);
-      await ringRenewalBell(term, 'lapse_parent_decided_elsewhere', eligibility.reason);
-    } else {
-      logger.warn(`[termite-annual-renewal] grace lapse for term ${term.id} deferred — a charge reconciliation is pending on invoice ${term.prepay_invoice_id}: ${eligibility.reason}`);
-      await ringRenewalBell(term, 'lapse_reconciliation_pending', eligibility.reason);
-    }
-    return 'deferred';
+    const manualReview = eligibility.kind === 'parent_decided_elsewhere';
+    return holdLapse(term, conn, {
+      manualReview,
+      kind: manualReview ? 'lapse_parent_decided_elsewhere' : 'lapse_reconciliation_pending',
+      reason: eligibility.reason,
+    });
   }
-  if (eligibility.outcome === 'retired') {
-    await conn('annual_prepay_terms').where({ id: term.id })
-      .update({ renewal_lapse_completed_at: new Date(), renewal_lapse_outcome: 'retired_settled' });
-    await ringRenewalBell(term, 'lapse_retired_settled', eligibility.reason);
-    return 'retired';
-  }
+  if (eligibility.outcome === 'retired') return retireSettledLapse(term, conn, eligibility.reason);
 
-  if (term.prepay_invoice_id) {
-    const InvoiceService = require('./invoice');
-    // Codex round-3 audit P0: resolveLapseVoidEligibility's own re-check
-    // above already committed and released its row lock by the time this
-    // call happens — apply-credit (or any other settlement) takes NO
-    // parent advisory lock before committing, so it can settle the
-    // invoice in that exact gap. voidInvoice's own `requireUnsettled`
-    // precondition re-verifies "genuinely still unpaid, no reconciliation
-    // pending" a SECOND time, but this time under the INVOICE'S OWN row
-    // lock, right where the void itself commits — the actual chokepoint,
-    // closing the race the eligibility pre-check alone cannot.
-    try {
-      await InvoiceService.voidInvoice(term.prepay_invoice_id, { requireUnsettled: true });
-    } catch (err) {
-      // INVOICE_ALREADY_PAID/INVOICE_SETTLED_REFUSE_VOID are both DURABLE
-      // settlement — the former from assertInvoiceVoidable's own
-      // unconditional guard (a genuinely cash-paid invoice), the latter
-      // from requireUnsettled's own check (a credit-settled 'prepaid'
-      // invoice, the status assertInvoiceVoidable deliberately allows
-      // through for other callers). Both retire the lapse the same way.
-      if (err.code === 'INVOICE_ALREADY_PAID' || err.code === 'INVOICE_SETTLED_REFUSE_VOID') {
-        logger.warn(`[termite-annual-renewal] grace lapse for term ${term.id} retired at the void chokepoint — invoice ${term.prepay_invoice_id} settled between the eligibility re-check and the void: ${err.message}`);
-        await conn('annual_prepay_terms').where({ id: term.id })
-          .update({ renewal_lapse_completed_at: new Date(), renewal_lapse_outcome: 'retired_settled' });
-        await ringRenewalBell(term, 'lapse_retired_settled', err.message);
-        return 'retired';
-      }
-      // INVOICE_PAYMENT_IN_FLIGHT/INVOICE_PROCESSING_REFUSE_VOID are the
-      // SAME "still clearing, could still bounce" ambiguity — neither is
-      // durable settlement, so this defers rather than retires.
-      // INVOICE_SEND_IN_PROGRESS is transient (a live send claim clears in
-      // seconds) — also worth a retry rather than any permanent outcome.
-      // INVOICE_PARTIAL_CREDIT_REFUSE_VOID (Codex #4971 round-4 post-merge
-      // audit P1) is neither: a partial credit is durable (won't resolve
-      // itself like an in-flight charge), but it is NOT full settlement
-      // either — some money is already committed against this invoice, so
-      // auto-voiding and restoring the credit is a decision for a human,
-      // not this sweep. Defer, never retire — this term is left open for
-      // the next scan and staff can see the bell now, not after the lapse
-      // was already marked done.
-      if ([
-        'INVOICE_PAYMENT_IN_FLIGHT', 'INVOICE_PROCESSING_REFUSE_VOID', 'INVOICE_SEND_IN_PROGRESS',
-        'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGE_IN_PROGRESS', 'INVOICE_PARTIAL_CREDIT_REFUSE_VOID',
-      ].includes(err.code)) {
-        logger.warn(`[termite-annual-renewal] grace lapse for term ${term.id} deferred at the void chokepoint — invoice ${term.prepay_invoice_id}: ${err.message}`);
-        await ringRenewalBell(term, 'lapse_reconciliation_pending', err.message);
-        return 'deferred';
-      }
-      throw err;
-    }
+  const voidOutcome = await voidLapsedInvoice(term, conn);
+  if (voidOutcome) return voidOutcome;
+  if (!(await raiseGraceLapseRetrievalTask(term, conn))) {
+    return holdLapse(term, conn, { manualReview: false, reason: 'the station-retrieval step is not confirmed yet' });
   }
-  if (!(await raiseGraceLapseRetrievalTask(term, conn))) return 'deferred';
-  let parentDecided = true;
-  if (term.renewed_from_term_id) {
-    try {
-      const decided = await require('./annual-prepay-renewals').recordDecision({ termId: term.renewed_from_term_id, action: 'cancel', conn });
-      if (!decided) {
-        // Codex round-7 P1 / round-3 audit P1: recordDecision returns null
-        // (never throws) on a guard-miss — but that guard-miss has TWO
-        // very different causes. (a) The parent was decided something
-        // ELSE (renew/switch_plan) in the tiny gap between the
-        // eligibility re-check above releasing its lock and this write —
-        // a genuine conflict; never mark the lapse "done". (b) A prior
-        // partial run of THIS SAME lapse already recorded 'cancel' on the
-        // parent and crashed before stamping completed_at — recordDecision's
-        // own guard (`renewal_decision IS NULL`) then correctly returns
-        // null on RETRY, since the decision is already there, but that is
-        // SUCCESS, not a conflict; without this check the row is stuck
-        // started-but-never-completed forever, permanently consuming the
-        // recovery scan's limited slots. Verified with a fresh read — an
-        // already-'cancel' parent completes this lapse; anything else
-        // (including no parent at all) is the genuine guard-miss.
-        const parent = await conn('annual_prepay_terms').where({ id: term.renewed_from_term_id }).first('renewal_decision');
-        if (parent?.renewal_decision === 'cancel') {
-          logger.info(`[termite-annual-renewal] parent ${term.renewed_from_term_id} already reads decided 'cancel' for successor ${term.id} — a prior partial run of this SAME lapse; completing it now`);
-        } else {
-          logger.warn(`[termite-annual-renewal] parent lapse-stamp guard-missed for successor ${term.id} — the parent was decided elsewhere between the re-check and this write`);
-          parentDecided = false;
-        }
-      }
-    } catch (err) {
-      logger.warn(`[termite-annual-renewal] parent lapse-stamp skipped for successor ${term.id}: ${err.message}`);
-      parentDecided = false;
-    }
+  if (!(await decideParentLapse(term, conn))) {
+    return holdLapse(term, conn, { manualReview: false, reason: 'the parent lapse decision did not record' });
   }
-  if (parentDecided) {
-    await conn('annual_prepay_terms').where({ id: term.id }).update({ renewal_lapse_completed_at: new Date(), renewal_lapse_outcome: 'lapsed' });
-  }
+  await conn('annual_prepay_terms').where({ id: term.id }).update({ renewal_lapse_completed_at: new Date(), renewal_lapse_outcome: 'lapsed' });
   return 'lapsed';
+}
+
+// Record the decided lapse ('cancel') on the PARENT. Returns true when the
+// parent reads decided 'cancel' afterwards.
+async function decideParentLapse(term, conn) {
+  if (!term.renewed_from_term_id) return true;
+  try {
+    const decided = await require('./annual-prepay-renewals').recordDecision({ termId: term.renewed_from_term_id, action: 'cancel', conn });
+    if (decided) return true;
+    // Codex round-7 P1 / round-3 audit P1: recordDecision returns null
+    // (never throws) on a guard-miss — but that guard-miss has TWO very
+    // different causes. (a) The parent was decided something ELSE — a
+    // genuine conflict; never mark the lapse "done". (b) A prior partial run
+    // of THIS SAME lapse already recorded 'cancel' on the parent and crashed
+    // before stamping completed_at — recordDecision's own guard
+    // (`renewal_decision IS NULL`) correctly returns null on RETRY, but that
+    // is SUCCESS, not a conflict. Verified with a fresh read.
+    const parent = await conn('annual_prepay_terms').where({ id: term.renewed_from_term_id }).first('renewal_decision');
+    if (parent?.renewal_decision === 'cancel') {
+      logger.info(`[termite-annual-renewal] parent ${term.renewed_from_term_id} already reads decided 'cancel' for successor ${term.id} — a prior partial run of this SAME lapse; completing it now`);
+      return true;
+    }
+    logger.warn(`[termite-annual-renewal] parent lapse-stamp guard-missed for successor ${term.id} — the parent was decided elsewhere between the re-check and this write`);
+    return false;
+  } catch (err) {
+    logger.warn(`[termite-annual-renewal] parent lapse-stamp skipped for successor ${term.id}: ${err.message}`);
+    return false;
+  }
 }
 
 // ---- pass 5b: reconcile missed lapse effects (Codex round-1 P1 / round-2 P1) --------
@@ -1887,6 +2127,11 @@ async function reconcileMissedLapseEffects({ conn = db, limit = 200, counts }) {
     const candidates = await conn('annual_prepay_terms as t')
       .whereNotNull('t.renewal_lapse_started_at')
       .whereNull('t.renewal_lapse_completed_at')
+      // Chokepoint D (item 4): a manual-review hold is staff's now, never
+      // re-run here; a self-clearing deferral rotates behind rows this
+      // pass has not retried yet — see holdLapse.
+      .whereRaw("coalesce(t.renewal_lapse_outcome, '') <> 'manual_review'")
+      .orderByRaw('t.renewal_sweep_deferred_at asc nulls first')
       .orderBy('t.renewal_lapse_started_at', 'asc')
       .select('t.*')
       .limit(limit);
@@ -1918,35 +2163,50 @@ async function reconcileMissedLapseEffects({ conn = db, limit = 200, counts }) {
 // term is exempt — no delivery needed), or false (the bell itself failed,
 // or a fresh bell's delivery failed) — only a truthy return may stamp the
 // leg's own exclusion column; false must stay retryable.
-async function bellAndVerifyDeliveryForNeverReachedStripe(successor, conn) {
-  // Codex #4971 round-4 (post-merge audit) P1: the FINAL parent check
-  // right before the Stripe call (decideAndCharge's own
-  // withParentDecisionLock re-check, a few hundred lines up) correctly
-  // blocks Stripe when a cancellation wins the race against an
-  // already-claimed attempt fence — but that block leaves the successor
-  // in EXACTLY the shape this leg selects on (renewal_charge_attempted_at
-  // set, no stripe_invoice_charge_attempts row, still payment_pending),
-  // and this leg never re-checked the parent at all before delivering the
-  // draft renewal invoice — a payment demand for a renewal the customer
-  // (or staff) already cancelled. Revalidate with the SAME allow-list
-  // (resolveParentEligibility) before ANY delivery. An ineligible parent
-  // is a DURABLE outcome (a decided cancellation doesn't un-decide
-  // itself) — bell staff with the real reason and stamp the handled
-  // marker so this successor is never re-selected, but never deliver.
+// Leg 7b's version of successorActionBlocker (the fence is already claimed
+// here, so that one would stop at 'already_attempted'): the parent's
+// eligibility and the successor's own grace window — past it, delivering a
+// pay link now would only hand the next grace-lapse tick a "presented"
+// renewal to lapse and retrieve on the spot.
+async function successorRecoveryRefusal(successor, conn) {
   if (successor.renewed_from_term_id) {
     const parent = await conn('annual_prepay_terms').where({ id: successor.renewed_from_term_id }).first();
     const parentEligibility = await resolveParentEligibility(conn, parent);
     if (!parentEligibility.eligible) {
-      const belled = await ringRenewalBell(
-        successor,
-        'ineligible',
-        `the renewal charge was claimed but never reached Stripe, and the parent is no longer eligible (${parentEligibility.reason}) — no invoice sent`,
-      );
-      // Same "staff were never actually told" guard as the normal path
-      // below — a bell delivery failure must stay retryable, never
-      // stamped handled.
-      return !!belled;
+      return { reason: `the parent is no longer eligible (${parentEligibility.reason})`, retire: parentEligibility.durable };
     }
+  }
+  const deadline = graceDeadlineFor(successor);
+  if (deadline && etDateString() > deadline) return { reason: 'past_grace_deadline', retire: true };
+  return null;
+}
+
+async function stampNeverReachedStripeHandled(successor, conn) {
+  await conn('annual_prepay_terms').where({ id: successor.id })
+    .whereNull('renewal_charge_never_reached_stripe_belled_at')
+    .update({ renewal_charge_never_reached_stripe_belled_at: new Date() });
+}
+
+async function bellAndVerifyDeliveryForNeverReachedStripe(successor, conn) {
+  // Codex #4971 round-4 (post-merge audit) P1: the FINAL parent check
+  // right before the Stripe call (decideAndCharge's withParentDecisionLock
+  // re-check) blocks Stripe when a cancellation wins the race against an
+  // already-claimed fence — which leaves the successor in EXACTLY the shape
+  // this leg selects on. Revalidate with the SAME rules as every other
+  // successor action (successorRecoveryRefusal) before ANY delivery.
+  // Codex #4971 round-3 P1 (item 1): a DURABLE refusal terminalizes the
+  // successor (chokepoint C) instead of stamping it handled and leaving it
+  // payment_pending forever; a transient one (the parent's own invoice in
+  // dispute) is left for a later tick, rotated behind newer rows.
+  const refusal = await successorRecoveryRefusal(successor, conn);
+  if (refusal?.retire) {
+    const retired = await retireUnpresentedSuccessor(successor, refusal.reason, conn);
+    return retired !== 'deferred';
+  }
+  if (refusal) {
+    await ringRenewalBell(successor, 'ineligible', `the renewal charge was claimed but never reached Stripe, and ${refusal.reason} — no invoice sent yet; it will be re-checked automatically`);
+    await stampSweepDeferred(successor, conn);
+    return false;
   }
   const result = await ringRenewalBell(
     successor,
@@ -1967,13 +2227,12 @@ async function bellAndVerifyDeliveryForNeverReachedStripe(successor, conn) {
   // evidence alone, independent of bell dedup — the SAME "invoice status
   // not draft, or a sent_at/sms_sent_at/email_sent_at stamp" proof
   // processGraceLapses' own presented-evidence check already uses.
-  const invoice = await conn('invoices').where({ id: successor.prepay_invoice_id })
-    .first('status', 'sent_at', 'sms_sent_at', 'email_sent_at');
-  const alreadyDelivered = !!invoice
-    && (String(invoice.status || '').toLowerCase() !== 'draft' || !!invoice.sent_at || !!invoice.sms_sent_at || !!invoice.email_sent_at);
-  if (alreadyDelivered) return true;
+  const invoice = classifyRenewalInvoice(await conn('invoices').where({ id: successor.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS));
+  if (invoice.delivered) return true;
   const delivery = await deliverRenewalInvoice(successor);
-  return delivery?.ok ? 'delivered' : false;
+  if (delivery?.ok) return 'delivered';
+  await stampSweepDeferred(successor, conn);
+  return false;
 }
 
 async function reconcileStuckSuccessors({ conn = db, limit = 200, counts }) {
@@ -2003,7 +2262,13 @@ async function reconcileStuckSuccessors({ conn = db, limit = 200, counts }) {
       .where('t.status', PAYMENT_PENDING_STATUS)
       .whereNull('t.renewal_charge_attempted_at')
       .whereNull('t.renewal_charge_skipped_at')
+      // A started grace lapse owns this row (passes 5/6) — never re-decide
+      // or retire it from here underneath that state machine.
+      .whereNull('t.renewal_lapse_started_at')
       .where('t.created_at', '<', staleCutoff)
+      // Chokepoint D: rows decideAndCharge deferred (a parent in dispute,
+      // a failed delivery) rotate behind rows it has not tried yet.
+      .orderByRaw('t.renewal_sweep_deferred_at asc nulls first')
       .orderBy('t.created_at', 'asc')
       .select('t.*')
       .limit(limit);
@@ -2048,9 +2313,17 @@ async function reconcileStuckSuccessors({ conn = db, limit = 200, counts }) {
       .where('t.status', PAYMENT_PENDING_STATUS)
       .whereNotNull('t.renewal_charge_attempted_at')
       .whereNull('t.renewal_charge_never_reached_stripe_belled_at')
-      .whereNotExists(function noAttemptRow() {
-        this.select(1).from('stripe_invoice_charge_attempts as a').whereRaw('a.invoice_id = t.prepay_invoice_id');
+      .whereNull('t.renewal_lapse_started_at')
+      // Chokepoint A (Codex #4971 round-3 P1, item 7): only an attempt with
+      // durable SUBMISSION evidence proves Stripe was reached. The attempt
+      // row is committed before the provider call, so an abandoned
+      // pre-submit claim (a crash, or stripe.js's own stale-claim release
+      // marking it failed) still has a row — the old bare NOT EXISTS hid it
+      // from this recovery forever.
+      .whereNotExists(function noSubmittedAttempt() {
+        whereAttemptSubmitted(this.select(1).from('stripe_invoice_charge_attempts as a').whereRaw('a.invoice_id = t.prepay_invoice_id'));
       })
+      .orderByRaw('t.renewal_sweep_deferred_at asc nulls first')
       .orderBy('t.renewal_charge_attempted_at', 'asc')
       .select('t.*')
       .limit(limit);
@@ -2059,11 +2332,7 @@ async function reconcileStuckSuccessors({ conn = db, limit = 200, counts }) {
       try {
         const handled = await bellAndVerifyDeliveryForNeverReachedStripe(successor, conn);
         if (handled === 'delivered') counts.reconcileNeverReachedStripeBelled += 1;
-        if (handled) {
-          await conn('annual_prepay_terms').where({ id: successor.id })
-            .whereNull('renewal_charge_never_reached_stripe_belled_at')
-            .update({ renewal_charge_never_reached_stripe_belled_at: new Date() });
-        }
+        if (handled) await stampNeverReachedStripeHandled(successor, conn);
       } catch (err) {
         logger.error(`[termite-annual-renewal] reconcile (never-reached-stripe) failed for successor ${successor.id}: ${err.message}`);
       }
@@ -2127,8 +2396,17 @@ module.exports = {
     resolveLapseVoidEligibility,
     resolveParentEligibility,
     parentInvoicePaidAndNotFullyRefunded,
+    classifyRenewalInvoice,
+    invoiceSettledNotRevoked,
+    whereInvoiceSettledNotRevoked,
+    whereInvoiceDelivered,
+    whereAttemptSubmitted,
+    renewalWasPresented,
+    retireUnpresentedSuccessor,
+    classifyVoidRefusal,
     checkStillEligibleForRenewalAction,
     processGraceLapseForTerm,
+    processGraceLapses,
     reconcileMissedLapseEffects,
     reconcileStuckSuccessors,
     bellNoWitnessTerms,

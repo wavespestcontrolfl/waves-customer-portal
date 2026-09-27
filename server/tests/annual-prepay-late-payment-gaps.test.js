@@ -141,6 +141,11 @@ describe('annual prepay late-payment gap fixes', () => {
 
   describe('suspendActiveTermsForDisputedInvoice', () => {
     const TERM_COLS = { prior_billing_mode: {}, dispute_suspended_at: {} };
+    // Each suspend call's conn queue below starts with the chokepoint-B probe (Codex #4971
+    // round-3 P1): the termite terms on this invoice, which take the
+    // parent-decision gate before the demotion — none here (non-termite
+    // terms keep the exact old path; the termite case is proven against
+    // real Postgres in annual-prepay-parent-decision-lock-postgres).
 
     test('flips active/renewal_pending to payment_pending, stamps the dispute marker, clears stamps, restores billing mode for suspended AND decided terms', async () => {
       const colsQ = query({ columnInfo: TERM_COLS });
@@ -157,7 +162,7 @@ describe('annual prepay late-payment gap fixes', () => {
       const decidedPriorQ = query({ first: { prior_billing_mode: 'none' } });
       const decidedCustomerResetQ = query();
       const conn = makeConn({
-        annual_prepay_terms: [colsQ, suspendQ, reselectQ, replacementQ, priorQ, decidedQ, decidedMarkerQ, decidedReplacementQ, decidedPriorQ],
+        annual_prepay_terms: [query({ rows: [] }), colsQ, suspendQ, reselectQ, replacementQ, priorQ, decidedQ, decidedMarkerQ, decidedReplacementQ, decidedPriorQ],
         scheduled_services: [stampClearQ, decidedStampClearQ],
         customers: [customerResetQ, decidedCustomerResetQ],
       });
@@ -215,7 +220,7 @@ describe('annual prepay late-payment gap fixes', () => {
       const customerResetQ = query();
       const decidedQ = query({ rows: [] });
       const conn = makeConn({
-        annual_prepay_terms: [colsQ, suspendQ, reselectQ, replacementQ, priorQ, decidedQ],
+        annual_prepay_terms: [query({ rows: [] }), colsQ, suspendQ, reselectQ, replacementQ, priorQ, decidedQ],
         scheduled_services: [stampClearQ],
         customers: [customerResetQ],
       });
@@ -236,7 +241,7 @@ describe('annual prepay late-payment gap fixes', () => {
       const failingClearQ = query();
       failingClearQ.then = (resolve, reject) => Promise.reject(new Error('db down')).then(resolve, reject);
       const conn = makeConn({
-        annual_prepay_terms: [colsQ, suspendQ, reselectQ],
+        annual_prepay_terms: [query({ rows: [] }), colsQ, suspendQ, reselectQ],
         scheduled_services: [failingClearQ],
       });
       conn.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
@@ -256,7 +261,7 @@ describe('annual prepay late-payment gap fixes', () => {
       const customerResetQ = query();
       const decidedQ = query({ rows: [] });
       const conn = makeConn({
-        annual_prepay_terms: [colsQ, suspendQ, replacementQ, priorQ, decidedQ],
+        annual_prepay_terms: [query({ rows: [] }), colsQ, suspendQ, replacementQ, priorQ, decidedQ],
         scheduled_services: [stampClearQ],
         customers: [customerResetQ],
       });

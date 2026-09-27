@@ -28,6 +28,7 @@ function chainable(firstResult) {
   });
   stub.modify = jest.fn((fn) => { if (typeof fn === 'function') fn(stub); return stub; });
   stub.first = jest.fn(() => Promise.resolve(firstResult));
+  stub.then = (resolve, reject) => Promise.resolve(firstResult === undefined ? [] : [firstResult]).then(resolve, reject);
   return stub;
 }
 
@@ -40,6 +41,7 @@ function coveredQuery({ liveTerm = undefined, rejectWith = null, forbidQuery = f
     if (rejectWith) {
       const stub = chainable(undefined);
       stub.first = jest.fn(() => Promise.reject(rejectWith));
+      stub.then = (resolve, reject) => Promise.reject(rejectWith).then(resolve, reject);
       return stub;
     }
     return chainable(liveTerm);
@@ -146,14 +148,14 @@ describe('annualPrepayCoversVisit — fail-closed completion coverage gate', () 
   // result for an unstamped visit that may genuinely still be in grace.
   test('an unstamped visit whose termite-grace lookup throws, under throwOnError: strict callers get the throw, never a silent false', async () => {
     coveredQuery({ rejectWith: new Error('db unreachable') });
-    const unstampedVisit = stampedVisit({ prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: null });
+    const unstampedVisit = stampedVisit({ prepaid_method: null, prepaid_amount: null });
     await expect(annualPrepayCoversVisit(unstampedVisit, db, { throwOnError: true }))
       .rejects.toThrow('db unreachable');
   });
 
   test('the SAME unstamped visit, non-strict (billing suppression): the lookup failure still degrades to NOT covered', async () => {
     coveredQuery({ rejectWith: new Error('db unreachable') });
-    const unstampedVisit = stampedVisit({ prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: null });
+    const unstampedVisit = stampedVisit({ prepaid_method: null, prepaid_amount: null });
     await expect(annualPrepayCoversVisit(unstampedVisit)).resolves.toBe(false);
   });
 

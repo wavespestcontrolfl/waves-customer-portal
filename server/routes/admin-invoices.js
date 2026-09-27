@@ -3213,6 +3213,11 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
           // guarded exactly like suspendActiveTermsForDisputedInvoice's own
           // inline demotion (pre-migration boots degrade to no exemption,
           // never a crash).
+          // Chokepoint B (Codex #4971 round-3 P1): un-paying a termite annual
+          // term moves it out of renewal-charge-eligible state — take the
+          // SAME parent-decision gate every other such writer takes, on
+          // this route's own transaction (no-op for a non-termite term).
+          await AnnualPrepayRenewals.lockTermiteTermForStatusWrite(trx, locked.annual_prepay_term_id);
           const termCols = await AnnualPrepayRenewals.annualPrepayColumns(trx);
           const demotion = { status: 'payment_pending', updated_at: trx.fn.now() };
           if (termCols.dispute_suspended_at) demotion.dispute_suspended_at = trx.fn.now();

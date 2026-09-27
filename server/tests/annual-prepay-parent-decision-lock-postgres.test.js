@@ -54,6 +54,9 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
   let holder; // a genuinely separate session/connection — models the "other side" of a race
   let withParentDecisionLock;
   let recordDecision;
+  let cancelTermWithRestorations;
+  let suspendActiveTermsForDisputedInvoice;
+  let lockTermiteTermForStatusWrite;
   const customerIds = [];
 
   beforeAll(() => {
@@ -65,7 +68,9 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
     process.env.DB_POOL_MAX = '2';
     process.env.DB_POOL_MIN = '2';
     db = require('../models/db');
-    ({ withParentDecisionLock, recordDecision } = require('../services/annual-prepay-renewals'));
+    ({
+      withParentDecisionLock, recordDecision, cancelTermWithRestorations, suspendActiveTermsForDisputedInvoice, lockTermiteTermForStatusWrite,
+    } = require('../services/annual-prepay-renewals'));
     holder = require('knex')({ client: 'pg', connection: process.env.REPAIR_TEST_DATABASE_URL, pool: { min: 1, max: 1 } });
   });
 
@@ -88,7 +93,7 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
 
   // Minimal valid rows on the REAL, already-migrated schema — annualPlanVersion
   // null/undefined models an ordinary (non-termite) program's term.
-  const insertTerm = async ({ annualPlanVersion = null, status = 'active', renewalDecision = null } = {}) => {
+  const insertTerm = async ({ annualPlanVersion = null, status = 'active', renewalDecision = null, withInvoice = false } = {}) => {
     const { randomUUID } = require('crypto');
     const customerId = randomUUID();
     customerIds.push(customerId);
@@ -97,6 +102,13 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
       first_name: 'Lock Test',
       phone: `+1555${String(Date.now()).slice(-7)}${Math.floor(Math.random() * 10)}`,
     });
+    let prepayInvoiceId = null;
+    if (withInvoice) {
+      const [invoice] = await db('invoices').insert({
+        customer_id: customerId, token: randomUUID(), invoice_number: `LOCK-${randomUUID().slice(0, 8)}`, status: 'paid',
+      }).returning('id');
+      prepayInvoiceId = invoice.id;
+    }
     const [term] = await db('annual_prepay_terms').insert({
       customer_id: customerId,
       term_start: '2026-01-01',
@@ -104,8 +116,38 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
       status,
       renewal_decision: renewalDecision,
       annual_plan_version: annualPlanVersion,
+      prepay_invoice_id: prepayInvoiceId,
     }).returning('*');
-    return term.id;
+    return withInvoice ? { termId: term.id, invoiceId: prepayInvoiceId } : term.id;
+  };
+
+  // Holds the charge's session lock on `termId` for `holdMs`, then runs
+  // `write` once the lock is visibly held; returns the write's result, the
+  // order of events, and how long the write took.
+  // `sawAdvisoryWait` is the direct proof the write queued on THIS lock (an
+  // ungranted advisory request on the key in pg_locks) — not merely on the
+  // small test pool, which a write could also wait on.
+  const raceWriteAgainstCharge = async (termId, write, { holdMs = 300 } = {}) => {
+    const order = [];
+    let sawAdvisoryWait = false;
+    const chargeDone = withParentDecisionLock(termId, async () => {
+      order.push('charge-holds-lock');
+      for (let waited = 0; waited < holdMs; waited += 25) {
+        await sleep(25);
+        const res = await holder.raw(
+          "SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid = hashtext(?) AND objid = hashtext(?::text)",
+          ['annual-prepay-parent-decision', String(termId)],
+        );
+        if (res.rows[0].n > 0) sawAdvisoryWait = true;
+      }
+      order.push('charge-releases');
+    });
+    await sleep(40);
+    const startedAt = Date.now();
+    const result = await write().then((value) => { order.push('write-runs'); return value; });
+    const elapsed = Date.now() - startedAt;
+    await chargeDone;
+    return { result, order, elapsed, sawAdvisoryWait };
   };
 
   // The two-int4-arg form (pg_advisory_lock(key1, key2), what
@@ -315,6 +357,65 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
     } finally {
       await soloPool.destroy();
     }
+  });
+
+  // Codex #4971 round-3 P1 (item 2) — chokepoint B: EVERY writer that can
+  // move a termite annual term out of charge-eligible state takes the same
+  // key, not just recordDecision. The refund/void-driven cancel
+  // (cancelTermWithRestorations — moves 9 and 13) and the dispute demotion
+  // (move 10) committing between the charge's last parent re-check and its
+  // Stripe submission would otherwise still get the parent charged.
+  test('(B) a refund/void-driven cancel (cancelTermWithRestorations) racing an in-flight charge on the SAME termite term WAITS, then cancels', async () => {
+    const termId = await insertTerm({ annualPlanVersion: 'v3', status: 'active' });
+    const { result, order, elapsed, sawAdvisoryWait } = await raceWriteAgainstCharge(termId, () => cancelTermWithRestorations(termId, db));
+
+    expect(sawAdvisoryWait).toBe(true);
+    expect(order).toEqual(['charge-holds-lock', 'charge-releases', 'write-runs']);
+    expect(elapsed).toBeGreaterThanOrEqual(200);
+    expect(result).toMatchObject({ id: termId, status: 'cancelled', renewal_decision: null });
+    expect(db.client.pool.numUsed()).toBe(0);
+  });
+
+  test('(B) a dispute demotion (suspendActiveTermsForDisputedInvoice) racing an in-flight charge on the SAME termite term WAITS, then demotes', async () => {
+    const { termId, invoiceId } = await insertTerm({ annualPlanVersion: 'v3', status: 'active', withInvoice: true });
+    const { result, order, elapsed, sawAdvisoryWait } = await raceWriteAgainstCharge(termId, () => suspendActiveTermsForDisputedInvoice(invoiceId, db));
+
+    expect(sawAdvisoryWait).toBe(true);
+    expect(order).toEqual(['charge-holds-lock', 'charge-releases', 'write-runs']);
+    expect(elapsed).toBeGreaterThanOrEqual(200);
+    expect(result.map((t) => [t.id, t.status])).toEqual([[termId, 'payment_pending']]);
+    expect(db.client.pool.numUsed()).toBe(0);
+  });
+
+  test('(B, e) a NON-termite cancel or demotion never waits on the key — byte-identical to main', async () => {
+    const plain = await insertTerm({ annualPlanVersion: null, status: 'active' });
+    const cancel = await raceWriteAgainstCharge(plain, () => cancelTermWithRestorations(plain, db));
+    expect(cancel.sawAdvisoryWait).toBe(false);
+    expect(cancel.result).toMatchObject({ id: plain, status: 'cancelled' });
+
+    const { termId: plainWithInvoice, invoiceId } = await insertTerm({ annualPlanVersion: null, status: 'active', withInvoice: true });
+    const demote = await raceWriteAgainstCharge(plainWithInvoice, () => suspendActiveTermsForDisputedInvoice(invoiceId, db));
+    expect(demote.sawAdvisoryWait).toBe(false);
+    expect(demote.order).toEqual(['charge-holds-lock', 'write-runs', 'charge-releases']);
+  });
+
+  test('(B) the refund/void cancel re-entering from INSIDE the charge\'s own lock for the SAME term never self-waits', async () => {
+    const termId = await insertTerm({ annualPlanVersion: 'v3', status: 'active' });
+    const startedAt = Date.now();
+    const cancelled = await withParentDecisionLock(termId, () => cancelTermWithRestorations(termId, db));
+    expect(cancelled).toMatchObject({ id: termId, status: 'cancelled' });
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+    expect(db.client.pool.numUsed()).toBe(0);
+  });
+
+  test('(B) taking the gate inside a caller\'s own transaction bounds only its own wait — the caller\'s lock_timeout is put back', async () => {
+    const termId = await insertTerm({ annualPlanVersion: 'v3', status: 'active' });
+    const seen = await db.transaction(async (trx) => {
+      await trx.raw("SELECT set_config('lock_timeout', '12s', true)");
+      await lockTermiteTermForStatusWrite(trx, termId);
+      return (await trx.raw('SHOW lock_timeout')).rows[0].lock_timeout;
+    });
+    expect(seen).toBe('12s');
   });
 
   // Codex round-7 P1 (2nd audit round) — REENTRANCY: chargeInvoiceWithSavedCard's

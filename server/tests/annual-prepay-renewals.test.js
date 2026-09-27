@@ -4053,6 +4053,39 @@ describe('annual prepay renewal helpers', () => {
     }));
   });
 
+  // Codex #4971 round-3 P1 (item 5): a renewal SUCCESSOR's window is fixed
+  // at mint (the day after its parent's term_end, through the next
+  // anniversary) and its grace coverage already ran from that start. Paid
+  // on grace day 20 it has no anchor stamp and no linked visit yet, which
+  // used to read as a first activation and slide term_end by the payment
+  // delay (20 unpaid days, and every later renewal date with them).
+  test('a renewal successor paid late during grace never slides its window — visits seed inside the minted window only', async () => {
+    const insertQuery = query({ returning: [{ id: 'svc-renewal', scheduled_date: '2026-10-20' }] });
+    // The slide's own queries, queued so a regression would actually slide
+    // (term_end column present, no later term to cap it) — and be caught.
+    const termSlideUpdate = query({});
+    setDbQueues({
+      scheduled_services: [
+        query({ columnInfo: TERMITE_COVERAGE_COLUMNS }),
+        query({ rows: [] }),
+        query({ first: undefined }),
+        insertQuery,
+      ],
+      annual_prepay_terms: [query({ columnInfo: { term_end: {}, first_visit_date: {} } }), query({ first: undefined }), termSlideUpdate],
+    });
+    const result = await _private.ensureCoverageRowsForTerm(termiteTerm({
+      id: 'term-renewal',
+      term_start: '2026-09-30',
+      term_end: '2027-09-30',
+      renewed_from_term_id: 'term-parent',
+      installation_anchored_at: null,
+    }), undefined, { today: '2026-10-20' });
+
+    expect(result).toMatchObject({ createdCount: 1, targetDates: ['2026-10-20'], effectiveTermEnd: '2027-09-30' });
+    expect(insertQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2026-10-20' }));
+    expect(termSlideUpdate.update).not.toHaveBeenCalled();
+  });
+
   // ---- termite annual plan: unified 45/30 notice-obligation pass (Codex #4921 r3 structural fix)
 
   describe('termiteRungDue — pure due/retry logic', () => {

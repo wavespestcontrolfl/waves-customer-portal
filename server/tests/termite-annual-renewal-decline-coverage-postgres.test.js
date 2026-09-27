@@ -524,6 +524,66 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
   });
 
+  test('renewal-lineage visits stay with a null-source successor; other service and malformed lineage require staff', async () => {
+    const { db, Renewals } = await load();
+    const fx = await paidInstalledTerm(db);
+    const propertyId = randomUUID();
+    await db('estimates').where({ id: fx.term.source_estimate_id }).update({ property_id: propertyId });
+    const [original] = await db('annual_prepay_terms').insert({
+      customer_id: fx.customerId,
+      source_estimate_id: fx.term.source_estimate_id,
+      term_start: addMonths(fx.today, -26),
+      term_end: addMonths(fx.today, -14),
+      status: 'expired',
+      annual_plan_version: 'v3',
+    }).returning('*');
+    const [predecessor] = await db('annual_prepay_terms').insert({
+      customer_id: fx.customerId,
+      renewed_from_term_id: original.id,
+      term_start: addMonths(fx.today, -14),
+      term_end: addMonths(fx.today, -2),
+      status: 'expired',
+      annual_plan_version: 'v3',
+    }).returning('*');
+    const [successor] = await db('annual_prepay_terms').where({ id: fx.term.id }).update({
+      source_estimate_id: null,
+      renewed_from_term_id: predecessor.id,
+    }).returning('*');
+    await db('scheduled_services').insert([
+      {
+        customer_id: fx.customerId,
+        source_estimate_id: original.source_estimate_id,
+        property_id: propertyId,
+        status: 'confirmed',
+        service_type: 'Termite Monitoring Visit',
+        scheduled_date: addMonths(fx.today, 2),
+      },
+      {
+        customer_id: fx.customerId,
+        annual_prepay_term_id: predecessor.id,
+        property_id: propertyId,
+        status: 'confirmed',
+        service_type: 'Termite Monitoring Visit',
+        scheduled_date: addMonths(fx.today, 3),
+      },
+    ]);
+
+    await expect(Renewals.otherLiveTermiteCoverage(successor, fx.today)).resolves.toBeNull();
+
+    const [otherService] = await db('scheduled_services').insert({
+      customer_id: fx.customerId,
+      property_id: randomUUID(),
+      status: 'confirmed',
+      service_type: 'Quarterly Termite Bait Monitoring',
+      scheduled_date: addMonths(fx.today, 2),
+    }).returning('id');
+    await expect(Renewals.otherLiveTermiteCoverage(successor, fx.today)).resolves.toBe('other_termite_service');
+
+    await db('scheduled_services').where({ id: otherService.id }).del();
+    await db('annual_prepay_terms').where({ id: predecessor.id }).update({ renewed_from_term_id: randomUUID() });
+    await expect(Renewals.otherLiveTermiteCoverage(successor, fx.today)).resolves.toBe('other_termite_service');
+  });
+
   test('a staff bell that is NOT stored leaves the term unsettled — the next sweep retries it', async () => {
     const { db, Renewals, notifyAdmin } = await load();
     const fx = await dueDeclinedTerm(db);

@@ -56,6 +56,7 @@ async function createScratchDb() {
   await db.raw(`CREATE TABLE annual_prepay_terms (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid NOT NULL,
+    source_estimate_id uuid,
     prepay_invoice_id uuid,
     status text NOT NULL,
     renewal_decision text,
@@ -66,6 +67,11 @@ async function createScratchDb() {
     term_end date NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
+  )`);
+  await db.raw('CREATE TABLE estimates (id uuid PRIMARY KEY, customer_id uuid NOT NULL, property_id uuid)');
+  await db.raw(`CREATE TABLE scheduled_services (
+    id uuid PRIMARY KEY, customer_id uuid NOT NULL, annual_prepay_term_id uuid,
+    source_estimate_id uuid, property_id uuid, recurring_parent_id uuid
   )`);
   return { db, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };
 }
@@ -105,6 +111,22 @@ describeOrSkip('coveredTermsAsOf — termite renewal grace coverage (P2-4), real
       term_end: termEnd,
       created_at: createdAt,
       ...overrides,
+    });
+    return id;
+  }
+
+  async function insertAncestor({ id = randomUUID(), sourceEstimateId = null, renewedFromTermId = null,
+    ownerId = customerId } = {}) {
+    await db('annual_prepay_terms').insert({
+      id,
+      customer_id: ownerId,
+      source_estimate_id: sourceEstimateId,
+      status: 'active',
+      renewed_from_term_id: renewedFromTermId,
+      annual_plan_version: 'v3',
+      term_start: '2025-09-27',
+      term_end: '2026-09-26',
+      created_at: '2025-09-27T12:00:00Z',
     });
     return id;
   }
@@ -223,24 +245,102 @@ describeOrSkip('coveredTermsAsOf — termite renewal grace coverage (P2-4), real
   // the 30-day window) reads as covered; one on day 31 (past the
   // deadline) does not.
   test('a visit completed on grace day 10 is covered — no stamp required', async () => {
-    await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z' });
+    const ancestorId = await insertAncestor();
+    const termId = await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z',
+      overrides: { renewed_from_term_id: ancestorId } });
     const fakeVisit = {
       id: randomUUID(), customer_id: customerId, service_type: null,
       scheduled_date: '2026-10-07', // day 10 from term_start
-      prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: null,
+      prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: termId,
     };
     const covered = await AnnualPrepayRenewals.annualPrepayCoversVisit(fakeVisit, db);
     expect(covered).toBe(true);
   });
 
   test('a visit completed on grace day 31 (past the deadline) is NOT covered', async () => {
-    await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z' });
+    const ancestorId = await insertAncestor();
+    const termId = await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z',
+      overrides: { renewed_from_term_id: ancestorId } });
     const fakeVisit = {
       id: randomUUID(), customer_id: customerId, service_type: null,
       scheduled_date: '2026-10-28', // day 31 from term_start
-      prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: null,
+      prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: termId,
     };
     const covered = await AnnualPrepayRenewals.annualPrepayCoversVisit(fakeVisit, db);
     expect(covered).toBe(false);
+  });
+
+  test('property-scoped grace covers property A but never an unrelated property B visit', async () => {
+    const estimateId = randomUUID();
+    const propertyA = randomUUID();
+    const propertyB = randomUUID();
+    await db('estimates').insert({ id: estimateId, customer_id: customerId, property_id: propertyA });
+    const originalId = await insertAncestor({ sourceEstimateId: estimateId });
+    await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z',
+      overrides: { renewed_from_term_id: originalId, source_estimate_id: null,
+        coverage_service_type: 'Termite Monitoring Visit' } });
+    const visit = { id: randomUUID(), customer_id: customerId, service_type: 'Termite Monitoring Visit',
+      scheduled_date: '2026-10-07', prepaid_method: null, property_id: propertyA };
+    await expect(AnnualPrepayRenewals.annualPrepayCoversVisit(visit, db)).resolves.toBe(true);
+    await expect(AnnualPrepayRenewals.annualPrepayCoversVisit({ ...visit, property_id: propertyB }, db)).resolves.toBe(false);
+  });
+
+  test('a null-source later successor inherits original scope through its recurring parent; conflicts and ambiguity fail closed', async () => {
+    const propertyId = randomUUID();
+    const estimateA = randomUUID();
+    const estimateB = randomUUID();
+    await db('estimates').insert([
+      { id: estimateA, customer_id: customerId, property_id: propertyId },
+      { id: estimateB, customer_id: customerId, property_id: propertyId },
+    ]);
+    const originalA = await insertAncestor({ sourceEstimateId: estimateA });
+    const middleA = await insertAncestor({ renewedFromTermId: originalA });
+    const termA = await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z',
+      overrides: { renewed_from_term_id: middleA, source_estimate_id: null } });
+    const originalB = await insertAncestor({ sourceEstimateId: estimateB });
+    await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z',
+      overrides: { renewed_from_term_id: originalB, source_estimate_id: null, prepay_invoice_id: invoiceId } });
+    const parentId = randomUUID();
+    await db('scheduled_services').insert({ id: parentId, customer_id: customerId,
+      annual_prepay_term_id: middleA, source_estimate_id: estimateA, property_id: propertyId });
+    const child = { id: randomUUID(), customer_id: customerId, service_type: null, scheduled_date: '2026-10-07',
+      prepaid_method: null, recurring_parent_id: parentId };
+    await expect(AnnualPrepayRenewals.annualPrepayCoversVisit(child, db)).resolves.toBe(true);
+    await expect(AnnualPrepayRenewals.annualPrepayCoversVisit({ ...child, source_estimate_id: estimateB }, db))
+      .resolves.toBe(false);
+    await expect(AnnualPrepayRenewals.annualPrepayCoversVisit({ ...child, recurring_parent_id: null, property_id: propertyId }, db))
+      .resolves.toBe(false);
+    await expect(AnnualPrepayRenewals.annualPrepayCoversVisit({
+      ...child, recurring_parent_id: randomUUID(), annual_prepay_term_id: termA,
+    }, db)).resolves.toBe(false);
+  });
+
+  test('missing, cross-customer, cyclic, and conflicting-source renewal ancestry is never grace coverage', async () => {
+    const estimateA = randomUUID();
+    const estimateB = randomUUID();
+    await db('estimates').insert([
+      { id: estimateA, customer_id: customerId, property_id: randomUUID() },
+      { id: estimateB, customer_id: customerId, property_id: randomUUID() },
+    ]);
+    const cases = [];
+    cases.push(await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z',
+      overrides: { renewed_from_term_id: randomUUID() } }));
+    const foreignAncestor = await insertAncestor({ ownerId: randomUUID(), sourceEstimateId: estimateA });
+    cases.push(await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z',
+      overrides: { renewed_from_term_id: foreignAncestor } }));
+    const conflictAncestor = await insertAncestor({ sourceEstimateId: estimateA });
+    cases.push(await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z',
+      overrides: { renewed_from_term_id: conflictAncestor, source_estimate_id: estimateB } }));
+    const cycleParent = await insertAncestor();
+    const cycleSuccessor = await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z',
+      overrides: { renewed_from_term_id: cycleParent } });
+    await db('annual_prepay_terms').where({ id: cycleParent }).update({ renewed_from_term_id: cycleSuccessor });
+    cases.push(cycleSuccessor);
+
+    for (const termId of cases) {
+      const visit = { id: randomUUID(), customer_id: customerId, service_type: null,
+        scheduled_date: '2026-10-07', prepaid_method: null, annual_prepay_term_id: termId };
+      await expect(AnnualPrepayRenewals.annualPrepayCoversVisit(visit, db)).resolves.toBe(false);
+    }
   });
 });

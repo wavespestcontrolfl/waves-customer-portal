@@ -693,6 +693,20 @@ function coverageAwaitsInstallation(term) {
   return !!term?.annual_plan_version && !term.renewed_from_term_id && !term.installation_anchored_at;
 }
 
+// A term whose coverage window was FIXED when it was created, so a late
+// payment must never slide it: an installation-anchored termite term (its
+// window IS the installation date + 12 months), and — Codex #4971 round-3 P1
+// (item 5) — a termite renewal SUCCESSOR, whose window is fixed at mint (the
+// day after its parent's term_end, through the next anniversary) and whose
+// grace coverage already ran from that start. A successor paid on grace day
+// 20 has no anchor stamp and usually no linked visit yet (payment_pending
+// refreshes deliberately seed nothing), so without this it read as a first
+// activation and slid term_end — and every later renewal date — by the
+// payment delay: 20 extra, unpaid days per late year.
+function windowFixedAtCreation(term) {
+  return !!(term?.installation_anchored_at || term?.renewed_from_term_id);
+}
+
 function isInstallationAnchorRow(term, row) {
   return term?.installation_anchor_visit_id != null && row?.id != null
     && String(row.id) === String(term.installation_anchor_visit_id);
@@ -954,7 +968,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, {
   // installation-anchored termite term never slides: its window IS the
   // installation date + 12 months, and the anchoring sweep runs after the
   // installation, so the lag would otherwise stretch every anchored year.
-  if (!alreadyActivated && !term?.installation_anchored_at
+  // Nor does a termite renewal SUCCESSOR (windowFixedAtCreation).
+  if (!alreadyActivated && !windowFixedAtCreation(term)
     && anchorLagDays != null && anchorLagDays > 0 && (await annualPrepayColumns(conn)).term_end) {
     effectiveTermEnd = addDaysYmd(termEnd, anchorLagDays);
     // Never slide into a successor term: a long-pending invoice can be paid
@@ -1819,10 +1834,26 @@ function isTermiteAnnualPlanTerm(term) {
 // undelivered-past-deadline bell as the durable backstop). null is returned
 // ONLY when the data is genuinely absent — no source estimate, no estimate
 // row, or neither a linked property address nor an estimate address.
+//
+// Codex #4971 round-3 (item 8): a renewal SUCCESSOR has no
+// source_estimate_id of its own (never copied — see termiteRenewalScope), so
+// its plan's estimate is its ROOT ancestor's, recovered through the shared
+// customer-scoped, cycle-safe lineage resolver. The root estimate's snapshot
+// stays the preferred address, exactly as for the original term. A
+// malformed lineage resolves no estimate (null — the notice then uses the
+// customer's address, the same answer as a term with no estimate at all).
+async function planEstimateIdForTerm(term, conn = db) {
+  if (term?.source_estimate_id) return term.source_estimate_id;
+  if (!term?.renewed_from_term_id) return null;
+  const scope = await termiteRenewalScope(term, term.customer_id, conn);
+  return scope?.estimateId || null;
+}
+
 async function planPropertyForTerm(term, conn = db) {
-  if (!term?.source_estimate_id) return null;
+  const estimateId = await planEstimateIdForTerm(term, conn);
+  if (!estimateId) return null;
   const estimate = await conn('estimates')
-    .where('id', term.source_estimate_id)
+    .where('id', estimateId)
     .first('property_id', 'address');
   if (!estimate) return null;
   if (estimate.address) {
@@ -3135,6 +3166,80 @@ function coveredTermsAsOf(conn, coverageDate = null) {
     );
 }
 
+const MAX_RENEWAL_ANCESTRY_DEPTH = 100;
+
+// Renewal successors intentionally do NOT copy source_estimate_id: doing so
+// would make createTermForAnnualPrepay find and overwrite the original term.
+// Recover the plan scope through the immutable renewed_from_term_id chain
+// instead. Every hop is ownership-scoped; malformed ancestry is unusable.
+// THE one lineage resolver (Codex #4971 round-3, item 8): renewal grace
+// coverage (termiteGraceVisitScope), the lapse/decline retrieval guard
+// (otherLiveTermiteCoverage), the renewal notice's protected property
+// (planPropertyForTerm) and the portal card's property label
+// (termPropertyLabelsForCustomer) all read a successor's plan identity
+// through here. Returns null for a malformed chain — a hop owned by another
+// customer, a cycle, two different estimates, a missing ancestor, or depth
+// past MAX_RENEWAL_ANCESTRY_DEPTH — so every caller fails closed.
+async function termiteRenewalScope(term, customerId, conn) {
+  const termIds = new Set();
+  const estimateIds = new Set();
+  let current = term;
+  for (let depth = 0; depth < MAX_RENEWAL_ANCESTRY_DEPTH; depth += 1) {
+    if (!current?.id || String(current.customer_id) !== String(customerId)) return null;
+    const currentId = String(current.id);
+    if (termIds.has(currentId)) return null;
+    termIds.add(currentId);
+    if (current.source_estimate_id) estimateIds.add(String(current.source_estimate_id));
+    if (estimateIds.size > 1) return null;
+    if (!current.renewed_from_term_id) {
+      const estimateId = [...estimateIds][0] || null;
+      if (!estimateId) return { termIds, estimateId: null, propertyId: null };
+      const estimate = await conn('estimates')
+        .where({ id: estimateId, customer_id: customerId })
+        .first('property_id');
+      if (!estimate) return null;
+      return { termIds, estimateId, propertyId: estimate.property_id ? String(estimate.property_id) : null };
+    }
+    current = await conn('annual_prepay_terms')
+      .where({ id: current.renewed_from_term_id, customer_id: customerId })
+      .first('id', 'customer_id', 'source_estimate_id', 'renewed_from_term_id');
+    if (!current) return null;
+  }
+  return null;
+}
+
+async function termiteGraceVisitScope(scheduledService, conn) {
+  let parent = null;
+  if (scheduledService.recurring_parent_id) {
+    parent = await conn('scheduled_services')
+      .where({ id: scheduledService.recurring_parent_id, customer_id: scheduledService.customer_id })
+      .first('annual_prepay_term_id', 'source_estimate_id', 'property_id');
+    if (!parent) return null;
+  }
+  const values = (field) => [...new Set(
+    [scheduledService[field], parent?.[field]].filter(Boolean).map(String),
+  )];
+  const termIds = values('annual_prepay_term_id');
+  const estimateIds = values('source_estimate_id');
+  const propertyIds = values('property_id');
+  // A child can carry the successor while its recurring parent still
+  // carries a predecessor, so multiple term IDs are validated against
+  // one ancestry. Estimates/properties cannot legitimately differ.
+  if (estimateIds.length > 1 || propertyIds.length > 1) return null;
+  if (!termIds.length && !estimateIds.length && !propertyIds.length) return null;
+  return { termIds, estimateId: estimateIds[0] || null, propertyId: propertyIds[0] || null };
+}
+
+async function graceTermMatchesVisit(term, visitScope, scheduledService, conn) {
+  const termScope = await termiteRenewalScope(term, scheduledService.customer_id, conn);
+  if (!termScope) return false;
+  if (visitScope.termIds.length && !visitScope.termIds.every((id) => termScope.termIds.has(id))) return false;
+  if (visitScope.estimateId && termScope.estimateId !== visitScope.estimateId) return false;
+  if (visitScope.propertyId && termScope.propertyId !== visitScope.propertyId) return false;
+  return !(term.coverage_service_type && scheduledService.service_type
+    && !serviceMatchesCoverage(scheduledService, normalizeCoverageServiceType(term.coverage_service_type)));
+}
+
 // Codex round-7 P1: the UNSTAMPED half of termite grace coverage — see the
 // call site's own doc in annualPrepayCoversVisit. Reuses coveredTermsAsOf
 // (the SAME grace-aware query the mint/charge/lapse passes all key off),
@@ -3175,19 +3280,27 @@ async function termiteGraceCoversVisit(scheduledService, conn, { throwOnError = 
     if (throwOnError) {
       if (!(await conn.schema.hasTable('annual_prepay_terms'))) return false;
     } else if (!(await annualPrepayTableExists())) return false;
-    const term = await coveredTermsAsOf(conn, visitDate)
+    // Resolve the visit's durable plan scope. A recurring child inherits the
+    // root's links, but conflicting child/root evidence is ambiguous and must
+    // never waive a charge. Property preference/profile rows are deliberately
+    // absent: annual coverage belongs to the quoted property/term, not the
+    // customer's primary address.
+    const visitScope = await termiteGraceVisitScope(scheduledService, conn);
+    if (!visitScope) return false;
+
+    const terms = await coveredTermsAsOf(conn, visitDate)
       .where('t.customer_id', scheduledService.customer_id)
       .where('t.status', PAYMENT_PENDING_STATUS)
       .whereNotNull('t.renewed_from_term_id')
       .whereNotNull('t.annual_plan_version')
-      .first('t.id', 't.coverage_service_type');
-    if (!term) return false;
-    if (term.coverage_service_type
-        && scheduledService.service_type
-        && !serviceMatchesCoverage(scheduledService, normalizeCoverageServiceType(term.coverage_service_type))) {
-      return false;
+      .select('t.id', 't.customer_id', 't.source_estimate_id', 't.renewed_from_term_id', 't.coverage_service_type');
+    const matches = [];
+    for (const term of terms) {
+      if (await graceTermMatchesVisit(term, visitScope, scheduledService, conn)) matches.push(term);
     }
-    return true;
+    // Property-only linkage can match two concurrent plans at one site;
+    // absence and ambiguity both fail closed rather than choosing `.first()`.
+    return matches.length === 1;
   } catch (err) {
     // Codex round-7 P1 (2nd audit round): a strict caller (the extended-
     // completion charging guard, same contract as the stamp-based checks
@@ -3275,19 +3388,51 @@ async function termPropertyLabelsForCustomer(customerId, termIds, conn = db) {
     .where('t.customer_id', customerId)
     .whereIn('t.id', ids)
     .select(
-      't.id as term_id',
+      't.id as term_id', 't.customer_id', 't.source_estimate_id', 't.renewed_from_term_id',
       'cp.address_line1 as cp_line1', 'cp.address_line2 as cp_line2', 'cp.city as cp_city', 'cp.state as cp_state', 'cp.zip as cp_zip',
       'e.address as estimate_address',
       'c.address_line1 as c_line1', 'c.address_line2 as c_line2', 'c.city as c_city', 'c.state as c_state', 'c.zip as c_zip',
     );
   for (const row of rows) {
-    const estimateAddress = row.estimate_address == null ? '' : String(row.estimate_address).trim();
-    const termLabel = estimateAddress
-      || formatStructuredAddress(row.cp_line1, row.cp_line2, row.cp_city, row.cp_state, row.cp_zip);
+    const termLabel = estimateLabelFromRow(row) || (await successorLineageLabel(row, customerId, conn));
     const label = termLabel || formatStructuredAddress(row.c_line1, row.c_line2, row.c_city, row.c_state, row.c_zip);
     if (label) labels.set(row.term_id, { label, termTied: !!termLabel });
   }
   return labels;
+}
+
+// The plan-tied half of a label: the estimate's quoted snapshot first, its
+// linked (ownership-scoped) property only for a legacy snapshot-less
+// estimate — see termPropertyLabelsForCustomer's doc.
+function estimateLabelFromRow(row) {
+  const estimateAddress = row.estimate_address == null ? '' : String(row.estimate_address).trim();
+  return estimateAddress
+    || formatStructuredAddress(row.cp_line1, row.cp_line2, row.cp_city, row.cp_state, row.cp_zip);
+}
+
+// Codex #4971 round-3 (item 8): a renewal SUCCESSOR carries no
+// source_estimate_id, so the join above finds nothing for it — its label is
+// its ROOT estimate's, reached through the shared lineage resolver
+// (termiteRenewalScope — customer-scoped at every hop, null on a cycle or a
+// foreign hop). The estimate and its property are re-checked against THIS
+// customer exactly like the join above. Anything unresolved returns null,
+// so the caller falls back to the customer address with termTied: false.
+async function successorLineageLabel(row, customerId, conn) {
+  if (row.source_estimate_id || !row.renewed_from_term_id) return null;
+  const scope = await termiteRenewalScope({
+    id: row.term_id, customer_id: row.customer_id, source_estimate_id: null, renewed_from_term_id: row.renewed_from_term_id,
+  }, customerId, conn);
+  if (!scope?.estimateId) return null;
+  const root = await conn('estimates as e')
+    .leftJoin('customer_properties as cp', function ownProperty() {
+      this.on('cp.id', '=', 'e.property_id').andOn('cp.customer_id', '=', 'e.customer_id');
+    })
+    .where({ 'e.id': scope.estimateId, 'e.customer_id': customerId })
+    .first(
+      'e.address as estimate_address',
+      'cp.address_line1 as cp_line1', 'cp.address_line2 as cp_line2', 'cp.city as cp_city', 'cp.state as cp_state', 'cp.zip as cp_zip',
+    );
+  return root ? estimateLabelFromRow(root) : null;
 }
 
 // Fail-closed coverage test for completion billing. An annual-prepay-stamped
@@ -3692,15 +3837,28 @@ async function reconcileParentRenewedStamps({ conn = db, limit = 200 } = {}) {
   if (!(await annualPrepayTableExists())) return summary;
   let candidates = [];
   try {
-    candidates = await conn('annual_prepay_terms as s')
-      .join('annual_prepay_terms as p', 'p.id', 's.renewed_from_term_id')
-      .leftJoin('invoices as i', 'i.id', 's.prepay_invoice_id')
-      .whereNotNull('s.renewed_from_term_id')
-      .whereIn('s.status', ACTIVE_STATUSES)
-      .whereNull('p.renewal_decision')
-      .where(function invoicePaid() {
-        this.where('i.status', 'paid').orWhereNotNull('i.paid_at');
-      })
+    // Codex #4971 round-3 P1 (item 3): a paid-LOOKING successor invoice is
+    // not proof — a full refund lands on the payments ledger before (or
+    // without) the successor's own cancel sync, leaving the successor
+    // 'active' with paid_at still set. The SAME settled-and-not-revoked
+    // predicate the charge path's parent check reads
+    // (termite-annual-renewal-charge.js whereInvoiceSettledNotRevoked —
+    // chokepoint A) gates the renew stamp, so returned money never records
+    // the parent 'renewed'. The parent must also still be in a status
+    // recordDecision can move (ACTIVE_STATUSES): an undecided parent that is
+    // already cancelled/payment_pending would guard-miss every tick and pin
+    // this bounded page forever.
+    const { whereInvoiceSettledNotRevoked } = require('./termite-annual-renewal-charge')._private;
+    candidates = await whereInvoiceSettledNotRevoked(
+      conn('annual_prepay_terms as s')
+        .join('annual_prepay_terms as p', 'p.id', 's.renewed_from_term_id')
+        .join('invoices as i', 'i.id', 's.prepay_invoice_id')
+        .whereNotNull('s.renewed_from_term_id')
+        .whereIn('s.status', ACTIVE_STATUSES)
+        .whereIn('p.status', ACTIVE_STATUSES)
+        .whereNull('p.renewal_decision'),
+      'i',
+    )
       .select('s.id as successor_id', 's.renewed_from_term_id as parent_id')
       .limit(limit);
   } catch (err) {
@@ -3739,6 +3897,12 @@ async function reconcileParentRenewedStamps({ conn = db, limit = 200 } = {}) {
 // silently completing it.
 async function cancelTermWithRestorations(termId, conn = db, { throwOnError = false } = {}) {
   const runCancel = async (t) => {
+    // Chokepoint B (Codex #4971 round-3 P1): a refund/void-driven cancel of
+    // a termite term must serialize with an in-flight renewal charge
+    // against it — see lockTermiteTermForStatusWrite. Only inside a real
+    // transaction (the xact lock lives until its commit); a non-termite
+    // term pays one primary-key read and nothing else.
+    if (t.isTransaction) await lockTermiteTermForStatusWrite(t, termId);
     const [updated] = await t('annual_prepay_terms')
       .where({ id: termId })
       .whereNull('renewal_decision')
@@ -4394,6 +4558,22 @@ async function activatePaidPendingTerms(conn = db) {
  */
 async function suspendActiveTermsForDisputedInvoice(invoiceId, conn = db) {
   if (!invoiceId || !(await annualPrepayTableExists())) return [];
+  // Chokepoint B (Codex #4971 round-3 P1): the demotion moves a termite
+  // term out of charge-eligible state (active -> payment_pending), so each
+  // termite term on this invoice takes the parent-decision gate first —
+  // see lockTermiteTermForStatusWrite. Both callers (the dispute webhooks)
+  // pass their own transaction; a root-handle call has nothing to hold an
+  // xact lock on, so it is re-entered inside one only when a termite term
+  // is actually involved (a non-termite invoice keeps its exact old path).
+  const termiteTerms = await conn('annual_prepay_terms')
+    .where({ prepay_invoice_id: invoiceId })
+    .whereIn('status', ACTIVE_STATUSES)
+    .whereNotNull('annual_plan_version')
+    .select('id');
+  if (termiteTerms.length && !conn.isTransaction) {
+    return conn.transaction((trx) => suspendActiveTermsForDisputedInvoice(invoiceId, trx));
+  }
+  for (const { id } of termiteTerms) await lockTermiteTermForStatusWrite(conn, id);
   const termCols = await annualPrepayColumns(conn);
   const demotion = { status: PAYMENT_PENDING_STATUS, updated_at: new Date() };
   if (termCols.dispute_suspended_at) demotion.dispute_suspended_at = new Date();
@@ -6064,6 +6244,11 @@ async function createTermForAnnualPrepay({
   }
 
   if (existing) {
+    // Chokepoint B (Codex #4971 round-3 P1): this re-write can move an
+    // existing termite term's status (nextStatus follows its invoice), so it
+    // takes the SAME parent-decision gate as every other status writer —
+    // see lockTermiteTermForStatusWrite (inside a caller's transaction only).
+    if (conn.isTransaction) await lockTermiteTermForStatusWrite(conn, existing.id);
     const updates = {
       source_estimate_id: existing.source_estimate_id || sourceEstimateId || null,
       prepay_invoice_id: existing.prepay_invoice_id || prepayInvoiceId || null,
@@ -8455,6 +8640,13 @@ const heldParentDecisionLockStore = new AsyncLocalStorage();
 // here still mutually excludes the charge path's session lock on the SAME
 // key.
 async function acquireParentDecisionXactLock(trx, termId) {
+  // Codex #4971 round-3 P1 (chokepoint B widened): this lock is now taken
+  // inside OTHER writers' larger transactions too (voidInvoice's refund/void
+  // sync -> cancelTermWithRestorations, the dispute demotion, the
+  // reverse-prepaid route) — a SET LOCAL left at 5s would silently cap every
+  // LATER lock wait in the caller's own transaction. Bound only THIS wait:
+  // remember the caller's value and put it back once the lock is held.
+  const previous = (await trx.raw('SELECT current_setting(\'lock_timeout\') AS previous'))?.rows?.[0]?.previous;
   try {
     await trx.raw('SELECT set_config(\'lock_timeout\', ?, true)', [`${PARENT_DECISION_LOCK_TIMEOUT_MS}ms`]);
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', [PARENT_DECISION_LOCK_NS, String(termId)]);
@@ -8464,53 +8656,53 @@ async function acquireParentDecisionXactLock(trx, termId) {
     }
     throw err;
   }
+  await trx.raw('SELECT set_config(\'lock_timeout\', ?, true)', [previous || '0']);
 }
 
-// Extracted from recordDecision (Codex round-7 P2 self-review) — the
-// termite-scoping decision (peek, re-entrancy check, lock-and-write vs
-// plain write) is a genuinely self-contained sub-decision. See
-// recordDecision's own call site comment and heldParentDecisionLockStore's
-// doc for the full reasoning; kept together here rather than split further
-// since these three checks are one coherent policy, not separable steps.
-async function writeDecisionUnderTermiteLock(conn, termId, runUpdate) {
-  // Only a TERMITE annual term (annual_plan_version NOT NULL) can race
-  // against termite-annual-renewal-charge.js's Stripe submission, so only
-  // that term type pays for any serialization at all — every other
-  // program's decision is BYTE-IDENTICAL to before this lane ever existed:
-  // one UPDATE, no transaction wrapper, no lock, no second connection.
+// Codex #4971 round-3 P1 — chokepoint B: THE one gate every writer that can
+// move a termite annual term OUT of charge-eligible state passes through
+// before its write, on the SAME transaction the write commits on:
+// recordDecision (moves 6-8), cancelTermWithRestorations (moves 9 & 13 —
+// the refund/void sync and the remove-flag route), the dispute demotion
+// (move 10, suspendActiveTermsForDisputedInvoice) and the reverse-prepaid
+// un-pay (move 12, admin-invoices.js). decideAndCharge holds the SAME key
+// (withParentDecisionLock, a session lock) from its last parent re-check
+// through the Stripe submission, so any of these writes either commits
+// before that re-check (which then sees it and refuses) or waits until the
+// submission is done — never lands in between. Termite-only: a term with
+// no annual_plan_version never races the renewal charge, so it pays one
+// extra primary-key read and nothing else (no lock, no transaction). Re-
+// entrant: a writer running INSIDE withParentDecisionLock's own async tree
+// for this SAME term (the charge's own activation sync, or the grace
+// lapse's own recordDecision('cancel')) skips the second acquisition — see
+// heldParentDecisionLockStore. `trx` must be a transaction (the xact lock
+// releases at its commit/rollback).
+async function lockTermiteTermForStatusWrite(trx, termId) {
+  if (await termiteLockNeeded(trx, termId)) await acquireParentDecisionXactLock(trx, termId);
+}
+
+// The shared "does this write need the gate at all" test: a termite term
+// (annual_plan_version set) not already held by this async tree's own
+// withParentDecisionLock.
+async function termiteLockNeeded(conn, termId) {
+  if (!termId) return false;
   const peek = await conn('annual_prepay_terms').where({ id: termId }).first('annual_plan_version');
-  if (!peek?.annual_plan_version) return runUpdate(conn);
+  if (!peek?.annual_plan_version) return false;
+  return heldParentDecisionLockStore.getStore() !== String(termId);
+}
 
-  // Re-entrancy guard: a synchronous call chain that already holds the
-  // SESSION lock on this EXACT term (decideAndCharge's
-  // withParentDecisionLock, still open around its own Stripe submission)
-  // needs no second lock from a second connection; that would only
-  // contend with itself.
-  if (heldParentDecisionLockStore.getStore() === String(termId)) return runUpdate(conn);
-
-  // TRANSACTION-scoped advisory lock (pg_advisory_xact_lock), on the SAME
-  // conn/transaction the UPDATE itself runs on — conn.transaction() opens a
-  // real transaction when `conn` is the root pool handle, or a SAVEPOINT
-  // (same connection, no new one borrowed) when `conn` is already a
-  // transaction (stampParentRenewedForSuccessor's own savepoint wrapper) —
-  // the SAME auto-detecting call already used elsewhere in this file.
-  // pg_advisory_xact_lock releases automatically at the enclosing
-  // transaction's commit/rollback — no explicit unlock statement, so there
-  // is no separate-connection unlock step that could fail to run. A
-  // SESSION lock (termite-annual-renewal-charge.js's decideAndCharge, held
-  // across its own live Stripe call on a DEDICATED connection) and an XACT
-  // lock on the SAME key still mutually exclude — Postgres advisory locks
-  // share one lock table regardless of which acquisition function took
-  // them, so a decision here genuinely waits behind an in-flight charge,
-  // and a charge genuinely waits behind an in-flight decision, whichever
-  // side gets there first.
+// recordDecision's wrapper around the shared gate above: a decision that
+// needs no lock (a non-termite term, or a re-entrant call already under
+// withParentDecisionLock for this term) stays ONE plain UPDATE, no
+// transaction wrapper — byte-identical to before this lane. Otherwise the
+// UPDATE runs inside a transaction (a real one on the root handle, a
+// SAVEPOINT on a caller's trx — stampParentRenewedForSuccessor's own
+// savepoint) that takes the xact lock first. The charge path's session lock
+// and this xact lock share one Postgres lock table, so they mutually
+// exclude on the SAME key.
+async function writeDecisionUnderTermiteLock(conn, termId, runUpdate) {
+  if (!(await termiteLockNeeded(conn, termId))) return runUpdate(conn);
   return conn.transaction(async (trx) => {
-    // SET LOCAL (inside acquireParentDecisionXactLock) — scoped to this
-    // transaction/savepoint only, cleared automatically at its own
-    // commit/rollback; never a session-level setting that could leak onto
-    // some later, unrelated borrower of the same pooled connection (the
-    // risk the OLD session-lock design for this write had to guard
-    // against with an explicit RESET).
     await acquireParentDecisionXactLock(trx, termId);
     return runUpdate(trx);
   });
@@ -8918,7 +9110,11 @@ function whereTermPrepayRefunded(builder, alias) {
 // series, a one-off treatment), or an active termite bond, at any property —
 // and staff confirm which stations to pull by hand instead. Returns the
 // reason (the staff bell's wording) or null. Visits of THIS plan (linked to
-// the term, or booked from its estimate) don't count.
+// any term in its renewal ancestry, or booked from the original estimate)
+// don't count. Renewal successors deliberately have no source_estimate_id,
+// so resolve that ancestry before applying either exclusion. A malformed
+// chain gets no exclusions: any live termite visit then fails closed to the
+// manual handoff instead of risking an account-wide pull.
 async function otherLiveTermiteCoverage(term, today = etDateString()) {
   const otherPlan = await db('annual_prepay_terms')
     .where({ customer_id: term.customer_id })
@@ -8931,13 +9127,20 @@ async function otherLiveTermiteCoverage(term, today = etDateString()) {
     .where((current) => whereTermCurrentOrAwaitingInstallation(current, today))
     .first('id');
   if (otherPlan) return 'other_termite_plan';
+  const renewalScope = await termiteRenewalScope(term, term.customer_id, db);
   const liveService = await db('scheduled_services')
     .where({ customer_id: term.customer_id })
     .whereRaw("LOWER(COALESCE(service_type, '')) LIKE '%termite%'")
     .whereNotIn('status', [...PREPAID_UPDATE_EXCLUDED_STATUSES])
     .where('scheduled_date', '>=', today)
-    .whereRaw('annual_prepay_term_id IS DISTINCT FROM ?', [term.id])
-    .modify((q) => { if (term.source_estimate_id) q.whereRaw('source_estimate_id IS DISTINCT FROM ?', [term.source_estimate_id]); })
+    .modify((q) => {
+      if (!renewalScope) return;
+      q.where((termLink) => termLink.whereNull('annual_prepay_term_id')
+        .orWhereNotIn('annual_prepay_term_id', [...renewalScope.termIds]));
+      if (renewalScope.estimateId) {
+        q.whereRaw('source_estimate_id IS DISTINCT FROM ?', [renewalScope.estimateId]);
+      }
+    })
     .first('id');
   if (liveService) return 'other_termite_service';
   const bond = await db('termite_bonds').where({ customer_id: term.customer_id, status: 'active' }).first('id');
@@ -9492,6 +9695,10 @@ module.exports = {
   // takes — exported so termite-annual-renewal-charge.js's charge path
   // can hold the SAME lock across its own Stripe submission.
   withParentDecisionLock,
+  // Chokepoint B (Codex #4971 round-3 P1): the transaction-scoped half of
+  // the SAME lock, for a status writer OUTSIDE this module that already
+  // holds its own transaction (admin-invoices.js's reverse-prepaid un-pay).
+  lockTermiteTermForStatusWrite,
   // Termite renewal grace window (P1-2 / P2-4): the ONE shared cutoff
   // between coveredTermsAsOf's grace-coverage branch (here) and
   // termite-annual-renewal-charge.js's own grace-lapse pass.
@@ -9598,6 +9805,7 @@ module.exports = {
     termiteLateColumnForDaysOut,
     termiteLateEscalationColumnForDaysOut,
     planPropertyForTerm,
+    termNoticeAddress,
     TERMITE_EXTRA_NOTICE_DAYS,
     TERMITE_COPY_NOTICE_DAYS,
     TERMITE_30_LATE_NOTICE_COLUMN,
