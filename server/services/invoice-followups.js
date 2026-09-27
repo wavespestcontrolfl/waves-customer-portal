@@ -1390,6 +1390,14 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   }
 
   if (!smsSent && !emailResult.ok) {
+    // A retryable email outcome (the shared billing email check could not
+    // authorize this touch yet) holds the step for any customer, not only an
+    // explicit channel selection: a customer with no explicit choice and no
+    // phone would otherwise fall to the pause below and lose every remaining
+    // follow-up over one transient refusal.
+    if (!smsDeferUntil && (emailResult.retryable === true || emailResult.deferred === true)) {
+      smsDeferUntil = new Date(Date.now() + 30 * 60 * 1000);
+    }
     if (smsDeferUntil) {
       // Nothing failed — the touch fired outside the 8AM-8PM ET send
       // window and no email leg covered it. Keep the sequence active and

@@ -349,6 +349,29 @@ describe('invoice follow-up email sidecar', () => {
   // the choice: the handoff's preference-change hold keeps the touch due for
   // a re-fan-out on the current choice; the sequence is never paused on the
   // stale Email-only snapshot.
+  // No explicit channel choice and no phone: the email is the only leg, so a
+  // retryable refusal from the shared check must hold the touch rather than
+  // fall to the pause branch and end every remaining follow-up.
+  test('a retryable email refusal holds the touch for a customer with no channel choice and no phone', async () => {
+    const sequence = followupRow();
+    const sequenceUpdate = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [sequence], first: sequence })],
+      customers: [chain({ first: customer({ phone: null }) })],
+      invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
+      notification_prefs: [chain({ first: {} })],
+      customer_interactions: [chain(), chain()],
+      invoice_followup_sequences: [chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
+    });
+    BillingEmailAuthority.loadBillingEmailContext.mockRejectedValueOnce(new Error('connection terminated'));
+    await InvoiceFollowUps.runPending();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const [update] = sequenceUpdate.update.mock.calls[0];
+    expect(update).not.toHaveProperty('status');
+    expect(update.next_touch_at).toEqual(new Date(Date.now() + 30 * 60 * 1000));
+  });
+
   test.each([
     ['a preference change', { code: 'BILLING_PREFERENCES_CHANGED', blocked: true, retryable: true, deferred: true,
       deliveryOutcome: 'not_sent', reason: 'Email is not selected for this billing category' }],
