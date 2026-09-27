@@ -2247,6 +2247,14 @@ async function restoreConsumedQueuedSend(consumedRows, database = db, claimToken
 async function queuePendingChannelReplay({
   invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, database = db,
 }) {
+  // Adopting ANY live invoice_send_deferred row for this invoice is safe, even
+  // though sendViaSMSAndEmail's held-SMS leg uses the same rail: this runs in
+  // finalizeInvoiceAfterSms under the invoice send claim, and before the send
+  // began claimInvoiceForSend either refused over every other live row
+  // (queuedPayLinkText) or cancelled a still-scheduled one it adopted
+  // (consumeQueuedInvoiceSend). Every producer on this rail holds that same
+  // exclusive claim, so a live match here can only be this helper's own row
+  // from a retried finalize, never another producer's differently-shaped row.
   const existingQueued = await database("sms_log")
     .whereIn("status", ["scheduled", "sending"])
     .whereRaw("metadata->>'entry_point' = ?", [INVOICE_SEND_DEFERRED_ENTRY_POINT])
