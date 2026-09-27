@@ -2347,6 +2347,11 @@ describe('intake chokepoint worst-case latency (#4905)', () => {
     const elapsed = process.cpuUsage(started);
     return (elapsed.user + elapsed.system) / 1000;
   };
+  // The best of three runs: a super-linear regex blows the budget on every
+  // run, while one GC or background-compile spike on a busy CI box does not
+  // (process CPU counts V8's helper threads too — #5067 saw a single 55 ms
+  // sample on a shape that measures ~1 ms before and after its change).
+  const bestCpuMs = (fn) => Math.min(cpuMs(fn), cpuMs(fn), cpuMs(fn));
 
   beforeAll(() => {
     // Compile and exercise the full no-match path at the real input caps before
@@ -2361,7 +2366,7 @@ describe('intake chokepoint worst-case latency (#4905)', () => {
   test.each(shapes)('stays well under budget for repeated %j', (unit) => {
     const msg = fill(unit, 2000);
     const ctx = [...Array(12).fill(fill(unit, 600)), msg].join('\n');
-    expect(cpuMs(() => runChokepoint(fill(unit, 600), ctx, msg))).toBeLessThan(50);
+    expect(bestCpuMs(() => runChokepoint(fill(unit, 600), ctx, msg))).toBeLessThan(50);
   });
 
   test('stays under budget for seeded random mixes of the matchers\' own vocabulary', () => {
@@ -2374,7 +2379,7 @@ describe('intake chokepoint worst-case latency (#4905)', () => {
       const msg = words(300).slice(0, 2000);
       const ctx = [...Array.from({ length: 12 }, () => words(100).slice(0, 600)), msg].join('\n');
       const reply = words(100).slice(0, 600);
-      worst = Math.max(worst, cpuMs(() => runChokepoint(reply, ctx, msg)));
+      worst = Math.max(worst, bestCpuMs(() => runChokepoint(reply, ctx, msg)));
     }
     expect(worst).toBeLessThan(50);
   });
