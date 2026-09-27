@@ -40,6 +40,11 @@ jest.mock('../services/short-url', () => ({
   createShortCode: jest.fn(async () => ({ code: 'k3j9x', shortUrl: 'https://portal.wavespestcontrol.com/l/k3j9x' })),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The missed-call text-back shares voicemail_sms_claims; its stale-claim
+// reconciliation (a provider lookup) is its own module's, pinned there.
+jest.mock('../services/missed-call-text-back', () => ({
+  reconcileStaleClaim: jest.fn(async (phone, claim) => claim),
+}));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
@@ -48,6 +53,7 @@ const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const lineType = require('../services/messaging/validators/line-type');
 const { mintLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { createShortCode } = require('../services/short-url');
+const { reconcileStaleClaim } = require('../services/missed-call-text-back');
 const { sendVoicemailQuoteLink, MESSAGE_TYPE } = require('../services/voicemail-lead-sms');
 
 const LEAD_ID = '3f2f7b9c-1111-4222-8333-abcdefabcdef';
@@ -108,6 +114,7 @@ beforeEach(() => {
   renderSmsTemplate.mockImplementation(async (key, vars) => `Hi ${vars.first_name} — ${vars.service_label}: ${vars.quote_url}`);
   // A REAL provider id — sent:true alone is a suppression sentinel (isRealProviderSend).
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM0123456789abcdef0123456789abcdef' });
+  reconcileStaleClaim.mockImplementation(async (phone, claim) => claim);
 });
 
 function args(overrides = {}) {
@@ -174,13 +181,61 @@ describe('voicemail lead text-back gates', () => {
   });
 
   test('phone claim conflict — of two concurrent voicemails from one phone, the loser skips atomically', async () => {
-    // ON CONFLICT DO NOTHING returns no row for the loser.
+    // ON CONFLICT DO NOTHING returns no row for the loser; the winner's row
+    // is another voicemail's (it carries a lead).
     state.insertResults.voicemail_sms_claims = [[]];
+    state.firstResults.voicemail_sms_claims = [{ lead_id: 'lead-other', outcome: 'claimed' }];
     const result = await sendVoicemailQuoteLink(args());
     expect(result).toEqual({ sent: false, skipped: 'already_sent_to_phone' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     // The loser never touches the winner's claim.
     expect(phoneClaimReleased()).toBe(false);
+  });
+
+  describe('the claim shared with the missed-call text-back (lead_id NULL rows)', () => {
+    const inFlight = (extra = {}) => ({ lead_id: null, outcome: 'missed_call_dispatching', created_at: new Date(), ...extra });
+
+    test('a missed-call text that already went out wins — skipped at once, no wait', async () => {
+      state.insertResults.voicemail_sms_claims = [[]];
+      state.firstResults.voicemail_sms_claims = [{ lead_id: null, outcome: 'missed_call_sent' }];
+      expect(await sendVoicemailQuoteLink(args())).toEqual({ sent: false, skipped: 'already_sent_to_phone' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(phoneClaimReleased()).toBe(false);
+    });
+
+    test('a missed-call send mid-handoff is waited out: once it releases, this voicemail claims and sends', async () => {
+      state.insertResults.voicemail_sms_claims = [[], [{ phone: PHONE }]];
+      state.firstResults.voicemail_sms_claims = [inFlight()];
+      const result = await sendVoicemailQuoteLink(args());
+      expect(result.sent).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(state.inserts.filter((i) => i.table === 'voicemail_sms_claims')).toHaveLength(2);
+    });
+
+    test('a missed-call send still in flight after the wait is treated as sent (at most once)', async () => {
+      jest.useFakeTimers();
+      try {
+        state.insertResults.voicemail_sms_claims = Array.from({ length: 60 }, () => []);
+        state.firstResults.voicemail_sms_claims = Array.from({ length: 60 }, () => inFlight());
+        const pending = sendVoicemailQuoteLink(args());
+        await jest.advanceTimersByTimeAsync(6000);
+        expect(await pending).toEqual({ sent: false, skipped: 'already_sent_to_phone' });
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+        // One provider lookup per attempt, never one per poll.
+        expect(reconcileStaleClaim).toHaveBeenCalledTimes(1);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('a stale missed-call claim the provider proves unsent is released, and this voicemail claims', async () => {
+      reconcileStaleClaim.mockResolvedValueOnce(null);
+      state.insertResults.voicemail_sms_claims = [[], [{ phone: PHONE }]];
+      state.firstResults.voicemail_sms_claims = [inFlight({ created_at: new Date(Date.now() - 60 * 60 * 1000) })];
+      const result = await sendVoicemailQuoteLink(args());
+      expect(result.sent).toBe(true);
+      expect(reconcileStaleClaim).toHaveBeenCalledWith(PHONE, expect.objectContaining({ outcome: 'missed_call_dispatching' }));
+    });
   });
 
   test('phone claim insert failure fails CLOSED', async () => {

@@ -154,6 +154,8 @@ jest.setTimeout(30000);
     expect(sendInput.purpose).toBe('missed_call_followup');
     expect(typeof sendInput.providerPreSendCheck).toBe('function');
     expect(sendInput.body).not.toMatch(/reply stop/i);
+    // The callback number is required at render (an edit/variant without it never sends).
+    expect(renderSmsTemplate.mock.calls[0][3]).toEqual({ requiredVars: ['callback_clause'] });
     const after = await stored(row);
     expect(after.metadata.missed_call_text_settled_at).toBeTruthy();
     expect(after.metadata.missed_call_text_outcome).toBe('sent');
@@ -613,6 +615,13 @@ jest.setTimeout(30000);
     const row = call(READY_MINUTES_AGO, { metadata: { missed_call_notified_at: bellAt, missed_call_settled_at: bellAt } });
     await database('call_log').insert(row);
     expect(await sweepMissedCallTextBacks()).toEqual({ sent: 1, offered: 1 });
+  });
+
+  test('a late status callback that rewrote updated_at on an hours-old call does not give it a fresh slot', async () => {
+    const row = call(3 * 60, { updated_at: new Date(NOW - 6 * 60 * 1000) }); // ended ~3h ago, row touched 6 minutes ago
+    await database('call_log').insert(row);
+    expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'too_old' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('an in-hours call past its 30-minute send slot settles too_old without sending', async () => {

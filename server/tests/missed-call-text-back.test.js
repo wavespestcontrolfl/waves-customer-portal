@@ -22,7 +22,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const {
   GATE, MESSAGE_TYPE, CLAIM, MAX_CALL_AGE_MS, SEND_SLOT_MS, VOICEMAIL_GRACE_MS,
-  _private: { textBackCoreEligible, tooOldToText, callbackClause, fromNumberForDialed, normalizePhoneE164 },
+  _private: { textBackCoreEligible, callEndedAt, tooOldToText, callbackClause, fromNumberForDialed, normalizePhoneE164 },
 } = require('../services/missed-call-text-back');
 
 // 2026-09-08T15:00Z = 11:00 ET (EDT) — inside the 8am–8pm send window.
@@ -163,6 +163,18 @@ describe('bounded catch-up (tooOldToText) — one 30-minute send slot per call',
     expect(tooOldToText(row, Date.parse('2026-09-09T02:00:00Z') + 15 * 60 * MIN)).toBe(true);
   });
 
+  test('a late or retried status callback that rewrites updated_at never reopens the slot', () => {
+    // 11:00 ET call (40 s), its row touched again three hours later.
+    const row = call({ created_at: new Date(IN_WINDOW), updated_at: new Date(IN_WINDOW + 3 * 60 * MIN), duration_seconds: 40 });
+    expect(callEndedAt(row)).toBe(IN_WINDOW + 40 * 1000);
+    expect(tooOldToText(row, IN_WINDOW + 3 * 60 * MIN + 6 * MIN)).toBe(true);
+  });
+
+  test('a row created at its terminal status is capped by updated_at, not pushed past it by the duration', () => {
+    const row = call({ created_at: new Date(IN_WINDOW), updated_at: new Date(IN_WINDOW), duration_seconds: 90 });
+    expect(callEndedAt(row)).toBe(IN_WINDOW);
+  });
+
   test('unreadable timestamps are too old (fail closed)', () => {
     expect(tooOldToText(call({ created_at: 'not a date', updated_at: 'not a date' }), IN_WINDOW)).toBe(true);
   });
@@ -239,6 +251,12 @@ describe('seeded copy (server/models/migrations/20260926180000_missed_call_text_
 
   test('template_key matches the module\'s MESSAGE_TYPE', () => {
     expect(MESSAGE_TYPE).toBe('missed_call_text_back');
+  });
+
+  test('the callback number is a required placeholder: template edits and render both refuse a body without it', () => {
+    const { REQUIRED_TEMPLATE_PLACEHOLDERS } = require('../routes/admin-sms-templates');
+    expect(REQUIRED_TEMPLATE_PLACEHOLDERS[MESSAGE_TYPE]).toEqual(['callback_clause']);
+    expect(TEMPLATE.body).toContain('{callback_clause}');
   });
 
   test('carries no "Reply STOP to opt out." line (owner ruling: they called us)', () => {

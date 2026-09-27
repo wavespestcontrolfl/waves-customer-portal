@@ -171,15 +171,29 @@ function textBackCoreEligible(row) {
 }
 
 /**
+ * When the call ended (ms epoch, NaN when unreadable), from facts a later
+ * write can't move: the row's creation plus Twilio's call duration. A
+ * retried or late status callback rewrites updated_at on the existing row,
+ * so updated_at alone would hand an hours-old call a fresh grace and send
+ * slot. updated_at still caps it, for rows created at their terminal
+ * status (the status-callback fallback insert).
+ */
+function callEndedAt(row) {
+  const byDuration = new Date(row.created_at).getTime() + Math.max(0, Number(row.duration_seconds) || 0) * 1000;
+  const lastWrite = new Date(row.updated_at || row.created_at).getTime();
+  const known = [byDuration, lastWrite].filter(Number.isFinite);
+  return known.length ? Math.min(...known) : NaN;
+}
+
+/**
  * When the call's one send slot closes (ms epoch), or null when its
  * timestamps are unreadable. The slot opens when the call clears the
- * voicemail-landing grace (measured from its terminal update, the same
- * clock the bell uses). If the window is closed then, or closes before the
- * slot would run out, the slot moves to the next 8 AM ET instead — the
- * owner's after-hours rule.
+ * voicemail-landing grace (measured from when it ended). If the window is
+ * closed then, or closes before the slot would run out, the slot moves to
+ * the next 8 AM ET instead — the owner's after-hours rule.
  */
 function sendSlotDeadline(row) {
-  const terminalAt = new Date(row.updated_at || row.created_at).getTime();
+  const terminalAt = callEndedAt(row);
   if (!Number.isFinite(terminalAt)) return null;
   const readyAt = terminalAt + VOICEMAIL_GRACE_MS;
   const inHoursEnd = readyAt + SEND_SLOT_MS;
@@ -340,10 +354,10 @@ async function precheckRow(row, now) {
     return { ok: false, deferred: true, nextAttemptAt: nextSendWindowOpenET(new Date(now)) };
   }
 
-  // In-hours voicemail-landing grace, from the terminal update — same
+  // In-hours voicemail-landing grace, from when the call ended — same
   // window the bell's own sweep uses (a voicemail can still be
   // recording/uploading right after the terminal status lands).
-  const terminalAt = new Date(row.updated_at || row.created_at).getTime();
+  const terminalAt = callEndedAt(row);
   if (Number.isFinite(terminalAt) && now - terminalAt < VOICEMAIL_GRACE_MS) {
     return { ok: false, pending: true, reason: 'voicemail_grace' };
   }
@@ -393,13 +407,16 @@ async function sendWithLease(row, { fromNumber, phone }, releaseLease, settleFen
     return { outcome: 'error' };
   }
 
+  // requiredVars: an admin edit or a weighted variant that drops the
+  // callback number never renders (the same list guards template edits).
+  const { REQUIRED_TEMPLATE_PLACEHOLDERS } = require('../routes/admin-sms-templates');
   const body = await renderSmsTemplate(MESSAGE_TYPE, {
     callback_clause: callbackClause(fromNumber),
   }, {
     workflow: MESSAGE_TYPE,
     entity_type: 'call_log',
     entity_id: row.id,
-  });
+  }, { requiredVars: REQUIRED_TEMPLATE_PLACEHOLDERS[MESSAGE_TYPE] });
   if (!body) {
     await releaseLease();
     logger.info(`[missed-call-text-back] Template ${MESSAGE_TYPE} missing/disabled — skipped for ${maskPhone(phone)}`);
@@ -688,6 +705,8 @@ module.exports = {
   MESSAGE_TYPE,
   CLAIM,
   BOUNDARY,
+  // voicemail-lead-sms.js resolves a stale claim of this lane's the same way.
+  reconcileStaleClaim,
   MAX_CALL_AGE_MS,
   SEND_SLOT_MS,
   VOICEMAIL_GRACE_MS,
@@ -695,6 +714,7 @@ module.exports = {
   sweepMissedCallTextBacks,
   _private: {
     textBackCoreEligible,
+    callEndedAt,
     sendSlotDeadline,
     tooOldToText,
     callbackClause,
