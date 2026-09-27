@@ -1,5 +1,5 @@
 /**
- * Real PostgreSQL, real DDL: 20260927010000_termite_annual_renewal_sweep_deferred_marker
+ * Real PostgreSQL, real DDL: 20260927020000_termite_annual_renewal_sweep_deferred_marker
  * runs its up()/down() against a scratch schema (its own random name,
  * dropped after the suite) inside a local throwaway database — same
  * convention as the 050000/050001/050002 migration tests.
@@ -10,7 +10,7 @@
  */
 const knexLib = require('knex');
 const { randomUUID } = require('crypto');
-const migration = require('../models/migrations/20260927010000_termite_annual_renewal_sweep_deferred_marker');
+const migration = require('../models/migrations/20260927020000_termite_annual_renewal_sweep_deferred_marker');
 
 const SKIP = !process.env.REPAIR_TEST_DATABASE_URL;
 const describeOrSkip = SKIP ? describe.skip : describe;
@@ -27,7 +27,7 @@ async function createScratchDb() {
   return { db, schema, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };
 }
 
-describeOrSkip('20260927010000_termite_annual_renewal_sweep_deferred_marker — real Postgres DDL', () => {
+describeOrSkip('20260927020000_termite_annual_renewal_sweep_deferred_marker — real Postgres DDL', () => {
   let fixture;
 
   beforeEach(async () => { fixture = await createScratchDb(); });

@@ -984,7 +984,7 @@ async function successorActionBlocker(conn, successorId, { lock = false } = {}) 
 
 // Chokepoint D (Codex #4971 round-3 P2, item 4): every bounded recovery
 // scan here orders by renewal_sweep_deferred_at NULLS FIRST ahead of its own
-// order (migration 20260927010000). A row a pass must leave for a later
+// order (migration 20260927020000). A row a pass must leave for a later
 // tick — a condition that clears on its own — is stamped here, so it
 // rotates to the back instead of re-occupying the same oldest page forever
 // and starving rows behind it. Ordering only; best-effort (a failed stamp
@@ -1465,7 +1465,7 @@ const FOLLOW_THROUGH_SENDS_PAY_LINK = new Set(['declined', 'refused']);
 // Codex #4971 pre-push P1 — THE follow-through chokepoint for a charge
 // outcome that reached Stripe but did not pay (a decline, a refusal, an
 // ambiguous or unverifiable result). Its obligations are persisted FIRST
-// (renewal_charge_failure_kind/_reason, 20260927010000), then carried out,
+// (renewal_charge_failure_kind/_reason, 20260927020000), then carried out,
 // and marked done (renewal_charge_failure_handled_at) only once the staff
 // bell persisted and — where one is owed — the pay link verifiably went
 // out. A submitted attempt is outside every other recovery leg (7a: the
