@@ -907,6 +907,25 @@ jest.setTimeout(30000);
     expect(bell.body).toMatch(/the listing gives EPA Reg\. No\. 279-3206, so confirm it from the label/);
   });
 
+  // 2026-09-27 pre-push audit: validation read a whitespace-only size as
+  // missing, but the write's truthiness check saw it as present, so stock
+  // logged without the size and later receipts stayed stuck in needs_size.
+  test('a whitespace-only container size is blank on the apply path too — the validated size is saved', async () => {
+    const [product] = await mockConn('products_catalog').insert({
+      name: 'Demand CS', active: true, category: 'insecticide', container_size: '   ', inventory_unit: null, inventory_on_hand: null,
+    }).returning('*');
+    const line = await pendingLine({ raw_title: 'Demand CS Insecticide 8 oz', product_id: product.id, quantity: 3, shipment_key: 'ship-blank-size' });
+    const result = await run({ ok: true, json: {
+      kind: 'existing', reason: 'matches the candidate', product_id: product.id, new_product: null,
+      reading: { size_text: '8 oz', size_number: 8, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    } });
+    expect(result).toMatchObject({ logged: 1 });
+    const updated = await mockConn('products_catalog').where({ id: product.id }).first();
+    expect(updated.container_size).toBe('8 oz');
+    expect(await stockOf(product.id)).toBe(24);
+    expect((await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).status).toBe('logged');
+  });
+
   test('a real hand-off through processReceiptLine saves handoffFrom, and a gate-off drain restores that status', async () => {
     const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
     const { drainAgentQueue } = require('../services/purchase-receipts/inventory-agent');

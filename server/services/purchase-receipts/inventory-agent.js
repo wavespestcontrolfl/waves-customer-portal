@@ -375,12 +375,21 @@ function isContiguousTitlePhrase(nameWords, titleWords) {
 //                  container's own count/unit.
 //   'missing'    — genuinely blank; this line's own reading may set it.
 //   'unreadable' — non-blank but neither parser can read it ("case of 4").
+// A container_size that is null, empty or only whitespace is MISSING — the
+// one blank test both validation (normalizeCandidateContainer) and the
+// apply's own write (resolveExistingProduct) use, so a size validated
+// against a blank container is always the size saved (2026-09-27 pre-push
+// audit: '   ' read as missing, then blocked the write as present).
+function isBlankContainer(value) {
+  return !String(value ?? '').trim();
+}
+
 function normalizeCandidateContainer(candidate) {
   const container = parsePackSize(candidate.container_size);
   if (container) return { kind: 'measured', amount: container.amount, unit: container.unit };
   const countContainer = parsePackCount(candidate.container_size);
   if (countContainer) return { kind: 'count', amount: countContainer.count, unit: countContainer.unit };
-  if (candidate.container_size && String(candidate.container_size).trim()) return { kind: 'unreadable' };
+  if (!isBlankContainer(candidate.container_size)) return { kind: 'unreadable' };
   return { kind: 'missing' };
 }
 
@@ -897,7 +906,7 @@ async function resolveExistingProduct(trx, { decision }) {
     defaultUnit: product.default_unit ?? null,
   };
   let catalogChangeNote = null;
-  if (decision.setContainerSize && !product.container_size) {
+  if (decision.setContainerSize && isBlankContainer(product.container_size)) {
     await trx('products_catalog').where({ id: productId }).update({ container_size: decision.setContainerSize, updated_at: new Date() });
     catalogChangeNote = `set ${product.name}'s container size to ${decision.setContainerSize}`;
   }
