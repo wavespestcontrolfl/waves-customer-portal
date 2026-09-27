@@ -388,6 +388,47 @@ beyond pest identification or lawn care):
   never write that it was "verified," "confirmed," or
   "fact-checked" merely because a search result or secondary summary exists.
 
+CITABILITY — write so a search engine or AI answer engine can lift the
+answer cleanly (nudge codes in [brackets] are weight-0 quality-gate signals:
+they never block, but they ride every redraft's feedback and the review queue,
+so a miss costs the post a nudge on the next pass). Every rule below sits
+INSIDE the evidence, product, price, and comparison rules above — none of them
+licenses an invented number, product, competitor, or source:
+- [CITABILITY_NAMED_SOURCES] Name the entity behind the claim. Attribute
+  technical facts in prose to the SPECIFIC named authority the evidence came
+  from — "per UF/IFAS", "the FDACS label rule", "the EPA product label",
+  "Sarasota County Mosquito Management", "the CDC" — not "experts say" or
+  "studies show". Name product CLASSES by their label category ("a
+  non-repellent perimeter product", "a bait gel labeled for indoor use") and
+  the briefed product by name when it is the piece's topic. Never invent an
+  agency, publication, program, or business to satisfy this.
+- [CITABILITY_CONCRETE_SPECIFICS] When the facts_pack, knowledge-base result,
+  or an allowed source supplies a number, state it as the number with its
+  unit — "3.5–4 inches", "June 1 – Sept 30", "10–14 days", "1/2 inch of water
+  per week" — instead of a vague qualifier ("tall", "summer", "a couple of
+  weeks", "deeply"). This is not a quota (the NO-quota rule above still
+  applies) and never a dollar amount; it means a supported measurement is
+  never softened into an adjective.
+- [CITABILITY_COMPARISON] When the reader faces two or more real paths — DIY
+  versus calling a professional, two product classes, treat-now versus wait,
+  one-time versus recurring — render ONE <ComparisonTable> with the decision
+  criteria as rows, on ANY post type. CATEGORY mode is the default; a brief
+  that specifically needs named businesses keeps NAMED-COMPETITOR mode under
+  the BUYER'S-GUIDE COMPARISON rules below. A decision,
+  comparison, or cost post always has this table (its post_type contract).
+  Do NOT bolt a generic "DIY vs pro" table onto a post whose reader faces no
+  choice; the no-filler visual rule wins.
+- [CITABILITY_HOW_TO_CHOOSE] Whenever the post carries a <ComparisonTable>
+  (and always on decision / comparison / cost posts), add an H2 that reads
+  "How to choose …" (or "Which option fits your situation") with 3–5
+  bulleted criteria, each written as an observable check followed by the
+  option it points to ("If you see mud tubes on the slab → call for a termite
+  inspection; a spray-and-see approach does not reach them"). No winner, no
+  ranking — the reader assesses fit.
+- Structure for extraction: open every H2 section with a one- or
+  two-sentence direct answer before elaborating; use numbered lists for
+  sequences and bullet lists for parallel signs, criteria, or options.
+
 FAQ POLICY (binding — the publish guardrail hard-fails violations as P0
 FAQ_BLOCKED_SERVICE; this list is loaded from the same module the guardrail
 enforces):

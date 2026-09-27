@@ -1919,7 +1919,12 @@ class AutonomousRunner {
     if (!alreadyRetried) {
       let recorded = false;
       try {
-        recorded = await this._recordGateRetry(opp, skipReason, blocking, claimToken);
+        // Early gates (guardrails, topic targeting, comparison, editorial)
+        // return here BEFORE the quality gate runs, so its weight-0
+        // citability nudges would never reach this sole redraft (Codex r7
+        // P2). Append them as non-blocking findings.
+        const nudges = this._citabilityNudgeFindings(run);
+        recorded = await this._recordGateRetry(opp, skipReason, [...(blocking || []), ...nudges], claimToken);
       } catch (err) {
         logger.warn(`[autonomous-runner] gate-retry record failed for ${opp.id}: ${err.message}`);
       }
@@ -1944,6 +1949,29 @@ class AutonomousRunner {
     });
     await this._skipClaimOrThrow(queue, opp.id, skipReason, { claimToken });
     return finalized;
+  }
+
+  /**
+   * Weight-0 citability nudges for the current draft, shaped as retry
+   * findings. Supporting-blog runs only (the only bundle that carries the
+   * checks). Never throws.
+   */
+  _citabilityNudgeFindings(run) {
+    try {
+      const draft = run?.draft_payload;
+      if (!draft || typeof draft !== 'object' || run.page_type !== 'supporting-blog') return [];
+      const checks = getQualityGate()?._internals?.PAGE_TYPE_CHECKS?.['supporting-blog'] || [];
+      const out = [];
+      for (const c of checks) {
+        if (!c.name.startsWith('citability_') || c.isHard) continue;
+        const r = c.evaluate(draft, {}, {});
+        if (r && !r.ok) out.push({ severity: 'P3', code: c.name.toUpperCase(), message: r.reason || 'citability nudge' });
+      }
+      return out;
+    } catch (err) {
+      logger.warn(`[autonomous-runner] citability nudge collection failed: ${err.message}`);
+      return [];
+    }
   }
 
   /**
@@ -3683,14 +3711,17 @@ class AutonomousRunner {
     }
     if (!qualityResult.ok) {
       const hard = (qualityResult.hard_failures || []).map((f) => f.name).join(', ');
-      const soft = (qualityResult.soft_failures || []).slice(0, 3).map((f) => f.name).join(', ');
+      // Every soft name, uncapped: the four weight-0 citability nudges plus
+      // blog_meta_soft_cta must all reach the single feedback redraft — a
+      // cap of 3 always dropped the last-registered ones (Codex P2, 2026-09-26).
+      const soft = (qualityResult.soft_failures || []).map((f) => f.name).join(', ');
       lines.push(`quality: hard=${hard || 'none'} soft=${soft || 'none'} score=${qualityResult.total_score}/${qualityResult.min_total_score}`);
     } else if ((qualityResult.soft_failures || []).length) {
       // Weight-0 nudges (blog_meta_soft_cta) ride along even when quality
       // passes, so a redraft triggered by ANOTHER gate still feeds them to
       // the writer and the review queue sees them (Codex r3 P2). The
       // quality gate itself never blocks on these.
-      const soft = qualityResult.soft_failures.slice(0, 3).map((f) => f.name).join(', ');
+      const soft = qualityResult.soft_failures.map((f) => f.name).join(', ');
       lines.push(`quality nudges (non-blocking): ${soft}`);
     }
     if (seoCompletionResult?.passed === false || seoCompletionResult?.summary?.needs_review) {
