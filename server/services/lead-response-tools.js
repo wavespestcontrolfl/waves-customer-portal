@@ -15,10 +15,23 @@ const {
 
 const { phoneMatchDigits } = require('../utils/phone');
 const { lockCustomerComms, withSmsConsentLock } = require('../utils/customer-comms-lock');
+
+const { stripTrailingSignature } = require('./messaging/sms-signoff');
 const PRE_CONTACT_LEAD_STATUSES = ['new', 'pending', 'started'];
 // Two-segment ceiling for the agent's text, STOP line included (policy.js
 // maxSegments for customer SMS; the send pipeline itself only advises).
 const LEAD_RESPONSE_MAX_SEGMENTS = 2;
+
+// The same body normalization sendCustomerMessage applies to lead SMS before
+// audit and dispatch (URL scheme stripped, typographic punctuation to GSM),
+// so what the agent gets back and what the report saves match what Twilio
+// received.
+function asSentSmsText(text) {
+  if (!text) return text;
+  const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+  const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+  return normalizeGsmPunctuation(stripSmsUrlScheme(text));
+}
 
 // Authority comes from the server's assigned session, never model arguments.
 async function resolveLeadSubject(input, context, conn = db, lock = false) {
@@ -54,6 +67,21 @@ async function withLockedLeadSubject(input, context, write) {
     const current = await resolveLeadSubject(input, context, trx, true);
     return current.error ? current : write(current, trx);
   });
+}
+
+// extracted_data keys that are staff-only: the Lead Response Agent writes the
+// customer's texts, so it never sees them. sign_host is the neighbor page's
+// "Which home had the sign?" answer (routes/lead-webhook.js), kept for the
+// office's sign-host credit.
+const AGENT_HIDDEN_EXTRACTED_KEYS = ['sign_host'];
+
+function agentVisibleExtractedData(raw) {
+  if (!raw) return null;
+  const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+  const visible = { ...data };
+  for (const key of AGENT_HIDDEN_EXTRACTED_KEYS) delete visible[key];
+  return visible;
 }
 
 async function executeLeadTool(toolName, input, context) {
@@ -96,7 +124,7 @@ async function executeLeadTool(toolName, input, context) {
         customerId: lead.customer_id,
         firstContactAt: lead.first_contact_at,
         responseTimeMin: lead.response_time_minutes,
-        extractedData: lead.extracted_data ? (typeof lead.extracted_data === 'string' ? JSON.parse(lead.extracted_data) : lead.extracted_data) : null,
+        extractedData: agentVisibleExtractedData(lead.extracted_data),
         triage: triageData,
         gclid: lead.gclid,
       };
@@ -273,6 +301,14 @@ async function executeLeadTool(toolName, input, context) {
     case 'send_lead_response': {
       const customer = subject.customer;
       if (!customer.phone) return { error: 'Customer has no phone number', validationError: true };
+      // An empty draft would send the STOP line alone and spend the phone's
+      // one automated text on it.
+      if (typeof input.message !== 'string' || !input.message.trim()) {
+        return { error: 'Message is empty. Write the reply and call send_lead_response again.', validationError: true };
+      }
+      // Customer texts are never signed (owner ruling 2026-09-26).
+      const message = stripTrailingSignature(input.message, { addresseeFirstName: customer.first_name });
+      if (!message) return { error: 'Message is empty once the sign-off is removed', validationError: true };
 
       // Owner ruling 2026-09-26: exactly one automated text ever reaches a
       // new website lead — the agent's reply replaces the standard
@@ -287,12 +323,8 @@ async function executeLeadTool(toolName, input, context) {
       // Customer texts stay within two SMS segments, and the STOP line below
       // is added after the agent drafts. Measure the composed text before
       // taking the claim, so the agent can shorten and retry.
-      // An empty draft would send the STOP line alone and spend the phone's
-      // one automated text on it.
-      if (typeof input.message !== 'string' || !input.message.trim()) {
-        return { error: 'Message is empty. Write the reply and call send_lead_response again.', validationError: true };
-      }
-      const messageBody = `${input.message}\n\nReply STOP to opt out.`;
+      // The unsigned text plus the first-touch opt-out line.
+      const messageBody = `${message}\n\nReply STOP to opt out.`;
       const { countSegments } = require('./messaging/segment-counter');
       const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
       // Measured as it will go out: the send pipeline swaps typographic
@@ -446,6 +478,9 @@ async function executeLeadTool(toolName, input, context) {
         logger.info(`[lead-agent] Auto-sent response (customerId=${customer.id} leadId=${input.lead_id || 'n/a'} auditLogId=${result.auditLogId || 'n/a'})`);
         return {
           sent: true,
+          // The text actually sent: sign-off stripped, then the send
+          // pipeline's own SMS normalization. Save this, not the draft.
+          message: asSentSmsText(message),
           to: customer.phone,
           name: customer.first_name,
           providerMessageId: result.providerMessageId,
@@ -660,7 +695,8 @@ async function executeLeadTool(toolName, input, context) {
             lead_id: input.lead_id,
             customer_id: input.customer_id,
             action_taken: input.action_taken,
-            response_message: input.response_message,
+            // Same addressee as the send, so the saved text matches what went out.
+            response_message: asSentSmsText(stripTrailingSignature(input.response_message, { addresseeFirstName: subject.customer?.first_name })) || null,
             response_time_seconds: input.response_time_seconds,
             triage_summary: input.triage_summary,
             follow_up_scheduled: input.follow_up_scheduled || false,

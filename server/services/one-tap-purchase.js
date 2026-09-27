@@ -246,12 +246,14 @@ async function initPurchase({ customerId, clicked }) {
     (basis.result?.currentServiceKeys || []).map((k) => (k === 'termite' ? 'termite_bait' : k))
   )];
   const context = { grassType: propertyContext.grassType, palmCount: propertyContext.palmCount };
-  const engineInputs = {
+  let engineInputs = {
     ...propertyContext.propertyInput,
     recurringCustomer: true,
     priorQualifyingServices: ownedFamilyKeys,
     services: pricingAi.optionServices(variant, context),
   };
+  engineInputs = await require('./pricing-engine/trusted-catalog-pricing')
+    .withTrustedCatalogPricing(engineInputs, { database: db });
   const engineResult = pricingEngine.generateEstimate(engineInputs);
   const line = pricingAi.findLineItem(engineResult, offer.serviceKey);
   const amount = pricingAi.quoteAmountFromLine(line);

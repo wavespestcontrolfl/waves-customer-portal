@@ -153,8 +153,8 @@ describe('lead automation consults estimate fieldVerify flags', () => {
     });
   }
 
-  test('a lot-fallback turf basis (LOW, FIELD_VERIFY_TURF_SQFT) parks the draft', () => {
-    const draft = buildAutomatedLeadDraftEstimate({
+  test('a lot-fallback turf basis (LOW, FIELD_VERIFY_TURF_SQFT) parks the draft', async () => {
+    const draft = await buildAutomatedLeadDraftEstimate({
       readiness: lawnReadiness(),
       intake: { serviceInterest: 'Lawn Care' },
       body: { homeSqFt: 2200, lotSqFt: 9000 },
@@ -170,8 +170,8 @@ describe('lead automation consults estimate fieldVerify flags', () => {
     expect(draft.monthly).toBe(0);
   });
 
-  test('a non-turf-priced draft (mosquito) still auto-generates', () => {
-    const draft = buildAutomatedLeadDraftEstimate({
+  test('a non-turf-priced draft (mosquito) still auto-generates', async () => {
+    const draft = await buildAutomatedLeadDraftEstimate({
       readiness: evaluateLeadEstimateAutomationReadiness({
         phone: '+19415550199',
         intake: {

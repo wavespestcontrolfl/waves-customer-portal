@@ -186,17 +186,17 @@
     "screeningBullet": "Vent screening on dryer, attic, gable, and soffit vents"
   },
   "rodent_trapping": {
-    "outcome": "The fastest way to drop an active interior population — we set, monitor, and clear traps until the activity stops.",
+    "outcome": "The fastest way to drop an active interior population — we set the traps, come back to check and reset them, then hand off to exclusion.",
     "includes": [
       "Interior snap and electronic traps in active areas — real interior trap lines, not just exterior bait",
-      "Trap-check visits during the active window",
+      "Setup visit plus {Checks} — additional checks are billed separately if the job needs them",
       "Documentation of what we catch and where",
       "Handoff to exclusion to keep the next ones out"
     ],
     "assurance": null,
     "terms": "Pay on service day. No contract.",
     "aiTitle": "Waves AI priced this as our standard trapping plan",
-    "aiBody": "Rodent trapping is one standard plan — interior trap lines set, checked, and cleared for the same active job at one price, with a surcharge only when you need an emergency start.",
+    "aiBody": "Rodent trapping is one standard plan — the setup visit and {checks} for the same active job at one price. Additional checks are billed separately, and there is a surcharge only when you need an emergency start.",
     "askChips": [
       "How often are traps checked?",
       "Trapping vs exclusion?",
@@ -206,8 +206,13 @@
     "hero": {
       "eyebrow": "Your rodent trapping plan",
       "h1": "Hello {first}, your rodent trapping quote is ready!",
-      "sub": "Interior trap lines set, checked, and cleared until the activity stops — approve online and pick a start day. Licensed & insured."
-    }
+      "sub": "Interior trap lines set, then checked and reset on a follow-up visit — approve online and pick a start day. Licensed & insured.",
+      "subLegacy": "Interior trap lines set, checked, and cleared until the activity stops — approve online and pick a start day. Licensed & insured."
+    },
+    "checksBullet": "Setup visit plus {Checks} — additional checks are billed separately if the job needs them",
+    "outcomeLegacy": "The fastest way to drop an active interior population — we set, monitor, and clear traps until the activity stops.",
+    "checksBulletLegacy": "Trap-check visits during the active window",
+    "aiBodyLegacy": "Rodent trapping is one standard plan — interior trap lines set, checked, and cleared for the same active job at one price, with a surcharge only when you need an emergency start."
   },
   "trap_only": {
     "outcome": "Interior trap lines set, checked, and cleared on a schedule — monitoring you don't have to think about.",
