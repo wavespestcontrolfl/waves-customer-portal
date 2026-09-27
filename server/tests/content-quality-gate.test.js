@@ -15,6 +15,7 @@ const {
   checkAnswerInFirstParagraph, checkSourceInternalLink, checkRedactionPassed,
   checkImprovementOverPrior,
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
+  checkRelatedPostsLinked,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
   checkNoRawMarkdownTables,
@@ -420,6 +421,354 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
     expect(checkNoRawMarkdownTables({ body: '<ComparisonTable columns={["a","b"]} rows={[{ label: "x", values: ["y"] }]} />' }).ok).toBe(true);
     expect(checkNoRawMarkdownTables({ body: 'Choose either|or — both work.\n\n---\n\nNext section.' }).ok).toBe(true);
     expect(checkNoRawMarkdownTables({ body: '' }).ok).toBe(true);
+  });
+  // Owner rule 2026-09-26 (related-post link lane), tightened per Codex
+  // round-1 P2 on #4984: HARD (blocks ok:false via hard_failures) but
+  // weight 0 (never moves total_score / MIN_TOTAL_SCORES for every OTHER
+  // supporting-blog draft — computeMinTotalScores sums WEIGHTS, and this
+  // one is 0 whichever bucket it lands in). Required = min(3, however many
+  // related_posts the brief lists).
+  describe('related posts linked (HARD, weight 0)', () => {
+    const relatedPosts = [
+      { title: 'A', path: '/termite/a/', keyword: 'a' },
+      { title: 'B', path: '/termite/b/', keyword: 'b' },
+      { title: 'C', path: '/termite/c/', keyword: 'c' },
+      { title: 'D', path: '/termite/d/', keyword: 'd' },
+    ];
+
+    test('no related_posts on the brief at all — not applicable, passes', () => {
+      expect(checkRelatedPostsLinked({ body: 'no links here' }, {}).ok).toBe(true);
+      expect(checkRelatedPostsLinked({ body: 'no links here' }, { voice_constraints: {} }).ok).toBe(true);
+      expect(checkRelatedPostsLinked({ body: 'no links here' }, { voice_constraints: { related_posts: [] } }).ok).toBe(true);
+    });
+
+    test('N=4 available, 2 linked: fails, reason is an actionable directive naming the required count', () => {
+      const two = checkRelatedPostsLinked(
+        { body: 'See [A](/termite/a/) and [B](/termite/b/).' },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(two.ok).toBe(false);
+      expect(two.reason).toMatch(/Add natural in-text links to at least 3/);
+      expect(two.reason).toMatch(/voice_constraints\.related_posts/);
+      expect(two.reason).toMatch(/linked 2 so far/);
+    });
+
+    test('N=4 available, exactly min(3,4)=3 linked: passes', () => {
+      expect(checkRelatedPostsLinked(
+        { body: 'See [A](/termite/a/), [B](/termite/b/), and [C](/termite/c/).' },
+        { voice_constraints: { related_posts: relatedPosts } }
+      ).ok).toBe(true);
+    });
+
+    test('N=4 available, all 4 linked: passes (never required to stop at 3)', () => {
+      expect(checkRelatedPostsLinked(
+        { body: 'See [A](/termite/a/), [B](/termite/b/), [C](/termite/c/), and [D](/termite/d/).' },
+        { voice_constraints: { related_posts: relatedPosts } }
+      ).ok).toBe(true);
+    });
+
+    test('N=2 available: requires 2 (min(3,2)), not the flat 3', () => {
+      const two = [relatedPosts[0], relatedPosts[1]];
+      expect(checkRelatedPostsLinked(
+        { body: 'See [A](/termite/a/).' },
+        { voice_constraints: { related_posts: two } }
+      ).ok).toBe(false);
+      expect(checkRelatedPostsLinked(
+        { body: 'See [A](/termite/a/) and [B](/termite/b/).' },
+        { voice_constraints: { related_posts: two } }
+      ).ok).toBe(true);
+    });
+
+    test('N=1 available: requires 1', () => {
+      const one = [relatedPosts[0]];
+      expect(checkRelatedPostsLinked({ body: 'no links' }, { voice_constraints: { related_posts: one } }).ok).toBe(false);
+      expect(checkRelatedPostsLinked({ body: 'See [A](/termite/a/).' }, { voice_constraints: { related_posts: one } }).ok).toBe(true);
+    });
+
+    test('duplicate links to one post count once — relinking A twice is still only 1 distinct post', () => {
+      const result = checkRelatedPostsLinked(
+        { body: 'See [A](/termite/a/) here and again [A once more](/termite/a/) later, plus [B](/termite/b/).' },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      // 2 DISTINCT posts linked (A, B) despite A appearing twice — still short of 3.
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 2 so far/);
+    });
+
+    // Codex round-2 P1 on #4984: a naive body.includes(path) substring search
+    // would have let a code-fenced example, an HTML comment, or an image src
+    // satisfy the requirement without a real clickable anchor. This pins the
+    // fix (reused content-guardrails destination extraction).
+    test('a mention in a code fence, HTML comment, or image src does NOT count as a link', () => {
+      const body = [
+        'Prose about termites here.',
+        '',
+        '```',
+        '[A](/termite/a/)',
+        '```',
+        '',
+        '<!-- [B](/termite/b/) -->',
+        '',
+        '![alt text](/termite/c/)',
+        '',
+        'Plain mention of /termite/d/ with no markdown link syntax at all.',
+      ].join('\n');
+      const result = checkRelatedPostsLinked({ body }, { voice_constraints: { related_posts: relatedPosts } });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 0 so far/);
+    });
+
+    test('a REAL markdown link to a candidate counts even alongside a fenced/commented mention of ANOTHER candidate', () => {
+      const body = [
+        'See [A](/termite/a/), [B](/termite/b/), and [C](/termite/c/) for background.',
+        '```',
+        '[D](/termite/d/)',
+        '```',
+      ].join('\n');
+      const result = checkRelatedPostsLinked({ body }, { voice_constraints: { related_posts: relatedPosts } });
+      expect(result.ok).toBe(true);
+    });
+
+    test('unsupported reference-link forms are not interpreted by this inline-link collector', () => {
+      const body = [
+        'See [the A guide][a], [B][], and [C] for background.',
+        '',
+        '[a]: /termite/a/',
+        '[b]: /termite/b/',
+        '[c]: /termite/c/',
+      ].join('\n');
+      const result = checkRelatedPostsLinked({ body }, { voice_constraints: { related_posts: relatedPosts } });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 0 so far/);
+      expect(checkBodySyntaxSupported({ body }).ok).toBe(false);
+    });
+
+    test('Markdown-shaped text inside a quoted component attribute does NOT count (Codex #4984 r4 P1)', () => {
+      const body = [
+        'Prose about termites.',
+        '',
+        '<InlineCTA headline="Read [A](/termite/a/)" />',
+        '<InlineCTA headline="Read [B](/termite/b/)" />',
+        "<InlineCTA headline='Read [C](/termite/c/)' />",
+      ].join('\n');
+      const result = checkRelatedPostsLinked({ body }, { voice_constraints: { related_posts: relatedPosts } });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 0 so far/);
+    });
+
+    test('an absolute Waves URL counts as its path, like the internal-route gate reads it (Codex #4984 r4 P1)', () => {
+      const body = 'See [A](https://www.wavespestcontrol.com/termite/a/), [B](https://wavespestcontrol.com/termite/b), and [C](/termite/c/).';
+      expect(checkRelatedPostsLinked({ body }, { voice_constraints: { related_posts: relatedPosts } }).ok).toBe(true);
+      // Another site's URL with the same path is not our post.
+      const offsite = 'See [A](https://example.com/termite/a/), [B](/termite/b/), and [C](/termite/c/).';
+      expect(checkRelatedPostsLinked({ body: offsite }, { voice_constraints: { related_posts: relatedPosts } }).reason).toMatch(/linked 2 so far/);
+    });
+
+    test('an absolute spoke URL cannot satisfy a hub brief related-post link', () => {
+      const body = 'See [A](https://www.sarasotaflpestcontrol.com/termite/a/), [B](/termite/b/), and [C](/termite/c/).';
+      const result = checkRelatedPostsLinked({ body }, { voice_constraints: { related_posts: relatedPosts } });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 2 so far/);
+    });
+
+    test('an absolute related-post URL counts on the spoke the brief actually targets', () => {
+      const previous = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+      const body = 'See [A](https://www.sarasotaflpestcontrol.com/termite/a/), [B](/termite/b/), and [C](/termite/c/).';
+      const spokeBrief = {
+        target_sites: ['sarasotaflpestcontrol.com'],
+        voice_constraints: { related_posts: relatedPosts },
+      };
+      try {
+        process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+        expect(checkRelatedPostsLinked({ body }, spokeBrief).ok).toBe(true);
+      } finally {
+        if (previous === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+        else process.env.SPOKE_BLOG_NETWORK_ENABLED = previous;
+      }
+    });
+
+    test('a queued spoke brief validates hub hosts when the publish kill switch turns off', () => {
+      const previous = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+      const body = 'See [A](https://www.sarasotaflpestcontrol.com/termite/a/), [B](/termite/b/), and [C](/termite/c/).';
+      const spokeBrief = {
+        target_sites: ['sarasotaflpestcontrol.com'],
+        voice_constraints: {
+          related_posts: relatedPosts,
+          related_posts_target_sites: ['sarasotaflpestcontrol.com'],
+        },
+      };
+      try {
+        // This target was durable queue state created while the lane was on.
+        process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+        process.env.SPOKE_BLOG_NETWORK_ENABLED = 'false';
+        const result = checkRelatedPostsLinked({ body }, spokeBrief);
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/publish_target_changed/);
+      } finally {
+        if (previous === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+        else process.env.SPOKE_BLOG_NETWORK_ENABLED = previous;
+      }
+    });
+
+    test('an explicitly frozen hub brief stays hub-only if the spoke flag is re-enabled', () => {
+      const previous = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+      const body = 'See [A](https://www.wavespestcontrol.com/termite/a/), [B](/termite/b/), and [C](/termite/c/).';
+      const frozenHubBrief = {
+        target_sites: ['wavespestcontrol.com'],
+        voice_constraints: {
+          related_posts: relatedPosts,
+          related_posts_target_sites: ['wavespestcontrol.com'],
+          operator_brief: { target_sites: ['sarasotaflpestcontrol.com'] },
+        },
+      };
+      try {
+        process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+        expect(checkRelatedPostsLinked({ body }, frozenHubBrief).ok).toBe(true);
+      } finally {
+        if (previous === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+        else process.env.SPOKE_BLOG_NETWORK_ENABLED = previous;
+      }
+    });
+
+    test('odd and even backslash-prefixed openers stay in the unsupported grammar and do not count', () => {
+      const escaped = String.raw`See \[A](/termite/a/), \[B](/termite/b/), and \[C](/termite/c/).`;
+      const escapedResult = checkRelatedPostsLinked(
+        { body: escaped },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(escapedResult.ok).toBe(false);
+      expect(escapedResult.reason).toMatch(/linked 0 so far/);
+      expect(checkBodySyntaxSupported({ body: escaped }).ok).toBe(false);
+
+      const evenRun = String.raw`See \\[A](/termite/a/), \\[B](/termite/b/), and \\[C](/termite/c/).`;
+      const evenResult = checkRelatedPostsLinked(
+        { body: evenRun },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(evenResult.ok).toBe(false);
+      expect(evenResult.reason).toMatch(/linked 0 so far/);
+      expect(checkBodySyntaxSupported({ body: evenRun }).ok).toBe(false);
+    });
+
+    test('empty and whitespace-only labels do not count as natural in-text links', () => {
+      const body = 'See [](/termite/a/), [   ](/termite/b/), and [C](/termite/c/).';
+      const result = checkRelatedPostsLinked(
+        { body },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 1 so far/);
+    });
+
+    test('anchor labels require visible rendered text, not passive tag markup or whitespace entities', () => {
+      const invisible = 'See [<span></span>](/termite/a/), [<span> </span>](/termite/b/), and [&nbsp;](/termite/c/).';
+      const result = checkRelatedPostsLinked(
+        { body: invisible },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 0 so far/);
+
+      const visible = 'See [<span>A guide</span>](/termite/a/), [B](/termite/b/), and [C](/termite/c/).';
+      expect(checkRelatedPostsLinked(
+        { body: visible },
+        { voice_constraints: { related_posts: relatedPosts } }
+      ).ok).toBe(true);
+    });
+
+    test('all numeric and named whitespace entities leave anchor labels empty', () => {
+      const invisible = 'See [&#9;](/termite/a/), [&#10;](/termite/b/), and [&Tab;](/termite/c/).';
+      const result = checkRelatedPostsLinked(
+        { body: invisible },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 0 so far/);
+
+      const broaderWhitespace = 'See [&#x2003;](/termite/a/), [&NewLine;](/termite/b/), and [&ZeroWidthSpace;](/termite/c/).';
+      expect(checkRelatedPostsLinked(
+        { body: broaderWhitespace },
+        { voice_constraints: { related_posts: relatedPosts } }
+      ).reason).toMatch(/linked 0 so far/);
+    });
+
+    test('literal invisible controls, formatting-only Markdown, and MDX expressions do not count as rendered labels', () => {
+      const invisible = 'See [\u200B](/termite/a/), [** **](/termite/b/), and [{void 0}](/termite/c/).';
+      const result = checkRelatedPostsLinked(
+        { body: invisible },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 0 so far/);
+
+      const visibleFormatting = 'See [**A guide**](/termite/a/), [_B guide_](/termite/b/), and [C guide](/termite/c/).';
+      expect(checkRelatedPostsLinked(
+        { body: visibleFormatting },
+        { voice_constraints: { related_posts: relatedPosts } }
+      ).ok).toBe(true);
+    });
+
+    test('MDX expressions that render no text do not count as visible anchor labels', () => {
+      const body = 'See [{null}](/termite/a/), [{false}](/termite/b/), and [{true}](/termite/c/).';
+      const result = checkRelatedPostsLinked(
+        { body },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(checkBodySyntaxSupported({ body }).ok).toBe(true);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 0 so far/);
+    });
+
+    test('brief entries that resolve to one URL count once (Codex #4984 r4 P2)', () => {
+      const dupes = [
+        { title: 'A', path: '/termite/a/' },
+        { title: 'A again', path: '/termite/a' },
+        { title: 'A absolute', path: 'https://www.wavespestcontrol.com/termite/a/' },
+      ];
+      // One distinct post, so one link satisfies min(3, 1) — and the reason
+      // text never claims three posts.
+      expect(checkRelatedPostsLinked({ body: 'See [A](/termite/a/).' }, { voice_constraints: { related_posts: dupes } }).ok).toBe(true);
+      const withB = [...dupes, { title: 'B', path: '/termite/b/' }, { title: 'C', path: '/termite/c/' }];
+      const result = checkRelatedPostsLinked({ body: 'See [A](/termite/a/).' }, { voice_constraints: { related_posts: withB } });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/at least 3 of the 3 related posts .*linked 1 so far/);
+    });
+
+    test('a full evaluate() run: fewer than required HARD-FAILS (ok:false) but never moves total_score', () => {
+      const passingBody = 'Termite swarmers show up after rain in Bradenton and Sarasota. See our [pest control services](/pest-control-services/) for treatment options.\n\nFAQ\n- Do swarmers bite?\n- No.';
+      const baseline = evaluate(
+        fullDraft({ body: passingBody }),
+        brief({ page_type: 'supporting-blog' }),
+        { previewBuildSuccess: true, sitemapHasUrl: true }
+      );
+      const withMiss = evaluate(
+        fullDraft({ body: passingBody }),
+        brief({ page_type: 'supporting-blog', voice_constraints: { related_posts: relatedPosts } }),
+        { previewBuildSuccess: true, sitemapHasUrl: true }
+      );
+      expect(withMiss.checks.related_posts_linked.ok).toBe(false);
+      // HARD now: it blocks via hard_failures, not soft_failures.
+      expect(withMiss.hard_failures.some((f) => f.name === 'related_posts_linked')).toBe(true);
+      expect(withMiss.soft_failures.some((f) => f.name === 'related_posts_linked')).toBe(false);
+      expect(withMiss.ok).toBe(false);
+      // Weight 0: total_score and min_total_score are BYTE-IDENTICAL to the
+      // no-related_posts baseline — this check never shifts the page type's
+      // score/threshold math for any other supporting-blog draft.
+      expect(withMiss.total_score).toBe(baseline.total_score);
+      expect(withMiss.min_total_score).toBe(baseline.min_total_score);
+      expect(baseline.ok).toBe(true);
+
+      // Satisfying the minimum flips ok back to true with the same score.
+      const satisfied = evaluate(
+        fullDraft({ body: `${passingBody} Also see [A](/termite/a/), [B](/termite/b/), and [C](/termite/c/).` }),
+        brief({ page_type: 'supporting-blog', voice_constraints: { related_posts: relatedPosts } }),
+        { previewBuildSuccess: true, sitemapHasUrl: true }
+      );
+      expect(satisfied.checks.related_posts_linked.ok).toBe(true);
+      expect(satisfied.hard_failures).toEqual([]);
+      expect(satisfied.ok).toBe(true);
+      expect(satisfied.total_score).toBe(baseline.total_score);
+    });
   });
   test('voice match', () => {
     const body = 'Your sandy soil and afternoon storms create perfect conditions. You should protect your home. Your yard matters. You need this. Your call.';

@@ -4253,10 +4253,26 @@ function actionEditsExistingPage(opp = {}, brief = null) {
 // guardrails/comparison gates do. The first finding carries the compact
 // reviewer summary — it names the specific failing checks and is the most
 // actionable feedback for the redraft.
+// Related-post link minimum (owner rule 2026-09-26, Codex round-1 P2 on
+// #4984): the generic QUALITY_GATE finding in aggregateGateFindings only
+// names the check by its NAME to the reviewer/summary — the redraft needs
+// the check's own actionable `reason` (which titles/paths to link, how many
+// so far) as a SPECIFIC finding so buildRetryDirectives' canonical
+// instruction + gate-reported detail both reach the writer's one
+// feedback-informed redraft, exactly like every other hard-gate code.
+// Pulled out of aggregateGateFindings to keep its own complexity bounded.
+function relatedPostsNotLinkedFinding(qualityResult) {
+  const check = qualityResult && qualityResult.checks && qualityResult.checks.related_posts_linked;
+  if (!check || check.ok !== false) return null;
+  return { severity: 'P1', code: 'RELATED_POSTS_NOT_LINKED', message: String(check.reason || 'related-post link minimum not met') };
+}
+
 function aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionResult, prePublishVisibilityResult, summary }) {
   const blocking = [];
   if (!uniquenessResult?.ok) blocking.push({ severity: 'P1', code: 'UNIQUENESS_GATE', message: 'draft failed the uniqueness/dedup gate' });
   if (!qualityResult?.ok) blocking.push({ severity: 'P1', code: 'QUALITY_GATE', message: 'draft failed the content quality gate' });
+  const relatedPostsFinding = relatedPostsNotLinkedFinding(qualityResult);
+  if (relatedPostsFinding) blocking.push(relatedPostsFinding);
   if (seoCompletionResult?.passed !== true) {
     blocking.push({ severity: 'P1', code: 'SEO_COMPLETION_GATE', message: `SEO completion failed (${Number(seoCompletionResult?.summary?.p0 || 0)} P0 / ${Number(seoCompletionResult?.summary?.p1 || 0)} P1 findings)` });
   }
@@ -4458,4 +4474,6 @@ module.exports._internals = {
   nextEtWeekStart,
   gbpLocationIdForCity,
   operatorBriefTextForComparisonGate,
+  aggregateGateFindings,
+  relatedPostsNotLinkedFinding,
 };
