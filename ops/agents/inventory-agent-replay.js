@@ -258,22 +258,21 @@ function rowKey(row) {
   return lineKey({ vendor: row.vendor, orderNumber: row.order_number, shipmentKey: row.shipment_key, lineNo: row.line_no });
 }
 
-// Recorded rows the collectors don't rebuild, placed on the timeline at the
-// time they were recorded so the live hand-off and invoice-copy rules see
-// them exactly as live (the live checks read the whole table, not a window):
+// Recorded rows the replay doesn't rebuild from their OWN email, placed on
+// the timeline at the time they were recorded. The live table holds one row
+// per line and the first writer owns it, so a recorded row always owns its
+// line against any OTHER email that rebuilds it (see dedupe) — only a line
+// rebuilt from the row's own email is replayed in its place. That covers:
 //   - an undelivered-shipment hold (undelivered-shipments.js, from a Shipped
-//     email): always, even when a later Delivered email rebuilds the same
-//     line — the recorded hold owns that line (see dedupe);
+//     email the collectors don't read);
 //   - a row whose email was deleted (email_id is ON DELETE SET NULL): the
-//     live agent can't check it for duplicates, so it holds it for a person —
-//     also always, since a surviving duplicate email rebuilding the same line
-//     was never recorded live (the row owns that line; see dedupe);
-//   - any other row outside the window (before --since): silent, there only
-//     so a hand-off recorded before the window still stops a later email.
-// Rows recorded inside the window are reported (holds and deleted-email
-// rows); the rest only feed the rules.
-function tableOnlyLines(rows, collectedKeys, since) {
-  return rows.filter((row) => row.status === 'no_delivery_email' || !row.email_id || !collectedKeys.has(rowKey(row))).map((row) => {
+//     live agent can't check it for duplicates, so it holds it for a person;
+//   - a row from before --since, so a hand-off recorded before the window
+//     still stops a later email, as the live whole-table checks do.
+// Undelivered holds and deleted-email rows recorded inside the window are
+// reported; every other such row only feeds the rules.
+function tableOnlyLines(rows, rebuiltFrom, since) {
+  return rows.filter((row) => !row.email_id || !rebuiltFrom.get(rowKey(row))?.has(row.email_id)).map((row) => {
     const inWindow = new Date(row.created_at) >= since;
     const report = !inWindow ? null : (!row.email_id && 'email_deleted') || (row.status === 'no_delivery_email' && row.status) || null;
     return {
@@ -292,8 +291,8 @@ function lineKey(line) {
   return [line.vendor, line.orderNumber || 'unknown', line.shipmentKey, line.lineNo].join('|');
 }
 
-// A line the live lane recorded that no email rebuilds (an undelivered
-// hold, a deleted-email row, see tableOnlyLines) owns its identity outright: the table holds exactly one row per
+// A line the live lane recorded that the replay doesn't rebuild from its own
+// email (see tableOnlyLines) owns its identity outright: the table holds exactly one row per
 // line, so a later Delivered email for that same line was never recorded
 // live, whichever email sorts first.
 function dedupe(lines) {
@@ -511,7 +510,12 @@ async function main() {
   const conn = readOnlyConn();
   try {
     const [amazon, siteOneRead, tableRows] = await Promise.all([amazonLines(conn, since), siteOneLines(since), recordedRows(conn)]);
-    const tableOnly = tableOnlyLines(tableRows, new Set([...amazon, ...siteOneRead.lines].map(lineKey)), since);
+    const rebuiltFrom = new Map();
+    for (const line of [...amazon, ...siteOneRead.lines]) {
+      if (!rebuiltFrom.has(lineKey(line))) rebuiltFrom.set(lineKey(line), new Set());
+      rebuiltFrom.get(lineKey(line)).add(line.email.id);
+    }
+    const tableOnly = tableOnlyLines(tableRows, rebuiltFrom, since);
     // In the live queue's order (see recordedTimes): hand-offs and proposed
     // catalog changes apply to what comes after, and --limit caps the same
     // lines the live agent would reach first.

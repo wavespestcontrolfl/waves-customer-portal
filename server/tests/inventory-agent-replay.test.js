@@ -197,18 +197,30 @@ describe('tableOnlyLines', () => {
   });
   const keyOf = (r) => lineKey({ vendor: r.vendor, orderNumber: r.order_number, shipmentKey: r.shipment_key, lineNo: r.line_no });
 
-  test('a rebuilt row is left to its email; an undelivered hold always comes along', () => {
+  const from = (entries) => new Map(entries.map(([r, ids]) => [keyOf(r), new Set(ids)]));
+
+  test('a row rebuilt from its own email is left to it; one rebuilt only by another email comes along', () => {
     const rebuilt = row({});
-    const hold = row({ line_no: 2, status: 'no_delivery_email' });
-    const out = tableOnlyLines([rebuilt, hold], new Set([keyOf(rebuilt), keyOf(hold)]), since);
+    const hold = row({ line_no: 2, status: 'no_delivery_email', email_id: 'shipped' });
+    const out = tableOnlyLines([rebuilt, hold], from([[rebuilt, ['e']], [hold, ['delivered']]]), since);
     expect(out.map((l) => [l.lineNo, l.report])).toEqual([[2, 'no_delivery_email']]);
+  });
+
+  // 2026-09-27 pre-push P1: an old placeholder keeps its line and its
+  // hand-off even when a later email rebuilds the same key.
+  test('a pre-window placeholder owns its line against a later email for it', () => {
+    const old = row({ status: 'no_items', created_at: '2026-08-01T00:00:00Z', email_id: 'old' });
+    const [recorded] = tableOnlyLines([old], from([[old, ['later']]]), since);
+    expect(recorded).toMatchObject({ recordedStatus: 'no_items', report: null });
+    const later = { vendor: 'amazon', orderNumber: 'o', shipmentKey: 'S', lineNo: 1, email: { id: 'later', received_at: '2026-09-05T00:00:00Z' } };
+    expect(dedupe([later, recorded])).toEqual([recorded]);
   });
 
   // 2026-09-27 pre-push P1: a surviving duplicate email rebuilding the same
   // line never displaces the recorded deleted-email row.
   test('a deleted-email row owns its line even when another email rebuilds it', () => {
     const orphan = row({ email_id: null, status: 'agent_pending' });
-    const [recorded] = tableOnlyLines([orphan], new Set([keyOf(orphan)]), since);
+    const [recorded] = tableOnlyLines([orphan], from([[orphan, ['dup']]]), since);
     const duplicate = { vendor: 'amazon', orderNumber: 'o', shipmentKey: 'S', lineNo: 1, email: { id: 'dup', received_at: orphan.created_at } };
     expect(dedupe([duplicate, recorded])).toEqual([recorded]);
   });
@@ -216,7 +228,7 @@ describe('tableOnlyLines', () => {
   test('a deleted-email row in the window is reported; a pre-window row only feeds the rules', () => {
     const orphan = row({ email_id: null, status: 'agent_pending' });
     const old = row({ line_no: 2, status: 'no_items', created_at: '2026-08-01T00:00:00Z' });
-    expect(tableOnlyLines([orphan, old], new Set(), since).map((l) => l.report)).toEqual(['email_deleted', null]);
+    expect(tableOnlyLines([orphan, old], new Map(), since).map((l) => l.report)).toEqual(['email_deleted', null]);
   });
 });
 
