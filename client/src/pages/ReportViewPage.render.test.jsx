@@ -403,6 +403,8 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     await screen.findByText('Visit Summary');
     expect(container.querySelector('#products-applied')).toBeNull();
     expect(screen.queryByText(/product applied/)).toBeNull();
+    // Poison Control rides Products Applied — a cartridge check carries none.
+    expect(container.querySelector('a[href="tel:+18002221222"]')).toBeNull();
   });
 });
 
@@ -698,6 +700,18 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     // 2026-07-05), so #map only exists when the coverage card itself shows —
     // and lawn reports hide the per-area coverage map.
     expect(container.querySelectorAll('#map')).toHaveLength(0);
+  });
+
+  it('ends Products Applied with a tappable Poison Control line', async () => {
+    const { container } = renderReport(legacyLawnReport);
+    await screen.findByText('Visit Summary');
+
+    const products = container.querySelector('#products-applied');
+    const note = within(products).getByTestId('poison-control-note');
+    const link = within(note).getByRole('link', { name: '1-800-222-1222' });
+    expect(link).toHaveAttribute('href', 'tel:+18002221222');
+    expect(note.textContent).toMatch(/names each product applied/);
+    expect(container.querySelectorAll('a[href="tel:+18002221222"]')).toHaveLength(1);
   });
 
   it('omits the lawn trend chart on a first assessment (single data point)', async () => {

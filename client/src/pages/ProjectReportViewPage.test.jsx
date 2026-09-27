@@ -91,3 +91,28 @@ describe('ProjectReportViewPage action bar — same four boxes on every report (
     expect(download).toHaveAttribute('href', expect.stringContaining('/fdacs-pdf'));
   });
 });
+
+describe('ProjectReportViewPage Poison Control (owner 2026-09-26)', () => {
+  it.each(['termite_treatment', 'flea', 'bed_bug', 'one_time_lawn_treatment'])(
+    'a %s report carries the tappable Poison Control line',
+    async (projectType) => {
+      const { findByTestId } = renderProjectReport(payload(projectType));
+      const card = await findByTestId('project-poison-control');
+      const link = card.querySelector('a[href="tel:+18002221222"]');
+      expect(link).not.toBeNull();
+      expect(link.textContent).toBe('1-800-222-1222');
+      // project findings list no products, so the line never points at one
+      expect(card.textContent).not.toMatch(/names each product/);
+    },
+  );
+
+  it.each(['wdo_inspection', 'pre_treatment_termite_certificate', 'termite_inspection', 'pest_inspection', 'rodent_exclusion', 'termite_bait_station'])(
+    'a %s report carries no Poison Control line',
+    async (projectType) => {
+      const { findAllByText, container } = renderProjectReport(payload(projectType));
+      await findAllByText(/this report is provided for your records|certificate of compliance/i);
+      expect(container.querySelector('[data-testid="project-poison-control"]')).toBeNull();
+      expect(container.querySelector('a[href="tel:+18002221222"]')).toBeNull();
+    },
+  );
+});

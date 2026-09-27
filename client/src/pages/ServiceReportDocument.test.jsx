@@ -199,6 +199,29 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toContain('Keep shrubs trimmed back from the exterior walls');
   });
 
+  it('prints a tappable Poison Control line when a product was applied', () => {
+    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    const line = screen.getByTestId('doc-poison-control');
+    const link = screen.getByRole('link', { name: '1-800-222-1222' });
+    expect(line).toContainElement(link);
+    expect(link).toHaveAttribute('href', 'tel:+18002221222');
+    expect(line.textContent).toMatch(/call 911/);
+  });
+
+  it('prints no Poison Control line on a visit that applied nothing', () => {
+    const stationCheck = {
+      id: 'st-1',
+      method: 'station_check',
+      product: { name: 'Rodent Bait Station', product_type: 'rodent bait station' },
+    };
+    for (const applications of [[], [stationCheck]]) {
+      const { container, unmount } = render(<ServiceReportDocument data={{ ...BASE_DATA, applications }} token="tok123" />);
+      expect(container.textContent).not.toContain('Poison Control');
+      expect(container.querySelector('a[href="tel:+18002221222"]')).toBeNull();
+      unmount();
+    }
+  });
+
   it('does not claim treatment areas on a visit with no applications', () => {
     // the server always builds mapSvg, even for inspection-only visits
     const data = { ...BASE_DATA, applications: [], mapSvg: '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>' };

@@ -20,6 +20,7 @@ import ProjectFindingFieldInput, {
   normalizeApplicationRows,
 } from "../../components/tech/ProjectFindingFieldInput";
 import { parseSections, TERMITE_COMPLIANCE_SECTIONS } from "../ProjectReportViewPage";
+import PoisonControlCopy, { POISON_CONTROL_PROJECT_TYPES } from "../../components/report/PoisonControlCopy";
 import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
 
 const {
@@ -1154,6 +1155,27 @@ function CustomerProjectReportPreview({
                   +{(photos || []).length - visiblePhotos.length} more shown on the full report
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Same type gate as the public page (preview == final). */}
+          {POISON_CONTROL_PROJECT_TYPES.has(project.project_type) && (
+            <div data-testid="preview-poison-control" style={{ marginTop: 12 }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: "#1B2C5B",
+                  textTransform: "uppercase",
+                  letterSpacing: 0.5,
+                  marginBottom: 4,
+                }}
+              >
+                Poison Control
+              </div>
+              <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5 }}>
+                <PoisonControlCopy linkStyle={{ color: "#1B2C5B", fontWeight: 700 }} />
+              </div>
             </div>
           )}
         </div>

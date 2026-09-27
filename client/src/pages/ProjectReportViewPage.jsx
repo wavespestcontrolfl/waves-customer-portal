@@ -10,6 +10,7 @@ import { CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import DocumentActionBar from '../components/DocumentActionBar';
 import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
+import PoisonControlCopy, { POISON_CONTROL_PROJECT_TYPES } from '../components/report/PoisonControlCopy';
 import { useGlassSurface } from '../glass/glass-engine';
 import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
@@ -784,6 +785,17 @@ export default function ProjectReportViewPage() {
                 <PhotoGrid photos={followupPhotos} noCard />
               </div>
             )}
+          </div>
+        )}
+
+        {POISON_CONTROL_PROJECT_TYPES.has(data.projectType) && (
+          <div data-glass="card" data-testid="project-poison-control" style={{ ...cardStyle, marginTop: 16 }}>
+            <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 8 }}>
+              Poison Control
+            </div>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+              <PoisonControlCopy linkStyle={{ color: ESTIMATE_TEXT, fontWeight: 700, whiteSpace: 'nowrap' }} />
+            </div>
           </div>
         )}
 

@@ -7,6 +7,7 @@ import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroac
 import {
   MARKED_PHOTO_INTRO, markColor, markedPhotoCaption,
 } from '../components/report/markedPhotoCopy';
+import PoisonControlCopy from '../components/report/PoisonControlCopy';
 
 // Work-order style service report document (owner direction 2026-08-03,
 // modeled on the TruGreen WO / All U Need service-notification formats):
@@ -1257,6 +1258,13 @@ export default function ServiceReportDocument({ data, token }) {
                   );
               })}
             </table>
+            {/* Same gate as the web section: only a visit that applied a
+                product prints Poison Control. The tel: link stays tappable
+                in the PDF. */}
+            <p className="doc-keep" data-testid="doc-poison-control" style={{ margin: '8px 0 0', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
+              <strong style={{ color: INK, fontWeight: 700 }}>Poison Control:</strong>{' '}
+              <PoisonControlCopy listsProducts linkStyle={{ color: INK, fontWeight: 700 }} />
+            </p>
           </div>
         )}
 

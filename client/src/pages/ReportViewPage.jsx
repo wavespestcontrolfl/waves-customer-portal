@@ -6,6 +6,7 @@ import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile'
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { StationMapCard } from '../components/StationMapCard';
 import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
+import PoisonControlCopy from '../components/report/PoisonControlCopy';
 import { LawnVisitTimeline, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
@@ -3623,6 +3624,12 @@ function AppliedProductsSection({ data, mode = 'live' }) {
           })}
         </div>
       )}
+      {/* Poison Control rides the product list: this section only mounts
+          when something was actually applied, so WDO, assessment and
+          monitoring-only visits never carry it (owner 2026-09-26). */}
+      <div className="manufacturer-guideline-note poison-control-note" data-testid="poison-control-note">
+        <strong>Poison Control.</strong> <PoisonControlCopy listsProducts />
+      </div>
     </section>
   );
 }
@@ -7451,6 +7458,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .manufacturer-guideline-note strong {
           color: var(--text);
           font-weight: 700;
+        }
+        .poison-control-note {
+          margin: 16px 0 0;
+        }
+        .poison-control-note a {
+          color: var(--text);
+          font-weight: 700;
+          white-space: nowrap;
         }
         .applied-product-maker {
           margin: -2px 0 8px;
