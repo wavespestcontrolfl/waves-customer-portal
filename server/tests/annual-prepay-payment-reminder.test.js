@@ -321,6 +321,16 @@ describe('annual prepay pre-visit payment reminders', () => {
     await expect(_private.invoiceDunningActiveToday('inv-1', { todayYmd: '2026-07-11' })).resolves.toBe(false);
   });
 
+  test('derives the dunning send day from the supplied clock when todayYmd is omitted', async () => {
+    setDbQueues({ invoice_followup_sequences: [query({ first: {
+      status: 'active', last_touch_at: null, next_touch_at: new Date('2026-07-08T14:00:00Z'),
+    } })] });
+
+    await expect(_private.invoiceDunningActiveToday('inv-1', {
+      now: new Date('2026-07-08T16:00:00Z'),
+    })).resolves.toBe(true);
+  });
+
   test('missing SMS template releases the claim instead of stamping sent', async () => {
     const claimQ = query({ returning: [{ ...BASE_TERM }] });
     const releaseQ = query();
