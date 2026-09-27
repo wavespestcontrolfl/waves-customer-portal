@@ -3525,7 +3525,12 @@ async function handleChargeRefunded(charge) {
     // it returns) is exactly what flips a termite parent's paid evidence, so
     // it either commits before the renewal charge's last parent re-check or
     // waits until that charge's submission is done. No-op without a termite
-    // term on the charge's invoices / customers.
+    // term on the charge's invoices / customers. A refund issued from the
+    // Stripe dashboard has already returned the money by the time this event
+    // arrives — only this stamp can be gated; the renewal charge's own
+    // in-gate parent re-check is the limit there. (A refund WE issue —
+    // StripeService.refund — holds the gate across the provider call too:
+    // annual-prepay-renewals withTermiteGateForCharge.)
     await require('../services/annual-prepay-renewals').acquireTermiteGateForCharge(trx, {
       chargeId,
       paymentIntentId: charge.payment_intent,

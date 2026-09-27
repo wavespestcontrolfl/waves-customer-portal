@@ -3027,7 +3027,19 @@ const StripeService = {
    * @param {{ amount?: number, reason?: string }} options
    * @returns {object} updated payment row
    */
-  async refund(paymentId, { amount, reason } = {}) {
+  // Codex #4971 r6 P1: a full refund of a termite annual-plan payment
+  // revokes the prior year a renewal charge checks under the parent-decision
+  // gate — so the gate is held from BEFORE the provider call through the
+  // ledger stamp and credit restore (annual-prepay-renewals
+  // withTermiteGateForCharge; no termite term → no lock, unchanged).
+  async refund(paymentId, options = {}) {
+    return require('./annual-prepay-renewals').withTermiteGateForCharge(
+      { paymentIds: [paymentId] },
+      () => this._refundPayment(paymentId, options),
+    );
+  },
+
+  async _refundPayment(paymentId, { amount, reason } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 

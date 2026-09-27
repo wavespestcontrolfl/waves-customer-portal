@@ -27,6 +27,7 @@ describe('StripeService.refund', () => {
   let paymentRow;
   let updatePayments;
   let mockGateForCharge;
+  let mockSessionGate;
 
   function loadService() {
      
@@ -47,6 +48,7 @@ describe('StripeService.refund', () => {
     };
     updatePayments = jest.fn().mockResolvedValue(1);
     mockGateForCharge = jest.fn(async () => []);
+    mockSessionGate = jest.fn(async (_keys, fn) => fn());
 
     stripeClient = {
       refunds: {
@@ -89,6 +91,7 @@ describe('StripeService.refund', () => {
     jest.doMock('../services/annual-prepay-renewals', () => ({
       syncTermForRefundedPayment: jest.fn(async () => undefined),
       acquireTermiteGateForCharge: mockGateForCharge,
+      withTermiteGateForCharge: mockSessionGate,
     }));
     jest.doMock('../services/customer-credit', () => ({
       returnAppliedCreditOnRefund: jest.fn(async () => undefined),
@@ -262,6 +265,9 @@ describe('StripeService.refund', () => {
     // payment), so it can never land mid-way through a renewal charge's
     // re-check-then-submit window.
     expect(mockGateForCharge).toHaveBeenCalledWith(dbMock, { paymentIds: ['pay-1'] });
+    // Codex #4971 r6 P1: the session gate is taken BEFORE the provider call.
+    expect(mockSessionGate).toHaveBeenCalledWith({ paymentIds: ['pay-1'] }, expect.any(Function));
+    expect(mockSessionGate.mock.invocationCallOrder[0]).toBeLessThan(stripeClient.refunds.create.mock.invocationCallOrder[0]);
     const stampCall = updatePayments.mock.calls.findIndex(([patch]) => patch.status === 'refunded');
     expect(mockGateForCharge.mock.invocationCallOrder[0])
       .toBeLessThan(updatePayments.mock.invocationCallOrder[stampCall]);

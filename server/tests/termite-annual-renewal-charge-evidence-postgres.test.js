@@ -496,7 +496,8 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       };
       const behindCancelled = await paidRenewal({ status: 'cancelled', renewal_decision: 'cancel' });
       const refundedInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(), stripe_payment_intent_id: 'pi_parent_refunded' });
-      await db('payments').insert({ status: 'refunded', refund_status: 'full', stripe_payment_intent_id: 'pi_parent_refunded' });
+      // The refund writer stamps the ledger row's updated_at (the refund time).
+      await db('payments').insert({ status: 'refunded', refund_status: 'full', stripe_payment_intent_id: 'pi_parent_refunded', updated_at: new Date(Date.now() - 60000) });
       const behindRefunded = await paidRenewal({ status: 'active', prepay_invoice_id: refundedInvoice.id });
       const behindRenewed = await paidRenewal({ status: 'renewed', renewal_decision: 'renew' });
 
@@ -611,6 +612,24 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       await expect(Charge._private.bellLatePaidRenewal(fresh, db)).resolves.toBe('not_owed');
       expect(mockNotifyAdmin).not.toHaveBeenCalled();
       expect((await db('annual_prepay_terms').where({ id: successor.id }).first()).renewal_late_paid_belled_at).toBeNull();
+    });
+
+    // Codex #4971 r6 P2: a still-active parent's old updated_at (an unrelated
+    // edit) is not evidence of the change. The renewal was paid, THEN the
+    // parent's invoice was refunded on the ledger (its term sync never ran) —
+    // the payment preceded the refund, so no late-paid alert.
+    test('an active parent with an old updated_at, refunded on the ledger AFTER the renewal was paid: no alert', async () => {
+      const DAY = 86400000;
+      const parentInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - 400 * DAY), stripe_payment_intent_id: `pi_parent_${randomUUID().slice(0, 8)}` });
+      const parent = await insertParent({ prepay_invoice_id: parentInvoice.id, updated_at: new Date(Date.now() - 300 * DAY) });
+      const successor = await insertSuccessor(parent, await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - 60 * DAY) }), { status: 'active' });
+      await db('payments').insert({ status: 'refunded', refund_status: 'full', stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id, updated_at: new Date(Date.now() - 10 * DAY) });
+
+      const counts = { latePaidScanned: 0, latePaidBelled: 0 };
+      await Charge._private.bellLatePaidRenewals({ conn: db, limit: 50, counts });
+      expect(counts.latePaidScanned).toBe(0);
+      expect(await Charge._private.bellLatePaidRenewal(await db('annual_prepay_terms').where({ id: successor.id }).first(), db)).toBe('not_owed');
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
     });
 
     test('a normal renewal (no refund) still stamps the parent renewed', async () => {

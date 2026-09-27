@@ -1293,7 +1293,11 @@ async function bellLatePaidRenewalUnderGate(original, conn) {
 // its refund-or-honor alert suppressed. The earliest of:
 //   - the parent's decision time (renewal_decision_at);
 //   - its dispute suspension (dispute_suspended_at);
-//   - its last row update (updated_at — an upper bound on a status change);
+//   - its last row update (updated_at — an upper bound on a status change),
+//     ONLY while the term row itself no longer authorizes the renewal (a
+//     non-renewable status, or a decision other than renew): Codex #4971 r6
+//     P2 — a still-active parent's updated_at dates unrelated edits, and
+//     would make a payment that preceded a later refund look late;
 //   - its prepay invoice's revocation (updated_at once it reads refunded /
 //     void / cancelled);
 //   - a full refund of that invoice on the payments ledger (the refund
@@ -1307,7 +1311,7 @@ function parentChangedAtSql(p = 'p', pi = 'pi') {
   return `LEAST(
     ${p}.renewal_decision_at,
     ${ts(p, 'dispute_suspended_at')},
-    ${p}.updated_at,
+    CASE WHEN NOT (${p}.status IN ('active', 'renewal_pending') OR (${p}.status = 'renewed' AND ${p}.renewal_decision = 'renew')) THEN ${p}.updated_at END,
     CASE WHEN lower(coalesce(${pi}.status, '')) IN ('void', 'cancelled', 'canceled', 'refunded') THEN ${ts(pi, 'updated_at')} END,
     (SELECT MIN(${ts('rp', 'updated_at')}) FROM payments rp
       WHERE (rp.status = 'refunded' OR rp.refund_status = 'full')

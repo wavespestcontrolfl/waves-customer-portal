@@ -8905,6 +8905,31 @@ async function acquireTermiteGateAtEntry(trx, { termIds = [], invoiceIds = [], c
 // invoices or customers -> nothing taken). Entry points: charge.refunded's
 // generic transaction, StripeService.refund's stamp and credit restore
 // (the admin refund route), and the lost-dispute invoice reopens.
+// Codex #4971 r6 P1 — a money reversal WE issue at the provider holds the
+// gate across the provider call, not only across its ledger write: an admin
+// refund (StripeService.refund) returns the customer's money at
+// stripe.refunds.create, and a renewal charge that took the gate between
+// that call and the local stamp would read the parent as still paid. The
+// same keys as acquireTermiteGateForCharge, taken as a SESSION lock
+// (withParentDecisionLock — the pattern the renewal charge uses across its
+// own Stripe call) from before the provider call through the stamp and the
+// credit restore; the nested xact gates inside skip the held keys. No
+// termite term on the payment → no lock, fn() runs exactly as before. A
+// refund issued OUTSIDE our code (the Stripe dashboard) has already moved
+// the money by the time charge.refunded arrives, so only its stamp can be
+// gated; the renewal charge's own in-gate parent re-check is the limit
+// there.
+async function withTermiteGateForCharge({ chargeId = null, paymentIntentId = null, paymentIds = [] } = {}, fn) {
+  const inputs = await chargeGateInputs(db, {
+    chargeId: chargeId || null,
+    paymentIntentId: paymentIntentId || null,
+    paymentIds: paymentIds.filter(Boolean).map(String),
+  });
+  const keys = await termiteGateKeys(db, { termIds: [], ...inputs });
+  if (!keys.length) return fn();
+  return withParentDecisionLock(keys[0], fn, { alsoTermIds: keys.slice(1) });
+}
+
 async function acquireTermiteGateForCharge(trx, { chargeId = null, paymentIntentId = null, paymentIds = [] } = {}) {
   const inputs = await chargeGateInputs(trx, {
     chargeId: chargeId || null,
@@ -10111,6 +10136,7 @@ module.exports = {
   acquireTermiteGateAtEntry,
   acquireTermiteGateForCharge,
   acquireTermiteGateForStatement,
+  withTermiteGateForCharge,
   // Termite renewal grace window (P1-2 / P2-4): the ONE shared cutoff
   // between coveredTermsAsOf's grace-coverage branch (here) and
   // termite-annual-renewal-charge.js's own grace-lapse pass.
