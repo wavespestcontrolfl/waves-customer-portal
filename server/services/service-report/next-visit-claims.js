@@ -3,19 +3,21 @@
 // lane are the next visit. The pest recap wrapper uses appointmentClaimProblems
 // so unrelated work dates and aftercare times remain valid prose.
 
-const WINDOW_TEXT_RE = /\b\d{1,2}(?::\d{2})?\s*(?:AM|PM)?\s*[–—-]\s*\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b/gi;
+const MERIDIEM_TEXT = String.raw`[ap]\.?m\.?`;
+const WINDOW_TEXT_RE = new RegExp(String.raw`\b\d{1,2}(?::\d{2})?\s*(?:${MERIDIEM_TEXT})?\s*[–—-]\s*\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z])`, 'gi');
 const MONTH_NAMES = 'January|February|March|April|May|June|July|August|September|October|November|December';
 const WEEKDAY_NAMES = 'Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday';
-const DATE_TEXT_RE = new RegExp(`\\b(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:\\s*,?\\s*(?:(?:in|of)\\s+)?\\(?(\\d{4}|[’']?\\d{2})(?![\\d:]|\\s*(?:AM|PM|[–—-]))\\)?)?`, 'gi');
+const DATE_TEXT_RE = new RegExp(`\\b(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:\\s*,?\\s*(?:(?:in|of)\\s+)?\\(?(\\d{4}|[’']?\\d{2})(?![\\d:]|\\s*(?:${MERIDIEM_TEXT}|[–—-]))\\)?)?`, 'gi');
 const APPOINTMENT_CLAIM_RE = new RegExp(
   `\\b(?:(?:(?:your|the)\\s+)?(?:next|upcoming)\\s+(?:visit|appointment|service)(?:\\s*:\\s*|\\s+(?:is|has\\s+been|will\\s+be|scheduled|booked|set|on|for)\\b)|(?:we(?:\\s+will|[’']ll)?\\s+)?see\\s+you\\b|we(?:\\s+will|[’']ll)\\s+(?:return|arrive|be\\s+back|come\\s+back)\\b|(?:appointment|visit|follow[-\\s]?up)\\s+(?:is\\s+)?(?:scheduled|booked|set)\\b)`,
   'i',
 );
-const CLOCK_TIME_RE = /\b\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b/gi;
+const CLOCK_TIME_RE = new RegExp(String.raw`\b\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z])`, 'gi');
 const NON_AFFIRMATIVE_APPOINTMENT_RE = /\b(?:is|has\s+been|will\s+be)\s+(?:not|never)\b|\b(?:not|never)\s+(?:scheduled|booked|set)\b|\bno\s+longer\s+(?:scheduled|booked|set)\b|\bcancell?ed\b/i;
 
 function normalizeWindowText(value) {
-  return String(value || '').replace(/[–—-]/g, '–').replace(/\s+/g, ' ').trim().toUpperCase();
+  return String(value || '').replace(/\b([ap])\.?m\.?(?![a-z])/gi, '$1M')
+    .replace(/[–—-]/g, '–').replace(/\s+/g, ' ').trim().toUpperCase();
 }
 
 // Any arrival-window or month-day mention must match the supplied next visit
@@ -27,7 +29,7 @@ function nextVisitProblems(text, facts) {
   const expectedWindow = normalizeWindowText(expected.window);
   for (const match of String(text).matchAll(new RegExp(WINDOW_TEXT_RE.source, 'gi'))) {
     if (normalizeWindowText(match[0]) !== expectedWindow) {
-      problems.push(`ungrounded_window:${match[0].trim()}`);
+      problems.push(`ungrounded_window:${normalizeWindowText(match[0])}`);
     }
   }
   const expectedDate = new RegExp(`^(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})$`, 'i')
@@ -49,14 +51,15 @@ function nextVisitProblems(text, facts) {
   }
   const withoutRanges = String(text).replace(new RegExp(WINDOW_TEXT_RE.source, 'gi'), ' ');
   for (const match of withoutRanges.matchAll(new RegExp(CLOCK_TIME_RE.source, 'gi'))) {
-    problems.push(`ungrounded_time:${match[0].trim()}`);
+    problems.push(`ungrounded_time:${normalizeWindowText(match[0])}`);
   }
   return problems;
 }
 
 function appointmentClaimProblems(text, facts) {
   const claims = String(text || '')
-    .split(/(?<=[.!?])\s+/)
+    // A dotted meridiem can precede more of the same appointment claim.
+    .split(/(?<!\b[ap]\.m\.)(?<=[.!?])\s+/i)
     .flatMap((sentence) => {
       const markers = [...sentence.matchAll(new RegExp(APPOINTMENT_CLAIM_RE.source, 'gi'))];
       return markers.map((marker, index) => sentence.slice(
@@ -71,7 +74,7 @@ function appointmentClaimProblems(text, facts) {
   for (const claim of claims) {
     // Recaps can append a separate aftercare instruction to the appointment
     // sentence. Keep that exception here: typed reports validate every time.
-    const appointmentCopy = claim.replace(/\b(?:keep|leave|avoid|do not)\b[^.!?]*?\buntil\s+\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b/gi, ' ');
+    const appointmentCopy = claim.replace(new RegExp(String.raw`\b(?:keep|leave|avoid|do not)\b[^.!?]*?\buntil\s+\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z])`, 'gi'), ' ');
     problems.push(...nextVisitProblems(appointmentCopy, facts));
     if (NON_AFFIRMATIVE_APPOINTMENT_RE.test(claim)) problems.push('negated_appointment_claim');
     if (!claim.toLowerCase().includes(String(facts.nextVisit.date).toLowerCase())) {

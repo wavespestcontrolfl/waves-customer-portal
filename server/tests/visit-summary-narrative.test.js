@@ -148,6 +148,23 @@ test('current appointment appears once and an authoritative empty schedule remov
   expect(deterministicSummary(failedLookup)).toBe(current);
 });
 
+test.each([
+  "Oct 2, '27",
+  'Oct 2, ’27',
+  'October 2, 27',
+  "October 2nd in '27",
+  'Friday, October 2nd (27)',
+  'October 2, 2027',
+])('stale appointment removal consumes the year and window after %s', (date) => {
+  const recap = `We treated a 1.5-foot perimeter gap. Your next visit is scheduled for ${date}, arriving 1–3 PM. Keep pets away until 4 p.m.`;
+  const expectedRecap = 'We treated a 1.5-foot perimeter gap. Keep pets away until 4 p.m.';
+  const facts = groundingFacts(input({ recap }));
+  expect(facts.recap).toBe(expectedRecap);
+  expect(deterministicSummary(facts)).toBe(`${expectedRecap} Your next visit is scheduled for Friday, October 2, arriving 8–10 AM.`);
+  expect(groundingFacts(input({ recap, nextAppointment: null })).recap).toBe(expectedRecap);
+  expect(groundingFacts(input({ recap, nextAppointment: undefined })).recap).toBe(recap);
+});
+
 test('missing pressure row still strips a stale appointment after a successful empty schedule lookup', async () => {
   const pestPressure = buildPestPressureCustomerView({
     config: DEFAULT_CONFIG,
@@ -337,18 +354,30 @@ test.each([
     .toEqual(expect.arrayContaining([expect.stringContaining('ungrounded_date:')]));
 });
 
-test.each(['8 AM', '10 AM'])('a grounded range does not authorize an exact %s arrival promise', (time) => {
+test.each(['8 AM', '10 AM', '10 a.m.', '8 p.m.', '10 A.M.', '10 a.m'])('a grounded range does not authorize an exact %s arrival promise', (time) => {
   const facts = { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } };
   expect(appointmentClaimProblems(
     `Your next visit is Friday, October 2, arriving 8–10 AM, specifically at ${time}.`,
     facts,
-  )).toContain(`ungrounded_time:${time}`);
+  )).toEqual(expect.arrayContaining([expect.stringContaining('ungrounded_time:')]));
 });
+
+test.each(['specifically at 10 a.m.', 'and specifically at 10 p.m.'])(
+  'dotted arrival windows retain their exact-arrival continuation: %s', (continuation) => {
+    expect(appointmentClaimProblems(
+      `Your next visit is Friday, October 2, arriving 8–10 a.m. ${continuation}`,
+      { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } },
+    )).toEqual(expect.arrayContaining([expect.stringContaining('ungrounded_time:')]));
+  },
+);
 
 test.each([
   'Your next visit is Friday, October 2, arriving 8–10 AM.',
   'Your next visit is Friday, October 2, arriving 8–10 AM, and keep pets away until 8 AM.',
   'Your next visit is Friday, October 2, arriving 8–10 AM, and keep pets away until 10 AM.',
+  'Your next visit is Friday, October 2, arriving 8–10 a.m.',
+  'Your next visit is Friday, October 2, arriving 8–10 AM, and keep pets away until 10 a.m.',
+  'Your next visit is Friday, October 2, arriving 8–10 a.m. and keep pets away until 4 p.m.',
 ])('grounded range copy remains valid without a year or exact arrival promise: %s', (summary) => {
   expect(appointmentClaimProblems(
     summary,
