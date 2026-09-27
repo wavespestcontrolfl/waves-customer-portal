@@ -50,8 +50,9 @@
  *
  * Precedence (per visit):
  *   1. protocols.json visit.completionDefaultProducts (curated, ordered)
- *      — today that's pest visit 2 (German roach cleanout) and the
- *      cockroach program's visit 1, both flat roach lists.
+ *      — today only the cockroach program's visit 1 (German roach
+ *      cleanout), a flat roach list. The pest program has none: it is
+ *      prefilled by pest-default-mix.js (owner ruling 2026-09-27).
  *   2. empty — no curated list, tech starts from a blank list (today's
  *      behavior everywhere else; also lawn, which is always excluded).
  *      There is deliberately no services.default_products fallback here
