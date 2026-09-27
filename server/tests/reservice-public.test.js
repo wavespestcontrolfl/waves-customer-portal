@@ -475,3 +475,298 @@ describe('selected-lane availability for a customer with both plans', () => {
     expect(build).not.toHaveBeenCalled();
   });
 });
+
+describe('staff geocode review blocks coordinate-less re-service offers', () => {
+  const token = 'a'.repeat(64);
+  const slotDate = etDateString(addETDays(new Date(), 3));
+  const address = {
+    address_line1: '123 Test Ave', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34236',
+  };
+  const customer = (overrides = {}) => ({
+    id: CUST_ID, first_name: 'Pat', active: true, waveguard_tier: null, monthly_rate: 0,
+    latitude: null, longitude: null, phone: '9415550101', ...address, ...overrides,
+  });
+  const review = (status) => ({
+    customer_id: CUST_ID,
+    status,
+    address_snapshot: [address.address_line1, address.address_line2, address.city, address.state, address.zip],
+    latitude: null,
+    longitude: null,
+  });
+  // The review store reads reviews as a list (with each customer's primary
+  // property, #5035), so the fixture lands on the list result.
+  const setReview = (row) => { listResults.customer_geocode_reviews = row ? [row] : []; };
+  const response = () => ({ status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() });
+  const getHandler = () => reservicePublicRouter.stack
+    .find(layer => layer.route?.path === '/:token' && layer.route.methods.get).route.stack.at(-1).handle;
+  const findHandler = () => reservicePublicRouter.stack
+    .find(layer => layer.route?.path === '/:token/find-slots').route.stack.at(-1).handle;
+  const commitHandler = () => reservicePublicRouter.stack
+    .find(layer => layer.route?.path === '/:token' && layer.route.methods.post).route.stack.at(-1).handle;
+  let oldReviewGate;
+
+  beforeEach(() => {
+    oldReviewGate = process.env.GATE_GEOCODE_REVIEW;
+    process.env.GATE_GEOCODE_REVIEW = 'true';
+    firstResults.customers = customer();
+    listResults.services = [{
+      id: 'pest-service', service_key: 'pest_re_service', name: 'Pest Control Re-Service', default_duration_minutes: 20,
+    }];
+    listResults['scheduled_services as s'] = [{ category: 'pest_control', service_type: 'General Pest Control' }];
+  });
+
+  afterEach(() => {
+    if (oldReviewGate === undefined) delete process.env.GATE_GEOCODE_REVIEW;
+    else process.env.GATE_GEOCODE_REVIEW = oldReviewGate;
+    jest.restoreAllMocks();
+  });
+
+  test.each(['needs_pin', 'needs_details', 'outside_area'])(
+    'a matching %s review blocks a coordinate-less customer',
+    async (status) => {
+      setReview(review(status));
+      await expect(reservicePublicRouter._test.reserviceLocationReviewRequired(customer())).resolves.toBe(true);
+    },
+  );
+
+  test('a complete stored pair and a dark review gate preserve the existing offer path', async () => {
+    setReview(review('needs_pin'));
+    await expect(reservicePublicRouter._test.reserviceLocationReviewRequired(customer({ latitude: 27.34, longitude: -82.53 })))
+      .resolves.toBe(false);
+    process.env.GATE_GEOCODE_REVIEW = 'false';
+    await expect(reservicePublicRouter._test.reserviceLocationReviewRequired(customer())).resolves.toBe(false);
+  });
+
+  // Offers are built on the pin the re-service commit books at (Codex #4992
+  // P1): createSelfBooking's stored pin → staff-verified pin → canonical
+  // geocode, never a different geocoder's answer.
+  const buildOffers = (who) => reservicePublicRouter._test.buildAvailabilityForCustomer(who, {
+    rangeFrom: slotDate, rangeTo: slotDate, config: {}, duration: 20, lanes: ['pest'],
+  });
+
+  test('a coordinate-less customer\'s offers are built at the matching staff-verified pin, not a provider geocode', async () => {
+    const reviewedPin = { lat: 27.40123, lng: -82.50123 };
+    setReview({ ...review('verified'), latitude: reviewedPin.lat, longitude: reviewedPin.lng });
+    const geocode = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: 27.34999, lng: -82.53999 });
+    const build = jest.spyOn(require('../routes/booking')._internals, 'buildBookingAvailability')
+      .mockResolvedValue({ slots: [], days: [], nearby: false });
+
+    const res = response();
+    await getHandler()({ params: { token }, query: {} }, res, jest.fn());
+
+    expect(build).toHaveBeenCalledWith(expect.objectContaining(reviewedPin));
+    expect(geocode).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ state: 'bookable', availability: expect.objectContaining({ days: [] }) }));
+  });
+
+  test('a review for a different address is out of scope: the canonical geocode of the customer\'s own address is used', async () => {
+    setReview({ ...review('verified'), latitude: 27.40123, longitude: -82.50123 });
+    const providerPin = { lat: 27.34999, lng: -82.53999 };
+    const geocode = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue(providerPin);
+    const build = jest.spyOn(require('../routes/booking')._internals, 'buildBookingAvailability')
+      .mockResolvedValue({ slots: [], days: [], nearby: false });
+
+    await buildOffers(customer({ address_line1: '999 Different Road' }));
+
+    expect(geocode).toHaveBeenCalledWith('999 Different Road, Sarasota, FL, 34236', expect.anything());
+    expect(build).toHaveBeenCalledWith(expect.objectContaining(providerPin));
+  });
+
+  test('a stored pin wins over any review, as it does at commit', async () => {
+    const storedPin = { lat: 27.34, lng: -82.53 };
+    setReview({ ...review('verified'), latitude: 27.40123, longitude: -82.50123 });
+    const geocode = jest.spyOn(require('../services/geocoder'), 'geocodeAddress');
+    const build = jest.spyOn(require('../routes/booking')._internals, 'buildBookingAvailability')
+      .mockResolvedValue({ slots: [], days: [], nearby: false });
+
+    await buildOffers(customer({ latitude: storedPin.lat, longitude: storedPin.lng }));
+
+    expect(build).toHaveBeenCalledWith(expect.objectContaining(storedPin));
+    expect(geocode).not.toHaveBeenCalled();
+  });
+
+  test('a held (unresolved) review with no stored pin builds no offers at all', async () => {
+    setReview(review('needs_pin'));
+    const geocode = jest.spyOn(require('../services/geocoder'), 'geocodeAddress');
+    const build = jest.spyOn(require('../routes/booking')._internals, 'buildBookingAvailability');
+
+    await expect(buildOffers(customer())).resolves.toBeNull();
+    expect(build).not.toHaveBeenCalled();
+    expect(geocode).not.toHaveBeenCalled();
+  });
+
+  test('browse and search suppress offers while the matching review is unresolved', async () => {
+    setReview(review('needs_pin'));
+    const booking = require('../routes/booking')._internals;
+    const build = jest.spyOn(booking, 'buildBookingAvailability');
+
+    const browseRes = response();
+    await getHandler()({ params: { token }, query: {} }, browseRes, jest.fn());
+    expect(browseRes.json).toHaveBeenCalledWith(expect.objectContaining({
+      state: 'bookable', availability: null, location_review_required: true,
+    }));
+
+    const searchRes = response();
+    await findHandler()({ params: { token }, body: { query: 'Tuesday', lane: 'pest' } }, searchRes, jest.fn());
+    expect(searchRes.status).toHaveBeenCalledWith(409);
+    expect(searchRes.json).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'LOCATION_REVIEW_REQUIRED', error: expect.stringMatching(/confirm your service address/i),
+    }));
+    expect(build).not.toHaveBeenCalled();
+  });
+
+  test('a review recorded during commit is not remapped to a slot race or refreshed into another offer', async () => {
+    setReview(null);
+    const booking = require('../routes/booking')._internals;
+    const config = jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({ advance_days_min: 1, advance_days_max: 14 });
+    const coords = jest.spyOn(booking, 'customerBookingLocation').mockResolvedValue({ lat: 27.34, lng: -82.53 });
+    const build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({
+      slots: [], nearby: false,
+      days: [{
+        date: slotDate,
+        slots: [{ start_time: '09:00', end_time: '09:20', technician_id: 'tech-1', start_label: '9:00 AM', end_label: '9:20 AM' }],
+      }],
+    });
+    const create = jest.spyOn(booking, 'createSelfBooking').mockResolvedValue({
+      ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY', error: 'Your address just changed — please pick a time again.',
+    });
+
+    const res = response();
+    await commitHandler()({
+      params: { token }, body: { lane: 'pest', date: slotDate, start_time: '09:00' },
+    }, res, jest.fn());
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'LOCATION_REVIEW_REQUIRED', error: expect.stringMatching(/confirm your service address/i),
+    }));
+    expect(build).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(config).toHaveBeenCalledTimes(1);
+    expect(coords).toHaveBeenCalled();
+  });
+
+  test('a customer change during commit reloads the token and never refreshes slots from the stale row', async () => {
+    setReview(null);
+    const booking = require('../routes/booking')._internals;
+    jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({ advance_days_min: 1, advance_days_max: 14 });
+    jest.spyOn(booking, 'customerBookingLocation').mockResolvedValue({ lat: 27.34, lng: -82.53 });
+    const build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({
+      slots: [], nearby: false,
+      days: [{
+        date: slotDate,
+        slots: [{ start_time: '09:00', end_time: '09:20', technician_id: 'tech-1', start_label: '9:00 AM', end_label: '9:20 AM' }],
+      }],
+    });
+    jest.spyOn(booking, 'createSelfBooking').mockImplementation(async () => {
+      firstResults.customers = customer({ address_line1: '456 Changed Avenue' });
+      return {
+        ok: false, status: 409, code: 'CUSTOMER_CHANGED_RETRY',
+        error: 'Your account details just changed — please refresh and book again.',
+      };
+    });
+    const mockedDb = require('../models/db');
+    const customerReadsBefore = mockedDb.mock.calls.filter(([table]) => table === 'customers').length;
+
+    const res = response();
+    await commitHandler()({
+      params: { token }, body: { lane: 'pest', date: slotDate, start_time: '09:00' },
+    }, res, jest.fn());
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'LOCATION_REVIEW_REQUIRED', error: expect.stringMatching(/confirm your service address/i),
+    }));
+    expect(build).toHaveBeenCalledTimes(1);
+    const customerReadsAfter = mockedDb.mock.calls.filter(([table]) => table === 'customers').length;
+    expect(customerReadsAfter - customerReadsBefore).toBeGreaterThanOrEqual(2);
+  });
+
+  test('a contact-only customer change refreshes current availability instead of entering address recovery', async () => {
+    setReview(null);
+    const booking = require('../routes/booking')._internals;
+    jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({ advance_days_min: 1, advance_days_max: 14 });
+    const coords = jest.spyOn(booking, 'customerBookingLocation').mockResolvedValue({ lat: 27.34, lng: -82.53 });
+    const replacement = {
+      slots: [], nearby: false,
+      days: [{
+        date: slotDate,
+        slots: [{ start_time: '14:00', end_time: '14:20', technician_id: 'tech-2', start_label: '2:00 PM', end_label: '2:20 PM' }],
+      }],
+    };
+    const build = jest.spyOn(booking, 'buildBookingAvailability')
+      .mockResolvedValueOnce({ ...replacement, days: [{ ...replacement.days[0], slots: [{ ...replacement.days[0].slots[0], start_time: '09:00' }] }] })
+      .mockResolvedValueOnce(replacement);
+    jest.spyOn(booking, 'createSelfBooking').mockImplementation(async () => {
+      firstResults.customers = customer({ phone: '9415550199' });
+      return { ok: false, status: 409, code: 'CUSTOMER_CHANGED_RETRY', error: 'changed' };
+    });
+
+    const res = response();
+    await commitHandler()({
+      params: { token }, body: { lane: 'pest', date: slotDate, start_time: '09:00' },
+    }, res, jest.fn());
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'SLOT_TAKEN',
+      availability: expect.objectContaining({
+        days: [expect.objectContaining({ slots: [expect.objectContaining({ start_time: '14:00' })] })],
+      }),
+    }));
+    expect(build).toHaveBeenCalledTimes(2);
+    expect(coords.mock.calls[1][0]).toEqual(expect.objectContaining({ phone: '9415550199' }));
+  });
+
+  test('a customer change that retires the token stays a generic 404 without stale slots', async () => {
+    setReview(null);
+    const booking = require('../routes/booking')._internals;
+    jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({ advance_days_min: 1, advance_days_max: 14 });
+    jest.spyOn(booking, 'customerBookingLocation').mockResolvedValue({ lat: 27.34, lng: -82.53 });
+    const build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({
+      slots: [], nearby: false,
+      days: [{ date: slotDate, slots: [{ start_time: '09:00', end_time: '09:20', technician_id: 'tech-1' }] }],
+    });
+    jest.spyOn(booking, 'createSelfBooking').mockImplementation(async () => {
+      firstResults.customers = null;
+      return { ok: false, status: 409, code: 'CUSTOMER_CHANGED_RETRY', error: 'changed' };
+    });
+
+    const res = response();
+    await commitHandler()({
+      params: { token }, body: { lane: 'pest', date: slotDate, start_time: '09:00' },
+    }, res, jest.fn());
+
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json).toHaveBeenCalledWith({ error: 'Not found' });
+    expect(build).toHaveBeenCalledTimes(1);
+  });
+
+  test('an ordinary DAY_FULL race still refreshes and returns SLOT_TAKEN', async () => {
+    firstResults.customers = customer({ latitude: 27.34, longitude: -82.53 });
+    setReview(review('needs_pin'));
+    const booking = require('../routes/booking')._internals;
+    jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({ advance_days_min: 1, advance_days_max: 14 });
+    const build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({
+      slots: [], nearby: false,
+      days: [{
+        date: slotDate,
+        slots: [{ start_time: '09:00', end_time: '09:20', technician_id: 'tech-1', start_label: '9:00 AM', end_label: '9:20 AM' }],
+      }],
+    });
+    jest.spyOn(booking, 'createSelfBooking').mockResolvedValue({
+      ok: false, status: 409, code: 'DAY_FULL', error: 'That day just filled.',
+    });
+
+    const res = response();
+    await commitHandler()({
+      params: { token }, body: { lane: 'pest', date: slotDate, start_time: '09:00' },
+    }, res, jest.fn());
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'SLOT_TAKEN', error: 'That day just filled.', availability: expect.objectContaining({ days: expect.any(Array) }),
+    }));
+    expect(build).toHaveBeenCalledTimes(2);
+  });
+});

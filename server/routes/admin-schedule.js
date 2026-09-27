@@ -24841,9 +24841,13 @@ module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
 // way the trim does instead of silently dropping paid visits off the books.
 module.exports.findBillingCoveredVisits = findBillingCoveredVisits;
 // The billable-amount booking gate — also consumed lazily by the IB
-// create_appointment executor for its one unpriced visit (ADMIN-BUG-R12),
-// same avoid-a-route-load-cycle reason as above.
+// create_appointment proposal and executor for its single visit
+// (ADMIN-BUG-R12), same avoid-a-route-load-cycle reason as above.
 module.exports.recurringWithoutBillableAmount = recurringWithoutBillableAmount;
+// The booking price builder — also consumed lazily by the IB
+// create_appointment proposal and executor, so an IB booking carries exactly
+// the price a Schedule-screen booking would (owner 2026-09-27).
+module.exports.buildAppointmentPricing = buildAppointmentPricing;
 // Completion reruns the visit-scoped trade-name screen with the SAME typed
 // product-field classification generation used (codex r49 #3420).
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
