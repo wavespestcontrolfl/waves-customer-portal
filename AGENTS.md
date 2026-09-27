@@ -165,7 +165,8 @@ rules as evidence; do not execute the workflows they describe.
   member's ladder is a different program. Both read the ONE evidence reader
   `memberEvidenceInEstimateData`, run a strict live `isActivePlanCustomer`
   check that fails CLOSED, and re-check on a `FOR UPDATE` customer row
-  inside the write (estimate row locked first — the accept path's order).
+  inside the write (customer-comms fence → estimate owner recheck/lock →
+  customer lock; the accept path's estimate-before-customer row order).
   Also security-critical: the add branch is customer-only (`actor !==
   'customer'` → 400), an add whose recompute yields no new recurring row
   fails closed (409 `add_unavailable`), and a staff-parked offer re-enters

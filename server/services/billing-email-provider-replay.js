@@ -23,6 +23,11 @@ function isBillingEmailProviderReplay(message) {
 
 const { readStoredBillingReplayContext } = EmailTemplateLibrary;
 
+// A terminal refusal that must not block the notice for good: the retry owner
+// settles the row as a definitely-unsent failure instead of 'blocked', so a
+// later send of the same notice re-delivers rather than deduping against it.
+const BILLING_REPLAY_RESENDABLE = 'BILLING_REPLAY_RESENDABLE';
+
 function refusal(block) {
   const retryable = block?.retryable === true;
   return {
@@ -35,7 +40,11 @@ function refusal(block) {
   };
 }
 
-async function runBillingEmailProviderReplayHandoff(message, dispatch) {
+async function runBillingEmailProviderReplayHandoff(message, dispatch, {
+  recipientEmail = clean(message?.recipient_email_snapshot).toLowerCase(),
+  authorityRecipientEmail = clean(message?.recipient_email_snapshot).toLowerCase(),
+  providerBoundaryCheck = null,
+} = {}) {
   if (!isBillingEmailProviderReplay(message)) return { handled: false };
   const context = readStoredBillingReplayContext(message);
   if (!context) {
@@ -57,18 +66,24 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch) {
         notificationEventKey: context.notificationEventKey,
       },
     },
-    recipientEmail: clean(message.recipient_email_snapshot).toLowerCase(),
+    recipientEmail: clean(recipientEmail).toLowerCase(),
+    authorityRecipientEmail: clean(authorityRecipientEmail).toLowerCase(),
     templateKey: clean(message.template_key),
-    preSendCheck: async ({ database }) => {
+    preSendCheck: async ({ database, providerBoundary }) => {
       const verdict = await billingEmailReplayEligible(context, database);
-      return verdict?.eligible === true ? { ok: true } : {
-        ok: false,
-        code: 'BILLING_REPLAY_INELIGIBLE',
-        reason: verdict?.reason || 'Billing replay is no longer eligible',
-        retryable: verdict?.retryable === true,
-      };
+      if (verdict?.eligible !== true) {
+        return {
+          ok: false,
+          // Preserve main's definitely-unsent, resendable refusal contract.
+          code: verdict?.resendable === true ? BILLING_REPLAY_RESENDABLE : 'BILLING_REPLAY_INELIGIBLE',
+          reason: verdict?.reason || 'Billing replay is no longer eligible',
+          retryable: verdict?.retryable === true,
+        };
+      }
+      return providerBoundary && typeof providerBoundaryCheck === 'function'
+        ? providerBoundaryCheck({ database }) : { ok: true };
     },
-    dispatch: (database) => dispatch(database),
+    dispatch: (database, providerBoundaryCheck) => dispatch(database, providerBoundaryCheck),
     state,
   });
 
@@ -83,4 +98,5 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch) {
 module.exports = {
   isBillingEmailProviderReplay,
   runBillingEmailProviderReplayHandoff,
+  BILLING_REPLAY_RESENDABLE,
 };

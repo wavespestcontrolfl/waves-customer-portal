@@ -1,5 +1,6 @@
-const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
 'use strict';
+
+const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
 
 const crypto = require('node:crypto');
 const db = require('../models/db');
@@ -10,7 +11,6 @@ const { collectionsChannelPermitted } = require('./collections/rail-guard');
 const TERMINAL_EMAIL_REFUSAL_CODES = new Set([
   'NO_EMAIL_RECIPIENT',
   'BILLING_EMAIL_NOT_SELECTED',
-  'BILLING_EMAIL_DISABLED',
   'EMAIL_SUPPRESSED',
   // The billing Email authority's phone-keyed suppression recheck (#4962):
   // the same hard stops the provider-retry path resolves terminally, so a
@@ -31,7 +31,7 @@ function isTerminalEmailRefusal(result) {
       || result.held === true || result.deliveryHeld === true
       || result.deliveryOutcome === 'uncertain') return false;
   const legacy = result.ok === false && (
-    (result.skipped === true && ['missing_email', 'billing_email_not_selected', 'email_disabled', 'template_unavailable'].includes(result.reason))
+    (result.skipped === true && ['missing_email', 'billing_email_not_selected', 'template_unavailable'].includes(result.reason))
     || (result.blocked === true && /^Suppressed: /.test(result.reason || ''))
   );
   const canonical = result.sent === false && result.blocked === true

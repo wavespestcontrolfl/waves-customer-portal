@@ -72,6 +72,11 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     'There is no chance of rain tomorrow, so we can treat.',
     'There is a chance of mild irritation, so follow the label.',
     "The spray won't do a thing to termites; they need a soil treatment.",
+    'Termites are unable to harm your home once treated.',
+    'Las termitas son incapaces de dañar su hogar una vez tratado.',
+    'Once treated, termites are unable to harm your home.',
+    'Termites are unable to cause your home any harm once treated.',
+    'Ants are incapable of crossing the barrier once it is applied.',
   ])('leaves compliant replies untouched: %s', (reply) => {
     expect(scrubUnsafeClaims({ ...base, reply }).reply).toBe(reply);
   });
@@ -255,6 +260,16 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ["This treatment won't do a thing to your pets.", ''],
     ["This product won't do anything to children.", ''],
     ['The spray does nothing to your pets.', ''],
+    ['This treatment is unable to harm pets.', ''],
+    ['This pesticide is incapable of causing harm to pets.', ''],
+    ['The spray is not capable of hurting children.', ''],
+    ['Este producto es incapaz de dañar a sus mascotas.', ''],
+    ['This spray for ants is unable to harm your pets.', ''],
+    ['This treatment for termites is incapable of causing harm to children.', ''],
+    ['Este spray para hormigas es incapaz de dañar a sus mascotas.', ''],
+    ['This treatment is unable to cause your pets any harm.', ''],
+    ['This product is incapable of doing children any harm.', ''],
+    ['This treatment is incapable of causing your dog harm.', ''],
     ['This pesticide is not considered hazardous to children.', ''],
     ['The product is not classified as toxic to pets.', ''],
     ['The treatment is not regarded as dangerous for dogs.', ''],
@@ -443,6 +458,11 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Puede volver a entrar ahora.', '¿Cuándo puedo volver a entrar?'],
     ['You can go back inside.', 'What should I do after the treatment?'],
     ['Go ahead and let the kids play outside.', 'What should I do after the treatment?'],
+    ['Come back once 30 minutes have elapsed.', 'What should I do after the treatment?'],
+    ['Please come back inside after an hour.', 'What should I do after the treatment?'],
+    ['Regrese en 30 minutos.', '¿Qué hago después del tratamiento?'],
+    ['Vuelva a entrar en 2 horas.', '¿Qué hago después del tratamiento?'],
+    ['Come back inside after 2 hours; you can ask us more in this chat.', 'What should I do after the treatment?'],
   ])('flags: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
   });
@@ -474,6 +494,15 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['You can go back inside once everything is dry.', 'What should I do after the treatment?'],
     ['You can get your price by tapping Get my price.', 'What should I do after the treatment?'],
     ['We can go inside to treat the kitchen.', 'What should I do after the treatment?'],
+    ["We'll come back in two weeks for a follow-up treatment.", 'What should I do after the treatment?'],
+    ['Come back to this chat anytime with questions.', 'What should I do after the treatment?'],
+    ['Entre las 8 y las 10 llegará el técnico.', '¿Cuándo es la cita?'],
+    ['Vuelva a llamarnos mañana si ve hormigas.', '¿Qué hago después del tratamiento?'],
+    ['Come back in 2 hours to this chat with questions.', 'What should I do after the treatment?'],
+    ['Please come back after 30 minutes to this chat.', 'What should I do after the treatment?'],
+    ['Regrese mañana a este chat si tiene preguntas.', '¿Qué hago después del tratamiento?'],
+    ['Come back at 10 AM to our office.', 'What should I do after the treatment?'],
+    ['Regrese a las 10 a nuestra oficina.', '¿Qué hago después del tratamiento?'],
   ])('leaves alone: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });
@@ -727,6 +756,12 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     expect(out.reply).toContain('1-800-222-1222');
   });
 
+  test('a visitor asking for Poison Control gets the Poison Control line', () => {
+    const out = normalizeIntakeResult({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, 'openai', 'I need Poison Control');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('1-800-222-1222');
+  });
+
   test.each(['Your child seems fine.', 'Your child appears to be okay.', 'He looks alright.', 'Su hijo parece estar bien.'])('an apparent-wellness reply after an ingestion gets the emergency script: %s', (reply) => {
     const out = normalizeIntakeResult({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, 'openai', 'My child swallowed pesticide');
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
@@ -737,6 +772,11 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     'My cat got sprayed with insecticide',
     'My rabbit touched rat poison',
     'My dog threw up after the treatment',
+    'My cow swallowed pesticide',
+    'My sheep ate rat poison',
+    'Mi vaca comió veneno',
+    'My dog choked on the bait',
+    'Mi perro se atragantó con el cebo',
   ])('an exposed pet gets the veterinary script: %s', (context) => {
     const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, context);
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
@@ -2149,6 +2189,18 @@ describe('looksLikeEmergency', () => {
     'The boy swallowed poison',
     'A woman inhaled poison fumes',
     "My neighbor's little boy drank the weed killer",
+    'My child choked on poison',
+    'My son is choking on the bait',
+    'I need Poison Control',
+    'I called poison control',
+    'Necesito el control de envenenamientos',
+    'My cow is vomiting after the pesticide treatment',
+    'My sheep collapsed after the lawn spray',
+    'Pesticide made my calf cough',
+    "He didn't swallow it but he choked on the bait",
+    'The dog found it and he ate the bait',
+    'Poison Control is needed',
+    'Mi hijo se atragantó con el veneno',
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
@@ -2250,6 +2302,16 @@ describe('looksLikeEmergency', () => {
     'The bait was swallowed whole by the rats',
     'I think a raccoon ate the bait',
     'My son says the rats ate the bait',
+    "I don't need poison control, just an ant treatment",
+    'No necesito el control de envenenamientos, solo control de hormigas',
+    "My child didn't choke on the bait",
+    'My son is not choking on poison',
+    'Mi hijo no se atragantó con el veneno',
+    'No need for Poison Control, just the ants',
+    'Poison Control is not needed',
+    "Don't call Poison Control, I need an ant treatment",
+    'No hace falta llamar a control de envenenamientos',
+    'The ants choked on the bait',
     'The rats were poisoned by spray',
     'The roaches were poisoned by the product',
     'The ants got poisoned by chemicals',
@@ -2302,49 +2364,48 @@ describe('public-quote resolveEntryChannel allowlist', () => {
 // Inputs are sized to the real caps (12 history turns × 600 chars, a
 // 2000-char message, a 600-char reply) with repetitive adversarial shapes.
 describe('intake chokepoint worst-case latency (#4905)', () => {
-  const { normalizeIntakeResult: normalize, looksLikeEmergency: emergency } = _internals;
-  const shapes = ['a ', 'my ', 'not ', "child's ", 'dry ', 'no les ', '- ', 'my child ', 'can i ', 'return ', 'avoid ', 'hospital ', 'spray ', 'my dog ate un poco ', 'my dog ate the some of '];
+  const { execFileSync } = require('child_process');
+  const path = require('path');
+  const shapes = ['a ', 'my ', 'not ', "child's ", 'dry ', 'no les ', '- ', 'my child ', 'can i ', 'return ', 'avoid ', 'hospital ', 'spray ', 'my dog ate un poco ', 'my dog ate the some of ',
+    'choked on the ', 'is choking on ', 'poison control ', 'unable to harm ', 'incapable of causing ', 'come back once ', 'please come back ', 'my cow swallowed the ', 'regrese en ', 'vuelva a entrar en '];
   const fill = (unit, n) => unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
-  const runChokepoint = (reply, ctx, msg) => {
-    normalize({ reply, intent: 'question', service_keys: [], ready_for_quote: true }, 'openai', ctx, msg);
-    emergency(ctx);
-  };
-  const cpuMs = (fn) => {
-    const started = process.cpuUsage();
-    fn();
-    const elapsed = process.cpuUsage(started);
-    return (elapsed.user + elapsed.system) / 1000;
+  // Timed in a fresh Node process (tests/fixtures/ask-waves-latency-probe.js):
+  // in this long-lived jest worker, process CPU also carries GC and
+  // background-compile work for every earlier test file — CI measured 54–62 ms,
+  // best of three, on shapes that take ~1 ms in isolation on Node 20 and 26.
+  // A super-linear regex still blows the budget there on every run.
+  const timeInFreshProcess = (inputs) => {
+    const out = execFileSync(process.execPath, [path.join(__dirname, 'fixtures', 'ask-waves-latency-probe.js')], {
+      // A super-linear regex fails fast instead of hanging CI (the child is
+      // synchronous, so jest's own test timeout cannot interrupt it).
+      input: JSON.stringify(inputs), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 30000,
+    });
+    return JSON.parse(out.split('\n').find((line) => line.startsWith('LATENCY ')).slice('LATENCY '.length));
   };
 
+  let shapeMs = [];
   beforeAll(() => {
-    // Compile and exercise the full no-match path at the real input caps before
-    // measuring steady synchronous work. Wall time here is dominated by host
-    // scheduling when CI runs many suites in parallel; process CPU still counts
-    // regex/string work (and GC) that can actually block this Node event loop.
-    const msg = fill('my yard has ants and a question ', 2000);
-    const ctx = [...Array(12).fill(fill('ordinary pest question ', 600)), msg].join('\n');
-    for (let k = 0; k < 2; k += 1) runChokepoint(fill('ordinary answer ', 600), ctx, msg);
+    shapeMs = timeInFreshProcess(shapes.map((unit) => {
+      const msg = fill(unit, 2000);
+      return { reply: fill(unit, 600), ctx: [...Array(12).fill(fill(unit, 600)), msg].join('\n'), msg };
+    }));
   });
 
-  test.each(shapes)('stays well under budget for repeated %j', (unit) => {
-    const msg = fill(unit, 2000);
-    const ctx = [...Array(12).fill(fill(unit, 600)), msg].join('\n');
-    expect(cpuMs(() => runChokepoint(fill(unit, 600), ctx, msg))).toBeLessThan(50);
+  test.each(shapes.map((unit, index) => [unit, index]))('stays well under budget for repeated %j', (unit, index) => {
+    expect(shapeMs[index]).toBeLessThan(50);
   });
 
   test('stays under budget for seeded random mixes of the matchers\' own vocabulary', () => {
-    const vocab = "my child dog ate swallowed the bait spray pesticide not no won't your pets safe after treatment until 4 PM re-enter inside outside hospital doctor now es seguro mascotas niños no molesta a sus después del tratamiento volver a entrar avoid dry was exposed to call 911 veterinary".split(' ');
+    const vocab = "my child dog ate swallowed the bait spray pesticide not no won't your pets safe after treatment until 4 PM re-enter inside outside hospital doctor now es seguro mascotas niños no molesta a sus después del tratamiento volver a entrar avoid dry was exposed to call 911 veterinary choked choking gagged on poison control unable incapable of causing harm come back once please cow sheep swallowed regrese vuelva en".split(' ');
     let seed = 42;
     const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
     const words = (n) => Array.from({ length: n }, () => vocab[Math.floor(rnd() * vocab.length)]).join(' ');
-    let worst = 0;
-    for (let k = 0; k < 40; k += 1) {
+    const inputs = Array.from({ length: 40 }, () => {
       const msg = words(300).slice(0, 2000);
       const ctx = [...Array.from({ length: 12 }, () => words(100).slice(0, 600)), msg].join('\n');
-      const reply = words(100).slice(0, 600);
-      worst = Math.max(worst, cpuMs(() => runChokepoint(reply, ctx, msg)));
-    }
-    expect(worst).toBeLessThan(50);
+      return { reply: words(100).slice(0, 600), ctx, msg };
+    });
+    expect(Math.max(...timeInFreshProcess(inputs))).toBeLessThan(50);
   });
 });
 
