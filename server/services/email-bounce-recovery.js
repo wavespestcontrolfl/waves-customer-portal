@@ -359,25 +359,25 @@ async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId, datab
   try {
     const customerRows = await database('customers')
       .where((q) => {
-        for (const f of CUSTOMER_EMAIL_FIELDS) q.orWhereRaw(`LOWER(${f}) = ?`, [email]);
+        for (const f of CUSTOMER_EMAIL_FIELDS) q.orWhereRaw(`LOWER(BTRIM(${f})) = ?`, [email]);
       })
       .select('id');
     if (customerRows.some((r) => String(r.id) !== own)) return true;
 
     // Estimates / leads carry a customer_id link; a record not tied to our own
     // customer (incl. prospect rows with no customer_id) is another party.
-    const estRows = await database('estimates').whereRaw('LOWER(customer_email) = ?', [email]).select('customer_id');
+    const estRows = await database('estimates').whereRaw('LOWER(BTRIM(customer_email)) = ?', [email]).select('customer_id');
     if (estRows.some((r) => isOther(r.customer_id))) return true;
 
-    const leadRows = await database('leads').whereRaw('LOWER(email) = ?', [email]).select('customer_id');
+    const leadRows = await database('leads').whereRaw('LOWER(BTRIM(email)) = ?', [email]).select('customer_id');
     if (leadRows.some((r) => isOther(r.customer_id))) return true;
 
     // notification_prefs.billing_email is also a sendable customer address
     // (getInvoiceEmailRecipients), so it can belong to another customer too.
-    const prefRows = await database('notification_prefs').whereRaw('LOWER(billing_email) = ?', [email]).select('customer_id');
+    const prefRows = await database('notification_prefs').whereRaw('LOWER(BTRIM(billing_email)) = ?', [email]).select('customer_id');
     if (prefRows.some((r) => isOther(r.customer_id))) return true;
   } catch (err) {
-    logger.warn(`[bounce-recovery] ownership lookup failed — treating as owned by other: ${err.message}`);
+    logger.warn(`[bounce-recovery] ownership lookup failed — treating as owned by other: ${err.code || 'db_error'}`);
     return true;
   }
   // Gmail ignores local-part dots and everything after '+': a corrected
@@ -408,8 +408,8 @@ async function gmailMailboxOwnedByOther(email, ownCustomerId, database = db) {
   // The SQL identity is shared with the operator email conflict check
   // (utils/customer-comms-lock.js GOOGLE_MAILBOX_SQL).
   const { GOOGLE_MAILBOX_SQL } = require('../utils/customer-comms-lock');
-  const CANON = GOOGLE_MAILBOX_SQL.mailbox;
-  const GOOGLE = GOOGLE_MAILBOX_SQL.isGoogle;
+  const CANON = (field) => GOOGLE_MAILBOX_SQL.mailbox(`BTRIM(${field})`);
+  const GOOGLE = (field) => GOOGLE_MAILBOX_SQL.isGoogle(`BTRIM(${field})`);
   try {
     const customerRows = await database('customers')
       .where((q) => {
@@ -433,7 +433,7 @@ async function gmailMailboxOwnedByOther(email, ownCustomerId, database = db) {
       .select('customer_id');
     if (prefRows.some((r) => isOther(r.customer_id))) return true;
   } catch (err) {
-    logger.warn(`[bounce-recovery] gmail mailbox ownership lookup failed — treating as owned by other: ${err.message}`);
+    logger.warn(`[bounce-recovery] gmail mailbox ownership lookup failed — treating as owned by other: ${err.code || 'db_error'}`);
     return true;
   }
   return false;
@@ -574,7 +574,8 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
           // request, on the held connection: a party that claimed that
           // address after the earlier ownership check must not receive the
           // bearer link.
-          if (await correctedAddressOwnedByOther(correctedEmail, ownCustomerId, trx || db)) return { ok: false, reason: 'corrected_owned_by_other' };
+          await require('../utils/customer-comms-lock').lockEmailOwnershipForSend(trx, correctedEmail);
+          if (await correctedAddressOwnedByOther(correctedEmail, ownCustomerId, trx)) return { ok: false, reason: 'corrected_owned_by_other' };
           await dispatchToProvider();
           return { ok: true };
         }, { destination: correctedEmail });
@@ -1277,6 +1278,7 @@ module.exports = {
   commitRecoveryOnDelivery,
   handleRecoveryBounce,
   // exported for tests
+  dispatchRecoveryMessage,
   resolveCustomerEmailField,
   correctedAddressSuppressed,
   correctedAddressOwnedByOther,

@@ -12,7 +12,7 @@ jest.mock('../services/email-template-library', () => ({
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 jest.mock('../services/visit-completion-summary', () => ({
-  retrySummaryThroughHandoff: jest.fn(async (message, dispatch) => { const verdict = await dispatch(); return verdict && verdict.ok === false ? verdict : { ok: true }; }),
+  retrySummaryThroughHandoff: jest.fn(async (message, dispatch) => { const verdict = await dispatch(mockOwnershipTrx()); return verdict && verdict.ok === false ? verdict : { ok: true }; }),
   reconcileSummaryEmailRecovery: jest.fn(async () => ({ reconciled: true })),
 }));
 
@@ -21,6 +21,14 @@ const sendgrid = require('../services/sendgrid-mail');
 const emailLib = require('../services/email-template-library');
 const NotificationService = require('../services/notification-service');
 const recovery = require('../services/email-bounce-recovery');
+
+function mockOwnershipTrx() {
+  return Object.assign((...args) => db(...args), {
+    isTransaction: true,
+    raw: jest.fn(async () => ({ rows: [{ locked: true }] })),
+  });
+}
+
 
 // Minimal chainable knex mock. Every builder method returns the chain; the
 // terminal-ish methods resolve to configurable values.
@@ -222,12 +230,17 @@ describe('attemptRecovery codex-fix behaviors', () => {
 
   test.each([
     ['sends a visit summary recovery through the locked handoff', { ok: true }, 1, 'resent'],
+    ['alerts a visit summary recovery when an ownership assignment is in progress', { ok: true, ownershipBusy: true }, 0, 'send_failed'],
     ['suppresses a visit summary recovery whose original recipient is no longer authorized', { ok: false, reason: 'visit_summary_recipient_changed' }, 0, 'recipient_unauthorized'],
   ])('%s', async (_label, fence, sends, finalStatus) => {
     const summary = require('../services/visit-completion-summary');
     summary.retrySummaryThroughHandoff.mockImplementationOnce(async (message, dispatch) => {
       expect(message.id).toBe('orig1');
-      if (fence.ok) return (await dispatch()) || fence;
+      if (fence.ok) {
+        const trx = mockOwnershipTrx();
+        if (fence.ownershipBusy) trx.raw.mockResolvedValue({ rows: [{ locked: false }] });
+        return (await dispatch(trx)) || fence;
+      }
       return fence;
     });
     emailLib.loadTemplateByKey.mockResolvedValue(undefined);
@@ -248,7 +261,12 @@ describe('attemptRecovery codex-fix behaviors', () => {
     );
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(sends);
     expect(mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries').pop().data).toMatchObject({ status: finalStatus });
-    if (fence.ok) {
+    if (fence.ownershipBusy) {
+      expect(res).toEqual({ error: 'Email ownership assignment in progress' });
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({
+        metadata: expect.objectContaining({ status: 'send_failed' }),
+      }));
+    } else if (fence.ok) {
       expect(res).toMatchObject({ resent: true });
     } else {
       expect(res).toEqual({ skipped: 'visit_summary_recipient_changed' });
@@ -998,5 +1016,44 @@ describe('annual guard trigger-id parsing (pre-push audit P1)', () => {
     expect(guardEstimateIdFromTriggerEvent('estimate_extended:not-an-id:2026-09-19T00:00:00.000Z')).toBeNull();
     expect(guardEstimateIdFromTriggerEvent('invoice_reminder:12345')).toBeNull();
     expect(guardEstimateIdFromTriggerEvent(null)).toBeNull();
+  });
+});
+
+
+describe('final ownership send fence', () => {
+  const { lockEmailOwnershipForSend } = require('../utils/customer-comms-lock');
+  test('query errors become sanitized transient failures', async () => {
+    const trx = Object.assign(jest.fn(), { isTransaction: true, raw: jest.fn(async () => {
+      throw new Error('SQL binding synthetic-secret@example.invalid');
+    }) });
+    await expect(lockEmailOwnershipForSend(trx, 'synthetic-secret@example.invalid')).rejects.toMatchObject({
+      message: 'Email ownership check temporarily unavailable', code: 'EMAIL_OWNERSHIP_CHECK_UNAVAILABLE',
+    });
+    await expect(lockEmailOwnershipForSend(db, 'synthetic-secret@example.invalid')).rejects.toMatchObject({
+      message: 'Email ownership check temporarily unavailable', code: 'EMAIL_OWNERSHIP_CHECK_UNAVAILABLE',
+    });
+  });
+  test('ownership lookup errors log only SQLSTATE, never query bindings', async () => {
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    const failure = Object.assign(new Error('SQL binding synthetic-secret@example.invalid'), { code: 'XX000' });
+    const chain = { where: () => chain, whereRaw: () => chain, select: () => Promise.reject(failure) };
+    const database = () => chain;
+    await expect(recovery.correctedAddressOwnedByOther('synthetic-secret@example.invalid', 'c1', database)).resolves.toBe(true);
+    await expect(recovery.gmailMailboxOwnedByOther('synthetic.secret@gmail.com', 'c1', database)).resolves.toBe(true);
+    expect(logger.warn).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(logger.warn.mock.calls)).toContain('XX000');
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('synthetic-secret');
+  });
+  test('busy exact or Gmail keys refuse before another ownership read', async () => {
+    const trx = mockOwnershipTrx();
+    trx.raw.mockResolvedValueOnce({ rows: [{ locked: true }] }).mockResolvedValueOnce({ rows: [{ locked: false }] });
+    await expect(lockEmailOwnershipForSend(trx, 'synthetic.secret+tag@googlemail.com')).rejects.toMatchObject({
+      message: 'Email ownership assignment in progress', code: 'EMAIL_OWNERSHIP_CHECK_BUSY',
+    });
+    expect(trx.raw.mock.calls.map((call) => call[1][0])).toEqual([
+      'email-ownership:customer-email:synthetic.secret+tag@googlemail.com',
+      'email-ownership:customer-mailbox:syntheticsecret@gmail.com',
+    ]);
   });
 });
