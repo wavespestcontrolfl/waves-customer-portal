@@ -112,8 +112,8 @@ test('keeps original recipient authority while sending a corrected bounce destin
   });
 
   await expect(runBillingEmailProviderReplayHandoff(message(), dispatch, {
-    recipientEmail: 'casey@example.net',
-    authorityRecipientEmail: 'casey@example.com',
+    recipientEmail: ' Casey@Example.Net ',
+    authorityRecipientEmail: ' Casey@Example.Com ',
     preSendCheck: correctedCheck,
     forwardProviderBoundary: true,
   })).resolves.toEqual({ handled: true, allowed: true });

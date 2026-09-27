@@ -62,8 +62,8 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch, {
         notificationEventKey: context.notificationEventKey,
       },
     },
-    recipientEmail,
-    authorityRecipientEmail,
+    recipientEmail: clean(recipientEmail).toLowerCase(),
+    authorityRecipientEmail: clean(authorityRecipientEmail).toLowerCase(),
     templateKey: clean(message.template_key),
     preSendCheck: async ({ database, providerBoundary }) => {
       const verdict = await billingEmailReplayEligible(context, database);

@@ -41,12 +41,13 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { customerOnAutopay } = require('./autopay-eligibility');
 const { publicPortalUrl } = require('../utils/portal-url');
 const EmailTemplateLibrary = require('./email-template-library');
-const { isDefiniteRejection } = require('./sendgrid-mail');
-const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { currency } = require('./email-template');
 const { formatDateOnly } = require('../utils/date-only');
 const { explicitBillingChannels } = require('./billing-delivery-channels');
-const { loadBillingEmailContext, dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
+const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
+const {
+  billingEmailRecipient, operatorEmailRecipient, selfPayOnlyHandoff, billingEmailSendOutcome, billingEmailSendFailure,
+} = require('./billing-email-sender');
 const { verdictAllows, verdictDurablyDenied } = require('./billing-reminder-delivery');
 
 const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
@@ -72,14 +73,6 @@ const STALE_TOUCH_GRACE_MS = 20 * 60 * 60 * 1000;
 
 function clean(value) {
   return String(value || '').trim();
-}
-
-function cleanEmail(value) {
-  return clean(value).toLowerCase();
-}
-
-function isEmailLike(value) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail(value));
 }
 
 function firstToken(value) {
@@ -216,105 +209,6 @@ async function logFollowupEmailAttempt({
   }
 }
 
-// Where a billing email authority refusal lands in this engine's outcome
-// vocabulary (terminalFollowupEmailRefusal / settleFollowupEmailLedger). The
-// final refusals keep the reasons the sequence already settles on, and a
-// suppression stays a "Suppressed: " refusal. Anything else did not deliver
-// and is no final answer about this customer, so it is a retryable not-sent
-// the step holds for. That includes BILLING_PREFERENCES_CHANGED (the choice
-// moved after fireTouch snapshotted selectedChannels), and both refusals a
-// profile merge can produce after fireTouch loaded the losing customer:
-// CUSTOMER_NOT_FOUND (the loser is soft-deleted) and INVOICE_CUSTOMER_MISMATCH
-// (the invoice moved to the winner). The next run re-reads them all.
-const FOLLOWUP_EMAIL_REFUSAL_REASONS = Object.freeze({
-  BILLING_EMAIL_DISABLED: 'email_disabled',
-  NO_EMAIL_RECIPIENT: 'missing_email',
-  INVOICE_PAYER_BILLED: 'invoice_payer_billed',
-});
-const FOLLOWUP_EMAIL_SUPPRESSION_CODES = new Set(['EMAIL_SUPPRESSED', 'SUPPRESSED_MANUAL_DNC', 'SUPPRESSED_OTHER']);
-
-function followupEmailRefusal(block) {
-  const reason = FOLLOWUP_EMAIL_REFUSAL_REASONS[block.code];
-  if (reason) return { ok: false, skipped: true, reason };
-  if (FOLLOWUP_EMAIL_SUPPRESSION_CODES.has(block.code)) {
-    const detail = String(block.reason || block.code);
-    return { ok: false, blocked: true, reason: detail.startsWith('Suppressed: ') ? detail : `Suppressed: ${detail}` };
-  }
-  return { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: block.code };
-}
-
-// Who this email may go to. The customer's billing choices, recipient and
-// invoice ownership come from the shared billing email authority (owner
-// ruling 2026-09-27), read here and again under its locks at the provider
-// handoff. An operator's explicit send skips the customer's choices, as
-// before, and rechecks ownership only.
-async function followupEmailRecipient({ customer, authorityInput, enforceBillingPreference }) {
-  if (enforceBillingPreference) {
-    let context;
-    try {
-      context = await loadBillingEmailContext(authorityInput);
-    } catch (err) {
-      logger.warn(`[invoice-followups] billing email context unavailable for ${customer.id}: ${err.message}`);
-      return { refusal: { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'billing_email_context_unavailable' } };
-    }
-    if (context.error) return { refusal: followupEmailRefusal(context.error) };
-    return { recipient: context.recipient, to: context.recipientEmail };
-  }
-  const prefs = await db('notification_prefs')
-    .where({ customer_id: customer.id })
-    .first()
-    .catch((err) => {
-      logger.warn(`[invoice-followups] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
-      return null;
-    });
-  const [recipient] = getInvoiceEmailRecipients(customer, prefs || {})
-    .filter((entry) => isEmailLike(entry.email));
-  if (!recipient?.email) return { refusal: { ok: false, skipped: true, reason: 'missing_email' } };
-  return { recipient, to: recipient.email };
-}
-
-// What the send returned, recorded and reported in the sequence's outcome
-// vocabulary. A refusal at the provider handoff maps like a first-read one.
-async function followupEmailOutcome(result, state, log) {
-  if (state.boundaryBlock) {
-    const refusal = followupEmailRefusal(state.boundaryBlock);
-    await log({ status: refusal.blocked ? 'blocked' : 'failed', failureReason: refusal.reason });
-    return refusal;
-  }
-  if (result.deduped) {
-    return { ok: !!result.sent, deduped: true, blocked: !!result.blocked, reason: result.reason || null };
-  }
-  const message = result.message || {};
-  await log({
-    status: result.sent ? 'sent' : result.blocked ? 'blocked' : 'failed',
-    providerMessageId: message.provider_message_id || null,
-    sentAt: message.sent_at || null,
-    failureReason: result.sent ? null : result.reason || message.error_message || 'email_not_sent',
-  });
-  if (result.sent) return { ok: true };
-  return { ok: false, blocked: !!result.blocked, reason: result.reason || 'email_not_sent' };
-}
-
-// A thrown send: accepted at the provider, known not sent, or uncertain.
-// Same evidence rule as every billing email sender here: a failure before
-// the provider handoff, or a definite provider refusal, is known not sent;
-// an unknown failure after the handoff stays uncertain.
-async function followupEmailFailure(err, handoffStarted, log, label) {
-  const outcome = err.providerOutcome?.deliveryOutcome;
-  if (outcome === 'accepted') {
-    await log({ status: 'sent', failureReason: null });
-    return { ok: true };
-  }
-  await log({ status: 'failed', failureReason: err.message });
-  logger.error(`[invoice-followups] ${label} email failed: ${err.message}`);
-  if (['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'].includes(err.code)) {
-    return { ok: false, skipped: true, reason: 'template_unavailable' };
-  }
-  const definitelyNotSent = err.code !== 'EMAIL_SEND_IN_PROGRESS'
-    && (outcome === 'not_sent' || (outcome !== 'uncertain' && (!handoffStarted || isDefiniteRejection(err))));
-  return { ok: false, error: err.message, deliveryOutcome: definitelyNotSent ? 'not_sent' : 'uncertain' };
-}
-
 async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference = true }) {
   const templateKey = FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
   if (!templateKey) return { ok: false, skipped: true, reason: 'no_email_template_mapping' };
@@ -335,7 +229,14 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
     customerId: customer.id, invoiceId: row.invoice_id, channel: 'email',
     metadata: { billingDeliveryCategory: 'invoice' },
   };
-  const { recipient, to, refusal } = await followupEmailRecipient({ customer, authorityInput, enforceBillingPreference });
+  // Who this email may go to. The customer's billing choices, recipient and
+  // invoice ownership come from the shared billing email authority (owner
+  // ruling 2026-09-27), read here and again under its locks at the provider
+  // handoff. An operator's explicit send skips the customer's choices, as
+  // before, and rechecks ownership only.
+  const { recipient, to, refusal } = enforceBillingPreference
+    ? await billingEmailRecipient(authorityInput, 'invoice-followups')
+    : await operatorEmailRecipient(customer, 'invoice-followups');
   if (refusal) return refusal;
 
   const payload = {
@@ -369,19 +270,13 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
         ? (dispatch) => dispatchUnderBillingEmailAuthority({
           input: authorityInput, recipientEmail: to, templateKey, dispatch, state,
         })
-        // Fail-closed — an unreadable invoice aborts before dispatch, like
-        // every other ownership guard here.
-        : async (dispatch) => {
-          const verdict = await invoiceHelpers.selfPayAtDispatch(row.invoice_id, db)();
-          if (verdict.ok !== true) return verdict;
-          state.handoffStarted = true;
-          await dispatch();
-          return { ok: true };
-        },
+        : selfPayOnlyHandoff(row.invoice_id, state),
     });
-    return await followupEmailOutcome(result, state, log);
+    return await billingEmailSendOutcome(result, state, log);
   } catch (err) {
-    return followupEmailFailure(err, state.handoffStarted, log, `${step.id} for invoice ${row.invoice_id}`);
+    return billingEmailSendFailure(err, state.handoffStarted, log, {
+      logTag: 'invoice-followups', label: `${step.id} for invoice ${row.invoice_id}`,
+    });
   }
 }
 

@@ -139,15 +139,12 @@ function recoveryIdFromMessage(message) {
  * Extracted so the gating logic is unit-testable without a DB.
  */
 function decideRecoveryAction({
-  candidate, suppressed, ownedByOther, hasAttachments, requiresSourceAuthorization = false,
+  candidate, suppressed, ownedByOther, hasAttachments,
   addressOnFile = true, min = 'high',
 }) {
   if (!candidate) return { action: 'skip', status: 'no_candidate' };
   if (!meetsConfidence(candidate.confidence, min)) {
     return { action: 'skip', status: 'skipped_low_confidence' };
-  }
-  if (requiresSourceAuthorization) {
-    return { action: 'skip', status: 'billing_replay_reauthorization_required' };
   }
   // PRIVACY: the corrected address is on file for a DIFFERENT customer (or, for
   // a lead with no resolvable customer, for any customer/lead/estimate).

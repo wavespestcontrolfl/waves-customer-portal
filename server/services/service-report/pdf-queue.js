@@ -14,6 +14,8 @@ const {
   timeOnSiteAdjustedPdfSignature,
   reentryAdjustedPdfSignature,
   treeShrubReviewPdfSignature,
+  applicatorIdentityPdfSignature,
+  applicatorRenderedPdfSignature,
 } = require('./pdf-storage');
 const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-pressure/store');
 const { summaryCopySignature } = require('./technician-report-copy');
@@ -111,6 +113,10 @@ async function loadServiceRecordForPdf(recordId, knex = db) {
       'technicians.photo_url as technician_photo_url',
       'technicians.avatar_url as technician_avatar_url',
       'technicians.photo_s3_key as technician_photo_s3_key',
+      // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+      // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
+      'technicians.fl_applicator_license as technician_fdacs_id',
+      'technicians.license_expiry as technician_license_expiry',
     )
     .first()
     // Frozen identity overlays the join before the canonical lawn pin and
@@ -395,7 +401,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       };
     }
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsBefore + photoSetBefore + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsBefore + photoSetBefore + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + applicatorRenderedPdfSignature(renderedData) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -546,7 +552,7 @@ async function getOrRenderServiceReportPdf(recordId, {
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await cockroachReportV2PdfSignature(service, knex) + await reserviceReportPdfSignature(service, { knex }) + await reserviceTrendsPdfSignature(service, knex) + await reportPhotoSetPdfSignature(service.id, knex) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled }) + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await cockroachReportV2PdfSignature(service, knex) + await reserviceReportPdfSignature(service, { knex }) + await reserviceTrendsPdfSignature(service, knex) + await reportPhotoSetPdfSignature(service.id, knex) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + await applicatorIdentityPdfSignature(service.id, knex) + await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled }) + photoMarksPdfSignature() + publicOriginPdfSignature(),
     })
     : null;
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)
