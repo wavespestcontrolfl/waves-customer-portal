@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { setGlassDefault } from '../lib/estimate-glass-copy';
 import WavesShell from '../components/brand/WavesShell';
+import TrustFooter from '../components/brand/TrustFooter';
 import EstimateViewPage, { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 vi.mock('react-router-dom', () => ({ useParams: () => ({ token: 'mixed-termite-token' }) }));
@@ -440,7 +441,7 @@ describe('ServiceSection', () => {
 });
 
 describe('mixed-estimate approval microcopy', () => {
-  it('uses the server no-guarantee decision for the plan-level CTA beside one-time termite work', async () => {
+  it('scopes the server no-guarantee decision to the estimate shell beside one-time termite work', async () => {
     const frequency = {
       key: 'standard',
       label: 'Standard',
@@ -498,7 +499,11 @@ describe('mixed-estimate approval microcopy', () => {
       }),
     })));
 
-    render(<WavesShell><EstimateViewPage /></WavesShell>);
+    render(<>
+      <section data-testid="estimate-shell"><WavesShell><EstimateViewPage /></WavesShell></section>
+      <section data-testid="other-shell"><WavesShell><div>Unrelated customer route</div></WavesShell></section>
+      <section data-testid="standalone-footer"><TrustFooter /></section>
+    </>);
 
     await waitFor(() => {
       expect(screen.getByText('Termite Trenching')).toBeInTheDocument();
@@ -506,10 +511,13 @@ describe('mixed-estimate approval microcopy', () => {
     expect(screen.getByText('Licensed & insured · No pressure — approve when you’re ready')).toBeInTheDocument();
     expect(screen.queryByText(/Satisfaction guaranteed/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/money-back guarantee/i)).not.toBeInTheDocument();
+    const estimateShell = within(screen.getByTestId('estimate-shell'));
     await waitFor(() => {
-      expect(screen.queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
-      expect(screen.getByText(/Written estimate scope and terms apply/i)).toBeInTheDocument();
+      expect(estimateShell.queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
+      expect(estimateShell.getByText(/Written estimate scope and terms apply/i)).toBeInTheDocument();
     });
+    expect(within(screen.getByTestId('other-shell')).getByText(/Backed by the Waves Guarantee/i)).toBeInTheDocument();
+    expect(within(screen.getByTestId('standalone-footer')).getByText(/Backed by the Waves Guarantee/i)).toBeInTheDocument();
   });
 
   it('retains the standard footer guarantee for an ordinary recurring estimate', async () => {
@@ -558,6 +566,7 @@ describe('mixed-estimate approval microcopy', () => {
 
     render(<WavesShell><EstimateViewPage /></WavesShell>);
 
+    await screen.findByText('1 Recurring Service Way');
     expect(await screen.findByText(/Backed by the Waves Guarantee/i)).toBeInTheDocument();
     expect(screen.queryByText(/Written estimate scope and terms apply/i)).not.toBeInTheDocument();
   });

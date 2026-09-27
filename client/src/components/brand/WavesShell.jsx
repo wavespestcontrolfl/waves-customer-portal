@@ -25,6 +25,7 @@ export default function WavesShell({
   showFooter = true,
   footerTone,
 }) {
+  const [footerNoGuarantee, setFooterNoGuarantee] = React.useState(false);
   const isTransparent = topBar === 'transparent';
   const phoneTone = isTransparent ? 'light' : 'dark';
   const resolvedFooterTone = footerTone || (isTransparent ? 'light' : 'dark');
@@ -43,7 +44,7 @@ export default function WavesShell({
   };
 
   return (
-    <WavesShellContext.Provider value={{ variant, inShell: true }}>
+    <WavesShellContext.Provider value={{ variant, inShell: true, setFooterNoGuarantee }}>
       <div
         style={{
           minHeight: '100vh',
@@ -110,7 +111,7 @@ export default function WavesShell({
         {showFooter && (
           <footer role="contentinfo" data-waves-shell-footer="">
             {variant === 'customer' ? <BrandFooter /> : null}
-            <TrustFooter tone={resolvedFooterTone} variant={variant} />
+            <TrustFooter tone={resolvedFooterTone} variant={variant} noGuarantee={footerNoGuarantee} />
           </footer>
         )}
       </div>

@@ -62,7 +62,7 @@ import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import useIsMobile from '../hooks/useIsMobile';
 import DocumentActionBar from '../components/DocumentActionBar';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
-import { setEstimateTrustFooterNoGuarantee } from '../components/brand/TrustFooter';
+import { useWavesShell } from '../components/brand/WavesShellContext';
 
 // Payment Element renders inside Stripe's iframe, so the glass theme can't
 // restyle it via CSS — when the theme is mounted the modals pass brand-tuned
@@ -5394,11 +5394,12 @@ function AnnualOfferClosedCard() {
 
 export default function EstimateViewPage() {
   const { token } = useParams();
+  const { setFooterNoGuarantee } = useWavesShell();
   const websiteMode = new URLSearchParams(window.location.search).get('website') === '1';
-  return <EstimateViewPageInner key={token || 'no-token'} websiteMode={websiteMode} />;
+  return <EstimateViewPageInner key={token || 'no-token'} websiteMode={websiteMode} setFooterNoGuarantee={setFooterNoGuarantee} />;
 }
 
-function EstimateViewPageInner({ websiteMode = false }) {
+function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = null }) {
   const { token } = useParams();
   // Root subscription to the module-global glass-copy flag: a change
   // (setGlassDefault from a /data load) re-renders this tree, so every
@@ -5413,9 +5414,9 @@ function EstimateViewPageInner({ websiteMode = false }) {
   const [data, setData] = useState(null);
   const estimateNoGuaranteeClaims = data?.estimate?.noGuaranteeClaims === true;
   useEffect(() => {
-    setEstimateTrustFooterNoGuarantee(estimateNoGuaranteeClaims);
-  }, [estimateNoGuaranteeClaims]);
-  useEffect(() => () => setEstimateTrustFooterNoGuarantee(false), []);
+    setFooterNoGuarantee?.(estimateNoGuaranteeClaims);
+  }, [estimateNoGuaranteeClaims, setFooterNoGuarantee]);
+  useEffect(() => () => setFooterNoGuarantee?.(false), [setFooterNoGuarantee]);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [loadError, setLoadError] = useState(false);
