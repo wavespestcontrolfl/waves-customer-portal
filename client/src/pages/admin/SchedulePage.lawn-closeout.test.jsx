@@ -189,20 +189,64 @@ it('withdraws spray evidence when a marker-backed application is no longer activ
 });
 
 it.each([
-  [Array.from({ length: 21 }, (_, i) => `Recorded action ${i + 1}.`), 'at most 20 entries'],
   [Array.from({ length: 20 }, (_, i) => `Recorded action ${i + 1}.`), 'at most 20 entries', '[Action] Another recorded action.'],
   [['Recorded action '.repeat(17)], 'keep each line under 240 characters'],
 ])('blocks completed actions the server would truncate: %s', async (actions, message, extraMarker = '') => {
   localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
     serviceId: service.id, savedAt: Date.now(), notes: `${actions.map((label) => `[Protocol] ${label}`).join('\n')}\n${extraMarker}`,
     selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
-    selectedProtocolActionLabels: actions,
+    selectedProtocolActionLabels: [actions[0]],
+    actionScopeByLabel: {
+      [actions[0]]: { scope: 'exterior', treatmentApplied: false },
+    },
   }));
   mount();
   fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
-  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  fireEvent.click(await screen.findByRole('button', { name: /complete & send recap/i }));
   expect(alert).toHaveBeenCalledWith(expect.stringContaining(message));
   expect(submit).not.toHaveBeenCalled();
+});
+
+it('does not count retired lawn actions that the submitted report removes', async () => {
+  const retiredActions = Array.from({ length: 20 }, (_, i) => `Retired lawn action ${i + 1}.`);
+  const activeMarker = '[Action] Inspected the current service area.';
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id, savedAt: Date.now(),
+    notes: `${retiredActions.map((label) => `[Protocol] ${label}`).join('\n')}\n${activeMarker}`,
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
+    selectedProtocolActionLabels: retiredActions,
+  }));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  fireEvent.click(await screen.findByRole('button', { name: /complete & send recap/i }));
+
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(alert.mock.calls.flat().join(' ')).not.toContain('Shorten these before submitting');
+  expect(submit.mock.calls[0][1]).toMatchObject({
+    protocolActionsCompleted: [], technicianNotes: activeMarker,
+  });
+});
+
+it('does not validate a long retired specialty marker that is excluded from the request', async () => {
+  const specialtyService = {
+    ...service, id: 'specialty-long-retired', serviceType: 'Mud Dauber Removal',
+    completionProfile: { serviceKey: 'mud_dauber_removal', requiresProducts: false },
+  };
+  const retiredAction = `Retired specialty action ${'x'.repeat(241)}`;
+  localStorage.setItem(`waves_completion_draft_${specialtyService.id}`, JSON.stringify({
+    serviceId: specialtyService.id, savedAt: Date.now(),
+    notes: `[Protocol] ${retiredAction}`,
+    selectedProducts: [], selectedProtocolActionLabels: [retiredAction],
+  }));
+  render(<CompletionPanel service={specialtyService} products={catalog} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(alert.mock.calls.flat().join(' ')).not.toContain('Shorten these before submitting');
+  expect(submit.mock.calls[0][1]).toMatchObject({
+    protocolActionsCompleted: [], technicianNotes: '',
+  });
 });
 
 it('keeps saved scope for a visible restored catalog action', async () => {

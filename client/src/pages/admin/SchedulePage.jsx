@@ -15713,9 +15713,9 @@ export function CompletionPanel({
   // the textareas they must reach the AI draft, the recap grounding and the
   // photo-caption context the same way. The textarea text still merges for
   // gate-off and restored drafts; the server dedupes.
-  function taggedNoteLines(tag) {
+  function taggedNoteLines(tag, source = notes) {
     const rx = new RegExp(`^\\[${tag}\\]\\s*(.+)$`, "i");
-    return freeTextLines(notes)
+    return freeTextLines(source)
       .map((line) => line.match(rx)?.[1]?.trim() || "")
       .filter(Boolean);
   }
@@ -16817,6 +16817,38 @@ export function CompletionPanel({
         return;
       }
     }
+    // Lawn closeouts enforce the product-backed rule at submit too: a
+    // draft saved before the scout/task rows were filtered out can restore
+    // labels the selector no longer offers — they must not persist as
+    // completed protocol actions. Only applied once the (filtered) action
+    // set has loaded; pest keeps its fallback-chip labels untouched.
+    // Specialty preset lanes (any service) accept only the preset's own
+    // actions — a restored label from a previously served list is stale
+    // and must not reach the customer report (codex P2 r7 #3701).
+    const reportProtocolActions = activeSelectedLabels(
+      selectedProtocolActionLabels,
+    ).filter((label) => {
+      if (specialtyProtocolActions.length > 0) {
+        return specialtyProtocolActions.some((action) => action.label === label);
+      }
+      // Saved treatment scope remains authoritative when a visible draft is
+      // restored after its action list becomes unavailable. Specialty
+      // membership stays first and cannot be bypassed by saved scope.
+      const savedScope = actionScopeByLabel[label];
+      if (savedScope?.scope === "interior" || savedScope?.scope === "exterior") return true;
+      return !isLawn ||
+        (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
+        (protocolActionsLoaded &&
+          protocolActions.some(
+            (action) =>
+              (action.label || action.note || action.raw || "") === label,
+          ));
+    });
+    // The server also reconstructs actions from marker notes. Remove rejected
+    // selections there so validation and submission see the same action set.
+    const excludedProtocolLabels = selectedProtocolActionLabels
+      .filter((label) => !reportProtocolActions.includes(label));
+    const reportTechnicianNotes = withoutProtocolMarkerLines(notes, excludedProtocolLabels);
     // The server normalizer silently trims each observation/recommendation
     // line to 240 chars and keeps at most 20 entries — reject oversized
     // input here instead of letting the saved report lose text without
@@ -16829,8 +16861,10 @@ export function CompletionPanel({
     {
       const freeTextProblems = [];
       const completedActions = uniqueLines([
-        ...activeSelectedLabels(selectedProtocolActionLabels),
-        ...taggedNoteLines("protocol"), ...taggedNoteLines("protocol optional"), ...taggedNoteLines("action"),
+        ...reportProtocolActions,
+        ...taggedNoteLines("protocol", reportTechnicianNotes),
+        ...taggedNoteLines("protocol optional", reportTechnicianNotes),
+        ...taggedNoteLines("action", reportTechnicianNotes),
       ]);
       const mergedCounts = [
         [
@@ -17214,33 +17248,6 @@ export function CompletionPanel({
           service.id,
         );
       }
-      // Lawn closeouts enforce the product-backed rule at submit too: a
-      // draft saved before the scout/task rows were filtered out can restore
-      // labels the selector no longer offers — they must not persist as
-      // completed protocol actions. Only applied once the (filtered) action
-      // set has loaded; pest keeps its fallback-chip labels untouched.
-      // Specialty preset lanes (any service) accept only the preset's own
-      // actions — a restored label from a previously served list is stale
-      // and must not reach the customer report (codex P2 r7 #3701).
-      const reportProtocolActions = activeSelectedLabels(
-        selectedProtocolActionLabels,
-      ).filter((label) => {
-        if (specialtyProtocolActions.length > 0) {
-          return specialtyProtocolActions.some((action) => action.label === label);
-        }
-        // Saved treatment scope remains authoritative when a visible draft is
-        // restored after its action list becomes unavailable. Specialty
-        // membership stays first and cannot be bypassed by saved scope.
-        const savedScope = actionScopeByLabel[label];
-        if (savedScope?.scope === "interior" || savedScope?.scope === "exterior") return true;
-        return !isLawn ||
-          (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
-          (protocolActionsLoaded &&
-            protocolActions.some(
-              (action) =>
-                (action.label || action.note || action.raw || "") === label,
-            ));
-      });
       const reportProtocolActionScopes = reportProtocolActions
         .map((label) => {
           const meta = actionScopeByLabel[label];
@@ -17255,11 +17262,6 @@ export function CompletionPanel({
           };
         })
         .filter(Boolean);
-      // The server also reconstructs actions from marker notes. Remove rejected
-      // selections there so a stale draft cannot restore them again.
-      const excludedProtocolLabels = selectedProtocolActionLabels
-        .filter((label) => !reportProtocolActions.includes(label));
-      const reportTechnicianNotes = withoutProtocolMarkerLines(notes, excludedProtocolLabels);
       const reportObservations = [
         ...activeSelectedLabels(selectedObservationLabels),
         ...observationFreeText(),
