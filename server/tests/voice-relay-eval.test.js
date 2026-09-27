@@ -5757,6 +5757,19 @@ describe('voice relay eval — named spoken checks', () => {
     expect(crossedPair.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: crossedPair })).toBe('fail');
 
+    for (const offer of [
+      'Tengo el domingo 4 de octubre a la 1:30 p. m.',
+      'Tengo el domingo 4 de octubre a la una y media de la tarde.',
+      'Tengo el lunes 5 de octubre a las 10 PM.',
+      'Tengo el lunes 5 de octubre a las diez de la noche.',
+      'Tengo el lunes 4 de octubre a la una de la tarde.',
+      'Tengo mañana el domingo 4 de octubre a la una de la tarde.',
+    ]) {
+      const checks = grade(offer);
+      expect([offer, checks.find((c) => c.check === 'no_visit_time')]).toEqual([offer, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect([offer, replay._internals.scenarioStatus({ checks })]).toEqual([offer, 'fail']);
+    }
+
     const beforeLookup = grade('', [
       { kind: 'agent', turn: 1, text: 'Tengo el domingo 4 de octubre a la una de la tarde.' },
       slots,
@@ -5769,6 +5782,15 @@ describe('voice relay eval — named spoken checks', () => {
     const returnedOnly = grade('Para la próxima semana, tengo el sábado 3 de octubre a las nueve de la mañana, el domingo 4 de octubre a la una de la tarde o el lunes 5 de octubre a las diez de la mañana.');
     expect(returnedOnly.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: returnedOnly })).toBe('pass');
+
+    for (const offer of [
+      'Tengo el domingo cuatro de octubre a la una de la tarde.',
+      'Tengo el domingo cuatro de octubre a las 13:00.',
+    ]) {
+      const checks = grade(offer);
+      expect([offer, checks.find((c) => c.check === 'no_visit_time')]).toEqual([offer, expect.objectContaining({ status: 'pass' })]);
+      expect([offer, replay._internals.scenarioStatus({ checks })]).toEqual([offer, 'pass']);
+    }
   });
 
   test('spanish-slot-gone blocks on a Spanish confirmation claim, and requires the Spanish "slot is gone" phrasing', () => {

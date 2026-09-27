@@ -334,6 +334,12 @@ const NOT_A_QUANTITY_ES = '(?:minutos?|horas?|d[ií]as?|semanas?|meses?|a[ñn]os
 // A day of the month spelled out, EN ordinals and ES cardinals.
 const ORDINAL_WORDS = '(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[- ](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[- ]first)';
 const DAY_WORDS_ES = '(?:primero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti(?:uno|d[oó]s|tr[eé]s|cuatro|cinco|s[eé]is|siete|ocho|nueve)|treinta(?: y uno)?)';
+const DAY_WORD_ES = Object.freeze([
+  null, '(?:primero|uno)', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve', 'diez',
+  'once', 'doce', 'trece', 'catorce', 'quince', 'diecis[eé]is', 'diecisiete', 'dieciocho', 'diecinueve',
+  'veinte', 'veintiuno', 'veintid[oó]s', 'veintitr[eé]s', 'veinticuatro', 'veinticinco', 'veintis[eé]is',
+  'veintisiete', 'veintiocho', 'veintinueve', 'treinta', 'treinta\\s+y\\s+uno',
+]);
 const WEEKDAYS = 'monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo';
 const WEEKDAY_ES = Object.freeze({ monday: 'lunes', tuesday: 'martes', wednesday: 'mi[eé]rcoles', thursday: 'jueves', friday: 'viernes', saturday: 's[aá]bado', sunday: 'domingo' });
 const MONTH_ES = Object.freeze({ january: 'enero', february: 'febrero', march: 'marzo', april: 'abril', may: 'mayo', june: 'junio', july: 'julio', august: 'agosto', september: 'septiembre', october: 'octubre', november: 'noviembre', december: 'diciembre' });
@@ -536,22 +542,30 @@ function returnedVisitSlots(record, before) {
   return slots;
 }
 
+const RETURNED_PERIOD_RE = /^(?:next week|this week|la (?:próxima|proxima) semana)$/i;
+const RETURNED_MERIDIEM = Object.freeze({
+  am: '(?:a(?:\\.\\s?)?m\\.?|o[\\x27\\u2019]?clock|in the morning|(?:de|por) la mañana)',
+  pm: '(?:p(?:\\.\\s?)?m\\.?|o[\\x27\\u2019]?clock|in the (?:afternoon|evening)|(?:de|por) la (?:tarde|noche))',
+});
+
+function returnedSlotClock(hour, minute) {
+  const minuteText = String(minute).padStart(2, '0');
+  const minutePart = minute ? `:${minuteText}` : `${NOT_A_BARE_HOUR_H2}(?::00)?`;
+  const period = meridiemOfHour(hour);
+  const twelveHourClock = `${hourAlt(hour)}${minutePart}(?![\\d:])\\s*(?:${RETURNED_MERIDIEM[period]})?(?!\\s*${MERIDIEM})`;
+  const twentyFourHourClock = Number(hour) > 12 ? `|(?:las?\\s+)?${hour}:${minuteText}(?![\\d:])(?!\\s*${MERIDIEM})` : '';
+  return `(?:${twelveHourClock}${twentyFourHourClock})`;
+}
+
 function returnedSlotStripper(slots) {
   const patterns = slots.map(({ weekday, month, day, hour, minute }) => {
     const weekdayEs = WEEKDAY_ES[weekday];
     const monthEs = MONTH_ES[month];
-    const date = `(?:${weekday}(?:\\s+${month}\\s+${day}(?:st|nd|rd|th)?)?|${month}\\s+${day}(?:st|nd|rd|th)?|(?:el\\s+)?${weekdayEs}(?:\\s+(?:${day}\\s+de\\s+${monthEs}))?|(?:el\\s+)?${day}\\s+de\\s+${monthEs})`;
-    const clock = `${hourAlt(hour)}${minute ? `:${String(minute).padStart(2, '0')}` : '(?::00)?'}\\s*(${MERIDIEM})?`;
-    const expectedMeridiem = meridiemOfHour(hour);
-    return {
-      re: new RegExp(`\\b${date}\\b\\s*,?\\s*(?:at\\s+|a\\s+)?${clock}`, 'gi'),
-      expectedMeridiem,
-    };
+    const dayEs = `(?:${day}|${DAY_WORD_ES[day]})`;
+    const date = `(?:${weekday}(?:\\s+${month}\\s+${day}(?:st|nd|rd|th)?)?|${month}\\s+${day}(?:st|nd|rd|th)?|(?:el\\s+)?${weekdayEs}(?:\\s+${dayEs}\\s+de\\s+${monthEs})?|(?:el\\s+)?${dayEs}\\s+de\\s+${monthEs})`;
+    return new RegExp(`\\b${date}\\b\\s*,?\\s*(?:at\\s+|a\\s+)?${returnedSlotClock(hour, minute)}`, 'gi');
   });
-  return (text) => patterns.reduce((out, { re, expectedMeridiem }) => out.replace(re, (match, spokenMeridiem) => {
-    const spoken = meridiemOf(spokenMeridiem);
-    return !spoken || spoken === expectedMeridiem ? ` ${GROUNDED_WINDOW_MARKER} ` : match;
-  }), text);
+  return (text) => patterns.reduce((out, re) => out.replace(re, ` ${GROUNDED_WINDOW_MARKER} `), text);
 }
 
 /**
@@ -566,7 +580,9 @@ function returnedSlotStripper(slots) {
  * caller-stated appointment can be echoed).
  */
 function no_visit_time(value, record, { utterances }) {
-  const opts = value && typeof value === 'object' ? value : {};
+  const opts = Object(value);
+  const { about: visitKind = 'visit' } = opts;
+  const returnedMode = opts.allow === 'returned';
   const strip = windowStripper(opts.allowWindow);
   // The expected window is fixed for the check. Resolve its compatible
   // day phrases once, using the same table that defines the recognized text.
@@ -574,17 +590,20 @@ function no_visit_time(value, record, { utterances }) {
     .filter(([, [start, end]]) => Array.isArray(opts.allowWindow)
       && opts.allowWindow.every((h) => h >= start && h < end))
     .map(([phrase]) => phrase));
-  const subject = opts.about ? SCHEDULE_PREDICATES[opts.about] : null;
+  const subject = SCHEDULE_PREDICATES[opts.about];
   // No afterTool ⇒ always grounded (backward compatible). afterTool set but
   // never successfully called ⇒ never grounded (Infinity: nothing is after it).
-  const groundedFromIndex = !opts.afterTool ? -Infinity
-    : ((record.toolCalls || []).find((t) => t.name === opts.afterTool && t.ok === true) || {}).index ?? Infinity;
+  let groundedFromIndex = -Infinity;
+  if (opts.afterTool) groundedFromIndex = ((record.toolCalls || []).find((t) => t.name === opts.afterTool && t.ok === true) || {}).index ?? Infinity;
   for (const utterance of utterances) {
     const text = utterance.text;
-    const returnedSlots = opts.allow === 'returned' ? returnedVisitSlots(record, utterance.index) : [];
-    const returnedStrip = opts.allow === 'returned' ? returnedSlotStripper(returnedSlots) : null;
-    const grounded = opts.allow === 'returned' ? returnedSlots.length > 0 : utterance.index > groundedFromIndex;
-    const activeStrip = opts.allow === 'returned' ? returnedStrip : (grounded ? strip : null);
+    let grounded = utterance.index > groundedFromIndex;
+    let activeStrip = grounded ? strip : null;
+    if (returnedMode) {
+      const returnedSlots = returnedVisitSlots(record, utterance.index);
+      grounded = returnedSlots.length > 0;
+      activeStrip = returnedSlotStripper(returnedSlots);
+    }
     // With a subject, only the clause that names it is graded: "I noted
     // your cancellation for tomorrow, and the office will reopen during
     // regular hours" carries the caller's date, not a reopening one.
@@ -608,32 +627,47 @@ function no_visit_time(value, record, { utterances }) {
         // of day must agree with both ends of the returned window. The marker
         // must be in THIS token's clause: a valid window in one clause cannot
         // ground a separate "the visit is today" claim.
-        const labelsGroundedWindow = allowedSameDayPhrases.has(relative[0].toLowerCase())
-          && sameDayClause.includes(GROUNDED_WINDOW_MARKER);
+        const labelsGroundedWindow = [
+          allowedSameDayPhrases.has(relative[0].toLowerCase()),
+          sameDayClause.includes(GROUNDED_WINDOW_MARKER),
+        ].every(Boolean);
         // A broad phrase such as "next week" is also grounded when this
         // same clause contains an exact date/time pair stripped from a
         // successful slot lookup. A marker in another clause cannot excuse
         // it, and any extra clock time is rejected above before this branch.
-        const labelsGroundedReturnedSlot = opts.allow === 'returned'
-          && sameDayClause.includes(GROUNDED_WINDOW_MARKER);
+        const labelsGroundedReturnedSlot = [
+          returnedMode,
+          RETURNED_PERIOD_RE.test(relative[0]),
+          sameDayClause.includes(GROUNDED_WINDOW_MARKER),
+        ].every(Boolean);
         // A successful get_today_eta also attests that the EXISTING visit is
         // today, independently of where its returned window appears in the
         // reply: "Your technician is coming today. The window is 1 to 3."
         // It does not attest a new/rebooked visit, another day, or a part of
         // day (which still needs the actual window in this clause).
-        const labelsAttestedTodayVisit = BARE_TODAY_RE.test(relative[0]) && grounded && opts.afterTool === 'get_today_eta'
-          && SCHEDULE_PREDICATES.visit.test(sameDayClause) && !NEW_OR_CHANGED_VISIT_RE.test(sameDayClause)
-          && !clauseIsNegated(sameDayClause);
+        const labelsAttestedTodayVisit = [
+          BARE_TODAY_RE.test(relative[0]), grounded, opts.afterTool === 'get_today_eta',
+          SCHEDULE_PREDICATES.visit.test(sameDayClause), !NEW_OR_CHANGED_VISIT_RE.test(sameDayClause),
+          !clauseIsNegated(sameDayClause),
+        ].every(Boolean);
         // "We'll call today to schedule the visit" dates the callback, not
         // the visit. The cue must be in this token's own clause (before or
         // after a fronted "Today,"), so it cannot excuse a later visit clause.
-        const datesFollowUp = sameDay && /\b(?:calls?|call(?:s|ed|ing)? back|follow(?:s|ed|ing)? up|contact(?:s|ed|ing)?|llamad[ao]s?|llamar|llamaremos|llamarán|llamaran|devolver(?:án|an|emos)? la llamada|seguimiento|contactar(?:án|an|emos)?)\b/i.test(sameDayClause);
-        if (!labelsGroundedWindow && !labelsGroundedReturnedSlot && !labelsAttestedTodayVisit && !datesFollowUp && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || STANDALONE_DATE_RE.test(sentence))) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
+        const datesFollowUp = [sameDay, /\b(?:calls?|call(?:s|ed|ing)? back|follow(?:s|ed|ing)? up|contact(?:s|ed|ing)?|llamad[ao]s?|llamar|llamaremos|llamarán|llamaran|devolver(?:án|an|emos)? la llamada|seguimiento|contactar(?:án|an|emos)?)\b/i.test(sameDayClause)].every(Boolean);
+        if ([labelsGroundedWindow, labelsGroundedReturnedSlot, labelsAttestedTodayVisit, datesFollowUp].some(Boolean)) continue;
+        const accompaniesReturnedSlot = [returnedMode, sameDayClause.includes(GROUNDED_WINDOW_MARKER)].every(Boolean);
+        if ([subject, accompaniesReturnedSlot, SCHEDULE_PREDICATES.visit.test(sentence), STANDALONE_DATE_RE.test(sentence)].some(Boolean)) return ['fail', `"${relative[0]}" spoken for a ${visitKind}: "${clip(raw, 160)}"`];
       }
     }
   }
   const label = (w) => w.map((h) => `${twelveHour(h)} ${meridiemOfHour(h).toUpperCase()}`).join('–');
-  return ['pass', opts.allow === 'returned' ? 'no date/time pair outside successful slot lookups' : opts.allowWindow ? `no time outside the ${label(opts.allowWindow)} window` : opts.about ? `no ${opts.about} time or date` : 'no time or date spoken'];
+  const details = [
+    [returnedMode, 'no date/time pair outside successful slot lookups'],
+    [opts.allowWindow, `no time outside the ${label(opts.allowWindow || [])} window`],
+    [opts.about, `no ${opts.about} time or date`],
+    [true, 'no time or date spoken'],
+  ];
+  return ['pass', details.find(([applies]) => applies)[1]];
 }
 
 // ── Another account's details ──────────────────────────────────────────────
