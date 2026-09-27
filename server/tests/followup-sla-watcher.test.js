@@ -546,27 +546,36 @@ test('a quote hint from before a floor time does not keep the promise', async ()
   expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
 });
 
-test('a booking after the call FOR the stated day keeps a scheduling promise before that time (it is the appointment); another day, or a quote promise, still waits for it', async () => {
+test('a booking after the call FOR the stated slot keeps a scheduling promise before that time (it is the appointment); another slot, or a quote promise, still waits for it', async () => {
   mockDb();
   const base = db.getMockImplementation();
   // Each booked at 13:58, on a 12:45 call, against a 2 PM stated time.
-  // scheduled_date as pg returns a DATE: a UTC-midnight Date.
-  const visitDay = { 'cust-visit': '2026-09-26', 'cust-untyped': '2026-09-26', 'cust-later': '2026-09-30', 'cust-quote': '2026-09-26' };
+  // As pg returns them: DATE a UTC-midnight Date, TIME an 'HH:MM:SS' string.
+  const booked = {
+    'cust-visit': ['2026-09-26', '14:00:00'],
+    'cust-untyped': ['2026-09-26', '14:00:00'],
+    'cust-sameday': ['2026-09-26', '10:00:00'],
+    'cust-later': ['2026-09-30', '14:00:00'],
+    'cust-quote': ['2026-09-26', '14:00:00'],
+  };
   db.mockImplementation((t) => {
     const q = base(t);
-    if (t === 'scheduled_services') q.select = async () => Object.entries(visitDay)
-      .map(([customer_id, day]) => ({ customer_id, created_at: et('13:58').toISOString(), scheduled_date: new Date(`${day}T00:00:00Z`) }));
+    if (t === 'scheduled_services') q.select = async () => Object.entries(booked).map(([customer_id, [day, start]]) => ({
+      customer_id, created_at: et('13:58').toISOString(), scheduled_date: new Date(`${day}T00:00:00Z`), window_start: start,
+    }));
     return q;
   });
   const stated = { call_started_at: et('12:45').toISOString(), due_at: et('14:00').toISOString() };
   listOpenCommitments.mockResolvedValue([
     row('visit', { kind: 'schedule_visit', ...stated, due_type: 'floor' }), // "on the schedule for around 2"
     row('untyped', { kind: 'schedule_visit', ...stated }),
-    row('later', { kind: 'schedule_visit', ...stated, due_type: 'floor' }), // "schedule it after the 2 PM inspection"
+    // "schedule it after the 2 PM inspection": unrelated visits that day or at 2 PM another day
+    row('sameday', { kind: 'schedule_visit', ...stated, due_type: 'floor' }),
+    row('later', { kind: 'schedule_visit', ...stated, due_type: 'floor' }),
     row('quote', { kind: 'send_estimate', ...stated, due_type: 'floor' }),
   ]);
   await runFollowUpSlaWatcher({ now: NOW });
-  expect(rollingCall()[3].metadata.missed_commitment_ids).toEqual(['later', 'quote']);
+  expect(rollingCall()[3].metadata.missed_commitment_ids).toEqual(['later', 'quote', 'sameday']);
   // The scan (the lock's re-check covers only the listed quote): bookings are
   // read from the call's end, texts still from the stated time.
   const scanSince = (t) => queriesOn(t)[0].calls.filter(([m, col]) => m === 'where' && col === 'created_at').map(([, , , v]) => new Date(v).toISOString());
