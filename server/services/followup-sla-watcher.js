@@ -168,12 +168,35 @@ function evidenceFrom(r) {
   return stated && !Number.isNaN(stated.getTime()) && (!at || stated > at) ? stated : at;
 }
 
+// A callback staff RE-OPENED or edited moves the evidence boundary forward
+// to that renewal (call-commitments' own resolveFulfillment rule): the
+// record that kept the promise before is not proof it was kept again. This
+// pager's own candidates never carry a human_state (isPagerScope excludes
+// them — reviewed work stays with the Owed queue), so this is a no-op for
+// every row the pager itself passes in; it only matters for another caller
+// (the promise-chaser bell) that reuses this evidence check on a promise
+// staff have since touched.
+async function renewedFloors(conn, rows) {
+  const floors = new Map();
+  for (const r of rows || []) {
+    if (r.kind !== 'callback' || r.party !== 'waves' || !['confirmed', 'edited'].includes(r.human_state)) continue;
+    const renewed = await commitments.obligationRenewedAt(conn, r).catch(() => null);
+    if (renewed) floors.set(String(r.id), renewed);
+  }
+  return floors;
+}
+
 async function followedUpIds(conn, rows) {
+  const renewed = await renewedFloors(conn, rows);
   // A caller with no customer record is matched by a USABLE number only —
   // an 'anonymous' or client: caller ID normalizes to nothing and gives the
   // row no contact to match on (never a match between two unusable values).
-  const scoped = (rows || []).map((r) => ({ r, since: evidenceFrom(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)) }))
-    .filter((x) => x.since && (x.r.customer_id || x.phone));
+  const scoped = (rows || []).map((r) => {
+    const base = evidenceFrom(r);
+    const floor = renewed.get(String(r.id));
+    const since = floor && (!base || floor.getTime() > base.getTime()) ? floor : base;
+    return { r, since, phone: r.customer_id ? null : phoneKey(contactPhone(r)) };
+  }).filter((x) => x.since && (x.r.customer_id || x.phone));
   const done = new Set();
   if (!scoped.length) return done;
   const floor = new Date(Math.min(...scoped.map((x) => x.since.getTime())));

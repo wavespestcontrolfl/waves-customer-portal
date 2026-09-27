@@ -2666,6 +2666,7 @@ module.exports = {
   editRestatesRow,
   callbackEditEventMetadata,
   addHumanCommitment,
+  obligationRenewedAt,
   buildCallOutcomes,
   OVERDUE_IMPLICIT_DAYS,
   PROMPT_KINDS,

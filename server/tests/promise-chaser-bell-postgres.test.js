@@ -27,7 +27,7 @@ const OUR_NUMBER = '+19415550100';
 (SKIP ? describe.skip : describe)('promise-chaser bell on PostgreSQL', () => {
   let database;
   const schema = `promise_chaser_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['call_log', 'call_commitments', 'scheduled_services', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts'];
+  const tables = ['call_log', 'call_commitments', 'scheduled_services', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'audit_log'];
   let now;
   const gateNames = ['promiseChaserBell', 'callCommitments'];
   const savedGates = Object.fromEntries(gateNames.map((key) => [key, gates[key]]));
@@ -106,6 +106,30 @@ const OUR_NUMBER = '+19415550100';
 
     expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
     expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('a callback REOPENED after that same call still rings — the old call is not proof it was kept again', async () => {
+    const earlier = callRow(240);
+    // Staff confirmed/edited the callback, then reopened it — human_state
+    // must be 'confirmed' or 'edited' for the renewal boundary to apply.
+    const commitment = commitmentRow(earlier.id, { human_state: 'confirmed' });
+    // Reached the caller 3h ago — normally enough to count as kept.
+    const reached = callRow(180, {
+      direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, duration_seconds: 90,
+    });
+    // Reopened 2h ago (AFTER that call) — the customer said it wasn't
+    // actually resolved. The old call before the reopen no longer counts.
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, reached, back]);
+    await mockConn('call_commitments').insert(commitment);
+    await mockConn('audit_log').insert({
+      id: randomUUID(), actor_type: 'admin', action: 'callback_reopen',
+      resource_type: 'call_commitment', resource_id: commitment.id,
+      metadata: JSON.stringify({}), created_at: new Date(now - 120 * 60000),
+    });
+
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(true);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
   });
 
   test('a lead who has since booked does not ring', async () => {
