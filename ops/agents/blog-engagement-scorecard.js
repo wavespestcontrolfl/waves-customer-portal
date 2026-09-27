@@ -19,10 +19,13 @@
 // DATABASE_PUBLIC_URL is in the environment too, the report adds each post's
 // cookie-free read-depth counts from blog_read_depth_daily (hub rows; the
 // portal's POST /api/public/blog-read-depth) for the same Eastern days: how
-// many readers' screens reached 25/50/75/100% of the article and the "keep
-// reading" row, plus the half-read and keep-reading rates per page load that
-// runs the counter (reloads included, bfcache restores not). Beacon counts are
-// exact while Cloudflare loads are sampled, so a small post's rates are rough.
+// many page loads reached 25/50/75/100% of the article and the "keep reading"
+// row — loads, not people: with no visitor identifier a reload counts again —
+// plus the half-read and keep-reading rates per page load that runs the
+// counter (reloads included, bfcache restores not). Rates are left out of a
+// window that began before counting did, since its loads include uncounted
+// days. Beacon counts are exact while Cloudflare loads are sampled, so a small
+// post's rates are rough.
 //
 // Writes nothing. Needs CF_API_TOKEN (Account Analytics read) and CF_ACCOUNT_ID
 // from the environment; CF_RUM_SITE_TAG overrides the site lookup. Read depth
@@ -255,7 +258,8 @@ function emptyDepth() {
  * sampled, so a small post's rates are still rough. Counts for posts
  * Cloudflare did not sample still reach the totals. `start`/`end` are the
  * window's Eastern days (`end` exclusive): a window that ends on or before
- * the first counted day has no coverage at all, never zeros.
+ * the first counted day has no coverage at all, never zeros, and one that
+ * starts on or before it gets counts but no rates.
  */
 function addReadDepth(summary, depthRows, { start, end, loads } = {}) {
   let coverage = 'full';
@@ -274,7 +278,9 @@ function addReadDepth(summary, depthRows, { start, end, loads } = {}) {
     byPath.get(path)[key] += count;
     totals[key] += count;
   }
-  const rate = (n, d) => (d > 0 ? n / d : null);
+  // A partly covered window's loads include days before counting began, so
+  // its rates would read low: counts only.
+  const rate = (n, d) => (coverage === 'full' && d > 0 ? n / d : null);
   const postLoads = (p) => (loads ? loads.byPath.get(p.path) || 0 : p.views);
   const totalLoads = loads ? loads.total : summary.totals.blogViews;
   return {
@@ -303,10 +309,12 @@ function formatReadDepth(lines, readDepth, top) {
   lines.push('### Read depth (cookie-free counts, hub)');
   lines.push('');
   if (readDepth.coverage === 'partial') {
-    lines.push(`- Counting began ${readDepth.liveSince} (Eastern), so this window is only partly covered.`);
+    lines.push(`- Counting began ${readDepth.liveSince} (Eastern), partway through this window: counts cover only the days since, and rates are left out.`);
   }
-  lines.push(`- Readers reaching 25 / 50 / 75 / 100% of a post: ${t.r25} / ${t.r50} / ${t.r75} / ${t.r100}; reaching the keep-reading row: ${t.next}`);
-  lines.push(`- Half-read: ${pct(t.halfRate)} of ${t.loads} post loads; reached keep reading: ${pct(t.nextRate)} (loads include reloads, which re-run the counter; Cloudflare samples, so rates are approximate)`);
+  lines.push(`- Page loads reaching 25 / 50 / 75 / 100% of a post: ${t.r25} / ${t.r50} / ${t.r75} / ${t.r100}; reaching the keep-reading row: ${t.next} (loads, not people: a reload counts again)`);
+  if (readDepth.coverage === 'full') {
+    lines.push(`- Half-read: ${pct(t.halfRate)} of ${t.loads} post loads; reached keep reading: ${pct(t.nextRate)} (Cloudflare samples, so rates are approximate)`);
+  }
   lines.push('');
   lines.push(`| Post (top ${top} by views) | Loads | 25% | 50% | 75% | 100% | Keep reading | Half-read | Reached keep reading |`);
   lines.push('|---|---:|---:|---:|---:|---:|---:|---:|---:|');

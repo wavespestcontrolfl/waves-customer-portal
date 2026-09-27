@@ -238,15 +238,28 @@ describe('read depth', () => {
     expect(rd.posts).toEqual([]);
   });
 
-  test('the markdown gains a read-depth section with every milestone', () => {
-    const readDepth = addReadDepth(summary, depthRows, { start: '2026-09-21', end: '2026-09-28', loads });
-    const md = formatMarkdown(summary, { start: '2026-09-21', end: '2026-09-27', top: 1, readDepth });
+  test('a window spanning the first counted day gets counts but no rates', () => {
+    const rd = addReadDepth(summary, depthRows, { start: '2026-09-21', end: '2026-09-28', loads });
+    expect(rd.coverage).toBe('partial');
+    expect(rd.totals).toMatchObject({ r50: 39, halfRate: null, nextRate: null });
+    expect(rd.posts[0]).toMatchObject({ r50: 30, halfRate: null, nextRate: null });
+    const md = formatMarkdown(summary, { start: '2026-09-21', end: '2026-09-27', top: 1, readDepth: rd });
+    expect(md).toContain('Counting began 2026-09-27 (Eastern), partway through this window: counts cover only the days since, and rates are left out.');
+    expect(md).not.toContain('Half-read:');
+    expect(md).toContain('| /pest-control/huntsman/ | 200 | 60 | 30 | 0 | 12 | 9 | — | — |');
+  });
+
+  test('a fully covered window shows every milestone and the rates, labelled as page loads', () => {
+    const readDepth = addReadDepth(summary, depthRows, { start: '2026-09-28', end: '2026-10-05', loads });
+    const md = formatMarkdown(summary, { start: '2026-09-28', end: '2026-10-04', top: 1, readDepth });
     expect(md).toContain('### Read depth (cookie-free counts, hub)');
-    expect(md).toContain('Counting began 2026-09-27 (Eastern), so this window is only partly covered.');
-    expect(md).toContain('Readers reaching 25 / 50 / 75 / 100% of a post: 60 / 39 / 0 / 12; reaching the keep-reading row: 9');
+    expect(md).not.toContain('Counting began');
+    expect(md).toContain('Page loads reaching 25 / 50 / 75 / 100% of a post: 60 / 39 / 0 / 12; reaching the keep-reading row: 9 (loads, not people: a reload counts again)');
+    expect(md).toContain('Half-read: 16.3% of 240 post loads; reached keep reading: 3.8%');
     expect(md).toContain('| Post (top 1 by views) | Loads | 25% | 50% | 75% | 100% | Keep reading | Half-read | Reached keep reading |');
     expect(md).toContain('| /pest-control/huntsman/ | 200 | 60 | 30 | 0 | 12 | 9 | 15.0% | 4.5% |');
     expect(md).not.toContain('| /pest-control/bagworm/ | 40 |');
+    expect(md).not.toMatch(/Readers/);
   });
 
   test('a window before counting says so instead of printing zeros; unavailable and not-asked stay distinct', () => {
