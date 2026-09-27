@@ -247,21 +247,29 @@ test.each([
   const prefix = facts.nextVisit
     ? 'Your next visit is Friday, October 2, arriving 8–10 AM. '
     : '';
-  expect(appointmentClaimProblems(
-    `${prefix}Keep pets inside until 8 PM when the technician will arrive.`,
-    facts,
-  )).toContain('ungrounded_time:8 PM');
+  for (const instruction of [
+    'Keep pets inside until 8 PM when the technician will arrive.',
+    'Keep pets inside until 8 PM, when the technician will arrive.',
+    'Keep pets inside until 8 p.m. when the technician will arrive.',
+  ]) {
+    expect(appointmentClaimProblems(`${prefix}${instruction}`, facts)).toContain('ungrounded_time:8 PM');
+  }
 });
 
 test.each([
   ['with the grounded slot', input(), 'Your next visit is Friday, October 2, arriving 8–10 AM. '],
   ['without a grounded slot', input({ nextAppointment: null }), ''],
 ])('an arrival after an aftercare time forces deterministic fallback %s', async (_label, args, prefix) => {
-  const summary = `${prefix}Keep pets inside until 8 PM when the technician will arrive.`;
-  const out = await applyVisitSummaryNarrative(args, {
-    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
-  });
-  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+  for (const instruction of [
+    'Keep pets inside until 8 PM, when the technician will arrive.',
+    'Keep pets inside until 8 p.m. when the technician will arrive.',
+  ]) {
+    const summary = `${prefix}${instruction}`;
+    const out = await applyVisitSummaryNarrative(args, {
+      callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+    });
+    expect(out).toBe(deterministicSummary(groundingFacts(args)));
+  }
 });
 
 test.each([

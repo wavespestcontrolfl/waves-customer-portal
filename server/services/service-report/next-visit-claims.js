@@ -25,9 +25,25 @@ const NON_AFFIRMATIVE_APPOINTMENT_RE = /\b(?:is|has\s+been|will\s+be)\s+(?:not|n
 // with an instruction verb ("Leave the gate open ... who will arrive at 8 PM").
 const AFTERCARE_APPOINTMENT_ACTION = String.raw`(?:arriv(?:e|es|ed|ing|al)|(?:will|[’']ll)\s+(?:return|be\s+back|come\s+back|check\s+back|follow[-\s]+up))`;
 const AFTERCARE_TIME_RE = new RegExp(
-  String.raw`\b(?:keep|leave|avoid|do not)\b(?:(?!\b${AFTERCARE_APPOINTMENT_ACTION}\b|\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z]))[^\n,.!?;]){1,100}?\buntil\s+\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z])(?![^\n,.!?;]{0,80}\b${AFTERCARE_APPOINTMENT_ACTION}\b)`,
+  String.raw`\b(?:keep|leave|avoid|do not)\b(?:(?!\b${AFTERCARE_APPOINTMENT_ACTION}\b|\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z]))[^\n,.!?;]){1,100}?\buntil\s+\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z])`,
   'gi',
 );
+
+function maskAftercareTimes(text) {
+  const source = String(text || '');
+  return source.replace(new RegExp(AFTERCARE_TIME_RE.source, 'gi'), (instruction, offset) => {
+    // A comma or semicolon can introduce an arrival continuation. Inspect the
+    // rest of this sentence after the complete meridiem (including a.m./p.m.'s
+    // final dot) before deciding that the clock belongs only to aftercare.
+    if (/\b\d{1,2}(?::\d{2})?\s*[ap]m\.$/i.test(instruction)) return ' ';
+    const continuation = source.slice(offset + instruction.length).match(/^[^\n.!?]{0,80}/)?.[0] || '';
+    const action = new RegExp(`\\b${AFTERCARE_APPOINTMENT_ACTION}\\b`, 'i').exec(continuation);
+    const groundedClaim = new RegExp(APPOINTMENT_CLAIM_RE.source, 'i').exec(continuation);
+    return action && (!groundedClaim || action.index < groundedClaim.index)
+      ? instruction
+      : ' ';
+  });
+}
 
 function normalizeWindowText(value) {
   return String(value || '').replace(/\s*([ap])\.?m\.?(?![a-z])/gi, ' $1M')
@@ -81,7 +97,7 @@ function appointmentClaimProblems(text, facts) {
   // as the subject. Screen the full output rather than expanding a list of
   // technician/crew/agent aliases. Only the established aftercare forms may
   // carry a separate clock time in a pest recap.
-  const withoutAftercareTimes = source.replace(new RegExp(AFTERCARE_TIME_RE.source, 'gi'), ' ');
+  const withoutAftercareTimes = maskAftercareTimes(source);
   const temporalProblems = clockWindowProblems(withoutAftercareTimes, facts);
   const claims = source
     // A dotted meridiem can precede more of the same appointment claim.
@@ -108,7 +124,7 @@ function appointmentClaimProblems(text, facts) {
   for (const claim of claims) {
     // Recaps can append a separate aftercare instruction to the appointment
     // sentence. Keep that exception here: typed reports validate every time.
-    const appointmentCopy = claim.replace(new RegExp(AFTERCARE_TIME_RE.source, 'gi'), ' ');
+    const appointmentCopy = maskAftercareTimes(claim);
     problems.push(...nextVisitProblems(appointmentCopy, facts));
     if (NON_AFFIRMATIVE_APPOINTMENT_RE.test(claim)) problems.push('negated_appointment_claim');
     if (!claim.toLowerCase().includes(String(facts.nextVisit.date).toLowerCase())) {
