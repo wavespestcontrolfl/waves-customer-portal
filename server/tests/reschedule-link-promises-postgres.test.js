@@ -2676,6 +2676,120 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       expect(new Date(after.available_at).getTime()).toBe(newFloor.getTime());
       expect(after.payload.delivery_outcome_uncertain).toBe(false);
     });
+
+    /**
+     * codex #5018 pre-push P1: withSmsHandoff used to lock `call_log` FIRST
+     * and only reach `customers` implicitly at the very end, when the
+     * sms_log insert inside dispatch()/handoff() (twilio.js) takes a KEY
+     * SHARE on it through the customer_id FK — the opposite of the
+     * established customers-before-call_log order this codebase uses
+     * everywhere else a writer holds both (call-recording-processor.js's own
+     * claim transaction takes `customers` FOR UPDATE, then the `call_log`
+     * claim UPDATE, "matching the correction lane's customers→call_log lock
+     * order, so the two never deadlock"; visit-completion-summary.js's
+     * claimDispatchThroughHandoff does the same). A concurrent reprocess
+     * claim on the SAME call — customers FOR UPDATE, then call_log — could
+     * deadlock against this handoff AFTER Twilio had already accepted the
+     * send, rolling back the delivery evidence. The fix takes `customers`
+     * FOR SHARE as the very first row lock in this handoff's transaction.
+     */
+    describe('lock ordering: withSmsHandoff locks customers before call_log (codex #5018 pre-push P1)', () => {
+      // Faithful replica of the PRE-FIX withSmsHandoff shape: call_log
+      // locked first, `customers` only reached afterward (standing in for
+      // the sms_log insert's own implicit FK lock at the very end of a real
+      // send) — nothing in the current tree still does this; this function
+      // exists only to demonstrate, deterministically, that the shape this
+      // fix replaced was a genuine deadlock hazard against the reprocessing
+      // claim's real, unchanged order.
+      async function preFixHandoffCallLogFirst(trx, callId) {
+        await trx('call_log').where({ id: callId }).forShare().first('id');
+      }
+
+      test('mechanism: call_log-then-customers deadlocks against a customers-then-call_log reprocess writer — the exact pre-fix hazard', async () => {
+        const callId = randomUUID();
+        const customerId = randomUUID();
+        await mockPg('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Customer', phone: '+15555550199',
+          address_line1: '1 Example St', city: 'Bradenton', zip: '34205', active: true });
+        await mockPg('call_log').insert({ id: callId, customer_id: customerId, direction: 'inbound', processing_generation: 0 });
+
+        // txHandoff: the PRE-FIX withSmsHandoff shape (call_log first).
+        // txReprocess: call-recording-processor.js's real, unchanged claim
+        // order (customers FOR UPDATE, then the call_log UPDATE).
+        const txHandoff = await mockPg.transaction();
+        const txReprocess = await mockPg.transaction();
+        try {
+          // Step 1 (sequenced, not raced): txHandoff takes call_log FOR SHARE.
+          await preFixHandoffCallLogFirst(txHandoff, callId);
+          // Step 2 (sequenced): txReprocess takes customers FOR UPDATE.
+          await txReprocess('customers').where({ id: customerId }).forUpdate().first('id');
+
+          // Step 3: cross, concurrently, the resource the OTHER side already
+          // holds — a genuine wait-for cycle by construction, exactly like
+          // this file's other lock-order mechanism tests below.
+          const crossed = await Promise.allSettled([
+            txHandoff('customers').where({ id: customerId }).forShare().first('id'),
+            txReprocess('call_log').where({ id: callId }).update({ updated_at: new Date() }),
+          ]);
+
+          const rejected = crossed.filter((r) => r.status === 'rejected');
+          const fulfilled = crossed.filter((r) => r.status === 'fulfilled');
+          expect(fulfilled).toHaveLength(1);
+          expect(rejected).toHaveLength(1);
+          expect(String(rejected[0].reason?.code || rejected[0].reason?.message || '')).toMatch(/40P01|deadlock/i);
+        } finally {
+          await txHandoff.rollback().catch(() => {});
+          await txReprocess.rollback().catch(() => {});
+        }
+      }, 15000);
+
+      test('fix: the real withSmsHandoff transaction and a customers-then-call_log reprocess writer on the SAME call never deadlock', async () => {
+        const now = new Date('2030-01-07T14:00:00Z');
+        const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link.' });
+        const commitment = await mockPg('call_commitments').where({ id: commitmentId }).first();
+        const call = await mockPg('call_log').where({ id: commitment.call_log_id }).first();
+        await links.stagePromises(mockPg);
+        const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+
+        let providerEntered;
+        const entered = new Promise((resolve) => { providerEntered = resolve; });
+        let releaseProvider;
+        const providerDone = new Promise((resolve) => { releaseProvider = resolve; });
+        const send = async ({ withSmsHandoff }) => {
+          const verdict = await withSmsHandoff(async () => {
+            providerEntered();
+            await providerDone;
+            return { ok: true };
+          });
+          return verdict.ok ? successfulSend() : { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: verdict.code };
+        };
+        const sending = links.runOne(mockPg, row, { now, send, buildLink: stubBuildLink, render: stubRender });
+        try {
+          // By the time the provider callback runs, the real withSmsHandoff
+          // has already acquired customers FOR SHARE, then call_log FOR
+          // SHARE, then call_commitments FOR SHARE, all inside its own
+          // still-open transaction.
+          await entered;
+          // A concurrent writer reproducing the reprocessing claim's real
+          // order (customers FOR UPDATE, then call_log) must genuinely wait
+          // — never deadlock — on the customers row the handoff already
+          // holds FOR SHARE.
+          let reprocessed = false;
+          const reprocess = mockPg.transaction(async (trx) => {
+            await trx('customers').where({ id: call.customer_id }).forUpdate().first('id');
+            await trx('call_log').where({ id: call.id }).update({ updated_at: new Date() });
+          }).then(() => { reprocessed = true; });
+          await new Promise((resolve) => setTimeout(resolve, 75));
+          expect(reprocessed).toBe(false);
+          releaseProvider();
+          await Promise.all([sending, reprocess]);
+          expect(reprocessed).toBe(true);
+          expect((await mockPg('outbox_messages').where({ id: row.id }).first()).status).toBe('sent');
+        } finally {
+          releaseProvider();
+          await sending.catch(() => {});
+        }
+      });
+    });
   });
 
   /**

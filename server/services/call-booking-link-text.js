@@ -385,10 +385,20 @@ async function outboundPriorContactMissing(conn, call) {
   const callCustomerCreatedAt = call.customer_id
     ? (await conn('customers').where({ id: call.customer_id }).whereNull('deleted_at').first('created_at').catch(() => null))?.created_at || null
     : null;
+  // conn (codex #5018 pre-push P1): thread the caller's own held connection
+  // through hasPriorContact's probes — during dispatchClaimedCall/
+  // neverSendRecheck, `conn` is the SAME connection a phone-locked handoff
+  // transaction already occupies, and under the supported DB_POOL_MAX=2 a
+  // probe opened on the shared pool instead would starve into a
+  // connection-acquire timeout (the cron lock takes the other slot). A
+  // genuine probe failure now propagates rather than being swallowed into
+  // "no prior contact" — see outboundStagingReason's own callers for why
+  // that must be retryable, never a permanent skip.
   const has = await hasPriorContact({
     customerId: outboundPriorContactCustomerId({ call, callMeta: parseMetadata(call), callCustomerCreatedAt, before }),
     phone: resolveCallContactPhone(call, null),
     before,
+    conn,
   });
   return !has;
 }
@@ -1163,9 +1173,13 @@ function neverSendRecheck(call, leadId, destinationPhone) {
       // hook's own reload; re-deriving it fresh here closes that race the
       // same way every other check on this hook already does.
       // outboundPriorContactMissing itself already no-ops for an inbound
-      // call (its own opening line) and, on a probe error, fails toward
-      // "missing" — blocking here, terminally, the SAME posture the
-      // existing DISPATCH_CHECKS entry for this predicate already has.
+      // call (its own opening line). Passed `dbi` (codex #5018 pre-push
+      // P1) — the SAME connection this handoff already holds — so its
+      // probes never reach for a second pool slot; a genuine probe failure
+      // now throws instead of being read as "missing," and lands in this
+      // function's own catch below, which already treats an uncaught
+      // throw here as a retryable infrastructure hiccup, never a
+      // permanent block.
       if (await outboundPriorContactMissing(dbi, freshCall)) return { ok: false, code: 'outbound_without_prior_contact' };
       const callStart = callStartedAt(call) || new Date(call.created_at);
       if (await bookedSinceCall(dbi, lead.customer_id, callStart, lead.phone)) return { ok: false, code: 'booked_since_call' };

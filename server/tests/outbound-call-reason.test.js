@@ -846,8 +846,42 @@ describe('hasPriorContact', () => {
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
   });
 
-  test('a probe failure fails CLOSED (no prior contact), never throws', async () => {
+  // codex #5018 pre-push P1: this used to catch a probe failure internally
+  // and fail closed (return false, read by every caller as "no prior
+  // contact"). Under the supported DB_POOL_MAX=2, a caller already holding
+  // the pool's other slot (a cron lock, a phone-locked handoff transaction)
+  // starved these probes into a connection-acquire timeout, which then read
+  // as a genuine negative and PERMANENTLY skipped an eligible send — an
+  // infra hiccup is not a "no" answer. It must now propagate, so each
+  // caller's own retry/defer path (every current caller has one) decides.
+  test('a probe failure now PROPAGATES (never silently fails closed to false)', async () => {
     db.mockImplementation(() => { throw Object.assign(new Error('down'), { code: 'ECONNREFUSED' }); });
-    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).rejects.toThrow('down');
+  });
+
+  // codex #5018 pre-push P1: every probe must run on a caller-supplied
+  // connection (a transaction, or the same pool slot a handoff already
+  // occupies) instead of always reaching for the shared pool — required so
+  // a caller holding the pool's other slot under DB_POOL_MAX=2 doesn't
+  // starve these probes into a timeout. The default `db` mock must never be
+  // touched when a `conn` is supplied.
+  test('every probe runs on a supplied conn, never the shared db pool', async () => {
+    const heldConnection = jest.fn((table) => {
+      const rowsFor = {
+        call_log: [],
+        sms_log: [],
+        leads: [],
+      };
+      const chain = {};
+      ['where', 'whereNull', 'whereNot', 'whereIn', 'whereRaw', 'orderBy', 'limit', 'modify'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.first = jest.fn(async () => (rowsFor[table] || [])[0]);
+      chain.select = jest.fn(async () => rowsFor[table] || []);
+      return chain;
+    });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0, conn: heldConnection })).resolves.toBe(false);
+    expect(heldConnection).toHaveBeenCalledWith('call_log');
+    expect(heldConnection).toHaveBeenCalledWith('sms_log');
+    expect(heldConnection).toHaveBeenCalledWith('leads');
+    expect(db).not.toHaveBeenCalled();
   });
 });

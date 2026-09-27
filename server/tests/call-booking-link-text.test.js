@@ -996,6 +996,38 @@ describe('outboundPriorContactMissing / outboundStagingReason', () => {
     const [[arg]] = hasPriorContact.mock.calls;
     expect(arg.before.getTime()).toBe(created_at.getTime() - duration_seconds * 1000); // NOT created_at itself
   });
+
+  // codex #5018 pre-push P1: hasPriorContact's own probes must run on the
+  // SAME connection this caller was handed — during dispatchClaimedCall/
+  // neverSendRecheck, that's the phone-locked handoff's own transaction —
+  // instead of reaching for the shared pool, which starves under the
+  // supported DB_POOL_MAX=2 while a cron lock and a handoff transaction
+  // both hold a slot. Real probe-level proof (the actual conn each probe
+  // queries through) lives in outbound-call-reason.test.js; this pins the
+  // one hop this module owns: outboundPriorContactMissing must forward its
+  // OWN `conn` argument into hasPriorContact, never drop it.
+  test('outboundPriorContactMissing forwards its own conn into hasPriorContact, never the shared pool', async () => {
+    hasPriorContact.mockResolvedValue(true);
+    const call = { direction: 'outbound', created_at: callEnd, to_phone: '+19415550100' };
+    const heldConnection = customerLookupConn(null);
+    await outboundPriorContactMissing(heldConnection, call);
+    expect(hasPriorContact).toHaveBeenCalledWith(expect.objectContaining({ conn: heldConnection }));
+  });
+
+  // codex #5018 pre-push P1's own core regression: this used to catch a
+  // probe failure and read it as "no prior contact" (a PERMANENT skip via
+  // outboundStagingReason ⇒ dispatchIneligibleReason ⇒ dispatchClaimedCall's
+  // own terminal `skip()`). hasPriorContact no longer swallows an infra
+  // failure, so outboundPriorContactMissing must let it propagate — never
+  // catch it and return true/false itself — for its callers' own retry
+  // rails (sweep()'s per-row catch → recoverAbandonedClaim, stage()'s own
+  // per-call catch, neverSendRecheck's own catch) to take over.
+  test('a probe failure PROPAGATES out of outboundPriorContactMissing, never resolves', async () => {
+    hasPriorContact.mockRejectedValue(new Error('pool timeout'));
+    const call = { direction: 'outbound', created_at: callEnd, to_phone: '+19415550100' };
+    await expect(outboundPriorContactMissing(throwingConn(), call)).rejects.toThrow('pool timeout');
+    await expect(outboundStagingReason(throwingConn(), call)).rejects.toThrow('pool timeout');
+  });
 });
 
 // ── resolveLeadId — the SID fallback for a stamp-less fresh lead ─────────
@@ -1322,6 +1354,22 @@ describe('neverSendRecheck', () => {
     await expect(check({ dbi: conn })).resolves.toEqual({ ok: true });
   });
 
+  // codex #5018 pre-push P1: hasPriorContact no longer swallows an infra
+  // failure into "no prior contact" — an uncaught throw here must land in
+  // THIS function's own outer catch (already returns a retryable refusal
+  // for any uncaught throw, see the "transient DB failure" test above),
+  // never resolve as the permanent `outbound_without_prior_contact` block
+  // the negative-answer test above proves.
+  test('an infra failure in the outbound-prior-contact probe is a retryable refusal, never the permanent outbound_without_prior_contact block', async () => {
+    const outboundCall = { ...CALL_FOR_RECHECK, direction: 'outbound' };
+    const check = neverSendRecheck(outboundCall, 'lead-1', DESTINATION);
+    hasPriorContact.mockRejectedValueOnce(new Error('pool timeout'));
+    const conn = dbi({ freshCall: { ...FRESH_CALL_LOG, direction: 'outbound' } });
+    await expect(check({ dbi: conn })).resolves.toEqual({
+      ok: false, retryable: true, code: 'never_send_recheck_failed', reason: 'pool timeout',
+    });
+  });
+
   test('booked since the call started blocks the send', async () => {
     // metadata.created_customer_id matches the lead's customer_id — THIS
     // call's own legacy path minted it, isolating this test from the new
@@ -1616,6 +1664,22 @@ describe('dispatchClaimedCall', () => {
     const conn = makeDb();
     const result = await dispatchClaimedCall(conn, outboundCall, NOW);
     expect(result.skipped).toBe('outbound_without_prior_contact');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  // codex #5018 pre-push P1: a genuine probe failure (a starved connection
+  // pool under DB_POOL_MAX=2, not a real "no prior contact" answer) must
+  // never resolve as the terminal `outbound_without_prior_contact` skip
+  // above — dispatchClaimedCall has no try/catch of its own around
+  // dispatchIneligibleReason, so this propagates out to sweep()'s own
+  // per-row catch, which hands it to recoverAbandonedClaim (no handoff
+  // marker exists yet at this point) to requeue as pending/retryable
+  // instead of a permanent skip.
+  test('an infra failure in the outbound-prior-contact probe propagates, never resolves as a terminal skip', async () => {
+    hasPriorContact.mockRejectedValue(new Error('pool timeout'));
+    const outboundCall = { ...CALL, direction: 'outbound' };
+    const conn = makeDb();
+    await expect(dispatchClaimedCall(conn, outboundCall, NOW)).rejects.toThrow('pool timeout');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
