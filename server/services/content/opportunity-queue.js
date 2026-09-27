@@ -129,7 +129,7 @@ async function supersedeCitabilityBackfillsForPage(trx, { pageUrl, ordinaryDedup
     // for its own canonical host/path, never the entire active backfill lane.
     .whereRaw(`CASE WHEN page_url LIKE '/%' THEN 'wavespestcontrol.com'
       ELSE regexp_replace(regexp_replace(split_part(split_part(lower(page_url), '//', 2), '/', 1), '^www[.]', ''), ':.*$', '') END = ?`, [host])
-    .whereRaw(`COALESCE(NULLIF(regexp_replace(regexp_replace(split_part(page_url, chr(63), 1), '^[a-z]+://[^/]+', ''), '/+$', ''), ''), '/') = ?`, [path])
+    .whereRaw(`COALESCE(NULLIF(regexp_replace(regexp_replace(split_part(split_part(page_url, chr(63), 1), chr(35), 1), '^[a-z]+://[^/]+', ''), '/+$', ''), ''), '/') = ?`, [path])
     .forUpdate()
     .select('id', 'page_url', 'status', 'signal_metadata');
   const matched = candidates.filter((row) => pageEditRouteIdentity(row.page_url) === identity);

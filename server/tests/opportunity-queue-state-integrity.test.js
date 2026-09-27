@@ -539,7 +539,7 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
     });
     const selectQuery = trx.mock.results[0].value;
     expect(selectQuery.whereRaw).toHaveBeenNthCalledWith(1, expect.stringContaining(":.*$"), ['wavespestcontrol.com']);
-    expect(selectQuery.whereRaw).toHaveBeenNthCalledWith(2, expect.stringContaining("COALESCE(NULLIF"), ['/blog/termite-guide']);
+    expect(selectQuery.whereRaw).toHaveBeenNthCalledWith(2, expect.stringMatching(/COALESCE\(NULLIF[\s\S]*chr\(35\)/), ['/blog/termite-guide']);
   });
 });
 describe('defer() — cap/gate-retry deferral back to pending (exceptions-only review queue)', () => {
