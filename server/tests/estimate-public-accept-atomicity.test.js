@@ -1691,6 +1691,30 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(cust.email).toBe('pat@example.com');
   });
 
+  test('a lowercase "customer" placeholder and a whitespace-only email count as gaps and get filled', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-9',
+      token: 'tok-contact-9-x0123456789',
+      customer_id: 'cust-placeholder',
+      customer_phone: null,
+      customer_name: 'Pat',
+      customer_email: '   ',
+    }));
+    db.__state.tables.customers = [{ id: 'cust-placeholder', first_name: 'Pat', last_name: 'customer', email: '  ', phone: null }];
+    conversionOk('cust-placeholder');
+
+    const res = await putAccept('tok-contact-9-x0123456789', {
+      contactLastName: 'Sample',
+      contactEmail: 'pat@example.com',
+    });
+    expect(res.status).toBe(200);
+
+    const cust = db.__state.tables.customers.find((c) => c.id === 'cust-placeholder');
+    expect(cust.last_name).toBe('Sample');
+    expect(cust.email).toBe('pat@example.com');
+    expect(storedEstimate().customer_email).toBe('pat@example.com');
+  });
+
   test('an existing linked customer with a real last name/email on file is NEVER overwritten', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-4',

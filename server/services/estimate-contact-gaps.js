@@ -86,25 +86,27 @@ function sanitizeContactEmail(raw) {
   return { value: normalized, error: null };
 }
 
-// Guarded fills for an EXISTING customer row — self-contained (the WHERE
-// clause is the gap check), so these are safe to call whenever a sanitized
-// value exists, whether or not the caller already computed contactGaps.
-// Never overwrites a real value.
+// Guarded fills for an EXISTING customer row — self-contained (the gap
+// check runs on the row-locked value with the SAME normalized predicates
+// computeContactGaps uses: whitespace-only is blank, 'Customer' matches
+// case-insensitively), so a field the page asked for is never silently
+// dropped, and a real value is never overwritten.
 async function fillExistingCustomerLastName(trx, customerId, lastName) {
   if (!customerId || !lastName) return;
-  await trx('customers').where({ id: customerId })
-    .where((q) => q.whereNull('last_name').orWhere('last_name', '').orWhere('last_name', 'Customer'))
-    .update({ last_name: lastName });
+  const row = await trx('customers').where({ id: customerId }).forUpdate().first('last_name');
+  if (!row || hasRealLastName(row.last_name)) return;
+  await trx('customers').where({ id: customerId }).update({ last_name: lastName });
 }
 
 async function fillExistingCustomerEmail(trx, customerId, email) {
   if (!customerId || !email) return;
-  await trx('customers').where({ id: customerId })
-    .where((q) => q.whereNull('email').orWhere('email', ''))
-    .update({ email });
+  const row = await trx('customers').where({ id: customerId }).forUpdate().first('email');
+  if (!row || hasEmail(row.email)) return;
+  await trx('customers').where({ id: customerId }).update({ email });
 }
 
 module.exports = {
+  hasEmail,
   CONTACT_LAST_NAME_MAX,
   CONTACT_EMAIL_MAX,
   computeContactGaps,

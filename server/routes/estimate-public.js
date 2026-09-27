@@ -29,6 +29,7 @@ const {
   sanitizeContactEmail,
   fillExistingCustomerLastName,
   fillExistingCustomerEmail,
+  hasEmail: contactGapHasEmail,
 } = require('../services/estimate-contact-gaps');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
@@ -10813,24 +10814,27 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // if still blank, so a concurrent writer's value is never overwritten.
       if (pendingEstimateContactPatch) {
         const { patch, priorName } = pendingEstimateContactPatch;
-        if (patch.customer_name) {
-          await trx('estimates').where({ id: estimate.id })
-            .where((q) => (priorName == null ? q.whereNull('customer_name') : q.where('customer_name', priorName)))
-            .update({ customer_name: patch.customer_name });
-        }
-        if (patch.customer_email) {
-          await trx('estimates').where({ id: estimate.id })
-            .where((q) => q.whereNull('customer_email').orWhere('customer_email', ''))
-            .update({ customer_email: patch.customer_email });
-        }
-        // A concurrent writer may have won the compare-and-set: re-read the
-        // locked row so everything downstream (customer resolution, the
-        // new-profile insert, notifications) uses what is actually stored,
-        // not the in-memory patch.
+        // The estimate row is already FOR UPDATE-locked above, so this
+        // read-then-write is race-free; the email gap uses the same
+        // normalized predicate as computeContactGaps (whitespace-only is
+        // blank), so a field the page asked for is never silently dropped.
         const lockedContact = await trx('estimates').where({ id: estimate.id }).first('customer_name', 'customer_email');
         if (lockedContact) {
-          estimate.customer_name = lockedContact.customer_name;
-          estimate.customer_email = lockedContact.customer_email;
+          const contactWrite = {};
+          if (patch.customer_name && (lockedContact.customer_name ?? null) === priorName) {
+            contactWrite.customer_name = patch.customer_name;
+          }
+          if (patch.customer_email && !contactGapHasEmail(lockedContact.customer_email)) {
+            contactWrite.customer_email = patch.customer_email;
+          }
+          if (Object.keys(contactWrite).length) {
+            await trx('estimates').where({ id: estimate.id }).update(contactWrite);
+          }
+          // A concurrent writer may have won: everything downstream
+          // (customer resolution, the new-profile insert, notifications)
+          // uses what is actually stored, not the in-memory patch.
+          estimate.customer_name = contactWrite.customer_name ?? lockedContact.customer_name;
+          estimate.customer_email = contactWrite.customer_email ?? lockedContact.customer_email;
         }
       }
       let customerId = estimate.customer_id;
