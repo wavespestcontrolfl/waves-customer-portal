@@ -330,7 +330,14 @@ class InternalLinkPrExecutor {
       return { status: 'hold', reason: 'head_not_executor_commit', pr_number: prNumber };
     }
 
-    const diff = await this._checkLinkOnlyDiff(pr, prTasks);
+    // Pin main to one commit: the link-only check reads the base files at it
+    // and the merge refuses unless main is still there (expectBaseSha) and
+    // every source file lands byte-identical to the checked head (verifyPaths)
+    // — a main edit to the same paragraph can never ride in unchecked.
+    const baseRef = pr.base?.ref || 'main';
+    const baseSha = await GitHubClient.getBranchSha(baseRef);
+    if (!baseSha) return { status: 'hold', reason: 'base_sha_unknown', pr_number: prNumber };
+    const diff = await this._checkLinkOnlyDiff(pr, prTasks, baseSha);
     if (!diff.ok) {
       await this._closeLinkPr(pr, prTasks, {
         status: 'patch_candidate',
@@ -371,12 +378,21 @@ class InternalLinkPrExecutor {
       return { status: 'hold', reason: 'codex_review_pending', pr_number: prNumber };
     }
 
-    const merged = await GitHubClient.mergePr(prNumber, {
-      method: 'squash',
-      sha: pr.head.sha,
-      title: pr.title,
-      message: `Auto-merged: link-only diff, green hub preview, ${codex.clean ? 'clean Codex review' : 'no Codex findings within the grace window'}.`,
-    });
+    let merged;
+    try {
+      merged = await GitHubClient.mergePr(prNumber, {
+        sha: pr.head.sha,
+        expectBaseSha: baseSha,
+        expectBaseRef: baseRef,
+        verifyPaths: diff.files,
+        title: pr.title,
+        message: `Auto-merged: link-only diff, green hub preview, ${codex.clean ? 'clean Codex review' : 'no Codex findings within the grace window'}.`,
+      });
+    } catch (err) {
+      // Main moved between the check and the merge: re-verify next tick.
+      if (err?.code === 'BLOG_BASE_MOVED') return { status: 'hold', reason: 'base_moved', pr_number: prNumber };
+      throw err;
+    }
     const mergedAt = new Date();
     for (const task of prTasks) {
       await this._markTaskMerged(task.id, { mergedAt, commitSha: merged?.sha || null });
@@ -385,7 +401,7 @@ class InternalLinkPrExecutor {
     return { status: 'merged', pr_number: prNumber, count: prTasks.length, codex: codex.clean ? 'clean' : 'silent' };
   }
 
-  async _checkLinkOnlyDiff(pr, prTasks) {
+  async _checkLinkOnlyDiff(pr, prTasks, baseSha) {
     const files = await GitHubClient.listPrFiles(pr.number);
     const changed = new Set((files || []).map((f) => f.filename));
     const expected = new Set(prTasks.map((t) => t.source_file));
@@ -399,7 +415,7 @@ class InternalLinkPrExecutor {
       const task = prTasks.find((t) => stem(t.source_file) === stem(file));
       const [head, base] = await Promise.all([
         GitHubClient.getFile(file, pr.head.sha),
-        GitHubClient.getFile(file, pr.base?.ref || 'main'),
+        GitHubClient.getFile(file, baseSha),
       ]);
       if (!head?.content || !base?.content) return { ok: false, reason: 'diff_file_unreadable' };
       const targetUrl = policy.normalizeInternalUrl(task.target_url);
@@ -408,7 +424,7 @@ class InternalLinkPrExecutor {
       if (links.length !== 1) return { ok: false, reason: 'diff_link_count' };
       if (head.content.replace(linkRe, '$1') !== base.content) return { ok: false, reason: 'diff_not_link_only_or_main_moved' };
     }
-    return { ok: true };
+    return { ok: true, files: [...changed] };
   }
 
   async _codexVerdict(prNumber, headSha) {

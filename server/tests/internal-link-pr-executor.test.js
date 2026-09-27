@@ -1240,6 +1240,7 @@ describe('internal-link PR auto-merge', () => {
     GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', title: 'SEO links', created_at: new Date(Date.now() - 3 * 3600e3).toISOString(), head: { sha: HEAD, ref: 'content/internal-link-x' }, base: { ref: 'main' } });
     GitHubClient.listPrFiles = jest.fn(async () => [{ filename: 'src/content/blog/a.md' }]);
     GitHubClient.getFile.mockImplementation(async (_path, ref) => ({ content: ref === HEAD ? headBody : baseBody }));
+    GitHubClient.getBranchSha = jest.fn(async () => 'e'.repeat(40));
     GitHubClient.mergePr = jest.fn(async () => ({ sha: 'b'.repeat(40), merged: true }));
     GitHubClient.closePr = jest.fn();
     GitHubClient.retireBranch = jest.fn();
@@ -1257,8 +1258,18 @@ describe('internal-link PR auto-merge', () => {
   test('merges a link-only PR with a green preview once Codex has been silent past the grace window', async () => {
     const result = await instance.runAutoMerge();
     expect(result).toMatchObject({ status: 'merged', pr_number: 77, codex: 'silent' });
-    expect(GitHubClient.mergePr).toHaveBeenCalledWith(77, expect.objectContaining({ sha: HEAD, method: 'squash' }));
+    // Base pinned to the commit the link-only check read, merged atomically.
+    expect(GitHubClient.getFile).toHaveBeenCalledWith('src/content/blog/a.md', 'e'.repeat(40));
+    expect(GitHubClient.mergePr).toHaveBeenCalledWith(77, expect.objectContaining({
+      sha: HEAD, expectBaseSha: 'e'.repeat(40), expectBaseRef: 'main', verifyPaths: ['src/content/blog/a.md'],
+    }));
     expect(instance._markTaskMerged).toHaveBeenCalledWith('t1', expect.objectContaining({ commitSha: 'b'.repeat(40) }));
+  });
+
+  test('holds when main moves between the check and the merge', async () => {
+    GitHubClient.mergePr.mockRejectedValueOnce(Object.assign(new Error('moved'), { code: 'BLOG_BASE_MOVED' }));
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'base_moved' });
+    expect(instance._markTaskMerged).not.toHaveBeenCalled();
   });
 
   test('holds inside the grace window while Codex has not answered', async () => {
