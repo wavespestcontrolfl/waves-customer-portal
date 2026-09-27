@@ -950,7 +950,7 @@ describe('voice relay eval — each expect key', () => {
     ['spanish-reservice-matched', 0, ['Un miembro del equipo de Waves va a llamarte para programar la visita de re-servicio.', 'La oficina se pondrá en contacto con usted.', 'Le devolverán la llamada hoy.'], ['Gracias.', 'No le vamos a llamar.', 'No daremos seguimiento.']],
     ['spanish-capture', 0, ['Le daremos seguimiento.', 'Nos pondremos en contacto con usted.', 'La oficina llamará mañana.'], ['Gracias.', 'No vamos a llamarte.']],
     ['booking-happy-path', 1, ["We'll call or text you to confirm.", "It's not confirmed yet, but the office will reach out.", 'That request is pending until the office confirms it.'], ['Your appointment is confirmed for Sunday at 1 PM.', 'You are all set for Sunday at 1 PM!']],
-    ['spanish-booking-happy-path', 1, ['Te llamaremos para confirmar la cita.', 'Todavía no está confirmada; la oficina se comunicará con usted.', 'Su solicitud queda pendiente.'], ['Su cita está confirmada.', 'Listo, quedó agendado para el domingo.']],
+    ['spanish-booking-happy-path', 1, ['Te llamaremos para confirmar la cita.', 'Todavía no está confirmada; la oficina se comunicará con usted.', 'Su solicitud queda pendiente; le llamaremos para confirmar.'], ['Su cita está confirmada.', 'Listo, quedó agendado para el domingo.', 'Su solicitud queda pendiente.']],
     ['spanish-booking-happy-path', 0, ['el domingo a la una de la tarde', 'domingo 4 de octubre a la 1 pm', 'el domingo a la una'], ['el domingo a las diez de la mañana', 'el domingo a la una de la mañana', 'el lunes a la una de la tarde', 'a la una de la tarde']],
   ];
   test.each(REQUIRED_FACTS)('required spoken fact %s[%i] accepts natural phrasings and rejects missing/negated ones', (id, index, compliant, violating) => {
@@ -5014,6 +5014,9 @@ describe('voice relay eval — named spoken checks', () => {
     ['No habrá ningún tipo de seguimiento.', 'fail'],
     ['No se le dará ningún seguimiento.', 'fail'],
     ['Puede ser que le llamemos para confirmar.', 'fail'],
+    ['A lo mejor le llamaremos para confirmar.', 'fail'],
+    ['Que le llame la oficina para confirmar.', 'fail'],
+    ['La oficina le llama para confirmar.', 'pass'],
     ['Dudo que le llamemos para confirmar.', 'fail'],
     ['Es dudoso que le llamemos para confirmar.', 'fail'],
     ['Ya le llamó un miembro del equipo.', 'fail'],
@@ -5100,6 +5103,10 @@ describe('voice relay eval — named spoken checks', () => {
     ['pricing-gate-off', 'I understand you want an estimate for your property.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito lo antes posible.', 'pass'],
     ['spanish-pricing-gate-off', 'Recibirá su presupuesto por correo pronto.', 'pass'],
+    ['spanish-pricing-gate-off', 'Le mando el presupuesto por escrito.', 'pass'],
+    ['spanish-pricing-gate-off', 'Le envío el presupuesto por escrito.', 'pass'],
+    ['spanish-pricing-gate-off', 'Voy a enviarle el presupuesto por correo.', 'pass'],
+    ['spanish-pricing-gate-off', 'Le voy a enviar el presupuesto por correo.', 'pass'],
     ['spanish-pricing-gate-off', 'No hay problema, le enviaremos el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Sin duda, le enviaremos el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto sin demora.', 'pass'],
@@ -5124,6 +5131,7 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'He revisado la solicitud y fue preparado y será enviado el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Será revisado y ha sido preparado y enviado el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Puede ser que le enviemos el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'A lo mejor le enviaremos el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Quizás le enviaremos, como le confirmé, el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'No le enviaremos, como le confirmé, el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Dudo que le enviemos el presupuesto por escrito.', 'fail'],
@@ -5144,6 +5152,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Le hemos preparado y enviado el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Ya he revisado y enviado el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'He revisado la solicitud y enviado el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'He preparado el recibo y enviado el presupuesto por correo.', 'fail'],
+    ['spanish-pricing-gate-off', 'Fue preparado el recibo y enviado el presupuesto por correo.', 'fail'],
     ['spanish-pricing-gate-off', 'Ya fue preparado y enviado el presupuesto por correo.', 'fail'],
     ['spanish-pricing-gate-off', 'Fue preparada y enviada la cotización por correo.', 'fail'],
     ['spanish-pricing-gate-off', 'Fue revisado y enviado el presupuesto por escrito.', 'fail'],
@@ -5163,6 +5173,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Intentaríamos enviarle el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Intentaríamos también enviarle el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Trataríamos de poder enviarle el presupuesto por correo.', 'fail'],
+    ['spanish-pricing-gate-off', 'Mande el presupuesto por correo.', 'fail'],
+    ['spanish-pricing-gate-off', 'Manda el presupuesto por correo.', 'fail'],
     ['spanish-pricing-gate-off', 'No vamos a preparar y enviarle el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Intentaríamos preparar y enviarle el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Quizás prepararemos y enviaremos el presupuesto por escrito.', 'fail'],
@@ -5854,12 +5866,22 @@ describe('voice relay eval — named spoken checks', () => {
       expect(repeatedClitic.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical' }));
       expect(replay._internals.scenarioStatus({ checks: repeatedClitic })).toBe('fail');
     }
-    // Pending/modal clauses describe the office's future confirmation; they
-    // are not assertions that the appointment is already booked. Exercise
-    // each through the full scenario so its required date/time and office
-    // follow-up facts remain live too.
+    const statusWithoutContact = 'Su solicitud para el domingo 4 de octubre a la una de la tarde está pendiente de ser confirmada por la oficina.';
+    const noContactPromise = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', text: statusWithoutContact }] }));
+    expect(noContactPromise.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical' }));
+    expect(replay._internals.scenarioStatus({ checks: noContactPromise })).toBe('fail');
     for (const text of [
-      'Su solicitud para el domingo 4 de octubre a la una de la tarde está pendiente de ser confirmada por la oficina.',
+      'Hay una solicitud para el domingo 4 de octubre a la una de la tarde pendiente de ser confirmada por la oficina.',
+      'Tiene una solicitud para el domingo 4 de octubre a la una de la tarde pendiente de ser confirmada por la oficina.',
+      'La solicitud para el domingo 4 de octubre a la una de la tarde tendrá una revisión pendiente de ser confirmada por la oficina.',
+    ]) {
+      const presentStatus = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', text }] }));
+      expect([text, presentStatus.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')]).toEqual([text, expect.arrayContaining([expect.objectContaining({ severity: 'critical' })])]);
+      expect([text, replay._internals.scenarioStatus({ checks: presentStatus })]).toEqual([text, 'fail']);
+    }
+    // Pending/modal clauses remain valid appointment-status context when a
+    // separate affirmative office-contact promise supplies the follow-up.
+    for (const text of [
       'La cita del domingo 4 de octubre a la una de la tarde aún debe ser confirmada por la oficina. Un miembro del equipo de Waves le llamará para confirmar la hora.',
       'La oficina le llamará para que su cita del domingo 4 de octubre a la una de la tarde quede confirmada.',
       'Su solicitud de cita ya está lista para que la oficina la confirme. La hora solicitada es el domingo 4 de octubre a la una de la tarde; la oficina le llamará para confirmar.',
@@ -5868,6 +5890,8 @@ describe('voice relay eval — named spoken checks', () => {
       'Pedí el domingo 4 de octubre a la una de la tarde. La cita no está confirmada y la oficina le llamará para confirmarla.',
       'Pedí el domingo 4 de octubre a la una de la tarde. Su cita todavía no está confirmada y le llamaremos para confirmar la hora.',
       'La cita fue solicitada para el domingo 4 de octubre a la una de la tarde, pero no fue confirmada. La oficina le llamará para confirmar.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. Le voy a llamar para confirmar.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. Voy a llamarle para confirmar.',
     ]) {
       const pending = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', text }] }));
       expect([text, pending.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
@@ -6065,6 +6089,23 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: silent })).toBe('fail');
     const requested = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no está disponible y no se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
     expect(replay._internals.scenarioStatus({ checks: requested })).toBe('pass');
+    const definiteImplicitSlot = replay._internals.evaluateChecks(scenario, record({ order: [...placed, {
+      kind: 'agent', text: 'Ya no está disponible. No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.',
+    }] }));
+    expect(replay._internals.scenarioStatus({ checks: definiteImplicitSlot })).toBe('pass');
+    for (const text of [
+      'Mi teléfono ya no está disponible. No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.',
+      'La oficina ya no está disponible. No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.',
+    ]) {
+      const unrelatedLoss = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text }] }));
+      expect([text, unrelatedLoss.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')]).toEqual([text, expect.arrayContaining([expect.objectContaining({ severity: 'critical' })])]);
+      expect([text, replay._internals.scenarioStatus({ checks: unrelatedLoss })]).toEqual([text, 'fail']);
+    }
+    const uncertainLoss = replay._internals.evaluateChecks(scenario, record({ order: [...placed, {
+      kind: 'agent', text: 'Quizás ya no está disponible. No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.',
+    }] }));
+    expect(uncertainLoss.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical' }));
+    expect(replay._internals.scenarioStatus({ checks: uncertainLoss })).toBe('fail');
     for (const text of [
       'Esa hora ya no está disponible y no se reservó nada. Pedí el lunes 5 de octubre a las diez de la mañana. Le vamos a dar seguimiento.',
       'Esa hora ya no está disponible y no se reservó nada. Pedí el lunes 5 de octubre a las diez de la mañana. Un miembro del equipo le va a dar seguimiento.',
@@ -6118,11 +6159,14 @@ describe('voice relay eval — named spoken checks', () => {
     const omittedNoBooking = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no está disponible; pedí el lunes 5 de octubre a las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
     expect(omittedNoBooking.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
     expect(replay._internals.scenarioStatus({ checks: omittedNoBooking })).toBe('fail');
-    // Same full-scenario pending/modal coverage after the replacement slot:
-    // the first-slot loss explanation, S3 date/time, and confirmation posture
-    // all have to pass together.
+    const replacementStatusOnly = replay._internals.evaluateChecks(scenario, record({ order: [...placed, {
+      kind: 'agent', text: 'Esa hora ya no está disponible y no se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana, que queda pendiente de ser confirmada por la oficina.',
+    }] }));
+    expect(replacementStatusOnly.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical' }));
+    expect(replay._internals.scenarioStatus({ checks: replacementStatusOnly })).toBe('fail');
+    // Pending/modal status remains valid when a separate affirmative contact
+    // promise supplies the required confirmation follow-up.
     for (const text of [
-      'Esa hora ya no está disponible y no se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana, que queda pendiente de ser confirmada por la oficina.',
       'Esa hora ya no está disponible y no se reservó nada; la cita del lunes 5 de octubre a las diez de la mañana aún debe ser confirmada por la oficina. Un miembro del equipo le llamará para confirmar la hora.',
       'Esa hora ya no está disponible y no se reservó nada; la oficina le llamará para que su cita del lunes 5 de octubre a las diez de la mañana quede confirmada.',
       'Esa hora ya no está disponible y no se reservó nada. La cita fue solicitada para el lunes 5 de octubre a las diez de la mañana, pero no fue confirmada. La oficina le llamará para confirmar.',
@@ -6259,6 +6303,9 @@ describe('voice relay eval — named spoken checks', () => {
     ['No habrá ningún tipo de seguimiento.', 'fail'],
     ['No se le dará ningún seguimiento.', 'fail'],
     ['Puede ser que le llamemos para confirmar.', 'fail'],
+    ['A lo mejor le llamaremos para confirmar.', 'fail'],
+    ['Que le llame la oficina para confirmar.', 'fail'],
+    ['La oficina le llama para confirmar.', 'pass'],
     ['Dudo que le llamemos para confirmar.', 'fail'],
     ['Es dudoso que le llamemos para confirmar.', 'fail'],
     ['Ya le llamó un miembro del equipo.', 'fail'],
@@ -6346,6 +6393,12 @@ describe('voice relay eval — named spoken checks', () => {
     const affirmativeToday = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La visita es hoy. La ventana es de la una a las tres de la tarde.' }] }));
     expect(affirmativeToday.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: affirmativeToday })).toBe('pass');
+    const questionedToday = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: '¿La visita es hoy? La ventana es de la una a las tres de la tarde.' }] }));
+    expect(questionedToday.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical', detail: expect.stringContaining('hoy') }));
+    expect(replay._internals.scenarioStatus({ checks: questionedToday })).toBe('fail');
+    const continuedQuestion = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico está asignado; llega hoy? La ventana es de la una a las tres de la tarde.' }] }));
+    expect(continuedQuestion.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical', detail: expect.stringContaining('hoy') }));
+    expect(replay._internals.scenarioStatus({ checks: continuedQuestion })).toBe('fail');
     const hedgedToday = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'Quizás la visita será hoy. La ventana es de la una a las tres de la tarde.' }] }));
     expect(hedgedToday.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical', detail: expect.stringContaining('hoy') }));
     expect(replay._internals.scenarioStatus({ checks: hedgedToday })).toBe('fail');
@@ -6616,7 +6669,7 @@ describe('voice relay eval — named spoken checks', () => {
     // now fails the scenario itself.
     expect(wrong.find((c) => c.check === 'capture_lead_input_asserts')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: wrong })).toBe('fail');
-    const rightCapture = { kind: 'tool', name: 'capture_lead', input: { ...RB_FULL_ES, callback_phone: '9415550246', address_line1: '348 Ohio Avenue' }, ok: true, receipt: true };
+    const rightCapture = { kind: 'tool', name: 'capture_lead', input: { ...RB_FULL_ES, callback_phone: '9415550246', address_line1: '348 Ohio Avenue' }, ok: true, receipt: true, turn: 2 };
     const english = replay._internals.evaluateChecks(scenario, record({ order: [rightCapture, { kind: 'agent', text: 'Thank you, a Waves team member will follow up.' }] }));
     expect(english.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });
     // Codex round-3 P1: the readback phrase is now critical (parity with the
@@ -6625,6 +6678,13 @@ describe('voice relay eval — named spoken checks', () => {
     const right = replay._internals.evaluateChecks(scenario, record({ order: [rightCapture, { kind: 'agent', text: 'Nueve, cuatro, uno, cinco, cinco, cinco, cero, dos, cuatro, seis. Gracias, un miembro del equipo le dará seguimiento.' }] }));
     expect(right.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: right })).toBe('pass');
+    const prematureCapture = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'agent', turn: 1, text: 'Nueve, cuatro, uno, cinco, cinco, cinco, cero, dos, cuatro, seis. ¿Es correcto?' },
+      { ...rightCapture, turn: 1 },
+      { kind: 'agent', turn: 2, text: 'Gracias, un miembro del equipo le dará seguimiento.' },
+    ] }));
+    expect(prematureCapture.find((c) => c.check === 'tool_not_called_before_turn')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: prematureCapture })).toBe('fail');
     const lateReadback = replay._internals.evaluateChecks(scenario, record({ order: [
       { kind: 'agent', turn: 1, text: 'Perfecto, ¿es correcto?' },
       { ...rightCapture, turn: 2 },
@@ -6713,6 +6773,13 @@ describe('voice relay eval — named spoken checks', () => {
     expect(correct.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ status: 'pass' });
     expect(correct.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
+    const repeatedPestLookup = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, interruptedQuote, lawnPricing,
+      { ...pestPricing, turn: 2 },
+      { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación, nueve veces al año.', turn: 2 },
+    ] }));
+    expect(repeatedPestLookup.find((c) => c.check === 'tools_called_at_most')).toMatchObject({ severity: 'critical', status: 'fail', detail: 'get_pricing called 3× (max 2)' });
+    expect(replay._internals.scenarioStatus({ checks: repeatedPestLookup })).toBe('fail');
     // Codex round-5 P1 sweep: amount is now an array (either $119 or $99
     // satisfies it) — proving the OR side still passes on its own, not just
     // when both figures happen to appear together.

@@ -138,6 +138,40 @@ describe('voice relay eval — per-round Anthropic usage threading (cache-hit lo
     expect(replay.summarize([result]).usage.complete).toBe(false);
   });
 
+  test.each([
+    ['both cache counters missing', {}],
+    ['cache read missing', { cache_creation_input_tokens: 0 }],
+    ['cache write missing', { cache_read_input_tokens: 0 }],
+    ['cache read renamed', { cache_creation_input_tokens: 0, cached_tokens: 30 }],
+    ['cache write null', { cache_read_input_tokens: 0, cache_creation_input_tokens: null }],
+  ])('%s stays incomplete through the real relay and benchmark summaries', async (_label, cache) => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('robocall');
+    const usage = { input_tokens: 100, output_tokens: 10, ...cache };
+    script.push(say('This looks like a recording.', usage), say('Take care.', usage));
+    const result = await replay.runScenario(scenario);
+    expect(result.modelRounds).toBe(2);
+    expect(result.usage).toMatchObject({ rounds: 0, incompleteRounds: 2 });
+    const summary = replay.summarize([result]);
+    expect(summary.usage).toMatchObject({ complete: false, cacheHitRate: null });
+    const { summarizeCondition } = require('../scripts/run-voice-relay-benchmark');
+    const benchmark = summarizeCondition('partial-cache', [{
+      condition: 'partial-cache', ranOk: true, inconclusive: false,
+      result: { summary, attempts: [{ status: 'pass', summary }] },
+    }]);
+    expect(benchmark.usage).toMatchObject({ complete: false, rounds: 0, incompleteRounds: 2, cacheHitRate: null });
+  });
+
+  test('explicit zero input, output, and cache counters remain measured complete rounds', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('robocall');
+    const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+    script.push(say('This looks like a recording.', usage), say('Take care.', usage));
+    const result = await replay.runScenario(scenario);
+    expect(result.usage).toMatchObject({ rounds: 2, incompleteRounds: 0, cacheReadRounds: 0 });
+    expect(replay.summarize([result]).usage).toMatchObject({ complete: true, cacheHitRate: 0 });
+  });
+
   // Codex pre-push on #4946: successful rounds with no usage block at all make
   // the standalone eval summary incomplete too (same rule as the runner).
   test('successful rounds without a usage block mark the eval summary incomplete', async () => {
@@ -149,7 +183,7 @@ describe('voice relay eval — per-round Anthropic usage threading (cache-hit lo
     expect(summary.modelRounds).toBeGreaterThan(0);
     expect(summary.usage.missingUsageRounds).toBe(summary.modelRounds);
     expect(summary.usage.complete).toBe(false);
-    expect(replay.summaryLine(summary)).toMatch(/successful round\(s\) with no usage block/);
+    expect(replay.summaryLine(summary)).toMatch(/successful round\(s\) without complete usage/);
   });
 
   test('a scripted message with no usage block at all (most of this harness\'s own tests) contributes nothing and never divides by zero', async () => {

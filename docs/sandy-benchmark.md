@@ -135,8 +135,8 @@ field names match: `input_tokens` / `output_tokens` / `cached_input_tokens`
 / `cache_write_tokens`) and accumulates it onto that scenario's `record`.
 Every scenario record in `result.results[]` carries its own `usage` totals;
 `result.summary.usage` sums them for the whole run, with `rounds` (how many
-rounds actually carried a `usage` block — a scripted unit-test double with
-none is not counted) and `cacheReadRounds` (how many of those had a
+rounds carried all four valid usage counters, including explicit zeroes)
+and `cacheReadRounds` (how many of those had a
 non-zero `cached_input_tokens`) as the cache-hit-rate's own denominator and
 numerator: `summary.usage.cacheHitRate = cacheReadRounds / rounds`, `null`
 (never `0`) when `rounds` is `0` — no evidence either way, not a confirmed
@@ -150,14 +150,20 @@ system-prompt size (~3.6K tokens) is a real, checkable question now rather
 than a guess: run the benchmark and read `cacheHitRate` for the Haiku
 condition directly instead of inferring it from trial position.
 
-A model round that REJECTS (the relay's 20-second stream timeout, an abort,
+A rejected model round (the relay's 20-second stream timeout, an abort,
 or a provider error) may already have spent input, cache and output tokens
-that no `usage` block ever reports. Each such round is counted in
+that no `usage` block ever reports. A present block with a missing, renamed,
+or invalid input, output, cache-read, or cache-write counter is also
+incomplete; missing cache counters are never inferred to be zero. Each
+rejected or unparseable round is counted in
 `usage.incompleteRounds` (per scenario, per run summary, and per condition
 in the runner). With any, `usage.complete` is `false`, the eval summary line
 says `usage INCOMPLETE`, and the runner's `usageComplete` column reads
-`NO — N rejected round(s)`: the token totals are then a lower bound, so a
-timeout-prone condition never reads artificially cheaper.
+`NO — N rejected/unparseable round(s)`: the token totals are then a lower
+bound. Successful rounds without complete usage also contribute to
+`missingUsageRounds`; a wholly absent block is not a measured zero round.
+The OpenAI adapter normalizes its provider-specific uncached and zero-usage
+shapes into the same four counters before this check.
 
 ### Inconclusive runs are missing data, never a completed run
 

@@ -57,7 +57,14 @@ describe('installHarness — OpenAI relay client instrumentation', () => {
     expect(h.modelFaultInjection).toBe(true); // the Anthropic patch is unaffected by adding the OpenAI one
   });
 
-  test('a real OpenAIRelayClient instance built AFTER installHarness() still gets the patched stream (shared prototype)', async () => {
+  test.each([
+    ['cached', { input_tokens: 50, input_tokens_details: { cached_tokens: 20 }, output_tokens: 5 },
+      { input_tokens: 30, output_tokens: 5, cached_input_tokens: 20, cacheReadRounds: 1 }],
+    ['uncached', { input_tokens: 50, output_tokens: 5 },
+      { input_tokens: 50, output_tokens: 5, cached_input_tokens: 0, cacheReadRounds: 0 }],
+    ['measured zero', { input_tokens: 0, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0 },
+      { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cacheReadRounds: 0 }],
+  ])('a real OpenAI %s round built AFTER installHarness() retains complete measured usage', async (_label, providerUsage, measured) => {
     const replay = require('../services/eval/voice-relay-replay');
     const h = replay.installHarness();
     const { OpenAIRelayClient } = require('../services/voice-agent/relay-openai-client');
@@ -67,7 +74,7 @@ describe('installHarness — OpenAI relay client instrumentation', () => {
     const client = new OpenAIRelayClient({
       apiKey: 'x',
       fetchImpl: fetchStub([
-        { type: 'response.completed', response: { id: 'r1', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'hi' }] }], usage: { input_tokens: 50, input_tokens_details: { cached_tokens: 20 }, output_tokens: 5 } } },
+        { type: 'response.completed', response: { id: 'r1', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'hi' }] }], usage: providerUsage } },
       ]),
     });
 
@@ -85,8 +92,7 @@ describe('installHarness — OpenAI relay client instrumentation', () => {
     expect(record.modelRounds).toBe(1);
     expect(record.modelErrors).toEqual([]);
     expect(record.usage).toEqual({
-      input_tokens: 30, output_tokens: 5, cached_input_tokens: 20, cache_write_tokens: 0,
-      rounds: 1, cacheReadRounds: 1, incompleteRounds: 0,
+      ...measured, cache_write_tokens: 0, rounds: 1, incompleteRounds: 0,
     });
   });
 

@@ -1129,11 +1129,12 @@ function patchStreamProto(getProto, state, label) {
               const usage = extractUsage('anthropic', msg);
               // An unexpected/renamed usage shape is incomplete telemetry,
               // never a zero-token round that makes a candidate look free.
-              if (Number.isFinite(usage.input_tokens) && Number.isFinite(usage.output_tokens)) {
+              if (Number.isFinite(usage.input_tokens) && Number.isFinite(usage.output_tokens)
+                && Number.isFinite(usage.cached_input_tokens) && Number.isFinite(usage.cache_write_tokens)) {
                 record.usage.input_tokens += usage.input_tokens;
                 record.usage.output_tokens += usage.output_tokens;
-                record.usage.cached_input_tokens += usage.cached_input_tokens || 0;
-                record.usage.cache_write_tokens += usage.cache_write_tokens || 0;
+                record.usage.cached_input_tokens += usage.cached_input_tokens;
+                record.usage.cache_write_tokens += usage.cache_write_tokens;
                 record.usage.rounds += 1;
                 if (usage.cached_input_tokens) record.usage.cacheReadRounds += 1;
               } else {
@@ -1993,7 +1994,7 @@ function summaryLine(summary = {}) {
     summary.usage && !summary.usage.complete && (summary.usage.incompleteRounds || summary.usage.missingUsageRounds)
       ? `usage INCOMPLETE: ${[
         summary.usage.incompleteRounds ? `${summary.usage.incompleteRounds} rejected/unparseable round(s)` : null,
-        summary.usage.missingUsageRounds ? `${summary.usage.missingUsageRounds} successful round(s) with no usage block` : null,
+        summary.usage.missingUsageRounds ? `${summary.usage.missingUsageRounds} successful round(s) without complete usage` : null,
       ].filter(Boolean).join(', ')} (totals are a lower bound)`
       : null,
   ];

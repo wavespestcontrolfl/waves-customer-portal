@@ -729,7 +729,7 @@ if (require.main === module) {
         cacheRead: c.usage.cachedInputTokens, cacheWrite: c.usage.cacheWriteTokens,
         cacheHitRate: c.usage.cacheHitRate == null ? 'n/a (0 rounds)' : `${(c.usage.cacheHitRate * 100).toFixed(1)}% (${c.usage.rounds} round(s))`,
         usageComplete: c.usage.complete ? 'yes' : `NO — ${[
-          c.usage.incompleteRounds ? `${c.usage.incompleteRounds} rejected round(s)` : null,
+          c.usage.incompleteRounds ? `${c.usage.incompleteRounds} rejected/unparseable round(s)` : null,
           c.usage.missingTelemetryRuns ? `${c.usage.missingTelemetryRuns} run(s) without telemetry` : null,
         ].filter(Boolean).join(', ')}; totals are a lower bound`,
       })));

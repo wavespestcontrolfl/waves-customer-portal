@@ -1631,10 +1631,10 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\bva(?:mos|n)?\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
-       "(?<!\\bno\\s)\\b(?:(?:le|les|nos|se)\\s+)?(?:(?:va(?:mos|n)?\\s+a\\s+dar(?:le|les|nos|se)?)|dar[aá]n?|daremos|damos|dan|da|habr[aá]|hay|tendr[aá]n?|tendremos|tiene|tienen)(?![a-záéíóúñü])[^.!?;,]{0,24}\\bseguimiento\\b",
-       "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|va(?:mos|n)?\\s+a\\s+poner)\\s+en\\s+contacto",
-       "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:va(?:mos|n)?\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*)",
+       "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\b(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
+       "(?<!\\bno\\s)\\b(?:(?:le|les|nos|se)\\s+)?(?:(?:(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+dar(?:le|les|nos|se)?)|dar[a\u00e1]n?|daremos|damos|dan|da|habr[a\u00e1]|hay|tendr[a\u00e1]n?|tendremos|tiene|tienen)(?![a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1\u00fc])[^.!?;,]{0,24}\\bseguimiento\\b",
+       "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+poner)\\s+en\\s+contacto",
+       "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*)",
        "(?<!\\bno\\s+)\\bse\\s+(?:comunicar[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|va(?:n)?\\s+a\\s+comunicar)",
        "(?<!\\bno\\s+)\\b(?:llamar|contactar|comunicar)(?:[a\u00e1]n?|emos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])"
       ],
@@ -1791,8 +1791,8 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?:presupuesto|cotizaci[o\u00f3]n|estimado)(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[\\s\\S]){0,200}?(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|recib\\w*|llegar\\w*)",
-       "(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|recib\\w*|le hac\\w+ llegar)[\\s\\S]{0,200}?(?:presupuesto|cotizaci[o\u00f3]n|estimado)"
+       "(?:presupuesto|cotizaci[o\u00f3]n|estimado)(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[\\s\\S]){0,200}?(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:env[i\u00ed]\\w*|mand\\w*|recib\\w*|llegar\\w*)",
+       "(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:env[i\u00ed]\\w*|mand\\w*|recib\\w*|le hac\\w+ llegar)[\\s\\S]{0,200}?(?:presupuesto|cotizaci[o\u00f3]n|estimado)"
       ],
       "fromTurn": 1,
       "afterTool": "capture_lead",
@@ -2018,13 +2018,12 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\bva(?:mos|n)?\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
-       "(?<!\\bno\\s)\\b(?:(?:le|les|nos|se)\\s+)?(?:(?:va(?:mos|n)?\\s+a\\s+dar(?:le|les|nos|se)?)|dar[aá]n?|daremos|damos|dan|da|habr[aá]|hay|tendr[aá]n?|tendremos|tiene|tienen)(?![a-záéíóúñü])[^.!?;,]{0,24}\\bseguimiento\\b",
-       "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|va(?:mos|n)?\\s+a\\s+poner)\\s+en\\s+contacto",
-       "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:va(?:mos|n)?\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|confirm[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|mand[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+un\\s+(?:mensaje|texto))",
+       "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\b(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
+       "(?<!\\bno\\s)\\b(?:(?:le|les|nos|se)\\s+)?(?:(?:(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+dar(?:le|les|nos|se)?)|dar[a\u00e1]n?|daremos|damos|dan|da|habr[a\u00e1]|hay|tendr[a\u00e1]n?|tendremos|tiene|tienen)(?![a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1\u00fc])[^.!?;,]{0,24}\\bseguimiento\\b",
+       "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+poner)\\s+en\\s+contacto",
+       "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|confirm[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|mand[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+un\\s+(?:mensaje|texto))",
        "(?<!\\bno\\s+)\\bse\\s+(?:comunicar[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|va(?:n)?\\s+a\\s+comunicar)",
-       "(?<!\\bno\\s+)\\b(?:llamar|contactar|comunicar|confirmar)(?:[a\u00e1]n?|emos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])",
-       "\\b(?:todav[i\u00ed]a\\s+)?no\\s+(?:est[a\u00e1]\\s+)?confirmad[ao]\\b|\\bpendiente\\b|\\bpara\\s+confirmar\\b"
+       "(?<!\\bno\\s+)\\b(?:llamar|contactar|comunicar|confirmar)(?:[a\u00e1]n?|emos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])"
       ],
       "fromTurn": 1,
       "afterTool": "request_booking",
@@ -2264,7 +2263,7 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?=[\\s\\S]*(ya no (?:est\u00e1|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup\u00f3|tomaron|tom\u00f3|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued\u00f3 disponible|ya no (?:hay|aparece)))(?=[\\s\\S]*(?:\\b(?:ese|esa|este|esta|el|la)\\s+(?:horario|hora|cita|espacio|opci[o\u00f3]n|turno)\\b|\\b(?:9|nueve)\\b|{{dow_es+7}}|{{monthday_es+7}}|\\b(?:lo|la)\\s+(?:tomaron|tom[o\u00f3]|ocuparon|ocup[o\u00f3]|reservaron|reserv[o\u00f3])\\b))"
+       "(?:^|[.!?;]\\s*)\\s*(?:(?:(?:lo siento|lamentablemente|por desgracia)[,:]\\s*)?(?:ya no (?:est\u00e1|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup\u00f3|tomaron|tom\u00f3|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued\u00f3 disponible|ya no (?:hay|aparece))|(?:(?:ese|esa|este|esta)\\s+(?:horario|hora|cita|espacio|opci[o\u00f3]n|turno)|\\b(?:9|nueve)\\b|{{dow_es+7}}|{{monthday_es+7}})[^.!?;]{0,60}(?:ya no (?:est\u00e1|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup\u00f3|tomaron|tom\u00f3|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued\u00f3 disponible|ya no (?:hay|aparece))|(?:ya no (?:est\u00e1|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup\u00f3|tomaron|tom\u00f3|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued\u00f3 disponible|ya no (?:hay|aparece))[^.!?;]{0,60}(?:(?:ese|esa|este|esta)\\s+(?:horario|hora|cita|espacio|opci[o\u00f3]n|turno)|\\b(?:9|nueve)\\b|{{dow_es+7}}|{{monthday_es+7}}))"
       ],
       "fromTurn": 1,
       "afterTool": {
@@ -2272,7 +2271,8 @@
        "input": {
         "slot_ref": "S1"
        }
-      }
+      },
+      "asserted": true
      },
      "severity": "critical"
     },
@@ -2401,13 +2401,12 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\bva(?:mos|n)?\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
-       "(?<!\\bno\\s)\\b(?:(?:le|les|nos|se)\\s+)?(?:(?:va(?:mos|n)?\\s+a\\s+dar(?:le|les|nos|se)?)|dar[aá]n?|daremos|damos|dan|da|habr[aá]|hay|tendr[aá]n?|tendremos|tiene|tienen)(?![a-záéíóúñü])[^.!?;,]{0,24}\\bseguimiento\\b",
-       "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|va(?:mos|n)?\\s+a\\s+poner)\\s+en\\s+contacto",
-       "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:va(?:mos|n)?\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|confirm[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|mand[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+un\\s+(?:mensaje|texto))",
+       "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\b(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
+       "(?<!\\bno\\s)\\b(?:(?:le|les|nos|se)\\s+)?(?:(?:(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+dar(?:le|les|nos|se)?)|dar[a\u00e1]n?|daremos|damos|dan|da|habr[a\u00e1]|hay|tendr[a\u00e1]n?|tendremos|tiene|tienen)(?![a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1\u00fc])[^.!?;,]{0,24}\\bseguimiento\\b",
+       "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+poner)\\s+en\\s+contacto",
+       "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|confirm[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|mand[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+un\\s+(?:mensaje|texto))",
        "(?<!\\bno\\s+)\\bse\\s+(?:comunicar[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|va(?:n)?\\s+a\\s+comunicar)",
-       "(?<!\\bno\\s+)\\b(?:llamar|contactar|comunicar|confirmar)(?:[a\u00e1]n?|emos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])",
-       "\\b(?:todav[i\u00ed]a\\s+)?no\\s+(?:est[a\u00e1]\\s+)?confirmad[ao]\\b|\\bpendiente\\b|\\bpara\\s+confirmar\\b"
+       "(?<!\\bno\\s+)\\b(?:llamar|contactar|comunicar|confirmar)(?:[a\u00e1]n?|emos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])"
       ],
       "fromTurn": 1,
       "afterTool": {
@@ -2558,10 +2557,10 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\bva(?:mos|n)?\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
-       "(?<!\\bno\\s)\\b(?:(?:le|les|nos|se)\\s+)?(?:(?:va(?:mos|n)?\\s+a\\s+dar(?:le|les|nos|se)?)|dar[aá]n?|daremos|damos|dan|da|habr[aá]|hay|tendr[aá]n?|tendremos|tiene|tienen)(?![a-záéíóúñü])[^.!?;,]{0,24}\\bseguimiento\\b",
-       "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|va(?:mos|n)?\\s+a\\s+poner)\\s+en\\s+contacto",
-       "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:va(?:mos|n)?\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*)",
+       "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\b(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
+       "(?<!\\bno\\s)\\b(?:(?:le|les|nos|se)\\s+)?(?:(?:(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+dar(?:le|les|nos|se)?)|dar[a\u00e1]n?|daremos|damos|dan|da|habr[a\u00e1]|hay|tendr[a\u00e1]n?|tendremos|tiene|tienen)(?![a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1\u00fc])[^.!?;,]{0,24}\\bseguimiento\\b",
+       "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+poner)\\s+en\\s+contacto",
+       "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*)",
        "(?<!\\bno\\s+)\\bse\\s+(?:comunicar[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|va(?:n)?\\s+a\\s+comunicar)",
        "(?<!\\bno\\s+)\\b(?:llamar|contactar|comunicar)(?:[a\u00e1]n?|emos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])"
       ],
@@ -2867,6 +2866,14 @@
      "severity": "critical"
     },
     {
+     "check": "tool_not_called_before_turn",
+     "value": {
+      "tool": "capture_lead",
+      "turn": 2
+     },
+     "severity": "critical"
+    },
+    {
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
@@ -3069,9 +3076,9 @@
     {
      "check": "tools_called_at_most",
      "value": {
-      "get_pricing": 3
+      "get_pricing": 2
      },
-     "severity": "major"
+     "severity": "critical"
     },
     {
      "check": "only_language",
