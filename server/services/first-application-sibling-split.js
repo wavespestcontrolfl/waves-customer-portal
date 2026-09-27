@@ -401,9 +401,11 @@ async function findLockedFirstApplicationInvoice(trx, moved, members) {
   return { invoice, invoiceRow };
 }
 
-// Members that have diverged from the invoice-holding row's date and have
-// not completed (a completed row's billing outcome is already a settled
-// fact this move cannot change). Pure filter, no DB reads.
+// Members that have diverged from the invoice-holding row's date. By
+// default also excludes a COMPLETED sibling (a completed row's billing
+// outcome is already a settled fact a plain DATE move cannot change) — pass
+// `{ includeCompleted: true }` to keep them in (see below). Pure filter, no
+// DB reads.
 //
 // Deliberately does NOT require estimated_price == null (#5021 round-3 P1:
 // it used to, dropping a sibling from review the instant it carried ANY
@@ -417,10 +419,31 @@ async function findLockedFirstApplicationInvoice(trx, moved, members) {
 // already treats a recorded sibling that picked up a price as unresolved
 // (fails closed, requires the manual clear) regardless of how it entered
 // the record, so widening this filter cannot make auto-clear too lenient.
-function divergingSiblings(invoiceRow, members) {
+//
+// `includeCompleted` (pre-push audit finding, this round): the default
+// completed-row exclusion is sound for the DATE-change chokepoint
+// (flagFirstApplicationInvoiceReviewOnDateChange) — a mere date write never
+// touches invoice money, so a sibling that already completed and billed
+// itself independently poses no NEW double-bill risk from that write alone.
+// It is NOT sound for the MONEY-edit chokepoint
+// (reopenBillingReviewOnInvoiceMoneyChange): completion only proves the
+// sibling's OWN charge was billed once, on its own row — it proves nothing
+// about whether ITS charge is also present on THIS invoice. Staff can split
+// an invoice, clear the review, let the now-separately-priced sibling
+// complete and bill on its own, and later edit the original invoice to add
+// that same sibling's charge back onto it (a recombination) — the sibling
+// is still on a different day the whole time, still genuinely diverged,
+// only now also completed. Excluding it here would make `diverging` empty,
+// the money-edit chokepoint would return `no_diverging_sibling`, and the
+// recombined invoice would go right back to being collectible with no
+// review — the exact double-bill this module exists to catch, just
+// reached through completion instead of through the date path. Money-edit
+// calls this with `{ includeCompleted: true }`; the date-change call site
+// is unchanged.
+function divergingSiblings(invoiceRow, members, { includeCompleted = false } = {}) {
   const invoiceDate = dateOnly(invoiceRow.scheduled_date);
   return members.filter((m) => String(m.id) !== String(invoiceRow.id)
-    && !m.completed_at
+    && (includeCompleted || !m.completed_at)
     && dateOnly(m.scheduled_date) !== invoiceDate);
 }
 
@@ -747,7 +770,12 @@ async function reopenBillingReviewOnInvoiceMoneyChange(trx, previousInvoiceRow, 
   if (String(invoice.id) !== String(currentInvoiceRow.id)) {
     return { action: 'skipped', reason: 'invoice_superseded', invoiceId: currentInvoiceRow.id };
   }
-  const diverging = divergingSiblings(invoiceRow, members);
+  // includeCompleted: true — see divergingSiblings' own header. A completed
+  // sibling's charge may have just been added back onto THIS invoice by the
+  // very edit that triggered this call; completion alone never proves its
+  // charge is absent here, so it must stay in scope for the money-edit
+  // check even though the date-change chokepoint (below) excludes it.
+  const diverging = divergingSiblings(invoiceRow, members, { includeCompleted: true });
   if (!diverging.length) {
     return { action: 'skipped', reason: 'no_diverging_sibling', invoiceId: currentInvoiceRow.id };
   }
@@ -870,6 +898,11 @@ async function flagFirstApplicationInvoiceReviewOnDateChange(trx, scheduledServi
   if (located.skip) return located.skip;
   const { invoice, invoiceRow } = located;
 
+  // Default (includeCompleted: false) — this write only ever changes a
+  // scheduled_date, never invoice money, so a sibling that already
+  // completed and billed itself poses no NEW double-bill risk from this
+  // move alone (see divergingSiblings' own header; the money-edit
+  // chokepoint below needs the opposite and asks for it explicitly).
   const diverging = divergingSiblings(invoiceRow, members);
   if (diverging.length) {
     // No review currently open, and the office's last manual clear already
