@@ -496,7 +496,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     expect(result).toEqual({ productId: ALPINE.id });
   });
 
-  test('a "Taurus ST" voice-typo is an explicit target that does not resolve: clarify first, then a "yes" grounds', async () => {
+  test('a "Taurus ST" voice-typo is an explicit target that does not resolve, and never grounds via a later bare follow-up either', async () => {
     setGroundingDb({ products: [TAURUS, ALPINE] });
     const first = await resolveInventoryWriteTarget({
       toolName: 'adjust_stock',
@@ -504,6 +504,10 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       preview: { product: { id: TAURUS.id, name: TAURUS.name } },
     });
     expect(first).toMatchObject({ code: 'target_clarification_required' });
+    // Closed-vocabulary residual rule (replaces the old prose heuristics):
+    // "st" is leftover content the fallback can't read even on the ORIGINAL
+    // turn, so a later bare "Yes" has nothing clean to borrow from either —
+    // refusing an unreadable typo is correct; guessing "SC" would not be.
     IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
     IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['Can you add 12 fluid ounces of Taurus ST to our inventory']);
     const confirmed = await resolveInventoryWriteTarget({
@@ -511,7 +515,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       preview: { product: { id: TAURUS.id, name: TAURUS.name } },
       actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 12,
     });
-    expect(confirmed).toEqual({ productId: TAURUS.id });
+    expect(confirmed).toMatchObject({ code: 'target_clarification_required' });
   });
 
   test.each([
@@ -522,6 +526,21 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     setGroundingDb({ products: [TAURUS, ALPINE] });
     const result = await resolveInventoryWriteTarget({
       toolName: 'adjust_stock', prompt,
+      preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+    });
+    expect(result).toMatchObject({ code: 'target_clarification_required' });
+  });
+
+  // The non-converging pre-push-audit case (structural fix: the
+  // closed-vocabulary residual rule). "used"/"but"/"unlisted"/"chemical" are
+  // all leftover content words once "Taurus SC" itself is removed from the
+  // text, so this refuses without needing a dedicated negation/contrast
+  // detector — the same rule that grounds clean prose refuses noisy prose.
+  test('"We used Taurus SC before, but bought Unlisted Chemical today" never grounds Taurus SC (the audit\'s non-converging case)', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock',
+      prompt: 'We used Taurus SC before, but bought Unlisted Chemical today; add 2 jugs of that to inventory',
       preview: { product: { id: TAURUS.id, name: TAURUS.name } },
     });
     expect(result).toMatchObject({ code: 'target_clarification_required' });
@@ -977,12 +996,15 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       expect(result).toMatchObject({ code: 'target_clarification_required' });
     });
 
-    // Single-word evidence (a distinctive TOKEN, or a ONE-WORD alias) grounds
-    // on ordinary English otherwise — "Dispatch" (product_aliases seeds it
-    // for "Dispatch Sprayable Wetting Agent") matches "can you dispatch this
-    // inventory adjustment?" with no product in mind at all. A full name or
-    // a multi-word alias is unaffected (already tested elsewhere above).
-    describe('single-word evidence needs supporting context', () => {
+    // Single-word evidence (a distinctive TOKEN, or a ONE-WORD alias)
+    // otherwise grounds on ordinary English — "Dispatch" (product_aliases
+    // seeds it for "Dispatch Sprayable Wetting Agent") would match "can you
+    // dispatch this inventory adjustment?" with no product in mind at all.
+    // The closed-vocabulary residual rule (productsNamedIn) is what actually
+    // stops it here: once "Dispatch" is removed, "inventory adjustment(s)"
+    // is leftover content outside CLOSED_VOCAB. A full name or a multi-word
+    // alias is unaffected (already tested elsewhere above).
+    describe('single-word evidence and the closed-vocabulary residual rule', () => {
       const DISPATCH = { id: 'p-dispatch', name: 'Dispatch Sprayable Wetting Agent', active: true };
 
       test.each([
@@ -997,12 +1019,10 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         expect(result).toEqual({ productId: TAURUS.id });
       });
 
-      // Codex round-2 P2: proximity/capitalization alone ("2" sitting within
-      // 3 words of "dispatch") used to ground this one-word alias on
-      // ordinary English with no product in mind at all. Single-word
-      // evidence now needs a grammatical tie (hasGrammaticalTie) — a
-      // purchase/stock cue word or an adjacent quantity, not just a nearby
-      // number.
+      // Structural fix (replaces the non-converging Codex round-2 prose
+      // heuristics): "inventory adjustment(s)" is leftover content once
+      // "dispatch" is removed — outside CLOSED_VOCAB — so this refuses
+      // regardless of a number sitting nearby.
       test.each([
         'can you dispatch this inventory adjustment?',
         'Can you dispatch 2 inventory adjustments?',
@@ -1027,11 +1047,11 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       });
     });
 
-    // Codex round-2 P2: targetClause splits at ANY colon or quote, so it
-    // used to strip a real catalog identity's own punctuation — a seeded
-    // alias that literally contains a colon (migration 20260528000041), or a
-    // quoted product name. The fallback no longer uses targetClause at all;
-    // only an actual note/message body region is excluded (bodyRegionStart).
+    // targetClause splits at ANY colon or quote, so it used to strip a real
+    // catalog identity's own punctuation — a seeded alias that literally
+    // contains a colon (migration 20260528000041), or a quoted product name.
+    // The fallback never uses targetClause; the closed-vocabulary residual
+    // rule works over the FULL raw text instead.
     describe('identity punctuation (colons/quotes that are part of the name itself)', () => {
       const DISPATCH = { id: 'p-dispatch', name: 'Dispatch Sprayable Wetting Agent', active: true };
 
@@ -1067,7 +1087,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         setGroundingDb({ products: [TAURUS, ALPINE] });
         IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
         IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce([
-          'Actually use Taurus SC', // newest
+          'We bought Taurus SC', // newest
           'Could you add we added your purchase in the Alpine WSG can you add that to our inventory stock', // older
         ]);
         const result = await resolveInventoryWriteTarget({
@@ -1083,7 +1103,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         setGroundingDb({ products: [DEMAND, ALPINE] });
         IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
         IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce([
-          "we're nearly out of Demand", // newest
+          'we bought Demand', // newest
           'CS is what we need for that job', // older
         ]);
         const result = await resolveInventoryWriteTarget({
@@ -1126,23 +1146,23 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     // qualifier as "20%" — a voice-typed prompt must not skip the check just
     // because the operator said the word instead of the symbol.
     describe('spoken percent is a concentration qualifier too', () => {
-      const COPPER = { id: 'p-copper', name: 'Southern Ag Copper Fungicide 27.15%', active: true };
+      const COPPER = { id: 'p-copper', name: 'Copper Fungicide 27.15%', active: true };
 
-      test('"Southern Ag Copper 20 percent" refuses against a "27.15%" catalog row', async () => {
+      test('"Copper Fungicide 20 percent" refuses against a "27.15%" catalog row', async () => {
         setGroundingDb({ products: [COPPER, ALPINE] });
         const result = await resolveInventoryWriteTarget({
           toolName: 'adjust_stock',
-          prompt: 'We bought Southern Ag Copper 20 percent',
+          prompt: 'We bought Copper Fungicide 20 percent',
           preview: { product: { id: COPPER.id, name: COPPER.name } },
         });
         expect(result).toMatchObject({ code: 'target_clarification_required' });
       });
 
-      test('"Southern Ag Copper 27.15 percent" grounds — the spoken concentration matches exactly', async () => {
+      test('"Copper Fungicide 27.15 percent" grounds — the spoken concentration matches exactly', async () => {
         setGroundingDb({ products: [COPPER, ALPINE] });
         const result = await resolveInventoryWriteTarget({
           toolName: 'adjust_stock',
-          prompt: 'We bought Southern Ag Copper 27.15 percent',
+          prompt: 'We bought Copper Fungicide 27.15 percent',
           preview: { product: { id: COPPER.id, name: COPPER.name } },
         });
         expect(result).toEqual({ productId: COPPER.id });

@@ -1117,144 +1117,114 @@ function qualifierConflict(rawText, phrases, productNameRaw) {
   }));
 }
 
-// A prior operator turn may only stand in for a CURRENT prompt that carries
-// no product reference of its own — a genuine bare follow-up ("1 bottle",
-// "78 ounces", "Yes", "add it"). Strip quantities, units/containers (the same
-// vocabulary the grammar's `unit` group recognizes, split into single
-// tokens), and a small closed list of follow-up filler; if nothing survives,
-// the prompt is bare. "we got a new jug of Unlisted Chemical" is NOT bare —
-// "unlisted"/"chemical" (and "we"/"got"/"new") survive — so it must stand on
-// its own, never borrowing a name from an earlier turn.
-const FOLLOW_UP_NUMBER_WORDS = new Set(['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'zero']);
-const FOLLOW_UP_UNIT_WORDS = new Set([
-  'lb', 'lbs', 'pound', 'pounds', 'oz', 'ounce', 'ounces', 'fl', 'fluid', 'gal', 'gallon', 'gallons',
-  'liter', 'liters', 'ml', 'gram', 'grams', 'kg', 'each', 'item', 'items', 'bottle', 'bottles',
-  'bag', 'bags', 'container', 'containers', 'case', 'cases', 'jug', 'jugs',
-]);
-const FOLLOW_UP_FILLER_WORDS = new Set([
-  'add', 'it', 'that', 'this', 'the', 'a', 'an', 'of', 'to', 'yes', 'yeah', 'ok', 'okay',
-  'please', 'confirm', 'confirmed', 'go', 'ahead', 'do', 'same', 'again', 'retry', 'just',
-  'inventory', 'stock',
-]);
-function isBareFollowUp(text) {
-  const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
-  const textNorm = normalizeForMatch(text);
-  if (!textNorm) return false;
-  return textNorm.split(' ').every((token) => !token
-    || /^[0-9]+$/.test(token)
-    || FOLLOW_UP_NUMBER_WORDS.has(token)
-    || FOLLOW_UP_UNIT_WORDS.has(token)
-    || FOLLOW_UP_FILLER_WORDS.has(token));
-}
-
-// Single-word evidence (a distinctive TOKEN, or a ONE-WORD alias) is too
-// weak on its own — a one-word alias like "Dispatch" (→ "Dispatch
-// Sprayable Wetting Agent", product_aliases) grounds on ordinary English
-// ("can you dispatch this inventory adjustment?"), and the same hole exists
-// for single distinctive tokens ("complete", "signature", "demand",
-// "agent", ...). A full catalog name or a multi-word alias needs no extra
-// context — it's already too specific to be a coincidence.
+// ─── CLOSED-VOCABULARY RESIDUAL RULE ────────────────────────────
 //
-// For single-word evidence, at least one RAW occurrence must be
-// grammatically TIED to a purchase/stock quantity (Codex round-2 P2 —
-// proximity/capitalization alone let "Can you dispatch 2 inventory
-// adjustments?" ground the "Dispatch" alias just because a number sat
-// within 3 words):
-//   (a) a purchase/stock cue word, optionally an article/quantifier,
-//       optionally a container phrase ending in "of", directly before the
-//       word ("bought a thing of Taurus", "add a jug of dispatch", "12
-//       ounces of Taurus" — "of" alone is a cue word too);
-//   (b) the word directly followed by a quantity — a number/number-word,
-//       then a unit/container word ("Taurus 78 ounces", "Taurus, 2 jugs");
-//   (c) a quantity + unit/container (+ optional "of") directly before the
-//       word ("78 ounces of Taurus", "2 jugs Taurus").
-// "Directly" allows only punctuation/whitespace between the pieces, same
-// convention as the qualifier-adjacency regexes above.
-const PURCHASE_CUE_WORDS_RE = '(?:of|bought|got|purchased|received|picked\\s+up|restock(?:ed)?|reorder(?:ed)?|add(?:ed)?|order(?:ed)?)';
-const PURCHASE_ARTICLE_WORDS_RE = '(?:a|an|the|some|more|another|new)';
-const PURCHASE_CONTAINER_WORDS_RE = '(?:thing|jug|bottle|bag|case|box|pail|can|gallon|quart|pint|tube|container|pack)s?';
-const NON_WORD_GAP = '[^a-zA-Z0-9]+';
-const NON_WORD_TRAIL = '[^a-zA-Z0-9]*';
-const PURCHASE_PHRASE_BEFORE_RE = new RegExp(
-  `\\b${PURCHASE_CUE_WORDS_RE}\\b(?:${NON_WORD_GAP}${PURCHASE_ARTICLE_WORDS_RE}\\b)?(?:${NON_WORD_GAP}${PURCHASE_CONTAINER_WORDS_RE}\\b${NON_WORD_GAP}of\\b)?${NON_WORD_TRAIL}$`, 'i',
-);
-const QUANTITY_NUMBER_RE = `(?:[0-9]+(?:\\.[0-9]+)?|${[...FOLLOW_UP_NUMBER_WORDS].join('|')})`;
-const QUANTITY_UNIT_RE = `(?:${[...FOLLOW_UP_UNIT_WORDS].join('|')})`;
-const QUANTITY_AFTER_RE = new RegExp(`^${NON_WORD_TRAIL}${QUANTITY_NUMBER_RE}\\b${NON_WORD_GAP}${QUANTITY_UNIT_RE}\\b`, 'i');
-const QUANTITY_BEFORE_RE = new RegExp(
-  `\\b${QUANTITY_NUMBER_RE}\\b${NON_WORD_GAP}${QUANTITY_UNIT_RE}\\b(?:${NON_WORD_GAP}of\\b)?${NON_WORD_TRAIL}$`, 'i',
-);
-// `spans` are always single-word occurrences here (a token, or a one-word
-// alias) — already resolved by the caller (productsNamedIn), body-region
-// mentions already excluded.
-function hasGrammaticalTie(rawText, spans) {
-  return spans.some((span) => PURCHASE_PHRASE_BEFORE_RE.test(rawText.slice(0, span.start))
-    || QUANTITY_AFTER_RE.test(rawText.slice(span.end))
-    || QUANTITY_BEFORE_RE.test(rawText.slice(0, span.start)));
+// Every prose heuristic tried here — proximity/capitalization, a purchase-
+// cue-word regex, a note/message-body detector, a negation detector — chased
+// one more failing pre-push-audit prompt without ever converging. Replaced
+// with ONE structural rule: a text grounds product P only when, after
+// removing every RAW occurrence of P's own name/alias/distinctive-token
+// mentions from the text, EVERY remaining word is a number or belongs to a
+// small, closed, documented vocabulary (CLOSED_VOCAB). A leftover word
+// outside that vocabulary — "used", "unlisted", "chemical", "adjustments",
+// "instead", "not", "notes", "customer" — is content the fallback can't
+// read, so the text grounds nothing rather than guess at what it means.
+// This is what isBareFollowUp ("1 bottle", "78 ounces", "Yes") and
+// productsNamedIn's naming check both reduce to; see isClosedVocabResidual.
+//
+// Deliberately NOT in the vocabulary: not, no, instead, rather, except, but,
+// used, before, notes, note, text, message, saying, customer, and every
+// other content word — a leftover instance of any of these already refuses
+// the text, with no need for its own special-cased detector ("We used
+// Taurus SC before, but bought Unlisted Chemical today; add 2 jugs of that
+// to inventory" refuses because "used"/"but"/"unlisted"/"chemical" all
+// survive removing the one genuine "Taurus SC" mention).
+const CLOSED_VOCAB = new Set([
+  // pronouns/determiners
+  'i', 'we', 'you', 'it', 'its', 's', 'this', 'that', 'these', 'those',
+  'a', 'an', 'the', 'some', 'more', 'another', 'our', 'your', 'my', 'me', 'us', 'them', 'they',
+  // auxiliaries/filler
+  'can', 'could', 'would', 'will', 'please', 'just', 'also', 'now', 'go', 'ahead', 'do', 'did',
+  'is', 'was', 'are', 'were', 'be', 'been', 'have', 'has', 'had', 'got', 'get', 'think', 'guess',
+  'so', 'ok', 'okay', 'yes', 'yeah', 'hey',
+  // prepositions/conjunctions
+  'of', 'to', 'in', 'into', 'for', 'on', 'at', 'as', 'and', 'with', 'from', 'by', 'up',
+  // purchase/stock words
+  'add', 'added', 'adding', 'bought', 'buy', 'purchase', 'purchased', 'picked', 'pick',
+  'received', 'receive', 'restock', 'restocked', 'reorder', 'reordered', 'order', 'ordered',
+  'log', 'logged', 'record', 'recorded', 'put', 'count', 'stock', 'inventory', 'shelf',
+  'delivered', 'arrived', 'came',
+  // quantity words
+  'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'twelve',
+  'dozen', 'half', 'couple', 'few',
+  // units/containers
+  'oz', 'ounce', 'ounces', 'fl', 'fluid', 'gal', 'gallon', 'gallons', 'qt', 'quart', 'quarts',
+  'pt', 'pint', 'pints', 'lb', 'lbs', 'pound', 'pounds', 'g', 'gram', 'grams', 'kg', 'ml', 'l',
+  'liter', 'liters', 'each', 'item', 'items', 'bottle', 'bottles', 'jug', 'jugs', 'bag', 'bags',
+  'case', 'cases', 'box', 'boxes', 'pail', 'pails', 'can', 'cans', 'container', 'containers',
+  'tube', 'tubes', 'pack', 'packs', 'thing', 'things', 'unit', 'units', 'bucket', 'buckets',
+  // spoken concentration (a percent is a unit for a number, same as "oz" —
+  // needed alongside qualifierConflict's own spoken-percent support so a
+  // clean "20 percent" mention doesn't strand "percent" as content)
+  'percent', 'pct', 'per', 'cent',
+  // time
+  'today', 'yesterday', 'tonight', 'morning',
+]);
+
+// Every RAW word (lowercased, non-alphanumeric runs collapsed to a
+// separator) in `rawText`, once the character ranges in `spans` are blanked
+// out. `spans` are exactly the matched occurrences of the product mention(s)
+// under test — nothing else is ever removed.
+function residualWords(rawText, spans) {
+  const chars = [...rawText];
+  for (const span of spans) {
+    for (let i = span.start; i < span.end; i++) chars[i] = ' ';
+  }
+  return chars.join('').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean);
 }
 
-// Note/message-body detection (Codex round-2 P2): a body region starts after
-// a communication cue and runs to the end of the text — a product named only
-// inside it (the CONTENT being saved/sent, not the operator's own request)
-// never grounds. This replaces targetClause for the fallback: targetClause
-// splits at ANY colon or quote, which also strips identity punctuation from
-// a real catalog name/alias ("We bought Premium: Dispatch wetting agent", a
-// seeded alias; 'We bought "Taurus SC"'). This only excludes text after an
-// actual communication cue — a cue word (notes?, message, text, sms, email,
-// reply, comment, instructions, memo) followed within ~40 chars by a colon
-// or an opening quote, or one of a small set of cue phrases ("saying",
-// "that says", "reading", "with the (text|body|message|note|content)").
-const BODY_CUE_WORD_RE = /\b(?:notes?|message|text|sms|email|reply|comment|instructions|memo)\b/gi;
-const BODY_CUE_PHRASE_RE = /\b(?:saying|that\s+says|reading|with\s+the\s+(?:text|body|message|note|content))\b/gi;
-const BODY_CUE_WINDOW = 40;
-// A mention right after a negation or exclusion ("instead of Taurus SC",
-// "not Taurus", "rather than Alpine WSG") is the product the operator does
-// NOT want, so it never names a target.
-const NEGATION_BEFORE_RE = /\b(?:not|no|never|without|except|besides|instead\s+of|rather\s+than|other\s+than)\s+(?:(?:a|an|the|any|some|our|that|this)\s+)?$/i;
-function negatedMention(rawText, start) {
-  return NEGATION_BEFORE_RE.test(rawText.slice(Math.max(0, start - 30), start));
+// Every leftover word must be a number or in CLOSED_VOCAB. An empty residual
+// (the whole text was the removed span(s), or nothing was removed and the
+// text was already all-vocabulary) trivially passes.
+function isClosedVocabResidual(rawText, spans = []) {
+  return residualWords(rawText, spans).every((word) => /^[0-9]+(?:\.[0-9]+)?$/.test(word) || CLOSED_VOCAB.has(word));
 }
 
-function bodyRegionStart(rawText) {
-  let earliest = Infinity;
-  for (const match of rawText.matchAll(BODY_CUE_WORD_RE)) {
-    const searchStart = match.index + match[0].length;
-    const window = rawText.slice(searchStart, searchStart + BODY_CUE_WINDOW);
-    const mark = window.match(/[:"“]/);
-    if (mark) earliest = Math.min(earliest, searchStart + mark.index + 1);
-  }
-  for (const match of rawText.matchAll(BODY_CUE_PHRASE_RE)) {
-    earliest = Math.min(earliest, match.index + match[0].length);
-  }
-  return earliest;
+// A prior operator turn — or the current prompt — may only stand in for
+// naming a product when it names NONE of them (checked by the caller via
+// productsNamedIn before calling this) and every one of its own words is a
+// number or in CLOSED_VOCAB: a genuine bare follow-up ("1 bottle", "78
+// ounces", "Yes", "add it"). "we got a new jug of Unlisted Chemical" is NOT
+// bare — "unlisted"/"chemical" survive — so it must stand on its own, never
+// borrowing a name from an earlier turn.
+function isBareFollowUp(text) {
+  return isClosedVocabResidual(text);
 }
 
 // Which ACTIVE catalog products does operator text name? A product is named
 // by its full catalog name, one of its product_aliases, or a name token that
 // belongs to it ALONE across the active catalog — each matched as whole
 // words (never a substring of a longer word), searched over the FULL raw
-// text. A mention that sits inside a note/message BODY REGION
-// (bodyRegionStart) is never evidence — the content being saved/sent is
-// data, never the operator's own naming (Codex round-2 P2: targetClause's
-// blanket colon/quote split also stripped a real catalog name's own
-// punctuation, e.g. an alias like "Premium: Dispatch wetting agent" or
-// 'We bought "Taurus SC"'; this only excludes text after an actual
-// communication cue). Returns { named, conflict }: `named` is a Set of
-// product ids (0 = nothing named, 1 = grounded, 2+ = ambiguous — the caller
-// refuses rather than guessing); `conflict` is true when a match (of ANY
-// type — full name, alias, or token) was disqualified by a concentration/
-// formulation qualifier sitting immediately before or after the matched span
-// that doesn't match that product's own catalog name (e.g. "Taurus SC 20%"
-// or "20% Taurus SC" naming only a plain "Taurus SC" catalog row, or
-// "Taurus 20% SC" naming only a "Taurus 10% SC" row) — a conflict never
-// grounds, on this text or any other (see resolveByOperatorGrounding). See
-// qualifierConflict for the one check every match type routes through.
+// text. A product is actually NAMED only when, after every one of its own
+// mention spans is removed, the CLOSED_VOCAB residual rule passes (see
+// above) — this is what replaces targetClause (which stripped a real catalog
+// name's own punctuation, e.g. an alias like "Premium: Dispatch wetting
+// agent" or 'We bought "Taurus SC"') and every prior prose heuristic.
+// Returns { named, conflict }: `named` is a Set of product ids (0 = nothing
+// named, 1 = grounded, 2+ = ambiguous — the caller refuses rather than
+// guessing); `conflict` is true when a match (of ANY type — full name,
+// alias, or token) was disqualified by a concentration/formulation qualifier
+// sitting immediately before or after the matched span that doesn't match
+// that product's own catalog name (e.g. "Taurus SC 20%" or "20% Taurus SC"
+// naming only a plain "Taurus SC" catalog row, or "Taurus 20% SC" naming
+// only a "Taurus 10% SC" row) — a conflict never grounds, on this text or
+// any other (see resolveByOperatorGrounding). See qualifierConflict for the
+// one check every match type routes through.
 async function productsNamedIn(rawText) {
   const named = new Set();
   let conflict = false;
   if (!rawText) return { named, conflict };
   const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
-  const bodyStart = bodyRegionStart(rawText);
   const products = await db('products_catalog').where({ active: true }).select('id', 'name');
   const aliasRows = await db('product_aliases as pa')
     .join('products_catalog as pc', 'pc.id', 'pa.product_id')
@@ -1278,31 +1248,25 @@ async function productsNamedIn(rawText) {
     // name "Taurus SC", but the trailing "20%" still has to agree with the
     // catalog row (see qualifierConflict's own doc for why a qualifier
     // INSIDE the matched span needs no separate check).
-    // Every phrase that could name this product here (full name, each
-    // alias, each distinctive token) is checked for its RAW occurrences,
-    // tagged `weak` when it's single-word evidence (a distinctive token, or
-    // a one-word alias), with any body-region occurrence dropped — a phrase
-    // that names this product ONLY inside a note/message body is the same
-    // as not naming it at all.
-    const candidates = [
-      { words: nameNorm.split(' '), weak: false },
-      ...aliasRows.filter((a) => a.product_id === p.id).map((a) => {
-        const words = normalizeForMatch(a.alias_name).split(' ');
-        return { words, weak: words.length === 1 };
-      }),
-      ...nameNorm.split(' ').filter((token) => isCandidateToken(token) && tokenOwners.get(token)?.size === 1)
-        .map((token) => ({ words: [token], weak: true })),
+    // Every phrase that could name this product (full name, each alias,
+    // each distinctive token) is checked for its RAW occurrences.
+    const phraseWords = [
+      nameNorm.split(' '),
+      ...aliasRows.filter((a) => a.product_id === p.id).map((a) => normalizeForMatch(a.alias_name).split(' ')),
+      ...nameNorm.split(' ').filter((token) => isCandidateToken(token) && tokenOwners.get(token)?.size === 1).map((token) => [token]),
     ];
-    const phrases = candidates
-      .map((phrase) => ({ ...phrase, spans: findPhraseSpansInRawText(rawText, phrase.words).filter((span) => span.start < bodyStart && !negatedMention(rawText, span.start)) }))
+    const phrases = phraseWords
+      .map((words) => ({ spans: findPhraseSpansInRawText(rawText, words) }))
       .filter((phrase) => phrase.spans.length > 0);
     if (!phrases.length) continue;
-    // Single-word evidence needs a grammatical tie (see hasGrammaticalTie)
-    // — a full name or a multi-word alias is specific enough to stand alone.
-    // No tie on any weak phrase, with no strong phrase either, means this
-    // text simply doesn't name the product (not a conflict — just
-    // insufficient evidence, so it never blocks a prior-turn fallback).
-    if (phrases.every((phrase) => phrase.weak) && !phrases.some((phrase) => hasGrammaticalTie(rawText, phrase.spans))) continue;
+    // The residual rule: remove every one of THIS product's own mention
+    // spans (every match type combined — a full-name match and its own
+    // token match cover the same ground) and require the rest of the text
+    // to be closed-vocabulary. Not naming (continue, no conflict) when it
+    // fails — insufficient/unreadable evidence, never a reason to block a
+    // prior-turn fallback the way a genuine qualifier conflict does.
+    const allSpans = phrases.flatMap((phrase) => phrase.spans);
+    if (!isClosedVocabResidual(rawText, allSpans)) continue;
     if (qualifierConflict(rawText, phrases, p.name)) { conflict = true; continue; }
     named.add(p.id);
   }
@@ -1323,14 +1287,14 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { 
     const [id] = named;
     return id === preview.product.id ? { productId: id } : { mismatch: true };
   };
-  // Naming comes from the operator's FULL raw text, minus any note/message
-  // body region (bodyRegionStart) — never targetClause, which also strips
+  // Naming comes from the operator's FULL raw text via the closed-vocabulary
+  // residual rule (productsNamedIn) — never targetClause, which also strips
   // identity punctuation from a real catalog name/alias ("We bought Premium:
   // Dispatch wetting agent", a seeded alias; 'We bought "Taurus SC"').
   // "Add notes for this customer: Request 2 lb of Taurus SC" still names
-  // nothing (the mention sits inside the note body). Qualifier conflicts are
-  // checked across the same body-filtered spans, so a concentration after a
-  // colon with no body cue involved ("Taurus SC: 20%") still refuses.
+  // nothing ("notes"/"customer" are leftover content words, outside
+  // CLOSED_VOCAB). Qualifier conflicts are checked across the same spans, so
+  // a concentration after a colon ("Taurus SC: 20%") still refuses.
   const current = await productsNamedIn(prompt);
   // A qualifier conflict ("Taurus 20% SC" against a "Taurus 10% SC" catalog
   // row) never grounds, on this text or any other — never fall back either.
