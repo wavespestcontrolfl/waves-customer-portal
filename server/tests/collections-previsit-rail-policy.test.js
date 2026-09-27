@@ -252,7 +252,12 @@ test('sms allowed + email denied ⇒ SMS only, hasEmailLeg declared false, one s
   const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
   expect(result).toMatchObject({ sent: 1, skipped: 0 });
   expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ hasEmailLeg: false }));
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+    hasEmailLeg: false,
+    withSmsHandoff: expect.any(Function),
+    providerPreSendCheck: expect.any(Function),
+  }));
+  expect(sendCustomerMessage.mock.calls[0][0]).not.toHaveProperty('preSendCheck');
   expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();
   const channels = ContactLedger.recordContact.mock.calls.map(([args]) => args.channel);
   expect(channels).toEqual(['sms']);
