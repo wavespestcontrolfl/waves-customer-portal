@@ -486,23 +486,23 @@ describe('invoice SMS provider handoff', () => {
         .some((change) => typeof change.status === 'string' && !change.status.startsWith('CASE WHEN'));
     }
 
-    test.each(['prior', 'bell', 'prior+email', 'prior+old-email'])('settled App %s finalizes once and preserves unfinished siblings', async (mode) => {
+    test.each(['prior', 'bell', 'bell+email', 'prior+email', 'prior+old-email'])('settled App %s finalizes once and preserves unfinished siblings', async (mode) => {
       const activityInserts = [], smsLogInserts = [], visibleAt = new Date(Date.now() - 86400000);
       const { invoiceQueries, mock } = invoiceQueryDb({ activityInserts, smsLogInserts });
       db.mockImplementation(mock);
-      const push = mode === 'bell' ? { sent: false, deliveryOutcome: 'uncertain', bellPersisted: true }
+      const push = mode.startsWith('bell') ? { sent: false, deliveryOutcome: 'uncertain', bellPersisted: true }
         : { sent: false, deliveryOutcome: 'not_sent', reason: 'app_event_already_visible', eventVisibleAt: visibleAt };
       sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', channelResults: {
-        push, ...(mode === 'prior' ? {} : mode === 'prior+old-email' ? { email: { sent: true, deliveryOutcome: 'accepted', deduped: true } } : { email: { sent: false, deliveryOutcome: 'not_sent', retryable: true } }),
+        push, ...(['prior', 'bell'].includes(mode) ? {} : mode === 'prior+old-email' ? { email: { sent: true, deliveryOutcome: 'accepted', deduped: true } } : { email: { sent: false, deliveryOutcome: 'not_sent', retryable: true } }),
       } });
       const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
       expect(result.sent).toBe(true);
-      expect(result.pendingChannelQueued === true).toBe(['bell', 'prior+email'].includes(mode));
+      expect(result.pendingChannelQueued === true).toBe(['bell+email', 'prior+email'].includes(mode));
       expect(claimWasRestored(invoiceQueries)).toBe(false);
       const stamp = invoiceQueries.flatMap(q => q.update.mock.calls.map(([change]) => change)).find(change => change.sent_at);
-      expect(stamp.sms_sent_at).toEqual(mode === 'bell' ? expect.any(Date) : visibleAt);
+      expect(stamp.sms_sent_at).toEqual(mode.startsWith('bell') ? expect.any(Date) : visibleAt);
       if (mode === 'prior+old-email') expect(stamp.email_sent_at).toBe('email_sent_at');
-      if (mode !== 'bell') { expect(result.deduped).toBe(true); expect(stamp.sent_at).toEqual(visibleAt); expect(activityInserts).toHaveLength(0); }
+      if (!mode.startsWith('bell')) { expect(result.deduped).toBe(true); expect(stamp.sent_at).toEqual(visibleAt); expect(activityInserts).toHaveLength(0); }
     });
 
     test('an accepted Email leg is finalized and never restores the claim when the Text leg still needs a retryable retry', async () => {

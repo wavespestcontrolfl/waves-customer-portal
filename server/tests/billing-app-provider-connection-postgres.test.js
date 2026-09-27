@@ -38,6 +38,7 @@ postgres('billing App quote guard under the scheduler connection limit', () => {
       pool: { min: 0, max: 2 }, acquireConnectionTimeout: 1500 });
     await mockPg.schema.createTable('invoices', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id'); table.integer('due_cents');
+      table.text('status'); table.timestamp('sms_sent_at'); table.timestamp('email_sent_at'); table.timestamp('updated_at');
     });
     await mockPg.schema.createTable('notifications', (table) => {
       table.increments('id'); table.uuid('recipient_id'); table.jsonb('metadata');
@@ -54,7 +55,12 @@ postgres('billing App quote guard under the scheduler connection limit', () => {
       table.integer('amount_cents'); table.uuid('payment_method_id'); table.uuid('payment_id');
       table.jsonb('details'); table.timestamp('created_at').defaultTo(mockPg.fn.now());
     });
-    await mockPg('invoices').insert({ id: invoiceId, customer_id: customerId, due_cents: 4900 });
+    await mockPg.schema.createTable('email_messages', table => { table.text('idempotency_key'); table.text('status'); });
+    await mockPg.schema.createTable('sms_log', table => {
+      for (const key of ['id', 'direction', 'status', 'twilio_sid', 'from_phone']) table.text(key);
+      table.jsonb('metadata');
+    });
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: customerId, due_cents: 4900, status: 'sent' });
   }, 30000);
   afterAll(async () => {
     await mockPg?.destroy();
@@ -158,4 +164,16 @@ postgres('billing App quote guard under the scheduler connection limit', () => {
     expect(settled.occurred_at).toEqual(deliveredAt);
     expect((await mockPg('collections_contact_ledger').where({ id: resumed.id }).first()).occurred_at).toEqual(deliveredAt);
   });
+  test('a committed current bell settles invoice replay even without native proof', async () => {
+    const key = `invoice:${invoiceId}:sent`;
+    PushService.sendToCustomer.mockRejectedValueOnce(new Error('native delivery failed'));
+    const bell = await NotificationService.notifyCustomer(customerId, 'invoice', 'Invoice ready', 'Open invoice', { dedupeKey: key, awaitPush: true });
+    expect(bell.push.accepted).toBeUndefined();
+    expect(await mockPg('sms_log')).toHaveLength(0);
+    await require('../services/messaging/deferred-replay-registry').finalizeDeferredReplay('invoice_send_deferred', {
+      invoice_id: invoiceId, partial_fanout_retry: true,
+    });
+    expect((await mockPg('invoices').where({ id: invoiceId }).first()).sms_sent_at).toEqual(bell.created_at);
+  });
+
 });

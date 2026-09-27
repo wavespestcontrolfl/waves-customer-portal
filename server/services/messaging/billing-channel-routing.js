@@ -147,8 +147,8 @@ function legFailure(channel, err) {
   const outcome = err.providerOutcome;
   return outcome?.deliveryOutcome === 'accepted'
     ? { ...outcome, sent: true, blocked: false, channel }
-    : { sent: false, blocked: false, channel, deliveryOutcome: outcome?.deliveryOutcome || 'not_sent',
-      code: 'BILLING_CHANNEL_FAILED', reason: err.message, retryable: true };
+    : { ...outcome, sent: false, blocked: false, channel, deliveryOutcome: outcome?.deliveryOutcome || 'not_sent',
+      code: 'BILLING_CHANNEL_FAILED', reason: outcome?.reason || outcome?.error || err.message, retryable: true };
 }
 
 // One leg through the complete guarded pipeline.
