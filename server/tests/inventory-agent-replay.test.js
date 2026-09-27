@@ -9,7 +9,7 @@
  * (this same function, run against the real shared db module before the
  * script does anything else) is for.
  */
-const { assertReadOnly } = require('../../ops/agents/inventory-agent-replay');
+const { assertReadOnly, siteOneReplayItems } = require('../../ops/agents/inventory-agent-replay');
 
 function mockDb(behavior) {
   return { raw: jest.fn(behavior) };
@@ -42,5 +42,40 @@ describe('assertReadOnly', () => {
       throw new Error('connection terminated unexpectedly');
     });
     await expect(assertReadOnly(db)).rejects.toThrow(/not with the expected read-only rejection/);
+  });
+});
+
+// The replay decides SiteOne lines with the same invoice evidence the live
+// agent reads (2026-09-27 pre-push audit): each item keeps its email id and
+// the invoice's own line number, and the lines the live sweep never hands
+// the agent are left out.
+describe('siteOneReplayItems', () => {
+  const email = { id: 'email-1' };
+
+  test('keeps the email id and each line\'s own invoice line number', () => {
+    const invoice = { lines: [
+      { title: 'TAURUS SC 78OZ', quantity: 2, lineNo: 1, uom: 'EA' },
+      { title: 'DEMAND CS 8OZ', quantity: 1, lineNo: 3, uom: 'EA' },
+    ] };
+    expect(siteOneReplayItems(email, invoice)).toEqual([
+      { vendor: 'siteone', title: 'TAURUS SC 78OZ', quantity: 2, emailId: 'email-1', lineNo: 1 },
+      { vendor: 'siteone', title: 'DEMAND CS 8OZ', quantity: 1, emailId: 'email-1', lineNo: 3 },
+    ]);
+  });
+
+  test('leaves out zero-quantity lines and the lines the sweep holds for a person', () => {
+    const invoice = { lines: [
+      { title: 'NOT SHIPPED', quantity: 0, lineNo: 1, uom: 'EA' },
+      { title: 'RETURNED BAIT', quantity: -1, lineNo: 2, uom: 'EA' },
+      { title: 'CASE OF 4', quantity: 1, lineNo: 3, uom: 'CS' },
+      { title: 'TAURUS SC 78OZ', quantity: 1, lineNo: 4, uom: 'EA' },
+    ] };
+    expect(siteOneReplayItems(email, invoice).map((item) => item.title)).toEqual(['TAURUS SC 78OZ']);
+    expect(siteOneReplayItems(email, { ...invoice, problem: 'unverified' })).toEqual([]);
+  });
+
+  test('a pending or unreadable invoice yields nothing', () => {
+    expect(siteOneReplayItems(email, null)).toEqual([]);
+    expect(siteOneReplayItems(email, { pending: true, lines: [] })).toEqual([]);
   });
 });

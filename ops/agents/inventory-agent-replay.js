@@ -80,7 +80,8 @@ const server = (relative) => path.join(__dirname, '..', '..', 'server', relative
 const { classifyItem, AGENT_HANDOFF_STATUSES } = require(server('services/purchase-receipts/receipt-processor'));
 const { parseAmazonDeliveredEmail, parseAmazonShippedEmail, AMAZON_DELIVERY_FROM, AMAZON_SHIPPED_FROM } = require(server('services/purchase-receipts/amazon-delivery-parser'));
 const siteOne = require(server('services/purchase-receipts/siteone-invoices'));
-const { decideForTitle, loadAllowedCategories, loadActiveCatalog } = require(server('services/purchase-receipts/inventory-agent'));
+const { decideForTitle, loadAllowedCategories, loadActiveCatalog, siteOneLineFields } = require(server('services/purchase-receipts/inventory-agent'));
+const { siteOneHold } = require(server('services/purchase-receipts/sweep'));
 const { dispatchWithFallback } = require(server('services/llm/call'));
 // The shared pool dispatchWithFallback's telemetry can write through —
 // required here ONLY so assertReadOnly can prove it's read-only too; every
@@ -148,10 +149,22 @@ async function siteOneTitles(conn, since) {
     } catch {
       continue; // one unreadable invoice never stops the rest
     }
-    if (!invoice || invoice.pending || !Array.isArray(invoice.lines)) continue;
-    for (const line of invoice.lines) items.push({ vendor: 'siteone', title: line.title, quantity: line.quantity });
+    items.push(...siteOneReplayItems(email, invoice));
   }
   return items;
+}
+
+// The SiteOne lines the live sweep would hand the agent, each keeping its
+// email id and invoice line number so the replay can read the same invoice
+// evidence (siteOneLineFields) processOneLine gives the model. A
+// zero-quantity line is never recorded, and a line the sweep holds for a
+// person (siteOneHold: a return, an unverified UOM or invoice) never
+// reaches the agent — both are left out, as the live lane leaves them out.
+function siteOneReplayItems(email, invoice) {
+  if (!invoice || invoice.pending || !Array.isArray(invoice.lines)) return [];
+  return invoice.lines
+    .filter((line) => line.quantity !== 0 && !siteOneHold(invoice.problem, line.quantity, line.uom))
+    .map((line) => ({ vendor: 'siteone', title: line.title, quantity: line.quantity, emailId: email.id, lineNo: line.lineNo }));
 }
 
 // One title, one quantity — the same title bought several times over the
@@ -219,7 +232,8 @@ async function main() {
         catalog = await loadActiveCatalog(conn);
       }
       llmCalls += 1;
-      const outcome = await decideForTitle(conn, dispatchWithFallback, { rawTitle: item.title, quantity: item.quantity, vendor: item.vendor, siteOneFields: null }, { allowedCategories, ...catalog });
+      const siteOneFields = item.vendor === 'siteone' ? await siteOneLineFields(conn, { email_id: item.emailId, line_no: item.lineNo }) : null;
+      const outcome = await decideForTitle(conn, dispatchWithFallback, { rawTitle: item.title, quantity: item.quantity, vendor: item.vendor, siteOneFields }, { allowedCategories, ...catalog });
       rows.push({ ...item, classifierStatus: classified.status, decisionText: outcomeSummary(outcome) });
     }
 
@@ -248,4 +262,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { assertReadOnly };
+module.exports = { assertReadOnly, siteOneReplayItems };

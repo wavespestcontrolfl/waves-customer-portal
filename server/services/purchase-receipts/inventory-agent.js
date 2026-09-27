@@ -1873,4 +1873,7 @@ module.exports = {
   // The same catalog view the live agent decides against, for the read-only
   // replay tool (ops/agents/inventory-agent-replay.js).
   loadAllowedCategories, loadActiveCatalog,
+  // The SiteOne invoice evidence (unit price, total, UOM) processOneLine
+  // gives the model, read the same way for the replay.
+  siteOneLineFields,
 };
