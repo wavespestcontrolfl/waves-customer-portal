@@ -98,15 +98,20 @@ async function fillExistingCustomerLastName(trx, customerId, lastName) {
   await trx('customers').where({ id: customerId }).update({ last_name: lastName });
 }
 
+// Email goes through the shared email-claim guard (customer row lock, then
+// the 'customer-email:' advisory lock, then the undone-merge holder
+// recheck) in a savepoint — the same serialization every other automated
+// blank-email backfill takes, so a racing merge undo cannot leave this
+// customer holding an address it just restored to the merged-away row.
 async function fillExistingCustomerEmail(trx, customerId, email) {
   if (!customerId || !email) return;
-  const row = await trx('customers').where({ id: customerId }).forUpdate().first('email');
-  if (!row || hasEmail(row.email)) return;
-  await trx('customers').where({ id: customerId }).update({ email });
+  const { backfillCustomerEmailInTrx } = require('./customer-email-fanout');
+  await backfillCustomerEmailInTrx(trx, { customerId, email, source: 'estimate-accept-contact' });
 }
 
 module.exports = {
   hasEmail,
+  cleanedNameTokens,
   CONTACT_LAST_NAME_MAX,
   CONTACT_EMAIL_MAX,
   computeContactGaps,

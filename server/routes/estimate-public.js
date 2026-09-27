@@ -30,6 +30,7 @@ const {
   fillExistingCustomerLastName,
   fillExistingCustomerEmail,
   hasEmail: contactGapHasEmail,
+  cleanedNameTokens: contactGapNameTokens,
 } = require('../services/estimate-contact-gaps');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
@@ -8623,12 +8624,30 @@ async function handleEstimateView(req, res, next) {
     const acceptanceTermsForcesReactView = featureGates.isEnabled('estimateAcceptanceTerms')
       && isEstimateAcceptActive(estimate)
       && acceptanceTermsApplyTo(estimate);
+    // Missing-contact capture (owner ruling 2026-09-27) lives ONLY in the
+    // React accept card; the legacy server-HTML page cannot collect a last
+    // name / email (codex #5102 r1 P0). An accept-active estimate with a
+    // contact gap therefore always gets the React view — same shape as the
+    // acceptance-terms force above. A lookup failure fails open (no force).
+    let contactGapsForceReactView = false;
+    if (isEstimateAcceptActive(estimate)) {
+      try {
+        const linkedCustomerForGaps = estimate.customer_id
+          ? await db('customers').where({ id: estimate.customer_id }).first('last_name', 'email')
+          : null;
+        const gaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
+        contactGapsForceReactView = !!(gaps.lastName || gaps.email);
+      } catch (e) {
+        logger.warn(`[estimate-view] contact-gap routing check skipped: ${e.message}`);
+      }
+    }
     let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
       || recurringCardForcesReactView
       || estimatePdfRenderPass
-      || acceptanceTermsForcesReactView;
+      || acceptanceTermsForcesReactView
+      || contactGapsForceReactView;
 
     // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
     // v2-by-default population is eligible: published, not an admin preview, not
@@ -8652,6 +8671,7 @@ async function handleEstimateView(req, res, next) {
       && !recurringCardForcesReactView
       && !estimatePdfRenderPass
       && !acceptanceTermsForcesReactView
+      && !contactGapsForceReactView
       && !adminPreviewRequested
       // Only estimates that can still convert: isEstimateAcceptActive excludes
       // unpublished, terminal (accepted/declined/expired/send_failed), archived,
@@ -8680,7 +8700,7 @@ async function handleEstimateView(req, res, next) {
     // the React URL for the same estimate instead of a dead-end 409. After
     // the expired carve-out: an expired estimate cannot accept, so it keeps
     // its personalized SSR expired page.
-    if (acceptanceTermsForcesReactView) {
+    if (acceptanceTermsForcesReactView || contactGapsForceReactView) {
       const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
       return res.redirect(302, `/estimate/${encodeURIComponent(estimate.token)}${qs}`);
     }
@@ -9083,6 +9103,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       return res.status(400).json({ error: contactEmailError.message, code: contactEmailError.code });
     }
     let pendingEstimateContactPatch = null;
+    // Only the fields the server itself flags as gaps are ever written —
+    // the same verdict /data advertised. A crafted request carrying a
+    // value for a field the page never offered writes nothing (codex
+    // #5102 r1 P0): customer fills below use these, not the raw inputs.
+    let contactFillLastName = null;
+    let contactFillEmail = null;
     if (sanitizedContactLastName || sanitizedContactEmail) {
       try {
         const linkedCustomerForGaps = estimate.customer_id
@@ -9090,13 +9116,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           : null;
         const contactFillGaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
         const estimateContactPatch = {};
-        if (sanitizedContactLastName && contactFillGaps.lastName) {
-          const firstToken = String(estimate.customer_name || '').trim().split(/\s+/).filter(Boolean)[0] || 'Customer';
+        if (sanitizedContactLastName && contactFillGaps.lastName) contactFillLastName = sanitizedContactLastName;
+        if (sanitizedContactEmail && contactFillGaps.email) contactFillEmail = sanitizedContactEmail;
+        if (contactFillLastName) {
+          // Cleaned tokens (codex #5102 r1 P2): a legacy "undefined Smith"
+          // row keeps no 'undefined' first name.
+          const firstToken = contactGapNameTokens(estimate.customer_name)[0] || 'Customer';
           // estimates.customer_name is varchar(100).
-          estimateContactPatch.customer_name = `${firstToken} ${sanitizedContactLastName}`.slice(0, 100);
+          estimateContactPatch.customer_name = `${firstToken} ${contactFillLastName}`.slice(0, 100);
         }
-        if (sanitizedContactEmail && contactFillGaps.email) {
-          estimateContactPatch.customer_email = sanitizedContactEmail;
+        if (contactFillEmail) {
+          estimateContactPatch.customer_email = contactFillEmail;
         }
         if (Object.keys(estimateContactPatch).length) {
           // Remember the pre-patch values for the in-transaction
@@ -10844,8 +10874,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // already fenced this row since acceptPreLockedCommsId === customerId
       // here). Never overwrites a real value already on file.
       if (customerId) {
-        if (sanitizedContactLastName) await fillExistingCustomerLastName(trx, customerId, sanitizedContactLastName);
-        if (sanitizedContactEmail) await fillExistingCustomerEmail(trx, customerId, sanitizedContactEmail);
+        if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName);
+        if (contactFillEmail) await fillExistingCustomerEmail(trx, customerId, contactFillEmail);
       }
       // Grouped multi-property accept: a sibling estimate in the same group
       // that already resolved its customer is the DETERMINISTIC owner of this
@@ -10889,8 +10919,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           }
           await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
           // Sibling's existing customer: same guarded, never-overwrite fill.
-          if (sanitizedContactLastName) await fillExistingCustomerLastName(trx, customerId, sanitizedContactLastName);
-          if (sanitizedContactEmail) await fillExistingCustomerEmail(trx, customerId, sanitizedContactEmail);
+          if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName);
+          if (contactFillEmail) await fillExistingCustomerEmail(trx, customerId, contactFillEmail);
         }
       }
       if (!customerId && estimate.customer_phone) {
@@ -10928,8 +10958,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // Reused an existing profile: fill its last_name/email ONLY if
           // blank/the 'Customer' placeholder — same guarded helpers as the
           // already-linked branch above, now under this authoritative lock.
-          if (sanitizedContactLastName) await fillExistingCustomerLastName(trx, customerId, sanitizedContactLastName);
-          if (sanitizedContactEmail) await fillExistingCustomerEmail(trx, customerId, sanitizedContactEmail);
+          if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName);
+          if (contactFillEmail) await fillExistingCustomerEmail(trx, customerId, contactFillEmail);
         } else {
           const nameParts = (estimate.customer_name || 'New Customer').split(' ');
           const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');

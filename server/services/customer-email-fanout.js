@@ -1530,6 +1530,70 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
 // new synced surface.
 const EMAIL_FANOUT_DISCLOSURE = 'an email change also updates every open send still targeting the old email address (leads, estimates, newsletter, automations, queued template sends, referral promoter, billing pref, contracts, booking recovery) and resolves open email review cards';
 
+// The guarded body of applyCustomerUpdatesWithEmailClaimGuard, run on a
+// caller-supplied transaction: customer row FOR UPDATE, then the shared
+// 'customer-email:' advisory lock, then the undone-merge holder recheck.
+async function claimGuardedCustomerUpdateInTrx(trx, {
+  customerId, updates, emailKeyNorm, replaceExpectedEmail = null, applyWithEmailInTrx = null,
+}) {
+  const fresh = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'email');
+  if (!fresh) return { emailApplied: false, emailDroppedReason: 'customer row gone' };
+  const standingValueBlocks = replaceExpectedEmail == null
+    ? !!fresh.email
+    : String(fresh.email || '') !== String(replaceExpectedEmail);
+  if (standingValueBlocks) {
+    // Filled (or fixed) while we waited — operator edit, merge
+    // backfill, a racing intake. The standing value wins; automated
+    // intake never overwrites an email it did not read pre-lock, only
+    // backfills an empty one or replaces the exact garbled value it
+    // saw.
+    const { email: _dropped, ...rest } = updates;
+    if (Object.keys(rest).length) await trx('customers').where({ id: customerId }).update(rest);
+    return { emailApplied: false, emailDroppedReason: 'email filled concurrently' };
+  }
+  await require('../utils/customer-comms-lock').lockCustomerEmail(trx, emailKeyNorm);
+  // MERGE-SPECIFIC evidence, not global uniqueness (r38 — the same
+  // ruling every other claimant site adopted): customers.email is
+  // deliberately non-unique, so a spouse/tenant/shared-household
+  // holder must not leave the matched customer email-less. Only a
+  // live holder who is the restored LOSER of an UNDONE merge whose
+  // winner is THIS customer proves the address is a stale pre-undo
+  // capture. One joined existence query; if the joined read fails,
+  // fall back to the conservative bare-holder block.
+  let undoneHolder = null;
+  try {
+    undoneHolder = await trx('customers as c')
+      .join('customer_merge_journal as j', function joinUndone() {
+        this.on('j.loser_customer_id', 'c.id');
+      })
+      .where('j.winner_customer_id', customerId)
+      .whereNotNull('j.undone_at')
+      .whereRaw('lower(c.email) = ?', [emailKeyNorm])
+      .whereNot('c.id', customerId)
+      .where('c.active', true)
+      .whereNull('c.deleted_at')
+      .first('c.id');
+  } catch {
+    undoneHolder = await trx('customers')
+      .whereRaw('lower(email) = ?', [emailKeyNorm])
+      .whereNot({ id: customerId })
+      .where('active', true)
+      .whereNull('deleted_at')
+      .first('id');
+  }
+  if (undoneHolder) {
+    const { email: _dropped, ...rest } = updates;
+    if (Object.keys(rest).length) await trx('customers').where({ id: customerId }).update(rest);
+    return { emailApplied: false, emailDroppedReason: 'address was restored to a merged-away customer by an undo' };
+  }
+  if (applyWithEmailInTrx) {
+    await applyWithEmailInTrx(trx);
+  } else {
+    await trx('customers').where({ id: customerId }).update(updates);
+  }
+  return { emailApplied: true, emailDroppedReason: null };
+}
+
 /**
  * Apply an AUTOMATED intake writer's updates to an existing customer row,
  * serializing an email backfill against a concurrent customer-merge UNDO.
@@ -1591,64 +1655,9 @@ async function applyCustomerUpdatesWithEmailClaimGuard({
     return { emailApplied: false, emailDroppedReason: null };
   }
   try {
-    return await db.transaction(async (trx) => {
-      const fresh = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'email');
-      if (!fresh) return { emailApplied: false, emailDroppedReason: 'customer row gone' };
-      const standingValueBlocks = replaceExpectedEmail == null
-        ? !!fresh.email
-        : String(fresh.email || '') !== String(replaceExpectedEmail);
-      if (standingValueBlocks) {
-        // Filled (or fixed) while we waited — operator edit, merge
-        // backfill, a racing intake. The standing value wins; automated
-        // intake never overwrites an email it did not read pre-lock, only
-        // backfills an empty one or replaces the exact garbled value it
-        // saw.
-        const { email: _dropped, ...rest } = updates;
-        if (Object.keys(rest).length) await trx('customers').where({ id: customerId }).update(rest);
-        return { emailApplied: false, emailDroppedReason: 'email filled concurrently' };
-      }
-      await require('../utils/customer-comms-lock').lockCustomerEmail(trx, emailKeyNorm);
-      // MERGE-SPECIFIC evidence, not global uniqueness (r38 — the same
-      // ruling every other claimant site adopted): customers.email is
-      // deliberately non-unique, so a spouse/tenant/shared-household
-      // holder must not leave the matched customer email-less. Only a
-      // live holder who is the restored LOSER of an UNDONE merge whose
-      // winner is THIS customer proves the address is a stale pre-undo
-      // capture. One joined existence query; if the joined read fails,
-      // fall back to the conservative bare-holder block.
-      let undoneHolder = null;
-      try {
-        undoneHolder = await trx('customers as c')
-          .join('customer_merge_journal as j', function joinUndone() {
-            this.on('j.loser_customer_id', 'c.id');
-          })
-          .where('j.winner_customer_id', customerId)
-          .whereNotNull('j.undone_at')
-          .whereRaw('lower(c.email) = ?', [emailKeyNorm])
-          .whereNot('c.id', customerId)
-          .where('c.active', true)
-          .whereNull('c.deleted_at')
-          .first('c.id');
-      } catch {
-        undoneHolder = await trx('customers')
-          .whereRaw('lower(email) = ?', [emailKeyNorm])
-          .whereNot({ id: customerId })
-          .where('active', true)
-          .whereNull('deleted_at')
-          .first('id');
-      }
-      if (undoneHolder) {
-        const { email: _dropped, ...rest } = updates;
-        if (Object.keys(rest).length) await trx('customers').where({ id: customerId }).update(rest);
-        return { emailApplied: false, emailDroppedReason: 'address was restored to a merged-away customer by an undo' };
-      }
-      if (applyWithEmailInTrx) {
-        await applyWithEmailInTrx(trx);
-      } else {
-        await trx('customers').where({ id: customerId }).update(updates);
-      }
-      return { emailApplied: true, emailDroppedReason: null };
-    });
+    return await db.transaction((trx) => claimGuardedCustomerUpdateInTrx(trx, {
+      customerId, updates, emailKeyNorm, replaceExpectedEmail, applyWithEmailInTrx,
+    }));
   } catch (e) {
     // The guard must never block the intake write into failure: drop the
     // email fill (the lead/quote/call record still carries the address for
@@ -1663,6 +1672,32 @@ async function applyCustomerUpdatesWithEmailClaimGuard({
   }
 }
 
+/**
+ * Blank-email backfill INSIDE a caller's transaction (the public estimate
+ * accept fills an existing customer's missing email from the accept card).
+ * Same claim guard as applyCustomerUpdatesWithEmailClaimGuard, run in a
+ * SAVEPOINT so a guard failure drops only the email fill — never the
+ * caller's transaction. A whitespace-only stored email counts as blank:
+ * it is replaced only if still that exact value under the row lock.
+ * Returns { emailApplied, emailDroppedReason }.
+ */
+async function backfillCustomerEmailInTrx(trx, { customerId, email, source = 'intake' }) {
+  const emailKeyNorm = emailKey(email);
+  if (!customerId || !email || !emailKeyNorm) return { emailApplied: false, emailDroppedReason: null };
+  const current = await trx('customers').where({ id: customerId }).first('email');
+  if (!current) return { emailApplied: false, emailDroppedReason: 'customer row gone' };
+  if (String(current.email || '').trim()) return { emailApplied: false, emailDroppedReason: 'email already on file' };
+  const replaceExpectedEmail = current.email ? current.email : null;
+  try {
+    return await trx.transaction((sp) => claimGuardedCustomerUpdateInTrx(sp, {
+      customerId, updates: { email }, emailKeyNorm, replaceExpectedEmail,
+    }));
+  } catch (e) {
+    logger.warn(`[email-fanout] in-transaction email-claim guard failed for ${source} (customer ${customerId}) — skipping the email backfill: ${e.message}`);
+    return { emailApplied: false, emailDroppedReason: `guard failed: ${e.message}` };
+  }
+}
+
 module.exports = {
   propagateCustomerEmailChange,
   resolveOpenEmailReviewCards,
@@ -1670,4 +1705,5 @@ module.exports = {
   emailKey,
   EMAIL_FANOUT_DISCLOSURE,
   applyCustomerUpdatesWithEmailClaimGuard,
+  backfillCustomerEmailInTrx,
 };

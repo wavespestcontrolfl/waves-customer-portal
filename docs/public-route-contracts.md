@@ -377,7 +377,16 @@ estimate row is written inside the acceptance transaction, after the row lock
 and eligibility checks, compare-and-set (name only if still the value read,
 email only if still blank), so a rejected accept changes nothing; the
 matched/linked/new customer gets `last_name` only when blank or `'Customer'`
-and `email` only when blank. No message is sent because of these fields.
+and `email` only when blank (whitespace-only counts as blank). Only fields the
+server's own `contactGaps` verdict flags are ever written — a value for a field
+the page never offered is ignored. The customer email fill runs through the
+shared email-claim guard (`backfillCustomerEmailInTrx`: row lock, then the
+`customer-email:` advisory lock, then the undone-merge holder recheck) in a
+savepoint, so a guard failure drops only the email fill, not the accept. An
+accept-active estimate with a contact gap always gets the React view: the
+`/estimate/` mount skips the legacy renderer and the GrowthBook holdback, and
+the `/api/estimates` mount redirects to `/estimate/:token`. No message is sent
+because of these fields.
 
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
