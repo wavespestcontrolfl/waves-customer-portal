@@ -1422,30 +1422,23 @@ topic, not grammatical subject, so it over-blocks by design.
 With `GATE_ASK_WAVES_TOPIC_ROUTING` on (dark; read at call time through
 `askWavesTopicRoutingLive()`), the model also returns a `topic`
 (`medical_emergency` / `product_safety` / `reentry_timing` / `none`; the field
-and its rules are sent only while the gate is on), and routing runs before the
-claim chokepoint:
+and its rules are sent only while the gate is on), and routing on that topic
+runs before the claim chokepoint:
 - `medical_emergency` → the emergency script (no quote CTA). Poison Control /
-  veterinary lines follow the visitor's words as in `emergencyGuidance`; a pet
-  named with a possessive or article (EN/ES) or a question about a vet or
-  animal hospital adds the veterinary line.
+  veterinary lines follow the visitor's words as in `emergencyGuidance`, and
+  any `PET_WORD` animal in the conversation or a vet / animal-hospital question
+  adds the veterinary line.
 - `product_safety` / `reentry_timing` → the reviewed "follow the product label"
   copy (EN/ES), keeping the model's validated quote fields (restored when the
-  model also labeled the turn "emergency"). It becomes the emergency script
-  instead only on qualified evidence in the conversation (`qualifiedEmergencyIn`:
-  a product exposure, a symptom after a treatment, or trouble breathing) — never
-  on the broad detector's other phrases.
-- `none` (or a missing / unknown topic) keeps the model's answer, except where
-  the visitor's own words match the floor: a question naming a safety word
-  about the treatment or about its effect on a person or pet, with no pest as
-  the subject once product names and protected targets are removed; or a
-  question with occupants coming back or re-entry / drying / letting-out words.
-  Known limitations (backlog, not contract): the floor does not read loose
-  access wording ("When can we walk on the lawn?" relies on the model's topic),
-  and it can still fire on an unusual phrasing that pairs a safety word with a
-  treatment word.
-With both providers down, a question matching the floor gets the reviewed copy
-instead of the generic quote fallback. Gate off: prompt, schema and replies are
-unchanged. NOT CORS-open — credentialed allowlist
+  model also labeled the turn "emergency"); it becomes the emergency script
+  instead only on qualified evidence in the conversation (`qualifiedEmergencyIn`
+  — a product exposure, a symptom after a treatment, or trouble breathing),
+  never on the broad detector's other phrases (#4899).
+- `none`, or a missing / unknown topic, keeps the model's answer, which still
+  goes through the claim chokepoint. There is no regex floor on the visitor's
+  words: routing follows the model's classification only.
+The provider-failure fallback is unchanged (there is no model topic). Gate off:
+prompt, schema and replies are unchanged. NOT CORS-open — credentialed allowlist
 origins only (hub site)).
 `/api/public/experiments` (`GET /status` + `POST /exposure`) (client-side
 GrowthBook experimentation surface — no auth, anonymous visitors are the

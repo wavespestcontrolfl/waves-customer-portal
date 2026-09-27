@@ -2366,9 +2366,9 @@ describe('public-quote resolveEntryChannel allowlist', () => {
 describe('topic routing (GATE_ASK_WAVES_TOPIC_ROUTING)', () => {
   // What the visitor asked decides: a medical-emergency, product-safety or
   // re-entry question gets reviewed copy, never the model's own words. The
-  // model's `topic` is the main signal; the visitor's words are a floor for
-  // safety and re-entry only (#4899: the regex emergency detector fires on
-  // business questions, so it never forces the emergency script alone).
+  // model's `topic` is the only routing signal — no regex floor on the
+  // visitor's words (#4899: the regex emergency detector fires on business
+  // questions) — and a `none` answer still goes through the claim chokepoint.
   const neutral = 'Great question! Our technicians handle that on every visit.';
   const withTopic = (topic, extra = {}) => ({ reply: neutral, intent: 'question', service_keys: [], ready_for_quote: false, topic, ...extra });
   const LABEL_COPY = /label directions/;
@@ -2428,6 +2428,8 @@ describe('topic routing (GATE_ASK_WAVES_TOPIC_ROUTING)', () => {
   test.each([
     'My dog is acting strange after you were here',
     'Mi perro se comporta raro después de que estuvieron aquí',
+    'A dog here is acting strange after the treatment',
+    'Un perro aquí se comporta raro después del tratamiento',
   ])('a model-classified emergency about a pet adds the veterinary line even when the regex sees nothing: %s', (message) => {
     const out = normalizeIntakeResult(withTopic('medical_emergency'), 'openai', message);
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
@@ -2440,9 +2442,9 @@ describe('topic routing (GATE_ASK_WAVES_TOPIC_ROUTING)', () => {
     expect(out.reply).toMatch(VET);
   });
 
-  test('loose access wording is left to the model topic', () => {
-    expect(normalizeIntakeResult(withTopic('none'), 'openai', 'When can we walk on the lawn?').reply).toBe(neutral);
-    expect(normalizeIntakeResult(withTopic('reentry_timing'), 'openai', 'When can we walk on the lawn?').reply).toMatch(LABEL_COPY);
+  test('a none answer to a safety question still goes through the claim chokepoint', () => {
+    const out = normalizeIntakeResult(withTopic('none', { reply: 'Yes, it is completely safe for cats.' }), 'openai', 'Is the spray safe for my cat?');
+    expect(out.reply).toMatch(LABEL_COPY);
   });
 
   test.each([
@@ -2466,18 +2468,6 @@ describe('topic routing (GATE_ASK_WAVES_TOPIC_ROUTING)', () => {
     expect(out.service_keys).toEqual(['rodentBait']);
   });
 
-  test.each([
-    'Is the spray safe for my cat?',
-    'Will the treatment hurt the kids?',
-    'Is your treatment safe for my dog?',
-    'Is the ant bait safe for my dog?',
-    'Is your mosquito spray safe for bees?',
-    'When can the kids go back outside?',
-    'How long until the lawn is dry?',
-    'Is it ok to let the dog out after the spray?',
-  ])('the visitor\'s words are a floor when the model says none: %s', (message) => {
-    expect(normalizeIntakeResult(withTopic('none'), 'openai', message).reply).toMatch(LABEL_COPY);
-  });
 
   test.each([
     'We live at 911 Palm Ave, do you service Parrish?',
@@ -2491,7 +2481,11 @@ describe('topic routing (GATE_ASK_WAVES_TOPIC_ROUTING)', () => {
     'Can I use your lawn care service for weeds?',
     'Can I use your lawn service today?',
     'Do you treat dry rot?',
-  ])('the regex never forces reviewed or emergency copy on its own: %s', (message) => {
+    'Can you let me out of my contract?',
+    'Is the spray safe for my cat?',
+    'When can the kids go back outside?',
+    'When can we walk on the lawn?',
+  ])('with topic none the model answer stands (no regex floor, no regex emergency override): %s', (message) => {
     expect(normalizeIntakeResult(withTopic('none'), 'openai', message).reply).toBe(neutral);
   });
 
@@ -2506,10 +2500,7 @@ describe('topic routing (GATE_ASK_WAVES_TOPIC_ROUTING)', () => {
     expect(out.reply).toContain('1-800-222-1222');
   });
 
-  test('with both providers down, a safety question gets the reviewed copy only while the gate is on', async () => {
-    dispatchWithFallback.mockResolvedValue(chainMiss());
-    expect((await processIntakeMessage({ message: 'Is the spray safe for my cat?' })).reply).toMatch(LABEL_COPY);
-    delete process.env.GATE_ASK_WAVES_TOPIC_ROUTING;
+  test('with both providers down, routing changes nothing (there is no model topic)', async () => {
     dispatchWithFallback.mockResolvedValue(chainMiss());
     expect((await processIntakeMessage({ message: 'Is the spray safe for my cat?' })).reply).toBe(FALLBACK_RESULT.reply);
   });
