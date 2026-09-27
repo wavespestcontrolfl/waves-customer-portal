@@ -4,6 +4,14 @@ const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2
 const { applyLawnReportNarrative } = require('../services/service-report/lawn-report-narrative');
 const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
 
+const APPROVED_WEEK_PLAN = {
+  title: 'This week: run once',
+  detail: 'On your permitted watering day, run each turf zone for 20 minutes.',
+  action: 'run',
+  visitInPlanWeek: true,
+  prescribesRun: true,
+};
+
 function assessment(droughtStress, flag, status = 'balanced') {
   const rain = { balanced: 0.9, deficit: 0.1, surplus: 2.96 }[status];
   return {
@@ -33,6 +41,7 @@ describe('structured moisture governs the optional whole-report narrative', () =
     { irrigation_required: true, irrigation_notes: 'If no rain occurs within 24 hours, water in with 0.25 inches.' },
   ])('aftercare constraints bypass model and cached prose: %j', async (product) => {
     const lawnAssessment = assessment('minor', true, 'deficit');
+    lawnAssessment.waterContext.weekPlan = APPROVED_WEEK_PLAN;
     const unguarded = buildLawnReportV2({ lawnAssessment });
     const guarded = buildLawnReportV2({ lawnAssessment, applications: [{ product }] });
     const ctx = { observations: `aftercare-cache-probe:${JSON.stringify(product)}` };
@@ -90,8 +99,9 @@ describe('structured moisture governs the optional whole-report narrative', () =
     ['none', true, 'balanced', 'balanced', 'checking the flagged area\'s coverage'],
     ['minor', undefined, 'deficit', 'low', 'more water'],
     ['minor', undefined, 'surplus', 'high', 'easing back'],
-  ])('affirmative severity %s / technician %j preserves deterministic %s water advice without a plan', async (severity, flag, adviceStatus, reportStatus, instruction) => {
+  ])('affirmative severity %s / technician %j accepts status-aligned %s prose with an approved plan', async (severity, flag, adviceStatus, reportStatus, instruction) => {
     const lawnAssessment = assessment(severity, flag, adviceStatus);
+    lawnAssessment.waterContext.weekPlan = APPROVED_WEEK_PLAN;
     const v2 = buildLawnReportV2({ lawnAssessment });
     const deterministicExplanation = v2.water.explanation;
     const wording = `Based on rain this week, the lawn needs ${instruction}.`;
@@ -101,36 +111,41 @@ describe('structured moisture governs the optional whole-report narrative', () =
     expect(callModel.mock.calls[0][0].text).toContain('"droughtSignal": true');
     expect(callModel.mock.calls[0][0].text).toContain(`"status": "${reportStatus}"`);
     expect(callModel.mock.calls[0][0].system).toContain(`"${reportStatus}" supports ${instruction}`);
-    expect(out.water.explanation).toBe(deterministicExplanation);
-    expect(out.water.explanation).not.toBe(wording);
+    expect(out.water.explanation).toBe(wording);
+    expect(out.water.explanation).not.toBe(deterministicExplanation);
     expect(out.water.status).toBe(reportStatus);
     expect(out.water.droughtSignal).toBe(true);
     expect(out.water.totalInches).toBe(v2.water.totalInches);
   });
 
-  test('a no-plan narrative overlay cannot replace evidence-bound customer actions', async () => {
+  test('a no-plan drought report bypasses cache/model before observation copy can inject watering advice', async () => {
     const lawnAssessment = assessment('minor', undefined, 'surplus');
     const v2 = buildLawnReportV2({ lawnAssessment });
+    const before = JSON.parse(JSON.stringify(v2));
     const originalSnapshotAction = v2.snapshot.customerAction;
-    const originalInsightActions = v2.insights.map((insight) => insight.customerAction);
-    const originalWaterExplanation = v2.water.explanation;
-    const inventedAction = 'Ease back to one irrigation cycle this week.';
+    const inventedAction = 'Add 15 minutes to every irrigation zone this week.';
     const callModel = jest.fn(async () => ({ ok: true, json: {
       customerAction: inventedAction,
-      water: 'Based on rain this week, the lawn needs easing back.',
-      insights: v2.insights.map(() => ({ customerAction: inventedAction })),
+      mainWatch: inventedAction,
+      water: inventedAction,
+      insights: v2.insights.map(() => ({ whatWeSaw: inventedAction, customerAction: inventedAction })),
     } }));
 
     const out = await applyLawnReportNarrative(v2, { observations: lawnAssessment.observations }, { callModel });
 
-    expect(callModel).toHaveBeenCalledTimes(1);
-    expect(callModel.mock.calls[0][0].text).toContain(JSON.stringify(originalSnapshotAction));
+    expect(v2.water.weekPlan).toBeNull();
+    expect(out).toBe(v2);
+    expect(callModel).not.toHaveBeenCalled();
     expect(v2.snapshot.rootCause).toMatch(/No upcoming watering plan is recorded/);
     expect(v2.snapshot.rootCause).not.toMatch(/ease back|reduce.*irrigation|skip.*water/i);
+    expect(out).toEqual(before);
     expect(out.snapshot.customerAction).toBe(originalSnapshotAction);
-    expect(out.insights.map((insight) => insight.customerAction)).toEqual(originalInsightActions);
-    expect(out.water.explanation).toBe(originalWaterExplanation);
     expect(out.snapshot.customerAction).toMatch(/No upcoming watering plan is recorded/);
-    expect(out.snapshot.customerAction).not.toContain(inventedAction);
+    expect(JSON.stringify(out)).not.toContain(inventedAction);
+    const data = { serviceLine: 'lawn', lawnAssessment, reportV2: out };
+    applyLawnReportReconciliation(data, null);
+    expect(data.reportV2.water.weekPlan).toBeNull();
+    expect(data.reportV2.snapshot.customerAction).toBe(originalSnapshotAction);
+    expect(JSON.stringify(data.reportV2)).not.toContain(inventedAction);
   });
 });

@@ -437,9 +437,10 @@ Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
 (or the original email timestamp on older snapshots), with the same policy,
 plan-week and service-premise checks. Unpublished drafts remain unavailable.
-The optional whole-report AI narrative runs
-only when `droughtSignal` is `true`; otherwise all deterministic report copy
-is retained before narrative cache/model access. Lawn PDF render strategy `p4` regenerates
+The optional whole-report AI narrative runs only when `droughtSignal` is `true`,
+an approved weekly watering plan is present, and aftercare has neither a watering
+hold nor a review-required direction; otherwise all deterministic report copy is
+retained before narrative cache/model access. Lawn PDF render strategy `p4` regenerates
 older cached PDFs to match this evidence rule),
 the legacy SPA `/recap/:token` link (token-shaped and rate-limited; redirects
 to `/report/:token#visit-recap`, where the report embeds the approved "Your
