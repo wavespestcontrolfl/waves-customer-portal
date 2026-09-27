@@ -358,7 +358,7 @@ describe('owner approval content binding', () => {
 
 describe('index.json — groups, subgroups, next_photo', () => {
   test('every group and subgroup has an ask/why next_photo within its length caps', () => {
-    expect(index.subgroups).toHaveLength(75);
+    expect(index.subgroups).toHaveLength(77);
     for (const g of index.groups) {
       expect(g.next_photo.ask.length).toBeLessThanOrEqual(180);
       expect(g.next_photo.why.length).toBeLessThanOrEqual(160);
@@ -786,6 +786,49 @@ describe('resolveName regressions', () => {
     for (const genus of genera) {
       expect([genus, catalog.resolveName(genus)?.node.level]).not.toEqual([genus, 'entry']);
     }
+  });
+
+  test('a genus-level subgroup name covers every catalog member of that genus', () => {
+    const genusNodes = index.subgroups.flatMap((subgroup) => String(subgroup.scientific || '')
+      .split('/')
+      .map((part) => part.trim())
+      .filter((part) => subgroup.rank === 'genus' && /^[A-Z][a-z]+$/.test(part)));
+
+    for (const genus of genusNodes) {
+      const resolved = catalog.resolveName(genus)?.node;
+      const resolvedId = resolved?.slug || resolved?.id;
+      const members = allEntries.filter((entry) => entry.kind === 'organism'
+        && String(entry.scientific_name || '').split('/')
+          .some((name) => name.trim() === genus || name.trim().startsWith(`${genus} `)));
+      expect({ genus, resolvedId }).toEqual({ genus, resolvedId: expect.any(String) });
+      expect(members.length).toBeGreaterThan(0);
+      for (const member of members) {
+        expect({ genus, slug: member.slug, lineage: catalog.lineage(member.slug).map((node) => node.id) })
+          .toMatchObject({ lineage: expect.arrayContaining([resolvedId]) });
+      }
+    }
+  });
+
+  test.each([
+    ['Solenopsis', 'group', 'ants'],
+    ['Blattella', 'group', 'roaches'],
+  ])('a partial genus subgroup cannot capture %s', (name, level, id) => {
+    expect(catalog.resolveName(name)).toMatchObject({ via: 'scientific', node: { level, id } });
+  });
+
+  test.each([
+    ['Solenopsis invicta', 'fire-ant'],
+    ['Solenopsis molesta', 'thief-ant'],
+    ['Blattella germanica', 'german-cockroach'],
+    ['Blattella asahinai', 'asian-cockroach'],
+  ])('the complete binomial %s still resolves to its catalog entry', (name, slug) => {
+    expect(catalog.resolveName(name)).toMatchObject({ via: 'scientific', node: { level: 'entry', slug } });
+  });
+
+  test('the termite order alone does not imply swarm-specific high-urgency guidance', () => {
+    expect(catalog.resolveName('Isoptera')).toBeNull();
+    expect(catalog.resolveName('Isoptera (winged reproductives)'))
+      .toMatchObject({ via: 'scientific', node: { level: 'entry', slug: 'termite-swarmers' } });
   });
 
   test('a specific name inside a sentence still beats the group name inside it', () => {

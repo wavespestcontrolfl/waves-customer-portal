@@ -468,6 +468,32 @@ describe('buildAnswer — candidates block hides an unapproved candidate\'s iden
     expect(unreviewed.scientific_name).toBeNull();
     expect(JSON.stringify(built)).not.toContain('Unreviewed Ant');
   });
+
+  test('indistinguishable draft candidates collapse without overstating confidence or local range', () => {
+    const draft = cand('unreviewed-ant', 0.8);
+    const candidates = [
+      draft,
+      { ...draft, entry: { ...draft.entry, slug: 'draft-ant-two', range: 'rare' }, confidence: 0.7 },
+      { ...draft, entry: { ...draft.entry, slug: 'draft-ant-three', range: 'occasional' }, confidence: 0.3 },
+    ];
+    expect(engine.candidatesBlockFor(candidates, CURRENT_MONTH)).toEqual([{
+      slug: null,
+      common_name: 'an ant',
+      scientific_name: null,
+      strength: 'possible',
+      difference_from_top: null,
+      local: null,
+    }]);
+  });
+
+  test('approved candidates remain separate named rows', () => {
+    const visible = engine.candidatesBlockFor([
+      cand('fire-ant', 0.85), cand('ghost-ant', 0.7), cand('white-footed-ant', 0.3),
+    ], CURRENT_MONTH);
+    expect(visible.map((candidate) => candidate.slug)).toEqual([
+      'fire-ant', 'ghost-ant', 'white-footed-ant',
+    ]);
+  });
 });
 
 describe('buildAnswer — evidence', () => {

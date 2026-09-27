@@ -652,7 +652,7 @@ function localLabel(entry, currentMonth) {
 function candidatesBlockFor(candidates, currentMonth) {
   const catalogCandidates = candidates.filter((c) => c.entry).slice(0, 3);
   const top = catalogCandidates.find((c) => isApproved(c.entry)) || catalogCandidates[0] || null;
-  return catalogCandidates.map((c) => {
+  const masked = catalogCandidates.map((c) => {
     const approved = isApproved(c.entry);
     const group = catalog.getGroup(c.entry.group);
     return {
@@ -668,6 +668,20 @@ function candidatesBlockFor(candidates, currentMonth) {
       local: localLabel(c.entry, currentMonth),
     };
   });
+  const visible = new Map();
+  for (const candidate of masked) {
+    const key = candidate.slug || `masked:${candidate.common_name}`;
+    const existing = visible.get(key);
+    if (!existing) {
+      visible.set(key, candidate);
+      continue;
+    }
+    // Collapsing indistinguishable masks must not add their confidences or
+    // imply that a hidden species' seasonal range applies to the whole group.
+    if (candidate.strength === 'possible') existing.strength = 'possible';
+    if (candidate.local !== existing.local) existing.local = null;
+  }
+  return [...visible.values()];
 }
 
 // Contract delta 2026-09-26 #3: a curated pair's OWN `photo_can_confirm`

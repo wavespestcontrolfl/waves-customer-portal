@@ -100,6 +100,15 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     ['two-striped-walkingstick', 'irritant-walkingsticks', {
       line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false,
     }, 'low'],
+    ['acrobat-ant', 'defensive-stinging-ants', {
+      line: 'pest', key: 'pest', label: 'General Pest Control', inspection_required: false,
+    }, 'low'],
+    ['trap-jaw-ant', 'defensive-stinging-ants', {
+      line: 'pest', key: 'pest', label: 'General Pest Control', inspection_required: false,
+    }, 'low'],
+    ['termite-swarmers', 'termite-swarm-activity', {
+      line: 'termite', key: null, label: 'Termite Protection', inspection_required: true,
+    }, 'high'],
   ])('a singleton draft %s retains its source-backed service contract at %s', (
     slug, nodeId, service, urgency,
   ) => {
@@ -108,6 +117,26 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     expect(mapToV1(built)).toMatchObject({
       species_slug: null, service_line: service.line, urgency,
       report_contract: { service, urgency },
+    });
+  });
+
+  test.each([
+    ['acrobat-ant', 'bigheaded-ant', 'ants'],
+    ['termite-swarmers', 'dampwood-termite', 'termites'],
+  ])('mixed draft %s and %s results retain only the shared %s contract', (specific, other, nodeId) => {
+    const built = buildAnswer({
+      candidates: [
+        { ...candidate(specific, { approved: false }), confidence: 0.55 },
+        { ...candidate(other, { approved: false }), confidence: 0.3 },
+      ],
+      disagreed: false, disagreementNode: null, escalationTriggered: false,
+      openaiAnswered: false, openaiStoodInAlone: false, qualityUsable: true,
+      qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+    });
+    expect(built.answer).toMatchObject({ level: 'group', node_id: nodeId });
+    expect(mapToV1(built).report_contract).toMatchObject({
+      urgency: expect.not.stringMatching(/^high$/),
+      safety: { stinging: false, structural_threat: false },
     });
   });
 

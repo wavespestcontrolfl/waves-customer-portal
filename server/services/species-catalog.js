@@ -473,13 +473,20 @@ function buildNameIndices() {
     // Species-level situation nodes must not shadow their exact entry taxon.
     // Multiple entries for that taxon already resolve to their shared ancestor.
     if (sg.rank === 'species') continue;
-    for (const part of String(sg.scientific || '').split('/')) {
-      if (TAXON.test(part.trim())) {
-        nodePairs.push([part.trim(), sg.id]);
-        // An entry belonging to this same named family/genus must not
-        // claim the whole taxon (for example, native vs Asian lady beetles).
-        scientificPairs.push([part.trim(), sg.id]);
-      }
+    const taxa = String(sg.scientific || '').split('/').map((part) => part.trim()).filter((part) => TAXON.test(part));
+    for (const taxon of taxa) {
+      const taxonMembers = [...CATALOG.entries.values()].filter((entry) => entry.kind !== 'sign'
+        && String(entry.scientific_name || '').split('/')
+          .some((name) => name.trim() === taxon || name.trim().startsWith(`${taxon} `)))
+        .map((entry) => entry.slug);
+      // A subgroup may contain only part of a taxon. Include every known
+      // member before assigning the unqualified query to that subgroup.
+      const target = commonAncestor([sg.id, ...taxonMembers]);
+      if (!target) continue;
+      nodePairs.push([taxon, target]);
+      // An entry belonging to this same named family/genus must not
+      // claim the whole taxon (for example, native vs Asian lady beetles).
+      scientificPairs.push([taxon, target]);
     }
   }
   return {

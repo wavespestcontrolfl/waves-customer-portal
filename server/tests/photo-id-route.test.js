@@ -1536,6 +1536,31 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
     });
   });
 
+  test.each([
+    ['acrobat-ant', 'defensive-stinging-ants', 'pest', 'low', { stinging: true, venomous: false }],
+    ['trap-jaw-ant', 'defensive-stinging-ants', 'pest', 'low', { stinging: true, venomous: false }],
+    ['termite-swarmers', 'termite-swarm-activity', 'termite', 'high', { structural_threat: true }],
+  ])('gate on: draft %s stores its source-backed generic contract', async (
+    slug, nodeId, serviceLine, urgency, safety,
+  ) => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultFor(slug);
+    expect(engineResult).toMatchObject({
+      v2: { answer: { level: 'subgroup', node_id: nodeId }, entry: null },
+      v1: { service_line: serviceLine, urgency, report_contract: { safety } },
+    });
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.v2).toMatchObject({ answer: { node_id: nodeId }, entry: null });
+      expect(TABLES.pest_identifications[0]).toMatchObject({ service_line: serviceLine, urgency });
+      expect(JSON.parse(TABLES.pest_identifications[0].report_contract)).toMatchObject({ safety });
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.v2.answer.node_id).toBe(nodeId);
+    });
+  });
+
   test('gate on: mixed Cuban and native treefrogs store only neutral parent guidance', async () => {
     mockGateState.photoIdV2 = true;
     const engineResult = realCatalogV2ResultForCandidates([

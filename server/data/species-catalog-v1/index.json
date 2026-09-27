@@ -2483,6 +2483,65 @@
           "https://en.wikipedia.org/wiki/Centruroides_hentzi"
         ]
       }
+    },
+    {
+      "id": "defensive-stinging-ants",
+      "group": "ants",
+      "label": "Defensive Stinging Ants",
+      "generic": "a defensive stinging ant",
+      "scientific": "several genera",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Use zoom from a safe distance to show the whole ant and its jaws or abdomen. Do not handle it or disturb a nest.",
+        "why": "The jaw shape and whether the abdomen lifts over the body help separate these defensive ants."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": false
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "These ants can bite or sting if handled or disturbed, and the sting may be painful. Leave them alone and use camera zoom for a closer look.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/in610",
+          "https://blogs.ifas.ufl.edu/escambiaco/2019/03/14/a-new-ant-experience-in-the-landscape/"
+        ]
+      }
+    },
+    {
+      "id": "termite-swarm-activity",
+      "group": "termites",
+      "label": "Termite Swarm Activity",
+      "generic": "termite swarm activity",
+      "scientific": "Isoptera (winged reproductives)",
+      "rank": "group",
+      "next_photo": {
+        "ask": "Photograph the wings or swarmers already visible and a wider view of where they appeared. Do not disturb walls or wood for a photo.",
+        "why": "Equal-length wings, straight antennae, and the location help distinguish termite activity from winged ants."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "structural_threat": true
+          },
+          "serviceLine": "termite",
+          "serviceKey": null,
+          "serviceLabel": "Termite Protection",
+          "inspectionRequired": true,
+          "urgency": "high"
+        },
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN369",
+          "https://ask.ifas.ufl.edu/publication/IN278",
+          "https://ask.ifas.ufl.edu/publication/IN537"
+        ]
+      }
     }
   ],
   "look_alike_groups": [
