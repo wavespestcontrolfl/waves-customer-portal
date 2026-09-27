@@ -1146,6 +1146,53 @@ describe('termite annual renewal charge', () => {
       });
     });
 
+    // Codex #4971 r13 P1: with $100 of account credit applied, Stripe was
+    // tried for $149 — the customer notice says $149.00, read from the
+    // durable attempt row, never the $249 plan fee.
+    test('a declined charge reduced by account credit: the customer notice reports the $149.00 actually attempted', async () => {
+      mockCommon();
+      mockGraceHelpers({ graceDays: 30 });
+      jest.doMock('../services/invoice', () => ({
+        sendViaSMSAndEmail: jest.fn(async () => ({ ok: true })),
+        withPayLinkSendClaim: jest.fn(async (_invoiceId, handoff) => handoff({ token: 'tok-1', total: 249, credit_applied: 100 })),
+      }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+      jest.doMock('../services/recurring-card-on-file', () => ({
+        resolvePrepayChargeMethod: jest.fn(async () => ({ paymentMethodRowId: 'pm-1' })),
+      }));
+      const declineErr = Object.assign(new Error('Your card was declined.'), { wavesCardDecline: { declineCode: 'card_declined' } });
+      mockSignatureChargePrivate({ classifyChargeErrorImpl: jest.fn(() => ({ status: 'declined', reason: declineErr.message })) });
+      jest.doMock('../services/stripe', () => ({
+        assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined),
+        chargeInvoiceWithSavedCard: jest.fn(async () => { throw declineErr; }),
+        quoteInvoiceSavedCardCharge: jest.fn(async () => ({ total: 149, projectedCreditApplied: 100 })),
+      }));
+      jest.doMock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.example.com' }));
+      const renderSmsTemplate = jest.fn(async () => 'rendered body');
+      jest.doMock('../services/sms-template-renderer', () => ({ renderSmsTemplate }));
+      jest.doMock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
+      const attemptQuery = {};
+      attemptQuery.where = jest.fn((arg) => { if (typeof arg === 'function') arg.call(attemptQuery); return attemptQuery; });
+      attemptQuery.whereNotNull = jest.fn(() => attemptQuery);
+      attemptQuery.orWhereNotNull = jest.fn(() => attemptQuery);
+      attemptQuery.orderBy = jest.fn(() => attemptQuery);
+      attemptQuery.first = jest.fn(async () => ({ amount: '149.00' }));
+      jest.doMock('../models/db', () => jest.fn((table) => {
+        if (table === 'customers') return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue({ id: 'cust-1', phone: '+19415551212', first_name: 'Pat', deleted_at: null }) }) };
+        if (table === 'stripe_invoice_charge_attempts as a') return attemptQuery;
+        throw new Error(`unexpected table ${table}`);
+      }));
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const successor = baseSuccessor();
+      const { conn } = makeDecideConn({ successor });
+      await _private.decideAndCharge(successor, baseParent(), conn);
+      await Promise.resolve();
+
+      expect(renderSmsTemplate).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ amount: '149.00' }), expect.any(Object));
+      expect(attemptQuery.where).toHaveBeenCalledWith('a.invoice_id', 'succ-invoice-1');
+    });
+
     test('a genuine Stripe decline (wavesCardDecline): one attempt, one "declined" bell, pay-link delivered, and the customer SMS fires', async () => {
       mockCommon();
       mockGraceHelpers({ graceDays: 30 });
@@ -2266,7 +2313,7 @@ describe('termite annual renewal charge', () => {
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith('cust-1', null, expect.objectContaining({
         termId: 'succ-term-1', episodeKey: 'renewal_grace_lapse',
       }));
-      expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel', conn });
+      expect(recordDecision).toHaveBeenCalledWith(expect.objectContaining({ termId: 'parent-1', action: 'cancel' }));
       expect(completedUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_lapse_completed_at: expect.any(Date) }));
     });
 
@@ -2314,7 +2361,7 @@ describe('termite annual renewal charge', () => {
       // work, not a no-op).
       expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1', { requireUnsettled: true });
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
-      expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel', conn });
+      expect(recordDecision).toHaveBeenCalledWith(expect.objectContaining({ termId: 'parent-1', action: 'cancel' }));
     });
 
     // Codex round-5 P0: voidInvoice's own assertInvoiceVoidable deliberately
@@ -2440,7 +2487,7 @@ describe('termite annual renewal charge', () => {
       // voidInvoice's own re-entry self-heals as a no-op — still called.
       expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1', { requireUnsettled: true });
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
-      expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel', conn });
+      expect(recordDecision).toHaveBeenCalledWith(expect.objectContaining({ termId: 'parent-1', action: 'cancel' }));
       expect(completedUpdate).toHaveBeenCalledWith(expect.objectContaining({
         renewal_lapse_completed_at: expect.any(Date), renewal_lapse_outcome: 'lapsed',
       }));
@@ -2488,7 +2535,7 @@ describe('termite annual renewal charge', () => {
       await expect(_private.processGraceLapseForTerm({ ...term, renewal_lapse_started_at: new Date() }, restored.conn)).resolves.toBe('lapsed');
       expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1', { requireUnsettled: true });
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
-      expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel', conn: restored.conn });
+      expect(recordDecision).toHaveBeenCalledWith(expect.objectContaining({ termId: 'parent-1', action: 'cancel' }));
       expect(restored.manualReviewUpdate).not.toHaveBeenCalled();
     });
 
@@ -2948,7 +2995,7 @@ describe('termite annual renewal charge', () => {
       expect(outcome).toBe('lapsed'); // completes, not stuck
       expect(voidInvoice).toHaveBeenCalledTimes(1);
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
-      expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel', conn });
+      expect(recordDecision).toHaveBeenCalledWith(expect.objectContaining({ termId: 'parent-1', action: 'cancel' }));
       expect(completedUpdate).toHaveBeenCalledWith(expect.objectContaining({
         renewal_lapse_completed_at: expect.any(Date), renewal_lapse_outcome: 'lapsed',
       }));
@@ -2979,7 +3026,7 @@ describe('termite annual renewal charge', () => {
       expect(outcome).toBe('deferred');
       expect(voidInvoice).toHaveBeenCalledTimes(1);
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
-      expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel', conn });
+      expect(recordDecision).toHaveBeenCalledWith(expect.objectContaining({ termId: 'parent-1', action: 'cancel' }));
       // completed_at is NEVER stamped — the row stays retryable rather than
       // being marked "done" against a parent decided renew.
       expect(completedUpdate).not.toHaveBeenCalled();
@@ -3053,7 +3100,7 @@ describe('termite annual renewal charge', () => {
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith('cust-1', null, expect.objectContaining({
         termId: 'succ-term-1', episodeKey: 'renewal_grace_lapse',
       }));
-      expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel', conn });
+      expect(recordDecision).toHaveBeenCalledWith(expect.objectContaining({ termId: 'parent-1', action: 'cancel' }));
       expect(completedUpdate).toHaveBeenCalledTimes(1);
     });
 

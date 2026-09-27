@@ -297,6 +297,36 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
     expect(await advisoryLockCount(termId)).toBe(0);
   });
 
+  // Codex #4971 r13 P2: the unpooled lock sessions are bounded (the shared
+  // raw-connection mechanism, raw-connection-slots.js): with every session
+  // slot held, the next gate fails at once with the "could not acquire"
+  // error callers already defer on — no ninth connection is opened — and a
+  // released slot is usable again.
+  test('the lock sessions are capped: with every slot held the next gate fails at once, then works once one is released', async () => {
+    const { PARENT_DECISION_LOCK_SESSIONS } = require('../services/annual-prepay-renewals')._private;
+    const releases = [];
+    const holders = [];
+    for (let i = 0; i < 8; i += 1) {
+      let release;
+      const released = new Promise((resolve) => { release = resolve; });
+      releases.push(release);
+      holders.push(withParentDecisionLock(`lock-cap-${i}`, () => released));
+    }
+    while (PARENT_DECISION_LOCK_SESSIONS.openCount() < 8) await sleep(10);
+    const startedAt = Date.now();
+    await expect(withParentDecisionLock('lock-cap-over', async () => 'unreachable'))
+      .rejects.toThrow(/could not acquire the parent-decision lock .* no lock session is available/);
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+    expect(await advisoryLockCount('lock-cap-over')).toBe(0);
+
+    releases[0]();
+    await holders[0];
+    await expect(withParentDecisionLock('lock-cap-over', async () => 'ok')).resolves.toBe('ok');
+    releases.slice(1).forEach((release) => release());
+    await Promise.all(holders);
+    expect(PARENT_DECISION_LOCK_SESSIONS.openCount()).toBe(0);
+  });
+
   test('(d) 20 sequential locks against a pool capped at 2 never exhaust it', async () => {
     for (let i = 0; i < 20; i += 1) {
        
@@ -759,6 +789,37 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
     await db('invoices').where({ id: renewalInvoice.id }).update({ status: 'sent' });
     await expect(recordDecision({ termId, action: 'cancel' })).resolves.toMatchObject({ renewal_decision: 'cancel' });
     expect(db.client.pool.numUsed()).toBe(0);
+  });
+
+  // Codex #4971 r13 P1: the paid sync activated the renewal but its parent
+  // 'renewed' stamp was lost (a failed savepoint) — the parent is still
+  // live and undecided. A cancel / switch is refused with the same 409 until
+  // the backstop records 'renew'; after that, the ordinary rules apply.
+  test('(D) a PAID renewal awaiting its parent stamp blocks a cancel / switch (409); the backstop\'s renew goes through, then cancel follows the normal rules', async () => {
+    const { randomUUID } = require('crypto');
+    const { termId } = await insertTerm({ annualPlanVersion: 'v3', status: 'active', withInvoice: true });
+    const parent = await db('annual_prepay_terms').where({ id: termId }).first('customer_id');
+    const [renewalInvoice] = await db('invoices').insert({
+      customer_id: parent.customer_id, token: randomUUID(), invoice_number: `LOCK-P-${randomUUID().slice(0, 8)}`, status: 'paid', paid_at: new Date(),
+    }).returning('id');
+    await db('annual_prepay_terms').insert({
+      customer_id: parent.customer_id, term_start: '2027-01-01', term_end: '2027-12-31', status: 'active',
+      annual_plan_version: 'v3', renewed_from_term_id: termId, prepay_invoice_id: renewalInvoice.id,
+    });
+
+    for (const action of ['cancel', 'switch_plan']) {
+      await expect(recordDecision({ termId, action })).rejects.toMatchObject({
+        code: 'renewal_money_in_motion', statusCode: 409,
+        message: 'A renewal payment was received for this plan and is still being recorded — try again shortly, or refund it first.',
+      });
+    }
+    expect(await db('annual_prepay_terms').where({ id: termId }).first('status', 'renewal_decision')).toEqual({ status: 'active', renewal_decision: null });
+
+    // The backstop (reconcileParentRenewedStamps) records 'renew' — never refused.
+    await expect(recordDecision({ termId, action: 'renew' })).resolves.toMatchObject({ renewal_decision: 'renew' });
+    // A decided parent is past recordDecision's reach (the normal guard): no 409, no write.
+    await expect(recordDecision({ termId, action: 'cancel' })).resolves.toBeNull();
+    expect(await db('annual_prepay_terms').where({ id: termId }).first('status', 'renewal_decision')).toEqual({ status: 'renewed', renewal_decision: 'renew' });
   });
 
   // Codex round-7 P1 (2nd audit round) — REENTRANCY: chargeInvoiceWithSavedCard's

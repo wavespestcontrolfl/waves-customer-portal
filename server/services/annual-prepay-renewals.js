@@ -9120,6 +9120,19 @@ async function writeDecisionUnderTermiteLock(conn, termId, runUpdate) {
 // can deadlock a gated flow (the refund gate, the dispute handlers' gate,
 // the renewal gate). The connection is always destroyed afterwards — ending
 // the session releases anything a failed unlock left held.
+//
+// Codex #4971 r13 P2: those sessions are BOUNDED — in count and in connect
+// time — through the same raw-connection mechanism the reschedule-link send
+// interlock uses (raw-connection-slots.js): concurrent refunds, disputes,
+// renewal sends and charges would otherwise each open a connection outside
+// DB_POOL_MAX with no cap and no connect timeout (lock_timeout only starts
+// once connected). A full cap or a connect timeout fails like a lock that
+// could not be taken — the error every caller already defers or retries on.
+const PARENT_DECISION_LOCK_SESSIONS = require('./raw-connection-slots').rawConnectionSlots({
+  max: 8,
+  connectMs: 5000,
+  logPrefix: '[annual-prepay] parent-decision lock session',
+});
 async function withParentDecisionLock(termId, fn, { timeoutMs = PARENT_DECISION_LOCK_TIMEOUT_MS, alsoTermIds = [] } = {}) {
   const held = heldDecisionKeys();
   const keys = [...new Set([termId, ...alsoTermIds].filter(Boolean).map(String))].filter((key) => !held.has(key)).sort();
@@ -9130,7 +9143,10 @@ async function withParentDecisionLock(termId, fn, { timeoutMs = PARENT_DECISION_
   let lockConn = null;
   const locked = [];
   try {
-    lockConn = await db.client.acquireRawConnection();
+    lockConn = await PARENT_DECISION_LOCK_SESSIONS.acquire();
+    if (!lockConn) {
+      throw new Error(`could not acquire the parent-decision lock for term ${keys[0]} — no lock session is available right now (the session cap is full or the database did not answer in time); retry shortly`);
+    }
     await takeSessionDecisionLocks(lockConn, keys, locked, boundedTimeoutMs);
     // Mark these terms as session-lock-held for the lifetime of fn()'s own
     // async tree — see heldParentDecisionLockStore's doc above.
@@ -9171,7 +9187,7 @@ async function releaseSessionDecisionLocks(lockConn, locked) {
       break;
     }
   }
-  try { await db.client.destroyRawConnection(lockConn); } catch { /* already gone: the server ended the session, and its locks with it */ }
+  await PARENT_DECISION_LOCK_SESSIONS.release(lockConn);
 }
 
 async function recordDecision({ termId, action, adminUserId = null, notes = null, disposition = null, conn = db } = {}) {
@@ -9270,10 +9286,24 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
 //     (renewalMoneyInMotionForTerm).
 const DECISIONS_REFUSED_WHILE_RENEWAL_CLEARING = new Set(['cancel', 'switch_plan']);
 // Termite terms only (recordDecision's gate peek decides).
+async function parentUndecided(conn, termId) {
+  const parent = await conn('annual_prepay_terms').where({ id: termId }).first('status', 'renewal_decision');
+  return Boolean(parent) && ACTIVE_STATUSES.includes(parent.status) && !parent.renewal_decision;
+}
+
+// Codex #4971 r13 P1: the same guard also refuses while a renewal already
+// PAID awaits its parent's 'renewed' stamp (renewalMoneyInMotionForParent).
 async function refuseWhileRenewalClearing(conn, termId) {
-  const reason = await require('./termite-annual-renewal-charge').renewalMoneyInMotionForParent(conn, termId);
+  const Charge = require('./termite-annual-renewal-charge');
+  const reason = await Charge.renewalMoneyInMotionForParent(conn, termId);
   if (!reason) return;
-  const err = new Error(`The renewal payment is still clearing (${reason}) — wait for it to settle or refund it first.`);
+  // A paid renewal blocks only while the parent still awaits its stamp
+  // (undecided); a parent already decided is past recordDecision's own
+  // guard, which answers as it always has.
+  if (reason === Charge._private.PAID_RENEWAL_AWAITING_PARENT_STAMP && !(await parentUndecided(conn, termId))) return;
+  const err = new Error(reason === Charge._private.PAID_RENEWAL_AWAITING_PARENT_STAMP
+    ? 'A renewal payment was received for this plan and is still being recorded — try again shortly, or refund it first.'
+    : `The renewal payment is still clearing (${reason}) — wait for it to settle or refund it first.`);
   err.code = 'renewal_money_in_motion';
   err.statusCode = 409;
   err.isOperational = true;
@@ -10251,6 +10281,7 @@ module.exports = {
   // suspendActiveTermsForDisputedInvoice stamps (ADMIN-BUG-R17-FINDING-1).
   annualPrepayColumns,
   _private: {
+    PARENT_DECISION_LOCK_SESSIONS,
     supersedeRenewWithCustomerCancel,
     declinePaymentPendingWithCustomerCancel,
     runTermiteNoticePass,

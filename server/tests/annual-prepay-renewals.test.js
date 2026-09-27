@@ -4863,7 +4863,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
         // A cancel first probes cancel_disposition support (columnInfo).
         ...(action === 'cancel' ? [query({ columnInfo: { cancel_disposition: {} } })] : []),
         query({ first: { annual_plan_version: 'v3' } }),
-        query({ rows: [{ id: 'succ-1', prepay_invoice_id: 'inv-succ' }] }),
+        query({ rows: [{ id: 'succ-1', status: 'payment_pending', prepay_invoice_id: 'inv-succ' }] }),
         decisionUpdate,
       ],
       invoices: [query({ first: { status: 'processing' } })],
@@ -4873,6 +4873,34 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       statusCode: 409,
       isOperational: true,
       message: expect.stringContaining('still clearing (an ACH payment on the renewal invoice is still clearing) — wait for it to settle or refund it first'),
+    });
+    expect(decisionUpdate.update).not.toHaveBeenCalled();
+
+    const renewUpdate = query({ returning: [{ id: 'term-1', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({ annual_prepay_terms: [query({ first: { annual_plan_version: 'v3' } }), renewUpdate] });
+    await expect(AnnualPrepayRenewals.recordDecision({ termId: 'term-1', action: 'renew' })).resolves.toMatchObject({ renewal_decision: 'renew' });
+  });
+
+  // Codex #4971 r13 P1: a renewal already PAID (successor active) whose
+  // parent 'renewed' stamp has not landed yet blocks a cancel / switch the
+  // same way — the backstop's renew is never refused.
+  test.each(['cancel', 'switch_plan'])('recordDecision(%s) on a termite parent whose PAID renewal awaits its parent stamp: one actionable 409; renew still goes through', async (action) => {
+    db.raw = jest.fn().mockResolvedValue({ rows: [{ previous: '0' }] });
+    const decisionUpdate = query({ returning: [] });
+    setDbQueues({
+      annual_prepay_terms: [
+        ...(action === 'cancel' ? [query({ columnInfo: { cancel_disposition: {} } })] : []),
+        query({ first: { annual_plan_version: 'v3' } }),
+        query({ rows: [{ id: 'succ-1', status: 'active', prepay_invoice_id: 'inv-succ' }] }),
+        query({ first: { status: 'active', renewal_decision: null } }), // the parent still awaits its stamp
+        decisionUpdate,
+      ],
+      invoices: [query({ first: { status: 'paid', paid_at: new Date(), stripe_payment_intent_id: 'pi_succ' } })],
+      payments: [query({ first: undefined })],
+    });
+    await expect(AnnualPrepayRenewals.recordDecision({ termId: 'term-1', action })).rejects.toMatchObject({
+      code: 'renewal_money_in_motion', statusCode: 409, isOperational: true,
+      message: 'A renewal payment was received for this plan and is still being recorded — try again shortly, or refund it first.',
     });
     expect(decisionUpdate.update).not.toHaveBeenCalled();
 

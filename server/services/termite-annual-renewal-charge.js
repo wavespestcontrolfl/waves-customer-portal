@@ -1309,20 +1309,33 @@ async function renewalMoneyInMotion(conn, successor) {
 // on a renewal the withdrawal could not void. Returns the reason, or null.
 async function renewalMoneyInMotionForParent(conn, parentTermId) {
   const successors = await conn('annual_prepay_terms')
-    .where({ renewed_from_term_id: parentTermId, status: PAYMENT_PENDING_STATUS })
+    .where({ renewed_from_term_id: parentTermId })
     .whereNotNull('annual_plan_version')
-    .select('id', 'prepay_invoice_id');
+    .select('*');
   for (const successor of successors || []) {
-    const reason = await renewalMoneyInMotion(conn, successor);
+    const reason = await successorRenewalUnsettled(conn, successor);
     if (reason) return reason;
   }
   return null;
 }
 
-// Codex #4971 r5 P1 — the portal decline's question for one termite term:
-// renewal money in motion on the term's OWN renewal invoice (it is a
-// payment_pending renewal successor — the live decline case, its card
-// declinable after the prior year ended) or on a pending successor of it.
+// One successor's answer: a payment_pending renewal with money in motion
+// (renewalMoneyInMotion), or — Codex #4971 r13 P1 — a renewal already PAID
+// (active, or the paid decided-lapse shape: successorPaymentBacksRenewal)
+// whose parent the caller is about to decide. The paid sync's parent
+// 'renewed' stamp is best-effort (a failed savepoint leaves it to
+// reconcileParentRenewedStamps), so a cancel / switch in that gap would
+// leave paid coverage behind a contradictory parent that neither the
+// backstop (it skips a cancelled parent) nor the late-paid alert (the
+// payment predates the decision) ever surfaces — refused like money still
+// clearing. recordDecision only moves an UNDECIDED parent, and the backstop
+// records 'renew', which the guard never refuses.
+const PAID_RENEWAL_AWAITING_PARENT_STAMP = 'a renewal payment was received and is still being recorded against this plan';
+async function successorRenewalUnsettled(conn, successor) {
+  if (successor.status === PAYMENT_PENDING_STATUS) return renewalMoneyInMotion(conn, successor);
+  return (await successorPaymentBacksRenewal(conn, successor)) ? PAID_RENEWAL_AWAITING_PARENT_STAMP : null;
+}
+
 async function renewalMoneyInMotionForTerm(conn, term) {
   if (term.renewed_from_term_id && term.status === PAYMENT_PENDING_STATUS) {
     const own = await renewalMoneyInMotion(conn, term);
@@ -2366,14 +2379,36 @@ async function composeAndSendChargeFailedNotice(successor) {
   return handed;
 }
 
+// The amount the failed charge actually asked Stripe for (Codex #4971 r13
+// P1, AGENTS.md: a customer-visible amount matches what was sent) — with
+// account credit applied, the card was tried for the reduced cash balance
+// (a $249 renewal with $100 of credit tries $149), not the plan fee. Read
+// from the durable attempt row, whose amount stripe.js writes at submission
+// (commitInvoiceSavedCardChargeSubmission: the cash total after credit,
+// surcharge included). Falls back to the invoice's balance due, then the
+// fee, when no submitted attempt can be read.
+async function attemptedChargeAmount(successor, invoice) {
+  try {
+    const attempt = await whereAttemptSubmitted(
+      db('stripe_invoice_charge_attempts as a').where('a.invoice_id', successor.prepay_invoice_id),
+    ).orderBy('a.created_at', 'desc').first('a.amount');
+    if (attempt?.amount != null && Number.isFinite(Number(attempt.amount))) return Number(attempt.amount);
+  } catch (err) {
+    logger.warn(`[termite-annual-renewal] attempted-amount read failed for term ${successor.id}: ${err.message}`);
+  }
+  if (invoice?.total != null) return require('./invoice-helpers').invoiceAmountDue(invoice);
+  return Number(successor.prepay_amount);
+}
+
 async function sendChargeFailedText(successor, customer, invoice) {
   const { publicPortalUrl } = require('../utils/portal-url');
   const payUrl = invoice?.token ? `${publicPortalUrl()}/pay/${invoice.token}` : null;
   if (!payUrl) return { sent: false, reason: 'no_pay_url' };
   const { renderSmsTemplate } = require('./sms-template-renderer');
+  const attempted = await attemptedChargeAmount(successor, invoice);
   const body = await renderSmsTemplate(RENEWAL_CHARGE_FAILED_SMS_KEY, {
     first_name: customer.first_name || 'there',
-    amount: Number(successor.prepay_amount).toFixed(2),
+    amount: attempted.toFixed(2),
     pay_url: payUrl,
   }, { workflow: 'termite_annual_renewal_charge_failed', entity_type: 'annual_prepay_term', entity_id: successor.id });
   if (!body) return { sent: false, reason: 'missing_template' };
@@ -2596,10 +2631,16 @@ function lapseVoidAlreadyRanFor(fresh, invoice) {
 async function parentStillDecidableForLapse(trx, fresh) {
   if (!fresh.renewed_from_term_id) return { ok: true };
   const parent = await trx('annual_prepay_terms').where({ id: fresh.renewed_from_term_id }).forUpdate().first();
-  const parentUndecidedOrOwnCancel = parent
-    && ((RENEWABLE_STATUSES.includes(parent.status) && !parent.renewal_decision)
-      || (parent.status === 'cancelled' && parent.renewal_decision === 'cancel'));
-  if (parentUndecidedOrOwnCancel) return { ok: true };
+  const parentCancelled = parent?.status === 'cancelled' && parent.renewal_decision === 'cancel';
+  const parentUndecided = parent && RENEWABLE_STATUSES.includes(parent.status) && !parent.renewal_decision;
+  // Codex #4971 r13 P1: a cancelled parent is THIS lapse's own earlier
+  // write (an idempotent resume after a crash) only with its provenance —
+  // renewal_lapse_parent_cancelled_at, stamped on this successor in the
+  // same transaction as that cancel (recordParentLapseCancel). Any other
+  // cancel (an admin, a customer decline) happened outside this lapse: the
+  // renewal is withdrawn, never lapsed — no retrieval, no parent decision.
+  if (parentUndecided || (parentCancelled && fresh.renewal_lapse_parent_cancelled_at)) return { ok: true };
+  if (parentCancelled) return { ok: false, reason: 'the parent was cancelled outside this lapse', externalCancel: true };
   // Codex #4971 pre-push P1: resolveParentEligibility's own durable /
   // transient split decides what the lapse does next. A parent demoted to
   // payment_pending by a dispute on its own invoice (move 10, no decision)
@@ -2709,7 +2750,7 @@ async function resolveLapseVoidEligibility(term, conn = db) {
     // between recordDecision succeeding and the completed_at stamp).
     const parentCheck = await parentStillDecidableForLapse(trx, fresh);
     if (!parentCheck.ok) {
-      return { outcome: 'deferred', kind: parentCheck.transient ? 'parent_suspended' : 'parent_decided_elsewhere', reason: parentCheck.reason };
+      return { outcome: 'deferred', kind: lapseParentHoldKind(parentCheck), reason: parentCheck.reason };
     }
 
     if (voidAlreadyRan) return { outcome: 'proceed' };
@@ -2959,10 +3000,34 @@ async function voidLapsedInvoice(term, conn) {
   }
 }
 
-const LAPSE_HOLD_BELL_KIND = { parent_decided_elsewhere: 'lapse_parent_decided_elsewhere', parent_suspended: null, successor_dispute_suspended: null };
+const LAPSE_HOLD_BELL_KIND = { parent_decided_elsewhere: 'lapse_parent_decided_elsewhere', parent_suspended: null, successor_dispute_suspended: null, parent_cancelled_elsewhere: null };
+
+function lapseParentHoldKind(parentCheck) {
+  if (parentCheck.externalCancel) return 'parent_cancelled_elsewhere';
+  return parentCheck.transient ? 'parent_suspended' : 'parent_decided_elsewhere';
+}
+
+// Codex #4971 r13 P1: the parent was cancelled outside this lapse — the
+// external cancellation's own path, never the lapse's: the renewal is
+// withdrawn (void + cancel + one staff bell; withdrawRenewalSuccessor
+// re-judges it under the gate this sequence already holds), with no station
+// retrieval and no parent decision. A renewal already voided (this lapse's
+// own void ran before the cancel landed) has nothing left to withdraw. The
+// lapse is then closed as 'withdrawn' so the recovery leg drops it.
+async function closeLapseForExternalParentCancel(term, reason, conn) {
+  const fresh = await conn('annual_prepay_terms').where({ id: term.id }).first('status');
+  if (fresh?.status === PAYMENT_PENDING_STATUS) {
+    const withdrawn = await withdrawRenewalSuccessor(term, reason, conn);
+    if (withdrawn !== 'retired') return 'deferred';
+  }
+  await conn('annual_prepay_terms').where({ id: term.id }).whereNull('renewal_lapse_completed_at')
+    .update({ renewal_lapse_completed_at: new Date(), renewal_lapse_outcome: 'withdrawn' });
+  return 'retired';
+}
 
 async function processGraceLapseSequence(term, conn) {
   const eligibility = await resolveLapseVoidEligibility(term, conn);
+  if (eligibility.kind === 'parent_cancelled_elsewhere') return closeLapseForExternalParentCancel(term, eligibility.reason, conn);
   if (eligibility.outcome === 'deferred') {
     const manualReview = eligibility.kind === 'parent_decided_elsewhere';
     // A parent suspended by a dispute on its own invoice is transient: the
@@ -2990,10 +3055,27 @@ async function processGraceLapseSequence(term, conn) {
 
 // Record the decided lapse ('cancel') on the PARENT. Returns true when the
 // parent reads decided 'cancel' afterwards.
+// The lapse's parent cancel and its provenance commit TOGETHER (Codex #4971
+// r13 P1): renewal_lapse_parent_cancelled_at on this successor is what lets
+// a resumed lapse tell its own earlier cancel from an outside one
+// (parentStillDecidableForLapse). Written only where the row shows the
+// column (20260927160000) — before it exists, a resume reads the cancel as
+// outside and withdraws instead (no retrieval: the safe side).
+async function recordParentLapseCancel(term, conn) {
+  const write = async (t) => {
+    const decided = await require('./annual-prepay-renewals').recordDecision({ termId: term.renewed_from_term_id, action: 'cancel', conn: t });
+    if (decided && Object.hasOwn(term, 'renewal_lapse_parent_cancelled_at')) {
+      await t('annual_prepay_terms').where({ id: term.id }).update({ renewal_lapse_parent_cancelled_at: new Date() });
+    }
+    return decided;
+  };
+  return typeof conn.transaction === 'function' && !conn.isTransaction ? conn.transaction(write) : write(conn);
+}
+
 async function decideParentLapse(term, conn) {
   if (!term.renewed_from_term_id) return true;
   try {
-    const decided = await require('./annual-prepay-renewals').recordDecision({ termId: term.renewed_from_term_id, action: 'cancel', conn });
+    const decided = await recordParentLapseCancel(term, conn);
     if (decided) return true;
     // Codex round-7 P1 / round-3 audit P1: recordDecision returns null
     // (never throws) on a guard-miss — but that guard-miss has TWO very
@@ -3081,14 +3163,22 @@ async function reconcileMissedLapseEffects({ conn = db, limit = 200, counts }) {
 // eligibility and the successor's own grace window — past it, delivering a
 // pay link now would only hand the next grace-lapse tick a "presented"
 // renewal to lapse and retrieve on the spot.
+// A deleted account (routes/auth.js DELETE /account stamps
+// customers.deleted_at and leaves Auto Pay armed) is never renewed —
+// durable: the renewal is withdrawn. null = a live account.
+async function customerDeletedRefusal(conn, successor) {
+  const customer = await conn('customers').where({ id: successor.customer_id }).first('deleted_at');
+  return customer?.deleted_at ? { reason: 'the customer deleted their account', retire: true } : null;
+}
+
 async function successorRecoveryRefusal(successor, conn) {
   // Codex #4971 r10 P1: an account deleted after the mint (routes/auth.js
   // DELETE /account stamps customers.deleted_at and leaves Auto Pay armed)
   // is never renewed — no charge (stripe.js refuses it under the customer
   // lock: CUSTOMER_DELETED), no pay link to an archived account, and the
   // renewal is withdrawn (void + cancel, one staff bell). Durable.
-  const customer = await conn('customers').where({ id: successor.customer_id }).first('deleted_at');
-  if (customer?.deleted_at) return { reason: 'the customer deleted their account', retire: true };
+  const deleted = await customerDeletedRefusal(conn, successor);
+  if (deleted) return deleted;
   if (successor.renewed_from_term_id) {
     const parent = await conn('annual_prepay_terms').where({ id: successor.renewed_from_term_id }).first();
     const parentEligibility = await parentRefusalForSuccessor(conn, successor, parent);
@@ -3369,16 +3459,24 @@ async function reconcileStuckSuccessors({ conn = db, limit = 200, counts }) {
 // manual reviews are excluded.
 async function withdrawSuccessorsOfIneligibleParents({ conn = db, limit = 200, counts }) {
   try {
-    const candidates = await whereParentNoLongerAuthorizes(
-      conn('annual_prepay_terms as t')
-        .join('annual_prepay_terms as p', 'p.id', 't.renewed_from_term_id')
-        .leftJoin('invoices as pi', 'pi.id', 'p.prepay_invoice_id')
-        .whereNotNull('t.annual_plan_version')
-        .where('t.status', PAYMENT_PENDING_STATUS)
-        .whereNull('t.dispute_suspended_at')
-        .whereNull('t.renewal_lapse_started_at')
-        .whereRaw("coalesce(t.renewal_lapse_outcome, '') <> 'manual_review'"),
-    )
+    const candidates = await conn('annual_prepay_terms as t')
+      .join('annual_prepay_terms as p', 'p.id', 't.renewed_from_term_id')
+      .leftJoin('invoices as pi', 'pi.id', 'p.prepay_invoice_id')
+      .whereNotNull('t.annual_plan_version')
+      .where('t.status', PAYMENT_PENDING_STATUS)
+      .whereNull('t.dispute_suspended_at')
+      .whereNull('t.renewal_lapse_started_at')
+      .whereRaw("coalesce(t.renewal_lapse_outcome, '') <> 'manual_review'")
+      // Codex #4971 r13 P1: a deleted account is a durable reason too — a
+      // renewal whose fallback pay link already went out (its skip /
+      // follow-through marker handled, so legs 7a-7c are done with it)
+      // would otherwise stay payable, grace-covered and bound for a lapse's
+      // station retrieval behind a still-eligible parent.
+      .where(function withdrawalOwed() {
+        whereParentNoLongerAuthorizes(this).orWhereExists(function customerDeleted() {
+          this.select(1).from('customers as c').whereRaw('c.id = t.customer_id').whereNotNull('c.deleted_at');
+        });
+      })
       .orderByRaw('t.renewal_sweep_deferred_at asc nulls first')
       .orderBy('t.created_at', 'asc')
       .select('t.*')
@@ -3414,14 +3512,24 @@ function whereParentNoLongerAuthorizes(query) {
   });
 }
 
-async function withdrawIfParentDurablyIneligible(successor, conn) {
+// Pass 4b's per-row check: the customer's account deleted (Codex #4971 r13
+// P1), else the parent's refusal. The withdrawal itself re-judges both under
+// the gate (successorRecoveryRefusal).
+async function withdrawalScanRefusal(successor, conn) {
+  const deleted = await customerDeletedRefusal(conn, successor);
+  if (deleted) return { eligible: false, durable: true, label: deleted.reason };
   const parent = await conn('annual_prepay_terms').where({ id: successor.renewed_from_term_id }).first();
   const refusal = await parentRefusalForSuccessor(conn, successor, parent);
+  return { ...refusal, label: `the prior year no longer backs this renewal (${refusal.reason})` };
+}
+
+async function withdrawIfParentDurablyIneligible(successor, conn) {
+  const refusal = await withdrawalScanRefusal(successor, conn);
   if (refusal.eligible || !refusal.durable) {
     await stampSweepDeferred(successor, conn);
     return 'deferred';
   }
-  const outcome = await withdrawRenewalSuccessor(successor, `the prior year no longer backs this renewal (${refusal.reason})`, conn);
+  const outcome = await withdrawRenewalSuccessor(successor, refusal.label, conn);
   if (outcome === 'manual_review') {
     // A partial account credit: staff own it now — out of this scan.
     await conn('annual_prepay_terms').where({ id: successor.id }).update({ renewal_lapse_outcome: 'manual_review' });
@@ -3636,6 +3744,7 @@ module.exports = {
     successorDisputeSuspended,
     whereSuccessorNotDisputeSuspended,
     successorShapeBacksRenewal,
+    PAID_RENEWAL_AWAITING_PARENT_STAMP,
     successorPaymentBacksRenewal,
     whereSuccessorPaymentBacksRenewal,
     whereInvoiceSettledNotRevoked,

@@ -92,6 +92,7 @@ async function createScratchDb() {
     renewal_charge_failure_handled_at timestamptz,
     renewal_late_paid_belled_at timestamptz,
     renewal_charge_claim_retired_at timestamptz,
+    renewal_lapse_parent_cancelled_at timestamptz,
     dispute_suspended_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
@@ -1033,6 +1034,69 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       expect(decide).toHaveBeenCalledWith(expect.objectContaining({ termId: fx.parent.id, action: 'cancel' }));
     });
 
+    // Codex #4971 r13 P1: a cancelled parent is this lapse's own earlier
+    // write only with its provenance (renewal_lapse_parent_cancelled_at on
+    // the successor, stamped with that cancel). An admin cancel between the
+    // scan and the gate is outside the lapse: withdrawn, never lapsed.
+    test('an admin cancel between the lapse scan and the gate: the renewal is withdrawn (voided, cancelled, one bell) — no retrieval, no parent decision', async () => {
+      const fx = await overdueRenewal();
+      Renewals4.withParentDecisionLock = async (_termId, fn) => {
+        await db('annual_prepay_terms').where({ id: fx.parent.id })
+          .update({ status: 'cancelled', renewal_decision: 'cancel', renewal_decision_at: new Date() });
+        return fn();
+      };
+      const decide = jest.spyOn(Renewals4, 'recordDecision');
+
+      const counts = graceCounts();
+      await Charge._private.processGraceLapses({ conn: db, limit: 50, counts });
+
+      expect(counts.graceLapsed).toBe(0);
+      expect(mockVoidInvoice).toHaveBeenCalledWith(fx.invoice.id, { requireUnsettled: true });
+      expect(mockRaiseRetrieval).not.toHaveBeenCalled();
+      expect(decide).not.toHaveBeenCalled();
+      expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/withdrawn/i), expect.any(String), expect.objectContaining({
+        dedupeKey: `termite-renewal-charge:${fx.successor.id}:renewal_withdrawn`,
+      }));
+      expect(await row(fx.successor.id)).toMatchObject({ status: 'cancelled', renewal_lapse_outcome: 'withdrawn', renewal_lapse_parent_cancelled_at: null });
+      expect((await row(fx.successor.id)).renewal_lapse_completed_at).toBeInstanceOf(Date);
+    });
+
+    test('a genuine resume after a crash right after the lapse\'s own parent cancel completes idempotently — retrieval, no second decision', async () => {
+      const fx = await overdueRenewal();
+      // The earlier run: voided, then cancelled the parent WITH provenance,
+      // then crashed before its completion stamp.
+      await db('invoices').where({ id: fx.invoice.id }).update({ status: 'void' });
+      await db('annual_prepay_terms').where({ id: fx.successor.id })
+        .update({ status: 'cancelled', renewal_lapse_started_at: new Date(Date.now() - 3600000), renewal_lapse_parent_cancelled_at: new Date(Date.now() - 1800000) });
+      await db('annual_prepay_terms').where({ id: fx.parent.id }).update({ status: 'cancelled', renewal_decision: 'cancel', renewal_decision_at: new Date(Date.now() - 1800000) });
+      const decide = jest.spyOn(Renewals4, 'recordDecision').mockResolvedValue(null); // guard-miss: already decided
+
+      const counts = lapseCounts();
+      await Charge._private.reconcileMissedLapseEffects({ conn: db, limit: 50, counts });
+
+      expect(counts.lapseEffectsReconciled).toBe(1);
+      expect(mockRaiseRetrieval).toHaveBeenCalledTimes(1);
+      expect(await row(fx.successor.id)).toMatchObject({ renewal_lapse_outcome: 'lapsed' });
+      expect(await row(fx.parent.id)).toMatchObject({ status: 'cancelled', renewal_decision: 'cancel' });
+      expect(decide).toHaveBeenCalledTimes(1); // the idempotent retry only
+    });
+
+    test('the lapse\'s own parent cancel stamps its provenance on the successor', async () => {
+      const fx = await overdueRenewal();
+      await db('annual_prepay_terms').where({ id: fx.successor.id }).update({ renewal_lapse_started_at: new Date(Date.now() - 86400000) });
+      jest.spyOn(Renewals4, 'recordDecision').mockImplementation(async ({ termId, action, conn }) => {
+        const [decided] = await conn('annual_prepay_terms').where({ id: termId }).whereNull('renewal_decision')
+          .update({ status: 'cancelled', renewal_decision: action, renewal_decision_at: new Date() }).returning('*');
+        return decided || null;
+      });
+
+      await Charge._private.reconcileMissedLapseEffects({ conn: db, limit: 50, counts: lapseCounts() });
+
+      const s = await row(fx.successor.id);
+      expect(s).toMatchObject({ renewal_lapse_outcome: 'lapsed' });
+      expect(s.renewal_lapse_parent_cancelled_at).toBeInstanceOf(Date);
+    });
+
     // The same rule on every other successor action that can void, send a
     // pay link or record a charge outcome — each re-reads the successor and
     // defers on a dispute suspension (successorDisputeSuspended).
@@ -1264,6 +1328,39 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/withdrawn/i), expect.any(String), expect.objectContaining({
         dedupeKey: `termite-renewal-charge:${successor.id}:renewal_withdrawn`,
       }));
+      expect(mockSendViaSMSAndEmail).not.toHaveBeenCalled();
+    });
+
+    // Codex #4971 r13 P1: a renewal whose fallback pay link already went
+    // out (its skip / follow-through markers handled — legs 7a-7c are done
+    // with it), behind a parent that is still fine, then the customer
+    // deleted their account: pass 4b withdraws it.
+    test('a delivered, handled renewal whose customer then deleted their account: 4b withdraws it (void + cancel + one bell), no retrieval', async () => {
+      const { renewalInvoice, successor } = await sentRenewalOfRefundableParent(); // parent still paid
+      await db('annual_prepay_terms').where({ id: successor.id }).update({
+        renewal_charge_skipped_at: new Date(), renewal_charge_skip_reason: 'no_method',
+        renewal_charge_failure_handled_at: new Date(),
+      });
+      const untouched = await sentRenewalOfRefundableParent(); // a live account: never selected
+      await db('customers').insert({ id: customerId, deleted_at: new Date() });
+      // The untouched renewal belongs to a different, live customer.
+      const liveCustomer = randomUUID();
+      await db('customers').insert({ id: liveCustomer, deleted_at: null });
+      await db('annual_prepay_terms').where({ id: untouched.successor.id }).update({ customer_id: liveCustomer });
+
+      const c = counts();
+      await Charge._private.withdrawSuccessorsOfIneligibleParents({ conn: db, limit: 50, counts: c });
+
+      expect(c).toEqual({ withdrawScanned: 1, withdrawn: 1 });
+      expect(mockVoidInvoice).toHaveBeenCalledWith(renewalInvoice.id, { requireUnsettled: true });
+      expect(mockVoidInvoice).toHaveBeenCalledTimes(1);
+      expect((await db('annual_prepay_terms').where({ id: successor.id }).first()).status).toBe('cancelled');
+      expect((await db('annual_prepay_terms').where({ id: untouched.successor.id }).first()).status).toBe('payment_pending');
+      expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+      expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/withdrawn/i), expect.stringContaining('deleted their account'), expect.objectContaining({
+        dedupeKey: `termite-renewal-charge:${successor.id}:renewal_withdrawn`,
+      }));
+      expect(mockRaiseRetrieval).not.toHaveBeenCalled();
       expect(mockSendViaSMSAndEmail).not.toHaveBeenCalled();
     });
 
