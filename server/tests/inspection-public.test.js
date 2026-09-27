@@ -1836,6 +1836,32 @@ describe('POST /:token commit', () => {
       expect(mockCreateSelfBooking).not.toHaveBeenCalled();
     });
 
+    test('a matched profile deleted before the review fence is a retry, not a server error', async () => {
+      gateState.reviewLive = true;
+      firstResults.leads = { ...LEAD_ROW, customer_id: null, first_contact_channel: 'call', twilio_call_sid: 'CA-test' };
+      firstResults.call_log = { from_phone: '+19415550101' };
+      const existingCustomer = {
+        id: 'cust-9', account_id: 'acct-9', is_primary_profile: true,
+        address_line1: '123 Palm Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209', phone: '9415550101',
+        latitude: null, longitude: null,
+      };
+      seedPhoneHousehold(existingCustomer);
+      listResults.customers = [existingCustomer];
+      listResults.scheduled_services = [];
+      firstResults.customers = query => (query.conds.account_id ? existingCustomer : null);
+      mockBuildAvailability.mockResolvedValueOnce({
+        days: [{ date: FUTURE_DATE, slots: [{ start_time: '09:00', end_time: '09:30', start_label: '9:00 AM', end_label: '9:30 AM', technician_id: 'tech-1' }] }],
+      });
+
+      const res = await callPost(mintLeadConsultationToken(LEAD_ID), {
+        date: FUTURE_DATE, time: '09:00', address: '123 Palm Ave, Bradenton, FL 34209',
+      });
+
+      expect(res.statusCode).toBe(422);
+      expect(res.body).toEqual({ error: 'address_unresolved' });
+      expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+    });
+
     // Codex #4737 r9 pre-push P1: a verified lead whose own customer_id is
     // UNTRUSTED reuses a matched profile — that profile is recorded as its
     // provenance (verification-required), so a reopened link finds it.

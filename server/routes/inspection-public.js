@@ -1425,7 +1425,7 @@ async function reuseMatchedProfile(trx, freshLead, matched, resolved) {
     return { customer: matched, location: resolved.location };
   }
   try {
-    return await review.withCustomerReviewWriteFence(matched.id, trx, async (fencedTrx) => {
+    const fenced = await review.withCustomerReviewWriteFence(matched.id, trx, async (fencedTrx) => {
       // Re-read after both the customer and primary property are locked. A
       // concurrent address edit or geocode decision must win rather than
       // receiving the provider result computed before this transaction.
@@ -1454,6 +1454,7 @@ async function reuseMatchedProfile(trx, freshLead, matched, resolved) {
       await fencedTrx('customers').where({ id: matched.id }).update({ ...after, updated_at: new Date() });
       return { customer: { ...matched, ...after }, location: resolved.location };
     }, { lockWhenDisabled: true, wait: false });
+    return fenced || { locationFailure: 'address_unresolved' };
   } catch (error) {
     if (error?.code === '55P03') return { locationFailure: 'address_unresolved' };
     throw error;
