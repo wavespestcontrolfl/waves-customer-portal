@@ -84,6 +84,7 @@ async function createScratchDb() {
     renewal_charge_failure_reason text,
     renewal_charge_failure_handled_at timestamptz,
     renewal_late_paid_belled_at timestamptz,
+    renewal_charge_claim_retired_at timestamptz,
     dispute_suspended_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
@@ -313,7 +314,7 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       const parent = await insertParent({ term_end: daysFromToday(-3) });
       const bareInvoice = await insertInvoice({ status: 'draft' });
       const bare = await insertSuccessor(parent, bareInvoice, {
-        term_start: daysFromToday(-2), created_at: new Date(), renewal_charge_attempted_at: new Date(Date.now() - 3600000),
+        term_start: daysFromToday(-2), created_at: new Date(), renewal_charge_attempted_at: new Date(Date.now() - 2 * 3600000), // past the 1h recovery lease
         renewal_charge_failure_kind: 'outcome_pending', // the write-ahead marker the fence claim wrote
       });
       await db('stripe_invoice_charge_attempts').insert({ invoice_id: bareInvoice.id, status: 'failed' });
@@ -321,7 +322,7 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       const parent2 = await insertParent({ term_end: daysFromToday(-3) });
       const sentInvoice = await insertInvoice({ status: 'draft' });
       const submitted = await insertSuccessor(parent2, sentInvoice, {
-        term_start: daysFromToday(-2), created_at: new Date(), renewal_charge_attempted_at: new Date(Date.now() - 3600000),
+        term_start: daysFromToday(-2), created_at: new Date(), renewal_charge_attempted_at: new Date(Date.now() - 2 * 3600000), // past the 1h recovery lease
       });
       await db('stripe_invoice_charge_attempts').insert({ invoice_id: sentInvoice.id, status: 'ambiguous', submitted_at: new Date() });
 
@@ -346,6 +347,62 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       // Codex #4971 r5 P2: handled by 7b, the never-submitted claim carries
       // no outcome — the write-ahead marker is cleared.
       expect((await db('annual_prepay_terms').where({ id: bare.id }).first('renewal_charge_failure_kind')).renewal_charge_failure_kind).toBeNull();
+    });
+
+    // Codex #4971 r7 P1 — live claim vs abandoned claim. Leg 7b takes over
+    // only a claim older than the recovery lease, and only after RETIRING it
+    // under the gate; the charging worker's own in-gate re-check then
+    // refuses the retired claim, so it can never submit afterwards.
+    describe('r7: 7b retires an abandoned claim before recovering it', () => {
+      async function claimed(ageMs, fields = {}) {
+        const parent = await insertParent({ term_end: daysFromToday(-3) });
+        const invoice = await insertInvoice({ status: 'draft' });
+        const successor = await insertSuccessor(parent, invoice, {
+          term_start: daysFromToday(-2), created_at: new Date(),
+          renewal_charge_attempted_at: new Date(Date.now() - ageMs), renewal_charge_failure_kind: 'outcome_pending', ...fields,
+        });
+        return { successor, invoice };
+      }
+      const rowOf = (id) => db('annual_prepay_terms').where({ id }).first();
+
+      test('a fresh claim is never selected; a stale one is retired, recovered once, and its worker\'s in-gate re-check refuses', async () => {
+        const fresh = await claimed(5 * 60000);
+        const stale = await claimed(2 * 3600000);
+
+        const counts = { reconcileNeverAttemptedScanned: 0, reconcileSkipped: 0, charged: 0, failed: 0, reconcileNeverReachedStripeScanned: 0, reconcileNeverReachedStripeBelled: 0 };
+        await Charge._private.reconcileStuckSuccessors({ conn: db, limit: 50, counts });
+
+        expect(counts.reconcileNeverReachedStripeScanned).toBe(1);
+        expect(mockSendViaSMSAndEmail).toHaveBeenCalledTimes(1);
+        expect(mockSendViaSMSAndEmail).toHaveBeenCalledWith(stale.invoice.id, expect.any(Object));
+        const staleRow = await rowOf(stale.successor.id);
+        expect(staleRow.renewal_charge_claim_retired_at).toBeInstanceOf(Date);
+        expect(staleRow.renewal_charge_never_reached_stripe_belled_at).toBeInstanceOf(Date);
+        expect(staleRow.renewal_charge_failure_kind).toBeNull();
+        const freshRow = await rowOf(fresh.successor.id);
+        expect(freshRow).toMatchObject({ renewal_charge_claim_retired_at: null, renewal_charge_never_reached_stripe_belled_at: null, renewal_charge_failure_kind: 'outcome_pending' });
+
+        // The original worker reaches the gate afterwards: refused.
+        await expect(Charge._private.chargeRefusalUnderGate(stale.successor, db)).resolves.toMatchObject({ reason: 'charge_claim_retired', superseded: true });
+        // The live claim's worker is unaffected.
+        await expect(Charge._private.chargeRefusalUnderGate(fresh.successor, db)).resolves.toBeNull();
+
+        // A second sweep never recovers it again (no second pay link).
+        await Charge._private.reconcileStuckSuccessors({ conn: db, limit: 50, counts: { ...counts } });
+        expect(mockSendViaSMSAndEmail).toHaveBeenCalledTimes(1);
+      });
+
+      test('a claim that reached Stripe while 7b waited for the gate is never retired or recovered', async () => {
+        const stale = await claimed(2 * 3600000);
+        Renewals.withParentDecisionLock = async (_termId, fn) => {
+          await db('stripe_invoice_charge_attempts').insert({ invoice_id: stale.invoice.id, status: 'claimed', submitted_at: new Date() });
+          return fn();
+        };
+        await Charge._private.reconcileStuckSuccessors({ conn: db, limit: 50, counts: { reconcileNeverAttemptedScanned: 0, reconcileSkipped: 0, charged: 0, failed: 0, reconcileNeverReachedStripeScanned: 0, reconcileNeverReachedStripeBelled: 0 } });
+        expect(mockSendViaSMSAndEmail).not.toHaveBeenCalled();
+        expect(mockNotifyAdmin).not.toHaveBeenCalled();
+        expect(await rowOf(stale.successor.id)).toMatchObject({ renewal_charge_claim_retired_at: null, renewal_charge_failure_kind: 'outcome_pending' });
+      });
     });
 
     test('pre-push P1: a scheduled or stale-sending renewal invoice with no delivery stamp is never "presented" — no lapse, no retrieval', async () => {

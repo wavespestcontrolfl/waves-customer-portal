@@ -1680,6 +1680,12 @@ async function chargeRefusalUnderGate(successor, conn) {
   if (fresh?.status !== PAYMENT_PENDING_STATUS || fresh.dispute_suspended_at) {
     return { eligible: false, reason: `successor_status_${fresh?.dispute_suspended_at ? 'dispute_suspended' : fresh?.status || 'missing'}`, durable: true };
   }
+  // Codex #4971 r7 P1: this claim was retired by leg 7b's recovery (or its
+  // outcome was already recorded) — the fallback owns it; never submit.
+  if (fresh.renewal_charge_claim_retired_at
+    || (fresh.renewal_charge_failure_kind && fresh.renewal_charge_failure_kind !== CHARGE_OUTCOME_PENDING)) {
+    return { eligible: false, reason: 'charge_claim_retired', superseded: true };
+  }
   const freshParent = await conn('annual_prepay_terms').where({ id: fresh.renewed_from_term_id }).first();
   const parentEligibility = await parentRefusalForSuccessor(conn, fresh, freshParent);
   return parentEligibility.eligible ? null : parentEligibility;
@@ -1695,6 +1701,9 @@ async function chargeRefusalUnderGate(successor, conn) {
 // retires the successor if it resolves the other way or its grace window
 // closes first.
 async function handleRefusalAtSubmission(successor, refusal, conn) {
+  // Recovery (leg 7b) retired this claim while it waited for the gate: the
+  // fallback owns the renewal — nothing to bell, withdraw or send here.
+  if (refusal.superseded) return { status: 'claim_retired', reason: refusal.reason };
   const reason = `the parent was decided elsewhere immediately before the charge attempt (${refusal.reason})`;
   if (refusal.durable) {
     const retired = await withdrawRenewalSuccessor(successor, reason, conn);
@@ -2858,7 +2867,44 @@ async function stampNeverReachedStripeHandled(successor, conn) {
   if (successor.renewal_charge_failure_kind === CHARGE_OUTCOME_PENDING) await clearChargeOutcomePending(successor, conn);
 }
 
+// Codex #4971 r7 P1 — live claim vs abandoned claim. The fence claim
+// (attempted_at + 'outcome_pending') commits BEFORE the charging worker takes
+// the renewal gate, so leg 7b could recover a claim whose worker was about
+// to submit: the fallback pay link went out, outcome_pending was cleared,
+// and the worker then charged anyway. Now 7b selects only claims older than
+// the recovery lease (the scan), and — under the renewal gate, before any
+// bell or delivery — re-reads the claim and RETIRES it with a
+// compare-and-set (renewal_charge_claim_retired_at, 20260927050000), only
+// while it is still the same unsubmitted claim: payment_pending, the fence
+// set, no recorded outcome other than 'outcome_pending', and no attempt
+// with submission evidence (whereAttemptSubmitted). The worker's own
+// in-gate re-check (chargeRefusalUnderGate) refuses a retired claim — one
+// fence, read on both sides under the same gate — so once recovery took
+// over, the original worker can never submit. A claim this leg already
+// retired stays its to recover (a retried delivery).
 async function bellAndVerifyDeliveryForNeverReachedStripe(successor, conn) {
+  const recover = async () => ((await retireAbandonedChargeClaim(successor, conn))
+    ? recoverNeverReachedStripe(successor, conn)
+    : false);
+  return successor.renewed_from_term_id ? withRenewalGate(successor, recover) : recover();
+}
+
+async function retireAbandonedChargeClaim(successor, conn) {
+  const claim = await conn('annual_prepay_terms').where({ id: successor.id }).first();
+  if (claim?.status !== PAYMENT_PENDING_STATUS || !claim.renewal_charge_attempted_at) return false;
+  if (claim.renewal_charge_claim_retired_at) return true;
+  if (claim.renewal_charge_failure_kind && claim.renewal_charge_failure_kind !== CHARGE_OUTCOME_PENDING) return false;
+  const submitted = await whereAttemptSubmitted(
+    conn('stripe_invoice_charge_attempts as a').where('a.invoice_id', claim.prepay_invoice_id),
+  ).first('a.id');
+  if (submitted) return false;
+  const retired = await conn('annual_prepay_terms').where({ id: successor.id })
+    .whereNull('renewal_charge_claim_retired_at')
+    .update({ renewal_charge_claim_retired_at: new Date() });
+  return Boolean(retired);
+}
+
+async function recoverNeverReachedStripe(successor, conn) {
   // Codex #4971 round-4 (post-merge audit) P1: the FINAL parent check
   // right before the Stripe call (decideAndCharge's withParentDecisionLock
   // re-check) blocks Stripe when a cancellation wins the race against an
@@ -2983,6 +3029,11 @@ async function reconcileStuckSuccessors({ conn = db, limit = 200, counts }) {
       .whereNotNull('t.annual_plan_version')
       .where('t.status', PAYMENT_PENDING_STATUS)
       .whereNotNull('t.renewal_charge_attempted_at')
+      // Codex #4971 r7 P1: only a claim older than the recovery lease (the
+      // same lease leg 7d applies to a pending outcome) — a fresh claim's
+      // worker is still on its way to the gate. The retire under the gate
+      // (bellAndVerifyDeliveryForNeverReachedStripe) is the authority.
+      .where('t.renewal_charge_attempted_at', '<', new Date(Date.now() - RECONCILE_NEVER_ATTEMPTED_AFTER_MS))
       .whereNull('t.renewal_charge_never_reached_stripe_belled_at')
       // A recorded charge outcome (renewal_charge_failure_kind) means the
       // result is KNOWN — not a crash gap. Leg 7c owns it, with that kind's
@@ -3281,6 +3332,8 @@ module.exports = {
     mintRenewalSuccessor,
     decideAndCharge,
     resolveChargeEligibility,
+    chargeRefusalUnderGate,
+    retireAbandonedChargeClaim,
     resolvePendingChargeOutcomes,
     bellLatePaidRenewals,
     bellLatePaidRenewal,
