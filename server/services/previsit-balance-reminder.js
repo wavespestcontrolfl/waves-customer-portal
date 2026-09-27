@@ -227,6 +227,20 @@ async function previsitPolicySnapshots(channels, consult) {
   return snapshots;
 }
 
+function previsitInvoicePolicy(snapshots, explicit) {
+  const sms = snapshots.find((snapshot) => snapshot.channel === 'sms');
+  const email = snapshots.find((snapshot) => snapshot.channel === 'email');
+  const lists = snapshots.filter((snapshot) => snapshot.permitted)
+    .map((snapshot) => snapshot.eligibleInvoiceIds).filter((ids) => ids != null);
+  return {
+    invoiceIds: explicit
+      ? (lists.length ? lists.reduce((ids, next) => ids.filter((id) => next.map(String).includes(String(id)))) : null)
+      : (sms.permitted && sms.eligibleInvoiceIds !== null ? sms.eligibleInvoiceIds : email.eligibleInvoiceIds),
+    smsPolicyPermitted: sms?.permitted,
+    emailPolicyPermitted: email?.permitted,
+  };
+}
+
 async function prepareVisitReminder(visit, { now, todayEt }) {
   // An unreadable choice must leave the visit unclaimed. Null alone retains legacy delivery.
   const prefs = await db('notification_prefs').where({ customer_id: visit.customer_id }).first();
@@ -243,7 +257,8 @@ async function prepareVisitReminder(visit, { now, todayEt }) {
   const duesLate = lane.mode === 'monthly_membership'
     && duesCollected === false
     && String(todayEt) >= String(obligation.graceDateEt);
-  const duesCents = duesLate ? Math.round((Number(visit.monthly_rate) || 0) * 100) : 0;
+  const monthlyRate = Number(visit.monthly_rate) || 0;
+  const duesCents = duesLate ? Math.round(monthlyRate * 100) : 0;
   const consult = {
     customerId: visit.customer_id,
     purpose: 'balance_reminder',
@@ -257,15 +272,8 @@ async function prepareVisitReminder(visit, { now, todayEt }) {
   });
   if (snapshots.some((snapshot) => snapshot.balanceIncomplete)
     || snapshots.every((snapshot) => !snapshot.permitted)) return null;
-  const smsVerdict = snapshots.find((snapshot) => snapshot.channel === 'sms');
-  const emailVerdict = snapshots.find((snapshot) => snapshot.channel === 'email');
-  const permitted = snapshots.filter((snapshot) => snapshot.permitted);
-  const lists = permitted.map((snapshot) => snapshot.eligibleInvoiceIds).filter((ids) => ids != null);
-  const eligibleIds = channels
-    ? (lists.length ? lists.reduce((ids, next) => ids.filter((id) => next.map(String).includes(String(id)))) : null)
-    : (smsVerdict.permitted && smsVerdict.eligibleInvoiceIds !== null
-      ? smsVerdict.eligibleInvoiceIds : emailVerdict.eligibleInvoiceIds);
-  const eligible = eligibleIds == null ? null : new Set(eligibleIds.map(String));
+  const policy = previsitInvoicePolicy(snapshots, channels !== null);
+  const eligible = policy.invoiceIds == null ? null : new Set(policy.invoiceIds.map(String));
   const fresh = eligible ? freshAll.filter((invoice) => eligible.has(String(invoice.id))) : freshAll;
   const overdueRecurringDue = fresh.reduce((sum, invoice) => sum + invoiceAmountDue(invoice), 0);
   const verdict = previsitBalanceReminderEligible({
@@ -280,12 +288,12 @@ async function prepareVisitReminder(visit, { now, todayEt }) {
   });
   if (!verdict.send) return null;
   const amount = verdict.duesLate
-    ? (Number(visit.monthly_rate) || 0) + verdict.overdueDue
+    ? monthlyRate + verdict.overdueDue
     : verdict.overdueDue;
   if (!(amount > 0)) return null;
   return {
-    smsPolicyPermitted: smsVerdict?.permitted,
-    emailPolicyPermitted: emailVerdict?.permitted,
+    smsPolicyPermitted: policy.smsPolicyPermitted,
+    emailPolicyPermitted: policy.emailPolicyPermitted,
     channels,
     amount,
     duesCents,
@@ -400,6 +408,14 @@ function currentDuesCents(customer, database, now) {
       ? Math.round((Number(customer.monthly_rate) || 0) * 100) : 0));
 }
 
+function visitMatchesPrevisitQuote(current, quoted, requireClaim) {
+  return !!current && String(current.customer_id) === String(quoted.customer_id)
+    && ['pending', 'confirmed'].includes(current.status) && current.is_recurring === true
+    && (!requireClaim || !!current.balance_reminder_sent_at)
+    && dateOnlyString(current.scheduled_date) === dateOnlyString(quoted.scheduled_date)
+    && String(current.service_type || 'service') === String(quoted.service_type || 'service');
+}
+
 function previsitQuoteAuthority({ visit, quotedInvoices, quotedDuesCents, ledgerId, replayContext }) {
   const quoted = frozenInvoiceQuote(quotedInvoices);
   const changed = (reason, supersessionReason) => ({
@@ -434,12 +450,7 @@ function previsitQuoteAuthority({ visit, quotedInvoices, quotedDuesCents, ledger
         if (!locked?.customer || locked.customer.deleted_at) return PREVISIT_AUTHORITY_BUSY;
         const check = async (savepoint) => {
           const currentVisit = locked.visits.find((row) => String(row.id) === String(visit.id));
-          if (!currentVisit || String(currentVisit.customer_id) !== String(visit.customer_id)
-            || !['pending', 'confirmed'].includes(currentVisit.status)
-            || currentVisit.is_recurring !== true
-            || (!replayContext && !currentVisit.balance_reminder_sent_at)
-            || dateOnlyString(currentVisit.scheduled_date) !== dateOnlyString(visit.scheduled_date)
-            || String(currentVisit.service_type || 'service') !== String(visit.service_type || 'service')) {
+          if (!visitMatchesPrevisitQuote(currentVisit, visit, !replayContext)) {
             return changed('visit changed before dispatch', 'balance-reminder-visit-changed');
           }
           let excludeLedgerIds = ledgerId ? [ledgerId] : [];
