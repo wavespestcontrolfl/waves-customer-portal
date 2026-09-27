@@ -111,6 +111,54 @@ test('an estimate identity follows the typed address to another property on the 
   })).resolves.toEqual({ ...propertyBPin, disclosable: false });
 });
 
+test('structured locality selects the same-street/unit property in the submitted ZIP', async () => {
+  const propertyAPin = { lat: 27.35, lng: -82.52 };
+  const propertyBPin = { lat: 26.64, lng: -81.87 };
+  firstResults.estimates = { customer_id: CUSTOMER_ID };
+  firstResults.customers = customerRow({
+    account_id: CUSTOMER_ID, address_line2: 'Apt A', zip: '34236',
+    latitude: propertyAPin.lat, longitude: propertyAPin.lng,
+  });
+  listResults.customers = [{
+    ...customerRow({
+      id: PROPERTY_B_ID, account_id: CUSTOMER_ID, address_line2: 'Apt A',
+      city: 'Fort Myers', zip: '33901', latitude: propertyBPin.lat, longitude: propertyBPin.lng,
+    }),
+  }];
+
+  await expect(resolveOfferCoords({
+    address: ADDRESS.address_line1,
+    city: 'Fort Myers',
+    state: 'FL',
+    zip: '33901',
+    unit: 'Apt A',
+    estimate_id: ESTIMATE_ID,
+  })).resolves.toEqual({ ...propertyBPin, disclosable: false });
+});
+
+test('street-only offer input retains structured locality for geocoding', async () => {
+  listResults.customers = [];
+  const savedKey = process.env.GOOGLE_MAPS_API_KEY;
+  process.env.GOOGLE_MAPS_API_KEY = 'fixture-key';
+  const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
+    json: async () => ({ status: 'OK', results: [{ geometry: { location: { lat: 27.34, lng: -82.53 } } }] }),
+  });
+  try {
+    await expect(resolveOfferCoords({
+      address: ADDRESS.address_line1,
+      city: ADDRESS.city,
+      state: ADDRESS.state,
+      zip: ADDRESS.zip,
+    })).resolves.toEqual({ lat: 27.34, lng: -82.53, disclosable: true });
+    const requested = new URL(fetchMock.mock.calls[0][0]);
+    expect(requested.searchParams.get('address')).toBe('123 Test Ave, Sarasota, FL 34236');
+  } finally {
+    fetchMock.mockRestore();
+    if (savedKey === undefined) delete process.env.GOOGLE_MAPS_API_KEY;
+    else process.env.GOOGLE_MAPS_API_KEY = savedKey;
+  }
+});
+
 test('an estimate identity with no matching account property never falls through to caller coordinates', async () => {
   firstResults.estimates = { customer_id: CUSTOMER_ID };
   firstResults.customers = customerRow({ address_line1: '999 Other Road' });

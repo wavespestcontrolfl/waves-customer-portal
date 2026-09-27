@@ -7,7 +7,11 @@ const db = require('../models/db');
 const { isAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
-const { estimateBelongsToCustomerAccount } = require('../services/customer-account-ownership');
+const {
+  estimateBelongsToCustomerAccount,
+  loadEstimateOwnershipSnapshots,
+  validateEstimateOwnershipUnderLock,
+} = require('../services/customer-account-ownership');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
@@ -988,6 +992,10 @@ function inTimeOfDay(startTimeHHMM, timeOfDay) {
 // check here) would hand out someone else's rooftop-accurate location, so the
 // public routes round those (roundPublicCoord). Slot computation always uses
 // the exact values either way.
+function firstNonblankAddressValue(...values) {
+  return values.map(value => String(value ?? '').trim()).find(Boolean) || '';
+}
+
 async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
   let resolvedLat = lat ? parseFloat(lat) : null;
   let resolvedLng = lng ? parseFloat(lng) : null;
@@ -1035,12 +1043,17 @@ async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
 // echoed exactly — it is a customer record's pin. Everyone else keeps
 // resolveBookingCoords. estimate_id is a raw public value: only a UUID
 // (LEAD_ID_RE's shape) is looked up.
-async function resolveOfferCoords({ lat, lng, address, city, unit, estimate_id }) {
+async function resolveOfferCoords({ lat, lng, address, city, state, zip, unit, estimate_id }) {
   let customer = null;
   let estimateBound = false;
   const parsed = parseRawAddress(address || '');
-  const line1 = parsed.line1 || address;
-  const submittedUnit = String(unit || '').trim() || submittedInlineUnit(line1);
+  const line1 = firstNonblankAddressValue(parsed.line1, address);
+  const locality = {
+    city: firstNonblankAddressValue(city, parsed.city),
+    state: firstNonblankAddressValue(state, parsed.state),
+    zip: firstNonblankAddressValue(zip, parsed.zip),
+  };
+  const submittedUnit = firstNonblankAddressValue(unit, submittedInlineUnit(line1));
   if (estimate_id && LEAD_ID_RE.test(String(estimate_id))) {
     const customerId = (await db('estimates').where('id', estimate_id).first('customer_id'))?.customer_id;
     estimateBound = !!customerId;
@@ -1050,7 +1063,7 @@ async function resolveOfferCoords({ lat, lng, address, city, unit, estimate_id }
           'address_line1', 'address_line2', 'city', 'state', 'zip');
       if (primary) {
         customer = await findAccountPropertyByAddress(primary, {
-          address: line1, zip: parsed.zip, unit: submittedUnit,
+          address: line1, zip: locality.zip, unit: submittedUnit,
         });
       }
     }
@@ -1062,8 +1075,8 @@ async function resolveOfferCoords({ lat, lng, address, city, unit, estimate_id }
   if (!customer && address) {
     const customerId = (await findUniqueCustomerByAddress(
       line1,
-      city || parsed.city,
-      parsed.zip,
+      locality.city,
+      locality.zip,
       submittedUnit,
     ))?.id;
     customer = customerId
@@ -1073,7 +1086,9 @@ async function resolveOfferCoords({ lat, lng, address, city, unit, estimate_id }
   }
   const pin = customer ? await customerBookingLocation(customer) : null;
   if (customer) return pin ? { ...pin, disclosable: false } : { lat: null, lng: null, disclosable: false };
-  return resolveBookingCoords({ lat, lng, address, city, estimate_id: null });
+  const stateZip = [locality.state, locality.zip].filter(Boolean).join(' ');
+  const geocodeAddressLine = [line1, locality.city, stateZip].filter(Boolean).join(', ');
+  return resolveBookingCoords({ lat, lng, address: geocodeAddressLine, city: locality.city, estimate_id: null });
 }
 
 // Load the singleton booking_config row, falling back to the same defaults the
@@ -1845,7 +1860,8 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
 }
 
 // GET /api/booking/availability
-//   query: lat, lng, address, city, service_type, duration_minutes, date_from, date_to
+//   query: lat, lng, address, city, state, zip, unit, estimate_id,
+//          service_type, duration_minutes, date_from, date_to
 router.get('/availability', async (req, res, next) => {
   try {
     const { isEnabled } = require('../config/feature-gates');
@@ -1854,7 +1870,7 @@ router.get('/availability', async (req, res, next) => {
     }
 
     const {
-      lat, lng, address, city, unit, estimate_id,
+      lat, lng, address, city, state, zip, unit, estimate_id,
       service_type, duration_minutes,
       date_from, date_to,
     } = req.query;
@@ -1866,7 +1882,9 @@ router.get('/availability', async (req, res, next) => {
       max_self_books_per_day: 3,
     };
 
-    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({ lat, lng, address, city, unit, estimate_id });
+    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({
+      lat, lng, address, city, state, zip, unit, estimate_id,
+    });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
@@ -1947,7 +1965,8 @@ const findSlotsHourlyLimiter = rateLimit({
 });
 
 // POST /api/booking/find-slots — Waves AI date/time search.
-//   body: { query, lat, lng, address, city, estimate_id, service_type, duration_minutes }
+//   body: { query, lat, lng, address, city, state, zip, unit, estimate_id,
+//           service_type, duration_minutes }
 //   Parses the natural-language "when" into a date window + time-of-day, then
 //   returns the matching open slots (same shape as /availability) plus a short
 //   summary line and a `nearby` flag for the soft route-density message.
@@ -1959,7 +1978,7 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
     }
 
     const {
-      query, lat, lng, address, city, unit, estimate_id,
+      query, lat, lng, address, city, state, zip, unit, estimate_id,
       service_type, duration_minutes,
     } = req.body || {};
     const cleanQuery = String(query || '').trim();
@@ -1973,7 +1992,9 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
       max_self_books_per_day: 3,
     };
 
-    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({ lat, lng, address, city, unit, estimate_id });
+    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({
+      lat, lng, address, city, state, zip, unit, estimate_id,
+    });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
@@ -3133,6 +3154,15 @@ async function createSelfBooking(payload = {}) {
         }),
       ];
       const commsFingerprint = (r) => COMMS_FINGERPRINT_COLS.map((c) => r?.[c] || '').join('|');
+      // Snapshot every estimate the visit will stamp before entering the
+      // scheduling transaction. Its current owner contributes a comms fence
+      // below; after that fence the estimate row and owner account are held
+      // FOR SHARE through the visit insert. A merge undo therefore either
+      // finishes its repoint before this snapshot is revalidated or waits for
+      // the booking to commit — it cannot change the owner after our check.
+      const stampedEstimateRefs = [...new Set([estimate?.id, sourceEstimateId].filter(Boolean).map(String))];
+      const estimateOwnershipSnapshots = await loadEstimateOwnershipSnapshots(db, stampedEstimateRefs);
+      const estimateOwnershipById = new Map(estimateOwnershipSnapshots.map(snapshot => [snapshot.id, snapshot]));
       const preFenceCustomer = custId
         ? await db('customers').where({ id: custId }).first('id', ...COMMS_FINGERPRINT_COLS, 'latitude', 'longitude')
         : null;
@@ -3295,13 +3325,23 @@ async function createSelfBooking(payload = {}) {
       // below resolves its comms recipients LIVE from the customer row, so
       // it must serialize against a concurrent customer-merge undo's
       // absence probes — after the scheduling rungs, BEFORE every row lock.
-      // The consultation page fences EVERY profile its lead touches first,
-      // in sorted order (Codex #4737 r22 P0 — the same order the waitlist
-      // uses); re-taking this customer's own fence below is a no-op.
+      // The consultation page fences EVERY profile its lead touches. Estimate
+      // ownership adds the current owner of every estimate this visit will
+      // stamp. Take the whole set in canonical id order before any customer
+      // or estimate row lock: merge undo takes the estimate owner's same
+      // customer-comms fence before it can repoint that estimate, so the
+      // ownership check below stays true through the final insert.
+      const commsFenceIds = new Set(
+        [custId, ...estimateOwnershipSnapshots.map(snapshot => snapshot.customerId)]
+          .filter(Boolean)
+          .map(String),
+      );
       if (typeof callbackVisit?.leadDedupe?.fenceIds === 'function') {
-        for (const id of await callbackVisit.leadDedupe.fenceIds(trx)) await lockCustomerComms(trx, id);
+        for (const id of await callbackVisit.leadDedupe.fenceIds(trx)) {
+          if (id) commsFenceIds.add(String(id));
+        }
       }
-      await lockCustomerComms(trx, custId);
+      for (const id of [...commsFenceIds].sort()) await lockCustomerComms(trx, id);
       if (custId) {
         const freshBookingCustomer = await trx('customers')
           .where({ id: custId }).forShare()
@@ -3385,11 +3425,12 @@ async function createSelfBooking(payload = {}) {
         // source estimate already books UNLINKED (fail-open ownership
         // gate above), and revalidating its row here would 409 a booking
         // that stamps nothing from it.
-        for (const estRef of [estimate?.id, sourceEstimateId]) {
-          if (!estRef) continue;
-          const freshEst = await trx('estimates').where({ id: estRef }).first('id', 'customer_id');
-          if (!freshEst || (freshEst.customer_id
-            && !await estimateBelongsToCustomerAccount(trx, freshEst, freshBookingCustomer))) {
+        for (const estRef of stampedEstimateRefs) {
+          if (!await validateEstimateOwnershipUnderLock(
+            trx,
+            estimateOwnershipById.get(estRef),
+            freshBookingCustomer,
+          )) {
             throw Object.assign(new Error('Your quote was just updated — please refresh and book again.'), {
               statusCode: 409,
               isOperational: true,

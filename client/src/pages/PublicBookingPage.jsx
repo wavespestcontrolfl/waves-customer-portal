@@ -25,6 +25,16 @@ const phoneDigits = (raw) => {
   return d.length === 11 && d.startsWith('1') ? d.slice(1) : d;
 };
 
+function bookingOfferAddress(address = {}) {
+  return Object.fromEntries(Object.entries({
+    address: address.line1 || address.formatted,
+    city: address.city,
+    state: address.state,
+    zip: address.zip,
+    unit: address.line2,
+  }).filter(([, value]) => value));
+}
+
 const SERVICES = [
   { id: 'pest_control', label: 'Pest Control', duration: 60, icon: 'bug', desc: 'Quarterly interior + exterior treatment' },
   { id: 'lawn_care', label: 'Lawn Care', duration: 60, icon: 'sprout', desc: 'Fertilization + weed control program' },
@@ -360,16 +370,16 @@ export default function PublicBookingPage() {
       // formatted text can retain the originally selected subpremise after
       // the visitor edits the unit box, which would otherwise submit Apt A
       // inline beside `unit=Apt B` and make the offer identity contradictory.
-      const fullAddress = address.line1 || address.formatted;
+      const offerAddress = bookingOfferAddress(address);
+      const fullAddress = offerAddress.address;
       const params = new URLSearchParams({
-        address: fullAddress,
+        ...offerAddress,
         service_type: service.id,
         duration_minutes: String(service.duration),
         // Expand each open day into its full block of 1-hour windows so the
         // day → time picker can show real per-day openings, not a single slot.
         expand: 'open',
       });
-      if (address.line2) params.set('unit', address.line2);
       if (estimateIdParam) params.set('estimate_id', estimateIdParam);
       if (coords?.lat && coords?.lng) {
         params.set('lat', String(coords.lat));
@@ -770,8 +780,7 @@ export default function PublicBookingPage() {
   const selectSlot = (date, slot) => { setSelectedDate(date); setSelectedSlot({ ...slot, date }); track(FUNNEL_EVENTS.BOOKING_SLOT_SELECTED, { date }); };
 
   const slotSearchBody = () => ({
-    address: address.line1 || address.formatted,
-    ...(address.line2 ? { unit: address.line2 } : {}),
+    ...bookingOfferAddress(address),
     ...(estimateIdParam ? { estimate_id: estimateIdParam } : {}),
     service_type: service.id,
     duration_minutes: service.duration,
@@ -824,14 +833,13 @@ export default function PublicBookingPage() {
     setBrowseLoading(true);
     try {
       const params = new URLSearchParams({
-        address: address.line1 || address.formatted,
+        ...bookingOfferAddress(address),
         service_type: service.id,
         duration_minutes: String(service.duration),
         expand: 'open',
         date_from: date,
         date_to: date,
       });
-      if (address.line2) params.set('unit', address.line2);
       if (estimateIdParam) params.set('estimate_id', estimateIdParam);
       if (coords?.lat && coords?.lng) { params.set('lat', String(coords.lat)); params.set('lng', String(coords.lng)); }
       const res = await fetch(`${API_BASE}/booking/availability?${params}`);

@@ -161,9 +161,14 @@ describe('PublicBookingPage offer identity', () => {
       for (const call of [availability, browse]) {
         expect(call.url.searchParams.get('estimate_id')).toBe('est-fixture');
         expect(call.url.searchParams.get('address')).toBe('123 Main St');
+        expect(call.url.searchParams.get('city')).toBe('Sarasota');
+        expect(call.url.searchParams.get('state')).toBe('FL');
+        expect(call.url.searchParams.get('zip')).toBe('34236');
         expect(call.url.searchParams.get('unit')).toBe('Apt B');
       }
-      expect(search.body).toMatchObject({ estimate_id: 'est-fixture', address: '123 Main St', unit: 'Apt B' });
+      expect(search.body).toMatchObject({
+        estimate_id: 'est-fixture', address: '123 Main St', city: 'Sarasota', state: 'FL', zip: '34236', unit: 'Apt B',
+      });
     });
   });
 });

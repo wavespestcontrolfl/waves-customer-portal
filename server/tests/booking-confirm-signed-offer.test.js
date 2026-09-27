@@ -432,6 +432,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       const b = {
         _id: null,
         where(arg) { b._id = (arg && typeof arg === 'object') ? arg.id : arg; return b; },
+        forShare: () => b,
         first: async () => ESTIMATES[String(b._id)] || null,
       };
       return b;
@@ -464,7 +465,13 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       if (table === 'estimates') {
         const builder = {
           _id: null,
+          _ids: null,
           where(_field, id) { builder._id = id; return builder; },
+          whereIn(_field, ids) { builder._ids = ids; return builder; },
+          select: jest.fn(async () => (builder._ids || [])
+            .map(id => ESTIMATES[String(id)])
+            .filter(Boolean)
+            .map(row => ({ id: row.id, customer_id: row.customer_id }))),
           first: jest.fn(() => Promise.resolve(ESTIMATES[String(builder._id)] || null)),
         };
         return builder;

@@ -575,14 +575,20 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
   // assessment, refusing ALREADY_BOOKED.
   // Codex #4737 r10 pre-push P0: the caller's authority is re-checked
   // under the lead lock, before the replay / insert.
-  // Codex #4737 r22 P0: every profile of the lead is fenced, sorted, before
-  // the booked customer's own comms fence.
-  test('leadDedupe.fenceIds fences are taken before the booked customer\'s own comms fence', () => {
-    const fences = src.indexOf('for (const id of await callbackVisit.leadDedupe.fenceIds(trx)) await lockCustomerComms(trx, id);');
-    const own = src.indexOf('await lockCustomerComms(trx, custId);', fences);
-    expect(fences).toBeGreaterThan(-1);
-    expect(own).toBeGreaterThan(fences);
-    expect(own - fences).toBeLessThan(400);
+  // Codex #4737 r22 P0: every profile of the lead is fenced before row locks.
+  // Estimate owners now join the same set; one sorted acquisition prevents
+  // multi-profile bookings from reversing customer-comms key order.
+  test('leadDedupe profiles, the booked customer, and estimate owners share one sorted comms-fence set', () => {
+    const fenceSet = src.indexOf('const commsFenceIds = new Set(');
+    const estimateOwners = src.indexOf('...estimateOwnershipSnapshots.map(snapshot => snapshot.customerId)', fenceSet);
+    const leadFences = src.indexOf('for (const id of await callbackVisit.leadDedupe.fenceIds(trx))', fenceSet);
+    const acquire = src.indexOf('for (const id of [...commsFenceIds].sort()) await lockCustomerComms(trx, id);', leadFences);
+    const customerRowLock = src.indexOf("const freshBookingCustomer = await trx('customers')", acquire);
+    expect(fenceSet).toBeGreaterThan(-1);
+    expect(estimateOwners).toBeGreaterThan(fenceSet);
+    expect(leadFences).toBeGreaterThan(fenceSet);
+    expect(acquire).toBeGreaterThan(leadFences);
+    expect(customerRowLock).toBeGreaterThan(acquire);
   });
 
   test('leadDedupe.revalidate runs right after the inspection-lead lock and refuses CUSTOMER_CHANGED_RETRY', () => {

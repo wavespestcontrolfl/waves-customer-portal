@@ -1,0 +1,35 @@
+const {
+  canonicalCustomerAccountId,
+  sameCustomerAccount,
+} = require('../services/customer-account-ownership');
+
+describe('canonical customer-account ownership', () => {
+  test('a primary row without account_id and its sibling share the primary id', () => {
+    const primary = { id: 'primary', account_id: null };
+    const sibling = { id: 'sibling', account_id: 'primary' };
+    expect(canonicalCustomerAccountId(primary)).toBe('primary');
+    expect(canonicalCustomerAccountId(sibling)).toBe('primary');
+    expect(sameCustomerAccount(primary, sibling)).toBe(true);
+  });
+
+  test('two sibling properties with the same explicit account remain related', () => {
+    expect(sameCustomerAccount(
+      { id: 'property-a', account_id: 'account-1' },
+      { id: 'property-b', account_id: 'account-1' },
+    )).toBe(true);
+  });
+
+  test('a moved primary owner does not match a stale sibling reference to its id', () => {
+    expect(sameCustomerAccount(
+      { id: 'sibling', account_id: 'primary' },
+      { id: 'primary', account_id: 'different-account' },
+    )).toBe(false);
+  });
+
+  test('matching row ids do not hide an explicit account move', () => {
+    expect(sameCustomerAccount(
+      { id: 'primary', account_id: 'account-before' },
+      { id: 'primary', account_id: 'account-after' },
+    )).toBe(false);
+  });
+});

@@ -222,8 +222,11 @@ server-resolved pair must match the signed grid and is stamped with its
 address on the new visit so dispatch uses the same location the commit
 certified. The customer profile is not rewritten, cleared pins are not
 restored, and no geocoder request runs while scheduling locks are held.
-The official `/book` client sends its estimate identity and dedicated unit on
-every availability, date-browse, and `/find-slots` request. The offer side
+The official `/book` client sends its estimate identity, street-only line,
+dedicated unit, and structured city/state/ZIP on every availability,
+date-browse, and `/find-slots` request. The street stays free of a stale Places
+subpremise after a unit edit while the structured locality keeps same-street
+properties in different ZIPs distinct. The offer side
 resolves the same location: `/api/booking/availability` and `/find-slots` build
 an existing customer's offers (an estimate identifies the account and the
 typed address/unit selects the matching property row, else the unique
