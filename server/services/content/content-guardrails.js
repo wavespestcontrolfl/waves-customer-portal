@@ -1936,7 +1936,49 @@ function isExactTagAt(text, start, name) {
 // {true}; Codex #3646 r36).
 // A child expression that renders NOTHING: an empty string or a boolean/
 // nullish literal, with optional comment trivia around it.
-const WHITESPACE_ENTITY_RE = /&(?:nbsp|ensp|emsp|thinsp|#0*(?:32|160|8194|8195|8201)|#x0*(?:20|a0|2002|2003|2009));?/gi;
+const INVISIBLE_NAMED_ENTITY_TEXT = Object.freeze({
+  tab: '\t',
+  newline: '\n',
+  nbsp: '\u00a0',
+  ensp: '\u2002',
+  emsp: '\u2003',
+  emsp13: '\u2004',
+  emsp14: '\u2005',
+  numsp: '\u2007',
+  puncsp: '\u2008',
+  thinsp: '\u2009',
+  hairsp: '\u200a',
+  verythinspace: '\u200a',
+  mediumspace: '\u205f',
+  thickspace: '\u205f\u200a',
+  negativemediumspace: '\u200b',
+  negativethickspace: '\u200b',
+  negativethinspace: '\u200b',
+  negativeverythinspace: '\u200b',
+  zerowidthspace: '\u200b',
+  nobreak: '\u2060',
+  applyfunction: '\u2061',
+  invisibletimes: '\u2062',
+  invisiblecomma: '\u2063',
+  shy: '\u00ad',
+  zwnj: '\u200c',
+  zwj: '\u200d',
+  lrm: '\u200e',
+  rlm: '\u200f',
+});
+const CHARACTER_REFERENCE_RE = /&(?:#(?:x([0-9a-f]+)|([0-9]+))|([a-z][a-z0-9]+));?/gi;
+function blankWhitespaceEntities(text) {
+  return String(text || '').replace(CHARACTER_REFERENCE_RE, (reference, hex, decimal, named) => {
+    let rendered = named ? INVISIBLE_NAMED_ENTITY_TEXT[named.toLowerCase()] : null;
+    if (!named) {
+      const codePoint = Number.parseInt(hex || decimal, hex ? 16 : 10);
+      if (Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff) {
+        try { rendered = String.fromCodePoint(codePoint); } catch { /* keep the reference */ }
+      }
+    }
+    return rendered && [...rendered].every((char) => /[\s\p{Cf}]/u.test(char)) ? ' ' : reference;
+  });
+}
 // An ARRAY whose slots are all non-rendering (or elided) renders nothing
 // either ({[]}, {[null]}, {[false, '']}; Codex #3646 r39).
 const NON_RENDERING_CHILD_RE = (() => {
@@ -1945,6 +1987,23 @@ const NON_RENDERING_CHILD_RE = (() => {
   const arr = '\\[' + trivia + '(?:' + lit + '?' + trivia + ',' + trivia + ')*' + '(?:' + lit + trivia + ')?' + '\\]';
   return new RegExp('\\{' + trivia + '(?:' + lit + '|' + arr + ')' + trivia + '\\}', 'g');
 })();
+function blankNonRenderingExpressions(text) {
+  return String(text || '').replace(NON_RENDERING_CHILD_RE, ' ');
+}
+
+// Conservative rendered inline text for link-label decisions. This removes
+// hidden/tag/MDX source syntax, whitespace and format-control characters, and
+// Markdown emphasis delimiters. Callers can then require an actual rendered
+// letter, number, punctuation mark, or symbol instead of accepting source
+// residue such as U+200B, `** **`, or `{void 0}` as visible anchor prose.
+function visibleRenderedInlineText(text) {
+  const hiddenBlanked = blankDefinitelyHiddenContent(String(text || ''));
+  const rendered = blankWhitespaceEntities(blankExpressions(blankTags(hiddenBlanked)))
+    .replace(/\p{Cf}/gu, ' ')
+    .replace(/[*_~`]+/g, ' ')
+    .trim();
+  return /[\p{L}\p{N}\p{P}\p{S}]/u.test(rendered) ? rendered : '';
+}
 // Returns the link's RENDERED anchor text ('' when self-closing, empty,
 // hidden-only, or unclosed) — the emptiness rule and the brief's anchor
 // binding both read it.
@@ -1980,7 +2039,7 @@ function affiliateLinkVisibleText(masked, strView, start, attrs) {
         // fragment delimiters (<></>) render nothing either (Codex #508 r5/r6).
         // Whitespace character references (&nbsp; &#32; …) decode to
         // whitespace the anchor cannot show either (Codex #508 r8).
-        return text.replace(/<>|<\/>/g, '').replace(NON_RENDERING_CHILD_RE, '').replace(WHITESPACE_ENTITY_RE, ' ').trim();
+        return blankWhitespaceEntities(blankNonRenderingExpressions(text.replace(/<>|<\/>/g, ''))).trim();
       }
     } else {
       const a = tagAttrsAt(masked, t.index);
@@ -6657,6 +6716,9 @@ module.exports = {
   // certainty-only hidden-text blanker — the completion gate judges HTML
   // CTA anchors by their VISIBLE wording.
   blankDefinitelyHiddenContent,
+  blankWhitespaceEntities,
+  blankNonRenderingExpressions,
+  visibleRenderedInlineText,
   // quote-aware tag walker + balanced MDX-expression blanker — the ONE tag
   // scanner (astro-publisher's body-image scan masks with these, never a
   // parallel regex).
@@ -6668,6 +6730,7 @@ module.exports = {
   normalizeReferenceLabel,
   parseLinkDestination,
   eachMarkdownLink,
+  blankReferenceDefinitions,
   isThematicBreak,
   isInterruptingBlock,
   blankHiddenContent,
@@ -6701,6 +6764,20 @@ module.exports = {
   SAFE_MDX_COMPONENTS,
   ALLOWED_INTERNAL_LINKS,
   isKnownGoodInternalRoute,
+  // Consumed by content-quality-gate's related_posts_linked check (with the
+  // already-exported eachMarkdownLink, markdownReferenceDefinitions,
+  // normalizeReferenceLabel, parseLinkDestination, blankReferenceDefinitions
+  // above) so it counts
+  // REAL, RENDERED, non-image link destinations — masking non-rendered
+  // markdown and expression-string prose first, resolving reference-style
+  // links against their ACTUAL definitions, and skipping unused reference
+  // definitions and image references — instead of a naive body substring
+  // search or an unconditional destination collector, either of which a
+  // comment, an unused `[a]: /x/` definition, a reference-style image, or a
+  // longer URL sharing a prefix could satisfy without an actual clickable
+  // anchor (Codex #4984 r2+r3 P1s).
+  blankExpressionStringLiterals,
+  normalizeInternalPath,
   // deterministic pre-gate repair for unambiguous citation artifacts —
   // consumed by brief-driven-tools emit_draft; kept here beside
   // CITATION_RESIDUE_RE so stripper and detector can never drift.

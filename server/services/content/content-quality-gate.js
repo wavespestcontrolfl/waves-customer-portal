@@ -34,7 +34,21 @@
 
 const { THRESHOLDS } = require('./scoring-config');
 const { evaluateTitleMetaSpam, renderMetaTokens, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, SALESY_META_RE, endsWithSoftCta, metaHasSalesCopy, BARE_PHONE_DIGITS_RE } = require('./title-meta-spam-gate');
-const { isFaqBlockedService } = require('./content-guardrails');
+const {
+  isFaqBlockedService,
+  // Reused for related_posts_linked so it counts REAL, RENDERED, non-image
+  // link destinations from the writer's supported inline-link subset,
+  // instead of a naive body substring search or an unconditional
+  // destination collector.
+  eachMarkdownLink,
+  visibleRenderedInlineText,
+  parseLinkDestination,
+  blankExpressionStringLiterals,
+  blankNonRenderedMarkdownWithDepths,
+  normalizeInternalPath,
+} = require('./content-guardrails');
+const { HUB_SITE_KEYS, normalizeSpokeSites } = require('../content-astro/spoke-sites');
+const { resolveSpokeTarget } = require('../content-astro/spoke-routing');
 
 // Compute the achievable maximum score PER PAGE TYPE so the pass
 // threshold is always a reachable fraction of that page type's own
@@ -156,6 +170,20 @@ const PAGE_TYPE_CHECKS = {
     { name: 'two_plus_city_mentions', weight: 4, evaluate: checkTwoPlusCityMentions },
     { name: 'faq_section_present', weight: 4, evaluate: checkFaqSectionPresent },
     { name: 'voice_match', weight: 6, evaluate: checkVoiceMatch },
+    // HARD but weight 0 (owner rule 2026-09-26, Codex round-1 P2 on #4984):
+    // a brief that supplies related_posts is telling the writer real,
+    // verified link targets exist for this topic — a draft that ignores
+    // them entirely ships exactly the orphan-post problem this whole lane
+    // exists to fix, so this DOES block (ok:false → hard_failures), unlike
+    // an ordinary soft nudge. Weight 0 so it contributes nothing to
+    // total_score and never shifts MIN_TOTAL_SCORES for every OTHER
+    // supporting-blog draft — the score/threshold math is untouched
+    // (computeMinTotalScores sums WEIGHTS, and this one is 0 whichever list
+    // it's in). Required = min(3, however many related_posts the brief
+    // actually lists) — a brief with only 1-2 candidates can still pass by
+    // linking all of them; a brief with none is not applicable (passes
+    // trivially). See checkRelatedPostsLinked for the redraft-directive text.
+    { name: 'related_posts_linked', weight: 0, isHard: true, evaluate: checkRelatedPostsLinked },
     // Owner rule 2026-07-29: blog metas carry NO phone and nothing salesy.
     // Weight 0 hard gate — without it a freshly authored blog meta bypassed
     // the metadata-lane check entirely. The soft-CTA ending was demoted out
@@ -1020,6 +1048,150 @@ function checkFaqSectionPresent(draft, brief) {
   return { ok: true };
 }
 
+// The minimum distinct related-post links a supporting-blog draft must
+// carry, capped by however many the brief actually lists — a brief with
+// fewer candidates than this can still pass by linking all of them.
+const RELATED_POSTS_LINK_MINIMUM = 3;
+
+// Every REAL, RENDERED, non-image markdown link destination in `body`,
+// normalized. Built from content-guardrails' own balanced link scanner
+// (eachMarkdownLink) rather than a naive substring search or its broader
+// collectInternalDestinations (which counts ANY destination-shaped text,
+// and doesn't distinguish an image from a link) — neither of those renders
+// as a clickable anchor a reader can follow (Codex #4984 r2+r3 P1s: a
+// code-fenced/commented mention or an <img>/![alt](path) must never satisfy
+// this).
+// Raw HTML <a href> is out of scope: the writer's plain-Markdown-subset
+// contract already hard-blocks it elsewhere (body_syntax_supported).
+// Quoted attribute values are blanked too (the default attrValues: true):
+// `<InlineCTA headline="Read [A](/termite/a/)" />` renders that text, not
+// an anchor. Reference links, backslash escapes, and nested image labels are
+// unsupported by that same contract, so this collector deliberately handles
+// only simple inline links rather than maintaining a second CommonMark path.
+function visibleInlineLinkLabel(label) {
+  return visibleRenderedInlineText(label);
+}
+
+function realMarkdownLinkPaths(body, allowedHosts) {
+  const { text: rendered } = blankNonRenderedMarkdownWithDepths(body);
+  const scanned = blankExpressionStringLiterals(rendered);
+  const paths = new Set();
+  for (const span of eachMarkdownLink(scanned)) {
+    if (span.kind !== 'inline' || span.isImage) continue;
+    // Any backslash immediately before the opener is outside the writer's
+    // supported body grammar. Do not implement CommonMark escape parity in
+    // this deliberately narrow inline-link collector.
+    if (span.labelStart > 0 && scanned[span.labelStart - 1] === '\\') continue;
+    const label = scanned.slice(span.labelStart + 1, span.labelEnd);
+    // Nested image/reference syntax belongs to the unsupported body grammar;
+    // do not partially interpret it here as visible anchor prose.
+    if (label.includes('[') || label.includes(']')) continue;
+    if (!visibleInlineLinkLabel(label)) continue;
+    const rawDest = parseLinkDestination(scanned.slice(span.destStart, span.destEnd + 1));
+    if (!rawDest) continue;
+    const norm = normalizeInternalPath(firstPartyPathname(rawDest, allowedHosts));
+    if (norm) paths.add(norm);
+  }
+  return paths;
+}
+
+// An absolute URL counts as an internal path only on the domain this brief
+// actually targets. The general route guard intentionally recognizes the
+// whole fleet, but using that broad set here would let a hub post satisfy its
+// mandatory related-link count with an absolute spoke URL.
+function firstPartyPathname(dest, allowedHosts) {
+  try {
+    const u = new URL(String(dest || '').trim());
+    if (/^https?:$/.test(u.protocol) && allowedHosts.has(u.hostname.toLowerCase())) return u.pathname || '/';
+  } catch { /* not absolute */ }
+  return dest;
+}
+
+function relatedPostHostSet(brief) {
+  // Share the publisher's single routing decision, including the runtime
+  // kill switch. A durable spoke target can fall back to the hub between
+  // queueing and composition/publication; accepting its raw target here
+  // would authorize the wrong host.
+  const publishSpoke = resolveSpokeTarget(brief);
+  const sites = publishSpoke ? [publishSpoke] : HUB_SITE_KEYS;
+  const hosts = new Set();
+  for (const site of sites) {
+    const bare = String(site).toLowerCase().replace(/^www\./, '');
+    hosts.add(bare);
+    hosts.add(`www.${bare}`);
+  }
+  return hosts;
+}
+
+function relatedPostTargetSitesMatch(brief) {
+  const selectedFor = brief?.voice_constraints?.related_posts_target_sites;
+  // Older briefs predate the selection-domain marker. Preserve their existing
+  // validation behavior; every newly composed brief with candidates has it.
+  if (selectedFor == null) return true;
+  const selectedSites = normalizeSpokeSites(selectedFor).sort();
+  const publishSpoke = resolveSpokeTarget(brief);
+  const publishSites = normalizeSpokeSites(publishSpoke ? [publishSpoke] : HUB_SITE_KEYS).sort();
+  return selectedSites.length === publishSites.length
+    && selectedSites.every((site, index) => site === publishSites[index]);
+}
+
+function relatedPostPrecondition(brief, related) {
+  if (!related.length) return { ok: true, reason: 'no_related_posts_on_brief' };
+  if (!relatedPostTargetSitesMatch(brief)) {
+    return {
+      ok: false,
+      reason: 'related_posts_publish_target_changed: recompose the brief so related-post candidates match the final publish domain',
+    };
+  }
+  return null;
+}
+
+// HARD check (see PAGE_TYPE_CHECKS['supporting-blog'] above, weight 0 —
+// blocks without moving score/threshold math): counts DISTINCT REAL link
+// destinations (realMarkdownLinkPaths above) against the brief's
+// voice_constraints.related_posts allowance (related-posts.js) — the
+// writer prompt asks for at least min(3, N) natural in-text links to them.
+// A post linked twice, or via two different anchors, still counts once —
+// the Set dedupes by normalized path. No related_posts on the brief
+// (older/non-blog briefs, or a topic with no candidates) passes trivially
+// — not applicable, not a miss.
+function checkRelatedPostsLinked(draft, brief) {
+  const related = Array.isArray(brief?.voice_constraints?.related_posts) ? brief.voice_constraints.related_posts : [];
+  const precondition = relatedPostPrecondition(brief, related);
+  if (precondition) return precondition;
+  const allowedHosts = relatedPostHostSet(brief);
+  const linkedPaths = realMarkdownLinkPaths(String(draft.body || ''), allowedHosts);
+  // Distinct candidate PATHS, not rows: two brief entries that resolve to
+  // one URL are one post, so a single anchor can never count twice.
+  const candidates = new Map();
+  for (const post of related) {
+    const norm = normalizeInternalPath(firstPartyPathname(post?.path, allowedHosts));
+    if (norm && !candidates.has(norm)) candidates.set(norm, post);
+  }
+  if (!candidates.size) return { ok: true, reason: 'no_related_posts_on_brief' };
+  let linked = 0;
+  const unlinked = [];
+  for (const [norm, post] of candidates) {
+    if (linkedPaths.has(norm)) linked++;
+    else unlinked.push(post);
+  }
+  const required = Math.min(RELATED_POSTS_LINK_MINIMUM, candidates.size);
+  if (linked >= required) return { ok: true };
+  // Actionable redraft text (Codex round-1 P2 on #4984: the prior weight-0
+  // soft version could silently ship with fewer links than the brief
+  // proposed). The CORE instruction (first sentence, always well under the
+  // 300-char cap autonomous-runner._recordGateRetry applies to every
+  // gate-retry message) is complete and actionable on its own — the writer
+  // can always re-fetch the full candidate list via get_content_brief's
+  // voice_constraints.related_posts. One named example just grounds it;
+  // losing the rest to truncation on a long title never loses the ask.
+  const example = unlinked[0] ? ` — e.g. "${String(unlinked[0].title || 'untitled')}" (${unlinked[0].path || ''})` : '';
+  return {
+    ok: false,
+    reason: `Add natural in-text links to at least ${required} of the ${candidates.size} related posts in voice_constraints.related_posts where the topic comes up (linked ${linked} so far)${example}.`,
+  };
+}
+
 // Raw markdown pipe table detector — delegates to the single-source
 // predicate in content-guardrails (hasRawMarkdownTable), which also
 // enforces the rule on the manual publishAstro lane, so the two
@@ -1224,7 +1396,11 @@ function checkNoDuplicateTitle(draft, _brief, context) {
 // DANGLING_META_ENDINGS is exported as the single source of truth for
 // "words a meta may not end on" — astro-publisher's clamp fallback strips
 // against the SAME set so a clamped meta can never fail this gate.
-module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor, DANGLING_META_ENDINGS };
+// RELATED_POSTS_LINK_MINIMUM is exported (like ALLOWED_INTERNAL_LINKS from
+// content-guardrails) so writer-agent-config's prompt wording can interpolate
+// the SAME number this gate enforces — instruction and enforcement can never
+// drift out of sync on what "at least N" means.
+module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor, DANGLING_META_ENDINGS, RELATED_POSTS_LINK_MINIMUM };
 module.exports._internals = {
   HARD_CHECKS,
   PAGE_TYPE_CHECKS,
@@ -1239,6 +1415,7 @@ module.exports._internals = {
   checkAnswerInFirstParagraph, checkSourceInternalLink, checkRedactionPassed,
   checkImprovementOverPrior,
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
+  checkRelatedPostsLinked,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
   checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract,
