@@ -6,6 +6,12 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../routes/admin-dispatch', () => ({ applySeriesMoveEffects: jest.fn().mockResolvedValue({}) }));
 jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue({}) }));
 jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jest.fn().mockResolvedValue({}) }));
+// Pass-through by default; one selection test stubs it to reach a target
+// the strict evidence window cannot ground yet.
+jest.mock('../services/call-triage-flags', () => {
+  const actual = jest.requireActual('../services/call-triage-flags');
+  return { ...actual, hasAgentCommittedEvidence: jest.fn(actual.hasAgentCommittedEvidence) };
+});
 jest.mock('../config/feature-gates', () => {
   const actual = jest.requireActual('../config/feature-gates');
   return { ...actual, isEnabled: jest.fn((name) => name === 'callAgentCommitTrustedLabels' || actual.isEnabled(name)) };
@@ -132,6 +138,38 @@ describe('planRescheduleFromCall', () => {
     expect(planRescheduleFromCall({ ...base, candidates: [visit(), farTwin] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
     const nearTwin = visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-09-26' });
     expect(planRescheduleFromCall({ ...base, candidates: [visit(), nearTwin] }).reason).toBe('service_needs_review');
+  });
+
+  // No name falls back only within V2's own category: a termite call never
+  // moves the property's pest visit, and an unmapped category never falls back.
+  test('the no-name fallback requires the visit to match V2\'s service category', () => {
+    const noName = (category) => v2({ service_request: { specific_service_name: null, primary_service_category: category } });
+    const base = { call: call(), customer: customer(), now: NOW, candidates: [visit()] };
+    expect(planRescheduleFromCall({ ...base, v2: noName('pest_general') })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    expect(planRescheduleFromCall({ ...base, v2: noName('termite') }).reason).toBe('service_needs_review');
+    expect(planRescheduleFromCall({ ...base, v2: noName('other') }).reason).toBe('service_needs_review');
+  });
+
+  // An orphaned in-span row may be the caller's target, so it keeps even a
+  // coarse two-program name in review rather than being narrowed away.
+  test('an unresolved in-span visit keeps a multi-program name in review', () => {
+    const farTwin = visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-12-01' });
+    const orphan = visit({ id: 'orphan', service_id: 'retired-program', catalog_service_name: null, scheduled_date: '2026-09-25' });
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [visit(), farTwin, orphan] }).reason)
+      .toBe('service_needs_review');
+  });
+
+  // Nearness to the destination cannot choose between occurrences: moving the
+  // September visit to December 17 must not move the December 24 one.
+  test('the moved visit must be its program\'s next occurrence from today', () => {
+    const { hasAgentCommittedEvidence } = require('../services/call-triage-flags');
+    const december = visit({ id: 'dec-visit', scheduled_date: '2026-12-24' });
+    const far = { v2: v2({ scheduling: { confirmed_start_at: '2026-12-17T12:00:00-05:00' } }), call: call(), customer: customer(), candidates: [visit(), december] };
+    hasAgentCommittedEvidence.mockReturnValueOnce(true);
+    expect(planRescheduleFromCall({ ...far, now: NOW })).toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
+    // Once the September visit is behind today, December 24 is the next one.
+    hasAgentCommittedEvidence.mockReturnValueOnce(true);
+    expect(planRescheduleFromCall({ ...far, now: new Date('2026-09-25T19:00:00Z') })).toMatchObject({ action: 'apply', visitId: 'dec-visit' });
   });
 
   // A repoint leaves service_type stale, so the label alone can name the

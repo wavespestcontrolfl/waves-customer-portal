@@ -82,8 +82,9 @@ const { createHash } = require('crypto');
 const logger = require('./logger');
 
 const MIN_SCHEDULING_CONFIDENCE = 0.8;
-// The uniquely identified occurrence may move within this span. Destination
-// proximity never identifies an occurrence among multiple recurring visits.
+// A visit is a candidate only within this span of the target date, and must
+// also be its program's next occurrence from today: nearness to the
+// destination alone never picks among several recurring visits.
 const CANDIDATE_SPAN_DAYS = 14;
 const LIVE_STATUSES = ['pending', 'confirmed', 'rescheduled'];
 // Automatic moves take ONLY these. A row parked at 'rescheduled' is out of
@@ -96,6 +97,21 @@ const ACTIVITY_ACTION = 'call_reschedule_applied';
 const RESCHEDULE_REASON_CODE = 'ai_call_reschedule'; // reschedule_log.reason_code varchar(30)
 const INITIATED_BY = 'ai_call_pipeline'; // reschedule_log.initiated_by varchar(20)
 const DEFAULT_DURATION_MINUTES = 60;
+// A call that names no service falls back to a visit only when V2's
+// service_request.primary_service_category agrees with the visit's own
+// family (appointment-tagger's classifyAppointmentType). A category not
+// listed here (rodent, exclusion, stinging_insect, inspection_only, other, or
+// none) never falls back.
+const FALLBACK_CATEGORY_TAGS = {
+  pest_general: ['pest_general'],
+  bundled_waveguard: ['pest_general'],
+  mosquito: ['mosquito'],
+  lawn_care: ['lawn'],
+  palm_injection: ['tree_shrub'],
+  termite: ['termite_treatment'],
+  bed_bug: ['bed_bug'],
+  wdo: ['wdo_inspection'],
+};
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 
@@ -261,7 +277,12 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
       if (!authoritative) return false;
       return serviceNameCandidates(authoritative).some((name) => namedServices.has(stripServiceSuffixes(name).toLowerCase()));
     });
-    const programIds = new Set(matchingServices.map((row) => row.service_id || stripServiceSuffixes(row.catalog_service_name || row.service_type).toLowerCase()));
+    const programOf = (row) => row.service_id || stripServiceSuffixes(row.catalog_service_name || row.service_type || '').toLowerCase();
+    const programIds = new Set(matchingServices.map(programOf));
+    const inSpanOf = (rows) => rows.filter((row) => {
+      const d = dateOnly(row.scheduled_date);
+      return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
+    });
     // Filter to span FIRST, then judge ambiguity on what's actually near the
     // target date — not on every future occurrence of the same recurring
     // program regardless of distance. loadCandidates has no upper date bound,
@@ -269,31 +290,43 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     // ambiguous_visit before this fix (0/1,089 calls ever moved a visit).
     if (programIds.size !== 1) {
       // Fallback ONLY where the call's own service evidence cannot pick a
-      // program: no service named at all (any program at the property), or a
-      // coarse name matching several programs (only those programs). An
-      // explicit name that matches nothing stays in review — a different
-      // program must never stand in for the one the caller asked about — and
-      // so does any in-span row whose catalog identity no longer resolves.
+      // program: no service named at all (a program of V2's own category at
+      // the property), or a coarse name matching several programs (only those
+      // programs). An explicit name that matches nothing stays in review — a
+      // different program must never stand in for the one the caller asked
+      // about — and so does any in-span row at the property whose catalog
+      // identity no longer resolves, checked before any narrowing since it
+      // may be the caller's target.
       if (namedServices.size && !programIds.size) return skip('service_needs_review');
-      const pool = namedServices.size ? matchingServices : atProperty;
-      const inSpanAny = pool.filter((row) => {
-        const d = dateOnly(row.scheduled_date);
-        return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
-      });
-      if (inSpanAny.some((row) => !(row.service_id ? row.catalog_service_name : row.service_type))) return skip('service_needs_review');
-      const spanProgramIds = new Set(inSpanAny.map((row) => row.service_id || stripServiceSuffixes(row.catalog_service_name || row.service_type).toLowerCase()));
-      if (!inSpanAny.length || spanProgramIds.size !== 1) return skip('service_needs_review');
+      if (inSpanOf(atProperty).some((row) => !(row.service_id ? row.catalog_service_name : row.service_type))) return skip('service_needs_review');
+      let pool = matchingServices;
+      if (!namedServices.size) {
+        const tags = FALLBACK_CATEGORY_TAGS[v2.service_request?.primary_service_category];
+        if (!tags) return skip('service_needs_review');
+        const tagger = require('./appointment-tagger');
+        pool = atProperty.filter((row) => tags.includes(tagger.classifyAppointmentType(row.service_id ? row.catalog_service_name : row.service_type).tag));
+      }
+      const inSpanAny = inSpanOf(pool);
+      if (!inSpanAny.length || new Set(inSpanAny.map(programOf)).size !== 1) return skip('service_needs_review');
       // One program, but two of its visits near the target: which one the
       // caller meant is as ambiguous here as on the named-service path.
       if (inSpanAny.length > 1) return skip('ambiguous_visit', { candidateIds: inSpanAny.map((r) => r.id) });
       nearby = inSpanAny; // invariant preserved: length is exactly 1 here
     } else {
-      const inSpan = matchingServices.filter((row) => {
-        const d = dateOnly(row.scheduled_date);
-        return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
-      });
+      const inSpan = inSpanOf(matchingServices);
       if (inSpan.length > 1) return skip('ambiguous_visit', { candidateIds: inSpan.map((r) => r.id) });
       nearby = inSpan; // invariant preserved: length is 0 or 1 here
+    }
+    // Nearness to the DESTINATION cannot say which occurrence the caller
+    // meant while an earlier one of the same program is still ahead: moving
+    // the September visit to December 17 must never move December 24
+    // instead. The visit moved must also be its program's next one from today.
+    if (nearby.length === 1) {
+      const chosen = nearby[0];
+      const today = etDateString(now);
+      const earlier = atProperty.filter((row) => row.id !== chosen.id && programOf(row) === programOf(chosen)
+        && dateOnly(row.scheduled_date) >= today && dateOnly(row.scheduled_date) < dateOnly(chosen.scheduled_date));
+      if (earlier.length) return skip('ambiguous_visit', { candidateIds: [...earlier.map((r) => r.id), chosen.id] });
     }
   }
   if (nearby.length === 0) return skip('no_visit_on_books');
