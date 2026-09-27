@@ -154,6 +154,9 @@ const SPELLED_NUMBERS = {
   seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
 };
 const NAMED_HOURS = { noon: 12, midnight: 0 };
+// A part of the day said in the sentence sets an hour's am/pm when none is
+// said with it ("Thursday evening at eight" is 8 PM).
+const DAY_PART_PERIODS = { morning: 'am', afternoon: 'pm', evening: 'pm', tonight: 'pm' };
 // Minute words that, after an hour, put a spoken time off the hour.
 const MINUTE_WORDS = new Set(['fifteen', 'twenty', 'thirty', 'forty', 'fifty']);
 // Words right before a number that make it a clock time: "at two".
@@ -271,15 +274,18 @@ function rangeStartHour(toks, n, rangeEnd) {
  * two"), both of which put it off the hour — a slot is always on the hour,
  * so such a mention can only disagree with one. A number running into a unit
  * of time is a length ("about two hours"). With no am/pm said with it, an
- * hour reads as business hours (7-11 morning; 12 and 1-6 afternoon), or a
- * range's start from its end's am/pm: a period said about another time ("my
- * 9 AM visit") says nothing about it.
+ * hour takes a part of the day said in its sentence ("Thursday evening at
+ * eight"), else a range's start its end's am/pm, else business hours (7-11
+ * morning; 12 and 1-6 afternoon): a period said about another time ("my 9
+ * AM visit") says nothing about it.
  */
 function extractHourMentions(turnText) {
   const mentions = [];
   let offset = 0; // token offset of this sentence within the whole turn
   for (const sentence of splitTurnSentences(turnText)) {
     const toks = normalize(sentence).split(' ').filter(Boolean);
+    const dayParts = new Set(toks.filter((t) => Object.hasOwn(DAY_PART_PERIODS, t)).map((t) => DAY_PART_PERIODS[t]));
+    const sentencePeriod = dayParts.size === 1 ? [...dayParts][0] : null;
     let rangeEnd = -1;
     for (let i = 0; i < toks.length; i += 1) {
       // "Half past two", "quarter past noon": a fraction lead-in is off the hour.
@@ -290,7 +296,7 @@ function extractHourMentions(turnText) {
       const after = i + 1 + minuteTokensAfter(toks, i);
       rangeEnd = rangeEndAfter(toks, i, after);
       const offHour = after > i + 1 || fraction;
-      const period = periodAfter(toks, after);
+      const period = periodAfter(toks, after) || sentencePeriod;
       const marked = offHour || rangeEnd > 0 || period || OCLOCK.has(toks[after]) || HOUR_LEADS.has(toks[i - 1]) || toks[i + 1] === 'ish';
       if (!marked || runsIntoDuration(toks, after)) continue;
       let end = Math.max(after, rangeEnd + 1);
@@ -311,8 +317,9 @@ function offeredWithAnotherHour(toks, pos, end) {
   const skip = (k, step) => { let j = k; while (HOUR_FILLER.has(toks[j])) j += step; return j; };
   const next = skip(end, 1);
   const prev = skip(pos - 1, -1);
-  return (HOUR_ALTERNATIVES.has(toks[next]) && hourNumber(toks[skip(next + 1, 1)]) != null)
-    || (HOUR_ALTERNATIVES.has(toks[prev]) && hourNumber(toks[skip(prev - 1, -1)]) != null);
+  const isHour = (t) => hourNumber(t) != null || Object.hasOwn(NAMED_HOURS, t || '');
+  return (HOUR_ALTERNATIVES.has(toks[next]) && isHour(toks[skip(next + 1, 1)]))
+    || (HOUR_ALTERNATIVES.has(toks[prev]) && isHour(toks[skip(prev - 1, -1)]));
 }
 
 // The hours of the day a part-of-day word covers.

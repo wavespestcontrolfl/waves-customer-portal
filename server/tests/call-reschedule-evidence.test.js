@@ -267,7 +267,7 @@ describe('rescheduleAgreementEvidence', () => {
   // Two hours offered as alternatives never settle which one, even when the
   // second has no marker of its own; a range is one time.
   test('hours offered as alternatives are not an agreed hour', () => {
-    for (const offer of ['Thursday at two or at four', 'Thursday at two or three', 'Thursday at 2 pm or 4']) {
+    for (const offer of ['Thursday at two or at four', 'Thursday at two or three', 'Thursday at 2 pm or 4', 'Thursday at noon or at two']) {
       expect(evidence(`Caller: Can we do ${offer}?\nAgent: We will see you then.`)).toMatchObject({ ok: false, reason: 'last_hour_ref_mismatch' });
     }
     expect(evidence('Caller: Can we do Thursday between two and four?\nAgent: We will see you then.').ok).toBe(true);

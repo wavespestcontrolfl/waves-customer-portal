@@ -60,6 +60,10 @@ describe('extractHourMentions', () => {
     expect(hours('At 7, or at 12, or at 6.')).toEqual([[7, false], [12, false], [18, false]]);
   });
 
+  test('a part of the day in the sentence sets an hour\'s am/pm', () => {
+    expect(hours('We will see you Thursday evening at eight. Tomorrow morning at 6. Morning or afternoon, at two?')).toEqual([[20, false], [6, false], [14, false]]);
+  });
+
   test('a range counts its start, reading the end\'s am/pm across noon', () => {
     expect(hours('Two to four, or between eight and ten pm, or 11 to 1 pm, or 2 pm to 4 pm.')).toEqual([[14, false], [20, false], [11, false], [14, false]]);
   });
