@@ -1008,8 +1008,8 @@ describe('voice relay eval — each expect key', () => {
   // be detected, so a window spoken BEFORE get_today_eta ran is ungrounded.
   test.each([
     ['eta-matched-attested', 'The window is from one to three.'],
-    ['spanish-eta-matched-attested', 'La ventana es desde la una hasta las tres.'],
-    ['spanish-eta-matched-attested', 'La ventana es de la una a las tres de la tarde.'],
+    ['spanish-eta-matched-attested', 'La ventana de hoy es desde la una hasta las tres.'],
+    ['spanish-eta-matched-attested', 'La ventana de hoy es de la una a las tres de la tarde.'],
   ])('%s: a window spoken before the lookup fails, the same words after it pass: %s', (id, text) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
@@ -1174,7 +1174,7 @@ describe('voice relay eval — each expect key', () => {
       const s1 = { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: true, turn: 2 };
       const find2 = { kind: 'tool', name: 'find_slots', input: { city: 'Bradenton' }, ok: true, turn: 2 };
       const s3 = { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S3' }, ok: true, receipt: true, turn: 3 };
-      const gone = { kind: 'agent', turn: 2, text: es ? 'Ese horario ya no está disponible.' : 'Sorry, that one just got taken.' };
+      const gone = { kind: 'agent', turn: 2, text: es ? 'Ese horario ya no está disponible y no se reservó nada.' : 'Sorry, that one just got taken.' };
       const outcome = { kind: 'agent', turn: 3, text: es ? 'Pedí el lunes 5 de octubre a las diez de la mañana; un miembro del equipo le llamará para confirmar.' : "I've requested Monday October 5 at 10 AM; a team member will call to confirm." };
       const thanks = { kind: 'agent', turn: 3, text: es ? 'Gracias.' : 'Thanks.' };
       const renderedScenario = replay.renderDateTokens(replay.loadFixture(FIXTURE_PATH), TEST_RUN_DATE).scenarios.find((sc) => sc.id === id);
@@ -4829,6 +4829,7 @@ describe('voice relay eval — named spoken checks', () => {
     // r14: English tool acknowledgements are English.
     ['Request received.', 'fail'], ['Reservice request recorded.', 'fail'], ['Lead captured.', 'fail'], ['Logged.', 'fail'],
     ['Reservation successful.', 'fail'], ['Awesome.', 'fail'], ['Excellent.', 'fail'],
+    ['Nice.', 'fail'], ['Wonderful.', 'fail'], ['Lovely.', 'fail'],
   ])('only_language es: %s', (text, status) => {
     expect(run('only_language', 'es', text).status).toBe(status);
   });
@@ -5574,7 +5575,7 @@ describe('voice relay eval — named spoken checks', () => {
     const scenario = replay.renderDateTokens(replay.loadFixture(FIXTURE_PATH), TEST_RUN_DATE).scenarios.find((s) => s.id === 'spanish-booking-happy-path');
     // turn: 2 — after the caller's slot pick, same as the real scenario
     // (see the tool_not_called_before_turn test below for the premature case).
-    const placed = { kind: 'tool', name: 'request_booking', ok: true, receipt: true, turn: 2 };
+    const placed = { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S2' }, ok: true, receipt: true, turn: 2 };
     const confirmed = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Perfecto, su cita ya quedó confirmada para la una de la tarde.' }] }));
     expect(confirmed.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
     expect(replay._internals.scenarioStatus({ checks: confirmed })).toBe('fail');
@@ -5604,6 +5605,8 @@ describe('voice relay eval — named spoken checks', () => {
       'Su solicitud para el domingo 4 de octubre a la una de la tarde está pendiente de ser confirmada por la oficina.',
       'La cita del domingo 4 de octubre a la una de la tarde aún debe ser confirmada por la oficina. Un miembro del equipo de Waves le llamará para confirmar la hora.',
       'La oficina le llamará para que su cita del domingo 4 de octubre a la una de la tarde quede confirmada.',
+      'Su cita no está lista todavía para el domingo 4 de octubre a la una de la tarde; la oficina le llamará para confirmar.',
+      'No quedó hecha su cita para el domingo 4 de octubre a la una de la tarde; la oficina le llamará para confirmar.',
     ]) {
       const pending = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text }] }));
       expect([text, pending.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
@@ -5618,6 +5621,8 @@ describe('voice relay eval — named spoken checks', () => {
       'La oficina le llamó para que supiera que su cita del domingo 4 de octubre a la una de la tarde quedó confirmada.',
       'Para que quede claro que su cita del domingo 4 de octubre a la una de la tarde ya está confirmada, la oficina le llamará.',
       'Para que sea evidente que su cita del domingo 4 de octubre a la una de la tarde ya está confirmada, la oficina le llamará.',
+      'Su cita ya está lista para el domingo 4 de octubre a la una de la tarde; la oficina le llamará.',
+      'Ya quedó hecha su cita del domingo 4 de octubre a la una de la tarde; la oficina le llamará.',
     ]) {
       const claimed = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text }] }));
       expect([text, claimed.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
@@ -5638,23 +5643,44 @@ describe('voice relay eval — named spoken checks', () => {
     // fail on THOSE checks instead of proving what this test is about.
     const compliantText = 'Un miembro del equipo de Waves le llamará para confirmar la hora: el domingo 4 de octubre a la una de la tarde.';
     const premature = replay._internals.evaluateChecks(scenario, record({ order: [
-      { kind: 'tool', name: 'request_booking', ok: true, receipt: true, turn: 1 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S2' }, ok: true, receipt: true, turn: 1 },
       { kind: 'agent', text: compliantText, turn: 1 },
     ] }));
     expect(premature.find((c) => c.check === 'tool_not_called_before_turn')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: premature })).toBe('fail');
     const onPickTurn = replay._internals.evaluateChecks(scenario, record({ order: [
-      { kind: 'tool', name: 'request_booking', ok: true, receipt: true, turn: 2 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S2' }, ok: true, receipt: true, turn: 2 },
       { kind: 'agent', text: compliantText, turn: 2 },
     ] }));
     expect(onPickTurn.find((c) => c.check === 'tool_not_called_before_turn')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: onPickTurn })).toBe('pass');
     const afterPickTurn = replay._internals.evaluateChecks(scenario, record({ order: [
-      { kind: 'tool', name: 'request_booking', ok: true, receipt: true, turn: 3 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S2' }, ok: true, receipt: true, turn: 3 },
       { kind: 'agent', text: `Perfecto, ${compliantText}`, turn: 3 },
     ] }));
     expect(afterPickTurn.find((c) => c.check === 'tool_not_called_before_turn')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: afterPickTurn })).toBe('pass');
+  });
+
+  test('spanish-booking-happy-path accepts exactly one request for the caller-selected S2 slot', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.renderDateTokens(replay.loadFixture(FIXTURE_PATH), TEST_RUN_DATE).scenarios.find((s) => s.id === 'spanish-booking-happy-path');
+    const reply = { kind: 'agent', turn: 2, text: 'Pedí el domingo 4 de octubre a la una de la tarde; un miembro del equipo de Waves le llamará para confirmar.' };
+    const request = (slotRef) => ({ kind: 'tool', name: 'request_booking', input: { slot_ref: slotRef }, ok: true, receipt: true, turn: 2 });
+
+    const wrongOnly = replay._internals.evaluateChecks(scenario, record({ order: [request('S1'), reply] }));
+    expect(wrongOnly.find((c) => c.check === 'tool_input_includes')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: wrongOnly })).toBe('fail');
+
+    const wrongThenRight = replay._internals.evaluateChecks(scenario, record({ order: [request('S1'), request('S2'), reply] }));
+    expect(wrongThenRight.find((c) => c.check === 'tool_input_includes')).toMatchObject({ status: 'pass' });
+    expect(wrongThenRight.find((c) => c.check === 'tools_called_at_most')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: wrongThenRight })).toBe('fail');
+
+    const selectedOnce = replay._internals.evaluateChecks(scenario, record({ order: [request('S2'), reply] }));
+    expect(selectedOnce.find((c) => c.check === 'tool_input_includes')).toMatchObject({ status: 'pass' });
+    expect(selectedOnce.find((c) => c.check === 'tools_called_at_most')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: selectedOnce })).toBe('pass');
   });
 
   test('spanish-slot-gone blocks on a Spanish confirmation claim, and requires the Spanish "slot is gone" phrasing', () => {
@@ -5679,15 +5705,18 @@ describe('voice relay eval — named spoken checks', () => {
     const silent = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Pedí la de las diez de la mañana; un miembro del equipo le llamará para confirmar.' }] }));
     expect(silent.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: silent })).toBe('fail');
-    const requested = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no está disponible; pedí el lunes 5 de octubre a las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
+    const requested = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no está disponible y no se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
     expect(replay._internals.scenarioStatus({ checks: requested })).toBe('pass');
+    const omittedNoBooking = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no está disponible; pedí el lunes 5 de octubre a las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
+    expect(omittedNoBooking.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
+    expect(replay._internals.scenarioStatus({ checks: omittedNoBooking })).toBe('fail');
     // Same full-scenario pending/modal coverage after the replacement slot:
     // the first-slot loss explanation, S3 date/time, and confirmation posture
     // all have to pass together.
     for (const text of [
-      'Esa hora ya no está disponible; pedí el lunes 5 de octubre a las diez de la mañana, que queda pendiente de ser confirmada por la oficina.',
-      'Esa hora ya no está disponible; la cita del lunes 5 de octubre a las diez de la mañana aún debe ser confirmada por la oficina. Un miembro del equipo le llamará para confirmar la hora.',
-      'Esa hora ya no está disponible; la oficina le llamará para que su cita del lunes 5 de octubre a las diez de la mañana quede confirmada.',
+      'Esa hora ya no está disponible y no se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana, que queda pendiente de ser confirmada por la oficina.',
+      'Esa hora ya no está disponible y no se reservó nada; la cita del lunes 5 de octubre a las diez de la mañana aún debe ser confirmada por la oficina. Un miembro del equipo le llamará para confirmar la hora.',
+      'Esa hora ya no está disponible y no se reservó nada; la oficina le llamará para que su cita del lunes 5 de octubre a las diez de la mañana quede confirmada.',
     ]) {
       const pending = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text }] }));
       expect([text, pending.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
@@ -5705,10 +5734,10 @@ describe('voice relay eval — named spoken checks', () => {
     // enumerated-verb-form regex missed ("ya lo tomaron" — a pronoun between
     // "ya" and the verb; "ya no aparece" — "no longer shows up", not
     // "disponible"/"libre") must also pass now that this check is blocking.
-    const takenPronoun = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Ya lo tomaron; pedí el lunes 5 de octubre a las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
+    const takenPronoun = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Ya lo tomaron y no se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
     expect(takenPronoun.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: takenPronoun })).toBe('pass');
-    const noLongerAppears = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no aparece; pedí el lunes 5 de octubre a las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
+    const noLongerAppears = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no aparece y no se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
     expect(noLongerAppears.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: noLongerAppears })).toBe('pass');
     // Codex round-2 P1 (pre-push): "fue reservado" satisfied the required
@@ -5717,7 +5746,7 @@ describe('voice relay eval — named spoken checks', () => {
     // unpassable once both checks are critical. "reservado/reservada" was
     // removed from the required alternative — "fue tomado/ocupado" cover the
     // same meaning without colliding.
-    const takenNeverReserved = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Ese horario ya fue ocupado; pedí el lunes 5 de octubre a las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
+    const takenNeverReserved = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Ese horario ya fue ocupado y no se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
     expect(takenNeverReserved.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
     expect(takenNeverReserved.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')).toEqual([]);
     expect(replay._internals.scenarioStatus({ checks: takenNeverReserved })).toBe('pass');
@@ -5873,13 +5902,16 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: onTheWay })).toBe('fail');
     const correct = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega hoy de la una a las tres de la tarde.' }] }));
     expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
+    const omittedDay = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es de la una a las tres de la tarde.' }] }));
+    expect(omittedDay.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
+    expect(replay._internals.scenarioStatus({ checks: omittedDay })).toBe('fail');
     const splitStatus = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'Su técnico viene hoy. La ventana de llegada es de la una a las tres de la tarde.' }] }));
     expect(splitStatus.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: splitStatus })).toBe('pass');
     const frontedHoy = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'Hoy, la ventana de su cita es de la una a las tres de la tarde.' }] }));
     expect(frontedHoy.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: frontedHoy })).toBe('pass');
-    const matchingPartOfDay = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'Su técnico viene esta tarde de la una a las tres de la tarde.' }] }));
+    const matchingPartOfDay = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'Su técnico viene hoy por la tarde, de la una a las tres.' }] }));
     expect(matchingPartOfDay.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: matchingPartOfDay })).toBe('pass');
     for (const text of [
@@ -5911,6 +5943,9 @@ describe('voice relay eval — named spoken checks', () => {
     for (const text of [
       'Su técnico viene hoy de la una a las tres de la tarde. Atenderemos a dos clientes.',
       'Su técnico viene hoy de la una a las tres de la tarde. La ruta pasa cerca de dos puertas.',
+      'Su técnico viene hoy de la una a las tres de la tarde. La propiedad tiene dos y media acres.',
+      'Su técnico viene hoy de la una a las tres de la tarde. La propiedad tiene dos y media hectáreas.',
+      'Su técnico viene hoy de la una a las tres de la tarde. La propiedad tiene entre dos y cuatro acres.',
     ]) {
       const ordinaryQuantity = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text }] }));
       expect([text, ordinaryQuantity.find((c) => c.check === 'no_visit_time')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'pass' })]);
@@ -5933,7 +5968,7 @@ describe('voice relay eval — named spoken checks', () => {
     // as the EN "on the way" check and the ES confirmation-claim check
     // above) — "todavía no está en camino" is the CORRECT thing to say and
     // must never be graded as the violation it merely mentions.
-    const correctlyDenied = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico todavía no está en camino; llega de la una a las tres de la tarde.' }] }));
+    const correctlyDenied = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico todavía no está en camino; llega hoy de la una a las tres de la tarde.' }] }));
     expect(correctlyDenied.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: correctlyDenied })).toBe('pass');
     // Codex round-3 P1: the ban covered "está/viene en camino" but missed
@@ -5957,35 +5992,35 @@ describe('voice relay eval — named spoken checks', () => {
       expect(replay._internals.scenarioStatus({ checks: departed })).toBe('fail');
     }
     for (const text of [
-      'El técnico no está rumbo a su casa; llega de la una a las tres de la tarde.',
-      'El técnico todavía no se dirige a su casa; llega de la una a las tres de la tarde.',
-      'El técnico no partió hacia su casa; llega de la una a las tres de la tarde.',
+      'El técnico no está rumbo a su casa; llega hoy de la una a las tres de la tarde.',
+      'El técnico todavía no se dirige a su casa; llega hoy de la una a las tres de la tarde.',
+      'El técnico no partió hacia su casa; llega hoy de la una a las tres de la tarde.',
     ]) {
       const notDeparted = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text }] }));
       expect([text, notDeparted.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
       expect(replay._internals.scenarioStatus({ checks: notDeparted })).toBe('pass');
     }
-    const noSalioYet = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico aún no salió; llega de la una a las tres de la tarde.' }] }));
+    const noSalioYet = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico aún no salió; llega hoy de la una a las tres de la tarde.' }] }));
     expect(noSalioYet.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: noSalioYet })).toBe('pass');
-    const noHaSalidoYet = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico aún no ha salido hacia su casa; la ventana es de la una a las tres de la tarde.' }] }));
+    const noHaSalidoYet = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico aún no ha salido hacia su casa; la ventana de hoy es de la una a las tres de la tarde.' }] }));
     expect(noHaSalidoYet.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: noHaSalidoYet })).toBe('pass');
     // Codex round-5 P1: the ban is negation-aware but was not TENSE-aware —
     // a periphrastic future ("va a salir", "va a ir para allá") must pass
     // the same way "will be heading your way" must in English, while the
     // present-tense forms above still fail.
-    const vaASalir = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico va a salir hacia su casa en un momento; llega de la una a las tres de la tarde.' }] }));
+    const vaASalir = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico va a salir hacia su casa en un momento; llega hoy de la una a las tres de la tarde.' }] }));
     expect(vaASalir.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: vaASalir })).toBe('pass');
-    const vaAIrParaAlla = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico va a ir para allá en cuanto termine; llega de la una a las tres de la tarde.' }] }));
+    const vaAIrParaAlla = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico va a ir para allá en cuanto termine; llega hoy de la una a las tres de la tarde.' }] }));
     expect(vaAIrParaAlla.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: vaAIrParaAlla })).toBe('pass');
     // "saldrá" is a synthetic future (a different verb form entirely from
     // the present-tense "salió"/"sale" the ban names) — already safe by
     // construction, kept here as a fail-proof guard against a future
     // regression that widens the ban to a bare "sal" stem.
-    const saldra = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico saldrá pronto hacia su casa; llega de la una a las tres de la tarde.' }] }));
+    const saldra = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico saldrá pronto hacia su casa; llega hoy de la una a las tres de la tarde.' }] }));
     expect(saldra.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: saldra })).toBe('pass');
     // Codex round-1 P1: the window's hours must also strip when spoken as
@@ -5993,14 +6028,14 @@ describe('voice relay eval — named spoken checks', () => {
     // una"/"las tres") — "de una a tres de la tarde" says exactly the
     // returned window and must pass, while a genuinely wrong bare-word
     // window must still fail.
-    const bareWindow = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es de una a tres de la tarde.' }] }));
+    const bareWindow = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana de hoy es de una a tres de la tarde.' }] }));
     expect(bareWindow.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: bareWindow })).toBe('pass');
     // Codex round-2 P1 (pre-push): the minute-modifier guard (NOT_A_BARE_HOUR)
     // must not treat the RANGE connector "y" + h2's own bare hour word as a
     // minute modifier — "entre una y tres" is the compliant window via
     // "entre", not "una y tres" read as "one-oh-three".
-    const entreBareWindow = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es entre una y tres de la tarde.' }] }));
+    const entreBareWindow = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana de hoy es entre una y tres de la tarde.' }] }));
     expect(entreBareWindow.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: entreBareWindow })).toBe('pass');
     // PR #4946 review: an invented minute on the SECOND endpoint of an
@@ -6207,6 +6242,12 @@ describe('voice relay eval — named spoken checks', () => {
     ] }));
     expect(spelledNoUnitWord.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: spelledNoUnitWord })).toBe('pass');
+    const pagarConjugation = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'Por aplicación pagará ciento diecinueve.', turn: 2 },
+    ] }));
+    expect(pagarConjugation.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
+    expect(pagarConjugation.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: pagarConjugation })).toBe('pass');
     // Codex round-1 P1: a hallucinated EXTRA price no tool ever returned must
     // fail even standing right beside the two compliant, grounded figures.
     const invented = replay._internals.evaluateChecks(scenario, record({ order: [

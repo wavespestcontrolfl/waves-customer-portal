@@ -115,6 +115,9 @@ describe('normalizeSpanishSpokenText — spelled prices in every price context',
     ['vale ciento diecinueve', 'vale 119'],
     ['cobramos ciento cincuenta', 'cobramos 150'],
     ['cobro ciento cincuenta', 'cobro 150'],
+    ['por aplicación pagará ciento diecinueve', 'por aplicación pagará 119'],
+    ['por aplicación pagaríamos ciento diecinueve', 'por aplicación pagaríamos 119'],
+    ['por aplicación pagaré ciento diecinueve', 'por aplicación pagaré 119'],
   ])('%s -> %s', (input, expected) => {
     expect(normalizeSpanishSpokenText(input)).toBe(expected);
   });
@@ -281,6 +284,8 @@ describe('normalizeSpanishSpokenText — article/quantity uses are never convert
     '¿Hay entre dos y cuatro habitaciones afectadas?',
     'Necesitamos entre dos y cuatro técnicos.',
     'Es una casa con dos pisos.',
+    'La propiedad tiene dos y media acres.',
+    'La propiedad tiene dos y media hectáreas.',
   ])('%s', (input) => {
     expect(normalizeSpanishSpokenText(input)).toBe(input);
   });

@@ -104,7 +104,7 @@ const MINUTE_SINGLE_WORDS = [
 const MINUTE_TENS_WORDS = ['treinta', 'cuarenta', 'cincuenta'];
 const MINUTE_UNIT_WORDS = ['uno', 'un', 'una', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve'];
 const MINUTE_SRC = `media|cuarto|(?:${altOf(MINUTE_TENS_WORDS)})(?:\\s+y\\s+(?:${altOf(MINUTE_UNIT_WORDS)}))?|${altOf(MINUTE_SINGLE_WORDS)}`;
-const QUANTITY_UNIT_AHEAD_SRC = '\\s+(?:de\\s+)?(?:minutos?|min\\b|horas?|d[ií]as?|semanas?|meses?|a[ñn]os?|veces|personas?|habitaciones?|cuartos?|ba[ñn]os?|pisos?|t[ée]cnicos?|mascotas?|perros?|gatos?|d[oó]lares?|pesos?|por\\s*ciento|%)';
+const QUANTITY_UNIT_AHEAD_SRC = '\\s+(?:de\\s+)?(?:minutos?|min\\b|horas?|d[ií]as?|semanas?|meses?|a[ñn]os?|veces|personas?|habitaciones?|cuartos?|ba[ñn]os?|pisos?|acres?|hect[aá]reas?|t[ée]cnicos?|mascotas?|perros?|gatos?|d[oó]lares?|pesos?|por\\s*ciento|%)';
 // The first lookahead stops a backtrack from settling on a bare tens word
 // when the full compound was refused ("tres y treinta y cinco minutos" must
 // not become "3:30 y cinco minutos"); the second is the quantity guard.
@@ -176,7 +176,9 @@ function convertDigitStrings(text) {
 // review): nothing is applied ten times a month.
 const BILLING_UNIT_AHEAD_ES = '(?=(?:por|cada|al|a\\s+la)\\s+(?:(aplicaci[oó]n(?:es)?|tratamientos?|visitas?|servicios?|mes(?:es)?|semanas?|trimestres?)|(a[ñn]os?))(?![a-záéíóúñ]))';
 const PRICE_WORD_RUN_RE = new RegExp(`\\b(${NUMBER_RUN_RE_SRC})(?:(d[oó]lares?|pesos?)\\b|${BILLING_UNIT_AHEAD_ES})`, 'gi');
-const PRICE_VERB_ES = '(?:cobr(?:o|as|a|amos|an)|cuestan?|costar[íi]an?|costar[áa]n?|valen?|salen?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a))';
+// Shared with the downstream amount matcher so every conjugation that makes
+// a bare figure a price is normalized before grading sees it.
+const PRICE_VERB_ES = '(?:cobr(?:o|as|a|amos|an|ar(?:[ée]|emos|[ée]is|[áa](?:s|n)?|[íi]a(?:s|mos|is|n)?))|pag(?:o|as|a|amos|an|ar(?:[ée]|emos|[ée]is|[áa](?:s|n)?|[íi]a(?:s|mos|is|n)?))|cuestan?|costar[íi]an?|costar[áa]n?|valen?|sale(?:n)?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a))';
 const PRICE_VERB_WORD_RUN_RE = new RegExp(`(\\b${PRICE_VERB_ES}\\s+(?:de\\s+)?)(${NUMBER_RUN_RE_SRC})`, 'gi');
 
 // Codex r10 on #4946: "ciento diecinueve con noventa y nueve por aplicación"
@@ -363,5 +365,6 @@ module.exports = {
   normalizeSpanishSpokenText,
   parseSpanishCardinal,
   isBareAnnualCount,
+  PRICE_VERB_ES,
   _internals: { convertHourMinutePhrases, convertDigitStrings, convertPriceWordRuns, convertPhoneCardinalGroups, chunkPhoneCardinals, UNIDADES, DECENAS, CENTENAS },
 };

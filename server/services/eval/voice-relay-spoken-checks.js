@@ -24,7 +24,7 @@ const {
 } = require('./voice-relay-spoken-language');
 
 const { no_safety_guarantee } = require('./voice-relay-safety-adjudicator');
-const { parseSpanishCardinal, isBareAnnualCount } = require('./voice-relay-spanish-numbers');
+const { parseSpanishCardinal, isBareAnnualCount, PRICE_VERB_ES } = require('./voice-relay-spanish-numbers');
 
 /**
  * Named spoken-content checks for the voice relay eval — one implementation
@@ -119,7 +119,7 @@ const ID_NOUNS = 'invoice|bill|factura';
 // one of several", "the price for a 2,000 square foot home".
 const NOT_AN_AMOUNT = 'of|details?|accounts?|records?|items?|things?|options?|visits?|treatments?|applications?|services?|invoices?|bills?|payments?|charges?|days?|weeks?|months?|years?|hours?|minutes?|times|people|customers?|technicians?|techs?|calls?|more|other|percent|%|reasons?|steps?|ways?|questions?|numbers?|digits?|plans?|programs?|properties|homes?|houses?|yards?|acres?|sq|square|feet|foot|ft';
 const ID_TAG = '(?:\\s+(?:number|no\\.?|n[uú]mero)\\s+|\\s*#\\s*|\\s+)';
-const PRICE_VERB = '(?:cobr(?:o|as|a|amos|an|ar(?:[ée]|emos|[ée]is|[áa](?:s|n)?|[íi]a(?:s|mos|is|n)?))|pag(?:o|as|a|amos|an|ar(?:emos|[áa](?:s|n)?|[íi]a(?:s|mos|is|n)?))|cuestan?|costar[íi]an?|costar[áa]n?|valen?|sale(?:n)?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a)|charges?|costs?|priced\\s+at|price\\s+(?:is|of)|runs?|would\\s+(?:run|cost))';
+const PRICE_VERB = `(?:${PRICE_VERB_ES}|charges?|costs?|priced\\s+at|price\\s+(?:is|of)|runs?|would\\s+(?:run|cost))`;
 const COUNT_NOUN_AHEAD = '(?!\\s*(?:%|por\\s*ciento|percent|aplicaciones|applications|visitas|visits|veces|times|tratamientos|treatments|meses|months|a[ñn]os|years|d[ií]as|days|semanas|weeks|pies|feet|square|sq\\b|minutos|minutes|horas|hours))';
 const AMOUNT_RES = Object.freeze([
   new RegExp(`\\$\\s?(${DIGITS})`, 'gi'),
@@ -326,7 +326,7 @@ const NOT_A_TIME = '(?:of|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?
 // HOUR used everywhere NOT_A_TIME already guards) accepts bare Spanish
 // number words, which is what exposed this: an English range already
 // reads NOT_A_TIME for the same reason.
-const NOT_A_QUANTITY_ES = '(?:minutos?|horas?|d[ií]as?|semanas?|meses?|a[ñn]os?|opciones?|veces|cosas?|personas?|puntos?|visitas?|tratamientos?|aplicaciones?|servicios?|t[eé]cnicos?|llamadas?|intentos?|paradas?|pasos?|m[aá]s|otro|otros?|[uú]ltimo|final|extra|adicional|habitaciones?|cuartos?|dormitorios?|ba[ñn]os?|mascotas?|pisos?|zonas?|[aá]reas?|n[uú]meros?|raz(?:[oó]n|ones)|preguntas?)';
+const NOT_A_QUANTITY_ES = '(?:minutos?|horas?|d[ií]as?|semanas?|meses?|a[ñn]os?|opciones?|veces|cosas?|personas?|puntos?|visitas?|tratamientos?|aplicaciones?|servicios?|t[eé]cnicos?|llamadas?|intentos?|paradas?|pasos?|m[aá]s|otro|otros?|[uú]ltimo|final|extra|adicional|habitaciones?|cuartos?|dormitorios?|ba[ñn]os?|mascotas?|pisos?|acres?|hect[aá]reas?|zonas?|[aá]reas?|n[uú]meros?|raz(?:[oó]n|ones)|preguntas?)';
 // A day of the month spelled out, EN ordinals and ES cardinals.
 const ORDINAL_WORDS = '(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[- ](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[- ]first)';
 const DAY_WORDS_ES = '(?:primero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti(?:uno|d[oó]s|tr[eé]s|cuatro|cinco|s[eé]is|siete|ocho|nueve)|treinta(?: y uno)?)';
@@ -2506,7 +2506,7 @@ const ENGLISH_EVIDENCE_WORDS = [
   'tomorrow', 'tonight', 'yesterday', 'morning', 'afternoon', 'evening', 'night', 'week',
   'month', 'year', 'day', 'time', 'moment', 'please', 'thank', 'thanks', 'welcome', 'sorry',
   'right', 'correct', 'wrong', 'best', 'better', 'worst', 'worse', 'more', 'most', 'less',
-  'least', 'yes', 'great', 'good', 'perfect', 'awesome', 'excellent', 'sounds', 'alright', 'absolutely', 'certainly',
+  'least', 'yes', 'great', 'good', 'perfect', 'awesome', 'excellent', 'nice', 'wonderful', 'lovely', 'sounds', 'alright', 'absolutely', 'certainly',
   'understood', 'gotcha', 'anytime', 'hello', 'goodbye', 'bye',
   'get', 'got', 'give', 'gave', 'given', 'make', 'made', 'go', 'going', 'went', 'gone',
   'coming', 'came', 'see', 'saw', 'seen', 'know', 'knew', 'known', 'think', 'thought', 'say',
