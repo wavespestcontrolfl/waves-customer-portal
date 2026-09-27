@@ -382,6 +382,47 @@ jest.setTimeout(30000);
     expect(bell.body).toMatch(/application unit can't take a count/);
   });
 
+  test('a held count decision on a blank-container product leaves the catalog untouched (the savepoint rolls back)', async () => {
+    const [trapProduct] = await mockConn('products_catalog').insert({
+      name: 'Victor Rat Trap', active: true, category: 'supplies', container_size: null, inventory_unit: null, default_unit: 'oz', inventory_on_hand: 5,
+    }).returning('*');
+    await mockConn('product_inventory_movements').insert({
+      product_id: trapProduct.id, movement_type: 'correction', quantity: 5, unit: 'oz', stock_before: 0, stock_after: 5,
+      metadata: { source: 'admin_manual_adjustment' },
+    });
+    const line = await pendingLine({ raw_title: 'Victor Rat Trap 12 Count', product_id: trapProduct.id, quantity: 1 });
+    const decision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: trapProduct.id, new_product: null,
+      reading: { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_text: null, pack_count: 1 },
+    };
+    await run({ ok: true, json: decision });
+    expect((await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).status).toBe('agent_unsure');
+    const after = await mockConn('products_catalog').where({ id: trapProduct.id }).first();
+    expect(after).toMatchObject({ container_size: null, default_unit: 'oz', inventory_unit: null });
+    expect(await bellsFor(line.id)).toHaveLength(1);
+  });
+
+  test('a possible duplicate leaves no container size or alias behind (the savepoint rolls back)', async () => {
+    const [bare] = await mockConn('products_catalog').insert({
+      name: 'Granular Bait', active: true, category: 'bait', container_size: null, inventory_unit: 'oz', inventory_on_hand: 10,
+    }).returning('*');
+    // A hand restock 1h before the email: the duplicate guard holds the line.
+    await mockConn('product_inventory_movements').insert({
+      product_id: bare.id, movement_type: 'restock', quantity: 16, unit: 'oz', stock_before: 10, stock_after: 26,
+      metadata: { source: 'admin_manual_adjustment' }, created_at: new Date(RECEIVED_AT.getTime() - HOUR),
+    });
+    const line = await pendingLine({ raw_title: 'Granular Bait 16 oz Bag', product_id: bare.id, quantity: 1 });
+    const decision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: bare.id, new_product: null,
+      reading: { size_text: '16 oz', size_number: 16, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    await run({ ok: true, json: decision });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'possible_duplicate', product_id: bare.id });
+    expect((await mockConn('products_catalog').where({ id: bare.id }).first()).container_size).toBeNull();
+    expect(await bellsFor(line.id)).toHaveLength(1);
+  });
+
   test('undo restores container_size/inventory_unit/inventory_on_hand/default_unit to their originals on an EXISTING product (review item 2)', async () => {
     const [trapProduct] = await mockConn('products_catalog').insert({
       name: 'Victor Rat Trap', active: true, category: 'supplies', container_size: '12 count', inventory_unit: null, default_unit: 'oz', inventory_on_hand: 0,

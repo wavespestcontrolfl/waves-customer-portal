@@ -689,7 +689,7 @@ async function settleTerminalKind(trx, { lineId, line, email, decision }, notify
 // incompatible default_unit holds for a person (writing the line + bell
 // itself) instead of silently reinterpreting it. Returns 'fixed' / 'unchanged'
 // / 'incompatible' — the caller folds 'fixed' into its own catalogChangeNote.
-async function fixCountDefaultUnit(trx, { line, productId, product, decision }, notifyAdmin) {
+async function fixCountDefaultUnit(trx, { productId, product }) {
   const defaultUnit = String(product.default_unit || '').trim();
   const looksUnset = !defaultUnit || normalizeInventoryUnit(defaultUnit) === 'oz';
   const hasAnyMovement = await trx('product_inventory_movements').where({ product_id: productId }).first('id');
@@ -697,18 +697,7 @@ async function fixCountDefaultUnit(trx, { line, productId, product, decision }, 
     await trx('products_catalog').where({ id: productId }).update({ default_unit: 'each', updated_at: new Date() });
     return 'fixed';
   }
-  if (convertInventoryQuantity(1, defaultUnit, 'each') == null) {
-    await trx('purchase_receipt_lines').where({ id: line.id }).update({
-      status: 'agent_unsure',
-      agent_decision: { ...decisionRecord(decision, {}), reason: 'application_unit_incompatible_with_count' },
-      agent_decided_at: new Date(),
-    });
-    await ringBell(notifyAdmin, {
-      lineId: line.id, emailId: line.email_id, status: 'agent_unsure', title: 'Inventory agent: not added',
-      body: `"${line.raw_title}" wasn't added: its application unit can't take a count; fix the product first.`, trx,
-    });
-    return 'incompatible';
-  }
+  if (convertInventoryQuantity(1, defaultUnit, 'each') == null) return 'incompatible';
   return 'unchanged';
 }
 
@@ -725,15 +714,15 @@ function candidateDrifted(product, decisionProduct) {
 
 // PHASE 2a — resolves an 'existing' decision to its locked product, or a
 // retry/unsure outcome. See resolveTargetProduct for the return contract.
-async function resolveExistingProduct(trx, { line, decision }, notifyAdmin) {
+async function resolveExistingProduct(trx, { decision }) {
   const productId = decision.product.id;
   const product = await trx('products_catalog').where({ id: productId }).forUpdate().first();
   // 'active' is one of the fields the prompt's candidate line carried
   // (candidateProducts only offers active rows) — a product deactivated
   // between the LLM call and this transaction is exactly the same kind of
   // drift the other fields below catch, just with its own reason.
-  if (!product || !product.active) return { ok: false, outcome: { applied: false, reason: 'product_no_longer_active' } };
-  if (candidateDrifted(product, decision.product)) return { ok: false, outcome: { applied: false, reason: 'product_changed' } };
+  if (!product || !product.active) return { ok: false, stop: { outcome: { applied: false, reason: 'product_no_longer_active' } } };
+  if (candidateDrifted(product, decision.product)) return { ok: false, stop: { outcome: { applied: false, reason: 'product_changed' } } };
   // The pre-write snapshot for the undo CLI — before setContainerSize, the
   // default_unit fix below, or adjustStock touch anything. inventory_on_hand
   // is kept exactly as read (null stays null, not 0) so an untracked
@@ -750,8 +739,13 @@ async function resolveExistingProduct(trx, { line, decision }, notifyAdmin) {
     catalogChangeNote = `set ${product.name}'s container size to ${decision.setContainerSize}`;
   }
   if (decision.unit === 'each') {
-    const fixOutcome = await fixCountDefaultUnit(trx, { line, productId, product, decision }, notifyAdmin);
-    if (fixOutcome === 'incompatible') return { ok: false, outcome: { applied: true, status: 'agent_unsure' } };
+    const fixOutcome = await fixCountDefaultUnit(trx, { productId, product });
+    if (fixOutcome === 'incompatible') {
+      return { ok: false, stop: { hold: {
+        status: 'agent_unsure', reason: 'application_unit_incompatible_with_count',
+        body: "its application unit can't take a count; fix the product first.",
+      } } };
+    }
     if (fixOutcome === 'fixed') {
       catalogChangeNote = catalogChangeNote ? `${catalogChangeNote}; set its application unit to each` : `set ${product.name}'s application unit to each`;
     }
@@ -790,7 +784,7 @@ async function resolveNewProduct(trx, { line, vendor, decision }) {
     guard: async (lockedTrx) => collidesWithActiveProduct(decision.newProduct.name, line.raw_title,
       await lockedTrx('products_catalog').where({ active: true }).select('id', 'name')),
   });
-  if (!created) return { ok: false, outcome: { applied: false, reason: 'name_collision_retry' } };
+  if (!created) return { ok: false, stop: { outcome: { applied: false, reason: 'name_collision_retry' } } };
   return {
     ok: true, productId: created.id, createdProductId: created.id,
     catalogChangeNote: `added "${created.name}" to the catalog`, originalProductFields: null,
@@ -804,8 +798,8 @@ async function resolveNewProduct(trx, { line, vendor, decision }) {
 // (product_no_longer_active / product_changed / name_collision_retry, all
 // { applied:false }) or an unsure line already written+bell'd
 // (application_unit_incompatible_with_count, { applied:true }).
-async function resolveTargetProduct(trx, { line, vendor, decision }, notifyAdmin) {
-  if (decision.kind === 'existing') return resolveExistingProduct(trx, { line, decision }, notifyAdmin);
+async function resolveTargetProduct(trx, { line, vendor, decision }) {
+  if (decision.kind === 'existing') return resolveExistingProduct(trx, { decision });
   return resolveNewProduct(trx, { line, vendor, decision });
 }
 
@@ -824,47 +818,64 @@ async function createAgentAlias(trx, { line, productId }) {
 // PHASE 4 — the deterministic matcher must resolve THIS title to the SAME
 // product under this transaction's own catalog change (a correcting alias, a
 // new product, a now-ambiguous match landing meanwhile throws, rolling
-// everything back — the line stays pending and the failure counts toward
-// the 3-attempt hand-off); then the duplicate-movement guard and the
-// post-change amount-agreement check, each a normal outcome (not a retry)
-// that writes the line + bell itself. null to proceed to phase 5.
-async function checkIdentityAndDuplicate(trx, { line, lineId, email, decision, productId, createdProductId, createdAliasId }, notifyAdmin) {
+// everything back: the line stays pending and the failure counts toward the
+// 3-attempt hand-off). Then the duplicate-movement guard and the post-change
+// amount-agreement check, each a hold described here and recorded by
+// applyDecision after the catalog changes are rolled back. null to proceed.
+async function findIdentityOrDuplicateHold(trx, { line, email, decision, productId }) {
   const reclassified = await classifyItem({ title: line.raw_title, quantity: Number(line.quantity) }, trx);
   if (reclassified.productId !== productId) {
     throw new Error(`the catalog now resolves "${line.raw_title}" to ${reclassified.productId ? 'a different product' : 'no single product'}`);
   }
-
   if (await findPossibleDuplicateMovement(trx, productId, email.received_at)) {
-    await trx('purchase_receipt_lines').where({ id: lineId }).update({
-      status: 'possible_duplicate', product_id: productId, received_qty: decision.amount, received_unit: decision.unit,
-      agent_decision: decisionRecord(decision, { createdProductId, createdAliasId }), agent_decided_at: new Date(),
-      agent_created_product_id: createdProductId, agent_created_alias_id: createdAliasId,
-    });
-    await ringBell(notifyAdmin, {
-      lineId, emailId: email.id, status: 'possible_duplicate', title: 'Inventory agent: possible duplicate',
-      body: `"${line.raw_title}" wasn't added. A manual restock or count was logged around the same time, so check the count.`, trx,
-    });
-    return { applied: true, status: 'possible_duplicate' };
+    return {
+      status: 'possible_duplicate', title: 'Inventory agent: possible duplicate',
+      body: 'A manual restock or count was logged around the same time, so check the count.',
+    };
   }
-
   // A catalog change just made (container size set, or a brand-new product)
   // can flip this SAME title to deterministically 'logged' next sweep via
-  // classifyItem — if it already would, its own amount must agree with what
+  // classifyItem; if it already would, its own amount must agree with what
   // was just validated, or something is inconsistent and this holds for a
   // person rather than trusting either read blindly.
   if (reclassified.status === 'logged' && !sizesAgreeAcrossUnits(reclassified.receivedQty, reclassified.receivedUnit, decision.amount, decision.unit)) {
-    await trx('purchase_receipt_lines').where({ id: lineId }).update({
-      status: 'agent_unsure',
-      agent_decision: { ...decisionRecord(decision, { createdProductId, createdAliasId }), reclassifyDisagreed: true },
-      agent_decided_at: new Date(),
-    });
-    await ringBell(notifyAdmin, {
-      lineId, emailId: email.id, status: 'agent_unsure', title: 'Inventory agent: not added',
-      body: `"${line.raw_title}" wasn't added: the catalog read disagreed with the agent's own amount after its change. Log it by hand if it's stock.`, trx,
-    });
-    return { applied: true, status: 'agent_unsure' };
+    return {
+      status: 'agent_unsure', flags: { reclassifyDisagreed: true },
+      body: "the catalog read disagreed with the agent's own amount after its change. Log it by hand if it's stock.",
+    };
   }
   return null;
+}
+
+// A hold (unsure, possible duplicate) recorded on the line with its bell, in
+// the outer transaction after the catalog changes were rolled back: the held
+// line never leaves a container size, count unit, alias or new product
+// behind. A possible duplicate keeps the amount it would have added and the
+// product it names when that product already existed.
+async function recordHold(trx, { line, lineId, email, decision, hold }, notifyAdmin) {
+  const existingProductId = decision.kind === 'existing' ? decision.product.id : null;
+  await trx('purchase_receipt_lines').where({ id: lineId }).update({
+    status: hold.status,
+    agent_decision: { ...decisionRecord(decision, {}), ...(hold.reason ? { reason: hold.reason } : {}), ...(hold.flags || {}) },
+    agent_decided_at: new Date(),
+    ...(hold.status === 'possible_duplicate'
+      ? { product_id: existingProductId || line.product_id, received_qty: decision.amount, received_unit: decision.unit }
+      : {}),
+  });
+  await ringBell(notifyAdmin, {
+    lineId, emailId: email.id, status: hold.status, title: hold.title || 'Inventory agent: not added',
+    body: `"${line.raw_title}" wasn't added${hold.status === 'possible_duplicate' ? '.' : ':'} ${hold.body}`, trx,
+  });
+  return { applied: true, status: hold.status };
+}
+
+// Thrown inside the catalog savepoint to stop applyDecision: `outcome` is a
+// retry for the next run, `hold` is recorded by recordHold.
+class StagedStop extends Error {
+  constructor(stop) {
+    super('staged stop');
+    this.stop = stop;
+  }
 }
 
 // PHASE 5 — the stock write itself (adjustStock, restock), the row-hash
@@ -942,15 +953,24 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
     const terminal = await settleTerminalKind(trx, { lineId, line, email, decision }, notifyAdmin);
     if (terminal) return terminal;
 
-    const resolved = await resolveTargetProduct(trx, { line, vendor, decision }, notifyAdmin);
-    if (!resolved.ok) return resolved.outcome;
-    const { productId, createdProductId, catalogChangeNote, originalProductFields } = resolved;
-
-    const createdAliasId = await createAgentAlias(trx, { line, productId });
-
-    const identityOutcome = await checkIdentityAndDuplicate(trx, { line, lineId, email, decision, productId, createdProductId, createdAliasId }, notifyAdmin);
-    if (identityOutcome) return identityOutcome;
-
+    // The catalog changes (a container size, the count unit, an alias, a new
+    // product) are made in a savepoint. A decision that ends in a hold or a
+    // retry rolls them back, so only the held line and its bell are saved.
+    let staged;
+    try {
+      staged = await trx.transaction(async (sp) => {
+        const resolved = await resolveTargetProduct(sp, { line, vendor, decision });
+        if (!resolved.ok) throw new StagedStop(resolved.stop);
+        const createdAliasId = await createAgentAlias(sp, { line, productId: resolved.productId });
+        const hold = await findIdentityOrDuplicateHold(sp, { line, email, decision, productId: resolved.productId });
+        if (hold) throw new StagedStop({ hold });
+        return { ...resolved, createdAliasId };
+      });
+    } catch (err) {
+      if (!(err instanceof StagedStop)) throw err;
+      return err.stop.hold ? recordHold(trx, { line, lineId, email, decision, hold: err.stop.hold }, notifyAdmin) : err.stop.outcome;
+    }
+    const { productId, createdProductId, createdAliasId, catalogChangeNote, originalProductFields } = staged;
     return commitStockMovement(trx, { line, lineId, vendor, email, decision, productId, createdProductId, createdAliasId, catalogChangeNote, originalProductFields }, notifyAdmin);
   });
 }
