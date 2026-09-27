@@ -41,6 +41,14 @@ function makeThreadsDb({ threads = [], turns = [] }) {
           }
           return api;
         },
+        whereNot(col, op, pattern) {
+          // whereNot(col, 'like', 'prefix%'), the only form the module uses.
+          if (op === 'like' && pattern.endsWith('%')) {
+            const prefix = pattern.slice(0, -1);
+            rows = rows.filter((r) => !String(r[col]).startsWith(prefix));
+          }
+          return api;
+        },
         orderBy(col, dir) {
           rows = [...rows].sort((a, b) => (dir === 'desc' ? b[col] - a[col] : a[col] - b[col]));
           return api;
@@ -108,6 +116,20 @@ describe('IbThreads.recentOperatorTurns', () => {
     });
     const result = await IbThreads.recentOperatorTurns(ACTOR, THREAD_ID, { limit: 3, maxAgeMinutes: 30 });
     expect(result).toEqual(['We bought Alpine WSG']);
+  });
+
+  test('continuation turns are excluded before the limit, so they never crowd out real turns', async () => {
+    const IbThreads = withThreadsModule({
+      threads: [{ id: THREAD_ID, admin_actor_id: ACTOR }],
+      turns: [
+        { thread_id: THREAD_ID, seq: 1, role: 'user', content: 'We bought a jug of Alpine WSG', created_at: minutesAgo(8) },
+        { thread_id: THREAD_ID, seq: 2, role: 'user', content: 'Continue the saved request using its recorded step outcomes.', created_at: minutesAgo(6) },
+        { thread_id: THREAD_ID, seq: 3, role: 'user', content: 'yes', created_at: minutesAgo(4) },
+        { thread_id: THREAD_ID, seq: 4, role: 'user', content: 'ok', created_at: minutesAgo(2) },
+      ],
+    });
+    const result = await IbThreads.recentOperatorTurns(ACTOR, THREAD_ID, { limit: 3, maxAgeMinutes: 30 });
+    expect(result).toEqual(['ok', 'yes', 'We bought a jug of Alpine WSG']);
   });
 
   test('an assistant-only mention never comes back, even when it is the most recent turn', async () => {

@@ -168,6 +168,7 @@ test.each([
   'Please use the earlier confirmation card to proceed.',
   'Please use the confirmation card I sent earlier.',
   "I've prepared a new confirmation card to replace the previous card.",
+  "I've prepared the confirmation cards below.",
 ])('a card claim in a turn with no pending action gets the notice (%s)', async (text) => {
   scriptModelTurns([[{ type: 'text', text }]]);
   await withServer(async (baseUrl) => {

@@ -583,6 +583,27 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     expect(confirmed).toEqual({ productId: ALPINE.id });
   });
 
+  test('an emoji before the name does not shift the removed mention (UTF-16 offsets)', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt: '👍 We bought Taurus SC',
+      preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+    });
+    expect(result).toEqual({ productId: TAURUS.id });
+  });
+
+  test.each(['?', '...'])('a punctuation-only reply (%s) is not a follow-up and borrows nothing', async (prompt) => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+    IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We bought a jug of Taurus SC']);
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt,
+      preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+      actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 5,
+    });
+    expect(result).toMatchObject({ code: 'target_clarification_required' });
+  });
+
   describe('the words must ask for the tool\'s own operation', () => {
     test.each([
       ['adjust_stock', 'We ordered Taurus SC', {}],

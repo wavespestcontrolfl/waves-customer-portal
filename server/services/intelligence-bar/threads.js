@@ -201,9 +201,11 @@ async function recentOperatorTurns(actorId, threadId, { limit = 3, maxAgeMinutes
     .where('role', 'user')
     .where('created_at', '>=', db.raw("NOW() - (? || ' minutes')::interval", [maxAgeMinutes]));
   if (Number.isInteger(maxSeq)) query = query.where('seq', '<=', maxSeq);
-  const rows = await query.orderBy('seq', 'desc').limit(limit).select('content');
-  // A continuation turn strips to nothing and is skipped, so the scan reaches
-  // the operator's real turns behind it.
+  // Continuation turns are excluded before the limit, so they never crowd
+  // out the operator's real turns; any turn that still strips to nothing is
+  // dropped after.
+  const rows = await query.whereNot('content', 'like', `${CONTINUATION_TURN}%`)
+    .orderBy('seq', 'desc').limit(limit).select('content');
   return rows.map((r) => operatorText(r.content)).filter(Boolean);
 }
 

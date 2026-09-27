@@ -271,7 +271,7 @@ const { CONTINUATION_TURN } = IbThreads;
 // reply gets a notice. It is not narrowed to "new" cards: a claim that also
 // mentions a prior card ("a new card to replace the previous card") is
 // still a claim, and the notice's wording is true either way.
-const CARD_CLAIM_RE = /\bcard below\b|\bconfirm(?:ation)? card\b|\bclick confirm\b|\bconfirm(?:ation)? on the card\b/i;
+const CARD_CLAIM_RE = /\bcards? below\b|\bconfirm(?:ation)? cards?\b|\bclick confirm\b|\bconfirm(?:ation)? on the cards?\b/i;
 const PHANTOM_CARD_NOTICE = "This reply didn't create a confirmation card. If you want a change, ask again and say exactly what to change.";
 
 function hasImageTaintedHistory(conversationHistory) {

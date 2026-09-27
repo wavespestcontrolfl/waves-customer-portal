@@ -1191,7 +1191,9 @@ const CLOSED_VOCAB = new Set([
 // out. `spans` are exactly the matched occurrences of the product mention(s)
 // under test — nothing else is ever removed.
 function residualWords(rawText, spans) {
-  const chars = [...rawText];
+  // UTF-16 code units, the same units the regex span offsets count in (an
+  // emoji before the name would otherwise shift every blanked position).
+  const chars = rawText.split('');
   for (const span of spans) {
     for (let i = span.start; i < span.end; i++) chars[i] = ' ';
   }
@@ -1213,7 +1215,9 @@ function isClosedVocabResidual(rawText, spans = []) {
 // bare — "unlisted"/"chemical" survive — so it must stand on its own, never
 // borrowing a name from an earlier turn.
 function isBareFollowUp(text) {
-  return isClosedVocabResidual(text);
+  // At least one word: a reply of only punctuation ("?", "...") says nothing
+  // and never borrows a product from an earlier turn.
+  return residualWords(text, []).length > 0 && isClosedVocabResidual(text);
 }
 
 // Which ACTIVE catalog products does operator text name? A product is named
