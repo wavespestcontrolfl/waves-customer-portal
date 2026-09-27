@@ -1491,9 +1491,9 @@ function purchasedServiceTermsAnswer(rows, namedService) {
     const prefix = namedService
       ? `For ${scope}, this estimate includes this purchased service-specific term:`
       : `This estimate includes this purchased service-specific term for ${scope}:`;
-    return `${prefix} ${row.purchasedTerms.join(' ')} It applies only to that service and does not create an estimate-wide callback or money-back guarantee.`;
+    return `${prefix} ${row.purchasedTerms.join(' ').replace(/([^.!?])$/, '$1.')} It applies only to that service and does not create an estimate-wide callback or money-back guarantee.`;
   }
-  const scopedTerms = rows.map((row) => `${row.label || 'Service'}: ${row.purchasedTerms.join(' ')}`).join(' ');
+  const scopedTerms = rows.map((row) => `${row.label || 'Service'}: ${row.purchasedTerms.join(' ').replace(/([^.!?])$/, '$1.')}`).join(' ');
   return `This estimate includes these purchased service-specific terms: ${scopedTerms} Each term applies only to the named service and does not create an estimate-wide callback or money-back guarantee.`;
 }
 
