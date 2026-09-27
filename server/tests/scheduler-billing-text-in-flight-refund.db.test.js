@@ -44,8 +44,9 @@ jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: (...args) => mockSendCustomerMessage(...args),
 }));
 
-const DATABASE_URL = process.env.DATABASE_URL;
-const postgres = DATABASE_URL ? describe : describe.skip;
+// CI's DB-gated step selects suites by this exact line (.github/workflows/tests.yml).
+const SKIP = !process.env.DATABASE_URL;
+const postgres = SKIP ? describe.skip : describe;
 
 postgres('scheduled billing replay held by an in-flight Text claim (real PostgreSQL)', () => {
   let fixture;

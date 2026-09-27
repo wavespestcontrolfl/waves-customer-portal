@@ -356,6 +356,14 @@ async function sendCustomerMessageCore(input) {
     providerPreSendCheck,
     withSmsHandoff,
     withProviderHandoff,
+    // Invoice-send-via-SMS's explicit billing Email leg only (see
+    // billingEmailLeg below): the invoice claim/visit/ownership/balance
+    // check withProviderHandoff runs for SMS/App, composed instead into
+    // providerPreparationCheck and run under the Email authority's OWN lock
+    // — withProviderHandoff itself is never invoked for this leg (see
+    // dispatchProvider below), so it never takes this handoff's lock on the
+    // same invoice row the authority already holds on a different connection.
+    billingEmailPreSendCheck,
     providerHandoffReservation: suppliedProviderHandoffReservation,
     ...inputRest
   } = input;
@@ -417,10 +425,30 @@ async function sendCustomerMessageCore(input) {
     && (sendInput.channel === 'sms' || (sendInput.channel === 'push' && input.metadata?.billingDeliveryLeg === 'push'))
     && input.purpose === 'payment_link'
     && input.entryPoint === 'invoice_send_via_sms';
-  if (withProviderHandoff
+  // The SAME invoice-send entry point's explicit billing Email leg (a
+  // customer selection of Email, fanned out by dispatchBillingChannels)
+  // never takes withProviderHandoff — that handoff's own
+  // withInvoiceDepositSettlement lock would deadlock against the Email
+  // authority's own lock on the same invoice row (billing-channel-email-
+  // authority.js, a different connection). It gets the SAME invoice
+  // preconditions a different way instead: billingEmailPreSendCheck, run
+  // under the authority's own lock (see providerPreparationCheck below).
+  // A caller on this leg with no such check is refused exactly like any
+  // other unsupported handoff — never silently dropped to "no invoice
+  // check at all".
+  const billingEmailLeg = input.audience === 'customer'
+    && sendInput.channel === 'email'
+    && input.metadata?.billingDeliveryLeg === 'email'
+    && input.purpose === 'payment_link'
+    && input.entryPoint === 'invoice_send_via_sms';
+  if (withProviderHandoff && !billingEmailLeg
     && (typeof withProviderHandoff !== 'function' || !providerHandoffAllowed || withSmsHandoff)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_PROVIDER_HANDOFF',
       reason: 'Locked provider handoff is restricted to invoice delivery' };
+  }
+  if (billingEmailLeg && typeof billingEmailPreSendCheck !== 'function') {
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_PROVIDER_HANDOFF',
+      reason: 'Billing Email delivery requires an invoice pre-send check' };
   }
   // SMS link schemes are removed before audit counting, matching the final
   // Twilio boundary for direct callers.
@@ -846,6 +874,20 @@ async function sendCustomerMessageCore(input) {
       if (!suppressionVerdict.ok) return rememberBoundaryBlock(suppressionVerdict, 'check_suppression_boundary');
       const consentVerdict = await checkConsentForPurpose(sendInput, policy, latest);
       if (!consentVerdict.ok) return rememberBoundaryBlock(consentVerdict, 'check_consent_boundary');
+      // billingEmailLeg's own invoice guard (claim/visit/ownership/balance —
+      // the same checks withProviderHandoff runs for SMS/App), composed here
+      // instead of via that handoff: this runs under the Email authority's
+      // OWN lock on the invoice row (billingEmailTrx IS that lock's
+      // transaction — see the comment above), never a second lock on the
+      // same row. billingEmailPreSendCheck is stripped from sendInput above
+      // and reaches here only when this leg is billingEmailLeg (the
+      // allowlist above refuses any other Email leg that supplies one).
+      if (sendInput.metadata?.billingDeliveryLeg === 'email' && typeof billingEmailPreSendCheck === 'function') {
+        const invoiceVerdict = await billingEmailPreSendCheck({ channel: 'email', database: billingEmailTrx });
+        if (!invoiceVerdict || invoiceVerdict.ok !== true) {
+          return rememberBoundaryBlock(invoiceVerdict, 'billing_email_pre_send_check_boundary');
+        }
+      }
     }
     const windowVerdict = checkSendWindow(sendInput, policy, contactState);
     if (!windowVerdict || windowVerdict.ok !== true) {
@@ -961,7 +1003,11 @@ async function sendCustomerMessageCore(input) {
     providerHandoffReservation,
   });
   };
-  providerOutcome = providerCoordinationBlock || (withProviderHandoff
+  // billingEmailLeg never invokes withProviderHandoff itself (see the
+  // allowlist above) — its invoice check runs instead inside
+  // providerPreparationCheck, composed with billingEmailPreSendCheck, under
+  // the Email authority's own lock.
+  providerOutcome = providerCoordinationBlock || (withProviderHandoff && !billingEmailLeg
     ? await withProviderHandoff(dispatchProvider)
     : await dispatchProvider());
   await providerCoordination.finalizeProviderHandoffReservation({

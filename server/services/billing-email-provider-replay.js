@@ -23,6 +23,11 @@ function isBillingEmailProviderReplay(message) {
 
 const { readStoredBillingReplayContext } = EmailTemplateLibrary;
 
+// A terminal refusal that must not block the notice for good: the retry owner
+// settles the row as a definitely-unsent failure instead of 'blocked', so a
+// later send of the same notice re-delivers rather than deduping against it.
+const BILLING_REPLAY_RESENDABLE = 'BILLING_REPLAY_RESENDABLE';
+
 function refusal(block) {
   const retryable = block?.retryable === true;
   return {
@@ -63,7 +68,9 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch) {
       const verdict = await billingEmailReplayEligible(context, database);
       return verdict?.eligible === true ? { ok: true } : {
         ok: false,
-        code: 'BILLING_REPLAY_INELIGIBLE',
+        // The authority keeps only code/reason/retryable, so a resendable
+        // refusal rides in the code (see BILLING_REPLAY_RESENDABLE).
+        code: verdict?.resendable === true ? BILLING_REPLAY_RESENDABLE : 'BILLING_REPLAY_INELIGIBLE',
         reason: verdict?.reason || 'Billing replay is no longer eligible',
         retryable: verdict?.retryable === true,
       };
@@ -83,4 +90,5 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch) {
 module.exports = {
   isBillingEmailProviderReplay,
   runBillingEmailProviderReplayHandoff,
+  BILLING_REPLAY_RESENDABLE,
 };
