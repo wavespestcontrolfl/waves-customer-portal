@@ -15763,7 +15763,10 @@ export function CompletionPanel({
     // value alone opened (codex r26; mirrors the chip membership rule).
     const nonInternalValuesNonEmpty = (schema, obj) => {
       const countableKeys = new Set(
-        (schema?.fields || []).filter((f) => !f.internal).map((f) => f.key),
+        // Treatment targets are objectives, not visit facts. Match the
+        // server's objective group for primary and companion forms alike.
+        (schema?.fields || []).filter((f) => !f.internal
+          && !/^target_(?!animal\b)|_target$/.test(f.key)).map((f) => f.key),
       );
       return Object.entries(obj || {}).some(
         ([key, v]) => countableKeys.has(key)
@@ -15886,6 +15889,12 @@ export function CompletionPanel({
         name: p.name,
         rate: p.rate || null,
         rateUnit: p.rateUnit || null,
+        applicationMethod: productApplicationMethod(p, serviceTypeForArea),
+        applicationArea:
+          p.applicationArea ||
+          (completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
+        areaValue: p.areaValue ?? null,
+        areaUnit: p.areaUnit || null,
         targets: Array.isArray(p.targets) ? p.targets : [],
       })),
       technicianName: service.technicianName || "Waves Tech",
@@ -17891,6 +17900,15 @@ export function CompletionPanel({
     const snapshot = JSON.stringify([
       areasServiced, observationsText, recommendationsText,
       customerInteraction, customerConcern, clientPestRating,
+      // Trace/default fetches can update product evidence while Generate is
+      // in flight. Track the same facts sent to the writer so the response
+      // cannot survive beside a newer application measurement.
+      selectedProducts.map((p) => [
+        p.productId, p.name, p.rate || null, p.rateUnit || null,
+        productApplicationMethod(p, serviceTypeForArea),
+        p.applicationArea || null, p.areaValue ?? null, p.areaUnit || null,
+        Array.isArray(p.targets) ? p.targets : [],
+      ]),
       // the payload sends photoCount — the set's size is a generation
       // input like any other (codex r44)
       servicePhotos.length,
@@ -17922,7 +17940,7 @@ export function CompletionPanel({
   }, [areasServiced, observationsText, recommendationsText,
     customerInteraction, customerConcern, clientPestRating,
     servicePhotos, generating, lawnAssessmentId, lawnAssessmentRevision,
-    aiReportIncludeComms]);
+    aiReportIncludeComms, selectedProducts, serviceTypeForArea]);
   // A typed edit AFTER generation settles invalidates an UNTOUCHED draft —
   // the installed prose described the old facts, and completion would
   // publish it beside contradicting structured findings (codex r23). Prose

@@ -4,6 +4,10 @@ const db = require('../models/db');
 const logger = require('./logger');
 const ContactLedger = require('./collections/contact-ledger');
 const { readStoredBillingReplayContext } = require('./email-template-library');
+const BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX = 'Billing email terminal refusal: ';
+const LEDGER_SOURCE_BY_ENTRY_POINT = Object.freeze({
+  invoice_followup_sequence: 'invoice_followups',
+});
 
 function replayContext(message) {
   try {
@@ -19,7 +23,7 @@ function reservationMatch(context) {
   return {
     customerId: context.customer_id,
     channel: 'email',
-    source: context.source_entry_point,
+    source: LEDGER_SOURCE_BY_ENTRY_POINT[context.source_entry_point] || context.source_entry_point,
     notificationEventKey: context.notificationEventKey,
     ...(context.invoice_id ? { invoiceId: context.invoice_id } : {}),
   };
@@ -64,6 +68,11 @@ function hasAcceptedEvidence(message) {
   return !!(message?.sent_at || message?.delivered_at || message?.opened_at || message?.clicked_at);
 }
 
+function hasTerminalRefusalEvidence(message) {
+  return message?.status === 'blocked' && !!message.provider_retry_exhausted_at
+    && String(message.error_message || '').startsWith(BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX);
+}
+
 function metadataOf(row) {
   if (typeof row?.metadata !== 'string') return row?.metadata || {};
   try { return JSON.parse(row.metadata) || {}; } catch { return {}; }
@@ -87,11 +96,18 @@ async function repairAcceptedBillingEmailReservations(rows, database = db) {
     const byLedgerId = new Map(candidates.map((row) => [String(row.id), row]));
     const repaired = new Set();
     for (const message of messages) {
-      if (!hasAcceptedEvidence(message)) continue;
+      const accepted = hasAcceptedEvidence(message);
+      const terminal = hasTerminalRefusalEvidence(message);
+      if (!accepted && !terminal) continue;
       const context = replayContext(message);
       const candidate = context && byLedgerId.get(String(context.collections_ledger_id));
       if (!candidate) continue;
-      if (await markBillingEmailReservationDelivered(message, database)) repaired.add(String(candidate.id));
+      if (accepted) {
+        if (await markBillingEmailReservationDelivered(message, database)) repaired.add(String(candidate.id));
+      } else if (await resolveBillingEmailReservationRefusal(message, database)) {
+        candidate.metadata = { ...metadataOf(candidate), send_failed: true,
+          resolved: true, resolution: 'email_terminal_refusal' };
+      }
     }
     return repaired;
   } catch (err) {
@@ -101,6 +117,7 @@ async function repairAcceptedBillingEmailReservations(rows, database = db) {
 }
 
 module.exports = {
+  BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX,
   hasAcceptedEvidence,
   markBillingEmailReservationDelivered,
   resolveBillingEmailReservationRefusal,
