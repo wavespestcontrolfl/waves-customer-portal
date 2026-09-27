@@ -212,6 +212,25 @@ suite('first-application-sibling-split — same-trip billing review on date chan
     expect((await readState(trx, ids)).invoice.billing_review_opened_at).toBeTruthy();
   }));
 
+  test('a sibling priced by hand and LATER moved back onto the invoice date must still NOT auto-clear', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+
+    // Priced by hand first (while still diverged)...
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ estimated_price: 56.40 });
+    // ...then some UNRELATED write moves its date back onto the invoice-
+    // holder's date, without the invoice itself ever being touched. Dates
+    // now match, the fingerprint is unchanged — but this sibling still
+    // bills its own separate price AND the invoice-holder's invoice was
+    // never reduced. Must still require the manual clear.
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: SAME_DATE });
+    const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('skipped');
+    expect(result.reason).toBe('review_open_requires_manual_clear');
+    expect((await readState(trx, ids)).invoice.billing_review_opened_at).toBeTruthy();
+  }));
+
   test('a diverging sibling that simply completes on its still-diverged date must NOT auto-clear', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });

@@ -272,13 +272,23 @@ async function maybeAutoClearBillingReview(trx, invoice, invoiceRow, members, mo
     return { action: 'skipped', reason: 'review_open_requires_manual_clear', invoiceId: invoice.id };
   }
   const invoiceDate = dateOnly(invoiceRow.scheduled_date);
-  const stillDiverged = recordedSiblingIds.some((id) => {
+  const notResolved = recordedSiblingIds.some((id) => {
     const member = members.find((m) => String(m.id) === String(id));
     // A recorded sibling that no longer exists in this locked group (e.g.
     // moved to a different estimate) can't be proven realigned — fail closed.
-    return !member || dateOnly(member.scheduled_date) !== invoiceDate;
+    if (!member) return true;
+    if (dateOnly(member.scheduled_date) !== invoiceDate) return true;
+    // Priced by hand SINCE it was recorded (Claude fallback-auditor P1,
+    // this branch's own third push): a sibling whose date was later moved
+    // back onto the invoice-holder's date by some unrelated write, while
+    // it also carries a manually-set estimated_price, is not the trivial
+    // "genuinely never diverged" case — it now bills its own separate
+    // price AND the invoice-holder's invoice was never reduced. The office
+    // must clear this by hand, having actually reconciled both sides.
+    if (member.estimated_price != null) return true;
+    return false;
   });
-  if (stillDiverged) {
+  if (notResolved) {
     return { action: 'skipped', reason: 'review_open_requires_manual_clear', invoiceId: invoice.id };
   }
   const snapshot = context?.invoiceMoneyFingerprintAtOpen;
