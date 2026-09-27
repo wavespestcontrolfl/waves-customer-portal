@@ -185,6 +185,21 @@ describe('getWeatherSignals MRMS rainfall enrichment (public pest forecast)', ()
     expect(fetchMrmsDailyRain).toHaveBeenCalledTimes(1);
   });
 
+  test('concurrent fills of one city share a single lookup — a slower failure can\'t overwrite a good reading', async () => {
+    fetchMrmsDailyRain
+      .mockResolvedValueOnce(mrmsDay('2026-07-14', 0.7)) // fast and good
+      .mockImplementationOnce(() => new Promise((resolve) => setTimeout(() => resolve(null), 20))); // a slow outage
+
+    const [a, b] = await Promise.all([getWeatherSignals(BRADENTON), getWeatherSignals(BRADENTON)]);
+    await new Promise((resolve) => setTimeout(resolve, 40)); // let any straggling fill land
+    const cached = await getWeatherSignals(BRADENTON);
+
+    expect(fetchMrmsDailyRain).toHaveBeenCalledTimes(1);
+    expect(a.recentRainIn).toBeCloseTo(0.7, 5);
+    expect(b.recentRainIn).toBeCloseTo(0.7, 5);
+    expect(cached.recentRainIn).toBeCloseTo(0.7, 5);
+  });
+
   describe('freshness', () => {
     // 11:30 PM ET on 07-15, then 12:30 AM ET on 07-16 — one hour apart, well
     // inside the 3h cache lifetime, but "yesterday" moved from 07-14 to 07-15.

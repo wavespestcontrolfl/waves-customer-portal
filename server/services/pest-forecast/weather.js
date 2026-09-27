@@ -33,6 +33,8 @@ const MISSING_RAIN_RETRY = 15 * 60 * 1000; // 15 minutes
 const TIMEOUT_MS = 4000;
 
 const _cache = new Map(); // key -> signals (each carries its own freshUntil)
+// The fill in progress per coordinate — concurrent requests share it.
+const _inflight = new Map(); // key -> Promise<signals>
 // Last measured MRMS reading per coordinate, for the ET day it measured.
 const _rainMemo = new Map(); // key -> { day, inches }
 
@@ -137,6 +139,18 @@ async function getWeatherSignals({ lat, lng, region } = {}) {
   const hit = _cache.get(key);
   if (hit && now.getTime() < hit.freshUntil) return hit;
 
+  // One fill per coordinate at a time: concurrent requests share it, so a
+  // slower failed lookup can never overwrite a faster good one, and a burst
+  // of requests costs one set of upstream calls.
+  if (!_inflight.has(key)) {
+    const fill = fillSignals({ lat, lng, region, key, now })
+      .finally(() => { if (_inflight.get(key) === fill) _inflight.delete(key); });
+    _inflight.set(key, fill);
+  }
+  return _inflight.get(key);
+}
+
+async function fillSignals({ lat, lng, region, key, now }) {
   // SWFL points also get yesterday's measured rainfall. Started before the
   // NWS lookup so a cache fill waits for the slower of the two, not both.
   const wantsRain = region === 'sw';
@@ -183,6 +197,6 @@ function flags(b) {
   };
 }
 
-function _clearCache() { _cache.clear(); _rainMemo.clear(); } // test hook
+function _clearCache() { _cache.clear(); _rainMemo.clear(); _inflight.clear(); } // test hook
 
 module.exports = { getWeatherSignals, flags, _clearCache };
