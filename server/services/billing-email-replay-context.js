@@ -8,7 +8,6 @@ const SOURCES = new Set([
   'invoice_followup_sequence',
   'balance_reminder_late_payment_check',
   'late_payment_checker',
-  'previsit_balance_reminder',
 ]);
 const CATEGORIES = new Set(['invoice', 'payment_issue', 'billing', 'payment_receipt']);
 const EXPIRY_STAGES = new Set(['expired', '7_day', '30_day', '60_day']);
@@ -69,10 +68,6 @@ function complete(context) {
     return has('invoice_id', 'appointment_id', 'appointment_date',
       'appointment_service_type', 'appointment_rendered_on', 'collections_ledger_id');
   }
-  if (context.source_entry_point === 'previsit_balance_reminder') {
-    return has('appointment_id', 'appointment_date',
-      'appointment_service_type', 'appointment_rendered_on', 'collections_ledger_id', 'rendered_amount', 'invoice_ids');
-  }
   if (context.source_entry_point === 'invoice_followup_sequence') {
     return has('invoice_id', 'followup_sequence_id', 'rendered_amount', 'collections_ledger_id');
   }
@@ -83,11 +78,6 @@ function sanitizeBillingReplayContext(context) {
   if (!context || typeof context !== 'object' || Array.isArray(context) || context.schema_version !== 1) return null;
   const out = { schema_version: 1 };
   if (!copyStrings(context, out) || !copyDates(context, out) || !copyExpiry(context, out)) return null;
-  if (context.invoice_ids != null) {
-    if (!Array.isArray(context.invoice_ids)) return null;
-    out.invoice_ids = context.invoice_ids.map((id) => boundedString(id, STRING_FIELDS.invoice_id));
-    if (out.invoice_ids.some((id) => !id) || new Set(out.invoice_ids).size !== out.invoice_ids.length) return null;
-  }
   if (!out.customer_id || !out.notificationEventKey) return null;
   if (out.rendered_amount != null && !/^\d+\.\d{2}$/.test(out.rendered_amount)) return null;
   if (!CATEGORIES.has(context.category) || !SOURCES.has(out.source_entry_point)) return null;
@@ -116,7 +106,6 @@ function buildBillingReplayContext(input, authorityContext, notificationEventKey
     appointment_rendered_on: meta.appointment_rendered_on,
     followup_sequence_id: meta.followup_sequence_id,
     rendered_amount: meta.rendered_amount,
-    invoice_ids: meta.invoice_ids,
   });
 }
 

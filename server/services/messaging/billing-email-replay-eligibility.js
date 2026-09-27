@@ -9,7 +9,6 @@ const INVOICE_GUARDS = new Set([
   'balance_reminder_late_payment_check', 'late_payment_checker',
 ]);
 const EXPIRY_ENTRY_POINTS = new Set(['autopay_card_expiry_warning', 'payment_expiry_workflow']);
-const VISIT_PINNED_SOURCES = new Set(['balance_reminder_workflow', 'previsit_balance_reminder']);
 
 function refused(reason, retryable = false) {
   return { eligible: false, reason, retryable };
@@ -126,7 +125,7 @@ async function expiryRefusal(meta, database) {
 }
 
 async function balanceReminderVisitRefusal(meta, database) {
-  if (!VISIT_PINNED_SOURCES.has(meta.source_entry_point)) return null;
+  if (meta.source_entry_point !== 'balance_reminder_workflow') return null;
   if (!meta.appointment_id || !/^\d{4}-\d{2}-\d{2}$/.test(meta.appointment_date || '')
     || !String(meta.appointment_service_type || '').trim()
     || !/^\d{4}-\d{2}-\d{2}$/.test(meta.appointment_rendered_on || '')) {
@@ -135,18 +134,11 @@ async function balanceReminderVisitRefusal(meta, database) {
   if (meta.appointment_rendered_on !== etDateString()) return refused('balance-reminder-copy-stale');
   const visit = await database('scheduled_services')
     .where({ id: meta.appointment_id, customer_id: meta.customer_id })
-    .first('status', 'scheduled_date', 'service_type', 'is_recurring');
+    .first('status', 'scheduled_date', 'service_type');
   if (!visit || !['pending', 'confirmed'].includes(visit.status)
     || dateOnlyString(visit.scheduled_date) !== meta.appointment_date
     || String(visit.service_type || 'service') !== meta.appointment_service_type) {
     return refused('balance-reminder-visit-changed');
-  }
-  if (meta.source_entry_point === 'previsit_balance_reminder') {
-    if (visit.is_recurring !== true) return refused('previsit-visit-no-longer-recurring');
-    const payer = await require('../payer').resolveForInvoice({
-      database, customerId: meta.customer_id, scheduledServiceId: meta.appointment_id, throwOnError: true,
-    });
-    if (payer.payerId) return refused('previsit-visit-payer-billed');
   }
   return null;
 }
@@ -160,52 +152,6 @@ async function invoiceRefusal(meta, database) {
   const ownership = await require('../invoice-helpers').selfPayAtDispatch(meta.invoice_id, database)();
   if (ownership.ok === true) return null;
   return refused(ownership.code || 'invoice-not-self-pay', ownership.code === 'INVOICE_UNREADABLE');
-}
-
-async function previsitQuoteRefusal(meta, database) {
-  if (meta.source_entry_point !== 'previsit_balance_reminder') return null;
-  if (!/^\d+\.\d{2}$/.test(meta.rendered_amount || '') || !(Number(meta.rendered_amount) > 0)) {
-    return refused('previsit-quote-missing');
-  }
-  const reservation = await database('collections_contact_ledger')
-    .where({ id: meta.collections_ledger_id, customer_id: meta.customer_id,
-      source: 'previsit_balance_reminder', channel: 'email' })
-    .whereRaw("metadata->>'notificationEventKey' = ?", [meta.notificationEventKey]).first('id');
-  const ids = meta.invoice_ids;
-  if (!reservation || !Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || !id)
-    || new Set(ids).size !== ids.length) return refused('previsit-quote-missing');
-  const current = await require('../previsit-balance-reminder').currentEligiblePrevisitBalance({
-    customerId: meta.customer_id,
-    channel: 'email',
-    eventKey: meta.notificationEventKey,
-    database,
-    now: new Date(),
-  });
-  if (!current.permitted) {
-    const policy = await require('../collections/rail-guard').collectionsChannelPermitted({
-      customerId: meta.customer_id,
-      invoiceId: null,
-      invoiceIds: ids,
-      channel: 'email',
-      purpose: 'balance_reminder',
-      offLedgerBalanceCents: current.duesCents,
-      excludeLedgerIds: current.excludeLedgerIds,
-      logTag: 'billing-email-obligation-replay',
-      detail: true,
-      database,
-    });
-    return refused('collections-policy-denied', policy?.durable !== true);
-  }
-  const liveIds = current.invoices.map((invoice) => String(invoice.id));
-  if (liveIds.length !== ids.length || liveIds.some((id) => !ids.includes(id))) {
-    return refused('previsit-quote-changed');
-  }
-  const { invoiceAmountDue } = require('../invoice-helpers');
-  const cents = current.invoices.reduce(
-    (sum, invoice) => sum + Math.round(invoiceAmountDue(invoice) * 100),
-    current.duesCents,
-  );
-  return cents === Math.round(Number(meta.rendered_amount) * 100) ? null : refused('previsit-quote-changed');
 }
 
 async function persistedLedgerExclusions(meta, database) {
@@ -236,8 +182,7 @@ async function collectionsPolicyRefusal(meta, database) {
 
 async function billingEmailReplayEligible(meta, database = db) {
   try {
-    const checks = [prechargeRefusal, expiryRefusal, balanceReminderVisitRefusal,
-      invoiceRefusal, previsitQuoteRefusal, collectionsPolicyRefusal];
+    const checks = [prechargeRefusal, expiryRefusal, balanceReminderVisitRefusal, invoiceRefusal, collectionsPolicyRefusal];
     for (const check of checks) {
       const refusal = await check(meta || {}, database);
       if (refusal) return refusal;
@@ -250,4 +195,4 @@ async function billingEmailReplayEligible(meta, database = db) {
 
 // Producer-state eligibility only. Recipient resolution and provider-boundary
 // send authorization remain the caller's responsibility when this is wired.
-module.exports = { billingEmailReplayEligible, balanceReminderVisitRefusal };
+module.exports = { billingEmailReplayEligible };

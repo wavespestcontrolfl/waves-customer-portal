@@ -117,9 +117,51 @@ function permitChannels(permitted) {
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.PREVISIT_BALANCE_REMINDER = 'true';
+  require('../services/invoice-helpers').invoiceWithdrawnFromCustomer.mockImplementation(() => false);
   collectionsChannelVerdict.mockResolvedValue({ permitted: true, eligibleInvoiceIds: null });
   AccountMembershipEmail.resolvePrevisitBalanceEmailRecipient.mockResolvedValue({ recipient: { email: 'taylor@example.com' } });
   AccountMembershipEmail.sendPrevisitBalanceReminder.mockResolvedValue({ ok: true });
+});
+
+test('an incomplete recent-contact snapshot fails closed before claiming or sending', async () => {
+  const claimChain = chain({ result: 1 });
+  setDbQueues({
+    sms_templates: [chain({ first: { is_active: true } })],
+    scheduled_services: [chain({ result: [VISIT] }), claimChain],
+    invoices: [chain({ result: [OVERDUE_INVOICE] })],
+    activity_log: [chain({ result: Promise.reject(new Error('activity read unavailable')) })],
+  });
+
+  await expect(runSweep({ now: new Date('2026-08-14T15:00:00Z') }))
+    .resolves.toMatchObject({ sent: 0, skipped: 1 });
+  expect(claimChain.update).not.toHaveBeenCalled();
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+  expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();
+});
+
+test('the shared fresh selector preserves only the complete eligible balance', async () => {
+  permitChannels({ sms: true, email: false });
+  require('../services/invoice-helpers').invoiceWithdrawnFromCustomer
+    .mockImplementation((invoice) => invoice.id === 'inv-withdrawn');
+  const now = new Date('2026-08-14T15:00:00Z');
+  setDbQueues({
+    sms_templates: [chain({ first: { is_active: true } })],
+    scheduled_services: [chain({ result: [VISIT] }), chain({ result: 1 })],
+    invoices: [chain({ result: [
+      OVERDUE_INVOICE,
+      { ...OVERDUE_INVOICE, id: 'inv-paid', status: 'paid', total: '500.00' },
+      { ...OVERDUE_INVOICE, id: 'inv-withdrawn', total: '400.00' },
+      { ...OVERDUE_INVOICE, id: 'inv-zero', total: '0.00' },
+      { ...OVERDUE_INVOICE, id: 'inv-recent', total: '300.00', last_reminder_at: now },
+      { ...OVERDUE_INVOICE, id: 'inv-legacy', total: '200.00' },
+    ] })],
+    activity_log: [chain({ result: [{ metadata: { invoiceId: 'inv-legacy' } }] })],
+  });
+
+  await expect(runSweep({ now })).resolves.toMatchObject({ sent: 1, skipped: 0 });
+  expect(require('../services/sms-template-renderer').renderSmsTemplate)
+    .toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ amount: '96.60' }));
+  expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['inv-9'] }));
 });
 afterEach(() => {
   delete process.env.PREVISIT_BALANCE_REMINDER;

@@ -142,13 +142,13 @@ const OVERDUE_AFTER_DAYS = 7;
 // Past-due invoices that belong to the recurring relationship: linked to a
 // recurring scheduled visit, homeowner-billed (payer AR excluded). One-time
 // invoice debt deliberately never counts here.
-async function overdueRecurringInvoices(customerId, now = new Date(), database = db) {
+async function overdueRecurringInvoices(customerId, now = new Date()) {
   const dueCutoff = new Date(now.getTime() - OVERDUE_AFTER_DAYS * 86400000);
   // The follow-up engine records its sends on
   // invoice_followup_sequences.last_touch_at, NOT invoices.last_reminder_at
   // — the recent-touch guard must read the real timestamp or the 10:00
   // dun and this 10:05 sweep double-text the same invoice (Codex r4).
-  return database('invoices')
+  return db('invoices')
     .join('scheduled_services as ss', 'invoices.scheduled_service_id', 'ss.id')
     .leftJoin('invoice_followup_sequences as ifs', 'ifs.invoice_id', 'invoices.id')
     .where('invoices.customer_id', customerId)
@@ -171,13 +171,12 @@ async function overdueRecurringInvoices(customerId, now = new Date(), database =
     .select('invoices.*', 'ifs.last_touch_at as followup_last_touch_at');
 }
 
-// One selector owns the current recurring debt set for the legacy sweep and
-// all replay/boundary validation. A newly eligible invoice must be visible to
-// validators even when the frozen quote named no invoices.
-async function freshOverdueRecurringInvoices(customerId, now = new Date(), database = db) {
-  const overdue = await overdueRecurringInvoices(customerId, now, database);
+// Keep the live sweep's eligibility and recent-contact filtering in one
+// selector so every candidate is screened by the same evidence reads.
+async function freshOverdueRecurringInvoices(customerId, now = new Date()) {
+  const overdue = await overdueRecurringInvoices(customerId, now);
   const cutoff = new Date(now.getTime() - RECENT_TOUCH_HOURS * 3600 * 1000);
-  const legacyTouches = await database('activity_log')
+  const legacyTouches = await db('activity_log')
     .where({ customer_id: customerId, action: 'late_payment_reminder' })
     .where('created_at', '>=', cutoff)
     .select('metadata');
@@ -196,56 +195,6 @@ async function freshOverdueRecurringInvoices(customerId, now = new Date(), datab
     && [invoice.last_reminder_at, invoice.followup_last_touch_at]
       .filter(Boolean)
       .every((touch) => new Date(touch) < cutoff));
-}
-
-async function currentDuesAllowanceCents(customerId, database = db, now = new Date()) {
-  const customer = await database('customers').where({ id: customerId })
-    .first('billing_mode', 'waveguard_tier', 'monthly_rate', 'billing_day');
-  if (!customer) return 0;
-  const todayEt = etDateString(now);
-  const lane = resolveBillingLane(customer);
-  const obligation = duesObligation(todayEt, customer.billing_day);
-  const duesCollected = lane.mode === 'monthly_membership'
-    ? await monthlyDuesCollected(database, customerId, new Date(`${obligation.dueDateEt}T12:00:00Z`))
-    : null;
-  const late = lane.mode === 'monthly_membership' && duesCollected === false
-    && String(todayEt) >= String(obligation.graceDateEt);
-  return late ? Math.round((Number(customer.monthly_rate) || 0) * 100) : 0;
-}
-
-async function previsitEpisodeLedgerIds(customerId, eventKey, database) {
-  if (process.env.GATE_COLLECTIONS_POLICY !== 'true' || !eventKey) return [];
-  const rows = await database('collections_contact_ledger')
-    .where({ customer_id: customerId, source: 'previsit_balance_reminder' })
-    .whereRaw("metadata->>'notificationEventKey' = ?", [eventKey])
-    .select('id');
-  return [...new Set(rows.map((row) => row.id).filter(Boolean))];
-}
-
-async function currentEligiblePrevisitBalance({
-  customerId, channel, eventKey, database = db, now = new Date(),
-}) {
-  const invoices = await freshOverdueRecurringInvoices(customerId, now, database);
-  const duesCents = await currentDuesAllowanceCents(customerId, database, now);
-  const excludeLedgerIds = await previsitEpisodeLedgerIds(customerId, eventKey, database);
-  const verdict = await collectionsChannelVerdict({
-    customerId,
-    channel,
-    purpose: 'balance_reminder',
-    offLedgerBalanceCents: duesCents,
-    excludeLedgerIds,
-    logTag: 'previsit-balance',
-    database,
-    now,
-  });
-  const eligibleIds = verdict.eligibleInvoiceIds == null
-    ? null : new Set(verdict.eligibleInvoiceIds.map(String));
-  return {
-    permitted: verdict.permitted,
-    invoices: eligibleIds ? invoices.filter((invoice) => eligibleIds.has(String(invoice.id))) : invoices,
-    duesCents,
-    excludeLedgerIds,
-  };
 }
 
 async function runSweep({ now = new Date() } = {}) {
@@ -494,9 +443,6 @@ module.exports = {
   duesObligation,
   friendlyVisitDate,
   overdueRecurringInvoices,
-  freshOverdueRecurringInvoices,
-  currentDuesAllowanceCents,
-  currentEligiblePrevisitBalance,
   TEMPLATE_KEY,
   EMAIL_TEMPLATE_KEY,
   LEAD_DAYS,
