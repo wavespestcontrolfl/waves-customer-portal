@@ -35,6 +35,9 @@ const factsLoader = require('../content-astro/facts-bank-loader');
 const interceptSeeder = require('./intercept-brief-seeder');
 const spokeSeeder = require('./spoke-seed-seeder');
 const categorySeeder = require('./category-seed-seeder');
+const relatedPostsSelector = require('./related-posts');
+const { resolveSpokeTarget } = require('../content-astro/spoke-routing');
+const { HUB_SITE_KEYS } = require('../content-astro/spoke-sites');
 
 // ── keyword overlap helpers for customer-cluster topic match ────────
 
@@ -81,6 +84,15 @@ function lazy(name, path) {
 }
 const getSerpProfiler = lazy('serp-profiler', '../seo/serp-profiler');
 const getConversionMiner = lazy('conversion-feedback-miner', '../seo/conversion-feedback-miner');
+
+function resolvedPublishTargetSites(opportunity) {
+  const queuedTargets = spokeSeeder.targetSitesFor(opportunity);
+  const publishSpoke = resolveSpokeTarget({ target_sites: queuedTargets });
+  // Persist the explicit hub key rather than []: resolveSpokeTarget falls
+  // back to operator_brief when the top-level list is empty, which would
+  // resurrect a stale queued spoke after the flag is re-enabled.
+  return publishSpoke ? [publishSpoke] : [...HUB_SITE_KEYS];
+}
 
 // ── required-sections matrix (per page-type, per v3.1 brief schema) ─
 
@@ -449,7 +461,18 @@ class ContentBriefBuilder {
       return null;
     });
 
-    const brief = this._composeBrief({ opportunity: opp, signals, decision, existingBriefVersions, factsPack });
+    // Related-post link targets for a NEW supporting-blog brief only (see
+    // related-posts.js). A lookup error is infrastructure, so composition
+    // rejects before the writer can spend an attempt on an unpublishable brief.
+    // Freeze the current canonical routing decision on the persisted brief.
+    // In particular, a spoke queued while enabled but composed while the
+    // network is disabled must stay hub-only if the flag is later re-enabled.
+    const publishTargetSites = decision.action_type === 'new_supporting_blog'
+      ? resolvedPublishTargetSites(opp)
+      : null;
+    const relatedPosts = await this._loadRelatedPosts(opp, decision, publishTargetSites);
+
+    const brief = this._composeBrief({ opportunity: opp, signals, decision, existingBriefVersions, factsPack, relatedPosts, publishTargetSites });
     if (persist) brief.id = await this._persist(brief);
     return brief;
   }
@@ -638,7 +661,35 @@ class ContentBriefBuilder {
     };
   }
 
-  _composeBrief({ opportunity, signals, decision, existingBriefVersions, factsPack = null }) {
+  /**
+   * Related-post link targets for a NEW supporting-blog brief (owner audit
+   * 2026-09-26: 115/278 blog posts link to no other post, because the
+   * writer's closed internal-link set never included any blog post). Scoped
+   * to pageType 'supporting-blog' — customer-question pages publish into the
+   * services collection, not the blog, and refresh/metadata actions have
+   * their own agents and prompts (writer-agent-config.js is the NEW-page
+   * writer only). Returns [] on anything else, so every other lane's brief
+   * shape is unchanged.
+   */
+  async _loadRelatedPosts(opportunity, decision, publishTargetSites = null) {
+    if (decision?.action_type !== 'new_supporting_blog') return [];
+    const effectiveTargets = publishTargetSites || resolvedPublishTargetSites(opportunity);
+    const selectionDomains = effectiveTargets.length ? effectiveTargets : HUB_SITE_KEYS;
+    return relatedPostsSelector.getRelatedPostsForBrief({
+      keyword: opportunity.query || opportunity.signal_metadata?.representative_query || null,
+      service: opportunity.service || null,
+      pestEntity: opportunity.signal_metadata?.specialty_topic || null,
+      city: opportunity.city || null,
+      // Match the publisher's effective destination, including its runtime
+      // spoke-network kill switch. A job queued for a spoke while the flag
+      // was on can be composed after it turns off; that post publishes on
+      // the hub, so its related targets must come from the hub too.
+      domains: selectionDomains,
+      excludePath: opportunity.page_url || null,
+    });
+  }
+
+  _composeBrief({ opportunity, signals, decision, existingBriefVersions, factsPack = null, relatedPosts = [], publishTargetSites = null }) {
     const pageType = decision.page_type;
 
     // Overlay answer-engine extractability requirements for aeo_gap briefs.
@@ -768,6 +819,8 @@ class ContentBriefBuilder {
       ? interceptSeeder.buildOperatorOverlay({ opportunity, pageType, requiredSections, schemaTypes })
       : null;
     const operatorOverlay = spokeOverlay || categoryOverlay || interceptOverlay;
+    const effectivePublishTargetSites = publishTargetSites
+      || (decision.action_type === 'new_supporting_blog' ? resolvedPublishTargetSites(opportunity) : null);
 
     return {
       facts_pack: factsPack,
@@ -786,7 +839,7 @@ class ContentBriefBuilder {
       // hub posts). Sourced from the seeded signal_metadata so it survives a
       // content_briefs round-trip; the Astro publisher reads it to stamp
       // frontmatter.domains + a self-canonical spoke URL.
-      target_sites: spokeSeeder.targetSitesFor(opportunity),
+      target_sites: effectivePublishTargetSites || spokeSeeder.targetSitesFor(opportunity),
 
       final_score: decision.final_score,
       score_breakdown: decision.score_breakdown,
@@ -907,7 +960,29 @@ class ContentBriefBuilder {
           ? { ...layered.voiceConstraints, operator_brief: operatorOverlay.operator_brief }
           : layered.voiceConstraints;
         const gateRetry = opportunity.signal_metadata?.gate_retry;
-        return gateRetry ? { ...base, retry_directives: buildRetryDirectives(gateRetry) } : base;
+        const withRetry = gateRetry ? { ...base, retry_directives: buildRetryDirectives(gateRetry) } : base;
+        // Related-post link allowance rides here (not internal_links_to_add,
+        // which is a MUST-appear checklist) — see _loadRelatedPosts. No
+        // migration: content_briefs has no dedicated column, and
+        // voice_constraints is the established jsonb extension point
+        // (operator_brief, retry_directives already live here) that
+        // round-trips through get_content_brief AND the stored-draft
+        // revalidation path (_loadReviewedBrief), so the gate allowance
+        // survives a re-check exactly like it did the first time.
+        if (decision.action_type !== 'new_supporting_blog') return withRetry;
+        // Persist independently of lookup results. content_briefs has no
+        // target_sites column, so this JSONB marker is also the publisher's
+        // durable routing decision after a reviewed brief is reloaded.
+        const withRouting = {
+          ...withRetry,
+          related_posts_target_sites: effectivePublishTargetSites,
+        };
+        return (Array.isArray(relatedPosts) && relatedPosts.length)
+          ? {
+              ...withRouting,
+              related_posts: relatedPosts,
+            }
+          : withRouting;
       })(),
 
       publish_window: nextWeekday9amET().toISOString(),

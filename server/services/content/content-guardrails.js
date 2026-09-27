@@ -5019,7 +5019,7 @@ function collectInternalDestinations(text) {
   const rel = new RegExp(RELATIVE_DEST_RE.source, RELATIVE_DEST_RE.flags);
   while ((m = rel.exec(s)) !== null) {
     if (attrMasked[m.index] !== s[m.index]) continue;
-    dests.push(m[1] || m[2] || m[3] || m[4]);
+    dests.push({ dest: m[1] || m[2] || m[3] || m[4], host: null });
   }
   const abs = new RegExp(HUB_URL_CANDIDATE_RE.source, HUB_URL_CANDIDATE_RE.flags);
   const hubHosts = hubHostSet();
@@ -5037,11 +5037,14 @@ function collectInternalDestinations(text) {
     const raw = m[0].replace(/[),.;:!?'"\]]+$/, '');
     try {
       const u = new URL(raw);
-      if (hubHosts.has(u.hostname.toLowerCase())) dests.push(u.pathname || '/');
+      if (hubHosts.has(u.hostname.toLowerCase())) {
+        dests.push({ dest: u.pathname || '/', host: u.hostname.toLowerCase() });
+      }
     } catch { /* malformed URL — the external gate owns it */ }
   }
   const normalized = [];
-  for (const dest of dests) {
+  for (const item of dests) {
+    const { dest, host } = item;
     // Resolve dot segments FIRST — browsers resolve "/images/../x/" to
     // "/x/", so the /images/ exemption must see the resolved path or a
     // dot-segment link reopens the dead-route class.
@@ -5050,7 +5053,7 @@ function collectInternalDestinations(text) {
     // Anchor-only and in-repo image references are not routes.
     if (resolved.startsWith('/images/')) continue;
     const norm = normalizeInternalPath(resolved);
-    if (norm) normalized.push({ dest, norm });
+    if (norm) normalized.push({ dest, norm, host });
   }
   return normalized;
 }
@@ -5087,7 +5090,7 @@ function isKnownGoodInternalRoute(dest) {
 // that preserves one legacy /old/ link must not thereby earn a free pass to
 // ADD more links to that dead route; only up to the prior body's count of
 // each route is preserved-legacy (see uncatalogedComponentFinding).
-function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts = null) {
+function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts = null, relatedPostLinks = [], relatedPostHosts = []) {
   // Non-rendered content carries no live links: a fenced or commented
   // example (<InlineCTA ctaHref="/example-only/">, a code-block href) must
   // not flag UNKNOWN_INTERNAL_ROUTE — the same masking the component
@@ -5117,8 +5120,27 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts
     if (allowanceCity && !PAGE_CITY_SLUGS.has(allowanceCity)) continue;
     allowed.add(norm);
   }
+  const relatedPaths = new Set((Array.isArray(relatedPostLinks) ? relatedPostLinks : [])
+    .map((link) => normalizeInternalPath(link))
+    .filter(Boolean));
+  const allowedRelatedHosts = new Set();
+  for (const value of Array.isArray(relatedPostHosts) ? relatedPostHosts : []) {
+    let host = String(value || '').trim().toLowerCase();
+    try { host = new URL(host.includes('://') ? host : `https://${host}`).hostname.toLowerCase(); } catch { continue; }
+    const bare = host.replace(/^www\./, '');
+    if (!SPOKE_SITE_KEYS.includes(bare)) continue;
+    allowedRelatedHosts.add(bare);
+    allowedRelatedHosts.add(`www.${bare}`);
+  }
   const seenCounts = new Map();
-  for (const { dest, norm } of collectInternalDestinations(text)) {
+  for (const { dest, norm, host } of collectInternalDestinations(text)) {
+    if (relatedPaths.has(norm)) {
+      // A relative candidate renders on the current publish host. An absolute
+      // candidate must name that same frozen host; a path match alone must not
+      // turn a hub allowance into permission for a spoke URL (or vice versa).
+      if (!host || allowedRelatedHosts.has(host)) continue;
+      return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links related-post path "${dest}" on host "${host}", which is not the brief's frozen publish host.`);
+    }
     if (allowed.has(norm)) continue;
     const seen = (seenCounts.get(norm) || 0) + 1;
     seenCounts.set(norm, seen);
@@ -6422,7 +6444,7 @@ function literalPhoneInTitleFinding(frontmatter) {
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], relatedPostLinks = [], relatedPostHosts = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false, allowedAffiliateProducts = null } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -6561,7 +6583,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     (isRefresh && !refreshPriorBody) ? null : internalRouteFinding(body, [
       ...(Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []),
       ...(Array.isArray(draft?.checked_existing_routes) ? draft.checked_existing_routes : []),
-    ], refreshExemptRoutes),
+    ], refreshExemptRoutes, relatedPostLinks, relatedPostHosts),
     // Owner hard rule (2026-07-16): service/location metaTitles — the
     // intentional long near-me titles — are NEVER edited by automation. A
     // refresh draft that proposes a DIFFERENT metaTitle than the live page is

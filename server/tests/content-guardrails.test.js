@@ -2396,6 +2396,43 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     expect(allowed.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
   });
 
+  test('related-post links (voice_constraints.related_posts) ride the same allowance, exactly the listed paths, never an invented sibling', () => {
+    const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
+    const brief = {
+      action_type: 'new_supporting_blog',
+      page_type: 'supporting-blog',
+      target_sites: ['wavespestcontrol.com'],
+      voice_constraints: {
+        related_posts: [
+          { title: 'Fall Armyworm Outbreak', path: '/lawn-care/fall-armyworm-outbreak/', keyword: 'fall armyworm' },
+          { title: 'Chinch Bug Damage', path: '/lawn-care/chinch-bug-damage/', keyword: 'chinch bugs' },
+        ],
+      },
+    };
+    const options = deriveSyncGuardrailOptions({}, brief);
+    expect(options.relatedPostLinks).toEqual(expect.arrayContaining([
+      '/lawn-care/fall-armyworm-outbreak/', '/lawn-care/chinch-bug-damage/',
+    ]));
+    const body = 'See our guide on [fall armyworms](/lawn-care/fall-armyworm-outbreak/) for background.';
+    const linked = guardrails.evaluate({ body }, options);
+    expect(linked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    // A blog post NOT on the brief's related_posts list is still an invented
+    // route — the allowance is exactly the listed paths, never every blog post.
+    const invented = 'See our guide on [drainage tips](/lawn-care/never-seeded-this-post/) for background.';
+    const notLinked = guardrails.evaluate({ body: invented }, options);
+    expect(notLinked.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const wrongHost = 'See [fall armyworms](https://www.sarasotaflpestcontrol.com/lawn-care/fall-armyworm-outbreak/).';
+    const wrongHostResult = guardrails.evaluate({ body: wrongHost }, options);
+    expect(wrongHostResult.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const hubAbsolute = 'See [fall armyworms](https://www.wavespestcontrol.com/lawn-care/fall-armyworm-outbreak/).';
+    const hubResult = guardrails.evaluate({ body: hubAbsolute }, options);
+    expect(hubResult.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    // No related_posts on the brief at all → no extra allowance, unchanged behavior.
+    const bare = deriveSyncGuardrailOptions({}, { action_type: 'new_supporting_blog', page_type: 'supporting-blog' });
+    expect(bare.allowedInternalLinks).toEqual([]);
+    expect(bare.relatedPostLinks).toEqual([]);
+  });
+
   test('member-expression components are rejected (Codex round 2)', () => {
     const r = guardrails.evaluate({ body: 'See <ComparisonTable.Row label="x" /> for details.' }, {});
     expect(r.findings.some((f) => f.code === 'UNCATALOGED_COMPONENT')).toBe(true);
