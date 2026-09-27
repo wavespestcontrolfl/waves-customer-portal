@@ -27,6 +27,8 @@ const logger = require('./logger');
 const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-config');
 const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
+const { gateEnvValue } = require('../config/feature-gates');
+const { etParts } = require('../utils/datetime-et');
 
 const DRAFTER = 'house_voice';
 // v7 (06-14): FEW-SHOT VOICE GROUNDING. v6 attacked fact fabrication via data
@@ -77,6 +79,25 @@ const DRAFTER = 'house_voice';
 // v11: explicit, context-sensitive gratitude candidates. The existing
 // graduation cohort resets when these instructions change.
 const PROMPT_VERSION = 'house_voice_v11';
+// v12 REAL ANSWERS (2026-09-27, owner ruling) — dark behind
+// GATE_SMS_REAL_ANSWERS (gateEnvValue, default off everywhere; read at call
+// time, no redeploy to flip). Gate off: buildSystemPromptWithProfile and
+// buildFactsBlock are byte-identical to v11 — every conditional in both
+// resolves to the pre-existing v11 literal on that branch, and
+// generateGroundedDraft keeps stamping PROMPT_VERSION. Gate on: replaces
+// "say you'll confirm and follow up" with answer-from-the-facts + real
+// offers (OPEN TIMES for booking/rescheduling from AvailabilityEngine, exact
+// amounts + send_payment_link, send_portal_link/send_estimate_link where
+// they fit), narrows the HELD-FOR-A-PERSON hand-off list by whichever
+// per-category gate (GATE_SMS_AGENT_COMPLAINTS / _BILLING_DISPUTES /
+// _CHEMICAL_MEDICAL / _LEGAL, each its own dark default-off gate) is on, and
+// answers cancellations instead of escalating them (skip/reschedule from
+// OPEN TIMES only — never an invented discount/credit/refund — plus an
+// escalate/"cancel_request" action so a person still processes the actual
+// cancellation). generateGroundedDraft stamps this version instead of
+// PROMPT_VERSION on a draft that actually used the rewritten prompt, so
+// judge/ledger rows tell the two cohorts apart.
+const REAL_ANSWERS_PROMPT_VERSION = 'house_voice_v12_real_answers';
 const SHADOW_STATUS = 'shadow';
 
 // Few-shot tunables. SHADOW_FEWSHOT=false disables corpus injection (v7 then
@@ -95,6 +116,103 @@ const INTENDED_ACTION_TYPES = [
   'send_portal_link',
   'send_estimate_link',
 ];
+
+// v12 real-answers hand-off categories (owner ruling 2026-09-27). Each has
+// its own dark, default-off gate — ON removes exactly that category from
+// the HELD-FOR-A-PERSON list in the real-answers prompt (realAnswersHandoffBullets).
+// Cancellations are NOT in this list: the owner ruling drops cancellations
+// out of escalation entirely (see the cancellation bullet below), independent
+// of any of these four gates.
+const REAL_ANSWERS_HANDOFF_CATEGORIES = [
+  { gate: 'GATE_SMS_AGENT_COMPLAINTS', label: 'complaints' },
+  { gate: 'GATE_SMS_AGENT_BILLING_DISPUTES', label: 'billing disputes' },
+  { gate: 'GATE_SMS_AGENT_CHEMICAL_MEDICAL', label: 'chemical/medical concerns' },
+  { gate: 'GATE_SMS_AGENT_LEGAL', label: 'legal threats' },
+];
+
+// 1-business-hour follow-up SLA (owner ruling 2026-09-27): 8am-8pm ET reads
+// "within the hour"; outside that window reads "by 9 AM tomorrow morning".
+// Computed off the ET wall clock so the model is TOLD the answer, never
+// asked to compute it itself. `now` is test-only (defaults to the real
+// clock); production callers never pass it.
+function followupSlaPhrase(now = new Date()) {
+  const { hour } = etParts(now);
+  return hour >= 8 && hour < 20 ? 'within the hour' : 'by 9 AM tomorrow morning';
+}
+
+// The real-answers ALSO-section hand-off bullets: a dynamic HELD-FOR-A-PERSON
+// line (only the categories whose own gate is still off), one instruction
+// bullet per category whose gate IS on (Codex-proofed against silent
+// no-ops: "each category gate removes exactly its category" is the test
+// contract), and the CANCELLATIONS bullet, which is unconditional — owner
+// ruling: cancellations are never escalated as their own category anymore.
+function realAnswersHandoffBullets(now) {
+  const held = REAL_ANSWERS_HANDOFF_CATEGORIES.filter((c) => !gateEnvValue(c.gate));
+  const lines = [
+    held.length
+      ? `- HELD FOR A PERSON: ${held.map((c) => c.label).join(', ')}. Acknowledge warmly, don't resolve it, add {"type":"escalate"} to intended_actions, and say CONCRETELY when they'll hear back — ${followupSlaPhrase(now)} (the 1-business-hour follow-up SLA, 8am–8pm ET).`
+      : "- Every category that used to hold for a person now answers from the facts instead — see the category rules below.",
+  ];
+  if (gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')) {
+    lines.push('- COMPLAINTS: answer from the facts, acknowledge what happened, and — if it fits — offer a free re-service using 2–3 SPECIFIC times from OPEN TIMES, adding {"type":"book_appointment"} once they confirm one.');
+  }
+  if (gateEnvValue('GATE_SMS_AGENT_BILLING_DISPUTES')) {
+    lines.push('- BILLING DISPUTES: answer from the facts only — state the real numbers from BILLING, never resolve the dispute or offer a credit/refund/discount that is not in the facts.');
+  }
+  if (gateEnvValue('GATE_SMS_AGENT_CHEMICAL_MEDICAL')) {
+    lines.push('- CHEMICAL/MEDICAL CONCERNS: answer from the facts only.');
+  }
+  if (gateEnvValue('GATE_SMS_AGENT_LEGAL')) {
+    lines.push('- LEGAL THREATS: answer from the facts only.');
+  }
+  lines.push('- CANCELLATIONS are never escalated as their own category: acknowledge, ask what\'s driving it, and offer ONLY real options — skipping or rescheduling the next visit using 2–3 SPECIFIC times from OPEN TIMES. NEVER invent a discount, credit, or refund. Always add {"type":"escalate","note":"cancel_request"} to intended_actions so a person still processes the actual cancellation.');
+  return lines.join('\n');
+}
+
+// Compact, real, bookable OPEN TIMES for the facts block — read-only
+// (AvailabilityEngine.getAvailableSlots, the SAME call the check_availability
+// tool makes; see server/services/ai-assistant/tools-expanded.js). Gated on
+// GATE_SMS_REAL_ANSWERS + a scheduling-related inbound + a known city; fully
+// fail-safe otherwise: no city, no scheduling intent, an error, or a timeout
+// all resolve to null (section omitted) — this must NEVER block drafting.
+// Never books or holds a slot.
+const OPEN_TIMES_TIMEOUT_MS = 3000;
+const OPEN_TIMES_MAX_DAYS = 3;
+const OPEN_TIMES_MAX_SLOTS_PER_DAY = 3;
+async function fetchOpenTimesBlock({ city, customerId, schedulingIntent } = {}) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
+  if (!schedulingIntent || !city) return null;
+  let timer = null;
+  try {
+    const Availability = require('./availability');
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('open-times timeout')), OPEN_TIMES_TIMEOUT_MS);
+    });
+    const result = await Promise.race([Availability.getAvailableSlots(city, null, { customerId }), timeout]);
+    const days = (result?.days || [])
+      .filter((d) => Array.isArray(d.slots) && d.slots.length)
+      .slice(0, OPEN_TIMES_MAX_DAYS);
+    if (!days.length) return null;
+    return days
+      .map((d) => {
+        const label = d.fullDate || [d.dayOfWeek, d.month, d.dayNum].filter(Boolean).join(' ');
+        const windows = d.slots.slice(0, OPEN_TIMES_MAX_SLOTS_PER_DAY)
+          .map((s) => `${s.start}–${s.end}`)
+          .join(', ');
+        return `- ${label}: ${windows}`;
+      })
+      .join('\n');
+  } catch (err) {
+    logger.warn(`[sms-shadow] open-times fetch failed (${err.message}); omitting OPEN TIMES section`);
+    return null;
+  } finally {
+    // Whichever side of the race wins, the timer must never outlive this
+    // call — an uncleared setTimeout is a real leaked handle (it kept the
+    // process alive for the timeout's own duration on every successful,
+    // fast-resolving fetch too, not just on an actual timeout).
+    if (timer) clearTimeout(timer);
+  }
+}
 
 // v9 voice-profile tunables. SHADOW_VOICE_PROFILE=false is the kill switch:
 // drafting reverts to the base prompt with no profile block, no deploy.
@@ -132,13 +250,26 @@ async function fetchVoiceProfileForDrafter({ dbi = db } = {}) {
   }
 }
 
-function buildSystemPromptWithProfile(voiceProfileText = '') {
+function buildSystemPromptWithProfile(voiceProfileText = '', { now } = {}) {
+  // v12 REAL ANSWERS: every conditional below resolves to the exact v11
+  // literal when the gate is off (see the constant-block comment above
+  // PROMPT_VERSION) — gate off is byte-identical.
+  const realAnswersOn = gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT, the thread`;
+  const upcomingOrThread = realAnswersOn ? 'UPCOMING SERVICES, OPEN TIMES, or the thread' : 'UPCOMING SERVICES, or the thread';
+  const deferRule = realAnswersOn
+    ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one) and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. When money is due, state the exact amount from BILLING or PENDING ESTIMATE and add {"type":"send_payment_link"}. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, say CONCRETELY when they'll hear back: ${followupSlaPhrase(now)} (the 1-business-hour follow-up SLA, 8am–8pm ET). Record the gap in missing_info either way.`
+    : "When you lack a fact the customer needs, the BEST reply acknowledges warmly and says you'll confirm and follow up — that is correct and safe, not a failure, and often better than the answer a human gave. Record the gap in missing_info.";
+  const handoffBullet = realAnswersOn
+    ? realAnswersHandoffBullets(now)
+    : '- If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.';
+
   const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
 
 ${CUSTOMER_SMS_HOUSE_VOICE}
 
-FACT DISCIPLINE — the single most important rule. A fabricated detail is the worst error you can make, worse than a plain reply. You may ONLY state facts that appear in the context block below (SERVICE HISTORY, UPCOMING SERVICES, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT, the thread). A plausible-sounding guess is still a fabrication. You must NEVER:
-- State a specific day, date, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "10–10:30am") unless it appears verbatim in SERVICE HISTORY (past visits), UPCOMING SERVICES, or the thread. If the customer asks when we're coming and no confirmed appointment is shown, do NOT name a time — say you'll confirm it and get right back to them.
+FACT DISCIPLINE — the single most important rule. A fabricated detail is the worst error you can make, worse than a plain reply. You may ONLY state facts that appear in the context block below (${factSourceList}). A plausible-sounding guess is still a fabrication. You must NEVER:
+- State a specific day, date, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "10–10:30am") unless it appears verbatim in SERVICE HISTORY (past visits), ${upcomingOrThread}. If the customer asks when we're coming and no confirmed appointment is shown, do NOT name a time — say you'll confirm it and get right back to them.
 - Name a technician, or say who is coming or on the way, unless UPCOMING SERVICES names the tech for that visit.
 - Say the tech is on the way, running late, running ahead, or nearby unless TODAY's visit line shows LIVE STATUS en route or on site. If a customer asks where the tech is TODAY and there is no LIVE STATUS, you genuinely don't know — never guess an ETA or invent a delay story; say you'll check with the office and get right back to them.
 - Claim what a trap caught, what was found, or what was treated, unless the context states it.
@@ -155,12 +286,12 @@ BILLING & MONEY RULES:
 PROPERTY & ACCESS RULES:
 - PROPERTY & PREFERENCES facts (pets, irrigation, HOA, instructions) are there so you respect them in replies — reference them naturally when relevant.
 - Access codes: you may confirm one is on file; NEVER include a code value in a reply (you never see them, and they must never be texted).
-When you lack a fact the customer needs, the BEST reply acknowledges warmly and says you'll confirm and follow up — that is correct and safe, not a failure, and often better than the answer a human gave. Record the gap in missing_info.
+${deferRule}
 
 USE THE REAL FACTS when they ARE present: UPCOMING SERVICES lists each scheduled visit with its date, arrival window, and assigned tech when on file — a visit marked TODAY is happening today, and LIVE STATUS "en route"/"on site" means you may confidently tell the customer the tech is on the way / on site right now. If the customer asks when we're coming or who's coming and that visit's date / window / tech IS listed, answer with it directly and confidently — don't deflect to "I'll confirm" when the answer is right there. A line that says "no arrival window set" or "tech not yet assigned" means that detail genuinely isn't decided — say you'll confirm it; never fill it in. RECENT PHONE CALLS tells you what was already discussed by phone — use it to understand references like "as we talked about", and never contradict it.
 
 ALSO:
-- If the message warrants a human (cancellation, complaint, billing dispute, chemical/medical concern, legal threat), the reply should acknowledge warmly without resolving, and intended_actions must include {"type":"escalate"}.
+${handoffBullet}
 - Each intended_actions entry's "type" must be one of: ${INTENDED_ACTION_TYPES.join(', ')}.
 - When CLASSIFIED INTENT is gratitude_reply, the customer may be expressing standalone thanks. Inspect the recent conversation and account flags first. Only when a completed answer/service or payment acknowledgement clearly explains the thanks, and there is no unresolved request, complaint, instruction, booking acceptance or operational question, return exactly the APPROVED GRATITUDE REPLY and intended_actions [{"type":"none"}]. If context is uncertain or anything still needs attention, return reply "". Never add a question, sales offer, review request, promise, sign-off or CTA. Never answer a reaction or continue an exchange after our own courtesy reply. Names mentioned by the customer are addressees, not customer identity. The server independently checks eligibility after a quiet period; this is only a draft.
 - For other intents, if the message is a pure courtesy acknowledgement that warrants NO reply at all (e.g. "Thanks!", a bare "ok" closing the thread), set "reply" to "" and intended_actions to [{"type":"none","note":"no reply warranted"}]. But a short confirmation that answers a question we asked (a "yes" to a proposed time) DOES warrant a reply.
@@ -188,12 +319,12 @@ Respond with ONLY a JSON object, no prose, no code fences:
       const composed = composeSystemPrompt(base, voiceProfileText);
       // composeSystemPrompt returns the base untouched when sanitization
       // strips every profile line — identity IS the applied signal.
-      if (composed !== base) return { system: composed, applied: true };
+      if (composed !== base) return { system: composed, applied: true, realAnswersApplied: realAnswersOn };
     } catch (err) {
       logger.warn(`[sms-shadow] voice profile compose failed (${err.message}); drafting on base prompt`);
     }
   }
-  return { system: base, applied: false };
+  return { system: base, applied: false, realAnswersApplied: realAnswersOn };
 }
 
 function buildSystemPrompt(voiceProfileText = '') {
@@ -282,7 +413,16 @@ function monthlyChargeNote(dues) {
  * verifier checks the draft against, so the two agree on what counts as
  * "supported". Shared by buildUserPrompt and the verify loop.
  */
-function buildFactsBlock(context) {
+function buildFactsBlock(context, extras = {}) {
+  // v12 REAL ANSWERS: buildFactsBlock stays SYNC on purpose (it's called
+  // from the verifier/judge paths too) — the async slot fetch happens
+  // upstream (fetchOpenTimesBlock) and its rendered text rides in here as
+  // `extras.openTimesBlock`. Omitted/null (gate off, no scheduling intent,
+  // no city, fetch error/timeout, or an old caller that doesn't pass it) →
+  // openTimesSection is '' and the returned block is byte-identical to v11.
+  const openTimesSection = extras.openTimesBlock
+    ? `OPEN TIMES (real, bookable slots, ET — offer ONLY from this list, never invent one):\n${extras.openTimesBlock}\n`
+    : '';
   // Shared compliance guard (Codex r5): banned customer-copy claims
   // ("pet-safe", "EPA-approved", fixed re-entry/drying times) must not enter
   // grounding from ANY untrusted text — property notes, call summaries, and
@@ -538,7 +678,7 @@ SERVICE HISTORY (most recent first):
 ${historyBlock || `- ${lastService}`}
 UPCOMING SERVICES:
 ${upcomingBlock}
-BILLING:
+${openTimesSection}BILLING:
 ${billingLines.join('\n')}
 PENDING ESTIMATE: ${estimateLine}
 PROPERTY & PREFERENCES:
@@ -762,7 +902,7 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId }) {
+async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -774,13 +914,24 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const voiceProfile = presetVoiceProfile !== undefined
     ? presetVoiceProfile
     : await fetchVoiceProfileForDrafter();
-  const { system, applied: profileApplied } = buildSystemPromptWithProfile(voiceProfile?.profile_text || '');
+  const { system, applied: profileApplied, realAnswersApplied } = buildSystemPromptWithProfile(voiceProfile?.profile_text || '');
+  // Only the drafts that actually saw the rewritten (real-answers) prompt
+  // stamp the bumped version — a base-prompt draft (gate off) keeps v11, the
+  // same "applied is the stamped signal" rule the voice profile already
+  // follows just above.
+  const promptVersion = realAnswersApplied ? REAL_ANSWERS_PROMPT_VERSION : PROMPT_VERSION;
   // presetFactsBlock (sealed-eval exam) replays the FROZEN facts the drafter
   // saw the day of the original message — building from a live context here
   // would grade the draft against today's schedule/balance (the exact drift
   // confound that contaminated every backfill measurement). Live callers
-  // omit it and get the aggregator-built block as before.
-  const factsBlock = presetFactsBlock || buildFactsBlock(context);
+  // omit it and get the aggregator-built block as before. The OPEN TIMES
+  // fetch is skipped for a frozen replay too — a live availability read
+  // against a historical message would grade the draft on today's calendar,
+  // not the one it actually saw.
+  const openTimesBlock = presetFactsBlock
+    ? null
+    : await fetchOpenTimesBlock({ city, customerId: context?.customer?.id || null, schedulingIntent });
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -813,12 +964,12 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane, ...lane });
   if (!first) return {
     parsed: null, passes: 1, converged: false, model: null, servedModel: null,
-    voiceProfileVersion, verifierModels: [],
+    voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
   };
   let { parsed, model, servedModel } = first;
   // Kill switch / single-pass mode: no verification claim, behave as pre-v3.
   if (!VERIFY_ENABLED) return {
-    parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [],
+    parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, promptVersion,
   };
 
   const verifier = require('./sms-draft-verifier');
@@ -881,7 +1032,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     passes += 1;
   }
 
-  return { parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels };
+  return { parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, promptVersion };
 }
 
 /**
@@ -962,8 +1113,10 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     // v3: draft → adversarial fact-check → revise loop (generateGroundedDraft).
-    const { parsed, passes, converged, model: draftModel, voiceProfileVersion } = await generateGroundedDraft({
-      client, context, inboundMessage, intent, schedulingIntent,
+    // city (real-answers OPEN TIMES fetch — see fetchOpenTimesBlock) comes
+    // from the customer row the webhook already matched, never re-looked-up.
+    const { parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion } = await generateGroundedDraft({
+      client, context, inboundMessage, intent, schedulingIntent, city: customer?.city || null,
     });
     if (!parsed) {
       logger.warn(`[sms-shadow] unparseable draft response (customer ${customer?.id || 'unknown'}); dropping`);
@@ -971,9 +1124,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     }
 
     const intentName = intent?.intent || 'GENERAL';
-    // Built once: persisted on the row (judge parity) AND consulted by the
-    // deterministic amount-source guard below.
-    const factsForDraft = buildFactsBlock(context);
+    // factsForDraft is the EXACT block generateGroundedDraft drafted and
+    // verified against (judge parity) — built once inside the loop above and
+    // returned, never recomputed here (a second live OPEN TIMES fetch could
+    // race a slot taken between the two calls and disagree with what the
+    // model actually saw).
     // Phase D/E: intents flipped to 'suggest' surface the draft as a composer
     // card; intents flipped to 'auto_send' (and that have earned the rung)
     // have it SENT to the customer automatically. Escalation intents,
@@ -1039,7 +1194,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
         status: SHADOW_STATUS,
         drafter: DRAFTER,
         model: draftModel,
-        prompt_version: PROMPT_VERSION,
+        prompt_version: promptVersion,
         // What the drafter actually saw — the judge grades fact-grounding
         // against this, not the one-line summary (without it, a draft that
         // correctly uses a call/dispatch fact reads as an invention).
@@ -1160,7 +1315,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           actionsVerifiedSafe: parsed.auto_send_safe,
           confidence: intent?.confidence ?? null,
           model: draftModel,
-          promptVersion: PROMPT_VERSION,
+          promptVersion,
           // The profile that ACTUALLY shaped this draft (null = base prompt).
           // The executor refuses when it differs from the currently effective
           // profile — readiness evidence belongs to the effective profile,
@@ -1199,7 +1354,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               intent: intentName,
               confidence: intent?.confidence ?? null,
               model: draftModel,
-              promptVersion: PROMPT_VERSION,
+              promptVersion,
               lintFailures: lint.failures,
             });
             if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
@@ -1246,7 +1401,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             intent: intentName,
             confidence: intent?.confidence ?? null,
             model: draftModel,
-            promptVersion: PROMPT_VERSION,
+            promptVersion,
             lintFailures: lint.failures,
           });
           if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
@@ -1300,9 +1455,13 @@ module.exports = {
   resolveEffectiveVoiceProfile,
   DRAFTER,
   PROMPT_VERSION,
+  REAL_ANSWERS_PROMPT_VERSION,
   VERIFY_ENABLED,
   MAX_REVISIONS,
   SHADOW_STATUS,
   INTENDED_ACTION_TYPES,
   EXEMPLAR_INJECTION_RE,
+  REAL_ANSWERS_HANDOFF_CATEGORIES,
+  followupSlaPhrase,
+  fetchOpenTimesBlock,
 };

@@ -880,6 +880,28 @@ const gates = {
   // Separate activation for commitment capture, follow-up bells and staff closure.
   smsCommitmentFollowup: gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP'),
 
+  // SMS real answers (owner ruling 2026-09-27) — the shadow drafter answers
+  // from the facts (real OPEN TIMES from AvailabilityEngine for booking/
+  // rescheduling, exact amounts + send_payment_link, portal/estimate links)
+  // instead of defaulting to "we'll confirm and follow up", and answers
+  // CANCELLATIONS (skip/reschedule from OPEN TIMES only, never an invented
+  // discount/credit/refund) instead of escalating them. Dark in every
+  // environment: gate off keeps the drafter's prompts, facts block and
+  // behavior byte-identical (draft rows keep stamping prompt_version
+  // house_voice_v11). The one canonical reader is server/services/
+  // sms-shadow-drafter.js, which re-reads gateEnvValue('GATE_SMS_REAL_ANSWERS')
+  // at draft time — this entry is for logGateStatus only.
+  smsRealAnswers: gateEnvValue('GATE_SMS_REAL_ANSWERS'),
+  // Per-category hand-off gates (owner ruling 2026-09-27): each one, ON,
+  // removes exactly that category from the HELD-FOR-A-PERSON list in the
+  // real-answers prompt (smsRealAnswers must ALSO be on, or there is no
+  // real-answers prompt to remove it from). All default off, dark in every
+  // environment, read at call time by the same drafter module.
+  smsAgentComplaints: gateEnvValue('GATE_SMS_AGENT_COMPLAINTS'),
+  smsAgentBillingDisputes: gateEnvValue('GATE_SMS_AGENT_BILLING_DISPUTES'),
+  smsAgentChemicalMedical: gateEnvValue('GATE_SMS_AGENT_CHEMICAL_MEDICAL'),
+  smsAgentLegal: gateEnvValue('GATE_SMS_AGENT_LEGAL'),
+
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into
   // voice_corpus_examples (redacted text only, reader-not-ingestor).
