@@ -219,6 +219,7 @@ test.each([
   'Leave treated surfaces alone until 4 p.m.',
   'Avoid treated areas until 4 PM.',
   'Do not re-enter until 4 p.m.',
+  'Keep pets inside until 8 PM, then resume normal activity.',
 ])('a bounded aftercare instruction may retain its supported clock time: %s', (instruction) => {
   expect(appointmentClaimProblems(instruction, { nextVisit: null })).toEqual([]);
 });
@@ -237,6 +238,30 @@ test.each([
     'ungrounded_time:8 PM',
     'ungrounded_time:10 PM',
   ]));
+});
+
+test.each([
+  ['with the grounded slot', { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } }],
+  ['without a grounded slot', { nextVisit: null }],
+])('an aftercare time cannot hide an arrival continuation %s', (_label, facts) => {
+  const prefix = facts.nextVisit
+    ? 'Your next visit is Friday, October 2, arriving 8–10 AM. '
+    : '';
+  expect(appointmentClaimProblems(
+    `${prefix}Keep pets inside until 8 PM when the technician will arrive.`,
+    facts,
+  )).toContain('ungrounded_time:8 PM');
+});
+
+test.each([
+  ['with the grounded slot', input(), 'Your next visit is Friday, October 2, arriving 8–10 AM. '],
+  ['without a grounded slot', input({ nextAppointment: null }), ''],
+])('an arrival after an aftercare time forces deterministic fallback %s', async (_label, args, prefix) => {
+  const summary = `${prefix}Keep pets inside until 8 PM when the technician will arrive.`;
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
 });
 
 test.each([

@@ -23,8 +23,9 @@ const NON_AFFIRMATIVE_APPOINTMENT_RE = /\b(?:is|has\s+been|will\s+be)\s+(?:not|n
 // a clause boundary, appointment action, or earlier clock time: those signals
 // must remain visible to the temporal validator even when the sentence starts
 // with an instruction verb ("Leave the gate open ... who will arrive at 8 PM").
+const AFTERCARE_APPOINTMENT_ACTION = String.raw`(?:arriv(?:e|es|ed|ing|al)|(?:will|[’']ll)\s+(?:return|be\s+back|come\s+back|check\s+back|follow[-\s]+up))`;
 const AFTERCARE_TIME_RE = new RegExp(
-  String.raw`\b(?:keep|leave|avoid|do not)\b(?:(?!\b(?:arriv(?:e|es|ed|ing|al)|return(?:s|ed|ing)?|be\s+back|come\s+back|check\s+back|follow[-\s]+up)\b|\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z]))[^\n,.!?;]){1,100}?\buntil\s+\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z])`,
+  String.raw`\b(?:keep|leave|avoid|do not)\b(?:(?!\b${AFTERCARE_APPOINTMENT_ACTION}\b|\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z]))[^\n,.!?;]){1,100}?\buntil\s+\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z])(?![^\n,.!?;]{0,80}\b${AFTERCARE_APPOINTMENT_ACTION}\b)`,
   'gi',
 );
 
