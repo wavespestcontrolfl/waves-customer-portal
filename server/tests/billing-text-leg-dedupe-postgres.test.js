@@ -104,9 +104,33 @@ postgres('billing text leg dedupe (private PostgreSQL)', () => {
     }
   });
 
-  test('a legacy send (no billingDeliveryLeg) never matches, even sharing the same key text', async () => {
-    await insertRow({ metadata: { notificationEventKey: 'billing:key:1' } });
+  test('a marker-less row with no Twilio SMS SID (an App push proof) never matches, even sharing the same key', async () => {
+    await insertRow({ from_phone: 'push', twilio_sid: null, metadata: { notificationEventKey: 'billing:key:1' } });
     expect(await findAcceptedBillingTextLeg(mockPg, customerId, 'billing:key:1')).toBeUndefined();
+  });
+
+  // Codex #5001 r1 P1: twilio.js stamped notificationEventKey on accepted
+  // rows before this lane added billingDeliveryLeg, so a text accepted
+  // before the deploy carries the key with no leg marker. Replaying that
+  // notice after the deploy must dedupe on it, never re-text.
+  test('a text accepted before the leg marker existed (same key, real SID) dedupes — never re-texted', async () => {
+    await insertRow({ twilio_sid: `SM${'b'.repeat(32)}`, metadata: { notificationEventKey: 'billing:key:1' } });
+    expect(await findAcceptedBillingTextLeg(mockPg, customerId, 'billing:key:1')).toMatchObject({ twilio_sid: `SM${'b'.repeat(32)}` });
+    const send = jest.fn();
+    const result = await withBillingTextLegLock(
+      { customerId, metadata: { billingDeliveryLeg: 'sms', notificationEventKey: 'billing:key:1' } },
+      send,
+    );
+    expect(send).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ sent: true, deduped: true, providerMessageId: `SM${'b'.repeat(32)}` });
+  });
+
+  test('an explicit non-Text leg row never counts as a sent text, whatever its SID', async () => {
+    for (const leg of ['push', 'email']) {
+      await mockPg('sms_log').del();
+      await insertRow({ twilio_sid: `SM${'c'.repeat(32)}`, metadata: { billingDeliveryLeg: leg, notificationEventKey: 'billing:key:1' } });
+      expect(await findAcceptedBillingTextLeg(mockPg, customerId, 'billing:key:1')).toBeUndefined();
+    }
   });
 
   test('a different notificationEventKey or a different customer does not match', async () => {
@@ -207,6 +231,43 @@ postgres('billing text leg dedupe (private PostgreSQL)', () => {
     const later = await withBillingTextLegLock(input, replaySend);
     expect(replaySend).not.toHaveBeenCalled();
     expect(later).toMatchObject({ sent: false, code: 'BILLING_TEXT_LEG_CLAIM_STALE', retryable: false });
+  });
+
+  // Codex #5001 r1 P1: a claim whose owner saw a definite outcome but could
+  // not delete it is marked release_pending; it must never read as in
+  // flight (or, once old, as the stale operator hold).
+  test('a release_pending claim is cleared by the next attempt, at any age, and the notice sends', async () => {
+    for (const ageMs of [1000, CLAIM_STALE_MS + 60000]) {
+      await mockPg('sms_log').del();
+      const staleId = randomUUID();
+      await mockPg('sms_log').insert({
+        id: staleId, customer_id: customerId, direction: 'outbound',
+        from_phone: 'billing-text-claim', to_phone: '+19415550100', message_body: '',
+        message_type: 'billing_text_leg_claim', status: 'sending', created_at: new Date(Date.now() - ageMs),
+        metadata: JSON.stringify({
+          billing_text_leg_claim: true, billingDeliveryLeg: 'sms', notificationEventKey: 'billing:key:pending', release_pending: true,
+        }),
+      });
+      const send = jest.fn(async () => ({ sent: false, provider: 'twilio', deliveryOutcome: 'not_sent', code: 'DELIVERY_SUPPRESSED' }));
+      await withBillingTextLegLock({ customerId, metadata: { billingDeliveryLeg: 'sms', notificationEventKey: 'billing:key:pending' } }, send);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(await mockPg('sms_log').where({ id: staleId }).first()).toBeUndefined();
+    }
+  });
+
+  test('the releasePending sweep deletes a release_pending billing claim and leaves a live one alone', async () => {
+    const { releasePending } = require('../services/messaging/review-ask-reservation');
+    const claim = (id, extra) => ({
+      id, customer_id: customerId, direction: 'outbound', from_phone: 'billing-text-claim', to_phone: '+19415550100',
+      message_body: '', message_type: 'billing_text_leg_claim', status: 'sending', created_at: new Date(),
+      metadata: JSON.stringify({ billing_text_leg_claim: true, billingDeliveryLeg: 'sms', notificationEventKey: `billing:key:${id}`, ...extra }),
+    });
+    const pendingId = randomUUID();
+    const liveId = randomUUID();
+    await mockPg('sms_log').insert([claim(pendingId, { release_pending: true }), claim(liveId, {})]);
+    expect(await releasePending({ trx: mockPg })).toBe(1);
+    expect(await mockPg('sms_log').where({ id: pendingId }).first()).toBeUndefined();
+    expect(await mockPg('sms_log').where({ id: liveId }).first()).toMatchObject({ status: 'sending' });
   });
 
   test('a definite not_sent refusal releases the claim, so a replay may send', async () => {

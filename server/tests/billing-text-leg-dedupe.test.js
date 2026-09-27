@@ -86,12 +86,24 @@ describe('billing-text-leg-dedupe', () => {
       const row = await findAcceptedBillingTextLeg(table, 'cust-1', 'billing:cust-1:billing_reminder:abc123');
       expect(table.__calls).toEqual(expect.arrayContaining([
         ['where', { customer_id: 'cust-1', direction: 'outbound' }],
-        ['whereRaw', "metadata->>'billingDeliveryLeg' = 'sms'"],
         ['whereRaw', "metadata->>'notificationEventKey' = ?", ['billing:cust-1:billing_reminder:abc123']],
+        ['where', expect.any(Function)],
         ['whereIn', 'status', ACCEPTED_STATUSES],
       ]));
       expect(ACCEPTED_STATUSES).toEqual(['queued', 'sent', 'delivered']);
       expect(row).toEqual({ twilio_sid: 'SM1', created_at: new Date('2026-09-01T00:00:00Z') });
+    });
+
+    test('the leg clause: an explicit Text leg, or a pre-marker row carrying a real Twilio message SID', async () => {
+      const knex = require('knex')({ client: 'pg' });
+      // Capture the built SQL at .first() instead of running it.
+      const conn = (table) => {
+        const qb = knex(table);
+        qb.first = function first() { return Promise.resolve(this.toSQL()); };
+        return qb;
+      };
+      const { sql } = await findAcceptedBillingTextLeg(conn, 'cust-1', 'billing:key');
+      expect(sql).toContain("(metadata->>'billingDeliveryLeg' = 'sms' or (metadata->>'billingDeliveryLeg' IS NULL and (twilio_sid LIKE 'SM%' OR twilio_sid LIKE 'MM%')))");
     });
   });
 
@@ -213,6 +225,45 @@ describe('billing-text-leg-dedupe', () => {
       expect(deleted).toBe(0);
       expect(updatedWith.twilio_sid).toBeUndefined();
       expect(JSON.parse(updatedWith.metadata.bindings[0])).toMatchObject({ acceptedProviderMessageId: 'SM-late' });
+    });
+
+    test('a not_sent release whose delete keeps failing retries once, then marks the claim release_pending', async () => {
+      const trx = makeTrx({ insertedId: 'claim-45' });
+      db.transaction = jest.fn(async (cb) => cb(trx));
+      let dels = 0;
+      let patch = null;
+      const table = makeSmsLogTable({ onDel: () => { dels += 1; throw new Error('connection reset'); } });
+      db.mockImplementation((name) => {
+        const q = table(name);
+        q.update = async (p) => { patch = p; return 1; };
+        return q;
+      });
+      db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+      const send = jest.fn(async () => ({ sent: false, provider: 'twilio', deliveryOutcome: 'not_sent', code: 'DELIVERY_SUPPRESSED' }));
+
+      await withBillingTextLegLock(baseInput(), send);
+
+      expect(dels).toBe(2);
+      expect(JSON.parse(patch.metadata.bindings[0])).toEqual({ release_pending: true });
+    });
+
+    test('a release that succeeds on its retry never marks release_pending', async () => {
+      const trx = makeTrx({ insertedId: 'claim-46' });
+      db.transaction = jest.fn(async (cb) => cb(trx));
+      let dels = 0;
+      let updated = 0;
+      const table = makeSmsLogTable({ onDel: () => { dels += 1; if (dels === 1) throw new Error('connection reset'); } });
+      db.mockImplementation((name) => {
+        const q = table(name);
+        q.update = async () => { updated += 1; return 1; };
+        return q;
+      });
+      const send = jest.fn(async () => ({ sent: false, provider: 'twilio', deliveryOutcome: 'not_sent', code: 'DELIVERY_SUPPRESSED' }));
+
+      await withBillingTextLegLock(baseInput(), send);
+
+      expect(dels).toBe(2);
+      expect(updated).toBe(0);
     });
 
     test('an adapter-returned uncertain outcome keeps the claim — no delete, no stamp', async () => {

@@ -4327,6 +4327,36 @@ function initScheduledJobs() {
               `, [completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
+          } else if (smsResult.code === 'BILLING_TEXT_LEG_IN_FLIGHT' && smsResult.nextAllowedAt) {
+            // Another attempt holds this notice's billing Text claim
+            // (messaging/billing-text-leg-dedupe.js), so no provider send
+            // was tried. Refund the attempt like QUIET_HOURS_HOLD above:
+            // spent on the bounded ladder, a claim live across three ticks
+            // would terminally block this replay, and the notice would be
+            // lost if that other attempt then ends not_sent. Still bounded:
+            // past CLAIM_STALE_MS the claim answers with the non-retryable
+            // BILLING_TEXT_LEG_CLAIM_STALE instead of this hold.
+            const inFlightRetryAt = new Date(smsResult.nextAllowedAt);
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+              status: 'scheduled',
+              scheduled_for: inFlightRetryAt,
+              updated_at: completedAt,
+              metadata: db.raw(`
+                COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                  'billing_text_in_flight_hold_at', ?::timestamptz,
+                  'scheduled_sms_attempts',
+                  GREATEST(
+                    CASE
+                      WHEN COALESCE(metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
+                        THEN (metadata->>'scheduled_sms_attempts')::int - 1
+                      ELSE 0
+                    END,
+                    0
+                  )
+                )
+              `, [completedAt]),
+            });
+            logger.info(`[scheduled-sms] ${msg.id} waiting on an in-flight billing text for the same notice — rescheduled for ${inFlightRetryAt.toISOString()} (attempt refunded)`);
           } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED' || smsResult.code === 'MOVE_HOLD')
                      && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
             // MOVE_HOLD: the replay now names its visit (appointmentId, app

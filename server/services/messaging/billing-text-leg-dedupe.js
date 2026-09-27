@@ -54,6 +54,9 @@
  *      (a Twilio timeout the adapter RETURNS rather than throws), a missing
  *      outcome, or send() THROWING — keeps the claim unstamped: delivery is
  *      unknown, so it ages into the stale-claim operator hold below.
+ *      A delete that keeps failing after a definite outcome marks the
+ *      claim release_pending (releaseClaim) instead, so it is cleared by
+ *      the next attempt or the releasePending sweep, never read as live.
  *
  * The claim is a plain sms_log row (no new table, no index) — the SAME
  * table the reply/review-ask send reservations already use for exactly
@@ -135,12 +138,27 @@ function lockKey(customerId, notificationEventKey) {
 // reservation — or our own in-flight claim — cannot match structurally
 // either way; excludeUnresolvedSendReservations applied on top regardless
 // (see the file header).
+//
+// Two row shapes count. A row with billingDeliveryLeg 'sms' (what
+// twilio.js persists for an explicit billing Text leg from this lane on),
+// or a PRE-MARKER row: twilio.js already stamped notificationEventKey on
+// accepted rows before billingDeliveryLeg existed, so a text accepted
+// before this deploy carries this notice's exact key with no leg marker.
+// That arm is held to a real Twilio message SID (SM…/MM…), which an App
+// push proof row or an Email record never has, and to a NULL marker, so an
+// explicit 'push'/'email' leg row can never read as a sent text.
 async function findAcceptedBillingTextLeg(conn, customerId, notificationEventKey) {
   return excludeUnresolvedSendReservations(
     conn('sms_log')
       .where({ customer_id: customerId, direction: 'outbound' })
-      .whereRaw("metadata->>'billingDeliveryLeg' = 'sms'")
       .whereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey])
+      .where(function textLeg() {
+        this.whereRaw("metadata->>'billingDeliveryLeg' = 'sms'")
+          .orWhere(function preMarkerText() {
+            this.whereRaw("metadata->>'billingDeliveryLeg' IS NULL")
+              .whereRaw("(twilio_sid LIKE 'SM%' OR twilio_sid LIKE 'MM%')");
+          });
+      })
       .whereIn('status', ACCEPTED_STATUSES),
   )
     .orderBy('created_at', 'desc')
@@ -195,18 +213,40 @@ async function insertClaim(conn, customerId, notificationEventKey, input) {
   return inserted?.id || inserted || null;
 }
 
-// Best-effort: whether or not it succeeds, the claim's only job (closing
-// the check-then-send race) is already done by the time this runs — send()
-// has already settled one way or another.
+// Runs only after a DEFINITE outcome (settleClaim). A claim left behind
+// here would read as in flight to every later attempt and then age into
+// the stale operator hold, suppressing a text that never went out. So the
+// delete gets ONE retry, and if that also throws the claim is marked
+// release_pending: the next attempt for this notice clears it under the
+// key's lock (claimOrResolve), and review-ask-reservation.js's
+// releasePending sweep deletes it on the review-reconcile cadence — the
+// same durable-ownership shape review-ask reservations use. Only if even
+// the mark fails (the database is down) does the claim fall back to the
+// stale hold, which fails safe: an operator sees it, nothing resends.
 async function releaseClaim(claimId) {
   if (!claimId) return;
+  const claimRow = () => db('sms_log')
+    .where({ id: claimId, status: 'sending' })
+    .whereRaw(`metadata->>'${CLAIM_MARKER}' = 'true'`);
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await claimRow().del();
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
   try {
-    await db('sms_log')
-      .where({ id: claimId, status: 'sending' })
-      .whereRaw(`metadata->>'${CLAIM_MARKER}' = 'true'`)
-      .del();
+    await claimRow().update({
+      metadata: db.raw('metadata || ?::jsonb', [JSON.stringify({ release_pending: true })]),
+    });
+    logger.warn(`[billing-text-leg-dedupe] claim ${claimId} release failed twice (${lastErr.message}) — marked release_pending`);
   } catch (err) {
-    logger.warn(`[billing-text-leg-dedupe] claim release failed for claim ${claimId}: ${err.message}`);
+    logger.error(
+      `[billing-text-leg-dedupe] claim ${claimId} release and release_pending mark both failed (${err.message}) — `
+      + 'it ages into the stale-claim operator hold',
+    );
   }
 }
 
@@ -332,7 +372,12 @@ async function claimOrResolve(trx, customerId, notificationEventKey, input) {
   if (liveClaim) {
     const acceptedSid = acceptedClaimSid(liveClaim);
     if (acceptedSid) return { outcome: dedupedAcceptance({ twilio_sid: acceptedSid, created_at: liveClaim.created_at }) };
-    return { outcome: isStaleClaim(liveClaim) ? staleClaimHold(liveClaim, customerId, notificationEventKey) : inFlightHold() };
+    if (claimMetadata(liveClaim).release_pending !== true) {
+      return { outcome: isStaleClaim(liveClaim) ? staleClaimHold(liveClaim, customerId, notificationEventKey) : inFlightHold() };
+    }
+    // Its owner saw a definite outcome but could not delete it (releaseClaim):
+    // clear it here, under this key's lock, and claim afresh — at any age.
+    await trx('sms_log').where({ id: liveClaim.id, status: 'sending' }).del();
   }
 
   const claimId = await insertClaim(trx, customerId, notificationEventKey, input);

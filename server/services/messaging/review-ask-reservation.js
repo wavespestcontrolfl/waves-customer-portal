@@ -464,13 +464,18 @@ async function countStaleUnresolved({ trx } = {}) {
 // reader (and permanently counted stale) with nothing left holding it
 // accountable. Called from reconcileStrandedSends alongside
 // countStaleUnresolved, so it runs on the existing cron cadence rather
-// than a new one.
+// than a new one. Also sweeps billing-text-leg-dedupe.js's claims, which
+// use the same release_pending mark when their own delete keeps failing
+// after a definite outcome.
 async function releasePending({ trx } = {}) {
   const conn = trx || defaultDb();
   const logger = require('../logger');
   const marked = await conn('sms_log')
     .where({ status: 'sending' })
-    .whereRaw(`metadata->>'${REVIEW_ASK_MARKER}' = 'true'`)
+    .where(function reviewAskOrBillingClaim() {
+      this.whereRaw(`metadata->>'${REVIEW_ASK_MARKER}' = 'true'`)
+        .orWhereRaw(`metadata->>'${BILLING_TEXT_LEG_CLAIM_MARKER}' = 'true'`);
+    })
     .whereRaw("metadata->>'release_pending' = 'true'")
     .select('id');
   let released = 0;
