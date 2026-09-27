@@ -591,4 +591,77 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     expect(result).toEqual({ productId: TAURUS.id });
     expect(IbThreadsMock.recentOperatorTurns).not.toHaveBeenCalled();
   });
+
+  test('a restock deadline that fails to split from the name refuses even when the prompt names the preview product (deadline branch never grounds)', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'create_restock_request',
+      prompt: 'request 2 lb of Taurus SC before next tuesday',
+      preview: { product: { id: TAURUS.id, name: TAURUS.name } }, // no needed_by on the preview
+    });
+    expect(result).toEqual({ error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' });
+  });
+
+  test('"Restock Unlisted Chemical" never borrows a prior turn\'s product (resolved.error site never allows prior turns)', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+    IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce([
+      'Could you add we added your purchase in the Alpine WSG can you add that to our inventory stock',
+    ]);
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'create_restock_request',
+      prompt: 'Restock Unlisted Chemical',
+      preview: { product: { id: ALPINE.id, name: ALPINE.name } },
+      actorId: 'actor-1', threadId: THREAD_ID,
+    });
+    expect(result).toMatchObject({ code: 'target_clarification_required' });
+    expect(IbThreadsMock.recentOperatorTurns).not.toHaveBeenCalled();
+  });
+
+  test('"we got a new jug of Unlisted Chemical" is not a bare follow-up, so it never borrows the prior turn either', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+    IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce([
+      'Could you add we added your purchase in the Alpine WSG can you add that to our inventory stock',
+    ]);
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock',
+      prompt: 'we got a new jug of Unlisted Chemical',
+      preview: { product: { id: ALPINE.id, name: ALPINE.name } },
+      actorId: 'actor-1', threadId: THREAD_ID,
+    });
+    expect(result).toMatchObject({ code: 'target_clarification_required' });
+    expect(IbThreadsMock.recentOperatorTurns).not.toHaveBeenCalled();
+  });
+
+  test('a bare "Yes" follow-up still grounds off a recent prior OPERATOR turn', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+    IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce([
+      'Could you add we added your purchase in the Alpine WSG can you add that to our inventory stock',
+    ]);
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt: 'Yes',
+      preview: { product: { id: ALPINE.id, name: ALPINE.name } },
+      actorId: 'actor-1', threadId: THREAD_ID,
+    });
+    expect(result).toEqual({ productId: ALPINE.id });
+  });
+
+  test('the deictic "this product" reference (no page context) never borrows a prior turn either', async () => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+    IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce([
+      'Could you add we added your purchase in the Alpine WSG can you add that to our inventory stock',
+    ]);
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock',
+      prompt: 'Add 2 lb of this product',
+      pageData: { route: '/admin/customers' }, // not an inventory page — no page productId available
+      preview: { product: { id: ALPINE.id, name: ALPINE.name } },
+      actorId: 'actor-1', threadId: THREAD_ID,
+    });
+    expect(result).toMatchObject({ code: 'target_clarification_required' });
+    expect(IbThreadsMock.recentOperatorTurns).not.toHaveBeenCalled();
+  });
 });

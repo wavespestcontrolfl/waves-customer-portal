@@ -959,6 +959,36 @@ function isCandidateToken(token) {
 
 const UUID_RE_THREAD = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// A prior operator turn may only stand in for a CURRENT prompt that carries
+// no product reference of its own — a genuine bare follow-up ("1 bottle",
+// "78 ounces", "Yes", "add it"). Strip quantities, units/containers (the same
+// vocabulary the grammar's `unit` group recognizes, split into single
+// tokens), and a small closed list of follow-up filler; if nothing survives,
+// the prompt is bare. "we got a new jug of Unlisted Chemical" is NOT bare —
+// "unlisted"/"chemical" (and "we"/"got"/"new") survive — so it must stand on
+// its own, never borrowing a name from an earlier turn.
+const FOLLOW_UP_NUMBER_WORDS = new Set(['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'zero']);
+const FOLLOW_UP_UNIT_WORDS = new Set([
+  'lb', 'lbs', 'pound', 'pounds', 'oz', 'ounce', 'ounces', 'fl', 'fluid', 'gal', 'gallon', 'gallons',
+  'liter', 'liters', 'ml', 'gram', 'grams', 'kg', 'each', 'item', 'items', 'bottle', 'bottles',
+  'bag', 'bags', 'container', 'containers', 'case', 'cases', 'jug', 'jugs',
+]);
+const FOLLOW_UP_FILLER_WORDS = new Set([
+  'add', 'it', 'that', 'this', 'the', 'a', 'an', 'of', 'to', 'yes', 'yeah', 'ok', 'okay',
+  'please', 'confirm', 'confirmed', 'go', 'ahead', 'do', 'same', 'again', 'retry', 'just',
+  'inventory', 'stock',
+]);
+function isBareFollowUp(text) {
+  const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
+  const textNorm = normalizeForMatch(text);
+  if (!textNorm) return false;
+  return textNorm.split(' ').every((token) => !token
+    || /^[0-9]+$/.test(token)
+    || FOLLOW_UP_NUMBER_WORDS.has(token)
+    || FOLLOW_UP_UNIT_WORDS.has(token)
+    || FOLLOW_UP_FILLER_WORDS.has(token));
+}
+
 // Which ACTIVE catalog products does normalized operator text name? A
 // product is named by its full catalog name, one of its product_aliases, or
 // a name token that belongs to it ALONE across the active catalog — each
@@ -997,13 +1027,16 @@ async function productsNamedIn(textNorm) {
   return named;
 }
 
-// Does the operator's own text (this prompt, or — only when this prompt
-// names nothing — their own recent prior turns) ground the preview's
-// product? Returns { productId } (allow), { mismatch: true } (a different
-// single product was named — target_relationship_mismatch), or null (no
-// grounding found; the caller keeps its original clarification refusal,
-// which also covers "named 2+ products").
-async function resolveByOperatorGrounding(prompt, preview, actorId, threadId) {
+// Does the operator's own text (this prompt, or — only when the call site
+// opts in AND this prompt names nothing AND this prompt is a bare follow-up
+// — their own recent prior turns) ground the preview's product? Returns
+// { productId } (allow), { mismatch: true } (a different single product was
+// named — target_relationship_mismatch), or null (no grounding found; the
+// caller keeps its original clarification refusal, which also covers "named
+// 2+ products"). `allowPriorTurns` is each call site's own explicit policy —
+// a selector that failed to resolve, or a deictic reference with no page
+// context, must stand on the CURRENT prompt alone.
+async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { allowPriorTurns = false } = {}) {
   const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
   if (!preview?.product?.id) return null;
   const decide = (named) => {
@@ -1015,6 +1048,7 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId) {
   const fromCurrent = decide(currentNamed);
   if (fromCurrent) return fromCurrent;
   if (currentNamed.size > 0) return null; // current prompt named something (ambiguous) — never fall back
+  if (!allowPriorTurns || !isBareFollowUp(prompt)) return null;
   const IbThreads = require('./threads');
   if (!IbThreads.threadsEnabled() || !actorId || !UUID_RE_THREAD.test(String(threadId || ''))) return null;
   const turns = await IbThreads.recentOperatorTurns(actorId, threadId, { limit: 3, maxAgeMinutes: 30 });
@@ -1065,11 +1099,11 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
     return { error: 'Explicitly request another restock request to create a duplicate.', code: 'duplicate_intent_required' };
   }
   // Grammar found no interpretable product reference at all: fall back to
-  // whether the OPERATOR's own words (this prompt, or — only when this
-  // prompt names nothing — their own recent prior turns) name exactly the
-  // product already sitting in the preview. See resolveByOperatorGrounding.
-  const groundedOrUnavailable = async (clarification) => {
-    const fallback = await resolveByOperatorGrounding(prompt, preview, actorId, threadId);
+  // whether the OPERATOR's own words name exactly the product already
+  // sitting in the preview. Each call site states its own policy on prior
+  // turns — see resolveByOperatorGrounding.
+  const groundedOrUnavailable = async (clarification, options) => {
+    const fallback = await resolveByOperatorGrounding(prompt, preview, actorId, threadId, options);
     if (fallback?.productId) return { productId: fallback.productId };
     if (fallback?.mismatch) return { ...unavailable, code: 'target_relationship_mismatch' };
     return clarification;
@@ -1085,7 +1119,11 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
     /^(?:restock|reorder)\s+(.+)$/i,
   ];
   const selected = patterns.map(pattern => clause.match(pattern)?.[1]).find(Boolean);
-  if (!selected) return groundedOrUnavailable(unavailable);
+  // No pattern matched at all: this is the ONLY site where a prior turn may
+  // stand in, and only when the current prompt is itself a bare follow-up
+  // ("1 bottle", "Yes") — resolveByOperatorGrounding enforces the bareness
+  // check; this just states the site's policy.
+  if (!selected) return groundedOrUnavailable(unavailable, { allowPriorTurns: true });
   let name = selected.replace(/\s+(?:to\s+(?:the\s+)?(?:restock|reorder)\s+list|that\s+(?:physically\s+)?arrived|on the shelf)[.!]?$/i, '').trim();
   let literal = null;
   const deadline = toolName === 'create_restock_request' && name.match(/^(.+?)\s+(?:before|by)\s+(?:(?:this|next)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|\d{4}-\d{2}-\d{2})[.!]?$/i);
@@ -1094,7 +1132,9 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
     // Only split it after that lookup misses, and never drop the preview date.
     literal = await resolveProduct({ product_name: name });
     if (!literal.product && !literal.candidates) {
-      if (!preview.needed_by) return groundedOrUnavailable(unavailable);
+      // A missing/unresolvable deadline is not a product-identity problem —
+      // no grounding fallback here at all, operator-named or otherwise.
+      if (!preview.needed_by) return unavailable;
       name = deadline[1].trim();
       literal = null;
     }
@@ -1103,9 +1143,17 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   const productId = deictic && inventoryPage ? pageData.productId || pageData.product_id || query.get('productId')
     : name.replace(/^product\s+/i, '');
   const selector = UUID_RE.test(String(productId || '')) ? { product_id: productId } : { product_name: name };
-  if (deictic && !selector.product_id) return groundedOrUnavailable(unavailable);
+  // A deictic reference ("this product") with no page context to resolve it
+  // names nothing itself — the current prompt may still separately name the
+  // preview product, but a prior turn never substitutes for a missing page
+  // selection.
+  if (deictic && !selector.product_id) return groundedOrUnavailable(unavailable, { allowPriorTurns: false });
   const resolved = literal || await resolveProduct(selector);
-  if (resolved.error) return groundedOrUnavailable({ ...resolved, code: 'target_clarification_required' });
+  // The grammar extracted a selector but it didn't resolve (e.g. "Restock
+  // Unlisted Chemical") — the current prompt may still name the preview
+  // product elsewhere in free phrasing, but a prior turn never rescues a
+  // name the operator just typed and got wrong.
+  if (resolved.error) return groundedOrUnavailable({ ...resolved, code: 'target_clarification_required' }, { allowPriorTurns: false });
   if (resolved.product.id !== preview.product?.id) return { ...unavailable, code: 'target_relationship_mismatch' };
   return { productId: resolved.product.id };
 }
