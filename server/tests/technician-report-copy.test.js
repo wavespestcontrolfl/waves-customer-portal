@@ -41,8 +41,8 @@ const AI_REPORT = [
 
 const AI_BODY = 'A full exterior perimeter application targeted the foundation line, door thresholds, and garage entry where ant trailing was documented. A non-repellent residual was applied to the plumbing penetrations under the kitchen sink. Ant activity was concentrated along the front walkway expansion joint, with light trailing near the garage. Activity typically tapers over the next one to two weeks as the product transfers through the colony.';
 
-describe('custom action credential screening', () => {
-  test.each([
+const CREDENTIAL_CASES = {
+  validatorOnly: [
     'Opened side gate with 2468',
     'Unlocked rear door using 2468',
     'Accessed garage with 2468',
@@ -90,22 +90,8 @@ describe('custom action credential screening', () => {
     'Rear gate is 24-0-11 fertilizer',
     'Opened rear gate with #24-0-11 fertilizer',
     'Opened rear gate with 2-4-6-8 and applied fertilizer',
-    'Use 2468 AT THE SIDE GATE',
-    'USE 24-68 AT THE GATE',
-    'USE 2468 TO OPEN THE GATE',
-    'USE AB-24-68-XY AT THE SIDE GATE',
-    'USE AB-24-68-XY TO OPEN THE GATE',
-    'Use 24-68-ab at the side gate',
-    'Use 24-68-in at the side gate',
-    'Use 24-68-to at the side gate',
     'Use 24-68-xy to open the side gate',
-    'Opened side gate with 2468ml',
     'Unlocked rear door using 2468ft',
-    'Use 2468ft to open the gate',
-    'Use 2468 ft to open the gate',
-    'Use 2468 square feet to unlock the rear gate',
-    'Enter 2468 ml at the side gate',
-    'Use 24-68 fl. oz to open the side gate',
     'Enter 2468ml at the side keypad',
     'The gate opens with 2468oz',
     'Rear gate AB-24-0-11 fertilizer',
@@ -118,6 +104,22 @@ describe('custom action credential screening', () => {
     'Applied Lesco and opened rear gate with 24-0-11',
     'Applied Lesco, then opened rear gate with 24-0-11',
     'Broadcast granular before unlocking rear gate with 24-0-11',
+  ],
+  shared: [
+    'Use 2468 AT THE SIDE GATE',
+    'USE 24-68 AT THE GATE',
+    'USE 2468 TO OPEN THE GATE',
+    'USE AB-24-68-XY AT THE SIDE GATE',
+    'USE AB-24-68-XY TO OPEN THE GATE',
+    'Use 24-68-ab at the side gate',
+    'Use 24-68-in at the side gate',
+    'Use 24-68-to at the side gate',
+    'Opened side gate with 2468ml',
+    'Use 2468ft to open the gate',
+    'Use 2468 ft to open the gate',
+    'Use 2468 square feet to unlock the rear gate',
+    'Enter 2468 ml at the side gate',
+    'Use 24-68 fl. oz to open the side gate',
     'Applied override 24-0-11 to open the rear gate',
     'Applied override 24-0-11 opens the rear gate',
     'Applied override 24-0-11 unlocks the rear gate',
@@ -164,11 +166,11 @@ describe('custom action credential screening', () => {
     'Opened gate and inspected 100 bait stations, then entered 8842 at the keypad',
     'Opened rear gate and checked 120 traps, then used code 2468 at the keypad',
     'Opened gate and serviced 100 bait stations, then unlocked the side door with 8842',
-  ])('rejects recorded access credentials: %s', (action) => {
-    expect(customerCopyViolations(action)).toContain('access_code');
-  });
+  ],
+};
 
-  test.each([
+const LEGITIMATE_CASES = {
+  validatorOnly: [
     'Inspected 120 linear feet around the garage',
     'Inspected the rear gate 120 feet from the lanai',
     'Opened the gate onto 400 square feet of treated turf',
@@ -193,13 +195,17 @@ describe('custom action credential screening', () => {
     '24-0-11 fertilizer was applied near the rear gate',
     'Opened rear gate, applied 24-0-11 fertilizer',
     'Applied 24-0-11 fertilizer after opening the rear gate',
+    'Spread slow-release granular 24-0-11 near the rear gate',
+  ],
+  sharedFertilizer: [
     'Applied Lesco 24-0-11 near the rear gate',
     'Applied Lesco 24-0-11, then opened the rear gate',
     'Applied Lesco 24-0-11 and opened the rear gate',
     'APPLIED LESCO 24-0-11 AND OPENED THE REAR GATE',
     'APPLIED LESCO 24-0-11 THEN UNLOCKED THE REAR GATE',
     'Broadcast granular 24-0-11 near the rear gate',
-    'Spread slow-release granular 24-0-11 near the rear gate',
+  ],
+  sharedWork: [
     'Using 100 ml at the rear gate, we treated the hinge area',
     'Using 100ml at the rear gate, we treated the hinge area',
     'Opened rear gate on 9/27/2026',
@@ -241,74 +247,28 @@ describe('custom action credential screening', () => {
     'Opened gate and treated 100 stations',
     'Opened gate and applied 100 product units',
     'Opened gate and found 100 empty traps',
+  ],
+};
+
+describe('custom action credential screening', () => {
+  test.each([
+    ...CREDENTIAL_CASES.validatorOnly,
+    ...CREDENTIAL_CASES.shared,
+  ])('rejects recorded access credentials: %s', (action) => {
+    expect(customerCopyViolations(action)).toContain('access_code');
+  });
+
+  test.each([
+    ...LEGITIMATE_CASES.validatorOnly,
+    ...LEGITIMATE_CASES.sharedFertilizer,
+    ...LEGITIMATE_CASES.sharedWork,
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
   });
 });
 
 describe('technicianReportCustomerCopy — shape parsing', () => {
-  test.each([
-    'Use 2468 AT THE SIDE GATE',
-    'USE 24-68 AT THE GATE',
-    'USE 2468 TO OPEN THE GATE',
-    'USE AB-24-68-XY AT THE SIDE GATE',
-    'USE AB-24-68-XY TO OPEN THE GATE',
-    'Use 24-68-ab at the side gate',
-    'Use 24-68-in at the side gate',
-    'Use 24-68-to at the side gate',
-    'Opened side gate with 2468ml',
-    'Use 2468ft to open the gate',
-    'Use 2468 ft to open the gate',
-    'Use 2468 square feet to unlock the rear gate',
-    'Enter 2468 ml at the side gate',
-    'Use 24-68 fl. oz to open the side gate',
-    'Applied override 24-0-11 to open the rear gate',
-    'Applied override 24-0-11 opens the rear gate',
-    'Applied override 24-0-11 unlocks the rear gate',
-    'Applied override 24-0-11 opened the rear gate',
-    'Broadcast granular 24-0-11 unlocked the side gate',
-    'Broadcast granular 24-0-11 to unlock the side gate',
-    'Opened the rear gate this morning with 2468 ml',
-    'Unlocked the side door earlier today using 8842 oz',
-    'Using 100 ml to open the rear gate',
-    'Using 100 ml at the rear gate to unlock it',
-    'Opened rear gate on 2468',
-    'Opened rear gate on 9/27/2026 with code 2468',
-    'Use unit2468 at the rear gate',
-    'USE 24-0-11-BEFORE AT THE REAR GATE',
-    'Opened rear gate using unit2468',
-    'The gate opens with unit2468',
-    'Use unit2468 to open the rear gate',
-    'Opened rear gate on 24-68',
-    'Opened rear gate on AB2468',
-    'Opened rear gate on 2 4 6 8',
-    'Opened rear gate on 9/27/2026, checked the hinges, and opened the side door on 2468',
-    'Opened rear gate on 24-68-24',
-    'Opened rear gate on 24-68-99',
-    'Opened rear gate on 02/30/2026',
-    'Opened rear gate by entering 2468 ml',
-    'Unlocked side door after typing 8842 oz',
-    'Unlocked side door after typing AB8842 oz',
-    'Unlocked side door after typing 88-42 oz',
-    'Opened rear gate after entering 24-68 ml',
-    'Opened rear gate after entering 09/27/2026',
-    'Opened rear gate with 09/27/2026',
-    'Opened rear gate using 2026-09-27',
-    'Opened rear gate with 09/27/26',
-    'Opened rear gate and found 100 ants, then entered 8842 at the keypad',
-    'Opened rear gate and found 100 German cockroaches, then entered 8842 at the keypad',
-    'The rear gate is 2468 ml',
-    'Opened rear gate and found 100 dead ants, then entered 8842 at the keypad',
-    'Use 2468 ft as the gate code',
-    'Enter AB24-68 ml as the side door PIN',
-    'Applied 24-0-11 to open turf near the rear gate, then used 24-0-11 to unlock the side door',
-    '2468 ft will open the rear gate',
-    '2468 ml can unlock the side door',
-    '2468 oz should still access the garage entry',
-    'Opened gate and inspected 100 bait stations, then entered 8842 at the keypad',
-    'Opened rear gate and checked 120 traps, then used code 2468 at the keypad',
-    'Opened gate and serviced 100 bait stations, then unlocked the side door with 8842',
-  ])('does not publish disguised access instructions: %s', (instruction) => {
+  test.each(CREDENTIAL_CASES.shared)('does not publish disguised access instructions: %s', (instruction) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${instruction}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toBeNull();
     expect(parsed.violations).toContain('access_code');
@@ -323,62 +283,13 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     expect(parsed.violations).toEqual([]);
   });
 
-  test.each([
-    'Applied Lesco 24-0-11 near the rear gate',
-    'Applied Lesco 24-0-11, then opened the rear gate',
-    'Applied Lesco 24-0-11 and opened the rear gate',
-    'APPLIED LESCO 24-0-11 AND OPENED THE REAR GATE',
-    'APPLIED LESCO 24-0-11 THEN UNLOCKED THE REAR GATE',
-    'Broadcast granular 24-0-11 near the rear gate',
-  ])('publishes a qualified fertilizer analysis in reviewed report copy: %s', (action) => {
+  test.each(LEGITIMATE_CASES.sharedFertilizer)('publishes a qualified fertilizer analysis in reviewed report copy: %s', (action) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${action}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toContain(action);
     expect(parsed.violations).toEqual([]);
   });
 
-  test.each([
-    'Using 100 ml at the rear gate, we treated the hinge area',
-    'Using 100ml at the rear gate, we treated the hinge area',
-    'Opened rear gate on 9/27/2026',
-    'Opened rear gate on 2026-09-27',
-    'Opened gate and treated unit 2468',
-    'Opened gate and treated unit2468',
-    'APPLIED LESCO 24-0-11 BEFORE OPENING THE REAR GATE',
-    'APPLIED LESCO 24-0-11 AFTER OPENING THE REAR GATE',
-    'APPLIED LESCO 24-0-11 WHILE OPENING THE REAR GATE',
-    'Using 100 ml at the rear gate before opening it, we treated the hinge area',
-    'Opened rear gate and sprayed with 100 ml',
-    'Opened rear gate and dusted with 100 grams',
-    'Opened rear gate and cleaned with 100 ml',
-    'Opened rear gate, applied 24-0-7 fertilizer',
-    'Opened rear gate, applied 0-0-7 fertilizer',
-    'Opened rear gate on 2026 - 09 - 27',
-    'Opened rear gate on 09 - 27 - 2026',
-    'Opened rear gate on 02/29/2024',
-    'Opened rear gate and found 100 ants',
-    'Opened rear gate and found 100 German cockroaches',
-    'Opened rear gate and found 100 fire ants',
-    'Opened rear gate and observed 200 ants',
-    'Opened rear gate and treated station 2468',
-    'Opened rear gate and serviced station 2468',
-    'Unlocked side door on 09/27/2026',
-    'Unlocked side door after servicing station 8842',
-    'Opened rear gate by using 2 hands',
-    'Opened rear gate after using 2 oz around the hinge',
-    'Opened rear gate and found 100 dead ants',
-    'The rear gate is 100 feet from the lanai',
-    'Use 2468 ft as the treated perimeter length',
-    'Applied 24-0-11 to open turf near the rear gate',
-    '2468 ft will cover open turf near the rear gate',
-    '2468 ml can treat the hinge beside the side door',
-    'Opened gate and inspected 100 bait stations',
-    'Opened rear gate and checked 120 traps',
-    'Opened gate and serviced 100 bait stations',
-    'Opened gate and replaced 120 traps',
-    'Opened gate and treated 100 stations',
-    'Opened gate and applied 100 product units',
-    'Opened gate and found 100 empty traps',
-  ])('publishes bounded material, date, unit-id, and fertilizer details: %s', (action) => {
+  test.each(LEGITIMATE_CASES.sharedWork)('publishes bounded material, date, unit-id, and fertilizer details: %s', (action) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${action}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toContain(action);
     expect(parsed.violations).toEqual([]);
