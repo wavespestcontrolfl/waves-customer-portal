@@ -14,11 +14,14 @@ const samePin = (customer, review) => hasPin(customer) && ['latitude', 'longitud
 const completeAddress = customer => ['address_line1', 'city', 'state', 'zip'].every(field => String(customer[field] || '').trim())
   && /^\d+[A-Za-z-]*\s+\S/.test(String(customer.address_line1 || '').trim());
 
-function reviewRevision(customer, review) {
+function reviewRevision(customer, review, primary = null) {
   const numeric = value => value == null ? null : Number(value);
   const saved = review ? [review.address_snapshot, review.status, review.reason, review.source, review.evidence,
     review.reviewed_by, new Date(review.updated_at).toISOString(), numeric(review.latitude), numeric(review.longitude)] : null;
-  return createHash('sha256').update(JSON.stringify([addressSnapshot(customer), numeric(customer.latitude), numeric(customer.longitude), saved])).digest('hex');
+  const primaryPin = [numeric(primary?.latitude ?? customer.latitude), numeric(primary?.longitude ?? customer.longitude)];
+  return createHash('sha256').update(JSON.stringify([
+    addressSnapshot(customer), numeric(customer.latitude), numeric(customer.longitude), primaryPin, saved,
+  ])).digest('hex');
 }
 
 function effectiveReview(customer, review) {
@@ -38,18 +41,24 @@ async function saveReview(trx, customer, values) {
   return saved;
 }
 
-function detail(customer, review, nextVisitDate) {
-  return { enabled: true, customer: Object.fromEntries(CUSTOMER_FIELDS.map(field => [field, customer[field] ?? null])),
-    review: effectiveReview(customer, review), revision: reviewRevision(customer, review), next_visit_date: nextVisitDate || null };
+function detail(customer, review, nextVisitDate, primary = null) {
+  const displayed = primary && hasPin(primary)
+    ? { ...customer, latitude: primary.latitude, longitude: primary.longitude }
+    : customer;
+  return { enabled: true, customer: Object.fromEntries(CUSTOMER_FIELDS.map(field => [field, displayed[field] ?? null])),
+    review: effectiveReview(displayed, review), revision: reviewRevision(customer, review, primary), next_visit_date: nextVisitDate || null };
 }
 
 async function getReviewDetail(customerId, conn = db) {
   const customer = await conn('customers').where({ id: customerId }).whereNull('deleted_at').first();
   if (!customer) return null;
-  const review = await conn('customer_geocode_reviews').where({ customer_id: customerId }).first();
+  const [review, primary] = await Promise.all([
+    conn('customer_geocode_reviews').where({ customer_id: customerId }).first(),
+    conn('customer_properties').where({ customer_id: customerId, active: true, is_primary: true }).first(),
+  ]);
   const next = await conn('scheduled_services').where({ customer_id: customerId }).whereIn('status', ['pending', 'confirmed'])
     .where('scheduled_date', '>=', etDateString(new Date())).min('scheduled_date as date').first();
-  return detail(customer, review, next?.date);
+  return detail(customer, review, next?.date, primary);
 }
 
 const ADDRESS_MATCH_SQL = 'r.address_snapshot = jsonb_build_array(c.address_line1, c.address_line2, c.city, c.state, c.zip)';
@@ -68,7 +77,13 @@ async function listReviewQueue({ limit = 25, offset = 0 } = {}, conn = db) {
   const [{ count }] = await query.clone().count('* as count');
   const rows = await query.select('c.*', conn.raw('to_jsonb(r) as review_record'), 'visits.next_visit_date')
     .orderByRaw('visits.next_visit_date ASC NULLS LAST').orderBy('c.id').limit(limit).offset(offset);
-  return { enabled: true, total: Number(count), records: rows.map(row => detail(row, row.review_record, row.next_visit_date)) };
+  const primaries = rows.length ? await conn('customer_properties')
+    .whereIn('customer_id', rows.map(row => row.id)).where({ active: true, is_primary: true })
+    .select('customer_id', 'latitude', 'longitude') : [];
+  const primaryByCustomer = new Map(primaries.map(row => [String(row.customer_id), row]));
+  return { enabled: true, total: Number(count), records: rows.map(row => detail(
+    row, row.review_record, row.next_visit_date, primaryByCustomer.get(String(row.id)),
+  )) };
 }
 
 /** Permanent review decisions are address-bound. Transient failures stay eligible.
