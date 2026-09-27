@@ -5423,7 +5423,7 @@ router.post('/calculate-estimate', async (req, res) => {
     if (pricingEngine.needsSync && pricingEngine.needsSync()) {
       await pricingEngine.syncConstantsFromDB();
     }
-    const v1Input = translateV2CallToV1Input(profile, selectedServices || [], options || {});
+    let v1Input = translateV2CallToV1Input(profile, selectedServices || [], options || {});
     // Canonical qualifying families of the MATCHED account (codex #3591 r16
     // P1): the estimator forwards only existingCustomerId (+ the quoted
     // address / group anchor); the keys are derived server-side through the
@@ -5443,6 +5443,8 @@ router.post('/calculate-estimate', async (req, res) => {
         retryable: true,
       });
     }
+    v1Input = await require('../services/pricing-engine/trusted-catalog-pricing')
+      .withTrustedCatalogPricing(v1Input);
     const v1 = pricingEngine.generateEstimate(v1Input);
     const mapped = mapV1ToLegacyShape(v1);
     res.json(mapped);

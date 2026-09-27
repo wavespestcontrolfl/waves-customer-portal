@@ -1,5 +1,9 @@
 const constants = require('../services/pricing-engine/constants');
-const { syncConstantsFromDB, validatePestPricingConfig } = require('../services/pricing-engine/db-bridge');
+const {
+  readRodentAdditionalCheckPriceFromCatalog,
+  syncConstantsFromDB,
+  validatePestPricingConfig,
+} = require('../services/pricing-engine/db-bridge');
 const { priceFlea } = require('../services/pricing-engine');
 
 function pricingConfigDb(rows) {
@@ -13,6 +17,27 @@ function pricingConfigDb(rows) {
   };
   db.schema = {
     hasTable: jest.fn(async () => true),
+  };
+  return db;
+}
+
+function rodentCatalogDb(basePrice, { active = true } = {}) {
+  const rows = [{ config_key: 'global_labor_rate', data: { value: constants.GLOBAL.LABOR_RATE } }];
+  const db = (table) => {
+    if (table === 'pricing_config') {
+      return { select: jest.fn(async () => rows) };
+    }
+    if (table === 'services') {
+      const query = {
+        where: jest.fn(() => query),
+        first: jest.fn(async () => (active ? { base_price: basePrice } : undefined)),
+      };
+      return query;
+    }
+    throw new Error(`Unexpected table ${table}`);
+  };
+  db.schema = {
+    hasTable: jest.fn(async (table) => table === 'pricing_config' || table === 'services'),
   };
   return db;
 }
@@ -49,6 +74,7 @@ describe('pricing engine DB bridge', () => {
   const originalTsDensityFactors = { ...constants.TREE_SHRUB.densityFactors };
   const originalTsPalmReserve = { ...constants.TREE_SHRUB.routinePalmCareReserve };
   const originalTsCallbackReserve = constants.TREE_SHRUB.callbackReservePerVisit;
+  const originalAdditionalCheckPrice = constants.RODENT.trapping.additionalCheckPrice;
 
   afterEach(() => {
     constants.PEST.pestInitialRoach = originalInitialRoach;
@@ -92,6 +118,25 @@ describe('pricing engine DB bridge', () => {
     constants.TREE_SHRUB.densityFactors = { ...originalTsDensityFactors };
     constants.TREE_SHRUB.routinePalmCareReserve = { ...originalTsPalmReserve };
     constants.TREE_SHRUB.callbackReservePerVisit = originalTsCallbackReserve;
+    constants.RODENT.trapping.additionalCheckPrice = originalAdditionalCheckPrice;
+  });
+
+  test('rodent additional-check catalog overlay preserves cents', async () => {
+    await expect(syncConstantsFromDB(rodentCatalogDb('95.50'))).resolves.toBe(true);
+    expect(constants.RODENT.trapping.additionalCheckPrice).toBe(95.5);
+  });
+
+  test('a quote process reads the current rodent check price without trusting its stale singleton', async () => {
+    constants.RODENT.trapping.additionalCheckPrice = 95;
+    await expect(readRodentAdditionalCheckPriceFromCatalog(rodentCatalogDb('110.25')))
+      .resolves.toBe(110.25);
+    expect(constants.RODENT.trapping.additionalCheckPrice).toBe(95);
+  });
+
+  test('an inactive additional-check row falls back to the code price', async () => {
+    constants.RODENT.trapping.additionalCheckPrice = 110;
+    await expect(readRodentAdditionalCheckPriceFromCatalog(rodentCatalogDb('110.00', { active: false })))
+      .resolves.toBe(originalAdditionalCheckPrice);
   });
 
   test('lawn program minimum: absent key restores the DISARMED 0 on every sync', async () => {
