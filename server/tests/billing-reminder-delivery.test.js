@@ -435,6 +435,30 @@ describe('billing reminder per-channel delivery progress', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  test('a newly allowed Email removes its persisted waiver before a transient retry failure', async () => {
+    let emailAllowed = false;
+    collectionsChannelPermitted.mockImplementation(async ({ channel }) => (channel === 'email' && !emailAllowed
+      ? { allowed: false, durable: true }
+      : { allowed: true, durable: false }));
+    const send = jest.fn()
+      .mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', code: 'SMS_FAILED' })
+      .mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', code: 'EMAIL_FAILED', retryable: true })
+      .mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' });
+
+    await expect(deliver(['email', 'sms'], send, 'waiver-revoked'))
+      .resolves.toMatchObject({ complete: false, deliveredNow: [] });
+    expect(rows.find((row) => row.channel === 'sms').metadata.policy_waived_channels).toEqual(['email']);
+
+    emailAllowed = true;
+    await expect(deliver(['email', 'sms'], send, 'waiver-revoked'))
+      .resolves.toMatchObject({ complete: false, deliveredNow: ['sms'] });
+    expect(send.mock.calls.map(([channel]) => channel)).toEqual(['sms', 'email', 'sms']);
+    expect(rows.find((row) => row.channel === 'sms').metadata.policy_waived_channels).toEqual([]);
+    await expect(require('../services/billing-reminder-delivery')
+      .reminderProgress('customer-1', 'balance_reminder_workflow', ['email', 'sms']))
+      .resolves.toEqual([expect.objectContaining({ complete: false, waived: new Set() })]);
+  });
+
   test('an unpersisted waiver never reports the episode settled', async () => {
     const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));
     collectionsChannelPermitted.mockImplementation(async ({ channel }) => (channel === 'email'

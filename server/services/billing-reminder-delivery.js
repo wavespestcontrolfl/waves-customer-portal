@@ -59,6 +59,21 @@ function metadataOf(row) {
   return typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
 }
 
+async function persistPolicyWaivers(rowIds, waived) {
+  const ids = [...rowIds].filter(Boolean);
+  if (!ids.length) return false;
+  try {
+    const changed = await db('collections_contact_ledger').whereIn('id', ids).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('policy_waived_channels', ?::jsonb)", [
+        JSON.stringify([...waived]),
+      ]),
+    });
+    return Number(changed) > 0;
+  } catch {
+    return false;
+  }
+}
+
 async function reminderProgress(customerId, source, channels) {
   const rows = await db('collections_contact_ledger').where({ customer_id: customerId, source })
     .where('occurred_at', '>', new Date(Date.now() - 90 * 86400000));
@@ -159,9 +174,25 @@ async function sendReminderChannels({
   })));
   const digest = crypto.createHash('sha256').update(`${customerId}:${eventKey}`).digest('hex');
   // Only a durable denial waives its leg; a spacing window keeps it owed.
-  const waived = new Set([...(existing?.waived || []),
+  // A later allowance revokes the old waiver. Persist that deletion before
+  // retrying: claimAttempt refreshes reservation metadata with a JSON merge,
+  // so merely omitting the key would leave the old waiver on the row.
+  const restoredWaived = new Set(existing?.waived || []);
+  const waived = new Set([...restoredWaived,
     ...pending.filter((_channel, index) => verdictDurablyDenied(permitted[index]))]);
+  for (const [index, channel] of pending.entries()) {
+    if (verdictAllows(permitted[index])) waived.delete(channel);
+  }
   const episodeRowIds = new Set(entries.map((entry) => entry.id));
+  const revokedWaiver = [...restoredWaived].some((channel) => !waived.has(channel));
+  if (revokedWaiver && !await persistPolicyWaivers(episodeRowIds, waived)) {
+    for (const [index, channel] of pending.entries()) {
+      if (verdictAllows(permitted[index])) {
+        results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_WAIVER_REFRESH_FAILED' };
+      }
+    }
+    return { complete: false, deliveredNow, results };
+  }
   for (const [index, channel] of pending.entries()) {
     if (!verdictAllows(permitted[index])) { results[channel] = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }; continue; }
     const reservation = {
@@ -198,18 +229,7 @@ async function settleEpisode(channels, { delivered, resolved, waived }, rowIds) 
   const reliesOnWaiver = channels.some((channel) => waived.has(channel)
     && !delivered.has(channel) && !resolved.has(channel));
   if (!reliesOnWaiver) return true;
-  const ids = [...rowIds].filter(Boolean);
-  if (!ids.length) return false;
-  try {
-    await db('collections_contact_ledger').whereIn('id', ids).update({
-      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('policy_waived_channels', ?::jsonb)", [
-        JSON.stringify([...waived]),
-      ]),
-    });
-    return true;
-  } catch {
-    return false;
-  }
+  return persistPolicyWaivers(rowIds, waived);
 }
 
 module.exports = {
