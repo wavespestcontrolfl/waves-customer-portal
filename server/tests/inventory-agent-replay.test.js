@@ -13,7 +13,6 @@ const {
   assertReadOnly, parseSince, parseLimit, lineKey, dedupe, inQueueOrder, emptyProposals, recordProposal, catalogWithProposals, replayLine,
 } = require('../../ops/agents/inventory-agent-replay');
 const { classifyItem } = require('../services/purchase-receipts/receipt-processor');
-const { decideForTitle } = require('../services/purchase-receipts/inventory-agent');
 
 function mockDb(behavior) {
   return { raw: jest.fn(behavior) };
@@ -86,8 +85,9 @@ describe('parseSince', () => {
 
 // Codex round 5: the live agent changes the catalog as it carries out a
 // proposal, so a later line — the same title or a differently worded one —
-// may then resolve by the receipt rules with no model call. The replay
-// matches every later line against the catalog plus its earlier proposals.
+// may then resolve by the receipt rules with no model call. Round 7: that
+// change can still be rolled back at apply time, so the replay only uses
+// this view to MARK a later line as depending on an earlier proposal.
 describe('catalogWithProposals', () => {
   const base = () => ({
     products: [{ id: 'p-taurus', name: 'Taurus SC', container_size: null, active: true }],
@@ -139,40 +139,6 @@ describe('catalogWithProposals', () => {
   });
 });
 
-// 2026-09-27 pre-push P1: the agent's own reads (its re-classification,
-// candidates, aliases) use the same snapshot, so a proposed container size
-// is never proposed again by a later line's decision.
-describe('decideForTitle on a catalog snapshot', () => {
-  const sizedTaurus = () => {
-    const proposals = emptyProposals();
-    recordProposal(proposals, {
-      outcome: { decision: { status: 'logged', kind: 'existing', product: { id: 'p-taurus' }, setContainerSize: '78 fl oz' } },
-      found: { status: 'needs_size', productId: 'p-taurus' },
-      title: 'Taurus SC Termiticide 78 oz',
-    });
-    return catalogWithProposals({
-      products: [{ id: 'p-taurus', name: 'Taurus SC', category: 'insecticide', container_size: null, inventory_unit: 'fl_oz', active: true }],
-      aliasRows: [],
-    }, proposals);
-  };
-  const ask = (title, dispatch) => decideForTitle(null, dispatch, { rawTitle: title, quantity: 1, vendor: 'amazon', siteOneFields: null }, {
-    allowedCategories: new Set(['insecticide']), catalogSnapshot: sizedTaurus(),
-  });
-
-  test('a title the proposed size now covers resolves by the rules, with no model call', async () => {
-    const dispatch = jest.fn();
-    expect(await ask('Taurus SC 78 oz', dispatch)).toMatchObject({ rulesResolve: true });
-    expect(dispatch).not.toHaveBeenCalled();
-  });
-
-  test('a different size is judged against the proposed size, never a blank container', async () => {
-    const dispatch = jest.fn(async () => ({ ok: false, reason: 'test' }));
-    const outcome = await ask('Taurus SC 96 oz', dispatch);
-    expect(outcome.reClassified).toMatchObject({ status: 'size_mismatch', product: { container_size: '78 fl oz' } });
-    expect(JSON.stringify(dispatch.mock.calls[0])).toContain('78 fl oz');
-  });
-});
-
 // Codex round 6: the live agent works its queue in the order the sweep
 // recorded the lines (a backfill sweep records all Amazon lines before any
 // SiteOne line), not the order the emails arrived.
@@ -186,10 +152,20 @@ describe('inQueueOrder', () => {
     const amazon = line('amazon', 'a1', '2026-09-02T10:00:00Z');
     const neverRecorded = line('amazon', 'a2', '2026-09-03T09:00:00Z');
     const recorded = new Map([
-      [lineKey(amazon), Date.parse('2026-09-03T08:00:00Z')],
-      [lineKey(siteOne), Date.parse('2026-09-03T08:00:05Z')],
+      [lineKey(amazon), { vendor: 'amazon', at: Date.parse('2026-09-03T08:00:00Z') }],
+      [lineKey(siteOne), { vendor: 'siteone', at: Date.parse('2026-09-03T08:00:05Z') }],
     ]);
     expect(inQueueOrder([siteOne, neverRecorded, amazon], recorded)).toEqual([amazon, siteOne, neverRecorded]);
+  });
+
+  // Codex round 7: a line the sweep skipped (handed off) keeps its scan
+  // position after the recorded hold from the same sweep, never jumping
+  // ahead of it on its earlier email time.
+  test('an unrecorded line sorts in the sweep that scanned it, by email arrival', () => {
+    const hold = line('amazon', 'a1', '2026-09-01T10:00:00Z');
+    const skipped = { ...line('amazon', 'a2', '2026-09-01T10:05:00Z'), shipmentKey: 'a1', lineNo: 2 };
+    const recorded = new Map([[lineKey(hold), { vendor: 'amazon', at: Date.parse('2026-09-01T12:00:00Z') }]]);
+    expect(inQueueOrder([skipped, hold], recorded)).toEqual([hold, skipped]);
   });
 
   test('ties keep email, then line order', () => {
@@ -207,7 +183,7 @@ describe('dedupe', () => {
   test.each([['a-hold', 'z-delivered'], ['z-hold', 'a-delivered']])('hold email %s vs Delivered email %s', (holdId, deliveredId) => {
     const hold = { ...key, email: { id: holdId, received_at: '2026-09-01T00:00:00Z' }, recordedStatus: 'no_delivery_email' };
     const delivered = { ...key, email: { id: deliveredId, received_at: '2026-09-01T00:00:00Z' } };
-    const ordered = inQueueOrder([delivered, hold], new Map([[lineKey(key), Date.parse('2026-09-01T00:00:00Z')]]));
+    const ordered = inQueueOrder([delivered, hold], new Map([[lineKey(key), { vendor: 'amazon', at: Date.parse('2026-09-01T00:00:00Z') }]]));
     expect(dedupe(ordered)).toEqual([hold]);
   });
 });

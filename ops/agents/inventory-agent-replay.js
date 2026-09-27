@@ -97,7 +97,7 @@ const { loadMatchCatalog } = require(server('services/purchase-receipts/product-
 const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require(server('services/purchase-receipts/amazon-delivery-parser'));
 const siteOne = require(server('services/purchase-receipts/siteone-invoices'));
 const { amazonEmailLines, siteOneInvoiceLines, authenticated } = require(server('services/purchase-receipts/sweep'));
-const { decideForTitle, loadAllowedCategories, siteOneLineFields } = require(server('services/purchase-receipts/inventory-agent'));
+const { decideForTitle, loadAllowedCategories, loadActiveCatalog, siteOneLineFields } = require(server('services/purchase-receipts/inventory-agent'));
 const { parseETDateTime, etDateString } = require(server('utils/datetime-et'));
 const { dispatchWithFallback } = require(server('services/llm/call'));
 // The shared pool: the sweep's own SiteOne builders read through it, and
@@ -172,23 +172,35 @@ function readOnlyConn() {
 
 // The live agent works its queue in purchase_receipt_lines.created_at
 // order — the order the sweep actually recorded the lines (in one backfill
-// sweep: every Amazon line, then the undelivered holds, then SiteOne), not
-// the order the emails arrived. So a line the live lane recorded replays at
-// its recorded time; one it never recorded (nothing to key it by) at its
-// email's time. Ties keep email, then line order.
+// sweep: every Amazon line, then the undelivered holds, then SiteOne), and
+// each vendor's sweep scans its emails oldest first. So every line gets a
+// SWEEP time on one basis: a line the live lane recorded, its recorded time;
+// one it never recorded (a hand-off skip, or before the lane existed), the
+// first recorded time of its vendor at or after its email arrived — the
+// sweep that scanned it — else its email's time. Within one sweep time,
+// email arrival order, then email, then line order.
 async function recordedTimes(conn, since) {
   const rows = await conn('purchase_receipt_lines').where('created_at', '>=', since)
     .select('vendor', 'order_number', 'shipment_key', 'line_no', 'created_at');
   return new Map(rows.map((row) => [
     lineKey({ vendor: row.vendor, orderNumber: row.order_number, shipmentKey: row.shipment_key, lineNo: row.line_no }),
-    new Date(row.created_at).getTime(),
+    { vendor: row.vendor, at: new Date(row.created_at).getTime() },
   ]));
 }
 
 function inQueueOrder(lines, recorded) {
-  const at = (line) => recorded.get(lineKey(line)) ?? new Date(line.email.received_at).getTime();
-  return lines.map((line, index) => ({ line, at: at(line), index }))
-    .sort((a, b) => (a.at - b.at) || String(a.line.email.id).localeCompare(String(b.line.email.id)) || (a.index - b.index))
+  const recordedTimesOf = {};
+  for (const { vendor, at } of recorded.values()) (recordedTimesOf[vendor] ||= []).push(at);
+  for (const times of Object.values(recordedTimesOf)) times.sort((a, b) => a - b);
+  const sweepTime = (line) => {
+    const own = recorded.get(lineKey(line));
+    if (own) return own.at;
+    const received = new Date(line.email.received_at).getTime();
+    return (recordedTimesOf[line.vendor] || []).find((at) => at >= received) ?? received;
+  };
+  return lines.map((line, index) => ({ line, at: sweepTime(line), received: new Date(line.email.received_at).getTime(), index }))
+    .sort((a, b) => (a.at - b.at) || (a.received - b.received)
+      || String(a.line.email.id).localeCompare(String(b.line.email.id)) || (a.index - b.index))
     .map(({ line }) => line);
 }
 
@@ -294,10 +306,11 @@ function decisionSummary(decision) {
 // (inventory-agent.js applyDecision): a new product (with its container
 // size), a container size on a product that had none, and — for a title the
 // rules couldn't match — an alias of that exact title to the chosen product.
-// The replay never writes them; it keeps them here, in order, and matches
-// every later line against the catalog plus these, so a later title (the
-// same or differently worded) the live rules would then resolve is resolved
-// here too, with no model call.
+// Whether a change survives is decided only at apply time (a nearby manual
+// restock, an application unit in use, … roll it back), so the replay never
+// treats one as made: every line is decided against the SAVED catalog, and
+// a later line the rules would take once an earlier change is made is
+// marked as depending on it — both outcomes shown, never one assumed.
 function emptyProposals() {
   return { products: [], containerSizes: new Map(), aliases: [] };
 }
@@ -348,8 +361,7 @@ function settledRow(state, line, status, text = '') {
 
 // The agent's answer for one line it would take: a reused one when the same
 // question was already asked, '--limit reached' past the cap, or a real
-// decideForTitle call. (A title an earlier proposal's catalog change covers
-// never gets here: replayLine already matched it against those changes.)
+// decideForTitle call against the saved catalog.
 async function agentProposal(conn, line, found, state) {
   const siteOneFields = line.vendor === 'siteone' ? await siteOneLineFields(conn, { email_id: line.email.id, line_no: line.lineNo }) : null;
   const question = JSON.stringify([line.vendor, line.item.title, line.item.quantity, siteOneFields]);
@@ -357,17 +369,15 @@ async function agentProposal(conn, line, found, state) {
   if (earlier) return `${earlier} (same as an earlier line)`;
   if (state.llmCalls >= state.limit) return '(skipped — --limit reached)';
   // Categories load once, as the live runner loads them once per run; the
-  // catalog reloads before every decision, as the live runner reloads it
-  // per line — staff can add a product or alias while this replay waits on
-  // the model — with the earlier proposals layered on, and every read of
-  // the decision (classification, candidates, aliases, duplicate names)
-  // uses that one snapshot.
+  // active catalog reloads before every decision, as the live runner
+  // reloads it per line — staff can add a product or alias while this
+  // replay waits on the model.
   if (!state.allowedCategories) state.allowedCategories = await loadAllowedCategories(conn);
-  const catalogSnapshot = catalogWithProposals(await loadMatchCatalog(conn), state.proposals);
+  const catalog = await loadActiveCatalog(conn);
   state.llmCalls += 1;
   const outcome = await decideForTitle(conn, dispatchWithFallback, {
     rawTitle: line.item.title, quantity: line.item.quantity, vendor: line.vendor, siteOneFields,
-  }, { allowedCategories: state.allowedCategories, catalogSnapshot });
+  }, { allowedCategories: state.allowedCategories, ...catalog });
   const text = outcomeSummary(outcome);
   // A failed call is never reused: the next identical line asks again.
   if (outcome.llmFailed) {
@@ -377,6 +387,15 @@ async function agentProposal(conn, line, found, state) {
   recordProposal(state.proposals, { outcome, found, title: line.item.title });
   state.decided.set(question, text);
   return text;
+}
+
+// Would the receipt rules log this line once the earlier proposals' catalog
+// changes were all made? (Asked before this line's own proposal is added.)
+async function coveredByEarlierProposal(conn, line, state) {
+  const { products, aliases, containerSizes } = state.proposals;
+  if (line.forcedStatus || !(products.length || aliases.length || containerSizes.size)) return false;
+  const found = await classifyItem(line.item, conn, catalogWithProposals(await loadMatchCatalog(conn), state.proposals));
+  return found.status === 'logged';
 }
 
 // The shipment hand-off rule (receipt-processor.js handedOffBy) applied to
@@ -392,11 +411,13 @@ function recordLine(state, line, status) {
   state.recorded.set(shipmentId(line), rows);
 }
 
-// One line's row, in time order: the live lane's own checks first
+// One line's row, in queue order: the live lane's own checks first
 // (receipt-processor.js processReceiptLine records nothing for a line with
 // no shipment key, or on a shipment already handed to a person), then its
-// disposition against the catalog plus the changes proposed so far, then —
-// for a line it hands to the agent — the agent's proposal.
+// disposition against the saved catalog, then — for a line it hands to the
+// agent — whether an earlier proposal's catalog change would let the rules
+// take it instead, and the agent's own proposal for when that change
+// doesn't survive (see emptyProposals).
 async function replayLine(conn, line, state) {
   if (line.recordedStatus) {
     recordLine(state, line, line.recordedStatus);
@@ -406,14 +427,21 @@ async function replayLine(conn, line, state) {
   if (handedOffBy(state.recorded.get(shipmentId(line)) || [], line.email.id)) return settledRow(state, line, 'handed_to_person');
   const found = line.forcedStatus
     ? { status: line.forcedStatus, productId: null, product: null }
-    : await classifyItem(line.item, conn, catalogWithProposals(await loadMatchCatalog(conn), state.proposals));
+    : await classifyItem(line.item, conn);
   const disposition = lineDisposition(found, line, { agentOn: true });
   recordLine(state, line, disposition.status);
   if (disposition.status !== 'agent_pending') {
     return settledRow(state, line, disposition.status, disposition.product ? `matched: ${disposition.product.name}` : '');
   }
   state.handedToAgent += 1;
-  return { line, status: `agent (${found.status})`, text: await agentProposal(conn, line, found, state) };
+  const dependent = await coveredByEarlierProposal(conn, line, state);
+  const proposal = await agentProposal(conn, line, found, state);
+  if (!dependent) return { line, status: `agent (${found.status})`, text: proposal };
+  state.dependsOnEarlier += 1;
+  return {
+    line, status: `agent (${found.status})`,
+    text: `the receipt rules take it IF an earlier proposal's catalog change survives; otherwise: ${proposal}`,
+  };
 }
 
 function printReport(rows, state, siteOneFailures) {
@@ -429,7 +457,9 @@ function printReport(rows, state, siteOneFailures) {
   console.log(`${state.handedToAgent} line(s) the agent would take; ${state.llmCalls} model decision(s), each at most two paid provider calls (--limit=${state.limit} decisions).`);
   console.log('Proposals are what the agent would PROPOSE; the live apply step can still hold one under its own checks '
     + '(a nearby manual restock or count, the catalog changing underneath, an application unit already in use).');
-  console.log('Each line is matched and decided against the catalog plus the changes earlier proposals would make.');
+  console.log('Every line is decided against the saved catalog. '
+    + `${state.dependsOnEarlier} line(s) the receipt rules would take instead IF an earlier proposal's catalog change survives the live checks; `
+    + 'their decision above is for when it does not.');
   // An incomplete replay never passes for a complete one: each gap is
   // listed and the run exits 1.
   if (state.llmFailures) {
@@ -466,7 +496,7 @@ async function main() {
     // question (title, quantity, vendor, invoice evidence) to its answer.
     const state = {
       limit, tally: {}, handedToAgent: 0, llmCalls: 0, llmFailures: 0, allowedCategories: null,
-      decided: new Map(), recorded: new Map(), proposals: emptyProposals(),
+      decided: new Map(), recorded: new Map(), proposals: emptyProposals(), dependsOnEarlier: 0,
     };
     const rows = [];
     for (const line of lines) rows.push(await replayLine(conn, line, state));
