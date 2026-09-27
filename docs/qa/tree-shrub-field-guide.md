@@ -35,7 +35,7 @@ Normal completion records actual use. The shared reviewed-area calculation is
 in PR #5050; palm counts/individual canopy measurements and calibrated scoops
 must never be substituted with bed area or tank capacity.
 
-Dependencies: draft child of #5049 at `13daf654364553a8e5991c491379487cc882d963`;
+Dependencies: draft child of #5049 at `27af8bdd749b32e8ff77e479492f090d1640e354`;
 its latest removal of speculative seasonal/rate configuration is preserved.
 Only the consumed T&S identity metadata extends its name entries.
 The unchanged `mix-amount.js` is the exact
@@ -52,16 +52,18 @@ The owner merges; this lane stops before merge.
   Merit expansion: soil kit only. Talus hold and label link verified in place.
 - Screenshots reviewed in-session. Native attachment unavailable with installed
   gh 2.90.0; no screenshot attachments are claimed.
-- 220 focused server tests passed after reconciling #5049's latest changes.
-- 34 dispatch-route checks passed, including seven cases proving default-product
+- 259 focused server tests passed after reconciling #5049's latest changes,
+  including 34 dispatch-route checks and seven cases proving default-product
   reads enforce the existing technician assignment/status/date scope before
   resolving any product or application history. Administrators retain access.
-- A temporary merge with #5050 at `f856e4c5eca7e7c3876ec66b170c177567275d18`
-  passed 94 client checks and the production build, including brand/domain
+- A temporary merge with #5050 at `41a7e958a3014559aee7e84934e3242f8eb4d583`
+  passed 98 client checks and the production build, including brand/domain
   checks. Two combined-flow cases exercised automatic Snapshot suggestions
   with early/late reviewed bed measurements, blank initial doses, rate-driven
   totals, partial coverage and preserved manual actuals. No request wrote data.
   The temporary merge was aborted; this PR does not duplicate #5050's diff.
+  When integrating, keep both `buildSelectedProduct`'s `applicationMethodOverride`
+  parameter from #5049 and #5050's `productUsesServiceArea` classification.
 - All 1,602 pending migrations applied to this worktree's isolated Railway
   staging QA database. Four real PostgreSQL cases passed (and passed again
   after reconciliation): idempotent equipment/product seeds, dark/on behavior,
