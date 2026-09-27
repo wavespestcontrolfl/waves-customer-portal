@@ -118,19 +118,6 @@ const LOOKBACK_MS = 30 * 60 * 1000;
 // what actually decides eligibility.
 const MAX_CALL_DURATION_MS = 4 * 60 * 60 * 1000;
 
-// How long a terminal-but-unprocessed call gets before the sweep considers
-// it settled anyway (Codex #5019 r11 P2): a terminal Twilio status does not
-// mean call-recording-processor has finished — it may still create the
-// booking or send the estimate that keeps THIS promise, and alerting first
-// would say "we still owe them a quote" the instant after we sent it.
-// Sized off the processor's own early-process delay (CALL_PROC_EARLY_PROCESS_DELAY_MS,
-// twilio-voice-webhook.js, default 2 minutes) plus a margin generous enough
-// that an ordinarily slow pass (transcription + extraction) still finishes
-// well inside it, while a genuinely STUCK pipeline can't block this bell
-// forever — comfortably inside the 30-minute LOOKBACK_MS window, so a call
-// that settles late still has most of the window left to be considered.
-const PROCESSING_SETTLE_GRACE_MS = 10 * 60 * 1000;
-
 
 // What we promised, and when — the two facts the alert body must carry.
 // A HUMAN-typed commitment (source 'human') wasn't necessarily made ON the
@@ -161,6 +148,11 @@ function describePromise(row) {
 // verified this instant, reads exactly the same as "genuinely nothing
 // open" — either way, the next tick (still inside the sweep's own window)
 // just re-runs this same read from scratch.
+// findPromiseToRing's result when it could not verify the answer (a lookup
+// threw or a refresh was unverified): never a ring, and never read as
+// "nothing is owed" either — only a verified null retires a stale bell.
+const FIND_FAILED = Symbol('find_failed');
+
 async function findPromiseToRing(call, now) {
   // Every open Waves promise (callback / quote / time to come out) made on
   // an EARLIER call for this same contact number — direction-agnostic
@@ -214,6 +206,9 @@ async function findPromiseToRing(call, now) {
   // promise that was actually just kept.
   const callIds = [...new Set(unbooked.map((r) => r.call_log_id))];
   const unverified = new Set();
+  // A null below is "nothing owed" only when every candidate was verified;
+  // with a row excluded as unverified it may still be owed.
+  const nothingOwed = () => (unverified.size ? FIND_FAILED : null);
   for (const id of callIds) {
     const result = await commitments.refreshFulfillment(db, id).catch((err) => {
       logger.warn(`[promise-chaser-bell] fulfillment refresh failed for call ${id}: ${err.message}`);
@@ -223,7 +218,7 @@ async function findPromiseToRing(call, now) {
   }
   const live = await commitments.stillOpenIds(db, unbooked.map((r) => r.id), { now });
   let open = unbooked.filter((r) => live.has(r.id) && !unverified.has(r.call_log_id));
-  if (!open.length) return null;
+  if (!open.length) return nothingOwed();
 
   // followedUpIds needs each row's call-ended time (promisedAt's basis) —
   // the same merge the SLA pager itself does before calling it.
@@ -255,18 +250,18 @@ async function findPromiseToRing(call, now) {
     }
   } catch (err) {
     logger.warn(`[promise-chaser-bell] renewal lookup failed: ${err.message}`);
-    return null;
+    return FIND_FAILED;
   }
   open = open.filter((r) => !unknown.has(r.id));
-  if (!open.length) return null;
+  if (!open.length) return nothingOwed();
   const renewedFloors = new Map([...renewedById].filter(([, at]) => at));
   const followed = await followedUpIds(db, open, { renewed: renewedFloors }).catch((err) => {
     logger.warn(`[promise-chaser-bell] follow-up lookup failed: ${err.message}`);
     return null;
   });
-  if (followed === null) return null;
+  if (followed === null) return FIND_FAILED;
   open = open.filter((r) => !followed.has(r.id));
-  if (!open.length) return null;
+  if (!open.length) return nothingOwed();
 
   // A callback that arrived BEFORE a promise's own renewal (staff reopened
   // or restated it) cannot be "about" that renewal — it happened before
@@ -312,7 +307,7 @@ async function findPromiseToRing(call, now) {
     if (boundaryMs >= call.created_at.getTime()) continue;
     withRenewal.push({ ...r, __renewedAt: renewedAt, __obligationAtMs: boundaryMs });
   }
-  if (!withRenewal.length) return null;
+  if (!withRenewal.length) return nothingOwed();
 
   // The promise the caller has waited longest for — by its own EFFECTIVE
   // obligation time (Codex #5019 r9 P2: the SAME boundaryMs just computed
@@ -334,7 +329,16 @@ async function findPromiseToRing(call, now) {
 // dedupeKey before dispatch) is the only durable state IT produces.
 async function ringForCall(call, now = new Date()) {
   const found = await findPromiseToRing(call, now);
-  if (!found) return false;
+  if (found === FIND_FAILED) return false;
+  if (!found) {
+    // Verified: nothing is owed on this callback any more. Retire any bell
+    // it still has showing — including one whose post-dispatch retirement
+    // failed on an earlier tick (Codex #5019 r20 P2); every tick inside the
+    // sweep window retries it.
+    await require('./notification-service').supersedeMissedCallAdmin({ callLogId: call.id, triggerKey: 'promise_chaser' })
+      .catch((err) => logger.warn(`[promise-chaser-bell] failed to retire a stale bell for call ${call.id}: ${err.message}`));
+    return false;
+  }
   const { promise, what, when, renewedAt } = found;
 
   // A callback staff RE-OPENED or edited after it last rang is a NEW
@@ -621,6 +625,7 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
   // cross-file reuse in this sweep (notification-triggers.js, below) is
   // lazy for the same reason. Cached by Node after the first tick either way.
   const settledStatuses = [...require('./call-recording-processor').COMPLETED_STATUSES];
+  const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
   let rang = 0;
   let cursor = null;
   for (;;) {
@@ -663,13 +668,13 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
       // own COMPLETED_STATUSES (reused, not re-derived — processed /
       // voicemail / spam; the retry states extraction_failed/no_transcription
       // are deliberately NOT here, matching the processor's own posture:
-      // they are unfinished work, not done), OR the call ended long enough
-      // ago (PROCESSING_SETTLE_GRACE_MS) that a stuck pipeline can no
-      // longer hold this bell hostage — a bounded safety valve, not a
-      // second window.
+      // they are unfinished work, not done), OR its extraction retries are
+      // exhausted, so the processor will not pick it up again. No elapsed-
+      // time valve (Codex #5019 r20 P2): every other unfinished state can
+      // still be retried and keep the promise, so it never rings.
       .whereRaw(`(processing_status IN (${settledStatuses.map(() => '?').join(', ')})
-        OR (COALESCE(bridged_at, created_at) + make_interval(secs => COALESCE(duration_seconds, 0))) <= ?)`,
-        [...settledStatuses, new Date(now.getTime() - PROCESSING_SETTLE_GRACE_MS)])
+        OR (processing_status = 'extraction_failed' AND COALESCE(extraction_attempts, 0) >= ?))`,
+        [...settledStatuses, CALL_EXTRACTION_MAX_ATTEMPTS])
       // Eligibility, not the window, is what keeps a dark-period call from
       // ringing (see module docstring) — a call the /voice webhook did not
       // stamp promise_chaser_eligible: true at arrival is never considered,

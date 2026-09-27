@@ -492,14 +492,24 @@ const OUR_NUMBER = '+19415550100';
       expect(await sweepPromiseChasers()).toBe(1);
     });
 
-    test('a call stuck in processing past the grace period rings anyway — a wedged pipeline cannot block this bell forever', async () => {
+    test.each([
+      ['processing', 0], ['extraction_failed', 0], ['no_transcription', 0],
+    ])('a call still retryable (%s) never rings, however long ago it ended — a later retry may keep the promise (Codex #5019 r20 P2)', async (status, attempts) => {
       const earlier = callRow(240);
       const commitment = commitmentRow(earlier.id);
-      // Ended ~10.5 minutes ago (past PROCESSING_SETTLE_GRACE_MS's 10
-      // minutes), still comfortably inside the 30-minute LOOKBACK_MS
-      // window — never reached a completed processing_status.
-      const stuck = callRow(12, { processing_status: 'processing' });
+      const stuck = callRow(12, { processing_status: status, extraction_attempts: attempts });
       await mockConn('call_log').insert([earlier, stuck]);
+      await mockConn('call_commitments').insert(commitment);
+
+      expect(await sweepPromiseChasers()).toBe(0);
+    });
+
+    test('a call whose extraction retries are exhausted is settled and rings (Codex #5019 r20 P2)', async () => {
+      const { CALL_EXTRACTION_MAX_ATTEMPTS } = require('../config/call-extraction-retry');
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const exhausted = callRow(12, { processing_status: 'extraction_failed', extraction_attempts: CALL_EXTRACTION_MAX_ATTEMPTS });
+      await mockConn('call_log').insert([earlier, exhausted]);
       await mockConn('call_commitments').insert(commitment);
 
       expect(await sweepPromiseChasers()).toBe(1);
@@ -843,6 +853,43 @@ const OUR_NUMBER = '+19415550100';
         return { bellWritten: false, push: { sent: 0, skipped: 'superseded_before_push' } };
       });
       expect(await sweepPromiseChasers()).toBe(0);
+    });
+
+    test('a bell whose post-dispatch retirement failed is retired on a later tick once nothing is owed (Codex #5019 r20 P2)', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+      // The state a failed retirement leaves: an unread bell, no delivery
+      // fact, and a promise staff have since closed.
+      await mockConn('notifications').insert({
+        id: randomUUID(), recipient_type: 'admin', category: 'missed_call', title: 'fixture',
+        metadata: { triggerKey: 'promise_chaser', dedupeKey: `promise_chaser:${commitment.id}:0:x`, payload: { callLogId: back.id, commitmentId: commitment.id } },
+      });
+      await mockConn('call_commitments').where({ id: commitment.id }).update({ status: 'fulfilled' });
+
+      expect(await sweepPromiseChasers()).toBe(0);
+      const bell = await mockConn('notifications').whereRaw("metadata->'payload'->>'callLogId' = ?", [back.id]).first();
+      expect(bell.read_at).not.toBeNull();
+    });
+
+    test('an unverifiable lookup never retires a bell', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+      await mockConn('notifications').insert({
+        id: randomUUID(), recipient_type: 'admin', category: 'missed_call', title: 'fixture',
+        metadata: { triggerKey: 'promise_chaser', dedupeKey: `promise_chaser:${commitment.id}:0:x`, payload: { callLogId: back.id, commitmentId: commitment.id } },
+      });
+      jest.spyOn(commitments, 'refreshFulfillment').mockRejectedValue(new Error('synthetic outage'));
+
+      expect(await sweepPromiseChasers()).toBe(0);
+      const bell = await mockConn('notifications').whereRaw("metadata->'payload'->>'callLogId' = ?", [back.id]).first();
+      expect(bell.read_at).toBeNull();
+      logger.warn.mockClear();
     });
 
     test('a failed fulfillment refresh inside the live recheck blocks the ring — never rings on unverifiable state', async () => {
