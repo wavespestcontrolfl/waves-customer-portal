@@ -303,7 +303,10 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   const OTHER_EST = 'bbbb2222-cc33-4d44-8e55-ffff6666aaaa';
   const PHONE_EST = 'cccc3333-dd44-4e55-8f66-aaaa7777bbbb';
   const MISMATCH_EST = 'dddd4444-ee55-4f66-8a77-bbbb8888cccc';
-  const CUST = { id: 'cust-1', phone: '(941) 555-0100', email: 'ada@example.com', city: 'Sarasota' };
+  const CUST = {
+    id: 'cust-1', phone: '(941) 555-0100', email: 'ada@example.com', city: 'Sarasota',
+    latitude: LAT, longitude: LNG,
+  };
   const ESTIMATES = {
     [EST_ID]: { id: EST_ID, source: 'admin', customer_id: 'cust-1', status: 'sent' },
     // someone ELSE's estimate — linked to a different customer
@@ -315,6 +318,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   };
   const SENTINEL = 'stop-after-scheduled-services-insert';
   let capturedScheduledInsert;
+  let fencedCustomer;
 
   function trxTable(table) {
     if (table === 'self_booked_appointments') {
@@ -358,7 +362,12 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       // compare passes and the flow reaches the insert.
       // …and the county-verdict stored-pair read (#4667: email + phone of
       // the resolved customer, before the comms fence) — same row.
-      const b = { where: () => b, whereNull: () => b, first: async () => CUST };
+      const b = {
+        where: () => b,
+        whereNull: () => b,
+        forShare: () => b,
+        first: async () => fencedCustomer,
+      };
       return b;
     }
     if (table === 'estimates') {
@@ -455,6 +464,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   beforeEach(() => {
     jest.clearAllMocks();
     capturedScheduledInsert = undefined;
+    fencedCustomer = { ...CUST };
     mockOwnershipTables();
   });
 
@@ -493,6 +503,53 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     });
     expect(row.source_estimate_id).toBe(PHONE_EST);
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  test('a customer pin moved to another signed-offer grid cell under the booking fence requires a fresh slot', async () => {
+    fencedCustomer = { ...CUST, latitude: 27.41, longitude: -82.61 };
+    const sig = mintSlotOfferField(offerPayload());
+
+    await expect(createSelfBooking(confirmPayload(sig))).resolves.toEqual({
+      ok: false,
+      status: 409,
+      error: 'Your address just changed — please pick a time again.',
+      code: 'LOCATION_CHANGED_RETRY',
+    });
+    expect(capturedScheduledInsert).toBeUndefined();
+  });
+
+  test('an exact pin correction inside the signed grid drives both commit-time route checks for the unstamped visit', async () => {
+    const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+    const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
+    const freshPin = { lat: 27.339, lng: -82.531 };
+    fencedCustomer = { ...CUST, latitude: freshPin.lat, longitude: freshPin.lng };
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const occupancy = require('../services/scheduling/occupancy');
+    const capacitySpy = jest.spyOn(arrivalRoute, 'checkArrivalPlacement')
+      .mockResolvedValue({ feasible: true, routeOrder: ['__candidate__'] });
+    const conflictSpy = jest.spyOn(occupancy, 'findConflictingVisits').mockResolvedValue([]);
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+    try {
+      await runToScheduledInsert();
+      expect(conflictSpy).toHaveBeenCalledWith(expect.objectContaining({
+        travel: expect.objectContaining(freshPin),
+      }));
+      expect(capacitySpy).toHaveBeenCalledWith(expect.objectContaining({
+        prospective: expect.objectContaining(freshPin),
+      }));
+      // The row has no visit pin, so dispatch inherits this same fenced
+      // customer pin; the capacity simulation cannot diverge from it.
+      expect(capturedScheduledInsert).not.toHaveProperty('lat');
+      expect(capturedScheduledInsert).not.toHaveProperty('lng');
+    } finally {
+      conflictSpy.mockRestore();
+      capacitySpy.mockRestore();
+      if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+      if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+      else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
+    }
   });
 
   test('a customer-less estimate with a NON-matching contact books UNLINKED with a warn', async () => {

@@ -2540,6 +2540,14 @@ async function createSelfBooking(payload = {}) {
       Number.isFinite(offerLat) ? offerLat : null,
       Number.isFinite(offerLng) ? offerLng : null,
     );
+    // The signed coordinates above prove what the availability builder
+    // offered. The visit itself is unstamped, though, so dispatch inherits
+    // the customer row's LIVE pin. Reload and fence that effective pin inside
+    // the booking transaction before any conflict/capacity simulation; a pin
+    // corrected after the offer must never leave those checks modeling the
+    // stale echo while the inserted visit routes to the corrected location.
+    let bookingLat = Number.isFinite(offerLat) ? offerLat : null;
+    let bookingLng = Number.isFinite(offerLng) ? offerLng : null;
     // An empty serviceKey can never have been offered by the funnel (both
     // public offer routes derive a key the same way) — refuse outright so a
     // sig harvested from a non-redeeming builder call (reschedule/voice
@@ -3153,7 +3161,8 @@ async function createSelfBooking(payload = {}) {
       await lockCustomerComms(trx, custId);
       if (custId) {
         const freshBookingCustomer = await trx('customers')
-          .where({ id: custId }).first(...COMMS_FINGERPRINT_COLS);
+          .where({ id: custId }).forShare()
+          .first(...COMMS_FINGERPRINT_COLS, 'latitude', 'longitude');
         if (!freshBookingCustomer || commsFingerprint(freshBookingCustomer) !== commsFingerprint(preFenceCustomer)) {
           throw Object.assign(new Error('Your account details just changed — please refresh and book again.'), {
             statusCode: 409,
@@ -3161,14 +3170,29 @@ async function createSelfBooking(payload = {}) {
             code: 'CUSTOMER_CHANGED_RETRY',
           });
         }
+        const freshLat = freshBookingCustomer.latitude != null ? Number(freshBookingCustomer.latitude) : NaN;
+        const freshLng = freshBookingCustomer.longitude != null ? Number(freshBookingCustomer.longitude) : NaN;
+        bookingLat = Number.isFinite(freshLat) ? freshLat : null;
+        bookingLng = Number.isFinite(freshLng) ? freshLng : null;
+        // Public offers bind the pin on the same rounded grid used by the
+        // availability response. A move to another grid cell invalidates the
+        // offer; an exact correction inside the same cell is safe because the
+        // live exact pin below drives every commit-time route check and the
+        // customer row is FOR SHARE-fenced through the unstamped insert.
+        if (!callbackVisit && bookingOfferLocationKey(bookingLat, bookingLng) !== offerLocationKey) {
+          throw Object.assign(new Error('Your address just changed — please pick a time again.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'LOCATION_CHANGED_RETRY',
+          });
+        }
         // callbackVisit.expectedLocation (consultation page only, Codex #4737
         // r5 P1): the location the caller validated the slot for must still be
         // the customer's, checked under this fence — another commit can have
         // replaced the address after the caller's own lock released.
         if (callbackVisit?.expectedLocation) {
-          const pin = await trx('customers').where({ id: custId }).first('latitude', 'longitude');
           const same = (a, b) => a != null && Math.abs(parseFloat(a) - Number(b)) < 1e-6;
-          if (!pin || !same(pin.latitude, callbackVisit.expectedLocation.lat) || !same(pin.longitude, callbackVisit.expectedLocation.lng)) {
+          if (!same(bookingLat, callbackVisit.expectedLocation.lat) || !same(bookingLng, callbackVisit.expectedLocation.lng)) {
             throw Object.assign(new Error('Your address just changed — please pick a time again.'), {
               statusCode: 409,
               isOperational: true,
@@ -3565,8 +3589,8 @@ async function createSelfBooking(payload = {}) {
         // Travel gap (GATE_SLOT_TRAVEL_GAP): the booking's own pin, resolved
         // for the offer location key above; NaN → null → buffer-only.
         travel: {
-          lat: Number.isFinite(offerLat) ? offerLat : null,
-          lng: Number.isFinite(offerLng) ? offerLng : null,
+          lat: bookingLat,
+          lng: bookingLng,
           // Same credit buildBookingAvailability offered this window under.
           // expectedIdentity: consultation page only (#4737 r1 P2).
           expectedMinutes: await bookingExpectedMinutes(trx, serviceKey, duration, callbackVisit?.expectedIdentity || null),
@@ -3590,7 +3614,7 @@ async function createSelfBooking(payload = {}) {
       const capacityCommitFit = await assertBookCapacityCommit({
         trx, technicianId: technician_id, date: slotDateStr,
         windowStart: slot_start, windowEnd: endTime, durationMinutes: duration,
-        lat: offerLat, lng: offerLng, serviceType: resolvedServiceType,
+        lat: bookingLat, lng: bookingLng, serviceType: resolvedServiceType,
       });
 
       const [bookingRow] = await trx('self_booked_appointments').insert({
@@ -4738,8 +4762,8 @@ async function createSelfBooking(payload = {}) {
               // extension can eat the gap without overlapping the next stop
               // (GH codex #3803 r3 P1). Same booking pin as the commit probe.
               travel: {
-                lat: Number.isFinite(offerLat) ? offerLat : null,
-                lng: Number.isFinite(offerLng) ? offerLng : null,
+                lat: bookingLat,
+                lng: bookingLng,
               },
             });
             if (extensionClashes.length === 0) {
@@ -4866,7 +4890,7 @@ async function createSelfBooking(payload = {}) {
               // stamped pin (the seeder copies the parent's lat/lng), else
               // the booking pin the parent commit measured with — the
               // mirrored guard every commit surface carries (pre-push P1).
-              travel: seededRowPin(row, offerLat, offerLng),
+              travel: seededRowPin(row, bookingLat, bookingLng),
             });
             if (clashes.length > 0) {
               // Demote the colliding occurrence to the documented
