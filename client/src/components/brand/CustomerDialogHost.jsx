@@ -74,7 +74,7 @@ export default function CustomerDialogHost() {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        padding: 20,
+        padding: 'calc(20px + env(safe-area-inset-top, 0px)) calc(20px + env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) calc(20px + env(safe-area-inset-left, 0px))',
         background: 'rgba(15,23,42,0.48)',
         backdropFilter: 'blur(6px)',
       }}

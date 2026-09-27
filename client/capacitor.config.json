@@ -3,7 +3,7 @@
   "appName": "Waves",
   "webDir": "dist",
   "ios": {
-    "contentInset": "always",
+    "contentInset": "never",
     "backgroundColor": "#E5EFF7"
   },
   "server": {
