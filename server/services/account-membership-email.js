@@ -3,7 +3,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { isTrackTokenLive } = require('./track-token-expiry');
-const { getPrimaryContact, getInvoiceEmailRecipients } = require('./customer-contact');
+const { getPrimaryContact } = require('./customer-contact');
+const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
+const { billingEmailRecipient, billingEmailRefusal } = require('./billing-email-sender');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { currency } = require('./email-template');
@@ -155,6 +157,7 @@ async function sendTemplate({
   triggerEventId,
   metadata = {},
   contactOverride = null,
+  billingAuthorityInput = null,
 }) {
   const recipientCustomer = await loadCustomer(recipientCustomerId);
   if (!recipientCustomer) return { ok: false, skipped: true, reason: 'customer_not_found' };
@@ -181,8 +184,12 @@ async function sendTemplate({
   // suppressionGroupKey below is TRANSACTIONAL_GROUP, which bypasses
   // SendGrid-side suppression groups by design). A lookup failure is treated
   // the same as opted-out: it must not read as "no opt-out" on a DB blip.
+  // A billing email (billingAuthorityInput set) leaves the switch, the billing
+  // choice and the recipient to the shared billing email authority (owner
+  // ruling 2026-09-27): read by the caller, and again at the provider handoff
+  // below.
   let emailOptedOut = false;
-  try {
+  if (!billingAuthorityInput) try {
     const prefs = await db('notification_prefs').where({ customer_id: recipientCustomer.id }).first();
     emailOptedOut = prefs ? prefs.email_enabled === false : false;
   } catch (err) {
@@ -233,6 +240,7 @@ async function sendTemplate({
     ...payload,
   };
 
+  const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
@@ -248,7 +256,25 @@ async function sendTemplate({
         ...categories,
       ],
       suppressionGroupKey: TRANSACTIONAL_GROUP,
+      ...(billingAuthorityInput ? {
+        withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
+          input: billingAuthorityInput, recipientEmail: contact.email, templateKey, dispatch, state,
+        }),
+      } : {}),
     });
+
+    if (state.boundaryBlock) {
+      const refusal = billingEmailRefusal(state.boundaryBlock);
+      await logLifecycleEmailAttempt({
+        customerId: recipientCustomer.id,
+        templateKey,
+        eventType,
+        status: refusal.blocked ? 'blocked' : 'failed',
+        failureReason: refusal.reason,
+        metadata,
+      });
+      return refusal;
+    }
 
     if (result.deduped) {
       return {
@@ -548,17 +574,15 @@ async function sendResolutionAccepted({ customerId, caseId, reference, summary, 
   });
 }
 
+function previsitAuthorityInput(customerId) {
+  return { customerId, channel: 'email', metadata: { billingDeliveryCategory: 'billing' } };
+}
+
 async function resolvePrevisitBalanceEmailRecipient(customerId) {
-  const customer = await loadCustomer(customerId);
-  if (!customer) return { recipient: null, reason: 'customer_not_found' };
-  let prefs = {};
-  try {
-    prefs = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
-  } catch { prefs = {}; }
-  if (prefs.email_enabled === false) return { recipient: null, reason: 'email_disabled' };
-  const [recipient] = getInvoiceEmailRecipients(customer, prefs).filter((r) => isEmailLike(r.email));
-  if (!recipient?.email) return { recipient: null, reason: 'missing_email' };
-  return { recipient, reason: null };
+  const { recipient, to, refusal } = await billingEmailRecipient(
+    previsitAuthorityInput(customerId), 'account-membership-email');
+  if (refusal) return { recipient: null, reason: refusal.reason, refusal };
+  return { recipient: { ...recipient, email: to }, reason: null };
 }
 
 async function sendPrevisitBalanceReminder({
@@ -569,8 +593,8 @@ async function sendPrevisitBalanceReminder({
   billingUrl,
   idempotencyKey,
 } = {}) {
-  const { recipient, reason } = await resolvePrevisitBalanceEmailRecipient(customerId);
-  if (!recipient) return { ok: false, skipped: true, reason };
+  const { recipient, refusal } = await resolvePrevisitBalanceEmailRecipient(customerId);
+  if (!recipient) return refusal;
   return sendTemplate({
     contactOverride: recipient,
     customerId,
@@ -585,6 +609,7 @@ async function sendPrevisitBalanceReminder({
     idempotencyKey,
     categories: ['previsit_balance_reminder'],
     metadata: { amount: clean(amount), visit_date: clean(visitDate) },
+    billingAuthorityInput: previsitAuthorityInput(customerId),
   });
 }
 
