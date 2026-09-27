@@ -124,6 +124,14 @@ describe('custom action credential screening', () => {
     'Applied override 24-0-11 opened the rear gate',
     'Broadcast granular 24-0-11 unlocked the side gate',
     'Broadcast granular 24-0-11 to unlock the side gate',
+    'Opened the rear gate this morning with 2468 ml',
+    'Unlocked the side door earlier today using 8842 oz',
+    'Using 100 ml to open the rear gate',
+    'Using 100 ml at the rear gate to unlock it',
+    'Opened rear gate on 2468',
+    'Opened rear gate on 9/27/2026 with code 2468',
+    'Use unit2468 at the rear gate',
+    'USE 24-0-11-BEFORE AT THE REAR GATE',
   ])('rejects recorded access credentials: %s', (action) => {
     expect(customerCopyViolations(action)).toContain('access_code');
   });
@@ -160,6 +168,15 @@ describe('custom action credential screening', () => {
     'APPLIED LESCO 24-0-11 THEN UNLOCKED THE REAR GATE',
     'Broadcast granular 24-0-11 near the rear gate',
     'Spread slow-release granular 24-0-11 near the rear gate',
+    'Using 100 ml at the rear gate, we treated the hinge area',
+    'Using 100ml at the rear gate, we treated the hinge area',
+    'Opened rear gate on 9/27/2026',
+    'Opened rear gate on 2026-09-27',
+    'Opened gate and treated unit 2468',
+    'Opened gate and treated unit2468',
+    'APPLIED LESCO 24-0-11 BEFORE OPENING THE REAR GATE',
+    'APPLIED LESCO 24-0-11 AFTER OPENING THE REAR GATE',
+    'APPLIED LESCO 24-0-11 WHILE OPENING THE REAR GATE',
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
   });
@@ -187,6 +204,14 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Applied override 24-0-11 opened the rear gate',
     'Broadcast granular 24-0-11 unlocked the side gate',
     'Broadcast granular 24-0-11 to unlock the side gate',
+    'Opened the rear gate this morning with 2468 ml',
+    'Unlocked the side door earlier today using 8842 oz',
+    'Using 100 ml to open the rear gate',
+    'Using 100 ml at the rear gate to unlock it',
+    'Opened rear gate on 2468',
+    'Opened rear gate on 9/27/2026 with code 2468',
+    'Use unit2468 at the rear gate',
+    'USE 24-0-11-BEFORE AT THE REAR GATE',
   ])('does not publish disguised access instructions: %s', (instruction) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${instruction}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toBeNull();
@@ -210,6 +235,22 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'APPLIED LESCO 24-0-11 THEN UNLOCKED THE REAR GATE',
     'Broadcast granular 24-0-11 near the rear gate',
   ])('publishes a qualified fertilizer analysis in reviewed report copy: %s', (action) => {
+    const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${action}.\nWHAT WE FOUND\nLight activity near the lanai.`);
+    expect(parsed.body).toContain(action);
+    expect(parsed.violations).toEqual([]);
+  });
+
+  test.each([
+    'Using 100 ml at the rear gate, we treated the hinge area',
+    'Using 100ml at the rear gate, we treated the hinge area',
+    'Opened rear gate on 9/27/2026',
+    'Opened rear gate on 2026-09-27',
+    'Opened gate and treated unit 2468',
+    'Opened gate and treated unit2468',
+    'APPLIED LESCO 24-0-11 BEFORE OPENING THE REAR GATE',
+    'APPLIED LESCO 24-0-11 AFTER OPENING THE REAR GATE',
+    'APPLIED LESCO 24-0-11 WHILE OPENING THE REAR GATE',
+  ])('publishes bounded material, date, unit-id, and fertilizer details: %s', (action) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${action}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toContain(action);
     expect(parsed.violations).toEqual([]);

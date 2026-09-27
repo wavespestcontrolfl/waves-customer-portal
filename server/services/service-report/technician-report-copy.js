@@ -67,9 +67,6 @@ const REPORT_ACCESS_CODE_RES = [
   // ≥3 digits so counts ("2 doors") never trip
   /\b\d{3,8}\b[^\n.!?]{0,20}\b(?:open(?:s|ing)?|unlock(?:s|ing)?|access(?:es|ing)?)\b[^\n.!?]{0,20}\b(?:gate|door|garage|entry|lock)\b/i,
   /\b(?:open(?:s|ing)?|unlock(?:s|ing)?|access(?:es|ing)?|enter(?:s|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b[^\n.!?]{0,15}\b\d{3,8}\b/i,
-  // Past actions also carry credentials; decimals and explicit dimension units
-  // remain work details. Bare "in" is a preposition, not evidence of inches.
-  /\b(?:opened|unlocked|accessed|entered)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b[^\n.!?]{0,15}\b\d{3,8}(?!\.\d)\b(?!\s*(?:feet|foot|ft|inch(?:es)?|yards?|yds?|meters?|metres?|sq|square|percent|%|min(?:utes?)?|h(?:ou)?rs?|days?|weeks?|months?|years?|dollars?|linear|gallons?|oz|ounces?|pounds?|lbs?)\b)/i,
   // Shorthand device credentials ("rear gate 2468", "rear gate #2468",
   // "rear gate A2468") need no linking verb. Direct adjacency and the unit
   // exclusion preserve treatment measurements.
@@ -184,7 +181,7 @@ const REPORT_CREDENTIAL_LEADING_AFFIX_GROUP = String.raw`(?!(?:[Gg][Aa][Tt][Ee]|
 // surrounding detector rather than being absorbed as part of the token.
 // Uppercase relation/action words are context too: consuming "AT THE SIDE"
 // or "TO OPEN THE" would erase the link between a credential and its device.
-const REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP = String.raw`(?!(?:AND|THEN|OR|BUT|AT|FOR|TO|ON|IN|INTO|NEAR|BY|AS|WITH|USING|VIA|IS|WAS|WERE|REMAINS?|STAYS?|BECOMES?|OPEN(?:S|ED|ING)?|UNLOCK(?:S|ED|ING)?|ACCESS(?:ES|ED|ING)?|ENTER(?:S|ED|ING)?)\b)(?=[A-Z0-9#*]{1,12}(?![A-Za-z0-9#*]))(?=[A-Z0-9#*]*[A-Z#*])[A-Z0-9#*]{1,12}`;
+const REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP = String.raw`(?!(?:AND|THEN|OR|BUT|BEFORE|AFTER|WHILE|WHEN|DURING|SINCE|UNTIL|UNLESS|IF|AT|FOR|TO|ON|IN|INTO|NEAR|BY|AS|WITH|USING|VIA|IS|WAS|WERE|REMAINS?|STAYS?|BECOMES?|OPEN(?:S|ED|ING)?|UNLOCK(?:S|ED|ING)?|ACCESS(?:ES|ED|ING)?|ENTER(?:S|ED|ING)?)\b)(?=[A-Z0-9#*]{1,12}(?![A-Za-z0-9#*]))(?=[A-Z0-9#*]*[A-Z#*])[A-Z0-9#*]{1,12}`;
 // A suffix joined by a hyphen is part of the credential token even when it
 // is lowercase ("24-68-ab"). Keep the uppercase-only rule for whitespace:
 // lowercase words separated by spaces are ordinary surrounding prose.
@@ -221,6 +218,39 @@ const REPORT_MEASUREMENT_QUANTITY_RE = new RegExp(
   String.raw`\b(?:\d+(?:\.\d+)?(?:\s*[-–—]\s*\d+(?:\.\d+)?)?|\d(?:[\s-]+\d){2,7})\s*${REPORT_MEASUREMENT_UNIT_TEXT}(?=\s|[.,;:!?)]|$)`,
   'gi',
 );
+const REPORT_MEASUREMENT_AFTER_NUMBER_RE = new RegExp(String.raw`^\s*${REPORT_MEASUREMENT_UNIT_TEXT}\b`, 'i');
+
+// Past access actions can legitimately be followed by a service date or a
+// labeled property/unit identifier. Inspect each bounded numeric candidate so
+// those structured values stay legal without exempting an unlabeled number.
+const REPORT_PAST_ACCESS_DEVICE_RE = /\b(?:opened|unlocked|accessed|entered)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b((?:\.(?=\d)|[^\n.!?])*)/gi;
+const REPORT_PAST_ACCESS_NUMBER_RE = /\b\d{3,8}\b(?!\.\d)/g;
+
+function isStructuredDateNumber(value, index, length) {
+  const before = value.slice(Math.max(0, index - 14), index);
+  const after = value.slice(index + length, index + length + 14);
+  return /(?:^|\b)\d{1,4}\s*[/-]\s*\d{1,2}\s*[/-]\s*$/.test(before)
+    || /^\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{1,4}\b/.test(after);
+}
+
+function containsPastAccessCredential(text) {
+  const value = String(text || '');
+  for (const relationship of value.matchAll(REPORT_PAST_ACCESS_DEVICE_RE)) {
+    const tail = relationship[1];
+    const tailOffset = relationship.index + relationship[0].length - tail.length;
+    for (const numeric of tail.matchAll(REPORT_PAST_ACCESS_NUMBER_RE)) {
+      if (numeric.index > 20) break;
+      const index = tailOffset + numeric.index;
+      const before = value.slice(Math.max(0, index - 16), index);
+      const after = value.slice(index + numeric[0].length);
+      if (/\bunit\s*$/i.test(before)) continue;
+      if (isStructuredDateNumber(value, index, numeric[0].length)) continue;
+      if (REPORT_MEASUREMENT_AFTER_NUMBER_RE.test(after)) continue;
+      return true;
+    }
+  }
+  return false;
+}
 
 // N-P-K fertilizer analyses use the same separated-number surface as an
 // access token. Preserve only a complete three-part analysis directly governed
@@ -315,6 +345,11 @@ function accessCodeDetectionText(text) {
     const digits = token.replace(/\D/g, '');
     const credentialShape = /[A-Za-z#*]/.test(token) || /[\s–—-]/.test(token);
     if (!credentialShape || digits.length < 3 || digits.length > 8) return match;
+    // A labeled property/unit id is not an access token. Keep the label in the
+    // detection text so normalization cannot collapse "treated unit 2468" to
+    // the false shorthand "gate 2468". Explicit code/PIN nouns were already
+    // screened on the original text above.
+    if (/(?:^|\s)unit\s*\d/i.test(token)) return match;
     const compactDevice = token.match(/^(?:(rear|side|front|back|main|north|south|east|west)[\s–—-]*)?(gate|door|garage|entry|keypad|lockbox|alarm)(?=[\d#*\s–—-]|$)/i);
     if (compactDevice) {
       const direction = compactDevice[1] ? `${compactDevice[1]} ` : '';
@@ -334,22 +369,28 @@ function accessCodeDetectionText(text) {
 // "Opened rear gate, applied 100 ml around hinges" has no access connector.
 const REPORT_DIRECT_ACCESS_CODE_RES = [
   /\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,
+  new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b(?:\s+(?!(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|broadcast(?:ed|ing)?|spread(?:ing)?|distribut(?:e|ed|ing))\b)[a-z][a-z'’\-]*){1,5}\s+(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b`, 'i'),
   new RegExp(String.raw`\b\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:(?:to|for)\s+)?(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,20}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b`, 'i'),
-  new RegExp(String.raw`\b(?:use|using|enter|entering|type|typing|press|pressing|punch(?:ing)?|input(?:ting)?|try|trying)\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b`, 'i'),
+  new RegExp(String.raw`\b(?:enter|entering|type|typing|press|pressing|punch(?:ing)?|input(?:ting)?|try|trying)\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b`, 'i'),
+  new RegExp(String.raw`\b(?:use|using)\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,20}\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b`, 'i'),
+  /\b(?:use|using|enter|entering|type|typing|press|pressing|input(?:ting)?|try|trying)\s+unit\s*\d{3,8}\b[^\n.!?]{0,12}\b(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b/i,
   /\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,20}\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,
 ];
+const REPORT_POSITIONAL_USE_CODE_RE = /\b(?:use|using)\s+\d{3,8}\b\s+(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b/i;
 
 function containsReportAccessCode(text) {
   const raw = String(text || '');
   if (containsExplicitNumericCredential(raw)) return true;
+  if (containsPastAccessCredential(raw)) return true;
   // Direct token-to-device relationships outrank fertilizer context. Check the
   // original copy before an application qualifier can mask an N-P-K-shaped
   // credential ("Applied override 24-0-11 to open the rear gate").
   const originalRelationship = accessCodeDetectionText(raw);
-  if (REPORT_DIRECT_ACCESS_CODE_RES.some((re) => re.test(originalRelationship))) return true;
+  if (REPORT_DIRECT_ACCESS_CODE_RES.some((re) => re.test(raw) || re.test(originalRelationship))) return true;
   const fertilizerScreened = maskFertilizerAnalyses(raw);
   const value = fertilizerScreened.replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]');
   const normalized = accessCodeDetectionText(value);
+  if (REPORT_POSITIONAL_USE_CODE_RE.test(normalized)) return true;
   // Normalization adds grouped/affixed spellings; it must never remove an
   // access relationship that the original, measurement-screened copy exposes.
   return REPORT_ACCESS_CODE_RES.some((re) => re.test(value) || re.test(normalized));
