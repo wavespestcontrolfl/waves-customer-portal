@@ -3094,6 +3094,63 @@ restore alone admits a `send_failed` row); a failed restore is a durable
 Treat the gate, the generic-404
 indistinguishability, the fail-closed reprice, the explicit membership
 identity, and the no-comms contract as security-critical.)
+`/api/public/blog-read-depth` (write; anonymous, cookie-free blog
+scroll-depth counter — owner-approved 2026-09-27, "E2: cookie-free
+read-depth counts", extending the 2026-07-16 exception that lets
+Cloudflare's cookie-free counter run before cookie consent. The hub and
+every spoke blog post fire `fetch(url, { method: 'POST', body, keepalive:
+true, credentials: 'omit', mode: 'no-cors' })` at 25/50/75/100% scrolled and
+at the post's "keep reading" row; the response is opaque to the browser by
+design, so it matters only for tests/abuse posture. **Gated behind
+GATE_BLOG_READ_DEPTH** — read via `isEnabled('blogReadDepth')`
+(server/config/feature-gates.js); while dark, EVERY request gets the SAME
+generic unknown-route 404 (`middleware/errors.js` `notFoundBody`) before the
+route's own rate limiter, at any volume — the house dark-`GATE_*` contract
+(AGENTS.md). Mounted in `server/index.js` ABOVE the global `cors({ origin:
+allowedOrigins })` — which would otherwise answer an allowed-origin OPTIONS
+preflight with 204 while the route is dark — and above the global
+`app.use('/api/', limiter)` and body parsers (own 120 req/min per-IP limiter
+applied AFTER the gate check, own `express.text({ type: () => true, limit:
+'1kb' })` parse), so a dark probe of any method only ever sees the generic
+404 and a reader's scroll beacons never spend the shared budget a customer's
+quote-form or booking calls need. The router ends in a terminal generic 404,
+so no request that reaches it (any method, any subpath) falls through to the
+app's request logger. It sets no CORS headers: beacons are no-cors
+`text/plain` POSTs whose response the page never reads.
+Body: `{"p":"/{category}/{slug}/","m":"25"|"50"|"75"|"100"|"next"}`, parsed
+and validated in try/catch (malformed JSON, a non-object, or a body over 1
+KB → 400/413, nothing written). `p` must match one of the six live blog
+categories (`lawn-care|mosquito|pest-control|seasonal|termite|tree-shrub`)
+and be ≤200 chars; `m` must be one of the five milestone values — anything
+else is 400. `site` is derived ONLY from the `Origin` header (never the
+body) via the spoke registry's own `normalizeSpokeSites` — a
+missing/`null`/unknown origin drops the beacon with 204 and writes nothing.
+The Origin is attribution, not authentication: a non-browser caller can claim
+any fleet origin, and an anonymous, cookie-free beacon cannot be
+authenticated without the identifier the owner's E2 scope rules out (no
+cookies, no IDs), so no per-source state is kept beyond the one-minute
+per-IP limiter every public route carries. What bounds a forged beacon
+instead: it counts only for a path the claimed site's OWN sitemap lists
+(`https://{site}/sitemap-index.xml` — what @astrojs/sitemap writes on every
+fleet site — falling back to `/sitemap.xml`, which only the hub serves, as a
+redirect to that index; read with content-registry-live-status's
+`fetchSitemapPaths` and compared with `normalizeContentUrl`, cached 6 h per
+site; a failed refresh keeps the last good list and retries after 5 min; no
+list yet means the beacon is dropped), so invented slugs never create rows —
+today every blog post is hub-only, so spoke beacons find no blog paths and
+drop; and each `(day, site, path, milestone)` bucket stops at 2,000 a day
+(the upsert's `WHERE count < 2000`), so a forged flood can skew one post by
+at most that much. The 204 is the same whether a beacon counts or drops and
+is sent before any sitemap read, so the response never says which paths
+are live.
+Storage is the ONLY thing this route does: `blog_read_depth_daily`, one row
+per `(day, site, path, milestone)` with an `INSERT ... ON CONFLICT DO UPDATE
+SET count = count + 1` capped at 2,000, `day` computed in SQL as the America/New_York
+calendar day. The 204 is returned before the write settles (fire-and-forget;
+a write failure is warn-logged by error kind ONLY). No cookie, user agent
+or referrer is ever read; the network address is used only by the
+one-minute per-IP limiter; nothing per-visitor is ever stored or logged. This is a pure aggregate count, never
+a session/visitor record.)
 The route-WIDE invariants — every public route must be listed here, the
 baseline token-route guards, the `/api/reports/:token/*` write rules,
 contract-token burn, and the estimate ask / find-slots gates — live in the
