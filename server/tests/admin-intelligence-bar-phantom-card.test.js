@@ -264,6 +264,101 @@ test('every card claim in a reply is counted: two singular claims against one cr
   });
 });
 
+// Codex round-11 P2: claimedCardCount used to just ADD every numeral it
+// found, so "I've prepared two confirmation cards below; use both cards
+// below to continue" summed 2 ("two") + 2 ("both") = 4 for a reply that
+// created only 2 real cards — a false partial-card notice on a correct
+// reply. Fixed structurally: the claimed count is a LOWER BOUND (the max
+// across indefinite-singular / plural-cardinal / definite-singular
+// buckets), never a sum of every plural/cardinal phrase, since "two cards"
+// and "both cards" describe the SAME set.
+test('the finding\'s own reply is not a phantom card: "two" and "both" describe the same 2 cards, not 2+2', async () => {
+  mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
+  mockExecuteTool.mockImplementation(async () => ({
+    preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
+  }));
+  mockCreatePendingAction
+    .mockResolvedValueOnce({ id: 'pending-1', tool_name: 'update_customer', summary: 'update_customer', expires_at: new Date(Date.now() + 600000).toISOString() })
+    .mockResolvedValueOnce({ id: 'pending-2', tool_name: 'update_customer', summary: 'update_customer', expires_at: new Date(Date.now() + 600000).toISOString() });
+  scriptModelTurns([
+    [
+      { type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } },
+      { type: 'tool_use', id: 'tu_2', name: 'update_customer', input: { customer_id: 'c2', updates: { city: 'Sarasota' } } },
+    ],
+    [{ type: 'text', text: "I've prepared two confirmation cards below; use both cards below to continue." }],
+  ]);
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'set Test Customer city and state', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.pendingActions).toHaveLength(2);
+    expect(body.response).not.toContain(NOTICE);
+  });
+});
+
+test('a lower-bound mismatch is still caught: "two confirmation cards ... both confirmation cards" against one created card gets the real count', async () => {
+  mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
+  mockExecuteTool.mockImplementation(async () => ({
+    preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
+  }));
+  scriptModelTurns([
+    [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } }],
+    [{ type: 'text', text: 'Two confirmation cards are ready below; use both confirmation cards to continue.' }],
+  ]);
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'set Test Customer city to Venice', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.pendingActions).toHaveLength(1);
+    expect(body.response).toContain('Only 1 confirmation card was created for this reply.');
+  });
+});
+
+// Indefinite-singular references ("a card", "another card") each name a
+// DIFFERENT card and sum; a plural/cardinal reference ("both confirmation
+// cards") describing the same set never adds on top of that sum.
+test('indefinite-singular references sum to the real distinct-card count, unaffected by a plural restating the same set', async () => {
+  mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
+  mockExecuteTool.mockImplementation(async () => ({
+    preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
+  }));
+  mockCreatePendingAction
+    .mockResolvedValueOnce({ id: 'pending-1', tool_name: 'update_customer', summary: 'update_customer', expires_at: new Date(Date.now() + 600000).toISOString() })
+    .mockResolvedValueOnce({ id: 'pending-2', tool_name: 'update_customer', summary: 'update_customer', expires_at: new Date(Date.now() + 600000).toISOString() });
+  scriptModelTurns([
+    [
+      { type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } },
+      { type: 'tool_use', id: 'tu_2', name: 'update_customer', input: { customer_id: 'c2', updates: { city: 'Sarasota' } } },
+    ],
+    [{ type: 'text', text: 'Here is a confirmation card for the city change and another confirmation card for the state change; tap both confirmation cards to continue.' }],
+  ]);
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'set Test Customer city and state', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.pendingActions).toHaveLength(2);
+    expect(body.response).not.toContain(NOTICE);
+  });
+});
+
+// A definite-singular reference and an indefinite-singular reference to a
+// single created card contribute a floor of 1 each, taken by max — never
+// summed to 2 (the same class of bug round-10 fixed for two unnumbered
+// mentions, now also proven across a mixed indefinite + definite pair).
+test('an indefinite mention and a later definite mention of the same one card do not sum to 2', async () => {
+  mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
+  mockExecuteTool.mockImplementation(async () => ({
+    preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
+  }));
+  scriptModelTurns([
+    [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } }],
+    [{ type: 'text', text: "I've prepared a confirmation card below; tap the confirmation card below to confirm." }],
+  ]);
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'set Test Customer city to Venice', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.pendingActions).toHaveLength(1);
+    expect(body.response).not.toContain(NOTICE);
+  });
+});
+
 test('an unnumbered card mentioned twice is still one card: no notice when one was created', async () => {
   mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
   mockExecuteTool.mockImplementation(async () => ({

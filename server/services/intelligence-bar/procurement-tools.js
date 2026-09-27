@@ -1118,11 +1118,29 @@ function qualifiersPreceding(rawText, toIndex) {
 // `identityNames` are the product's catalog name and its registered aliases:
 // a qualifier in any of them is part of the product's identity ("Velista
 // WDG" is a registered alias of "Velista").
+//
+// An N-P-K fertilizer analysis (three 1-2 digit numbers, each with an
+// optional one-decimal fraction, joined by -, –, —, or / with optional
+// spaces around the separators) is an identity qualifier exactly like a
+// concentration or formulation code — a seeded alias "K-Flow" mapping to
+// "LESCO K-Flow 0-0-25" must not ground "We bought K-Flow 0-0-20". Checked
+// over the WHOLE raw text, not just adjacent to a matched span, because the
+// analysis reads as the product's own identity wherever it sits in the
+// sentence ("K-Flow — we bought 0-0-20 of it" is still a mismatch).
+const ANALYSIS_RE = /\b\d{1,2}(?:\.\d)?\s*[-–—/]\s*\d{1,2}(?:\.\d)?\s*[-–—/]\s*\d{1,2}(?:\.\d)?\b/g;
+function normalizeAnalysis(raw) {
+  return String(raw).replace(/\s+/g, '').replace(/[–—/]/g, '-');
+}
+function analysesIn(text) {
+  return [...String(text).matchAll(ANALYSIS_RE)].map((m) => normalizeAnalysis(m[0]));
+}
 function qualifierConflict(rawText, phrases, identityNames) {
   const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
   const nameTokens = new Set(identityNames.flatMap((name) => normalizeForMatch(name).split(' ')));
   const nameConcentrations = identityNames.flatMap((name) => [...String(name).matchAll(/(\d+(?:\.\d+)?)\s*%/g)].map((m) => Number(m[1])));
-  return phrases.some((phrase) => phrase.spans.some((span) => {
+  const nameAnalyses = new Set(identityNames.flatMap((name) => analysesIn(name)));
+  const analysisConflict = analysesIn(rawText).some((analysis) => !nameAnalyses.has(analysis));
+  return analysisConflict || phrases.some((phrase) => phrase.spans.some((span) => {
     const before = qualifiersPreceding(rawText, span.start);
     const after = qualifiersFollowing(rawText, span.end);
     const formulations = [...before.formulations, ...after.formulations];
@@ -1159,6 +1177,21 @@ function qualifierConflict(rawText, phrases, identityNames) {
 // Taurus SC before, but bought Unlisted Chemical today; add 2 jugs of that
 // to inventory" refuses because "used"/"but"/"unlisted"/"chemical" all
 // survive removing the one genuine "Taurus SC" mention).
+// The one closed, documented list of discourse/politeness filler words —
+// spread into CLOSED_VOCAB below (so a leftover filler word never blocks
+// the residual rule) AND used to build LEADING_FILLER_RE further down (see
+// isQuestion), so the two can never drift apart again. Codex round-11 P2:
+// "please" was in CLOSED_VOCAB but missing from the old hand-maintained
+// LEADING_FILLER_RE, so "Please, did we receive..." read as a statement.
+// Deliberately excludes modal/auxiliary verbs (can, could, would, will, do,
+// did, have, has, had, is, are, was, were) — those carry real grammatical
+// signal for REQUEST_START_RE / QUESTION_START_RE / the aux-inversion check
+// and must never be stripped as if they were content-free filler.
+const FILLER_WORDS = [
+  'please', 'pls', 'plz', 'kindly', 'hey', 'hi', 'hello', 'ok', 'okay',
+  'so', 'and', 'also', 'um', 'uh', 'well', 'oh', 'yeah', 'yes', 'alright',
+  'now', 'just', 'quick', 'question',
+];
 const CLOSED_VOCAB = new Set([
   // pronouns/determiners
   'i', 'we', 'you', 'it', 'its', 's', 'this', 'that', 'these', 'those',
@@ -1166,10 +1199,11 @@ const CLOSED_VOCAB = new Set([
   // "we'll", "I'm", "we'd"); "n't" leaves "didn"/"don", which stay outside
   're', 've', 'll', 'm', 'd',
   'a', 'an', 'the', 'some', 'more', 'another', 'our', 'your', 'my', 'me', 'us', 'them', 'they',
-  // auxiliaries/filler
-  'can', 'could', 'would', 'will', 'please', 'just', 'also', 'now', 'go', 'ahead', 'do', 'did',
+  // discourse/politeness filler (the shared FILLER_WORDS list above)
+  ...FILLER_WORDS,
+  // auxiliaries (grammatical, never filler — kept out of FILLER_WORDS)
+  'can', 'could', 'would', 'will', 'go', 'ahead', 'do', 'did',
   'is', 'was', 'are', 'were', 'be', 'been', 'have', 'has', 'had', 'got', 'get', 'think', 'guess',
-  'so', 'ok', 'okay', 'yes', 'yeah', 'hey',
   // prepositions/conjunctions
   'of', 'to', 'in', 'into', 'for', 'on', 'at', 'as', 'and', 'with', 'from', 'by', 'up',
   // purchase/stock words
@@ -1370,13 +1404,37 @@ function textOperation(text) {
 // you add...?") are not questions.
 const QUESTION_START_RE = /^\s*(?:did|do|does|have|has|had|is|are|was|were|how|what|when|where|why|who|which|any)\b/i;
 const REQUEST_START_RE = /^\s*(?:please\s+)?(?:can|could|would|will)\s+you\b/i;
-// Leading greetings and fillers ("Hey, did we receive...") are skipped
-// before the question-start check.
-const LEADING_FILLER_RE = /^\s*(?:(?:hey|hi|hello|ok|okay|so|um|uh|well|yeah|yes|alright|and|also|quick\s+question|question)\b[\s,.:;!-]*)+/i;
+// Leading greetings and fillers ("Hey, did we receive...", "Please, did we
+// receive...") are skipped before the question-start check. Built from the
+// single shared FILLER_WORDS list (see its own doc comment above
+// CLOSED_VOCAB) so a word added there is automatically stripped here too —
+// any punctuation/whitespace may separate a run of several filler words
+// ("um so please, have we received...").
+const LEADING_FILLER_RE = new RegExp(`^\\s*(?:(?:${FILLER_WORDS.join('|')})\\b[\\s,.:;!-]*)+`, 'i');
+// A clause boundary a question can start fresh after ("Taurus SC — did we
+// receive two bottles" is a question even though it doesn't start with
+// one). Also used to re-run the filler strip + question-start check at the
+// head of every clause, not just the whole text's own head.
+const CLAUSE_SPLIT_RE = /[,;:.!?]+|[-–—]+/;
+// A non-modal auxiliary immediately followed by its subject, ANYWHERE in
+// the text — not just at a clause head — is a spoken-question inversion
+// regardless of where it lands ("two bottles of Taurus SC did we receive
+// them"). Modals (can/could/would/will) are deliberately excluded: "can
+// you"/"could you" stay requests, never questions (REQUEST_START_RE).
+const AUX_INVERSION_RE = /\b(?:did|do|does|have|has|had)(?:n['’]?t)?\s+(?:we|you|they|i)\b/i;
 function isQuestion(text) {
-  const raw = String(text || '').replace(LEADING_FILLER_RE, '');
-  if (REQUEST_START_RE.test(raw)) return false;
-  return QUESTION_START_RE.test(raw) || /\?\s*$/.test(raw);
+  const raw = String(text || '');
+  // A polite REQUEST ("Can you add...", "Could you add...?") is never a
+  // question even when it ends with '?' or contains an aux-inversion
+  // elsewhere — checked once against the whole text (after its own leading
+  // filler is stripped), exactly as before.
+  if (REQUEST_START_RE.test(raw.replace(LEADING_FILLER_RE, ''))) return false;
+  const clauses = raw.split(CLAUSE_SPLIT_RE)
+    .map((clause) => clause.replace(LEADING_FILLER_RE, '').trim())
+    .filter(Boolean);
+  if (clauses.some((clause) => QUESTION_START_RE.test(clause))) return true;
+  if (AUX_INVERSION_RE.test(raw)) return true;
+  return /\?\s*$/.test(raw);
 }
 // `texts` run newest first: the current prompt, any bare turns the look-back
 // skipped, then the turn that named the product. The newest text with an

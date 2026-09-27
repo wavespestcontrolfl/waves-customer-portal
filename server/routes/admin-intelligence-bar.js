@@ -273,24 +273,55 @@ const { CONTINUATION_TURN } = IbThreads;
 // new card to replace the previous card") is still a claim, and the
 // notice's wording is true either way.
 const CARD_CLAIM_RE = /\bcards? below\b|\bconfirm(?:ation)? cards?\b|\bconfirm(?:ation)? buttons?\b|\b(?:click|press|tap|hit|use)\s+(?:the\s+)?confirm\b|\bconfirm(?:ation)? on the cards?\b/i;
-// How many cards a reply claims: the explicit numbers add up ("one card for
-// the address and one card for the phone" is two); unnumbered mentions count
-// once however often they repeat ("a confirmation card ... the card below" is
-// one), or two for a plural ("the confirmation cards below").
-const CARD_COUNT_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, both: 2 };
-const CARD_PHRASE_RE = /\b(?:(\d+|one|two|three|four|five|six|both)\s+(?:(?:new|separate)\s+)?)?(?:confirm(?:ation)?\s+(cards?)(?:\s+below)?|(cards?)\s+below)\b/gi;
+// How many DISTINCT cards a reply claims: a lower bound, not a sum of every
+// numeral in the text (Codex round-11 P2: "I've prepared two confirmation
+// cards below; use both cards below to continue" summed 2 + 2 ("both") = 4
+// for a reply that created only 2). Every card-noun-phrase in the text
+// sorts into one of three buckets, each read independently, then the
+// claimed count is the MAX across buckets — never their sum, since a
+// plural/cardinal phrase and an indefinite-singular phrase can equally well
+// be re-describing the SAME cards:
+//   - indefinite singular ("a card", "an … card", "one card", "another
+//     card") — each occurrence names a DIFFERENT new card, so these SUM;
+//   - plural/cardinal ("two cards", "both cards", an unnumbered plural
+//     "cards") — every one of these describes the SAME shared set, so the
+//     largest one found wins, never added to another;
+//   - definite singular ("the card", "this card", "that card", "your
+//     card") or a bare mention with no determiner at all — too ambiguous to
+//     say whether it's a new card or a repeat of one already counted, so it
+//     only ever contributes a floor of 1, exactly like round-10's fix for
+//     "a confirmation card ... the card below" being one card however often
+//     it's named.
+const CARD_INDEFINITE_SINGULAR_WORDS = new Set(['a', 'an', 'one', 'another']);
+const CARD_CARDINAL_WORDS = { two: 2, three: 3, four: 4, five: 5, six: 6, both: 2 };
+const CARD_DETERMINER_ALT = '\\d+|a|an|one|two|three|four|five|six|another|both|the|this|that|your';
+const CARD_PHRASE_RE = new RegExp(
+  `\\b(?:(${CARD_DETERMINER_ALT})\\s+(?:(?:new|separate)\\s+)?)?(?:confirm(?:ation)?\\s+(cards?)(?:\\s+below)?|(cards?)\\s+below)\\b`,
+  'gi',
+);
+function cardinalValue(determiner) {
+  if (CARD_CARDINAL_WORDS[determiner] != null) return CARD_CARDINAL_WORDS[determiner];
+  const n = Number(determiner);
+  return Number.isFinite(n) && n >= 2 ? n : null;
+}
 function claimedCardCount(text) {
   if (!CARD_CLAIM_RE.test(text)) return 0;
-  let explicit = 0;
-  let unnumbered = 1; // a claim with no noun phrase ("click Confirm") is one card
-  for (const [, count, noun, nounBelow] of String(text).matchAll(CARD_PHRASE_RE)) {
-    const number = count && (Number(count) || CARD_COUNT_WORDS[count.toLowerCase()]);
-    if (number) explicit += number;
-    // Unnumbered mentions may repeat the same card ("a confirmation card
-    // ... the card below"), so they add nothing; a plural means two or more.
-    else if (/s$/i.test(noun || nounBelow)) unnumbered = 2;
+  let indefiniteSingularSum = 0;
+  let pluralCardinalMax = 0;
+  let singularFloor = 0;
+  let sawAnyPhrase = false;
+  for (const [, word, noun, nounBelow] of String(text).matchAll(CARD_PHRASE_RE)) {
+    sawAnyPhrase = true;
+    const determiner = (word || '').toLowerCase();
+    const isPlural = /s$/i.test(noun || nounBelow);
+    const cardinal = cardinalValue(determiner);
+    if (cardinal != null) pluralCardinalMax = Math.max(pluralCardinalMax, cardinal);
+    else if (isPlural) pluralCardinalMax = Math.max(pluralCardinalMax, 2);
+    else if (determiner === '1' || CARD_INDEFINITE_SINGULAR_WORDS.has(determiner)) indefiniteSingularSum += 1;
+    else singularFloor = 1;
   }
-  return Math.max(explicit, unnumbered);
+  if (!sawAnyPhrase) return 1; // a claim with no noun phrase ("click Confirm") is one card
+  return Math.max(indefiniteSingularSum, pluralCardinalMax, singularFloor);
 }
 function phantomCardNotice(created) {
   if (created === 0) return "This reply didn't create a confirmation card. If you want a change, ask again and say exactly what to change.";

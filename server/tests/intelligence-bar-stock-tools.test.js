@@ -699,6 +699,31 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     expect(result).toMatchObject(expected);
   });
 
+  // Codex round-11 P2: "please" was in CLOSED_VOCAB but missing from the old
+  // hand-maintained LEADING_FILLER_RE, so "Please, did we receive..." read
+  // as a statement and grounded a write. Structural fix: one shared
+  // FILLER_WORDS list feeds both CLOSED_VOCAB and the filler strip, the
+  // question-start check re-runs at the head of every clause (split on
+  // punctuation and dashes), and a non-modal auxiliary immediately followed
+  // by its subject (did/do/does/have/has/had + we/you/they/i) is a question
+  // wherever it sits in the text, never just at the very start.
+  test.each([
+    ['adjust_stock', 'Please, did we receive two bottles of Taurus SC', { code: 'target_clarification_required' }],
+    ['adjust_stock', 'please did we receive two bottles of Taurus SC', { code: 'target_clarification_required' }],
+    ['adjust_stock', 'um so please, have we received two bottles of Taurus SC', { code: 'target_clarification_required' }],
+    ['adjust_stock', 'two bottles of Taurus SC did we receive them', { code: 'target_clarification_required' }],
+    ['adjust_stock', 'Taurus SC — did we receive two bottles', { code: 'target_clarification_required' }],
+    ['adjust_stock', 'please add two bottles of Taurus SC', { productId: 'p-taurus' }],
+    ['adjust_stock', 'can you log two bottles of Taurus SC', { productId: 'p-taurus' }],
+    ['adjust_stock', 'could you receive two bottles of Taurus SC', { productId: 'p-taurus' }],
+  ])('%s: "%s" (a filler word or a mid-text auxiliary inversion is still a question; a polite request still writes)', async (toolName, prompt, expected) => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    const result = await resolveInventoryWriteTarget({
+      toolName, prompt, preview: { product: { id: TAURUS.id, name: TAURUS.name }, movement_type: 'restock' },
+    });
+    expect(result).toMatchObject(expected);
+  });
+
   test.each([
     ['create_restock_request', 'Did we order Taurus SC?'],
     ['adjust_stock', 'Did we receive two bottles of Taurus SC?'],
@@ -1382,6 +1407,51 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
           preview: { product: { id: COPPER.id, name: COPPER.name } },
         });
         expect(result).toEqual({ productId: COPPER.id });
+      });
+    });
+
+    // Codex round-11 P2: the seeded alias "K-Flow" maps to "LESCO K-Flow
+    // 0-0-25" (server/models/migrations/20260528000007_protocol_canonical_
+    // price_mappings.js), but qualifierConflict only knew concentrations and
+    // formulation codes, so "K-Flow 0-0-20" still grounded the 0-0-25 row.
+    // An N-P-K analysis (three 1-2 digit numbers, optional one decimal,
+    // joined by -, –, —, or /) is now an identity qualifier exactly like a
+    // concentration: every analysis the operator says must appear,
+    // normalized, in the grounded product's own name or a registered alias.
+    describe('an N-P-K fertilizer analysis is an identity qualifier too', () => {
+      const K_FLOW = { id: 'p-k-flow', name: 'LESCO K-Flow 0-0-25', active: true };
+      const K_FLOW_ALIASES = [{ product_id: K_FLOW.id, alias_name: 'K-Flow' }];
+
+      test('"K-Flow 0-0-25" grounds — the analysis matches the catalog name exactly', async () => {
+        setGroundingDb({ products: [K_FLOW, ALPINE], aliases: K_FLOW_ALIASES });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock',
+          prompt: 'We bought two bottles of K-Flow 0-0-25',
+          preview: { product: { id: K_FLOW.id, name: K_FLOW.name } },
+        });
+        expect(result).toEqual({ productId: K_FLOW.id });
+      });
+
+      test('plain "K-Flow" with no analysis at all still grounds', async () => {
+        setGroundingDb({ products: [K_FLOW, ALPINE], aliases: K_FLOW_ALIASES });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock',
+          prompt: 'We bought two bottles of K-Flow',
+          preview: { product: { id: K_FLOW.id, name: K_FLOW.name } },
+        });
+        expect(result).toEqual({ productId: K_FLOW.id });
+      });
+
+      test.each([
+        'We bought two bottles of K-Flow 0-0-20',
+        'We bought two bottles of K-Flow 0/0/20',
+      ])('"%s" refuses — the analysis does not match the catalog row', async (prompt) => {
+        setGroundingDb({ products: [K_FLOW, ALPINE], aliases: K_FLOW_ALIASES });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt,
+          preview: { product: { id: K_FLOW.id, name: K_FLOW.name } },
+        });
+        expect(result).toMatchObject({ code: 'target_clarification_required' });
       });
     });
   });
