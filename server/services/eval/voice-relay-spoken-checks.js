@@ -595,7 +595,10 @@ const RELATIVE_DATE_ALLOWANCES = Object.freeze([
 ]);
 const UNGROUNDED_DATE_CONTEXTS = Object.freeze([
   { name: 'configured subject', applies: (c) => Boolean(c.subject) },
-  { name: 'beside returned slot', applies: (c) => c.returnedMode && c.sentenceHasGrounding },
+  // In returned-slot mode every recognized date must have been consumed as
+  // part of an exact returned pair or accepted by an allowance above. This
+  // remains true across punctuation and sentence boundaries.
+  { name: 'returned slot availability', applies: (c) => c.returnedMode },
   { name: 'visit sentence', applies: (c) => SCHEDULE_PREDICATES.visit.test(c.sentence) },
   { name: 'standalone date reply', applies: (c) => STANDALONE_DATE_RE.test(c.sentence) },
 ]);

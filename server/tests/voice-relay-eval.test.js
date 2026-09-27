@@ -5768,6 +5768,9 @@ describe('voice relay eval — named spoken checks', () => {
       'Tengo el domingo 4 de octubre a la una de la tarde. También tengo el domingo 4 de octubre a la una de la mañana.',
       'Tengo el domingo 4 de octubre a la una de la tarde, mañana.',
       'Tengo el domingo 4 de octubre a la una de la tarde y también el martes.',
+      'Tengo el domingo 4 de octubre a la una de la tarde. También tengo el martes.',
+      'Tengo el domingo 4 de octubre a la una de la tarde; también tengo el martes.',
+      'Tengo el domingo 4 de octubre a la una de la tarde. También tengo mañana.',
     ]) {
       const checks = grade(offer);
       expect([offer, checks.find((c) => c.check === 'no_visit_time')]).toEqual([offer, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
