@@ -654,9 +654,56 @@ async function reconcileFirstApplicationSplitOnDateChangeSafely(trx, scheduledSe
   }
 }
 
+/**
+ * Shared batch-deferral mechanism (pre-push round 3 P1 on #5021): a caller
+ * that moves more than one scheduled_service's date in ONE logical
+ * operation — but commits each row in its OWN transaction, one at a time —
+ * must never let this module's per-row reconcile run before every row in
+ * the batch has committed its date write. Two same-trip siblings of a
+ * combined first-application invoice, both moved to the SAME new day in one
+ * batch call, would otherwise have the FIRST row's reconcile see the SECOND
+ * still on its old date — a transient mid-batch divergence that permanently
+ * splits an invoice whose siblings end up sharing a date once the whole
+ * batch lands. (moveStopsToDay hit this same class when every row shared
+ * ONE transaction — see its own fix — but here each row's transaction is
+ * already its own commit by the time the next row is even read, so the
+ * defer point is "after the whole batch settles", not "before this trx
+ * commits".)
+ *
+ * Usage: create one collector per batch, call `markMoved(id)` for every
+ * scheduledServiceId whose date actually changed as each row commits (in
+ * place of the immediate reconcile call), then `flush(conn, context)` ONCE
+ * after every row in the batch has committed — reconciling each affected
+ * anchor against the batch's FINAL state instead of a mid-batch snapshot.
+ * `conn` is a plain knex connection (the top-level db, or an open trx if the
+ * whole batch shares one) — reconcileFirstApplicationSplitOnDateChangeSafely
+ * opens its own nested transaction off whatever is passed.
+ */
+function createDeferredSiblingSplitReconciler() {
+  const pending = new Set();
+  return {
+    markMoved(scheduledServiceId) {
+      if (scheduledServiceId) pending.add(String(scheduledServiceId));
+    },
+    get size() { return pending.size; },
+    async flush(conn, context = '') {
+      const results = [];
+      for (const id of pending) {
+        results.push({
+          scheduledServiceId: id,
+          ...(await reconcileFirstApplicationSplitOnDateChangeSafely(conn, id, context)),
+        });
+      }
+      pending.clear();
+      return results;
+    },
+  };
+}
+
 module.exports = {
   reconcileFirstApplicationSplitOnDateChange,
   reconcileFirstApplicationSplitOnDateChangeSafely,
+  createDeferredSiblingSplitReconciler,
   anchoredSplitPerVisit,
   splitFromSharedInvoiceId,
   SPLIT_PROVENANCE_KEY,

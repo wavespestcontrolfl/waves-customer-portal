@@ -1745,9 +1745,24 @@ class SmartRebooker {
       // "safely" wrapper) — a successful split still commits atomically with
       // the move, but a failure inside it never poisons this transaction the
       // way a plain try/catch around a failing statement would on Postgres.
+      //
+      // options.deferSiblingSplitReconcile (pre-push round 3 P1 on #5021):
+      // a batch caller that moves more than one member of the SAME visit
+      // group through this method — one call per member, each its own
+      // transaction (visit-groups.js moveVisitAsUnit) — must not let this
+      // row's reconcile run before every member in that batch has landed;
+      // the first member's reconcile would otherwise see the second still
+      // on its old date and permanently split an invoice whose siblings end
+      // up sharing a date once the whole unit move commits. When present,
+      // the caller's collector is marked instead of reconciling here, and
+      // the caller flushes it once after its own batch settles.
       if (dateOnly(newDate) !== dateOnly(originalDate)) {
-        await require('./first-application-sibling-split')
-          .reconcileFirstApplicationSplitOnDateChangeSafely(trx, serviceId, 'single-visit reschedule');
+        if (typeof options.deferSiblingSplitReconcile === 'function') {
+          options.deferSiblingSplitReconcile(serviceId);
+        } else {
+          await require('./first-application-sibling-split')
+            .reconcileFirstApplicationSplitOnDateChangeSafely(trx, serviceId, 'single-visit reschedule');
+        }
       }
     });
 

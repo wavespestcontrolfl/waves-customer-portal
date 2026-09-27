@@ -31,7 +31,7 @@ const suite = local || managed || ci ? describe : describe.skip;
 suite('first-application-sibling-split — same-trip resplit on date change', () => {
   let db;
   const {
-    reconcileFirstApplicationSplitOnDateChange, reconcileFirstApplicationSplitOnDateChangeSafely, splitFromSharedInvoiceId,
+    reconcileFirstApplicationSplitOnDateChange, reconcileFirstApplicationSplitOnDateChangeSafely, splitFromSharedInvoiceId, dateOnly,
   } = require('../services/first-application-sibling-split');
 
   beforeAll(() => { db = require('knex')({ client: 'pg', connection: testUrl }); });
@@ -598,5 +598,116 @@ suite('first-application-sibling-split — same-trip resplit on date change', ()
     test('calling the plain (non-safe) function directly with a bad id propagates — documents why callers with more work after it must use the safe wrapper', () => rollbackTest(async (trx) => {
       await expect(reconcileFirstApplicationSplitOnDateChange(trx, 'not-a-valid-uuid')).rejects.toThrow();
     }));
+  });
+
+  describe('createDeferredSiblingSplitReconciler — batch mover defer/flush (pre-push round 3 P1 on #5021)', () => {
+    const { createDeferredSiblingSplitReconciler } = require('../services/first-application-sibling-split');
+
+    // Real COMMITS, not the rollback-trx pattern above — the bug this
+    // mechanism fixes only exists across separately-committed transactions
+    // (each batch member moves in its OWN transaction, exactly like
+    // admin-schedule.js's bulk-reschedule route and visit-groups.js's unit
+    // mover). Every row this creates is deleted afterward.
+    async function cleanupFixture(ids) {
+      await db('notifications').where({ link: `/admin/invoices?invoice=${ids.invoiceId}` }).del();
+      // A successful split writes a best-effort activity_log row (see
+      // applySplitMutation) — must clear before the customer/estimate FKs.
+      await db('activity_log').where({ customer_id: ids.customerId }).del();
+      await db('invoices').where({ id: ids.invoiceId }).del();
+      await db('scheduled_services').where({ source_estimate_id: ids.estimateId }).del();
+      await db('estimates').where({ id: ids.estimateId }).del();
+      await db('customers').where({ id: ids.customerId }).del();
+    }
+
+    test('naive per-row reconcile mid-batch (before the second sibling commits its own move) splits the invoice — documents the bug the collector fixes', async () => {
+      const ids = await fixture(db);
+      try {
+        // Batch member 1 (pest, the invoice-holding row) commits its own
+        // move to the new shared date FIRST, in its own transaction — same
+        // shape as admin-schedule.js bulk-reschedule / visit-groups.js unit
+        // move, each row its own commit.
+        await db('scheduled_services').where({ id: ids.pestId }).update({ scheduled_date: '2026-10-05' });
+        // The OLD (buggy) behavior: reconcile runs immediately after this
+        // row's own commit, while member 2 (lawn) is STILL on the old date
+        // — a transient divergence that looks exactly like a genuine
+        // reschedule-off-the-invoice-date.
+        const midBatch = await reconcileFirstApplicationSplitOnDateChange(db, ids.pestId);
+        expect(midBatch.action).toBe('split');
+
+        // Batch member 2 now also commits its move to the SAME new date —
+        // the batch's actual final state has both siblings sharing a date
+        // again — but the invoice is already permanently split from the
+        // premature reconcile above; nothing un-splits it.
+        await db('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-05' });
+        const state = await readState(db, ids);
+        expect(Number(state.invoice.total)).toBe(97.2);
+        expect(Number(state.lawn.estimated_price)).toBe(56.4);
+        expect(dateOnly(state.pest.scheduled_date)).toBe('2026-10-05');
+        expect(dateOnly(state.lawn.scheduled_date)).toBe('2026-10-05');
+      } finally {
+        await cleanupFixture(ids);
+      }
+    });
+
+    test('two siblings moved to the same new day in one batch, deferred and flushed once after both commit → no split', async () => {
+      const ids = await fixture(db);
+      try {
+        const reconciler = createDeferredSiblingSplitReconciler();
+        expect(reconciler.size).toBe(0);
+
+        // Member 1 commits its own move, marks itself instead of
+        // reconciling inline.
+        await db('scheduled_services').where({ id: ids.pestId }).update({ scheduled_date: '2026-10-05' });
+        reconciler.markMoved(ids.pestId);
+        // Member 2 commits its own move too, same target date — the
+        // batch's real final state.
+        await db('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-05' });
+        reconciler.markMoved(ids.lawnId);
+        expect(reconciler.size).toBe(2);
+
+        // Flush ONCE, after every row in the batch has committed — both
+        // members share the SAME date now, so no divergence exists.
+        const results = await reconciler.flush(db, 'test batch');
+        expect(reconciler.size).toBe(0);
+        expect(results).toHaveLength(2);
+        for (const r of results) expect(r.action).toBe('skipped');
+
+        const state = await readState(db, ids);
+        expect(state.lawn.estimated_price).toBeNull();
+        expect(Number(state.pest.estimated_price)).toBe(153.60);
+        expect(Number(state.invoice.total)).toBe(153.60);
+        expect(splitFromSharedInvoiceId(state.lawn)).toBeNull();
+
+        const alerts = await db('notifications')
+          .where({ recipient_type: 'admin', category: 'billing' })
+          .whereRaw("metadata->>'dedupeKey' = ?", [`first_application_split_declined:${ids.invoiceId}`]);
+        expect(alerts.length).toBe(0);
+      } finally {
+        await cleanupFixture(ids);
+      }
+    });
+
+    test('only one sibling moved in the batch, deferred and flushed → still splits (deferral never suppresses a genuine divergence)', async () => {
+      const ids = await fixture(db);
+      try {
+        const reconciler = createDeferredSiblingSplitReconciler();
+        // Only the lawn sibling moves this batch; pest (the invoice-holding
+        // row) stays on the original date.
+        await db('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-05' });
+        reconciler.markMoved(ids.lawnId);
+
+        const results = await reconciler.flush(db, 'test batch');
+        expect(results).toHaveLength(1);
+        expect(results[0].action).toBe('split');
+
+        const state = await readState(db, ids);
+        expect(Number(state.pest.estimated_price)).toBe(97.2);
+        expect(Number(state.lawn.estimated_price)).toBe(56.4);
+        expect(Number(state.invoice.total)).toBe(97.2);
+        expect(splitFromSharedInvoiceId(state.lawn)).toBe(ids.invoiceId);
+      } finally {
+        await cleanupFixture(ids);
+      }
+    });
   });
 });

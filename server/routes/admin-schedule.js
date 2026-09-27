@@ -9369,6 +9369,18 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
     // the reseed gate says.
     const { isCountingSourceStatus } = require('../services/recurring-series-cancel-reseed');
     const bulkPlanReductions = action === 'cancel' ? await readBulkPlanReductionIntent(db, serviceIds) : new Map();
+    // Same-trip first-application resplit chokepoint (pre-push round 3 P1 on
+    // #5021): this route commits each selected row's date write in its OWN
+    // transaction, one id at a time — calling the reconciler inside each
+    // one (as the single-visit writers do) would let the FIRST row's
+    // reconcile see the SECOND still on its old date when both siblings of
+    // a combined first-application invoice are selected together in this
+    // same batch, permanently splitting an invoice whose siblings end up
+    // sharing a date once every selected row lands. Deferred with the
+    // shared batch collector (first-application-sibling-split.js) — each
+    // 'reschedule' row marks itself moved instead of reconciling inline,
+    // and the whole batch flushes ONCE after every id below has settled.
+    const siblingSplitReconcile = require('../services/first-application-sibling-split').createDeferredSiblingSplitReconciler();
 
     const { transitionJobStatus } = require('../services/job-status');
 
@@ -9738,15 +9750,17 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 );
               }
               // Same-trip first-application resplit chokepoint (prod
-              // 2026-09-26): a bulk date move may pull this row off the date
-              // of a shared first-application invoice, on either side. Runs
-              // in its own savepoint off this trx (the "safely" wrapper) — a
-              // plain try/catch around a failing statement does not recover
-              // a Postgres transaction; every later statement on it,
-              // including this row's own commit, would fail.
+              // 2026-09-26; deferred pre-push round 3 P1): a bulk date move
+              // may pull this row off the date of a shared first-application
+              // invoice, on either side. This route commits each id in its
+              // OWN transaction, so the reconcile itself must NOT run here —
+              // two same-trip siblings selected together in this batch would
+              // otherwise have the first one's reconcile see the second
+              // still on its old date. Mark it moved; the whole batch
+              // reconciles once after every selected row has committed (see
+              // siblingSplitReconcile.flush below the id loop).
               if (prevDate !== bulkTargetDate) {
-                await require('../services/first-application-sibling-split')
-                  .reconcileFirstApplicationSplitOnDateChangeSafely(trx, id, 'bulk reschedule');
+                siblingSplitReconcile.markMoved(id);
               }
               {
                 const committedTechId = bulkCommittedRows[0]?.technician_id || null;
@@ -10080,6 +10094,16 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
       await flushDispatchQualityDates(qualityDates);
     } catch (e) {
       logger.error(`[admin-schedule] bulk-action route quality refresh failed: ${e.message}`);
+    }
+    // Same-trip first-application resplit — deferred flush (pre-push round
+    // 3 P1 on #5021): every 'reschedule' row whose date changed committed
+    // its own transaction above; reconcile each one now, against the
+    // batch's FINAL state, on a fresh connection (each row's own trx is
+    // already committed by this point). flush() catches every per-row
+    // failure internally (reconcileFirstApplicationSplitOnDateChangeSafely)
+    // and never throws.
+    if (siblingSplitReconcile.size) {
+      await siblingSplitReconcile.flush(db, 'bulk reschedule');
     }
     // Counted-plan reseed (owner ruling 2026-09-24): once per series for the
     // batch's single-visit cancels. Gated, failure-isolated, post-commit.
