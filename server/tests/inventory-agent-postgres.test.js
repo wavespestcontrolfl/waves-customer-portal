@@ -127,6 +127,33 @@ jest.setTimeout(30000);
     expect(after.ok).toBe(false);
   });
 
+  test('a correcting alias added while the model decides rolls the apply back; the line stays pending with one attempt', async () => {
+    const [bifenXts] = await mockConn('products_catalog').insert({
+      name: 'Bifen XTS', active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', inventory_on_hand: 0,
+    }).returning('*');
+    const [bifenIt] = await mockConn('products_catalog').insert({
+      name: 'Bifen IT', active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', inventory_on_hand: 0,
+    }).returning('*');
+    const title = 'Bifen Insecticide Concentrate 96 oz';
+    const line = await pendingLine({ raw_title: title, quantity: 1 });
+    const decision = {
+      kind: 'existing', reason: 'looks like Bifen XTS', product_id: bifenXts.id, new_product: null,
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    // An admin links this exact title to Bifen IT while the model is still deciding.
+    const llm = async () => {
+      await mockConn('product_aliases').insert({ product_id: bifenIt.id, alias_name: title });
+      return { ok: true, json: decision };
+    };
+    const result = await runInventoryAgent({ conn: mockConn, llm, notifyAdmin });
+    expect(result).toMatchObject({ logged: 0 });
+
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'agent_pending', agent_attempts: 1 });
+    expect(await mockConn('product_inventory_movements').whereIn('product_id', [bifenXts.id, bifenIt.id])).toHaveLength(0);
+    expect(await mockConn('product_aliases').where({ product_id: bifenXts.id })).toHaveLength(0);
+  });
+
   test('a needs_size line: the model reads the title\'s size, the catalog container is set once, and the line logs', async () => {
     const [bare] = await mockConn('products_catalog').insert({
       name: 'Granular Bait', active: true, category: 'bait', container_size: null, inventory_unit: null, inventory_on_hand: 0,

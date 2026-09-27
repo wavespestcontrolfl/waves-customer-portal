@@ -627,6 +627,16 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
       }
     }
 
+    // With this transaction's own catalog change in place, the deterministic
+    // matcher must resolve the title to this same product. If the catalog
+    // moved while the model was deciding (a correcting alias, a new product,
+    // a now-ambiguous match), roll everything back; the line stays pending
+    // and the failure counts toward the 3-attempt hand-off.
+    const reclassified = await classifyItem({ title: line.raw_title, quantity: Number(line.quantity) }, trx);
+    if (reclassified.productId !== productId) {
+      throw new Error(`the catalog now resolves "${line.raw_title}" to ${reclassified.productId ? 'a different product' : 'no single product'}`);
+    }
+
     if (await findPossibleDuplicateMovement(trx, productId, email.received_at)) {
       await trx('purchase_receipt_lines').where({ id: lineId }).update({
         status: 'possible_duplicate', product_id: productId, received_qty: decision.amount, received_unit: decision.unit,
@@ -645,7 +655,6 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
     // sweep via classifyItem — if it already would, its own amount must
     // agree with what was just validated, or something is inconsistent and
     // this holds for a person rather than trusting either read blindly.
-    const reclassified = await classifyItem({ title: line.raw_title, quantity: Number(line.quantity) }, trx);
     if (reclassified.status === 'logged' && !sizesAgreeAcrossUnits(reclassified.receivedQty, reclassified.receivedUnit, decision.amount, decision.unit)) {
       await trx('purchase_receipt_lines').where({ id: lineId }).update({
         status: 'agent_unsure',
