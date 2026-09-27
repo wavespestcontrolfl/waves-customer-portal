@@ -36,6 +36,8 @@ const interceptSeeder = require('./intercept-brief-seeder');
 const spokeSeeder = require('./spoke-seed-seeder');
 const categorySeeder = require('./category-seed-seeder');
 const relatedPostsSelector = require('./related-posts');
+const { resolveSpokeTarget } = require('../content-astro/spoke-routing');
+const { HUB_SITE_KEYS } = require('../content-astro/spoke-sites');
 
 // ── keyword overlap helpers for customer-cluster topic match ────────
 
@@ -659,12 +661,18 @@ class ContentBriefBuilder {
    */
   async _loadRelatedPosts(opportunity, decision) {
     if (decision?.action_type !== 'new_supporting_blog') return [];
+    const queuedTargets = spokeSeeder.targetSitesFor(opportunity);
+    const publishSpoke = resolveSpokeTarget({ target_sites: queuedTargets });
     return relatedPostsSelector.getRelatedPostsForBrief({
       keyword: opportunity.query || opportunity.signal_metadata?.representative_query || null,
       service: opportunity.service || null,
       pestEntity: opportunity.signal_metadata?.specialty_topic || null,
       city: opportunity.city || null,
-      domains: spokeSeeder.targetSitesFor(opportunity),
+      // Match the publisher's effective destination, including its runtime
+      // spoke-network kill switch. A job queued for a spoke while the flag
+      // was on can be composed after it turns off; that post publishes on
+      // the hub, so its related targets must come from the hub too.
+      domains: publishSpoke ? [publishSpoke] : HUB_SITE_KEYS,
       excludePath: opportunity.page_url || null,
     });
   }

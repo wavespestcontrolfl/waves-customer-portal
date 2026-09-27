@@ -554,6 +554,41 @@ describe('_loadRelatedPosts gating', () => {
     }));
     spy.mockRestore();
   });
+
+  test('a queued spoke job selects hub posts when the publish kill switch turns off before composition', async () => {
+    const previous = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    const selector = require('../services/content/related-posts');
+    const spy = jest.spyOn(selector, 'getRelatedPostsForBrief').mockResolvedValue([]);
+    try {
+      // The job was queued while spoke publishing was enabled and retains
+      // that target in its durable signal metadata.
+      process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+      const opportunity = {
+        id: 'queued-spoke-1',
+        query: 'termite swarmers',
+        service: 'termite',
+        signal_metadata: {
+          spoke_seed: true,
+          target_sites: ['sarasotaflpestcontrol.com'],
+        },
+      };
+
+      // The canonical publisher decision now falls back to the hub. Related
+      // candidates must use that same effective destination.
+      process.env.SPOKE_BLOG_NETWORK_ENABLED = 'false';
+      await new ContentBriefBuilder()._loadRelatedPosts(
+        opportunity,
+        { page_type: 'supporting-blog', action_type: 'new_supporting_blog' }
+      );
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({
+        domains: ['wavespestcontrol.com'],
+      }));
+    } finally {
+      spy.mockRestore();
+      if (previous === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+      else process.env.SPOKE_BLOG_NETWORK_ENABLED = previous;
+    }
+  });
 });
 
 describe('nextWeekday9amET', () => {
