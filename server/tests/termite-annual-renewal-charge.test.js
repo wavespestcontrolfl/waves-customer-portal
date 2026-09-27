@@ -2341,6 +2341,45 @@ describe('termite annual renewal charge', () => {
     // retrieval already ran) against a plan the operator just renewed.
     // resolveLapseVoidEligibility's own parent re-check (under the SAME
     // lock, BEFORE the void) must catch this and defer instead.
+    // Codex #4971 pre-push P1: a parent demoted to payment_pending by a
+    // dispute on its own invoice (move 10, no decision) is TRANSIENT — the
+    // lapse rotates for retry (no manual review, no bell); once the dispute
+    // is won and the parent restored, the next run completes the lapse.
+    test('a dispute-suspended parent at the grace deadline rotates (no manual review, no bell); after the dispute is won the lapse completes', async () => {
+      mockCommon();
+      const { voidInvoice, raiseTermiteRetrievalTask, recordDecision } = mockLapseDeps();
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1', prepay_amount: 249,
+      };
+      const successorRow = { status: 'payment_pending', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1' };
+      const { _private } = require('../services/termite-annual-renewal-charge');
+
+      const suspended = makeLapseConn({
+        freshSuccessor: successorRow,
+        freshInvoice: { status: 'sent', paid_at: null },
+        freshParent: { status: 'payment_pending', renewal_decision: null },
+      });
+      await expect(_private.processGraceLapseForTerm(term, suspended.conn)).resolves.toBe('deferred');
+      expect(voidInvoice).not.toHaveBeenCalled();
+      expect(suspended.manualReviewUpdate).not.toHaveBeenCalled();
+      expect(suspended.deferredUpdate).toHaveBeenCalledWith({ renewal_sweep_deferred_at: expect.any(Date) });
+      expect(notifyAdmin).not.toHaveBeenCalled();
+
+      // The dispute is won: the parent is live again.
+      const restored = makeLapseConn({
+        startedAlreadySet: true,
+        freshSuccessor: successorRow,
+        freshInvoice: { status: 'sent', paid_at: null },
+      });
+      await expect(_private.processGraceLapseForTerm({ ...term, renewal_lapse_started_at: new Date() }, restored.conn)).resolves.toBe('lapsed');
+      expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1', { requireUnsettled: true });
+      expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+      expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel', conn: restored.conn });
+      expect(restored.manualReviewUpdate).not.toHaveBeenCalled();
+    });
+
     test('P1: the parent was already decided \'renew\' by an operator — deferred, NO void, NO retrieval', async () => {
       mockCommon();
       const { voidInvoice, raiseTermiteRetrievalTask, recordDecision } = mockLapseDeps();

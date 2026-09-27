@@ -2359,10 +2359,17 @@ async function parentStillDecidableForLapse(trx, fresh) {
     && ((RENEWABLE_STATUSES.includes(parent.status) && !parent.renewal_decision)
       || (parent.status === 'cancelled' && parent.renewal_decision === 'cancel'));
   if (parentUndecidedOrOwnCancel) return { ok: true };
+  // Codex #4971 pre-push P1: resolveParentEligibility's own durable /
+  // transient split decides what the lapse does next. A parent demoted to
+  // payment_pending by a dispute on its own invoice (move 10, no decision)
+  // can come back when the dispute is won — the lapse waits and retries;
+  // only a durable change elsewhere (a decision, a cancel, a missing row)
+  // is a human's call.
+  const { durable } = await resolveParentEligibility(trx, parent);
   const reason = parent
     ? `the parent was already decided '${parent.renewal_decision || parent.status}'`
     : 'the parent no longer exists';
-  return { ok: false, reason };
+  return { ok: false, reason, transient: durable === false };
 }
 
 async function reconciliationStatusForVoid(trx, invoiceId) {
@@ -2452,7 +2459,7 @@ async function resolveLapseVoidEligibility(term, conn = db) {
     // between recordDecision succeeding and the completed_at stamp).
     const parentCheck = await parentStillDecidableForLapse(trx, fresh);
     if (!parentCheck.ok) {
-      return { outcome: 'deferred', kind: 'parent_decided_elsewhere', reason: parentCheck.reason };
+      return { outcome: 'deferred', kind: parentCheck.transient ? 'parent_suspended' : 'parent_decided_elsewhere', reason: parentCheck.reason };
     }
 
     if (voidAlreadyRan) return { outcome: 'proceed' };
@@ -2702,13 +2709,18 @@ async function voidLapsedInvoice(term, conn) {
   }
 }
 
+const LAPSE_HOLD_BELL_KIND = { parent_decided_elsewhere: 'lapse_parent_decided_elsewhere', parent_suspended: null };
+
 async function processGraceLapseSequence(term, conn) {
   const eligibility = await resolveLapseVoidEligibility(term, conn);
   if (eligibility.outcome === 'deferred') {
     const manualReview = eligibility.kind === 'parent_decided_elsewhere';
+    // A parent suspended by a dispute on its own invoice is transient: the
+    // lapse rotates (no manual review, no bell) and is retried every sweep
+    // until the dispute resolves either way.
     return holdLapse(term, conn, {
       manualReview,
-      kind: manualReview ? 'lapse_parent_decided_elsewhere' : 'lapse_reconciliation_pending',
+      kind: Object.hasOwn(LAPSE_HOLD_BELL_KIND, eligibility.kind) ? LAPSE_HOLD_BELL_KIND[eligibility.kind] : 'lapse_reconciliation_pending',
       reason: eligibility.reason,
     });
   }

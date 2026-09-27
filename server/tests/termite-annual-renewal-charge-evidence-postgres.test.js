@@ -405,6 +405,37 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       });
     });
 
+    // Codex #4971 pre-push P1: a parent demoted to payment_pending by a
+    // dispute on its own invoice is transient — the grace lapse rotates it
+    // (never manual_review), and the recovery leg keeps selecting it until
+    // the dispute resolves; a durable decision elsewhere is manual_review.
+    test('a dispute-suspended parent keeps the lapse retryable; a durable decision elsewhere is manual review', async () => {
+      const make = async (parentFields) => {
+        const parent = await insertParent(parentFields);
+        const invoice = await insertInvoice({ status: 'sent', sms_sent_at: new Date() });
+        return insertSuccessor(parent, invoice);
+      };
+      const suspended = await make({ status: 'payment_pending' });
+      const decided = await make({ status: 'renewed', renewal_decision: 'switch_plan' });
+
+      await Charge._private.processGraceLapses({ conn: db, limit: 50, counts: { graceScanned: 0, graceLapsed: 0, graceReconciliationDeferred: 0, graceRetiredSettled: 0 } });
+
+      const suspendedRow = await db('annual_prepay_terms').where({ id: suspended.id }).first();
+      expect(suspendedRow.renewal_lapse_started_at).toBeInstanceOf(Date);
+      expect(suspendedRow.renewal_lapse_outcome).toBeNull();
+      expect(suspendedRow.renewal_sweep_deferred_at).toBeInstanceOf(Date);
+      expect((await db('annual_prepay_terms').where({ id: decided.id }).first()).renewal_lapse_outcome).toBe('manual_review');
+      expect(mockNotifyAdmin.mock.calls.map(([, , , opts]) => opts.dedupeKey)).toEqual([
+        `termite-renewal-charge:${decided.id}:lapse_parent_decided_elsewhere`,
+      ]);
+
+      // The recovery leg keeps retrying the suspended one (never the held one).
+      const counts = { lapseEffectsScanned: 0, lapseEffectsReconciled: 0 };
+      await Charge._private.reconcileMissedLapseEffects({ conn: db, limit: 50, counts });
+      expect(counts.lapseEffectsScanned).toBe(1);
+      expect((await db('annual_prepay_terms').where({ id: suspended.id }).first()).renewal_lapse_outcome).toBeNull();
+    });
+
     test('pre-push P1: a scheduled or stale-sending renewal invoice with no delivery stamp is never "presented" — no lapse, no retrieval', async () => {
       const Renewals2 = require('../services/annual-prepay-renewals');
       const originalLock = Renewals2.withParentDecisionLock;
