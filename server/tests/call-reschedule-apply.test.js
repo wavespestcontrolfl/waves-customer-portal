@@ -109,6 +109,9 @@ describe('planRescheduleFromCall', () => {
     expect(planRescheduleFromCall({ ...base, candidates: [visit()] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
     expect(planRescheduleFromCall({ ...base, candidates: [visit(), visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-09-25' })] }).reason).toBe('service_needs_review');
     expect(planRescheduleFromCall({ ...base, candidates: [visit({ scheduled_date: '2026-12-01' })] }).reason).toBe('service_needs_review');
+    // One program, two of its visits in span: the fallback does not guess.
+    expect(planRescheduleFromCall({ ...base, candidates: [visit(), visit({ id: 'same-program-2', scheduled_date: '2026-09-28' })] }))
+      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'same-program-2'] });
   });
 
   // A repoint leaves service_type stale, so the label alone can name the

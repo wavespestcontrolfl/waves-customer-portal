@@ -26,7 +26,9 @@
  *     identified property sits within
  *     CANDIDATE_SPAN_DAYS of the target date — two candidates is ambiguous,
  *     zero means the call was about a visit we don't have (the booking lane
- *     owns that); coarse or ambiguous service names stay in review. A
+ *     owns that). A coarse, absent or unmatched service name falls back to
+ *     the property's one in-span visit, and stays in review when more than
+ *     one program (or more than one visit) sits in span. A
  *     grouped visit needs the whole-visit mover's
  *     disclosure a phone call never gave
  *   - the pipeline did not itself create an appointment from this call
@@ -277,7 +279,10 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
       });
       const spanProgramIds = new Set(inSpanAny.map((row) => row.service_id || stripServiceSuffixes(row.catalog_service_name || row.service_type || '').toLowerCase()));
       if (!inSpanAny.length || spanProgramIds.size !== 1) return skip('service_needs_review');
-      nearby = inSpanAny;
+      // One program, but two of its visits near the target: which one the
+      // caller meant is as ambiguous here as on the named-service path.
+      if (inSpanAny.length > 1) return skip('ambiguous_visit', { candidateIds: inSpanAny.map((r) => r.id) });
+      nearby = inSpanAny; // invariant preserved: length is exactly 1 here
     } else {
       const inSpan = matchingServices.filter((row) => {
         const d = dateOnly(row.scheduled_date);
