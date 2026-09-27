@@ -56,7 +56,7 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
   let recordDecision;
   let cancelTermWithRestorations;
   let suspendActiveTermsForDisputedInvoice;
-  let lockTermiteTermForStatusWrite;
+  let acquireTermiteGateAtEntry;
   const customerIds = [];
 
   beforeAll(() => {
@@ -69,7 +69,7 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
     process.env.DB_POOL_MIN = '2';
     db = require('../models/db');
     ({
-      withParentDecisionLock, recordDecision, cancelTermWithRestorations, suspendActiveTermsForDisputedInvoice, lockTermiteTermForStatusWrite,
+      withParentDecisionLock, recordDecision, cancelTermWithRestorations, suspendActiveTermsForDisputedInvoice, acquireTermiteGateAtEntry,
     } = require('../services/annual-prepay-renewals'));
     holder = require('knex')({ client: 'pg', connection: process.env.REPAIR_TEST_DATABASE_URL, pool: { min: 1, max: 1 } });
   });
@@ -412,10 +412,83 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
     const termId = await insertTerm({ annualPlanVersion: 'v3', status: 'active' });
     const seen = await db.transaction(async (trx) => {
       await trx.raw("SELECT set_config('lock_timeout', '12s', true)");
-      await lockTermiteTermForStatusWrite(trx, termId);
+      await acquireTermiteGateAtEntry(trx, { termIds: [termId] });
       return (await trx.raw('SHOW lock_timeout')).rows[0].lock_timeout;
     });
     expect(seen).toBe('12s');
+  });
+
+  // Codex #4971 pre-push (lock order): the gate is every writer's FIRST
+  // lock — gate → customer → invoice → term, the charge path's own order.
+  // The charge holds the gate and THEN asks for the customer row; a writer
+  // that takes the gate first simply queues behind the charge (visible as
+  // an ungranted advisory lock), then proceeds — no lock_timeout, no
+  // deadlock. The control case shows the old order (a row lock first, the
+  // gate second) stalls the charge on the row until the writer's 5s
+  // lock_timeout aborts it.
+  describe('(B) lock order: gate first at every writer entry', () => {
+    let writerDb;
+    beforeAll(() => {
+      writerDb = require('knex')({ client: 'pg', connection: process.env.REPAIR_TEST_DATABASE_URL, pool: { min: 0, max: 2 } });
+    });
+    afterAll(async () => { await writerDb?.destroy(); });
+
+    const gateWaiters = async (termId) => (await holder.raw(
+      "SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid = hashtext(?) AND objid = hashtext(?::text)",
+      ['annual-prepay-parent-decision', String(termId)],
+    )).rows[0].n;
+
+    // The charge: gate, then (after a beat) the customer row, held briefly.
+    const chargeHoldingGateThenCustomer = (termId, customerId, order) => withParentDecisionLock(termId, async () => {
+      order.push('charge-gate');
+      await sleep(150);
+      await db.transaction(async (t) => {
+        await t('customers').where({ id: customerId }).forUpdate().first('id');
+        order.push('charge-customer-row');
+        await sleep(100);
+      });
+      order.push('charge-done');
+    });
+
+    test('a writer entering gate-first while the charge holds the gate and requests the customer row WAITS, then proceeds — no timeout, no deadlock', async () => {
+      const { termId, invoiceId } = await insertTerm({ annualPlanVersion: 'v3', status: 'active', withInvoice: true });
+      const { customer_id: customerId } = await db('annual_prepay_terms').where({ id: termId }).first('customer_id');
+      const order = [];
+      let sawGateWait = false;
+      const charge = chargeHoldingGateThenCustomer(termId, customerId, order);
+      await sleep(40);
+      const startedAt = Date.now();
+      const writer = writerDb.transaction(async (trx) => {
+        // The writer's entry (reverse-prepaid / remove-flag / dispute shape):
+        await acquireTermiteGateAtEntry(trx, { invoiceIds: [invoiceId] });
+        order.push('writer-gate');
+        await trx('customers').where({ id: customerId }).forUpdate().first('id');
+        await trx('invoices').where({ id: invoiceId }).forUpdate().first('id');
+        await trx('annual_prepay_terms').where({ id: termId }).forUpdate().first('id');
+        order.push('writer-rows');
+      });
+      const poll = (async () => { while (!order.includes('writer-gate')) { if (await gateWaiters(termId)) sawGateWait = true; await sleep(20); } })();
+      await Promise.all([charge, writer, poll]);
+
+      expect(sawGateWait).toBe(true);
+      expect(order).toEqual(['charge-gate', 'charge-customer-row', 'charge-done', 'writer-gate', 'writer-rows']);
+      expect(Date.now() - startedAt).toBeLessThan(4000); // never the 5s lock_timeout
+    });
+
+    test('control: the OLD order (customer row first, gate second) stalls both until the writer\'s lock_timeout aborts it', async () => {
+      const { termId, invoiceId } = await insertTerm({ annualPlanVersion: 'v3', status: 'active', withInvoice: true });
+      const { customer_id: customerId } = await db('annual_prepay_terms').where({ id: termId }).first('customer_id');
+      const order = [];
+      const charge = chargeHoldingGateThenCustomer(termId, customerId, order);
+      await sleep(40);
+      const writer = writerDb.transaction(async (trx) => {
+        await trx('customers').where({ id: customerId }).forUpdate().first('id');
+        await acquireTermiteGateAtEntry(trx, { invoiceIds: [invoiceId] });
+      });
+      await expect(writer).rejects.toThrow(/could not acquire the parent-decision lock/);
+      await charge;
+      expect(order).toEqual(['charge-gate', 'charge-customer-row', 'charge-done']);
+    }, 20000);
   });
 
   // Codex round-7 P1 (2nd audit round) — REENTRANCY: chargeInvoiceWithSavedCard's

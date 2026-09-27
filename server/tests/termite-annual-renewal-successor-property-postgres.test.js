@@ -56,6 +56,7 @@ async function createScratchDb() {
     coverage_service_type text,
     coverage_visit_count integer,
     coverage_cadence text,
+    dispute_suspended_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     term_start date NOT NULL DEFAULT '2025-10-01',
     term_end date NOT NULL DEFAULT '2026-09-30'

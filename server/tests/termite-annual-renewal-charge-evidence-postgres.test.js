@@ -78,6 +78,10 @@ async function createScratchDb() {
     renewal_lapse_completed_at timestamptz,
     renewal_lapse_outcome text,
     renewal_sweep_deferred_at timestamptz,
+    renewal_charge_failure_kind text,
+    renewal_charge_failure_reason text,
+    renewal_charge_failure_handled_at timestamptz,
+    dispute_suspended_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
   )`);
@@ -104,6 +108,7 @@ async function createScratchDb() {
     status text NOT NULL DEFAULT 'claimed',
     submitted_at timestamptz,
     stripe_payment_intent_id text,
+    resolved_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now()
   )`);
   return { db, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };
@@ -290,14 +295,15 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
 
     test('item 7: leg 7b recovers an abandoned pre-submit claim (bell + pay link) and leaves a genuinely submitted attempt alone', async () => {
       // Inside its grace window: a pay link is still the right recovery.
-      const parent = await insertParent();
+      // Each successor follows its parent (term_start = parent term_end + 1).
+      const parent = await insertParent({ term_end: daysFromToday(-3) });
       const bareInvoice = await insertInvoice({ status: 'draft' });
       const bare = await insertSuccessor(parent, bareInvoice, {
         term_start: daysFromToday(-2), created_at: new Date(), renewal_charge_attempted_at: new Date(Date.now() - 3600000),
       });
       await db('stripe_invoice_charge_attempts').insert({ invoice_id: bareInvoice.id, status: 'failed' });
 
-      const parent2 = await insertParent();
+      const parent2 = await insertParent({ term_end: daysFromToday(-3) });
       const sentInvoice = await insertInvoice({ status: 'draft' });
       const submitted = await insertSuccessor(parent2, sentInvoice, {
         term_start: daysFromToday(-2), created_at: new Date(), renewal_charge_attempted_at: new Date(Date.now() - 3600000),
@@ -346,6 +352,92 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       const submitted = await claimedDraftSuccessor({ status: 'failed', submitted_at: new Date() });
       expect(await Charge._private.renewalWasPresented(db, bare)).toBe(false);
       expect(await Charge._private.renewalWasPresented(db, submitted)).toBe(true);
+    });
+  });
+
+  // OWNER RULING (pre-push item 6): a renewal whose invoice was already SENT
+  // is withdrawn right away once the prior year becomes durably ineligible
+  // — here a full refund of the parent's own invoice, recorded on the
+  // payments ledger before any status sync. Pass 4b's SQL pre-filter finds
+  // it, the per-row check confirms the refusal is durable, and the
+  // withdrawal voids (voidInvoice, requireUnsettled) + cancels, with one
+  // staff alert and no customer message.
+  describe('owner ruling: withdraw a sent renewal when the prior year is refunded (pass 4b)', () => {
+    let Renewals3;
+    let originalLock;
+    beforeEach(() => {
+      Renewals3 = require('../services/annual-prepay-renewals');
+      originalLock = Renewals3.withParentDecisionLock;
+      Renewals3.withParentDecisionLock = (_termId, fn) => fn();
+      require('../services/stripe').assertNoInvoiceChargeReconciliationPending.mockImplementation(async () => undefined);
+      mockVoidInvoice.mockImplementation(async (invoiceId) => {
+        // voidInvoice's own effects: the invoice voids, its sync cancels the term.
+        await db('invoices').where({ id: invoiceId }).update({ status: 'void' });
+        await db('annual_prepay_terms').where({ prepay_invoice_id: invoiceId }).update({ status: 'cancelled' });
+        return {};
+      });
+    });
+    afterEach(() => {
+      Renewals3.withParentDecisionLock = originalLock;
+      require('../services/stripe').assertNoInvoiceChargeReconciliationPending.mockImplementation(async () => { throw new Error('reconciliation pending (test)'); });
+      mockVoidInvoice.mockReset();
+    });
+
+    async function sentRenewalOfRefundableParent() {
+      const parentInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(), stripe_payment_intent_id: `pi_${randomUUID()}` });
+      const parent = await insertParent({ prepay_invoice_id: parentInvoice.id });
+      const renewalInvoice = await insertInvoice({ status: 'sent', sent_at: new Date() });
+      const successor = await insertSuccessor(parent, renewalInvoice, {
+        term_start: daysFromToday(-34), created_at: new Date(),
+      });
+      return { parent, parentInvoice, renewalInvoice, successor };
+    }
+    const counts = () => ({ withdrawScanned: 0, withdrawn: 0 });
+
+    test('a delivery-stamped unpaid renewal is voided and cancelled right after the parent is refunded — one staff alert', async () => {
+      const { parentInvoice, renewalInvoice, successor } = await sentRenewalOfRefundableParent();
+      const untouched = await sentRenewalOfRefundableParent(); // parent still paid: never selected
+      await db('payments').insert({ status: 'refunded', stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id });
+
+      const c = counts();
+      await Charge._private.withdrawSuccessorsOfIneligibleParents({ conn: db, limit: 50, counts: c });
+
+      expect(c).toEqual({ withdrawScanned: 1, withdrawn: 1 });
+      expect(mockVoidInvoice).toHaveBeenCalledWith(renewalInvoice.id, { requireUnsettled: true });
+      expect((await db('annual_prepay_terms').where({ id: successor.id }).first()).status).toBe('cancelled');
+      expect((await db('annual_prepay_terms').where({ id: untouched.successor.id }).first()).status).toBe('payment_pending');
+      expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+      expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/withdrawn/i), expect.any(String), expect.objectContaining({
+        dedupeKey: `termite-renewal-charge:${successor.id}:renewal_withdrawn`,
+      }));
+      expect(mockSendViaSMSAndEmail).not.toHaveBeenCalled();
+    });
+
+    test('a submitted, unresolved charge on the renewal wins: nothing voided, no alert, rotated', async () => {
+      const { parentInvoice, renewalInvoice, successor } = await sentRenewalOfRefundableParent();
+      await db('payments').insert({ status: 'refunded', stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id });
+      await db('stripe_invoice_charge_attempts').insert({ invoice_id: renewalInvoice.id, status: 'ambiguous', submitted_at: new Date() });
+
+      await Charge._private.withdrawSuccessorsOfIneligibleParents({ conn: db, limit: 50, counts: counts() });
+
+      expect(mockVoidInvoice).not.toHaveBeenCalled();
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
+      const row = await db('annual_prepay_terms').where({ id: successor.id }).first();
+      expect(row.status).toBe('payment_pending');
+      expect(row.renewal_sweep_deferred_at).not.toBeNull();
+    });
+
+    test('a lost staff bell voids nothing — rotated to ring again', async () => {
+      const { parentInvoice, successor } = await sentRenewalOfRefundableParent();
+      await db('payments').insert({ status: 'refunded', stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id });
+      mockNotifyAdmin.mockResolvedValueOnce(null);
+
+      await Charge._private.withdrawSuccessorsOfIneligibleParents({ conn: db, limit: 50, counts: counts() });
+
+      expect(mockVoidInvoice).not.toHaveBeenCalled();
+      const row = await db('annual_prepay_terms').where({ id: successor.id }).first();
+      expect(row.status).toBe('payment_pending');
+      expect(row.renewal_sweep_deferred_at).not.toBeNull();
     });
   });
 });

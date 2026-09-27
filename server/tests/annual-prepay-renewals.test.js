@@ -4707,8 +4707,15 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
   // bare db('annual_prepay_terms').columnInfo(). The probe answers "column
   // present" without consuming a queued query, so every queued chain below
   // still lines up with the statement it models.
+  // The decline's own transaction takes the termite renewal gate for the
+  // customer's termite terms FIRST (acquireTermiteGateAtEntry — a plain
+  // lookup, then the advisory locks), before any term row lock: every queue
+  // below is preceded by that lookup, which finds no term to lock here.
+  const gateLookups = [];
   const setDeclineQueues = (queues) => {
-    const queued = setDbQueues(queues);
+    const gateLookup = query({ rows: [] });
+    gateLookups.push(gateLookup);
+    const queued = setDbQueues({ ...queues, annual_prepay_terms: [gateLookup, ...(queues.annual_prepay_terms || [])] });
     const impl = db.getMockImplementation();
     db.mockImplementation((table) => {
       if (table !== 'annual_prepay_terms') return impl(table);
@@ -4767,6 +4774,10 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     expect(result).toEqual({
       ok: true, termId: 'term-1', termEnd: '2027-05-20', awaitsInstallation: false, prepayAmount: 450, alreadyDeclined: false,
     });
+    // Codex #4971 pre-push lock order: the gate lookup for the customer's
+    // termite terms ran FIRST — before the term row lock.
+    expect(gateLookups.at(-1).whereRaw).toHaveBeenCalledWith(expect.stringContaining('customer_id::text = ANY'), ['{}', '{}', '{}', '{cust-1}']);
+    expect(gateLookups.at(-1).whereRaw.mock.invocationCallOrder[0]).toBeLessThan(termSelectQuery.forUpdate.mock.invocationCallOrder[0]);
     // The SAME status/decision transition recordDecision('cancel') always
     // writes (statusAfterDecision('cancel') === 'cancelled') — this is what
     // coveredTermsAsOf's decided-lapse branch (lapsedRenewalStillInTerm,
@@ -6713,6 +6724,9 @@ describe('billing_mode reset on term void/refund', () => {
   const cancelQueues = (term, cancelled, resetQ) => ({
     annual_prepay_terms: [
       query({ rows: [term] }), // terms select for the refunded invoice
+      // cancelTermWithRestorations opens its own transaction here, so the
+      // termite gate lookup is its first statement (none: not a termite term).
+      query({ rows: [] }),
       query({ returning: [cancelled] }), // cancel transition update
       query({ first: undefined }), // reset helper's replacement-coverage check
       query({ first: undefined }), // prior_billing_mode read (not recorded → heuristic)
@@ -6769,7 +6783,7 @@ describe('billing_mode reset on term void/refund', () => {
     const queues = cancelQueues(TERM, { ...TERM, status: 'cancelled' }, resetQ);
     // prior_billing_mode WAS recorded at stamp time — the heuristic
     // (no source estimate → NULL) must NOT win over it.
-    queues.annual_prepay_terms[3] = query({ first: { prior_billing_mode: 'per_application' } });
+    queues.annual_prepay_terms[4] = query({ first: { prior_billing_mode: 'per_application' } });
     setDbQueues(queues);
 
     await AnnualPrepayRenewals.syncTermForInvoicePayment(
@@ -6791,7 +6805,7 @@ describe('billing_mode reset on term void/refund', () => {
     const queues = cancelQueues(TERM, { ...TERM, status: 'cancelled' }, resetQ);
     // Recorded 'none' (prior was NULL legacy monthly) beats the heuristic
     // (source estimate present → per_application).
-    queues.annual_prepay_terms[3] = query({ first: { prior_billing_mode: 'none' } });
+    queues.annual_prepay_terms[4] = query({ first: { prior_billing_mode: 'none' } });
     setDbQueues(queues);
 
     await AnnualPrepayRenewals.syncTermForInvoicePayment(

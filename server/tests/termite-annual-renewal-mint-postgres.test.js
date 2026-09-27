@@ -43,6 +43,8 @@ async function createScratchDb() {
     status text NOT NULL,
     renewal_decision text,
     renewed_from_term_id uuid,
+    notice_45_sent_at timestamptz,
+    installation_anchored_at timestamptz,
     term_start date NOT NULL,
     term_end date NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -52,6 +54,10 @@ async function createScratchDb() {
   await db.schema.alterTable('annual_prepay_terms', (t) => {
     t.unique(['renewed_from_term_id'], 'annual_prepay_terms_renewed_from_term_unique');
   });
+  // The mint re-checks the scan's own "renewal due" predicate against the
+  // locked parent (Codex #4971 pre-push P0) — it reads the customer's
+  // liveness too.
+  await db.raw('CREATE TABLE customers (id uuid PRIMARY KEY, deleted_at timestamptz)');
   await db.raw(`CREATE TABLE invoices (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid,
@@ -61,6 +67,10 @@ async function createScratchDb() {
   )`);
   return { db, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };
 }
+
+// The renewal day itself: the parent's term_end (2026-09-26) has just been
+// reached — pinned so the fixture never ages out of the renewal window.
+const TODAY = '2026-09-27';
 
 describeOrSkip('mintRenewalSuccessor — DB-level idempotency anchor, real Postgres', () => {
   let fixture;
@@ -82,7 +92,10 @@ describeOrSkip('mintRenewalSuccessor — DB-level idempotency anchor, real Postg
       prepay_amount: 249,
       term_start: '2025-09-27',
       term_end: '2026-09-26',
+      notice_45_sent_at: new Date('2026-08-12T14:00:00Z'),
+      installation_anchored_at: new Date('2025-09-27T14:00:00Z'),
     });
+    await db('customers').insert({ id: customerId });
 
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     jest.doMock('../routes/admin-customers', () => ({
@@ -97,6 +110,7 @@ describeOrSkip('mintRenewalSuccessor — DB-level idempotency anchor, real Postg
       }),
     }));
     jest.doMock('../services/annual-prepay-renewals', () => ({
+      TERMITE_RENEWAL_GRACE_DAYS: 30,
       createTermForAnnualPrepay: jest.fn(async ({ conn, customerId: custId, prepayInvoiceId, prepayAmount, termStart, termEnd, renewedFromTermId, annualPlanVersion }) => {
         const [row] = await conn('annual_prepay_terms').insert({
           customer_id: custId,
@@ -116,7 +130,7 @@ describeOrSkip('mintRenewalSuccessor — DB-level idempotency anchor, real Postg
 
   test('mints exactly one successor', async () => {
     const { _private } = require('../services/termite-annual-renewal-charge');
-    const result = await _private.mintRenewalSuccessor(parentId, db);
+    const result = await _private.mintRenewalSuccessor(parentId, db, TODAY);
     expect(result.minted).toBe(true);
     const successors = await db('annual_prepay_terms').where({ renewed_from_term_id: parentId });
     expect(successors.length).toBe(1);
@@ -124,10 +138,10 @@ describeOrSkip('mintRenewalSuccessor — DB-level idempotency anchor, real Postg
 
   test('the successor-exists recheck: a second call for the SAME parent returns the existing row, minted:false, and creates nothing new', async () => {
     const { _private } = require('../services/termite-annual-renewal-charge');
-    const first = await _private.mintRenewalSuccessor(parentId, db);
+    const first = await _private.mintRenewalSuccessor(parentId, db, TODAY);
     expect(first.minted).toBe(true);
 
-    const second = await _private.mintRenewalSuccessor(parentId, db);
+    const second = await _private.mintRenewalSuccessor(parentId, db, TODAY);
     expect(second.minted).toBe(false);
     expect(second.successor.id).toBe(first.successor.id);
 
@@ -135,6 +149,25 @@ describeOrSkip('mintRenewalSuccessor — DB-level idempotency anchor, real Postg
     expect(successors.length).toBe(1);
     const invoices = await db('invoices');
     expect(invoices.length).toBe(1);
+  });
+
+  // Codex #4971 pre-push P0: staff extended the parent's term_end after the
+  // candidate scan selected it. The mint re-runs the scan's own predicate
+  // against the LOCKED parent and mints nothing — no invoice, no successor
+  // with the new, future dates charged today.
+  test('a parent no longer due under the mint lock (term_end extended) mints nothing', async () => {
+    await db('annual_prepay_terms').where({ id: parentId }).update({ term_end: '2027-09-26' });
+    const { _private } = require('../services/termite-annual-renewal-charge');
+    await expect(_private.mintRenewalSuccessor(parentId, db, TODAY)).resolves.toBeNull();
+    expect(await db('annual_prepay_terms').where({ renewed_from_term_id: parentId })).toHaveLength(0);
+    expect(await db('invoices')).toHaveLength(0);
+  });
+
+  test('a parent whose on-time 45-day notice witness is gone mints nothing', async () => {
+    await db('annual_prepay_terms').where({ id: parentId }).update({ notice_45_sent_at: null });
+    const { _private } = require('../services/termite-annual-renewal-charge');
+    await expect(_private.mintRenewalSuccessor(parentId, db, TODAY)).resolves.toBeNull();
+    expect(await db('invoices')).toHaveLength(0);
   });
 
   test('UNIQUE renewed_from_term_id: even bypassing the app-level recheck, Postgres itself refuses a second successor for the same parent', async () => {

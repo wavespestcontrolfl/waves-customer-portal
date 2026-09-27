@@ -63,11 +63,16 @@ async function createScratchDb() {
     renewed_from_term_id uuid,
     annual_plan_version text,
     coverage_service_type text,
+    dispute_suspended_at timestamptz,
+    prior_billing_mode text,
     term_start date NOT NULL,
     term_end date NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
   )`);
+  // What the real dispute demotion (suspendActiveTermsForDisputedInvoice)
+  // writes besides the term: the customer's billing_mode restore.
+  await db.raw('CREATE TABLE customers (id uuid PRIMARY KEY, billing_mode text, updated_at timestamptz)');
   await db.raw('CREATE TABLE estimates (id uuid PRIMARY KEY, customer_id uuid NOT NULL, property_id uuid)');
   await db.raw(`CREATE TABLE scheduled_services (
     id uuid PRIMARY KEY, customer_id uuid NOT NULL, annual_prepay_term_id uuid,
@@ -173,6 +178,38 @@ describeOrSkip('coveredTermsAsOf — termite renewal grace coverage (P2-4), real
     await db('invoices').where({ id: invoiceId }).update({ status: 'void' });
     const coveredAfter = await AnnualPrepayRenewals.coveredTermsAsOf(db, '2026-10-01').where('t.id', id).first('t.id');
     expect(coveredAfter).toBeUndefined();
+  });
+
+  // Codex #4971 pre-push P0: a dispute inside the first 30 days demotes the
+  // PAID successor back to payment_pending (the real
+  // suspendActiveTermsForDisputedInvoice, as the dispute webhook runs it)
+  // and reopens its invoice with the Stripe identifiers cleared. The grace
+  // branch must NOT hand that coverage straight back — completion charges
+  // and monthly dues would be suppressed on clawed-back money.
+  test('a paid successor disputed inside its grace window is NOT grace-covered after the dispute demotion', async () => {
+    await db('customers').insert({ id: customerId, billing_mode: 'annual_prepay' });
+    await db('invoices').where({ id: invoiceId }).update({ status: 'paid', paid_at: new Date(), stripe_payment_intent_id: 'pi_renewal' });
+    const termId = await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z', overrides: { status: 'active' } });
+    const coveredOn = async (date) => Boolean(await AnnualPrepayRenewals.coveredTermsAsOf(db, date).where('t.id', termId).first('t.id'));
+    await expect(coveredOn('2026-10-07')).resolves.toBe(true); // paid and active: covered
+
+    await db.transaction(async (trx) => {
+      await AnnualPrepayRenewals.suspendActiveTermsForDisputedInvoice(invoiceId, trx);
+      await trx('invoices').where({ id: invoiceId }).update({
+        status: 'overdue', paid_at: null, stripe_payment_intent_id: null, stripe_charge_id: null,
+      });
+    });
+
+    const term = await db('annual_prepay_terms').where({ id: termId }).first();
+    expect(term.status).toBe('payment_pending');
+    expect(term.dispute_suspended_at).not.toBeNull();
+    // Day 10 of the renewal — inside the 30-day grace window by date alone.
+    await expect(coveredOn('2026-10-07')).resolves.toBe(false);
+    const visit = {
+      id: randomUUID(), customer_id: customerId, service_type: null, scheduled_date: '2026-10-07',
+      prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: termId,
+    };
+    await expect(AnnualPrepayRenewals.annualPrepayCoversVisit(visit, db)).resolves.toBe(false);
   });
 
   test('a non-termite payment_pending term (no annual_plan_version) is still NOT covered', async () => {

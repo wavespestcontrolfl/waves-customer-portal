@@ -2420,6 +2420,10 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     // inside a transaction, so it runs after commit (below).
     let coveredInvoiceIds = [];
     const txResult = await db.transaction(async (trx) => {
+      // Chokepoint B (pre-push lock order): the parent-decision gate for the
+      // termite term this flag removal cancels is the FIRST lock — gate →
+      // customer → invoice → term, the charge path's own order.
+      await AnnualPrepayRenewals.acquireTermiteGateAtEntry(trx, { invoiceIds: [invoice.id] });
       // Customer before invoice — the order reverse-prepaid and apply-credit
       // take, and the cancel below locks the customer too — then re-read the
       // invoice under its own lock: a payment landing on it waits for us.
@@ -3084,6 +3088,14 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
         }
       }
       outcome = await db.transaction(async (trx) => {
+        // Chokepoint B (Codex #4971 pre-push P1, lock order): un-paying a
+        // termite annual term moves it out of renewal-charge-eligible state,
+        // so the parent-decision gate is this transaction's FIRST lock —
+        // before the customer / invoice / term row locks below. The renewal
+        // charge holds the gate and then asks for the customer row; taking
+        // the rows first made the two wait on each other until the 5s
+        // lock_timeout aborted the reversal. No-op without a termite term.
+        await AnnualPrepayRenewals.acquireTermiteGateAtEntry(trx, { invoiceIds: [id] });
         if (preCustomer) await trx('customers').where({ id: preCustomer.customer_id }).forUpdate().first('id');
         const locked = await trx('invoices').where({ id }).forUpdate().first();
         if (!locked) {
@@ -3213,11 +3225,6 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
           // guarded exactly like suspendActiveTermsForDisputedInvoice's own
           // inline demotion (pre-migration boots degrade to no exemption,
           // never a crash).
-          // Chokepoint B (Codex #4971 round-3 P1): un-paying a termite annual
-          // term moves it out of renewal-charge-eligible state — take the
-          // SAME parent-decision gate every other such writer takes, on
-          // this route's own transaction (no-op for a non-termite term).
-          await AnnualPrepayRenewals.lockTermiteTermForStatusWrite(trx, locked.annual_prepay_term_id);
           const termCols = await AnnualPrepayRenewals.annualPrepayColumns(trx);
           const demotion = { status: 'payment_pending', updated_at: trx.fn.now() };
           if (termCols.dispute_suspended_at) demotion.dispute_suspended_at = trx.fn.now();

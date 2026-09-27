@@ -17,25 +17,38 @@
  * (NULLS FIRST) ahead of its own order: rows never deferred always come
  * first, deferred rows rotate least-recently-deferred first. Ordering only —
  * it never excludes a row and never changes what a pass does with it.
- * Additive, nullable.
+ *
+ * annual_prepay_terms.renewal_charge_failure_kind / _reason / _handled_at —
+ * Codex #4971 pre-push P1: a renewal charge that reached Stripe but did not
+ * pay (a genuine decline, a refusal, an ambiguous result) owes staff a bell
+ * and, for a decline/refusal, the customer a pay link. That follow-through
+ * is persisted (kind + reason) BEFORE it runs and marked handled only once
+ * it verifiably happened, so leg 7c can re-run a follow-through whose bell
+ * or delivery failed — never the charge itself.
+ *
+ * All additive and nullable.
  */
+const COLUMNS = [
+  ['renewal_sweep_deferred_at', (t) => t.timestamp('renewal_sweep_deferred_at', { useTz: true })],
+  ['renewal_charge_failure_kind', (t) => t.text('renewal_charge_failure_kind')],
+  ['renewal_charge_failure_reason', (t) => t.text('renewal_charge_failure_reason')],
+  ['renewal_charge_failure_handled_at', (t) => t.timestamp('renewal_charge_failure_handled_at', { useTz: true })],
+];
 
 exports.up = async function up(knex) {
-  if (await knex.schema.hasTable('annual_prepay_terms')) {
-    if (!(await knex.schema.hasColumn('annual_prepay_terms', 'renewal_sweep_deferred_at'))) {
-      await knex.schema.alterTable('annual_prepay_terms', (t) => {
-        t.timestamp('renewal_sweep_deferred_at', { useTz: true });
-      });
+  if (!(await knex.schema.hasTable('annual_prepay_terms'))) return;
+  for (const [name, add] of COLUMNS) {
+    if (!(await knex.schema.hasColumn('annual_prepay_terms', name))) {
+      await knex.schema.alterTable('annual_prepay_terms', add);
     }
   }
 };
 
 exports.down = async function down(knex) {
-  if (await knex.schema.hasTable('annual_prepay_terms')) {
-    if (await knex.schema.hasColumn('annual_prepay_terms', 'renewal_sweep_deferred_at')) {
-      await knex.schema.alterTable('annual_prepay_terms', (t) => {
-        t.dropColumn('renewal_sweep_deferred_at');
-      });
+  if (!(await knex.schema.hasTable('annual_prepay_terms'))) return;
+  for (const [name] of [...COLUMNS].reverse()) {
+    if (await knex.schema.hasColumn('annual_prepay_terms', name)) {
+      await knex.schema.alterTable('annual_prepay_terms', (t) => t.dropColumn(name));
     }
   }
 };

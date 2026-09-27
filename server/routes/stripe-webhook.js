@@ -7028,6 +7028,10 @@ async function handleDisputeCreated(dispute) {
         // that finalized between the lock release and this reopen owns the
         // outcome — a won restore must not be reopened behind its back.
         await db.transaction(async (trx) => {
+          // Chokepoint B (Codex #4971 pre-push lock order): the renewal
+          // parent-decision gate is this transaction's FIRST lock (no-op
+          // without a termite term on the invoice).
+          await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [reopenInvoiceId] });
           const rowNow = await trx('payments').where({ id: reopenRowId }).first('status', 'metadata');
           let rowNowMeta = {};
           try { rowNowMeta = rowNow?.metadata ? (typeof rowNow.metadata === 'string' ? JSON.parse(rowNow.metadata) : rowNow.metadata) : {}; } catch { rowNowMeta = {}; }
@@ -7226,6 +7230,8 @@ async function handleDisputeCreated(dispute) {
       // critical-write discipline, a rollback fails the event and Stripe
       // retries it.
       await db.transaction(async (trx) => {
+        // Chokepoint B (Codex #4971 pre-push lock order): the gate first.
+        await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [invoice.id] });
         await require('../services/annual-prepay-renewals')
           .suspendActiveTermsForDisputedInvoice(invoice.id, trx);
 

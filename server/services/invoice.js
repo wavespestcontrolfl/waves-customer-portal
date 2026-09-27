@@ -7907,6 +7907,18 @@ const InvoiceService = {
     // can never run twice for one invoice.
     let invoice = null;
     await db.transaction(async (trx) => {
+      // Codex #4971 pre-push P0 (lock order): voiding a credit-settled
+      // ('prepaid') termite annual invoice restores its account credit and
+      // COMMITS here, before the term sync below ever runs. A renewal charge
+      // already past its final parent re-check could otherwise submit while
+      // this void is in flight and consume that returned credit. The
+      // parent-decision gate for the termite term(s) tied to this invoice is
+      // therefore this transaction's FIRST lock — before the statement /
+      // invoice row locks, the void and the credit restore — so the void
+      // either commits before the charge's re-check (which then refuses a
+      // voided parent) or waits until the charge's submission is done. No-op
+      // without a termite term.
+      await require("./annual-prepay-renewals").acquireTermiteGateAtEntry(trx, { invoiceIds: [id] });
       // Phase 2: lock + re-verify the parent statement is still OPEN inside the
       // transaction (the pre-check above is a fast fail, but a concurrent close
       // could finalize the statement between it and this write — that would let
@@ -10099,6 +10111,11 @@ const InvoiceService = {
 
           // ── Atomic re-check + void (row lock) ──────────────────────────
           const result = await db.transaction(async (trx) => {
+            // Codex #4971 pre-push P0 (lock order): this void can take a
+            // credit-settled ('prepaid') invoice and restore its credit, so
+            // a termite renewal parent-decision gate tied to it is this
+            // transaction's FIRST lock (no-op without a termite term).
+            await require("./annual-prepay-renewals").acquireTermiteGateAtEntry(trx, { invoiceIds: [candidate.id] });
             // Phase 2: parent-before-child lock order (matches the edit/void
             // paths) so a concurrent accrued edit/void + this cancellation can't
             // AB-BA deadlock. Lock the statement FIRST (using the

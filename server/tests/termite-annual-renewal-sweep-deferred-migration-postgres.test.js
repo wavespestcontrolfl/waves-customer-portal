@@ -54,6 +54,20 @@ describeOrSkip('20260927010000_termite_annual_renewal_sweep_deferred_marker — 
     expect(order).toEqual([never, older, newer]);
   });
 
+  test('up() adds the charge follow-through columns (kind, reason, handled_at), all nullable', async () => {
+    const { db } = fixture;
+    await migration.up(db);
+    const cols = await db('annual_prepay_terms').columnInfo();
+    expect(cols.renewal_charge_failure_kind).toMatchObject({ type: 'text', nullable: true });
+    expect(cols.renewal_charge_failure_reason).toMatchObject({ type: 'text', nullable: true });
+    expect(cols.renewal_charge_failure_handled_at).toMatchObject({ type: 'timestamp with time zone', nullable: true });
+    await migration.down(db);
+    const after = await db('annual_prepay_terms').columnInfo();
+    expect(after).not.toHaveProperty('renewal_charge_failure_kind');
+    expect(after).not.toHaveProperty('renewal_charge_failure_handled_at');
+    expect(after).not.toHaveProperty('renewal_sweep_deferred_at');
+  });
+
   test('up() is idempotent — running it twice does not throw', async () => {
     const { db } = fixture;
     await migration.up(db);
