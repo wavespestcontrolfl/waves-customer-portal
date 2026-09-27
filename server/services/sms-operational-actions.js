@@ -19,7 +19,7 @@ const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplici
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentCanAnswer } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentCanAnswer, paymentEvidenceRow } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -723,14 +723,16 @@ const UNSEEN_FLOOR = `GREATEST(${SOURCE_AT}, COALESCE(${EVENT_SEEN_AT}, ${SOURCE
 // The floor and the tick bound sit in every branch, so each scan starts from
 // the row's watermark rather than the customer's whole visit history.
 const unseen = (column) => `${column} <= ? AND ${column} > ${UNSEEN_FLOOR}`;
-// Visit activity, and money landing (R2): a paid payments row or a received
+// Visit activity, and money landing (R2): a payments row that can be
+// evidence (paymentEvidenceRow, the payment legs' own test) or a received
 // estimate deposit. Without the money branches a payment-only ask waited for
 // its cursor page — a full rotation under backlog (Codex #4996 r1). Money
-// wakes only the kinds that can cite it: a callback or report row it cannot
-// answer must not take a slot from a settlement question (r4). A payment or
-// deposit counts from when its row last changed, not its settlement stamp: a
-// late webhook records a settlement from hours or days ago
-// (stripe-webhook.js), which the watermark has long passed.
+// wakes only the kinds that can cite it, and only through a row a leg reads:
+// a callback or report row it cannot answer must not take a slot from a
+// settlement question (r4), nor may a fee or a refund in flight (r9). A
+// payment or deposit counts from when its row last changed, not its
+// settlement stamp: a late webhook records a settlement from hours or days
+// ago (stripe-webhook.js), which the watermark has long passed.
 const PAYMENT_CHANGED_AT = "GREATEST(pm.updated_at, COALESCE((pm.metadata->>'settled_event_at')::timestamptz, pm.created_at))";
 // Rows captured before the flag existed stay eligible.
 const MONEY_KIND = `cc.kind IN (${PAYMENT_WITNESS_KINDS.map((v) => `'${v}'`).join(', ')})
@@ -751,8 +753,8 @@ const UNSEEN_EVENT_ACTIVITY = `(SELECT MAX(a.at) FROM (
     UNION ALL SELECT r.created_at FROM reschedule_log r JOIN scheduled_services v ON v.id = r.scheduled_service_id
       WHERE v.customer_id = s.customer_id AND ${unseen('r.created_at')}
         AND ${LOGGED_MOVE_SQL('r')}
-    UNION ALL SELECT ${PAYMENT_CHANGED_AT} FROM payments pm WHERE ${MONEY_KIND} AND pm.customer_id = s.customer_id AND pm.status = 'paid'
-        AND ${unseen(PAYMENT_CHANGED_AT)}
+    UNION ALL SELECT ${PAYMENT_CHANGED_AT} FROM payments pm WHERE ${MONEY_KIND} AND pm.customer_id = s.customer_id
+        AND ${paymentEvidenceRow('pm')} AND ${unseen(PAYMENT_CHANGED_AT)}
     UNION ALL SELECT GREATEST(ed.updated_at, ed.received_at) FROM estimate_deposits ed JOIN estimates e ON e.id = ed.estimate_id
       WHERE ${MONEY_KIND} AND ed.status IN ('received', 'credited') AND ${unseen('GREATEST(ed.updated_at, ed.received_at)')}
         AND ${ESTIMATE_MAY_BELONG}

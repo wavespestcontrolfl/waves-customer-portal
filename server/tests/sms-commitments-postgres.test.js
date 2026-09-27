@@ -28,7 +28,7 @@ const schema = `sms_commitments_${randomUUID().replaceAll('-', '')}`;
 const TABLES = ['customers', 'customer_properties', 'property_preferences', 'sms_log', 'call_log',
   'call_commitments', 'data_hygiene_source_extractions', 'data_hygiene_proposals', 'data_hygiene_sensitive_vault',
   'conversations', 'messages', 'notifications', 'audit_log',
-  'emails', 'email_messages', 'estimates', 'estimate_deposits', 'invoices', 'payments', 'payers', 'setup_fee_claims', 'scheduled_services', 'job_status_history', 'reschedule_log', 'system_settings', 'leads', 'messaging_audit_log'];
+  'emails', 'email_messages', 'estimates', 'estimate_deposits', 'invoices', 'payments', 'payment_methods', 'payers', 'setup_fee_claims', 'scheduled_services', 'job_status_history', 'reschedule_log', 'system_settings', 'leads', 'messaging_audit_log'];
 let mockPg;
 let admin;
 let message;
@@ -1821,7 +1821,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(verify).toHaveBeenCalledTimes(1);
     const ledger = verify.mock.calls[0][1].records.find((r) => r.type === 'payment');
     expect(ledger).toMatchObject({ payment_source: 'ledger' });
-    expect(ledger.text).toContain('Payment of $200.00 recorded');
+    expect(ledger.text).toContain('Payment of $200.00 by Zelle recorded');
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
@@ -1998,13 +1998,13 @@ postgres('SMS commitments on PostgreSQL', () => {
     const commitment = { kind: 'other', description: 'Did you receive my Zelle?',
       sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
-    expect(evidence.records.find((r) => r.payment_source === 'ledger').text).toBe(`Payment of $200.00 recorded ${etDateString(after)} (zelle)`);
+    expect(evidence.records.find((r) => r.payment_source === 'ledger').text).toBe(`Payment of $200.00 by Zelle recorded ${etDateString(after)}`);
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     await verifySmsFulfillment(commitment, evidence, { now });
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
     const prompt = JSON.stringify(dispatchWithFallback.mock.calls[0]);
     for (const note of ['Pat Example', '941-555-0123', 'pat.example@example.invalid']) expect(prompt).not.toContain(note);
-    expect(prompt).toContain('(zelle)');
+    expect(prompt).toContain('by Zelle');
   });
 
   test('Codex #4996 r1: an invoice payment reads as its number, title and settled amount, dated when the money settled — not when a late webhook stamped the invoice paid', async () => {
@@ -2245,46 +2245,124 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(JSON.stringify(evidence.records)).not.toContain('941-555-0123');
   });
 
-  test('Codex #4996 r8: a card payment shows the invoice amount beside the surcharged charge, and an untitled invoice shows its service', async () => {
+  test('Codex #4996 r8/r9: a payment shows the invoice amount beside the surcharged charge and what paid it — the card, the saved method, or the bank — and an untitled invoice shows its service', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);
     const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-1001',
       title: null, service_type: 'Termite Treatment', total: 100, subtotal: 100, line_items: '[]', status: 'paid', paid_at: after }).returning('id');
+    // The saved card the monthly dues charge ran on; the payment row carries no snapshot of its own.
+    const [savedCard] = await mockPg('payment_methods').insert({ customer_id: message.customer_id, stripe_payment_method_id: `pm_synthetic_${randomUUID()}`,
+      card_brand: 'MASTERCARD', last_four: '5454', method_type: 'card' }).returning('id');
     const card = (extra) => ({ customer_id: message.customer_id, status: 'paid', payment_date: etDateString(after), processor: 'stripe', created_at: after, ...extra });
-    await mockPg('payments').insert([
+    const [, dues, bank] = await mockPg('payments').insert([
       card({ amount: 102.90, base_amount_cents: 10000, surcharge_amount_cents: 290, stripe_payment_intent_id: 'pi_card_invoice',
-        metadata: JSON.stringify({ invoice_id: invoice.id }) }),
+        card_brand: 'visa', card_last_four: '4242', metadata: JSON.stringify({ invoice_id: invoice.id, payment_method: 'card' }) }),
       card({ amount: 92.57, base_amount_cents: 9000, surcharge_amount_cents: 257, stripe_payment_intent_id: 'pi_card_dues',
-        metadata: JSON.stringify({ billed_month: '2026-09' }) })]);
+        payment_method_id: savedCard.id, metadata: JSON.stringify({ billed_month: '2026-09' }) }),
+      card({ amount: 60, stripe_payment_intent_id: 'pi_bank', card_last_four: '6789', metadata: JSON.stringify({ payment_method: 'us_bank_account' }) })]).returning('id');
     const commitment = { kind: 'other', description: 'Did my $100 termite payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     expect(evidence.records.find((r) => r.payment_source === 'invoice').text)
-      .toBe(`Payment of $102.90 ($100.00 plus a $2.90 card surcharge) toward invoice WPC-2026-1001 (Termite Treatment) received ${etDateString(after)}; the invoice is paid in full`);
-    expect(evidence.records.find((r) => r.payment_source === 'ledger').text)
-      .toBe(`Payment of $92.57 ($90.00 plus a $2.57 card surcharge) recorded ${etDateString(after)} (monthly plan charge for 2026-09)`);
+      .toBe(`Payment of $102.90 ($100.00 plus a $2.90 card surcharge) by Visa ending 4242 toward invoice WPC-2026-1001 (Termite Treatment) received ${etDateString(after)}; the invoice is paid in full`);
+    const ledger = Object.fromEntries(evidence.records.filter((r) => r.payment_source === 'ledger').map((r) => [r.id, r]));
+    expect(ledger[dues.id].text)
+      .toBe(`Payment of $92.57 ($90.00 plus a $2.57 card surcharge) by Mastercard ending 5454 recorded ${etDateString(after)} (monthly plan charge for 2026-09)`);
+    expect(ledger[bank.id].text).toBe(`Payment of $60.00 by bank account (ACH) ending 6789 recorded ${etDateString(after)}`);
+    // The tender reaches the model only as text, never as fields of its own.
+    for (const record of evidence.records.filter((r) => r.type === 'payment')) {
+      for (const field of ['method', 'method_type', 'card_brand', 'last_four']) expect(record).not.toHaveProperty(field);
+    }
   });
 
-  test('Codex #4996 r7: a no-show or cancellation fee takes its property from the visit or estimate its payment row names', async () => {
+  test('Codex #4996 r9: a no-show or late-cancellation fee is not payment evidence — the webhook books it when it runs, with no settlement time of its own', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);
-    const [visit] = await mockPg('scheduled_services').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
-      service_type: 'Quarterly Pest Control', scheduled_date: etDateString(message.created_at), window_start: '09:00:00', status: 'no_show',
-      created_at: new Date(message.created_at.getTime() - 86400000) }).returning('id');
-    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
-      status: 'accepted', service_interest: 'Termite' }).returning('id');
-    const feeInvoice = (number) => ({ customer_id: message.customer_id, token: randomUUID(), invoice_number: number,
-      title: 'No-show fee', total: 50, subtotal: 50, line_items: '[]', status: 'paid', paid_at: after });
-    const [visitFee, estimateFee] = await mockPg('invoices').insert([feeInvoice('WPC-2026-0991'), feeInvoice('WPC-2026-0992')]).returning('id');
-    const feePayment = (invoiceId, metadata) => ({ customer_id: message.customer_id, amount: 50, status: 'paid', payment_date: etDateString(after),
-      processor: 'stripe', stripe_payment_intent_id: `pi_fee_${invoiceId}`, created_at: after,
-      metadata: JSON.stringify({ purpose: 'card_hold_no_show_fee', invoice_id: invoiceId, ...metadata }) });
-    await mockPg('payments').insert([feePayment(visitFee.id, { scheduled_service_id: visit.id }), feePayment(estimateFee.id, { estimate_id: estimate.id })]);
-    const commitment = { kind: 'other', description: 'Did the fee go through?', sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    const invoiceRow = (number, title) => ({ customer_id: message.customer_id, token: randomUUID(), invoice_number: number,
+      title, total: 50, subtotal: 50, line_items: '[]', status: 'paid', paid_at: after });
+    const [cardHoldFee, appointmentFee, service] = await mockPg('invoices').insert([invoiceRow('WPC-2026-0991', 'One-time visit — no-show fee'),
+      invoiceRow('WPC-2026-0992', 'Late-cancellation fee'), invoiceRow('WPC-2026-0993', 'Quarterly Pest Control')]).returning('id');
+    // Booked by a redelivered webhook after the question, for captures that landed before it.
+    const payment = (metadata) => ({ customer_id: message.customer_id, amount: 50, status: 'paid', payment_date: etDateString(after),
+      processor: 'stripe', stripe_payment_intent_id: `pi_${randomUUID()}`, created_at: after, metadata: JSON.stringify(metadata) });
+    const [, , , paid] = await mockPg('payments').insert([
+      payment({ purpose: 'card_hold_no_show_fee', invoice_id: cardHoldFee.id, reason: 'no_show' }),
+      payment({ purpose: 'appointment_card_no_show_fee', invoice_id: appointmentFee.id }),
+      // A fee's partial-refund marker names no invoice; it is still a fee.
+      payment({ purpose: 'appointment_card_no_show_fee' }),
+      payment({ invoice_id: service.id })]).returning('id');
+    const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
-    const fees = evidence.records.filter((r) => r.payment_source === 'invoice');
-    expect(Object.fromEntries(fees.map((r) => [r.invoice_id, r.property_id])))
-      .toEqual({ [visitFee.id]: context.properties[0].id, [estimateFee.id]: context.properties[0].id });
-    for (const fee of fees) expect(admissibleWitness(fee, commitment)).toBe(true);
+    expect(evidence.records.filter((r) => r.type === 'payment').map((r) => [r.id, r.payment_source])).toEqual([[paid.id, 'invoice']]);
+  });
+
+  test('Codex #4996 r9: a payment with a refund in flight is not evidence, and a refund starting after the check fails the close', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0994',
+      title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: after }).returning('id');
+    const metadata = { invoice_id: invoice.id, settled_event_at: after.toISOString() };
+    const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(after),
+      processor: 'stripe', stripe_payment_intent_id: 'pi_refund_in_flight', created_at: after, metadata: JSON.stringify(metadata) }).returning('id');
+    const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const witness = evidence.records.find((r) => r.id === payment.id);
+    const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
+    const verdict = { ...grounded, evidence_hash: fulfillmentFingerprint(commitment, evidence).evidenceHash };
+    const closes = () => mockPg.transaction((trx) => revalidateSmsFulfillment(trx, commitment, message, verdict, now));
+    expect(await closes()).toBe(true);
+    // What StripeService.refund persists before it calls Stripe; the row stays 'paid' until Stripe answers.
+    const inFlight = { ...metadata, pending_refund_key: `refund_pay_${payment.id}_rest_0`, pending_refund_request: 'rest',
+      pending_refund_at: now.toISOString() };
+    await mockPg('payments').where({ id: payment.id }).update({ metadata: JSON.stringify(inFlight) });
+    expect((await loadSmsFulfillmentEvidence(mockPg, commitment, message, now)).records.filter((r) => r.type === 'payment')).toEqual([]);
+    expect(await closes()).toBe(false);
+    // Stripe rejected the refund outright: the marker is cleared and the payment stands.
+    await mockPg('payments').where({ id: payment.id }).update({ metadata: JSON.stringify(metadata) });
+    expect(await closes()).toBe(true);
+  });
+
+  test('Codex #4996 r9: a close on a property-scoped ask holds the visit or setup-claim estimate that ties the payment to the property', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const propertyId = context.properties[0].id;
+    const [visit] = await mockPg('scheduled_services').insert({ customer_id: message.customer_id, property_id: propertyId,
+      service_type: 'Quarterly Pest Control', scheduled_date: etDateString(message.created_at), window_start: '09:00:00', status: 'completed',
+      created_at: new Date(message.created_at.getTime() - 86400000) }).returning('id');
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: propertyId,
+      status: 'accepted', service_interest: 'Rodent' }).returning('id');
+    const invoiceRow = (number, extra) => ({ customer_id: message.customer_id, token: randomUUID(), invoice_number: number,
+      title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: after, ...extra });
+    const [visitInvoice, setupInvoice] = await mockPg('invoices').insert([invoiceRow('WPC-2026-0995', { scheduled_service_id: visit.id }),
+      invoiceRow('WPC-2026-0996', { title: 'Rodent setup' })]).returning('id');
+    const [claim] = await mockPg('setup_fee_claims').insert({ invoice_id: setupInvoice.id, estimate_id: estimate.id, amount: 125 }).returning('id');
+    const paymentRow = (invoiceId) => ({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(after),
+      created_at: after, metadata: JSON.stringify({ invoice_id: invoiceId, settled_event_at: after.toISOString() }) });
+    const [visitPaid, setupPaid] = await mockPg('payments').insert([paymentRow(visitInvoice.id), paymentRow(setupInvoice.id)]).returning('id');
+    const closer = (sms_context, paymentId) => async () => {
+      const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { ...sms_context, source_at: message.created_at.toISOString() } };
+      const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+      const witness = evidence.records.find((r) => r.id === paymentId);
+      const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
+      const verdict = { ...grounded, evidence_hash: fulfillmentFingerprint(commitment, evidence).evidenceHash };
+      return mockPg.transaction((trx) => revalidateSmsFulfillment(trx, commitment, message, verdict, now));
+    };
+    const held = async (table, id, run) => {
+      const writer = await mockPg.transaction();
+      try {
+        await writer(table).where({ id }).forUpdate().first('id');
+        return await run();
+      } finally { await writer.rollback(); }
+    };
+    const scopedVisit = closer({ property_id: propertyId }, visitPaid.id);
+    const scopedSetup = closer({ property_id: propertyId }, setupPaid.id);
+    expect(await scopedVisit()).toBe(true);
+    expect(await scopedSetup()).toBe(true);
+    // A geocode review repointing the visit, or an estimate writer, holds the row mid-close.
+    expect(await held('scheduled_services', visit.id, scopedVisit)).toBe(false);
+    expect(await held('setup_fee_claims', claim.id, scopedSetup)).toBe(false);
+    expect(await held('estimates', estimate.id, scopedSetup)).toBe(false);
+    // An unscoped ask depends on no property, so it takes no such lock.
+    expect(await held('scheduled_services', visit.id, closer({ property_id: null }, visitPaid.id))).toBe(true);
   });
 
   test('Codex #4996 r5: a setup-only invoice from an estimate is scoped to the estimate\'s property through its setup-fee claim', async () => {
@@ -2409,12 +2487,14 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(verify.mock.calls.map(([row]) => row.id)).toEqual([target]);
     });
 
-    test('another customer\'s payment, and a deposit being refunded, are not events', async () => {
+    test('another customer\'s payment, a fee, a refund in flight, and a deposit being refunded, are not events', async () => {
       const otherCustomer = randomUUID();
       await mockPg('customers').insert({ id: otherCustomer, first_name: 'Other', last_name: 'Fixture', phone: '+12025550199',
         address_line1: '300 Example Lane', city: 'Sarasota', zip: '34236' });
-      await mockPg('payments').insert({ customer_id: otherCustomer, amount: 125, status: 'paid', payment_date: etDateString(minutes(2)),
-        created_at: minutes(2), updated_at: minutes(2) });
+      const paid = (customerId, metadata) => ({ customer_id: customerId, amount: 125, status: 'paid', payment_date: etDateString(minutes(2)),
+        created_at: minutes(2), updated_at: minutes(2), metadata: JSON.stringify(metadata) });
+      await mockPg('payments').insert([paid(otherCustomer, {}), paid(message.customer_id, { purpose: 'card_hold_no_show_fee' }),
+        paid(message.customer_id, { pending_refund_key: 'refund_pay_synthetic_rest_0' })]);
       const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, status: 'accepted', service_interest: 'Termite' }).returning('id');
       await mockPg('estimate_deposits').insert({ estimate_id: estimate.id, amount: 150, status: 'refunding', received_at: minutes(2), updated_at: minutes(2),
         stripe_payment_intent_id: `pi_deposit_${randomUUID()}` });

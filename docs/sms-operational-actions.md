@@ -50,13 +50,17 @@ autopay, or a received estimate deposit. A payment receipt (text, App push or em
 not evidence of its own; the money row it reports is. Nor is a visit's prepaid stamp: it
 is a balance with no receipt history (an edit or a series re-spread moves its time and
 amount with no money arriving), so a prepayment counts only once it is recorded as a
-payment. Account credit, third-party payers, refunds and disputes are never money
-landing (a partial refund is shown beside the payment it reduces); a payment never
+payment. Nor is a no-show or late-cancellation fee: Waves takes it from the card on file
+and the row carries no settlement time of its own. Account credit, third-party payers,
+refunds and disputes are never money landing, nor is a payment while a refund of it is
+in flight (a partial refund is shown beside the payment it reduces); a payment never
 answers a request to change how the customer pays, though a term the customer negates
 ("don't refund it") is not such a request; money tied to another property never answers
 a question about this one; and a staff "received" text never closes it. The model must
-cite the payment; the close locks it, and the invoice or estimate it depends on, and
-rechecks it. Staff payment notes never reach the model.
+cite the payment, which shows how it was paid (card brand and last four, bank account,
+or the recorded tender); the close locks it, the invoice or estimate it depends on, and
+for a question about one property the rows that tie the payment to it, and rechecks it.
+Staff payment notes never reach the model.
 
 ## Verification
 
