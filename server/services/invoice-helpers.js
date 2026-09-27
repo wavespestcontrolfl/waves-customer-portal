@@ -215,6 +215,20 @@ function assertInvoiceCollectible(invoice) {
   // open. The office clears it (POST /admin/invoices/:id/billing-review/
   // clear, or the trivial same-date/untouched auto-clear) once the invoice
   // is priced correctly by hand.
+  //
+  // Placed AFTER every terminal-status check above (paid/prepaid/
+  // processing/void/refunded/canceled already returned by this point) and
+  // BEFORE the withdrawal check below — the "terminal status reports its
+  // own reason first, withdrawal checked last" ordering the comment below
+  // documents is unaffected: a terminal row never reaches this line at all.
+  //
+  // Depends on the caller's invoice object actually carrying this column —
+  // every current caller of assertInvoiceCollectible (stripe.js, invoice-
+  // manual-payment.js, admin-payments-reconcile.js, customer-credit.js)
+  // fetches the row via a plain `.first()`/`.select('*')` with no column
+  // projection, so this is never missing today; a future caller that
+  // narrows its own SELECT must include billing_review_opened_at or this
+  // hold silently never fires for it.
   if (invoice.billing_review_opened_at) {
     throw new Error('This invoice has an open billing review — a same-trip visit diverged in date; resolve and clear the review before collecting');
   }
