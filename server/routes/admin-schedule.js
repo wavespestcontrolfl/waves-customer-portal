@@ -9412,6 +9412,11 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             let liveMoveRefreshStatus = 'confirmed';
             let bulkTechMoveNotice = null;
             await db.transaction(async (trx) => {
+              // Sibling-group lock FIRST — rung 0, before rung 1 below and
+              // every row lock this transaction takes (see first-
+              // application-sibling-split.js's ROOT FIX comment). A no-op
+              // for a visit with no estimate.
+              await require('../services/first-application-sibling-split').lockSiblingGroupForVisit(trx, id);
               // Rung 1 (occupancy.js ORDERING CONTRACT): the date-wide lock
               // must precede every other lock in this trx — including the
               // tech-day fence below — so take it up front; the probe itself
@@ -12770,6 +12775,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     }
     let addressUpdatedIds = [];
     await db.transaction(async (trx) => {
+      // Sibling-group lock FIRST — rung 0, before rung 1/6 below and every
+      // row lock this transaction takes (see first-application-sibling-
+      // split.js's ROOT FIX comment). A no-op for a visit with no estimate.
+      await require('../services/first-application-sibling-split').lockSiblingGroupForVisit(trx, req.params.id);
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
       // spawn recurring children (scheduled_services inserts) — lock
       // customer-comms off an unlocked peek BEFORE any row lock in the trx

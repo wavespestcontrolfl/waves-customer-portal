@@ -7649,6 +7649,23 @@ const InvoiceService = {
     };
 
     const runEdit = async (client) => {
+      // ROOT FIX — estimate-group advisory lock FIRST (see first-
+      // application-sibling-split.js's ROOT FIX comment on
+      // lockSiblingGroupForVisit): taken before EVERYTHING else in this
+      // transaction, including this edit's own invoice guard lock below and
+      // the row-level group lock immediately after. This is what actually
+      // closes the deadlock against a CONCURRENT reschedule on the same
+      // estimate group — every date writer (rebooker, admin-schedule, the
+      // Intelligence Bar movers) takes this SAME advisory lock before its
+      // own row UPDATE, so whichever side gets here first fully finishes
+      // before the other takes any row lock at all. Unconditional (not
+      // gated on isRetotal): it is a plain read + an instant no-op
+      // advisory-lock acquire for an invoice with no linked visit or no
+      // estimate, so there is no cost to skip by narrowing it.
+      if (existing.scheduled_service_id) {
+        await require("./first-application-sibling-split")
+          .lockSiblingGroupForVisit(client, existing.scheduled_service_id);
+      }
       // Lock order (round-4 Codex P1 on #5021): every date-changing writer
       // (rebooker, admin-schedule, the Intelligence Bar movers) locks
       // scheduled_services FIRST, then locks the invoice
@@ -7659,19 +7676,20 @@ const InvoiceService = {
       // even the LATER billing-review write below (unrelated columns) can
       // need an implicit lock on the linked scheduled_services row. Taking
       // the SAME scheduled_services-group lock here, BEFORE the invoice
-      // lock, keeps one consistent order everywhere and closes a genuine
-      // deadlock risk against a concurrent reschedule on the same estimate
-      // group — a concurrent reschedule now either wins this lock first (this
-      // edit waits, same as any other row-lock wait) or loses it outright
-      // (it waits for OUR edit to finish), never both waiting on each other.
-      // Cheap when it doesn't apply: loadLockedEstimateGroup's own early
-      // skips (`not_estimate_anchor` / `no_siblings`) take no lock at all,
-      // so this only matters — and only locks anything — for an invoice
-      // that's actually linked to a multi-member estimate-accept group.
-      // Skipped entirely for a non-retotal edit (metadata only): a plain
-      // title/notes/due-date save changes no protected money field, so
-      // reopenBillingReviewOnInvoiceMoneyChange below is a no-op fingerprint
-      // compare either way — no reason to take this lock for it.
+      // lock, keeps one consistent order everywhere for THIS (row-level,
+      // FK-implicit-lock) concern — a NARROWER, second-order fix layered on
+      // top of the advisory lock above, which is what closes the actual
+      // cross-transaction deadlock. Cheap when it doesn't apply:
+      // loadLockedEstimateGroup's own early skips (`not_estimate_anchor` /
+      // `no_siblings`) take no row lock at all, so this only matters — and
+      // only locks anything — for an invoice that's actually linked to a
+      // multi-member estimate-accept group. Skipped entirely for a
+      // non-retotal edit (metadata only): a plain title/notes/due-date save
+      // changes no protected money field, so reopenBillingReviewOnInvoice-
+      // MoneyChange below is a no-op fingerprint compare either way — no
+      // reason to take this row lock for it (the advisory lock above is
+      // taken regardless, since IT is what serializes against a concurrent
+      // reschedule, not just against the FK-implicit-lock case).
       if (isRetotal && existing.scheduled_service_id) {
         await require("./first-application-sibling-split")
           .loadLockedEstimateGroup(client, existing.scheduled_service_id);

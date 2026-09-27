@@ -228,24 +228,33 @@ describeOrSkip("InvoiceService.update() reopens a resolved billing review when m
     }
   });
 
-  // Round-4 Codex P1 #1: InvoiceService.update() locks the INVOICE first
-  // (its own editability guard), while every date-changing writer locks
-  // scheduled_services FIRST, then the invoice — a lock-order inversion
-  // that could deadlock a concurrent reschedule against a concurrent
-  // invoice edit on the same estimate group (confirmed against real
-  // Postgres: even an UPDATE that never touches scheduled_service_id can
-  // need an implicit lock on the linked scheduled_services row, via the
-  // invoices→scheduled_services foreign key's own referential-integrity
-  // check, once the invoice row has already been written once in the same
-  // transaction). The fix: runEdit takes the SAME scheduled_services-group
-  // lock (loadLockedEstimateGroup) at the very top of its transaction,
-  // BEFORE its own invoice lock — establishing ONE consistent order
-  // everywhere. Proven here with two REAL, concurrently open connections
-  // and the ACTUAL InvoiceService.update(), not just the module helper:
-  // connection 1 takes the group lock first (mimicking a reschedule
-  // in-flight); the real update() call — reaching the very same lock —
-  // WAITS for it (ordinary contention, not a deadlock) and completes
-  // cleanly the moment connection 1 releases.
+  // Round-4 Codex P1 #1, then hardened by the ROOT FIX (structural lock
+  // order, first-application-sibling-split.js's lockSiblingGroupForVisit):
+  // InvoiceService.update() locks the INVOICE first (its own editability
+  // guard), while every date-changing writer locks scheduled_services
+  // FIRST, then the invoice — a lock-order inversion that could deadlock a
+  // concurrent reschedule against a concurrent invoice edit on the same
+  // estimate group (confirmed against real Postgres: even an UPDATE that
+  // never touches scheduled_service_id can need an implicit lock on the
+  // linked scheduled_services row, via the invoices→scheduled_services
+  // foreign key's own referential-integrity check, once the invoice row
+  // has already been written once in the same transaction). The ROOT fix:
+  // runEdit takes lockSiblingGroupForVisit — ONE estimate-scoped advisory
+  // lock, namespaced separately from every row lock — UNCONDITIONALLY, at
+  // the very top of its transaction, before EVERYTHING else, including the
+  // row-level scheduled_services-group lock (loadLockedEstimateGroup,
+  // still taken afterward for a retotal edit, for the narrower FK-implicit-
+  // lock reason above) and its own invoice lock. Every date-changing writer
+  // takes the SAME advisory lock first too, so whichever side gets there
+  // first fully finishes before the other takes ANY row lock at all — no
+  // cross-transaction cycle is possible. Proven here with two REAL,
+  // concurrently open connections and the ACTUAL InvoiceService.update(),
+  // not just the module helper: connection 1 takes the group lock first
+  // (mimicking a reschedule in-flight — loadLockedEstimateGroup now also
+  // takes the SAME advisory lock, re-entrantly); the real update() call —
+  // reaching the very same advisory lock at the top of runEdit — WAITS for
+  // it (ordinary contention, not a deadlock) and completes cleanly the
+  // moment connection 1 releases.
   test("two connections: a concurrent reschedule's group lock never deadlocks a real InvoiceService.update() money edit", async () => {
     const ids = await makeFixture();
     let trx1;

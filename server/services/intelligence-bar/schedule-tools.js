@@ -1334,6 +1334,15 @@ async function moveStopsToDay(input, actionContext = {}) {
   });
   const { lockTechDays } = require('../scheduling/tech-day-lock');
   const runBatchTrx = async () => db.transaction(async (trx) => {
+    // Sibling-group lock FIRST — rung 0, before rung 1 below and every row
+    // lock this transaction takes (see first-application-sibling-split.js's
+    // ROOT FIX comment). ONE call for the WHOLE batch: it reads every
+    // stop's source_estimate_id and acquires the distinct estimate ids in
+    // ascending order, so two concurrent batches that share more than one
+    // estimate group always converge on the same relative order. A no-op
+    // for a stop with no estimate.
+    await require('../first-application-sibling-split')
+      .lockSiblingGroupsForVisits(trx, classified.map((c) => c.s.id));
     const overlappedIds = [];
     // Rung 1 + tech-blind probes FIRST (occupancy.js ORDERING CONTRACT: the
     // date-wide lock precedes the tech-day fence). Advisory only — a hit

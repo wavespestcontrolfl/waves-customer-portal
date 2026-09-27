@@ -1413,6 +1413,14 @@ class SmartRebooker {
       }
     };
     await moveTrx(async (trx) => {
+      // Sibling-group lock FIRST — rung 0, before EVERY other lock this
+      // transaction takes, including rung 1 below and this move's own CAS
+      // row UPDATE (see first-application-sibling-split.js's ROOT FIX
+      // comment: a date writer's own single-row UPDATE used to run before
+      // the group-wide FOR UPDATE the billing-review flag takes later,
+      // which is exactly the shape that deadlocked two concurrent sibling
+      // moves against each other). A no-op for a visit with no estimate.
+      await require('./first-application-sibling-split').lockSiblingGroupForVisit(trx, serviceId);
       // The kept technician's route is real — writing 'confirmed' on top
       // of an overlapping job double-books them deterministically (the
       // customer picked from offers that never checked the route).
@@ -2143,6 +2151,11 @@ class SmartRebooker {
       await preloadServiceLocations(db, arrivalRows.map(row => row.id));
     }
     const occurrencesRescheduled = await db.transaction(async (trx) => {
+      // Sibling-group lock FIRST — rung 0, before rung 1 and every row lock
+      // this transaction takes (see first-application-sibling-split.js's
+      // ROOT FIX comment, and the single-visit path above for the same
+      // call). A no-op for a series with no estimate.
+      await require('./first-application-sibling-split').lockSiblingGroupForVisit(trx, serviceId);
       // Same ORDERING CONTRACT as the single path (GH codex #4204 r5 P1): the
       // caller's guard takes customer/property/call locks, so it runs after
       // rung 1 and before this transaction's first row lock. Idempotent — the

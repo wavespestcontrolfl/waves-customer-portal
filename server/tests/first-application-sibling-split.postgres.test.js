@@ -37,6 +37,7 @@ suite('first-application-sibling-split — same-trip billing review on date chan
     flagFirstApplicationInvoiceReviewOnDateChangeSafely,
     clearBillingReview,
     dateOnly,
+    lockSiblingGroupForVisit,
   } = require('../services/first-application-sibling-split');
   const { assertInvoiceCollectible, billingReviewVersion, isInvoiceUndeliveredForBillingReview } = require('../services/invoice-helpers');
   const InvoiceService = require('../services/invoice');
@@ -866,17 +867,71 @@ suite('first-application-sibling-split — same-trip billing review on date chan
       expect(state.invoice.billing_review_opened_at).toBeTruthy();
     }));
 
+    // Root fix (identity): durable provenance (billing_review_context.
+    // sourceEstimateId) is now checked in ANY state — open, resolved, or
+    // auto-cleared — not just a manual-clear resolution record. Before this
+    // fix, an OPEN review's own context was invisible to the fallback (it
+    // only matched `resolvedAt`), so a notes rewrite that happened WHILE a
+    // review was still open (not yet cleared) could make a later
+    // divergence read as `no_first_application_invoice` instead of
+    // accumulating onto the same invoice.
+    test('notes rewritten while the review is still OPEN (never cleared), then a second, different sibling diverges — the SAME invoice is found, its context/version update, and a stale Clear 409s', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      const thirdId = randomUUID();
+      await trx('scheduled_services').insert({
+        id: thirdId, customer_id: ids.customerId, source_estimate_id: ids.estimateId, scheduled_date: SAME_DATE,
+        service_type: 'Tree & Shrub', status: 'confirmed', is_recurring: true, estimated_price: null,
+      });
+
+      // First divergence opens the review — the context durably records
+      // sourceEstimateId from this point on (openBillingReview).
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      const openedInvoice = await trx('invoices').where({ id: ids.invoiceId }).first();
+      expect(openedInvoice.billing_review_opened_at).toBeTruthy();
+      const staleVersion = billingReviewVersion(openedInvoice);
+
+      // The office rewrites the auto-generated notes/title WHILE the
+      // review is still open (never cleared) — the text-match's required
+      // substrings are gone for good.
+      await trx('invoices').where({ id: ids.invoiceId })
+        .update({ notes: 'Split by hand 2026-10-02 — see office notes', title: 'Pest control invoice' });
+
+      // A SECOND, different sibling diverges. The review is still open, so
+      // this must ACCUMULATE onto the SAME invoice (not open a second one,
+      // and not skip with no_first_application_invoice).
+      await trx('scheduled_services').where({ id: thirdId }).update({ scheduled_date: '2026-10-03' });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, thirdId);
+      expect(result.action).toBe('review_opened');
+      expect(result.invoiceId).toBe(ids.invoiceId);
+
+      const state = await readState(trx, ids);
+      expect(new Set(state.invoice.billing_review_context.divergingSiblingIds))
+        .toEqual(new Set([ids.lawnId, thirdId]));
+      const freshVersion = billingReviewVersion(state.invoice);
+      expect(freshVersion).not.toBe(staleVersion);
+
+      // A Clear against the version read BEFORE this second divergence is stale.
+      const staleClear = await clearBillingReview(ids.invoiceId, staleVersion, trx);
+      expect(staleClear.code).toBe('stale');
+      expect((await readState(trx, ids)).invoice.billing_review_opened_at).toBeTruthy();
+    }));
+
     test('auto-clear (realignment, nobody reviewed anything), then a re-divergence reopens', () => rollbackTest(async (trx) => {
       const ids = await fixture(trx);
       await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
       await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
 
       // Realigns with the invoice untouched — auto-clears, recording NO
-      // resolution (context is fully nulled, not a resolution record).
+      // resolution (root fix: the context keeps only the minimal
+      // sourceEstimateId provenance, never a resolvedAt resolution record —
+      // isDivergenceAlreadyResolved still returns false for it below).
       await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: SAME_DATE });
       const autoCleared = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
       expect(autoCleared.action).toBe('review_auto_cleared');
-      expect((await readState(trx, ids)).invoice.billing_review_context).toBeNull();
+      const autoClearedContext = (await readState(trx, ids)).invoice.billing_review_context;
+      expect(autoClearedContext.sourceEstimateId).toBe(ids.estimateId);
+      expect(autoClearedContext.resolvedAt).toBeUndefined();
 
       // The SAME sibling diverges again — must reopen normally; there is no
       // resolution on record to suppress it (nobody manually reviewed the
@@ -929,5 +984,126 @@ suite('first-application-sibling-split — same-trip billing review on date chan
       expect(result.action).toBe('review_opened');
       expect(result.opened).toBe(true);
     }));
+  });
+
+  // -------------------------------------------------------------------------
+  // Root fix (lock order): every date writer now takes lockSiblingGroupForVisit
+  // / lockSiblingGroupsForVisits FIRST — before its own row UPDATE. Before
+  // this fix, a writer's own single-row UPDATE ran BEFORE the group-wide
+  // loadLockedEstimateGroup FOR UPDATE this module's flag call takes, so two
+  // concurrent movers of DIFFERENT siblings of the SAME estimate group could
+  // each hold their own row and then deadlock waiting on the OTHER's row via
+  // that FOR UPDATE. These tests use two REAL, independently connected
+  // transactions (this suite's own `db`, not the single shared `trx` the
+  // rollback-wrapper tests share) — a real deadlock would hang/40P01 one
+  // side; this proves ordinary serialized contention instead.
+  // -------------------------------------------------------------------------
+  describe('root fix: the estimate-group lock prevents a cross-transaction deadlock', () => {
+    jest.setTimeout(20000);
+
+    async function committedFixture() {
+      const customerId = randomUUID();
+      const estimateId = randomUUID();
+      const pestId = randomUUID();
+      const lawnId = randomUUID();
+      const invoiceId = randomUUID();
+      await db('customers').insert({
+        id: customerId, first_name: 'Synthetic lock-order fixture', phone: `qa-${customerId.slice(0, 8)}`, active: true,
+      });
+      await db('estimates').insert({ id: estimateId, customer_id: customerId, status: 'accepted' });
+      await db('scheduled_services').insert({
+        id: pestId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: SAME_DATE,
+        service_type: 'Quarterly Pest Control', status: 'confirmed', is_recurring: true, estimated_price: 153.60,
+      });
+      await db('scheduled_services').insert({
+        id: lawnId, customer_id: customerId, source_estimate_id: estimateId, scheduled_date: SAME_DATE,
+        service_type: 'Lawn Care', status: 'confirmed', is_recurring: true, estimated_price: null,
+      });
+      await db('invoices').insert({
+        id: invoiceId, customer_id: customerId, scheduled_service_id: pestId,
+        token: randomUUID(), invoice_number: `QA-${randomUUID().slice(0, 20)}`,
+        status: 'draft', title: 'First Service Application',
+        notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`,
+        line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 153.60, amount: 153.60 }]),
+        subtotal: 153.60, total: 153.60,
+      });
+      return { customerId, estimateId, pestId, lawnId, invoiceId };
+    }
+
+    async function cleanupCommitted(ids) {
+      await db('invoices').where({ id: ids.invoiceId }).del();
+      await db('scheduled_services').whereIn('id', [ids.pestId, ids.lawnId]).del();
+      await db('estimates').where({ id: ids.estimateId }).del();
+      await db('customers').where({ id: ids.customerId }).del();
+    }
+
+    test('two real connections, each moving a DIFFERENT sibling of the same group concurrently, never deadlock — both serialize', async () => {
+      const ids = await committedFixture();
+      try {
+        // Mirrors the FIXED order every real date writer now uses: the
+        // estimate-group lock FIRST, then this transaction's own single-row
+        // UPDATE, then the flag chokepoint — see rebooker.js's
+        // rescheduleOnce for the production shape this reproduces.
+        const moveSibling = (id, newDate) => db.transaction(async (movetrx) => {
+          await lockSiblingGroupForVisit(movetrx, id);
+          await movetrx('scheduled_services').where({ id }).update({ scheduled_date: newDate });
+          await flagFirstApplicationInvoiceReviewOnDateChangeSafely(movetrx, id, 'lock-order test');
+        });
+
+        // Genuinely concurrent — both connections are in flight together,
+        // neither awaited before the other starts.
+        await Promise.all([
+          moveSibling(ids.pestId, '2026-10-10'),
+          moveSibling(ids.lawnId, '2026-10-11'),
+        ]);
+
+        // Both committed cleanly (no 40P01/deadlock) and the group is
+        // genuinely diverged (the two moved to different days) — a review
+        // must be open regardless of which side happened to serialize
+        // first.
+        const invoice = await db('invoices').where({ id: ids.invoiceId }).first();
+        expect(invoice.billing_review_opened_at).toBeTruthy();
+      } finally {
+        await cleanupCommitted(ids);
+      }
+    });
+
+    // The other half of the cycle check (module header's ROOT FIX comment):
+    // a concurrent reschedule's group lock (simulated here via
+    // loadLockedEstimateGroup, exactly the shape a real date writer takes)
+    // must never deadlock against InvoiceService.update()'s own runEdit,
+    // which now takes the SAME advisory lock first. Full end-to-end coverage
+    // through the REAL InvoiceService.update() lives in
+    // invoice-update-billing-review-reopen-postgres.test.js; this is the
+    // module-level half using the same fixture shape as the rest of this
+    // suite.
+    test('a concurrent reschedule (holding the group lock) never deadlocks a concurrent flag call on the SAME sibling — ordinary contention only', async () => {
+      const ids = await committedFixture();
+      let holderTrx;
+      try {
+        holderTrx = await db.transaction();
+        await lockSiblingGroupForVisit(holderTrx, ids.lawnId);
+
+        const flagPromise = db.transaction(async (movetrx) => {
+          await lockSiblingGroupForVisit(movetrx, ids.lawnId);
+          await movetrx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-12' });
+          return flagFirstApplicationInvoiceReviewOnDateChangeSafely(movetrx, ids.lawnId, 'lock-order test 2');
+        });
+
+        // Give the second connection a moment to actually be waiting on the
+        // lock, then release it — a real deadlock could never be resolved
+        // this way (each side would already be blocked on the other).
+        await new Promise((resolve) => { setTimeout(resolve, 300); });
+        await holderTrx.rollback();
+        holderTrx = null;
+
+        await flagPromise;
+        const invoice = await db('invoices').where({ id: ids.invoiceId }).first();
+        expect(invoice.billing_review_opened_at).toBeTruthy();
+      } finally {
+        if (holderTrx) await holderTrx.rollback().catch(() => {});
+        await cleanupCommitted(ids);
+      }
+    });
   });
 });

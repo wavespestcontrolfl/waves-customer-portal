@@ -129,6 +129,101 @@
 // own comment. reopenBillingReviewOnInvoiceMoneyChange's own lock requests
 // below are then always instant re-locks of rows the transaction already
 // holds.
+//
+// ROOT FIX — STRUCTURAL LOCK ORDER (post-round-6): the group FOR UPDATE
+// above still isn't enough. Every date writer's OWN single-row UPDATE of
+// the row it's moving runs BEFORE it ever calls loadLockedEstimateGroup —
+// that individual row lock is taken by a DIFFERENT statement (the writer's
+// own CAS update), not by this module. Two DIFFERENT siblings of the SAME
+// estimate-accept group, moved by two genuinely concurrent writers, can
+// each hold their own row (from their own earlier single-row UPDATE) and
+// then both wait on loadLockedEstimateGroup's `FOR UPDATE` for the OTHER's
+// row — a real deadlock a consistent ORDER BY inside the group query
+// cannot fix, because each side's first hold didn't come through that
+// query at all.
+//
+// The fix is ONE estimate-scoped advisory lock, taken FIRST — before the
+// writer's own row UPDATE, before occupancy/tech-day/stop locks, before
+// any row lock at all — by EVERY participant: lockSiblingGroupForVisit /
+// lockSiblingGroupsForVisits below. Two concurrent movers of different
+// siblings of the same group now contend on ONE resource up front; the
+// loser simply waits for the winner's whole transaction to commit (or
+// roll back) before it ever takes a row lock — no cycle is possible,
+// because neither side can be holding a row the other wants while it
+// waits on this lock (it hasn't taken any row lock yet).
+//
+// Callers (every one takes this BEFORE its own row UPDATE / row lock):
+//   rebooker.js rescheduleOnce (single) + rescheduleSeries (series anchor)
+//   admin-schedule.js bulk-reschedule route (per row) + update-details
+//   intelligence-bar/schedule-tools.js moveStopsToDay (every stop in the
+//     batch, ONE call covering the whole batch — see
+//     lockSiblingGroupsForVisits — in ascending ESTIMATE id order, so two
+//     concurrent batches touching overlapping groups always converge on
+//     the same relative order)
+//   intelligence-bar/tools.js rescheduleAppointment
+//   invoice.js InvoiceService.update()'s runEdit, via the invoice's own
+//     scheduled_service_id linkage — closes the SAME deadlock class
+//     against a concurrent reschedule, not just against the FK-implicit-
+//     lock case the comment above already covers.
+// Also called here, inside loadLockedEstimateGroup (below) — re-entrant:
+// pg_advisory_xact_lock is stackable within one transaction (a second
+// acquire of a key the same transaction already holds is an instant
+// no-op, released once, with everything else, at commit/rollback), so a
+// caller that already took it up front pays nothing extra, and a future
+// caller that reaches this module WITHOUT its own upfront call still gets
+// it before this module's own row lock.
+//
+// A no-op for a visit with no source_estimate_id (nothing to serialize:
+// loadLockedEstimateGroup's own very next check would skip it anyway).
+//
+// CYCLE CHECK against every other lock these writers already hold —
+// acquired FIRST here, so none of them can be held while this one waits:
+//   - scheduling/occupancy.js rung 1 (date-wide) and scheduling/
+//     tech-day-lock.js rung 3 (tech-day) — this lock is namespaced
+//     'sibling-group', distinct from their shared 'slot-reserve'
+//     namespace, and is always the FIRST statement in every writer above,
+//     strictly before either rung.
+//   - visit-groups.js's 'visit.stop' lock — same reasoning; the stop lock
+//     is always taken later in each of these writers' transactions.
+//   - estimate-deposits.js's acquireEstimateDepositLedgerLock
+//     ('estimate.deposit.ledger', also estimate-keyed, used by the mint/
+//     receipt/void/reconcile paths including #5023's mint path) —
+//     PROVABLY INDEPENDENT rather than ordered against this one: none of
+//     the writers that take THIS lock (enumerated above) ever also take
+//     the deposit-ledger lock in the same transaction, and none of the
+//     deposit-ledger lock's own callers call into this module or into
+//     InvoiceService.update()'s runEdit. Two locks that are never both
+//     wanted by the same pair of transactions cannot deadlock against
+//     each other, so no ordering between them is needed — verified by
+//     direct read of every acquireEstimateDepositLedgerLock call site
+//     (all inside estimate-deposits.js's own mint/credit functions, none
+//     reachable from a date writer or from runEdit).
+const SIBLING_GROUP_LOCK_NS = 'sibling-group';
+
+async function lockSiblingGroupsForVisits(trx, scheduledServiceIds) {
+  const ids = [...new Set((scheduledServiceIds || []).filter(Boolean).map(String))];
+  if (!trx || !ids.length) return [];
+  const rows = await trx('scheduled_services').whereIn('id', ids).select('id', 'source_estimate_id');
+  // Ascending, deterministic order — two callers whose batches share more
+  // than one estimate group always acquire them in the same relative
+  // order, same principle as occupancy.js's acquireOccupancyLocks.
+  const estimateIds = [...new Set(rows.map((r) => r.source_estimate_id).filter(Boolean).map(String))].sort();
+  for (const estimateId of estimateIds) {
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      [SIBLING_GROUP_LOCK_NS, estimateId],
+    );
+  }
+  return estimateIds;
+}
+
+// Single-visit convenience wrapper — the common case (every writer above
+// except the IB batch mover, which locks its whole batch in one call).
+async function lockSiblingGroupForVisit(trx, scheduledServiceId) {
+  const locked = await lockSiblingGroupsForVisits(trx, [scheduledServiceId]);
+  return locked[0] || null;
+}
+
 const logger = require('./logger');
 const db = require('../models/db');
 const {
@@ -164,6 +259,12 @@ function dateOnly(value) {
 // taken at the very top of its transaction before the invoice's own guard
 // lock, for how the money-edit path keeps this order.
 async function loadLockedEstimateGroup(trx, scheduledServiceId) {
+  // Re-entrant (see the module header's ROOT FIX comment): every caller of
+  // this function is expected to have already taken this lock BEFORE its
+  // own row UPDATE, so this is normally an instant no-op re-acquire — but
+  // taking it here too means a future caller that reaches this module
+  // without its own upfront call still gets it before the FOR UPDATE below.
+  await lockSiblingGroupForVisit(trx, scheduledServiceId);
   const moved = await trx('scheduled_services')
     .where({ id: scheduledServiceId })
     .first('id', 'customer_id', 'source_estimate_id', 'recurring_parent_id');
@@ -175,10 +276,15 @@ async function loadLockedEstimateGroup(trx, scheduledServiceId) {
   }
   // Lock every member of this estimate's accept group up front — the read
   // below must not race a concurrent completion or a second reschedule of a
-  // sibling landing between this read and the flag write.
+  // sibling landing between this read and the flag write. Deterministic
+  // ORDER BY id (root-fix hardening): two concurrent lockers of the SAME
+  // group now also acquire these row locks in the same relative order —
+  // belt-and-suspenders alongside the advisory lock above, which is what
+  // actually prevents the cross-transaction deadlock (see the header).
   const members = await trx('scheduled_services')
     .where({ customer_id: moved.customer_id, source_estimate_id: moved.source_estimate_id })
     .whereNull('recurring_parent_id')
+    .orderBy('id')
     .forUpdate()
     .select('id', 'scheduled_date', 'estimated_price', 'completed_at');
   if (members.length < 2) return { skip: { action: 'skipped', reason: 'no_siblings', moved } };
@@ -201,29 +307,58 @@ async function loadLockedEstimateGroup(trx, scheduledServiceId) {
 // group (no live invoice at all) has nothing left to protect or alert on
 // and is skipped, same as "no first-application invoice".
 //
-// Durable-provenance fallback (round-4 Codex P1, second pre-push round):
+// ROOT FIX — DURABLE PROVENANCE IS THE PRIMARY IDENTITY (post-round-6):
 // selectFirstApplicationInvoiceMatch identifies the invoice by pattern-
 // matching its auto-generated title/notes TEXT — an ordinary notes/title
 // edit through the SAME editable PUT route (e.g. the office tidying up the
 // wording while splitting the invoice by hand) permanently breaks that
-// match. Shared by BOTH chokepoints that call this function
-// (flagFirstApplicationInvoiceReviewOnDateChange, the date-change path, and
-// reopenBillingReviewOnInvoiceMoneyChange, the money-edit path) — a text
-// rewrite must not silently blind EITHER one. When the text-match finds
-// NOTHING among the already-fetched `candidates` (no extra query), fall
-// back to a resolution record (billing_review_context.resolvedAt, written
-// only by a MANUAL clear) — durable, first-party proof that row WAS this
-// group's invoice-holder, independent of its current wording. `candidates`
-// is already scoped to this group's members and excludes void rows, so no
-// further checks are needed; ordered `created_at DESC`, so if more than one
-// resolved candidate somehow exists (an edge case — a group is not
-// expected to accumulate more than one manually-resolved invoice), the
-// most recently created one wins, matching the ordering's existing intent
-// elsewhere in this function. Can never override a genuinely different,
-// still-correctly-identified invoice — this only runs when the text-match
-// found nothing at all.
+// match. Every prior round patched this with ANOTHER fallback (round-4:
+// fall back when text-match finds nothing at all; round-5/6: extend that
+// fallback to the money-edit chokepoint too, then move it here so both
+// chokepoints share it) — each one only covering the ONE case that round's
+// audit happened to find (a resolved-context row; a rewritten-but-still-
+// live row). The actual invariant is simpler and covers all of them at
+// once: once a review has EVER opened on an invoice, that invoice's
+// billing_review_context durably records `sourceEstimateId` — in EVERY
+// state a review context takes (open: openBillingReview; resolved by a
+// manual clear: clearBillingReview; auto-cleared by realignment:
+// maybeAutoClearBillingReview, which now keeps this one field rather than
+// nulling the whole column — see its own comment). That is first-party
+// proof this exact row IS the group's invoice-holder, independent of its
+// current title/notes wording, and it is checked FIRST, before the text
+// pattern — the text pattern is only ever needed for a FIRST-EVER opening,
+// when no candidate has any provenance yet.
+//
+// Provenance does not blindly win, though: a candidate whose provenance
+// match is itself in a shadowable state (refunded/canceled/etc. —
+// InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES minus 'refunded',
+// same vocabulary selectFirstApplicationInvoiceMatch already uses) must
+// still lose to a LIVE text-matching replacement — otherwise this fix
+// would reopen the round-3 bug it was built to close (a stale canceled
+// invoice's own leftover provenance shadowing the live replacement that
+// superseded it and text-matches normally). So the precedence is:
+//   1. a provenance match that is itself LIVE (not in that shadowable set)
+//   2. else the ordinary text-match precedence (live > refunded > the
+//      canceled-with-setup-fee park case), unchanged from round-3
+//   3. else the provenance match anyway (even shadowable) — better than
+//      nothing when nothing text-matches at all; this is the same "last
+//      resort" every prior round's fallback already was, just no longer
+//      restricted to resolvedAt-only.
+// `candidates` is already scoped to this group's members and excludes
+// void rows, ordered `created_at DESC`, so the first provenance hit is the
+// most-recently-created one when more than one exists (an edge case — a
+// group is not expected to accumulate more than one reviewed invoice).
+function invoiceProvenanceEstimateId(row) {
+  let context = row?.billing_review_context;
+  if (typeof context === 'string') {
+    try { context = JSON.parse(context); } catch { context = null; }
+  }
+  return context && context.sourceEstimateId != null ? String(context.sourceEstimateId) : null;
+}
+
 async function findLockedFirstApplicationInvoice(trx, moved, members) {
   const { selectFirstApplicationInvoiceMatch } = require('./estimate-first-application-invoice');
+  const InvoiceService = require('./invoice');
   const memberIds = members.map((m) => m.id);
   const candidates = await trx('invoices')
     .whereIn('scheduled_service_id', memberIds)
@@ -231,16 +366,17 @@ async function findLockedFirstApplicationInvoice(trx, moved, members) {
     .orderBy('created_at', 'desc')
     .forUpdate()
     .select('*');
+
+  const provenanceMatch = candidates.find(
+    (row) => invoiceProvenanceEstimateId(row) === String(moved.source_estimate_id),
+  ) || null;
+  const shadowableStatuses = InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES.filter((s) => s !== 'refunded');
+  const provenanceIsLive = !!provenanceMatch && !shadowableStatuses.includes(provenanceMatch.status);
+
   const { invoice: selected, liveBeside } = selectFirstApplicationInvoiceMatch(candidates);
-  const invoice = liveBeside || selected || null
-    || candidates.find((row) => {
-      let context = row.billing_review_context;
-      if (typeof context === 'string') {
-        try { context = JSON.parse(context); } catch { context = null; }
-      }
-      return typeof context?.resolvedAt === 'string';
-    })
-    || null;
+  const textMatch = liveBeside || selected || null;
+
+  const invoice = (provenanceIsLive ? provenanceMatch : null) || textMatch || provenanceMatch || null;
   if (!invoice) return { skip: { action: 'skipped', reason: 'no_first_application_invoice', moved } };
 
   const invoiceRow = members.find((m) => String(m.id) === String(invoice.scheduled_service_id));
@@ -472,6 +608,14 @@ async function clearBillingReview(invoiceId, expectedVersion, database = db, act
       try { context = JSON.parse(context); } catch { context = null; }
     }
     const resolution = {
+      // Carried forward from the open context (never re-derived here — this
+      // function has no `moved` row to read it from) so this resolution
+      // remains durable, estimate-scoped provenance findLockedFirstApplication
+      // Invoice can match on later, in ANY state (see that function's own
+      // header). Every context this module ever writes stamps this same
+      // field at open time (openBillingReview), so it is always present on
+      // a review that reaches a manual clear.
+      sourceEstimateId: context?.sourceEstimateId != null ? String(context.sourceEstimateId) : null,
       resolvedAt: new Date().toISOString(),
       resolvedBy: actorId || null,
       resolvedSiblingIds: Array.isArray(context?.divergingSiblingIds) ? context.divergingSiblingIds : [],
@@ -652,10 +796,26 @@ async function maybeAutoClearBillingReview(trx, invoice, invoiceRow, members, mo
   if (!untouched) {
     return { action: 'skipped', reason: 'review_open_requires_manual_clear', invoiceId: invoice.id };
   }
+  // Minimal provenance, NOT a full null (root fix, findLockedFirstApplication
+  // Invoice's header): nobody reviewed anything here — this is realignment,
+  // not a resolution — so isDivergenceAlreadyResolved must still see no
+  // `resolvedAt` and treat a later re-divergence as brand new (unchanged
+  // from before this fix). But the estimate id itself is durable, first-
+  // party proof this row IS (or was) the group's invoice-holder, needed so
+  // an ordinary notes/title rewrite AFTER an auto-clear can't blind a later
+  // lookup on THIS estimate the way a fully-nulled context used to.
   const [cleared] = await trx('invoices')
     .where({ id: invoice.id })
     .whereNotNull('billing_review_opened_at')
-    .update({ billing_review_opened_at: null, billing_review_reason: null, billing_review_context: null })
+    .update({
+      billing_review_opened_at: null,
+      billing_review_reason: null,
+      billing_review_context: JSON.stringify({
+        sourceEstimateId: String(moved.source_estimate_id),
+        invoiceHolderScheduledServiceId: invoice.scheduled_service_id,
+        autoClearedAt: new Date().toISOString(),
+      }),
+    })
     .returning('id');
   if (cleared) {
     await resolveBillingReviewAlert(trx, invoice.id);
@@ -752,6 +912,11 @@ module.exports = {
   clearBillingReview,
   reopenBillingReviewOnInvoiceMoneyChange,
   dateOnly,
+  // The estimate-group lock (root fix) — every date writer + InvoiceService.
+  // update() calls one of these FIRST, before any row lock. See the module
+  // header's ROOT FIX comment for the ordering contract.
+  lockSiblingGroupForVisit,
+  lockSiblingGroupsForVisits,
   // Exported for direct unit coverage of the lookup/classification pieces.
   loadLockedEstimateGroup,
   findLockedFirstApplicationInvoice,

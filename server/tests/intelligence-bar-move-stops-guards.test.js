@@ -25,6 +25,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 // batch-move test.
 jest.mock('../services/first-application-sibling-split', () => ({
   flagFirstApplicationInvoiceReviewOnDateChangeSafely: jest.fn().mockResolvedValue({ action: 'skipped' }),
+  // Root fix (lock order): every date writer now calls this FIRST, before
+  // its own row lock/write — the mocked module needs it too, or the real
+  // (unmocked) function would throw "is not a function" against this
+  // suite's plain mock trx.
+  lockSiblingGroupForVisit: jest.fn().mockResolvedValue(null),
+  lockSiblingGroupsForVisits: jest.fn().mockResolvedValue([]),
 }));
 jest.mock('../services/tech-status', () => ({
   clearTechCurrentJob: jest.fn().mockResolvedValue(null),

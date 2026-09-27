@@ -2897,6 +2897,10 @@ async function rescheduleAppointment(input, actionContext = {}) {
   let committedTechId = null;
   let overlapAdvisory = null;
   await db.transaction(async (trx) => {
+      // Sibling-group lock FIRST — rung 0, before rung 1 below and every
+      // row lock this transaction takes (see first-application-sibling-
+      // split.js's ROOT FIX comment). A no-op for a visit with no estimate.
+      await require('../first-application-sibling-split').lockSiblingGroupForVisit(trx, appointment_id);
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
       // #3609 r30 P2): probeSlotOverlap's ordering contract puts the
       // occupancy lock before any narrower lock, and the other IB date
