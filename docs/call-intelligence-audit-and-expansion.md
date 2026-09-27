@@ -245,7 +245,10 @@ basis, matched_at), `human_state` (confirmed|dismissed|edited), `human_note`,
 **Fulfillment** (`refreshFulfillment`, run on read): two strengths of proof.
 *Direct* — a later record linked to this call (a `scheduled_services` row
 with `source_call_log_id` = this call, the estimate on the lead this call
-minted, the invoice for that visit) — marks the open AI row fulfilled.
+minted, the invoice for that visit), or, for a `schedule_visit` promise, a
+same-customer visit booked after the call for exactly its stated slot (the
+stated ET day and start minute; not a deadline; owner ruling 2026-09-27) —
+marks the open AI row fulfilled.
 *Association* — a record that merely belongs to the same customer or phone
 within 14 days (a `confirmation` text to the caller, a completed outbound
 call ≥20 s, an inbound message with media, a customer estimate/visit/invoice)

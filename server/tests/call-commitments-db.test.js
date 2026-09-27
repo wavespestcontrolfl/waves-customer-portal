@@ -341,6 +341,33 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       .toMatchObject({ kind: 'appointment_booked', record_id: booked.id, strength: 'association' });
   });
 
+  test('a visit booked after the call FOR the stated slot keeps schedule_visit (direct); another time that day, a cancelled booking, a deadline or a technician follow-up stays a hint', async () => {
+    const [cust] = await db('customers').insert({ first_name: 'Slot', phone: '+15555550176' }).returning('id');
+    cleanup.customerIds.push(cust.id);
+    const [call] = await db('call_log').insert({
+      twilio_call_sid: 'CA' + '7'.repeat(30) + 's2', direction: 'inbound', from_phone: '+15555550176', to_phone: OUR_NUMBER,
+      status: 'completed', customer_id: cust.id, created_at: new Date(Date.now() - 10 * 60 * 1000),
+    }).returning('*');
+    cleanup.callIds.push(call.id);
+    // "I'll put you on the schedule for around 3" — 3 PM ET on a fixed future day.
+    const promise = { kind: 'schedule_visit', due_at: '2026-10-15T15:00:00-04:00', due_type: 'floor' };
+    const book = async (window_start, extra = {}) => {
+      const [v] = await db('scheduled_services').insert({ scheduled_date: '2026-10-15', window_start, service_type: 'Rodent Trapping Service', status: 'pending', customer_id: cust.id, created_at: new Date(Date.now() - 60 * 1000), ...extra }).returning('id');
+      cleanup.visitIds.push(v.id);
+      return v;
+    };
+    const other = await book('10:00');
+    expect(await cc.resolveFulfillment(db, promise, call)).toMatchObject({ record_id: other.id, strength: 'association' });
+    await book('15:00', { status: 'cancelled' });
+    expect(await cc.resolveFulfillment(db, promise, call)).toMatchObject({ record_id: other.id, strength: 'association' });
+    const atSlot = await book('15:00');
+    expect(await cc.resolveFulfillment(db, promise, call))
+      .toMatchObject({ kind: 'appointment_booked', record_id: atSlot.id, strength: 'direct', basis: 'visit_booked_at_the_promised_time' });
+    expect(await cc.resolveFulfillment(db, { ...promise, due_type: null }, call)).toMatchObject({ record_id: atSlot.id, strength: 'direct' });
+    expect(await cc.resolveFulfillment(db, { ...promise, due_type: 'deadline' }, call)).toMatchObject({ strength: 'association' });
+    expect(await cc.resolveFulfillment(db, { ...promise, kind: 'technician_follow_up' }, call)).toMatchObject({ strength: 'association' });
+  });
+
   test('an invoice on the visit booked from this call counts only when paid AFTER the call', async () => {
     const call = await db('call_log').where({ id: callId }).first();
     const [visit] = await db('scheduled_services').insert({ scheduled_date: '2026-09-11', service_type: 'General Pest Control', status: 'completed', source_call_log_id: callId }).returning('id');

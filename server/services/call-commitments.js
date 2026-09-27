@@ -39,7 +39,7 @@ const crypto = require('crypto');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
-const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { parseETDateTime, etDateString, etParts, addETDays } = require('../utils/datetime-et');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 // A due time typed by the office arrives either as an ISO instant (the
@@ -1441,6 +1441,17 @@ function whereEstimateCustomerOwnership(query, customerId) {
         ))`, [customerId, customerId, customerId, customerId, customerId]);
 }
 
+// A promise's stated time as a bookable slot — its ET day and HH:MM — or
+// null: no stated time, one labeled a deadline (the latest moment for the
+// action, not an appointment), or one no later than the evidence boundary
+// (nothing left to book).
+function statedSlot(commitment, after) {
+  const at = commitment?.due_at ? new Date(commitment.due_at) : null;
+  if (!at || Number.isNaN(at.getTime()) || commitment.due_type === "deadline" || at.getTime() <= after.getTime()) return null;
+  const { hour, minute } = etParts(at);
+  return { day: etDateString(at), time: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}` };
+}
+
 async function resolveFulfillment(conn, commitment, call) {
   const started = call?.created_at ? new Date(call.created_at) : null;
   // Evidence counts from the end of the call — or, for a callback card whose
@@ -1668,6 +1679,25 @@ async function resolveFulfillment(conn, commitment, call) {
         return { kind: "appointment_rescheduled", record_type: "scheduled_service", record_id: movedMeta.scheduled_service_id, matched_at: movedRow.created_at, strength: "direct", basis: "visit_rescheduled_from_this_call" };
       }
       if (!customerId) return null;
+      // A scheduling promise's stated time is usually the appointment itself
+      // ("I'll put you on the schedule for around 3"): a visit booked for this
+      // customer after the call FOR exactly that slot — the stated ET day, its
+      // arrival window starting at the stated minute — is the promise kept,
+      // not a same-customer hint (owner ruling 2026-09-27). schedule_visit
+      // only, like the moved-visit proof above; the follow-up pager applies
+      // the same slot test to its own evidence (appointmentSlot).
+      const slot = commitment.kind === "schedule_visit" ? statedSlot(commitment, after) : null;
+      const atSlot = slot && await conn("scheduled_services")
+        .where("customer_id", customerId)
+        .where("created_at", ">", after)
+        .where("scheduled_date", slot.day)
+        .whereRaw("to_char(window_start, 'HH24:MI') = ?", [slot.time])
+        .whereNotIn("status", ["cancelled", "canceled"])
+        .whereNull("recurring_parent_id")
+        .whereNull("parent_service_id")
+        .orderBy("created_at", "asc")
+        .first("id", "created_at");
+      if (atSlot) return { kind: "appointment_booked", record_type: "scheduled_service", record_id: atSlot.id, matched_at: atSlot.created_at, strength: "direct", basis: "visit_booked_at_the_promised_time" };
       const visit = await conn("scheduled_services")
         .where("customer_id", customerId)
         .where("created_at", ">", after)
