@@ -24831,6 +24831,10 @@ module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
 // cancel so a 'following' / 'series' cancel refuses prepaid visits the same
 // way the trim does instead of silently dropping paid visits off the books.
 module.exports.findBillingCoveredVisits = findBillingCoveredVisits;
+// The billable-amount booking gate — also consumed lazily by the IB
+// create_appointment executor for its one unpriced visit (ADMIN-BUG-R12),
+// same avoid-a-route-load-cycle reason as above.
+module.exports.recurringWithoutBillableAmount = recurringWithoutBillableAmount;
 // Completion reruns the visit-scoped trade-name screen with the SAME typed
 // product-field classification generation used (codex r49 #3420).
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;

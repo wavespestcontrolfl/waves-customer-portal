@@ -3,8 +3,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, cleanup } from '@testing-library/react';
 import useLockBodyScroll from './useLockBodyScroll';
 
-function Locker({ active = true }) {
-  useLockBodyScroll(active);
+function Locker({ active = true, preserveSticky = false }) {
+  useLockBodyScroll(active, { preserveSticky });
   return null;
 }
 
@@ -14,6 +14,8 @@ describe('useLockBodyScroll', () => {
     document.body.style.position = '';
     document.body.style.top = '';
     document.body.style.overflow = '';
+    document.documentElement.style.overflow = '';
+    document.documentElement.style.overscrollBehavior = '';
     window.scrollTo = vi.fn();
   });
 
@@ -38,6 +40,21 @@ describe('useLockBodyScroll', () => {
   it('is a no-op when inactive', () => {
     render(<Locker active={false} />);
     expect(document.body.style.position).toBe('');
+  });
+
+  it('locks the root scroller without moving the body for sticky header surfaces', () => {
+    Object.defineProperty(window, 'scrollY', { value: 240, configurable: true });
+    const { unmount } = render(<Locker active preserveSticky />);
+
+    expect(document.documentElement.style.overflow).toBe('hidden');
+    expect(document.documentElement.style.overscrollBehavior).toBe('none');
+    expect(document.body.style.position).toBe('');
+    expect(document.body.style.top).toBe('');
+
+    unmount();
+    expect(document.documentElement.style.overflow).toBe('');
+    expect(document.documentElement.style.overscrollBehavior).toBe('');
+    expect(window.scrollTo).toHaveBeenCalledWith(0, 240);
   });
 
   it('reference-counts nested locks so an inner unlock does not release the body early', () => {
