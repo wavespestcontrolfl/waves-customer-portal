@@ -108,11 +108,21 @@ function parseSince(raw) {
   const bareDate = /^\d{4}-\d{2}-\d{2}$/.test(raw);
   const date = parseETDateTime(bareDate ? `${raw}T00:00` : raw);
   // An impossible calendar date (2026-02-30) would otherwise roll forward
-  // (to March 2) and silently drop days: it must round-trip exactly.
-  if (Number.isNaN(date.getTime()) || (bareDate && etDateString(date) !== raw)) {
+  // (to March 2) and silently drop days — in a bare date or a full
+  // timestamp alike: its YYYY-MM-DD must be a real day, and a bare date
+  // must round-trip to that same Eastern day.
+  if (Number.isNaN(date.getTime()) || !isRealCalendarDay(raw) || (bareDate && etDateString(date) !== raw)) {
     throw new Error(`--since=${raw} is not a date: use a real YYYY-MM-DD (Eastern midnight) or a full ISO timestamp`);
   }
   return date;
+}
+
+function isRealCalendarDay(raw) {
+  const parts = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
+  if (!parts) return true; // no calendar prefix to check (Date parsing already vetted it)
+  const [, y, m, d] = parts.map(Number);
+  const day = new Date(Date.UTC(y, m - 1, d));
+  return day.getUTCFullYear() === y && day.getUTCMonth() === m - 1 && day.getUTCDate() === d;
 }
 
 // Proves layer 1 above actually took: a real write statement through the
@@ -237,11 +247,26 @@ function dedupe(lines) {
   });
 }
 
+// The agent's validated PROPOSAL (decideForTitle), never the final write:
+// the live apply step still runs its own checks under its locks — a nearby
+// manual restock or count (a possible duplicate), the catalog changing
+// underneath, an application unit already in use — and can still hold it.
 function decisionSummary(decision) {
   if (decision.status !== 'logged') return `${decision.status}${decision.reason ? `: ${decision.reason}` : ''}`;
   const created = decision.kind === 'new_product' ? ` (NEW PRODUCT: "${decision.newProduct.name}", category ${decision.newProduct.category})` : '';
   const containerNote = decision.kind === 'existing' && decision.setContainerSize ? ` (would set container_size to "${decision.setContainerSize}")` : '';
-  return `WOULD LOG ${decision.amount} ${decision.unit}${created}${containerNote}`;
+  return `PROPOSES LOGGING ${decision.amount} ${decision.unit}${created}${containerNote}`;
+}
+
+// A proposal the live agent would carry out by changing the catalog — a new
+// product, a container size, or the alias it saves for an unmatched title.
+// Once the live agent has done that for one line, a later line with the same
+// title is resolved by the receipt rules, not the model, so the replay must
+// not reuse the proposal for it.
+function changesCatalog(outcome) {
+  const decision = outcome.decision;
+  if (!decision || decision.status !== 'logged') return false;
+  return decision.kind === 'new_product' || Boolean(decision.setContainerSize) || outcome.reClassified?.status === 'unmatched';
 }
 
 // decideForTitle answers one of three ways: the model couldn't be reached,
@@ -252,6 +277,87 @@ function outcomeSummary(outcome) {
   if (outcome.llmFailed) return `LLM unavailable (${outcome.reason || 'no_json'})`;
   if (outcome.rulesResolve) return 'the receipt rules resolve it now (no model call)';
   return decisionSummary(outcome.decision);
+}
+
+// Counts one line the live lane settles without the agent, and returns its row.
+function settledRow(state, line, status, text = '') {
+  state.tally[status] = (state.tally[status] || 0) + 1;
+  return { line, status, text };
+}
+
+// The agent's answer for one line it would take: a reused one when the same
+// question was already asked (or the receipt rules' line when that earlier
+// proposal changes the catalog), '--limit reached' past the cap, or a real
+// decideForTitle call against the catalog as it stands right now.
+async function agentProposal(conn, line, state) {
+  const siteOneFields = line.vendor === 'siteone' ? await siteOneLineFields(conn, { email_id: line.email.id, line_no: line.lineNo }) : null;
+  const question = JSON.stringify([line.vendor, line.item.title, line.item.quantity, siteOneFields]);
+  const earlier = state.decided.get(question);
+  if (earlier) {
+    return earlier.changesCatalog
+      ? "the receipt rules would take it, once the earlier line's catalog change is made (no model call)"
+      : `${earlier.text} (same as an earlier line)`;
+  }
+  if (state.llmCalls >= state.limit) return '(skipped — --limit reached)';
+  // Categories load once, as the live runner loads them once per run; the
+  // active catalog reloads before every decision, as the live runner
+  // reloads it per line — staff can add a product or alias while this
+  // replay waits on the model.
+  if (!state.allowedCategories) state.allowedCategories = await loadAllowedCategories(conn);
+  const catalog = await loadActiveCatalog(conn);
+  state.llmCalls += 1;
+  const outcome = await decideForTitle(conn, dispatchWithFallback, {
+    rawTitle: line.item.title, quantity: line.item.quantity, vendor: line.vendor, siteOneFields,
+  }, { allowedCategories: state.allowedCategories, ...catalog });
+  const text = outcomeSummary(outcome);
+  // A failed call is never reused: the next identical line asks again.
+  if (outcome.llmFailed) state.llmFailures += 1;
+  else state.decided.set(question, { text, changesCatalog: changesCatalog(outcome) });
+  return text;
+}
+
+// One line's row: the live lane's own checks first (receipt-processor.js
+// processReceiptLine records nothing for a line with no shipment key, or on
+// a shipment a later email handed to a person), then its disposition, then
+// — for a line it hands to the agent — the agent's proposal.
+async function replayLine(conn, line, state) {
+  if (!line.shipmentKey) return settledRow(state, line, 'no_shipment_key');
+  if (await shipmentHandedOff(conn, line.vendor, line.shipmentKey, line.email.id)) return settledRow(state, line, 'handed_to_person');
+  const found = line.forcedStatus ? { status: line.forcedStatus, productId: null, product: null } : await classifyItem(line.item, conn);
+  const disposition = lineDisposition(found, line, { agentOn: true });
+  if (disposition.status !== 'agent_pending') {
+    return settledRow(state, line, disposition.status, disposition.product ? `matched: ${disposition.product.name}` : '');
+  }
+  state.handedToAgent += 1;
+  return { line, status: `agent (${found.status})`, text: await agentProposal(conn, line, state) };
+}
+
+function printReport(rows, state, siteOneFailures) {
+  console.log('');
+  console.log(['title', 'vendor', 'disposition', 'what happens'].map((h, i) => h.padEnd([62, 9, 26, 0][i])).join(' | '));
+  console.log('-'.repeat(120));
+  for (const row of rows) {
+    console.log([row.line.item.title.slice(0, 60).padEnd(62), row.line.vendor.padEnd(9), row.status.padEnd(26), row.text].join(' | '));
+  }
+  console.log('');
+  const counts = Object.entries(state.tally).sort(([a], [b]) => a.localeCompare(b)).map(([status, n]) => `${status} ${n}`).join(', ');
+  console.log(`Without the agent: ${counts || 'nothing'}.`);
+  console.log(`${state.handedToAgent} line(s) the agent would take; ${state.llmCalls} real LLM decision(s) (--limit=${state.limit}).`);
+  console.log('Proposals are what the agent would PROPOSE; the live apply step can still hold one under its own checks '
+    + '(a nearby manual restock or count, the catalog changing underneath, an application unit already in use).');
+  // An incomplete replay never passes for a complete one: each gap is
+  // listed and the run exits 1.
+  if (state.llmFailures) {
+    console.log('');
+    console.log(`INCOMPLETE: ${state.llmFailures} line(s) got no decision because the model was unavailable (see "LLM unavailable" above).`);
+    process.exitCode = 1;
+  }
+  if (siteOneFailures.length) {
+    console.log('');
+    console.log(`INCOMPLETE: ${siteOneFailures.length} SiteOne invoice email(s) could not be read, so their lines are missing above:`);
+    for (const failure of siteOneFailures) console.log(`  email ${failure.emailId} "${failure.subject}": ${failure.message}`);
+    process.exitCode = 1;
+  }
 }
 
 async function main() {
@@ -268,79 +374,15 @@ async function main() {
       + `(${amazon.length} Amazon, ${siteOneRead.lines.length} SiteOne before dedupe), `
       + `plus ${undelivered.length} undelivered-shipment line(s) the live lane held for a person.`);
 
+    // One paid call per distinct question: `decided` maps each asked
+    // question (title, quantity, vendor, invoice evidence) to its answer.
+    const state = {
+      limit, tally: undelivered.length ? { no_delivery_email: undelivered.length } : {},
+      handedToAgent: 0, llmCalls: 0, llmFailures: 0, allowedCategories: null, decided: new Map(),
+    };
     const rows = undelivered.map((line) => ({ line, status: line.recordedStatus, text: '' }));
-    const tally = undelivered.length ? { no_delivery_email: undelivered.length } : {};
-    let handedToAgent = 0;
-    let llmCalls = 0;
-    let allowedCategories = null;
-    // One paid call per distinct question: a line whose exact inputs (title,
-    // quantity, vendor, invoice evidence) were already decided reuses that
-    // answer instead of paying again.
-    const decided = new Map();
-
-    for (const line of lines) {
-      // The live lane (receipt-processor.js processReceiptLine) records
-      // nothing for a line with no shipment key, or on a shipment a later
-      // email handed to a person — checked before anything else.
-      if (!line.shipmentKey) {
-        tally.no_shipment_key = (tally.no_shipment_key || 0) + 1;
-        rows.push({ line, status: 'no_shipment_key', text: '' });
-        continue;
-      }
-      if (await shipmentHandedOff(conn, line.vendor, line.shipmentKey, line.email.id)) {
-        tally.handed_to_person = (tally.handed_to_person || 0) + 1;
-        rows.push({ line, status: 'handed_to_person', text: '' });
-        continue;
-      }
-      const found = line.forcedStatus ? { status: line.forcedStatus, productId: null, product: null } : await classifyItem(line.item, conn);
-      const disposition = lineDisposition(found, line, { agentOn: true });
-      if (disposition.status !== 'agent_pending') {
-        tally[disposition.status] = (tally[disposition.status] || 0) + 1;
-        rows.push({ line, status: disposition.status, text: disposition.product ? `matched: ${disposition.product.name}` : '' });
-        continue;
-      }
-      handedToAgent += 1;
-      const siteOneFields = line.vendor === 'siteone' ? await siteOneLineFields(conn, { email_id: line.email.id, line_no: line.lineNo }) : null;
-      const question = JSON.stringify([line.vendor, line.item.title, line.item.quantity, siteOneFields]);
-      if (decided.has(question)) {
-        rows.push({ line, status: `agent (${found.status})`, text: `${decided.get(question)} (same as an earlier line)` });
-        continue;
-      }
-      if (llmCalls >= limit) {
-        rows.push({ line, status: `agent (${found.status})`, text: '(skipped — --limit reached)' });
-        continue;
-      }
-      // Categories load once, as the live runner loads them once per run; the
-      // active catalog reloads before every decision, as the live runner
-      // reloads it per line — staff can add a product or alias while this
-      // replay waits on the model.
-      if (!allowedCategories) allowedCategories = await loadAllowedCategories(conn);
-      const catalog = await loadActiveCatalog(conn);
-      llmCalls += 1;
-      const outcome = await decideForTitle(conn, dispatchWithFallback, {
-        rawTitle: line.item.title, quantity: line.item.quantity, vendor: line.vendor, siteOneFields,
-      }, { allowedCategories, ...catalog });
-      const text = outcomeSummary(outcome);
-      decided.set(question, text);
-      rows.push({ line, status: `agent (${found.status})`, text });
-    }
-
-    console.log('');
-    console.log(['title', 'vendor', 'disposition', 'what happens'].map((h, i) => h.padEnd([62, 9, 26, 0][i])).join(' | '));
-    console.log('-'.repeat(120));
-    for (const row of rows) {
-      console.log([row.line.item.title.slice(0, 60).padEnd(62), row.line.vendor.padEnd(9), row.status.padEnd(26), row.text].join(' | '));
-    }
-    console.log('');
-    const counts = Object.entries(tally).sort(([a], [b]) => a.localeCompare(b)).map(([status, n]) => `${status} ${n}`).join(', ');
-    console.log(`Without the agent: ${counts || 'nothing'}.`);
-    console.log(`${handedToAgent} line(s) the agent would take; ${llmCalls} real LLM decision(s) (--limit=${limit}).`);
-    if (siteOneRead.failures.length) {
-      console.log('');
-      console.log(`INCOMPLETE: ${siteOneRead.failures.length} SiteOne invoice email(s) could not be read, so their lines are missing above:`);
-      for (const failure of siteOneRead.failures) console.log(`  email ${failure.emailId} "${failure.subject}": ${failure.message}`);
-      process.exitCode = 1;
-    }
+    for (const line of lines) rows.push(await replayLine(conn, line, state));
+    printReport(rows, state, siteOneRead.failures);
   } finally {
     await conn.destroy();
     await sharedDb.destroy();
@@ -358,4 +400,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { assertReadOnly, parseSince, parseLimit, lineKey };
+module.exports = { assertReadOnly, parseSince, parseLimit, lineKey, changesCatalog };

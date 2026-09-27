@@ -9,7 +9,7 @@
  * (this same function, run against the real shared db module before the
  * script does anything else) is for.
  */
-const { assertReadOnly, parseSince, parseLimit, lineKey } = require('../../ops/agents/inventory-agent-replay');
+const { assertReadOnly, parseSince, parseLimit, lineKey, changesCatalog } = require('../../ops/agents/inventory-agent-replay');
 
 function mockDb(behavior) {
   return { raw: jest.fn(behavior) };
@@ -71,6 +71,31 @@ describe('parseSince', () => {
     expect(() => parseSince('2026-02-30')).toThrow(/is not a date/);
     expect(() => parseSince('2026-13-01')).toThrow(/is not a date/);
     expect(parseSince('2028-02-29').toISOString()).toBe('2028-02-29T05:00:00.000Z');
+  });
+
+  // Codex round 4: the calendar check covers full timestamps too.
+  test('an impossible day in a full timestamp refuses as well', () => {
+    expect(() => parseSince('2026-02-30T05:00:00Z')).toThrow(/is not a date/);
+    expect(parseSince('2028-02-29T05:00:00Z').toISOString()).toBe('2028-02-29T05:00:00.000Z');
+  });
+});
+
+// Codex round 4: once the live agent changes the catalog for one line (a new
+// product, a container size, the alias for an unmatched title), a later line
+// with the same title goes through the receipt rules instead.
+describe('changesCatalog', () => {
+  const logged = (decision) => ({ status: 'logged', ...decision });
+
+  test('a new product, a container size, or an unmatched title (its alias) changes the catalog', () => {
+    expect(changesCatalog({ decision: logged({ kind: 'new_product' }) })).toBe(true);
+    expect(changesCatalog({ decision: logged({ kind: 'existing', setContainerSize: '78 oz' }), reClassified: { status: 'needs_size' } })).toBe(true);
+    expect(changesCatalog({ decision: logged({ kind: 'existing', setContainerSize: null }), reClassified: { status: 'unmatched' } })).toBe(true);
+  });
+
+  test('a plain restock of an already-matched product, a hold, or a failed call does not', () => {
+    expect(changesCatalog({ decision: logged({ kind: 'existing', setContainerSize: null }), reClassified: { status: 'size_mismatch' } })).toBe(false);
+    expect(changesCatalog({ decision: { kind: 'unsure', status: 'agent_unsure' }, reClassified: { status: 'unmatched' } })).toBe(false);
+    expect(changesCatalog({ llmFailed: true })).toBe(false);
   });
 });
 
