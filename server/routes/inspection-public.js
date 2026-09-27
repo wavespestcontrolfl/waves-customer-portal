@@ -1713,9 +1713,11 @@ async function provisionLinkedCustomer(trx, {
     return { locationFailure: 'address_unresolved' };
   }
   provisioned = freshCustRow;
-  const explicitDifferentAddress = resolved.source === 'supplied'
-    && Boolean(storedCustRow.address_line1)
-    && !profileMatchesAddress(storedCustRow, resolved.address, resolved.location);
+  const explicitDifferentAddress = [
+    resolved.source === 'supplied',
+    Boolean(storedCustRow.address_line1),
+    !profileMatchesAddress(storedCustRow, resolved.address, resolved.location),
+  ].every(Boolean);
   if (freshCustRow.geocode_review_blocked && !explicitDifferentAddress) {
     return { locationFailure: 'address_unresolved' };
   }
@@ -1739,7 +1741,11 @@ async function provisionLinkedCustomer(trx, {
     if (other.locationFailure) return { locationFailure: other.locationFailure };
     return { custRow: other.customer, location: other.location || resolved.location };
   }
-  if (resolved.source !== 'customer') {
+  const reviewedLocation = freshCustRow.latitude != null && freshCustRow.longitude != null
+    ? { lat: Number(freshCustRow.latitude), lng: Number(freshCustRow.longitude) }
+    : null;
+  const retainReviewedLocation = Boolean(reviewedLocation) && !explicitDifferentAddress;
+  if (resolved.source !== 'customer' && !retainReviewedLocation) {
     // The pre-lock resolution did NOT come from this row's own
     // stored address (it was empty, or the stored one failed to
     // geocode and a lead/supplied fallback won) — write the
@@ -1768,10 +1774,7 @@ async function provisionLinkedCustomer(trx, {
   // createSelfBooking reloads the row for its commit-time travel check,
   // which must never run locationless.
   else {
-    const reviewedLocation = freshCustRow.latitude != null && freshCustRow.longitude != null
-      ? { lat: Number(freshCustRow.latitude), lng: Number(freshCustRow.longitude) }
-      : null;
-    const after = reviewedLocation
+    const after = retainReviewedLocation
       ? { latitude: reviewedLocation.lat, longitude: reviewedLocation.lng }
       : { latitude: resolved.location.lat, longitude: resolved.location.lng };
     const mirrorMatches = sameCoordinates(storedCustRow, after);
