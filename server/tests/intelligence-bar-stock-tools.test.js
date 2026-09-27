@@ -631,6 +631,22 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     expect(result).toEqual({ productId: VELISTA.id });
   });
 
+  test.each([
+    ['adjust_stock', { productId: 'p-taurus' }],
+    ['create_restock_request', { code: 'target_clarification_required' }],
+  ])('a skipped "It arrived" turn decides the operation over an older "ordered" (%s)', async (toolName, expected) => {
+    setGroundingDb({ products: [TAURUS, ALPINE] });
+    IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+    // Newest first: "It arrived" (bare, skipped), then the product-naming turn.
+    IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['It arrived', 'We ordered Taurus SC']);
+    const result = await resolveInventoryWriteTarget({
+      toolName, prompt: '1 bottle',
+      preview: { product: { id: TAURUS.id, name: TAURUS.name }, ...(toolName === 'adjust_stock' ? { movement_type: 'restock' } : {}) },
+      actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 5,
+    });
+    expect(result).toMatchObject(expected);
+  });
+
   test('the current turn\'s own operation words decide: "It arrived, one bottle" after "Order Taurus SC" is a receipt', async () => {
     setGroundingDb({ products: [TAURUS, ALPINE] });
     IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);

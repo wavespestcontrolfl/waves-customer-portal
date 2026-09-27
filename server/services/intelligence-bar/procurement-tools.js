@@ -1342,17 +1342,18 @@ const RECEIPT_WORDS = new Set(['bought', 'buy', 'purchase', 'purchased', 'picked
 const ORDER_WORDS = new Set(['order', 'ordered', 'reorder', 'reordered', 'restock']);
 // A receipt phrase grounds only a restock: a count correction or a write-off
 // from the same words is never inferred.
-// texts[0] is the current prompt. Its own operation words decide; an earlier
-// turn's words count only when the current prompt has none, so "It arrived,
-// one bottle" after "Order Taurus SC" is a receipt.
+// `texts` run newest first: the current prompt, any bare turns the look-back
+// skipped, then the turn that named the product. The newest text with any
+// operation word decides, so "It arrived, one bottle" after "Order Taurus
+// SC" is a receipt, and so is "1 bottle" after "We ordered Taurus SC" then
+// "It arrived".
 function operationMatches(toolName, texts, preview) {
   const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
-  const cues = (textList) => {
-    const words = textList.flatMap((text) => normalizeForMatch(text).split(' '));
+  const cues = (text) => {
+    const words = normalizeForMatch(text).split(' ');
     return { receipt: words.some((word) => RECEIPT_WORDS.has(word)), order: words.some((word) => ORDER_WORDS.has(word)) };
   };
-  const current = cues(texts.slice(0, 1));
-  const { receipt, order } = current.receipt || current.order ? current : cues(texts.slice(1));
+  const { receipt, order } = texts.map(cues).find((c) => c.receipt || c.order) || { receipt: false, order: false };
   if (toolName === 'adjust_stock') {
     return receipt && !order && (preview.movement_type == null || preview.movement_type === 'restock');
   }
@@ -1402,16 +1403,18 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { 
   // joining them would let a qualifier (or a name) spill across a turn
   // boundary that was never actually adjacent in what the operator said.
   const turns = await IbThreads.recentOperatorTurns(actorId, threadId, { limit: 3, maxAgeMinutes: 30, maxSeq: observedSeq });
+  const skipped = [];
   for (const turn of turns) {
     const turnResult = await productsNamedIn(turn);
     if (turnResult.conflict) return null; // a conflict on any prior turn refuses outright
     if (turnResult.named.size > 1) return null; // that turn alone is ambiguous — refuse, don't guess
-    if (turnResult.named.size === 1) return decide(turnResult.named, [prompt, turn]);
+    if (turnResult.named.size === 1) return decide(turnResult.named, [prompt, ...skipped, turn]);
     // Named nothing. Only a bare reply ("yes", "1 bottle") has no opinion
     // and may be skipped; any other turn ("Actually use Unlisted Chemical
     // instead") may be a correction this catalog can't read, so the scan
     // stops rather than reach past it to an older product.
     if (!isBareFollowUp(turn)) return null;
+    skipped.push(turn);
   }
   return null;
 }
