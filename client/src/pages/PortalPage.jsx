@@ -4200,6 +4200,8 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
   const [expanded, setExpanded] = useState(false);
   const settingsId = useId();
   if (!prefs.appPreferencesAvailable) return null;
+  const { fresh, registered } = app.status ?? {};
+  const connected = fresh === true;
   const connectionCopy = {
     checking: 'Checking this device…',
     granted: 'This device is connected.',
@@ -4210,25 +4212,24 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
     permission_unavailable: 'Waves did not receive a notification permission response. Check Waves in your device’s notification Settings, then try again.',
     registration_unavailable: 'This device could not connect. Check your connection and try again.',
     unavailable: 'App notification setup is unavailable on this device.',
-    web: 'Open the Waves app on your phone to connect a device.',
+    web: connected ? 'Connected to your Waves app.' : 'Open the Waves app on your phone to connect a device.',
   };
-  const connected = app.status?.fresh === true;
   const needsSetup = prefs.pushEnabled === false || (app.deviceState !== 'checking' && !app.ready);
   const showSettings = expanded || needsSetup;
+  const disclosureLabel = expanded ? 'Hide' : 'Manage';
   return (
     <div style={{ marginTop: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <div role="status" style={{ fontSize: 16, lineHeight: 1.5, color: B.grayDark }}>
           {prefs.pushEnabled === false ? 'App notifications are off.'
-            : app.deviceState === 'web' && connected ? 'Connected to your Waves app.'
-              : connectionCopy[app.deviceState] || connectionCopy.registration_unavailable}
+            : connectionCopy[app.deviceState] || connectionCopy.registration_unavailable}
         </div>
         {!needsSetup && (
           <button type="button" data-glass="chip" aria-expanded={expanded} aria-controls={settingsId}
-            aria-label={`${expanded ? 'Hide' : 'Manage'} app notification settings`}
+            aria-label={`${disclosureLabel} app notification settings`}
             onClick={() => setExpanded((previous) => !previous)}
             style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, flexShrink: 0 }}>
-            {expanded ? 'Hide' : 'Manage'}
+            {disclosureLabel}
           </button>
         )}
       </div>
@@ -4237,7 +4238,7 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
           <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Allow app notifications</div>
           <GoldSwitch on={prefs.pushEnabled !== false} onChange={() => onSave({ pushEnabled: prefs.pushEnabled === false })} label="App notifications for my account" disabled={saving} />
         </div>
-        {(prefs.pushEnabled === false || (!connected && app.status?.registered)) && (
+        {(prefs.pushEnabled === false || (!connected && registered)) && (
           <p style={{ margin: '8px 0 0', fontSize: 16, color: B.grayDark, lineHeight: 1.5 }}>
             {prefs.pushEnabled === false ? 'Your notification history is still available.'
               : 'Open the app to refresh its connection.'}
@@ -4260,8 +4261,9 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
           </p>
           <p style={{ margin: '0 0 12px' }}>
             If an app notification cannot be delivered, we may use text or email where available, following your preferences.
-            {prefs.smsEnabled === false ? ' Text backup is off.' : ''}
-            {prefs.emailEnabled === false ? ' Email backup is off.' : ''}
+            {Object.entries({ smsEnabled: 'Text', emailEnabled: 'Email' })
+              .filter(([key]) => prefs[key] === false)
+              .map(([, label]) => ` ${label} backup is off.`)}
           </p>
           <p style={{ margin: '0 0 12px' }}>
             Request confirmations continue by email. Manage invoices and payment notifications in Billing. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
