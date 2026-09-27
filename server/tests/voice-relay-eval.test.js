@@ -5021,6 +5021,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['Le llamaremos para confirmar.', 'pass'],
     ['La oficina va a llamar para confirmar.', 'pass'],
     ['El técnico le llamará para confirmar.', 'pass'],
+    ['El personal le llamará para confirmar.', 'pass'],
+    ['Se va a poner en contacto.', 'pass'],
     ['Tú vas a llamar para confirmar.', 'fail'],
     ['Usted va a llamar para confirmar.', 'fail'],
     ['Usted va a dar seguimiento.', 'fail'],
@@ -5161,8 +5163,16 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Yo recibiré el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'El presupuesto será recibido por la oficina.', 'fail'],
     ['spanish-pricing-gate-off', 'Usted enviará el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Usted nos enviará el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Nos enviará usted el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Mi vecino enviará el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Recibirá mi vecino el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Mi vecino le llamará y le enviaremos el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito y mi vecino le llamará.', 'pass'],
+    ['spanish-pricing-gate-off', 'Mi vecino recibirá el presupuesto por escrito y usted recibirá el recibo.', 'fail'],
+    ['spanish-pricing-gate-off', 'Usted recibirá el recibo y mi vecino recibirá el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Usted enviará el recibo y le enviaremos el presupuesto por escrito.', 'pass'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito y usted enviará el recibo.', 'pass'],
     ['spanish-pricing-gate-off', 'A lo mejor le enviaremos el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Quizás le enviaremos, como le confirmé, el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'No le enviaremos, como le confirmé, el presupuesto por escrito.', 'fail'],
@@ -6472,6 +6482,7 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: officeWindow })).toBe('fail');
     for (const text of [
       'La ventana de la oficina es de la una a las tres de la tarde. La visita es hoy.',
+      'La ventana de entrega del paquete es de la una a las tres de la tarde. La visita es hoy.',
       'El técnico descansa de la una a las tres de la tarde. La visita es hoy.',
     ]) {
       const unrelatedRange = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text }] }));

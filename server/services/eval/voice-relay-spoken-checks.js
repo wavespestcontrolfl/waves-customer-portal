@@ -91,25 +91,40 @@ const SPANISH_TARGET_PARTICIPLE_RE = new RegExp(`^\\s*${SPANISH_PARTICIPLE}\\b`,
 const SPANISH_SHARED_AUXILIARY_PREFIX_RE = new RegExp(`\\b(?:${SPANISH_PAST_AUXILIARY}|ser(?:é|ás|á|emos|éis|án))\\s+${SPANISH_PARTICIPLE}\\b[^.!?;]{0,80}\\by\\s*$`, 'i');
 const SPANISH_CALLBACK_ACTION = '(?:(?:llam|contact|comunic|escrib|confirm)[a-záéíóúñü]*|devolv[a-záéíóúñü]*\\s+la\\s+llamada|(?:dar|doy|da|damos|dan|daré|dará|daremos|darán)(?:le|les)?\\s+seguimiento|(?:pon|pong|pondr)[a-záéíóúñü]*(?:se)?\\s+en\\s+contacto)';
 const SPANISH_CALLBACK_TARGET_RE = new RegExp(`(?:${SPANISH_CALLBACK_ACTION}|\\bseguimiento\\b|\\ben\\s+contacto\\b)`, 'i');
-const SPANISH_STAFF_ACTOR = '(?:(?:la|nuestra)\\s+oficina|(?:el|nuestro)\\s+equipo|(?:el|un)\\s+(?:miembro|integrante)\\s+del\\s+equipo(?:\\s+de\\s+Waves)?|(?:el|la|un|una|su)\\s+t[eé]cnic[oa]|(?:el|la|un|una)\\s+(?:recepcionista|coordinador|coordinadora|secretari[oa])|Waves)';
+const SPANISH_STAFF_ACTOR = '(?:(?:la|nuestra)\\s+oficina|(?:el|nuestro)\\s+(?:equipo|personal)|(?:el|un)\\s+(?:miembro|integrante)\\s+del\\s+equipo(?:\\s+de\\s+Waves)?|(?:el|la|un|una|su)\\s+t[eé]cnic[oa]|(?:el|la|un|una)\\s+(?:recepcionista|coordinador|coordinadora|secretari[oa])|Waves)';
 const SPANISH_STAFF_CALLBACK_RE = new RegExp(`(?:${SPANISH_STAFF_ACTOR}\\s+(?:(?:le|les|lo|la|los|las|te|nos|se)\\s+)?(?:(?:va(?:n)?\\s+a)\\s+)?${SPANISH_CALLBACK_ACTION}|${SPANISH_CALLBACK_ACTION}\\s+${SPANISH_STAFF_ACTOR})`, 'i');
 const SPANISH_EXPLICIT_CALLBACK_SUBJECT_RE = new RegExp(`(?<![a-záéíóúñü])(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\\s+[a-záéíóúñü]+)\\s+(?:(?:le|les|lo|la|los|las|te|nos|se)\\s+)?(?:(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+)?${SPANISH_CALLBACK_ACTION}`, 'i');
 const SPANISH_POSTPOSED_CALLBACK_SUBJECT_RE = new RegExp(`${SPANISH_CALLBACK_ACTION}\\s+(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\\s+[a-záéíóúñü]+)`, 'i');
 const SPANISH_FIRST_PERSON_CALLBACK_RE = new RegExp(`(?<![a-záéíóúñü])(?:(?:voy|vamos)\\s+a\\s+${SPANISH_CALLBACK_ACTION}|llam(?:o|amos|aré|aremos)|(?<!en\\s)contacto|contact(?:amos|aré|aremos)|(?:comunic|confirm)(?:o|amos|aré|aremos)|escrib(?:o|imos|iré|iremos)|(?:doy|damos|daré|daremos)(?:le|les)?\\s+seguimiento|(?:me|nos)\\s+(?:pongo|ponemos|pondré|pondremos)\\s+en\\s+contacto)(?![a-záéíóúñü])`, 'i');
 const SPANISH_CALLER_OBJECT_CALLBACK_RE = new RegExp(`\\b(?:le|les|lo|la|los|las|te)\\s+(?:(?:voy|vamos|va|van)\\s+a\\s+)?${SPANISH_CALLBACK_ACTION}`, 'i');
-const SPANISH_IMPERSONAL_CALLBACK_RE = /\b(?:se\s+(?:(?:va(?:n)?\s+a\s+)?comunic[a-záéíóúñü]*|pondr[a-záéíóúñü]*\s+en\s+contacto)|habr[aá]\s+seguimiento)\b/i;
+const SPANISH_IMPERSONAL_CALLBACK_RE = /\b(?:se\s+(?:(?:va(?:n)?\s+a\s+)(?:comunicar|poner)|comunic[a-záéíóúñü]*|pondr[a-záéíóúñü]*)\s+(?:en\s+contacto)?|habr[aá]\s+seguimiento)\b/i;
 const SPANISH_ESTIMATE_RE = /\b(?:presupuesto|cotizaci[oó]n|estimado)\b/i;
 const SPANISH_RECEIVE_RE = /(?<![a-záéíóúñü])(?:recib(?:ir[a-záéíóúñü]*|id[oa]s?|ió|ieron|ía(?:s|mos|n)?|e|es|imos|en)|va(?:mos|n)?\s+a\s+recibir)(?![a-záéíóúñü])/i;
 const SPANISH_ESTIMATE_REQUEST_RE = /\b(?:solicitud|pedido|petici[oó]n)\b[^.!?;,]{0,45}\b(?:de|del|para\s+(?:el|un))\s+(?:presupuesto|cotizaci[oó]n|estimado)\b/i;
 const SPANISH_EXPLICIT_RECEIVER_RE = /(?<![a-záéíóúñü])(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\s+[a-záéíóúñü]+)\s+(?:(?:lo|la|los|las|le|les|se)\s+)?(?:(?:voy|va(?:s|mos|is|n)?)\s+a\s+)?recib[a-záéíóúñü]*/i;
 const SPANISH_EXPLICIT_CALLER_RECEIVER_RE = /(?<![a-záéíóúñü])(?:t[uú]|usted(?:es)?|vosotr[oa]s?|(?:el|la)\s+cliente)\s+(?:(?:lo|la|los|las|se)\s+)?(?:(?:va(?:s|is|n)?)\s+a\s+)?recib[a-záéíóúñü]*/i;
+const SPANISH_POSTPOSED_RECEIVER_RE = /\brecib[a-záéíóúñü]*\s+(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\s+[a-záéíóúñü]+)[^.!?;,]{0,30}\b(?:el|un|su)\s+(?:presupuesto|estimado)|\brecib[a-záéíóúñü]*\s+(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\s+[a-záéíóúñü]+)[^.!?;,]{0,30}\b(?:la|una|su)\s+cotizaci[oó]n/i;
+const SPANISH_POSTPOSED_CALLER_RECEIVER_RE = /\brecib[a-záéíóúñü]*\s+(?:t[uú]|usted(?:es)?|vosotr[oa]s?|(?:el|la)\s+cliente)\b[^.!?;,]{0,30}\b(?:presupuesto|estimado|cotizaci[oó]n)\b/i;
 const SPANISH_IMPLICIT_CALLER_RECEIVER_RE = /(?<![a-záéíóúñü])(?:recibir[aá]n?|va(?:n)?\s+a\s+recibir)(?![a-záéíóúñü])/i;
 const SPANISH_FIRST_PERSON_RECEIVE_RE = /(?<!\bel\s)(?<!\bun\s)(?<!\bsu\s)(?<!\bmi\s)(?<![a-záéíóúñü])(?:recibo|recibimos|recibiré|recibiremos|(?:voy|vamos)\s+a\s+recibir)(?![a-záéíóúñü])/i;
 const SPANISH_PASSIVE_RECEIVE_RE = /\b(?:ser[aá]|va\s+a\s+ser)\s+recibid[oa]s?\b/i;
 const SPANISH_CALLER_PASSIVE_AGENT_RE = /\bpor\s+(?:usted(?:es)?|(?:el|la)\s+cliente)\b/i;
-const SPANISH_CUSTOMER_SEND_ACTOR_RE = new RegExp(`(?<!\\ba\\s)(?<![a-záéíóúñü])(?:t[uú]|usted(?:es)?|vosotr[oa]s?)\\s+(?:(?:lo|la|los|las|le|les|se)\\s+)?(?:(?:va(?:s|is|n)?)\\s+a\\s+)?(?:env[ií]|mand|entreg)[a-záéíóúñü]*`, 'i');
+const SPANISH_SEND_ACTION = '(?:env[ií]|mand|entreg)[a-záéíóúñü]*';
+const SPANISH_SEND_ACTION_RE = new RegExp(`(?<![a-záéíóúñü])${SPANISH_SEND_ACTION}`, 'i');
+const SPANISH_EXPLICIT_SEND_SUBJECT_RE = new RegExp(`(?<![a-záéíóúñü])(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\\s+[a-záéíóúñü]+)\\s+(?:(?:lo|la|los|las|le|les|te|nos|se)\\s+)?(?:(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+)?${SPANISH_SEND_ACTION}`, 'i');
+const SPANISH_POSTPOSED_SEND_SUBJECT_RE = new RegExp(`${SPANISH_SEND_ACTION}\\s+(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\\s+[a-záéíóúñü]+)[^.!?;,]{0,30}\\b(?:presupuesto|estimado|cotizaci[oó]n)\\b`, 'i');
+const SPANISH_STAFF_SEND_RE = new RegExp(`(?:${SPANISH_STAFF_ACTOR}\\s+(?:(?:lo|la|los|las|le|les|te|se)\\s+)?(?:(?:va(?:n)?\\s+a)\\s+)?${SPANISH_SEND_ACTION}|${SPANISH_SEND_ACTION}\\s+${SPANISH_STAFF_ACTOR})`, 'i');
+const SPANISH_FIRST_PERSON_SEND_RE = /(?<![a-záéíóúñü])(?:(?:voy|vamos)\s+a\s+(?:enviar|mandar|entregar)(?:le|les|lo|la|los|las)?|env(?:ío|iamos|iaré|iaremos)|mand(?:o|amos|aré|aremos)|entreg(?:o|amos|aré|aremos))(?![a-záéíóúñü])/i;
+const SPANISH_CALLER_OBJECT_SEND_RE = new RegExp(`\\b(?:le|les|lo|la|los|las|te)\\s+(?:(?:voy|vamos|va|van)\\s+a\\s+)?${SPANISH_SEND_ACTION}`, 'i');
+const SPANISH_PASSIVE_SEND_RE = /\b(?:se\s+(?:enviar|mandar|entregar)[aá]n?|ser[aá]\s+(?:enviad|mandad|entregad)[oa]s?|va\s+a\s+ser\s+(?:enviad|mandad|entregad)[oa]s?)(?![a-záéíóúñü])/i;
+const SPANISH_SHARED_PASSIVE_SEND_RE = new RegExp(`\\b(?:${SPANISH_PAST_AUXILIARY}|ser(?:é|ás|á|emos|éis|án))\\s+${SPANISH_PARTICIPLE}\\b[^.!?;]{0,80}\\by\\s+(?:enviad|mandad|entregad)[oa]s?(?![a-záéíóúñü])`, 'i');
+const SPANISH_PASSIVE_SEND_AGENT_MARKER_RE = /\b(?:enviad|mandad|entregad)[oa]s?\s+por\b/i;
+const SPANISH_STAFF_PASSIVE_SEND_AGENT_RE = new RegExp(`\\bpor\\s+${SPANISH_STAFF_ACTOR}\\b`, 'i');
+const SPANISH_ESTIMATE_ARRIVAL = 'lleg[a-záéíóúñü]*';
+const SPANISH_DELIVERY_PREDICATE_RE = new RegExp(`(?:${SPANISH_SEND_ACTION}|${SPANISH_RECEIVE_RE.source}|${SPANISH_ESTIMATE_ARRIVAL})`, 'gi');
+const SPANISH_ROLE_BOUNDARY_RE = /[.!?;]|\b(?:y|pero|aunque|sino)\b/gi;
 const SPANISH_CLOCK_RANGE_RE = /\b(?:de|entre|desde)\s+(?:la\s+)?(?:una|1)(?::00)?\b[^.!?;,]{0,45}\b(?:tres|3)(?::00)?\b/i;
-const SPANISH_VISIT_RANGE_CONTEXT_RE = /\b(?:ventana\b(?!\s+de\s+(?:la\s+)?oficina)|llegada|(?:visita|cita)\b[^.!?;,]{0,35}\b(?:es|ser[aá]|ocurre|tiene\s+lugar|est[aá]\s+programada)|t[eé]cnico\b[^.!?;,]{0,35}\b(?:llega|viene|estar[aá])|(?:llega|viene|estar[aá])\b[^.!?;,]{0,35}\bt[eé]cnico)\b/i;
+const SPANISH_VISIT_RANGE_CONTEXT_RE = /\b(?:ventana\s+(?:(?:de|para)\s+(?:hoy|llegada|la\s+visita|su\s+cita)\s+)?(?:es|ser[aá]|est[aá]|queda|va)|llegada|(?:visita|cita)\b[^.!?;,]{0,35}\b(?:es|ser[aá]|ocurre|tiene\s+lugar|est[aá]\s+programada)|t[eé]cnico\b[^.!?;,]{0,35}\b(?:llega|viene|estar[aá])|(?:llega|viene|estar[aá])\b[^.!?;,]{0,35}\bt[eé]cnico)\b/i;
 
 function spanishCallbackHasWavesActor(roleEvidence, matchText) {
   const explicitActor = SPANISH_EXPLICIT_CALLBACK_SUBJECT_RE.test(roleEvidence) || SPANISH_POSTPOSED_CALLBACK_SUBJECT_RE.test(roleEvidence);
@@ -120,16 +135,55 @@ function spanishCallbackHasWavesActor(roleEvidence, matchText) {
   return staffActor || firstPersonActor || implicitWavesActor;
 }
 
+function spanishDeliveryRoleEvidence(claim, match) {
+  const estimate = SPANISH_ESTIMATE_RE.exec(match[0]);
+  SPANISH_DELIVERY_PREDICATE_RE.lastIndex = 0;
+  const predicates = [...claim.matchAll(SPANISH_DELIVERY_PREDICATE_RE)];
+  if (!estimate || !predicates.length) return { found: false, roleEvidence: '', targetText: '' };
+  const estimateAt = match.index + estimate.index;
+  const beforeEstimate = predicates.filter((predicate) => predicate.index < estimateAt);
+  let target = beforeEstimate.at(-1) || predicates.find((predicate) => predicate.index > estimateAt);
+  if (target && target.index > estimateAt) {
+    SPANISH_ROLE_BOUNDARY_RE.lastIndex = 0;
+    if (SPANISH_ROLE_BOUNDARY_RE.test(claim.slice(estimateAt + estimate[0].length, target.index))) target = null;
+  }
+  if (!target) return { found: false, roleEvidence: '', targetText: '' };
+  const targetAt = target.index;
+  SPANISH_ROLE_BOUNDARY_RE.lastIndex = 0;
+  const leftBoundaries = [...claim.slice(0, targetAt).matchAll(SPANISH_ROLE_BOUNDARY_RE)];
+  let left = leftBoundaries.length ? leftBoundaries.at(-1).index + leftBoundaries.at(-1)[0].length : 0;
+  const sharedAuxiliary = SPANISH_TARGET_PARTICIPLE_RE.test(target[0])
+    ? claim.slice(0, targetAt).match(SPANISH_SHARED_AUXILIARY_PREFIX_RE) : null;
+  if (sharedAuxiliary) left = targetAt - sharedAuxiliary[0].length;
+  SPANISH_ROLE_BOUNDARY_RE.lastIndex = Math.max(targetAt + target[0].length, estimateAt + estimate[0].length);
+  const rightBoundary = SPANISH_ROLE_BOUNDARY_RE.exec(claim);
+  const right = rightBoundary ? rightBoundary.index : claim.length;
+  return { found: true, roleEvidence: claim.slice(left, right), targetText: target[0] };
+}
+
+function spanishSendHasWavesActor(roleEvidence, targetText) {
+  const explicitActor = SPANISH_EXPLICIT_SEND_SUBJECT_RE.test(roleEvidence) || SPANISH_POSTPOSED_SEND_SUBJECT_RE.test(roleEvidence);
+  const staffActor = SPANISH_STAFF_SEND_RE.test(roleEvidence);
+  const firstPersonActor = SPANISH_FIRST_PERSON_SEND_RE.test(roleEvidence);
+  const passive = SPANISH_PASSIVE_SEND_RE.test(roleEvidence) || SPANISH_SHARED_PASSIVE_SEND_RE.test(roleEvidence);
+  if (passive && SPANISH_PASSIVE_SEND_AGENT_MARKER_RE.test(roleEvidence)) return SPANISH_STAFF_PASSIVE_SEND_AGENT_RE.test(roleEvidence);
+  if (passive) return true;
+  if (explicitActor) return staffActor || firstPersonActor;
+  return staffActor || firstPersonActor || SPANISH_CALLER_OBJECT_SEND_RE.test(roleEvidence)
+    || !SPANISH_SEND_ACTION_RE.test(targetText);
+}
+
 function spanishEstimateTargetsCaller(roleEvidence, matchText) {
-  if (SPANISH_CUSTOMER_SEND_ACTOR_RE.test(roleEvidence)) return false;
+  if (!spanishSendHasWavesActor(roleEvidence, matchText)) return false;
   const receivePredicate = SPANISH_RECEIVE_RE.test(matchText) || SPANISH_FIRST_PERSON_RECEIVE_RE.test(roleEvidence);
   if (!receivePredicate) return true;
-  if (SPANISH_ESTIMATE_REQUEST_RE.test(matchText) || SPANISH_FIRST_PERSON_RECEIVE_RE.test(roleEvidence)) return false;
+  if (SPANISH_ESTIMATE_REQUEST_RE.test(roleEvidence) || SPANISH_FIRST_PERSON_RECEIVE_RE.test(roleEvidence)) return false;
   const passive = SPANISH_PASSIVE_RECEIVE_RE.test(roleEvidence);
   if (passive) return SPANISH_CALLER_PASSIVE_AGENT_RE.test(roleEvidence);
-  const explicitReceiver = SPANISH_EXPLICIT_RECEIVER_RE.test(roleEvidence);
+  const explicitReceiver = SPANISH_EXPLICIT_RECEIVER_RE.test(roleEvidence) || SPANISH_POSTPOSED_RECEIVER_RE.test(roleEvidence);
   return explicitReceiver
-    ? SPANISH_EXPLICIT_CALLER_RECEIVER_RE.test(roleEvidence) : SPANISH_IMPLICIT_CALLER_RECEIVER_RE.test(matchText);
+    ? SPANISH_EXPLICIT_CALLER_RECEIVER_RE.test(roleEvidence) || SPANISH_POSTPOSED_CALLER_RECEIVER_RE.test(roleEvidence)
+    : SPANISH_IMPLICIT_CALLER_RECEIVER_RE.test(matchText);
 }
 
 function spanishMatchHasValidRoles(claim, match, prospective) {
@@ -137,8 +191,10 @@ function spanishMatchHasValidRoles(claim, match, prospective) {
   const roleEvidence = claim.slice(Math.max(0, match.index - 80), match.index + matchText.length + 80);
   if (prospective && SPANISH_CALLBACK_TARGET_RE.test(matchText)
       && !spanishCallbackHasWavesActor(roleEvidence, matchText)) return false;
-  if (prospective && SPANISH_ESTIMATE_RE.test(matchText)
-      && !spanishEstimateTargetsCaller(roleEvidence, matchText)) return false;
+  if (prospective && SPANISH_ESTIMATE_RE.test(matchText)) {
+    const delivery = spanishDeliveryRoleEvidence(claim, match);
+    if (!delivery.found || !spanishEstimateTargetsCaller(delivery.roleEvidence, delivery.targetText)) return false;
+  }
   return !SPANISH_CLOCK_RANGE_RE.test(matchText) || SPANISH_VISIT_RANGE_CONTEXT_RE.test(claim);
 }
 
