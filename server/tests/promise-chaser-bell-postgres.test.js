@@ -700,6 +700,25 @@ const OUR_NUMBER = '+19415550100';
       expect(triggerNotification).not.toHaveBeenCalled();
     });
 
+    test('an AI-extracted commitment whose row lands AFTER the callback (slow extraction) still rings — its boundary is the ORIGINATING call, never its own insert time (Codex #5019 r6 P1)', async () => {
+      const earlier = callRow(240);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      // source: 'ai' (the default) — its row's own created_at is stamped
+      // at the REAL moment the extraction pipeline inserted it, which here
+      // is deliberately AFTER `back` already arrived, exactly like a slow
+      // extraction pass finishing late in production. The promise itself
+      // was made on `earlier` (240 minutes ago), well before the callback —
+      // that origin, not this row's insert time, is what must gate it.
+      const commitment = commitmentRow(earlier.id, {
+        created_at: new Date(now + 1000), updated_at: new Date(now + 1000),
+      });
+      await mockConn('call_commitments').insert(commitment);
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+    });
+
     test("the ET day in dedupeKey comes from the callback's OWN created_at, never the sweep tick's current time (Codex #5019 r18 P1)", async () => {
       const earlier = callRow(240);
       const commitment = commitmentRow(earlier.id);

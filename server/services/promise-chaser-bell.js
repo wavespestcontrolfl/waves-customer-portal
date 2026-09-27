@@ -232,19 +232,33 @@ async function findPromiseToRing(call, now) {
     });
     if (renewedAt === RENEWAL_LOOKUP_FAILED) continue;
     // The commitment's own creation — or renewal, whichever is LATER —
-    // must precede THIS callback (Codex #5019 r5 P2): a human-added
-    // commitment (source 'human', e.g. a send_estimate or schedule_visit
-    // promise typed onto an OLDER call AFTER the fact) cannot possibly be
-    // "about" a callback that happened before it existed, exactly like a
-    // renewed callback cannot be about a callback that preceded the
-    // renewal. Every kind gets this check now, not only callbacks —
-    // obligationRenewedAt itself only ever returns non-null for a renewed
-    // callback, so every other kind's own boundary is simply its created_at.
+    // must precede THIS callback (Codex #5019 r5 P2, then r6 P1): a
+    // HUMAN-typed commitment (source 'human', e.g. a send_estimate or
+    // schedule_visit promise added to an OLDER call AFTER the fact)
+    // cannot possibly be "about" a callback that happened before it
+    // existed, exactly like a renewed callback cannot be about a callback
+    // that preceded the renewal — for that source, created_at IS the
+    // moment the promise came into being.
+    //
+    // An AI-EXTRACTED commitment (source 'ai', the default) is different:
+    // its created_at is when the extraction pipeline's row landed, which
+    // can be well AFTER the call itself — extraction is async, and a slow
+    // pass finishing after a genuinely later callback already arrived
+    // must NOT permanently exclude the promise it correctly found (Codex
+    // r6 P1: the delayed-extraction test above only passed because its
+    // fixture backdates created_at 4 hours, masking this). The promise's
+    // own boundary there is the ORIGINATING call's time (call_started_at
+    // — already enforced to precede this callback above, at the very top
+    // of this function), so this check is a deliberate no-op for AI rows:
+    // only a human row's own later created_at can ever move the boundary
+    // past what that earlier check already guaranteed.
     // An unreadable created_at excludes the row (never a false ring on
     // unverifiable creation time).
-    const createdAtMs = new Date(r.created_at).getTime();
-    if (!Number.isFinite(createdAtMs)) continue;
-    const boundaryMs = renewedAt && renewedAt.getTime() > createdAtMs ? renewedAt.getTime() : createdAtMs;
+    const createdBoundaryMs = r.source === 'human'
+      ? new Date(r.created_at).getTime()
+      : new Date(r.call_started_at).getTime();
+    if (!Number.isFinite(createdBoundaryMs)) continue;
+    const boundaryMs = renewedAt && renewedAt.getTime() > createdBoundaryMs ? renewedAt.getTime() : createdBoundaryMs;
     if (boundaryMs >= call.created_at.getTime()) continue;
     withRenewal.push({ ...r, __renewedAt: renewedAt });
   }
