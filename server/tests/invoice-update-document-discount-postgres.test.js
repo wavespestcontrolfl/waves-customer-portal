@@ -252,6 +252,65 @@ postgres('InvoiceService.update — unbacked document-level discount fence', () 
     return { customerId, invoiceId };
   }
 
+  // Codex round-3 P1: a SECOND edit that changes the discount composition
+  // away from what create() left must not get stuck refusing every LATER
+  // edit forever just because the STALE create-time invoice_discounts rows
+  // no longer match the current lines. reconcileInvoiceDiscountProvenance
+  // (called after every successful line-item retotal) is what keeps the
+  // provenance table in sync so this doesn't happen.
+  test('replacing a catalog-backed discount with a literal credit, then editing again, does not get stuck refusing forever', async () => {
+    const customerId = await insertCustomer('Synthetic reconcile-on-edit fixture');
+    const invoiceId = randomUUID();
+    const catalogDiscountId = randomUUID();
+    await trx('invoices').insert({
+      id: invoiceId, customer_id: customerId,
+      token: randomUUID(), invoice_number: `QA-${randomUUID().slice(0, 20)}`,
+      status: 'draft', title: 'First Service Application',
+      line_items: JSON.stringify([
+        { description: 'First service application', quantity: 1, unit_price: 100, amount: 100 },
+        {
+          description: 'Loyalty discount', quantity: 1, unit_price: -10, amount: -10,
+          discount_id: catalogDiscountId,
+        },
+      ]),
+      discount_amount: 10, subtotal: 100, total: 90,
+    });
+    await trx('invoice_discounts').insert([
+      { invoice_id: invoiceId, discount_id: catalogDiscountId, discount_dollars: 10 },
+    ]);
+
+    // Edit #1: replace the lines with a $50 service + a $50 LITERAL credit
+    // (no discount_id) — discount_amount now equals the new subtotal
+    // exactly (the ambiguous shape), but there is no document-level
+    // component here at all.
+    const afterFirstEdit = await InvoiceService.update(invoiceId, {
+      line_items: [
+        { description: 'First service application', quantity: 1, unit_price: 50, amount: 50 },
+        { description: 'Courtesy discount', quantity: 1, unit_price: -50, amount: -50 },
+      ],
+    });
+    expect(Number(afterFirstEdit.discount_amount)).toBe(50);
+    expect(Number(afterFirstEdit.total)).toBe(0);
+
+    // The stale catalog-discount audit row must be gone — reconciled to
+    // reflect the invoice's CURRENT (literal-credit) composition.
+    const provenance = await trx('invoice_discounts').where({ invoice_id: invoiceId });
+    expect(provenance).toHaveLength(1);
+    expect(provenance[0].discount_id).toBeNull();
+
+    // Edit #2: a later, unrelated retotal on this now-literal-only invoice
+    // must NOT be refused just because the ORIGINAL catalog discount_id is
+    // no longer present anywhere.
+    const afterSecondEdit = await InvoiceService.update(invoiceId, {
+      line_items: [
+        { description: 'First service application', quantity: 1, unit_price: 80, amount: 80 },
+        { description: 'Courtesy discount', quantity: 1, unit_price: -50, amount: -50 },
+      ],
+    });
+    expect(Number(afterSecondEdit.discount_amount)).toBe(50);
+    expect(Number(afterSecondEdit.total)).toBe(30);
+  });
+
   test('a legit literal (no discount_id) line-item credit that happens to equal 100% of the subtotal still retotals normally', async () => {
     const { invoiceId } = await fixtureWithLegitLiteralFullLineDiscount();
     const updated = await InvoiceService.update(invoiceId, {

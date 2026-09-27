@@ -325,6 +325,54 @@ async function invoiceHasUnbackedDocumentDiscount(invoice, lineItems, conn) {
   return true;
 }
 
+// invoiceHasUnbackedDocumentDiscount's capped-shape disambiguation reads
+// invoice_discounts as the invoice's discount provenance — but update()'s
+// own line-item retotal never wrote that table (the pre-existing "KNOWN
+// LIMITATION (accepted)" a few hundred lines down, previously reporting-only:
+// changing/removing a discount through an edit left the create-time audit
+// rows in place). Once that stale table is CONSULTED for correctness rather
+// than just reporting, staleness becomes a real bug (Codex round 3): edit an
+// invoice's line items away from what it was created with, and the OLD
+// discount_id rows will never match the NEW lines, permanently refusing every
+// later edit of an invoice that in fact carries no document-level discount
+// at all. Called after every successful line-item retotal to keep the table
+// in sync with what is actually backing the invoice NOW — replacing the old
+// rows entirely, mirroring create()'s own shape (discount_id, discount_name,
+// discount_dollars) for each current negative line. Never touches
+// discounts.times_applied/total_discount_given (those ledger counters are
+// a separate, still-accepted limitation — reversing them would need a
+// dedicated primitive this fix doesn't add). Best-effort: a failure here
+// must not roll back or fail an otherwise-successful edit.
+async function reconcileInvoiceDiscountProvenance(invoiceId, lineItems, conn) {
+  try {
+    const items = Array.isArray(lineItems) ? lineItems : parseInvoiceLineItems(lineItems);
+    const rows = items
+      .filter((li) => {
+        if (li?.category === "deposit_credit") return false;
+        const qty = li?.quantity != null ? Number(li.quantity) : 1;
+        const rawAmt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+        return Number.isFinite(rawAmt) && rawAmt < 0;
+      })
+      .map((li) => ({
+        invoice_id: invoiceId,
+        discount_id: li?.discount_id || null,
+        discount_name: li?.description || null,
+        discount_dollars: Math.round(Math.abs(Number(li?.amount ?? li?.unit_price) || 0) * 100) / 100,
+      }));
+    // SAVEPOINT (nested transaction) so a failure here rolls back only
+    // itself — never the caller's edit transaction, which a raw failed
+    // statement inside a Postgres txn would otherwise abort even though
+    // this catch swallows the JS error (same technique create()'s own
+    // best-effort invoice_discounts write above uses).
+    await conn.transaction(async (sp) => {
+      await sp("invoice_discounts").where({ invoice_id: invoiceId }).del();
+      if (rows.length > 0) await sp("invoice_discounts").insert(rows);
+    });
+  } catch (err) {
+    logger.warn(`[invoice] Could not reconcile invoice_discounts on edit: ${err.message}`);
+  }
+}
+
 // Linked-visit guards for unvoidInvoice (Codex #3493 r2/r3). Runs TWICE:
 // pre-transaction as a fast fail, and again INSIDE the restore transaction
 // on the freshly-locked invoice row — a cancellation, free re-service
@@ -7830,6 +7878,13 @@ const InvoiceService = {
         throw new Error(
           "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
         );
+      }
+      // Keep the discount provenance table in sync with what actually backs
+      // this invoice's line items NOW (see reconcileInvoiceDiscountProvenance
+      // above) — in the SAME transaction as the edit itself, best-effort
+      // (never aborts an otherwise-successful edit).
+      if (updates.line_items && data.line_items !== undefined) {
+        await reconcileInvoiceDiscountProvenance(id, data.line_items, client);
       }
       // Phase 2: an edited accrued invoice changes the statement total — reroll in
       // the SAME transaction so a reroll failure ABORTS the edit; we never commit
