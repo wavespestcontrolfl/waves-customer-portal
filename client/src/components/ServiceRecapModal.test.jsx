@@ -259,6 +259,23 @@ describe('ServiceRecapModal default pest tank mix', () => {
     expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeTruthy();
   });
 
+  test('a bare "Pest Control Service" recap carrying the one_time_pest_control key DOES seed the mix (Codex r4, PR #5049)', async () => {
+    // TechHomePage now threads the schedule row's completionProfile.serviceKey
+    // into the recap's service prop — the key, not the label, marks the job.
+    const request = makeRequest({ products: MIX_CATALOG });
+    render(
+      <ServiceRecapModal
+        service={{ id: 'svc-1', serviceType: 'Pest Control Service', serviceKey: 'one_time_pest_control' }}
+        request={request}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(await screen.findByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Atticus Talak 7.9 F', pressed: true })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeTruthy();
+  });
+
   test('a reopened recap keeps the recorded selection — no mix injection', async () => {
     const request = makeRequest({
       products: MIX_CATALOG,
