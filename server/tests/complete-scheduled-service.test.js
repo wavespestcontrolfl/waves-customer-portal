@@ -302,14 +302,16 @@ describe('customer-safe routine completion observations', () => {
     ])).toBeNull();
   });
 
-  test.each(['', ...lawnConditionCatalog.extents])('rejects routine leaf spotting with a throughout-lawn disease-free claim (extent %s)', async (extent) => {
+  test.each(['leaf-spots-unconfirmed', 'circular-discoloration'].flatMap((symptomId) => (
+    ['', ...lawnConditionCatalog.extents].map((extent) => [symptomId, extent])
+  )))('rejects routine %s with a throughout-lawn disease-free claim (extent %s)', async (symptomId, extent) => {
     service.service_type = 'Lawn Care';
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
     resolveCompletionProfileForScheduledService.mockResolvedValueOnce({ serviceKey: 'lawn', completionMode: 'service_report' });
 
     const result = await complete({
       structuredObservations: [
-        completionObservationCatalog.lawn.find(([id]) => id === 'leaf-spots-unconfirmed')[1],
+        completionObservationCatalog.lawn.find(([id]) => id === symptomId)[1],
         lawnObservation('No visible disease symptoms', 'Throughout inspected lawn', extent),
       ],
     });

@@ -46,6 +46,7 @@ const LAWN_VISIBLE_DISEASE_SYMPTOM_IDS = new Set([
   // mushrooms out: their catalog copy explicitly says they do not establish
   // turf disease.
   'leaf-spots-unconfirmed',
+  'circular-discoloration',
 ]);
 const THROUGHOUT_INSPECTED_LAWN = 'Throughout inspected lawn';
 const LAWN_PEST_OBSERVATION_SCOPE = new Map();
