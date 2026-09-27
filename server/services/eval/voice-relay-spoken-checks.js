@@ -57,7 +57,7 @@ const SPANISH_DIRECT_CONDITIONAL_RE = new RegExp(`^(?:(?:${SPANISH_ASSERTION_VER
 const SPANISH_ASSERTION_VERB_RE = new RegExp(`\\b${SPANISH_ASSERTION_VERB}[a-záéíóúñü]*\\b`, 'i');
 const SPANISH_CONDITIONAL_NOUN_LEAD_RE = /\b(?:el|la|los|las|un|una|unos|unas|este|esta|ese|esa|mi|tu|su|por|de|del|en|con|sin|para)\s*$/i;
 const SPANISH_CONDITIONAL_NOUN_TAIL_RE = /^\s+(?:para|que)\b/i;
-const SPANISH_UNCERTAINTY_RE = /\b(?:quiz[aá]s?|tal\s+vez|a\s+lo\s+mejor|acaso|posiblemente|probablemente|puede\s+(?:ser\s+)?que|dudo\s+que|es\s+(?:(?:posible|probable)\s+que|dudoso\s+que)|si|no\s+(?:s[eé]|sabemos|estoy\s+segur[oa]|estamos\s+segur[oa]s?)\s+si)\b/i;
+const SPANISH_UNCERTAINTY_RE = /\b(?:quiz[aá]s?|tal\s+vez|a\s+lo\s+mejor|acaso|posiblemente|probablemente|puede\s+(?:ser\s+)?que|puede(?:n)?\s+(?:llegar|venir|estar|ocurrir|presentarse|tener\s+lugar)|dudo\s+que|es\s+(?:(?:posible|probable)\s+que|dudoso\s+que)|si|no\s+(?:s[eé]|sabemos|estoy\s+segur[oa]|estamos\s+segur[oa]s?)\s+si)\b/i;
 const SPANISH_NEGATION_RE = /\b(?:no|nunca|jam[aá]s|tampoco)\b/i;
 const SPANISH_EXPLICIT_SUBJECT_ASSERTION_RE = new RegExp(`^\\s*(?:(?:el|la|los|las|un|una|este|esta|ese|esa|mi|tu|su|nuestro|nuestra)\\s+(?:[a-záéíóúñü]+\\s+){0,4}|(?:yo|nosotros|nosotras|ellos|ellas|usted|ustedes)\\s+)(?:(?:le|les|nos|se)\\s+)?(?:va(?:mos|n)?\\s+a\\s+)?${SPANISH_ASSERTION_VERB}[a-záéíóúñü]*\\b`, 'i');
 const SPANISH_CLITIC_ASSERTION_RE = new RegExp(`^\\s*(?:le|les|nos|se)\\s+(?:va(?:mos|n)?\\s+a\\s+)?${SPANISH_ASSERTION_VERB}[a-záéíóúñü]*\\b`, 'i');
@@ -89,6 +89,24 @@ const SPANISH_TARGET_PARTICIPLE_RE = new RegExp(`^\\s*${SPANISH_PARTICIPLE}\\b`,
 // list, including an intervening object. Keep past and future forms separate
 // so the target predicate inherits the auxiliary's actual tense.
 const SPANISH_SHARED_AUXILIARY_PREFIX_RE = new RegExp(`\\b(?:${SPANISH_PAST_AUXILIARY}|ser(?:é|ás|á|emos|éis|án))\\s+${SPANISH_PARTICIPLE}\\b[^.!?;]{0,80}\\by\\s*$`, 'i');
+const SPANISH_CUSTOMER_CALLBACK_ACTOR_RE = /(?<!\ba\s)\b(?:t[uú]|usted(?:es)?|vosotr[oa]s?)\s+(?:(?:le|les|se)\s+)?(?:(?:va(?:s|is|n)?\s+a)\s+)?(?:(?:llam|contact|comunic|escrib|confirm)[a-záéíóúñü]*|dar(?:le|les)?\s+seguimiento|poner(?:se)?\s+en\s+contacto)/i;
+const SPANISH_NONSTAFF_CALLBACK_ACTOR_RE = /(?<![a-záéíóúñü])(?:[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\s+(?!(?:equipo|oficina|personal|miembro|integrante|recepcionista|coordinador|coordinadora|secretari[oa])\b)[a-záéíóúñü]+)\s+(?:(?:le|les|se)\s+)?(?:(?:va(?:n)?\s+a)\s+)?(?:llam|contact|comunic|escrib|confirm)[a-záéíóúñü]*/i;
+const SPANISH_BARE_THIRD_CALLBACK_RE = /^\s*(?:(?:perfecto|gracias|claro)[,:]\s*)?(?:va\s+a\s+(?:llamar|contactar|comunicar|escribir|confirmar)|(?:llam|contact|comunic|escrib|confirm)[a-záéíóúñü]*[aá])\b/i;
+const SPANISH_ESTIMATE_RE = /\b(?:presupuesto|cotizaci[oó]n|estimado)\b/i;
+const SPANISH_RECEIVE_RE = /\b(?:recib[a-záéíóúñü]*|va(?:mos|n)?\s+a\s+recibir)\b/i;
+const SPANISH_WAVES_RECEIVER_RE = /\b(?:(?:nosotros|nosotras)|(?:la|nuestra)\s+oficina|(?:el|nuestro)\s+equipo|waves)\b[^.!?;,]{0,35}\b(?:recib[a-záéíóúñü]*|va(?:mos|n)?\s+a\s+recibir)\b|\b(?:recibiremos|recibimos|vamos\s+a\s+recibir)\b/i;
+const SPANISH_ESTIMATE_REQUEST_RE = /\b(?:solicitud|pedido|petici[oó]n)\b[^.!?;,]{0,45}\b(?:de|del|para\s+(?:el|un))\s+(?:presupuesto|cotizaci[oó]n|estimado)\b/i;
+const SPANISH_CLOCK_RANGE_RE = /\b(?:de|entre|desde)\s+(?:la\s+)?(?:una|1)(?::00)?\b[^.!?;,]{0,45}\b(?:tres|3)(?::00)?\b/i;
+const SPANISH_VISIT_RANGE_CONTEXT_RE = /\b(?:ventana|visita|cita|t[eé]cnico|llegada|horario\s+(?:de|para)\s+(?:la\s+)?(?:visita|cita|llegada)|(?:llega|viene|estar[aá])\s+hoy)\b/i;
+
+function spanishMatchHasValidRoles(claim, match, prospective) {
+  if (prospective && (SPANISH_CUSTOMER_CALLBACK_ACTOR_RE.test(claim)
+      || SPANISH_NONSTAFF_CALLBACK_ACTOR_RE.test(claim) || SPANISH_BARE_THIRD_CALLBACK_RE.test(claim))) return false;
+  if (prospective && SPANISH_ESTIMATE_RE.test(match[0]) && SPANISH_RECEIVE_RE.test(claim)
+      && (SPANISH_WAVES_RECEIVER_RE.test(claim) || SPANISH_ESTIMATE_REQUEST_RE.test(claim))) return false;
+  if (SPANISH_CLOCK_RANGE_RE.test(match[0]) && !SPANISH_VISIT_RANGE_CONTEXT_RE.test(claim)) return false;
+  return true;
+}
 
 function spanishClaimIsUncertain(claim) {
   if (clauseIsEpistemicallyHedged(claim) || SPANISH_UNCERTAINTY_RE.test(claim)) return true;
@@ -176,7 +194,7 @@ function assertedSpokenMatch(text, re, { prospective = false } = {}) {
     // The nearest finite auxiliary governs the delivery predicate, even
     // when an earlier coordinated predicate used another tense.
     const prospectiveAssertion = !prospective || prospectiveAt > completedAt;
-    if (!denied && !uncertain && prospectiveAssertion) return match;
+    if (!denied && !uncertain && prospectiveAssertion && spanishMatchHasValidRoles(claim, match, prospective)) return match;
   }
   return null;
 }

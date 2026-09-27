@@ -2006,7 +2006,7 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?=[\\s\\S]*(?:{{dow_es+8}}|{{monthday_es+8}}))(?=[\\s\\S]*(?:\\b(?:1|una)\\b.{0,25}\\b(?:tarde|pm)\\b|\\ba\\s+la\\s+(?:una|1)\\b(?!\\s*(?:de\\s+la\\s+(?:ma\u00f1ana|madrugada|noche)|am\\b))|\\b13:00\\b))"
+       "(?=[\\s\\S]*(?:{{dow_es+8}}|{{monthday_es+8}}))(?=[\\s\\S]*(?:\\b(?:1|una)\\b.{0,25}\\b(?:tarde|pm)\\b|\\ba\\s+la\\s+(?:una|1)\\b(?!\\s*(?:de\\s+la\\s+(?:ma\u00f1ana|madrugada|noche)|am\\b))|\\b13:00\\b))(?=[\\s\\S]*(?:\\b(?:cita|visita|solicitud|hora\\s+(?:solicitada|elegida)|confirmar\\s+la\\s+hora)\\b|\\b(?:ped(?:\u00ed|imos)|solicit(?:\u00e9|amos|\u00f3|aron))(?![a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1\u00fc])))"
       ],
       "fromTurn": 1,
       "afterTool": "request_booking",
@@ -2263,7 +2263,7 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?:^|[.!?;]\\s*)\\s*(?:(?:lo siento|lamentablemente|por desgracia)[,:]\\s*)?(?:(?:ya no (?:est\u00e1|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup\u00f3|tomaron|tom\u00f3|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued\u00f3 disponible|ya no (?:hay|aparece))|(?:(?:ese|esa|este|esta|el|la)\\s+(?:horario|hora|cita|espacio|opci[o\u00f3]n|turno)|\\b(?:9|nueve)\\b|{{dow_es+7}}|{{monthday_es+7}})[^.!?;]{0,60}(?:ya no (?:est\u00e1|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup\u00f3|tomaron|tom\u00f3|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued\u00f3 disponible|ya no (?:hay|aparece))|(?:ya no (?:est\u00e1|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup\u00f3|tomaron|tom\u00f3|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued\u00f3 disponible|ya no (?:hay|aparece))[^.!?;]{0,60}(?:(?:ese|esa|este|esta|el|la)\\s+(?:horario|hora|cita|espacio|opci[o\u00f3]n|turno)|\\b(?:9|nueve)\\b|{{dow_es+7}}|{{monthday_es+7}}))"
+       "(?:^|[.!?;]\\s*)\\s*(?:(?:lo siento|lamentablemente|por desgracia)[,:]\\s*)?(?:(?:ya no (?:est\u00e1|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup\u00f3|tomaron|tom\u00f3|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued\u00f3 disponible|ya no (?:hay|aparece) (?:disponibilidad|espacio|cupo|lugar|horario|hora|opci[o\u00f3]n|turno))|(?:(?:ese|esa|este|esta|el|la)\\s+(?:horario|hora|cita|espacio|opci[o\u00f3]n|turno)|\\b(?:9|nueve)\\b|{{dow_es+7}}|{{monthday_es+7}})[^.!?;]{0,60}(?:ya no (?:est\u00e1|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup\u00f3|tomaron|tom\u00f3|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued\u00f3 disponible|ya no (?:hay|aparece))|(?:ya no (?:est\u00e1|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocup\u00f3|tomaron|tom\u00f3|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no qued\u00f3 disponible|ya no (?:hay|aparece))[^.!?;]{0,60}(?:(?:ese|esa|este|esta|el|la)\\s+(?:horario|hora|cita|espacio|opci[o\u00f3]n|turno)|\\b(?:9|nueve)\\b|{{dow_es+7}}|{{monthday_es+7}}))"
       ],
       "fromTurn": 1,
       "afterTool": {
