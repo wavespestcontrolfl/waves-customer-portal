@@ -9,7 +9,7 @@
  * (this same function, run against the real shared db module before the
  * script does anything else) is for.
  */
-const { assertReadOnly, parseSince } = require('../../ops/agents/inventory-agent-replay');
+const { assertReadOnly, parseSince, parseLimit, lineKey } = require('../../ops/agents/inventory-agent-replay');
 
 function mockDb(behavior) {
   return { raw: jest.fn(behavior) };
@@ -63,5 +63,43 @@ describe('parseSince', () => {
 
   test('an unreadable value refuses to run', () => {
     expect(() => parseSince('June first')).toThrow(/is not a date/);
+  });
+
+  // Codex round 3: 2026-02-30 would roll forward to March 2 and silently
+  // drop two days.
+  test('an impossible calendar date refuses rather than rolling forward', () => {
+    expect(() => parseSince('2026-02-30')).toThrow(/is not a date/);
+    expect(() => parseSince('2026-13-01')).toThrow(/is not a date/);
+    expect(parseSince('2028-02-29').toISOString()).toBe('2028-02-29T05:00:00.000Z');
+  });
+});
+
+// Codex round 3: a mistyped cap on paid calls refuses instead of silently
+// becoming 50.
+describe('parseLimit', () => {
+  test('a whole number, zero included; 50 when absent', () => {
+    expect(parseLimit('20')).toBe(20);
+    expect(parseLimit('0')).toBe(0);
+    expect(parseLimit(null)).toBe(50);
+  });
+
+  test('anything else refuses', () => {
+    for (const raw of ['5O', '-1', '2.5', '', 'ten']) expect(() => parseLimit(raw)).toThrow(/not a whole number/);
+  });
+});
+
+// Codex round 3: deduplicate by the live lane's own purchase-line identity,
+// so the same title bought on two orders stays two lines.
+describe('lineKey', () => {
+  const base = { vendor: 'amazon', orderNumber: '111-1', shipmentKey: 'ship-1', lineNo: 1, item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 } };
+
+  test('the same line from two emails is one key; another order or line is another', () => {
+    expect(lineKey({ ...base })).toBe(lineKey({ ...base, email: { id: 'other' } }));
+    expect(lineKey({ ...base, orderNumber: '222-2', shipmentKey: 'ship-2' })).not.toBe(lineKey(base));
+    expect(lineKey({ ...base, lineNo: 2 })).not.toBe(lineKey(base));
+  });
+
+  test('a missing order number keys as unknown, as the live lane keys it', () => {
+    expect(lineKey({ ...base, orderNumber: null })).toBe('amazon|unknown|ship-1|1');
   });
 });

@@ -76,9 +76,14 @@ function arg(name, fallback = null) {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
   return hit ? hit.slice(name.length + 3) : fallback;
 }
-// --limit=0 is valid: list every line with its disposition, no LLM calls.
-const LIMIT_ARG = Number(arg('limit', '50'));
-const LIMIT = Number.isInteger(LIMIT_ARG) && LIMIT_ARG >= 0 ? LIMIT_ARG : 50;
+// --limit caps paid LLM calls: a whole number, 0 allowed (list every line
+// with its disposition, no calls), 50 when absent. A mistyped value
+// ("5O", "-1") refuses to run rather than falling back to 50 real calls.
+function parseLimit(raw) {
+  if (raw == null) return 50;
+  if (!/^\d+$/.test(raw)) throw new Error(`--limit=${raw} is not a whole number of LLM calls (0 lists every line with no calls)`);
+  return Number(raw);
+}
 
 const server = (relative) => path.join(__dirname, '..', '..', 'server', relative);
 const { classifyItem, lineDisposition, shipmentHandedOff } = require(server('services/purchase-receipts/receipt-processor'));
@@ -86,7 +91,7 @@ const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require(server('serv
 const siteOne = require(server('services/purchase-receipts/siteone-invoices'));
 const { amazonEmailLines, siteOneInvoiceLines, authenticated } = require(server('services/purchase-receipts/sweep'));
 const { decideForTitle, loadAllowedCategories, loadActiveCatalog, siteOneLineFields } = require(server('services/purchase-receipts/inventory-agent'));
-const { parseETDateTime } = require(server('utils/datetime-et'));
+const { parseETDateTime, etDateString } = require(server('utils/datetime-et'));
 const { dispatchWithFallback } = require(server('services/llm/call'));
 // The shared pool: the sweep's own SiteOne builders read through it, and
 // dispatchWithFallback's telemetry could write through it. PGOPTIONS makes
@@ -100,8 +105,13 @@ const sharedDb = require(server('models/db'));
 // silently replaying everything.
 function parseSince(raw) {
   if (raw == null) return new Date('2000-01-01T00:00:00Z');
-  const date = parseETDateTime(/^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T00:00` : raw);
-  if (Number.isNaN(date.getTime())) throw new Error(`--since=${raw} is not a date: use YYYY-MM-DD (Eastern midnight) or a full ISO timestamp`);
+  const bareDate = /^\d{4}-\d{2}-\d{2}$/.test(raw);
+  const date = parseETDateTime(bareDate ? `${raw}T00:00` : raw);
+  // An impossible calendar date (2026-02-30) would otherwise roll forward
+  // (to March 2) and silently drop days: it must round-trip exactly.
+  if (Number.isNaN(date.getTime()) || (bareDate && etDateString(date) !== raw)) {
+    throw new Error(`--since=${raw} is not a date: use a real YYYY-MM-DD (Eastern midnight) or a full ISO timestamp`);
+  }
   return date;
 }
 
@@ -162,7 +172,7 @@ async function amazonLines(conn, since) {
     const parsed = parseAmazonDeliveredEmail(email);
     if (!parsed || !authenticated(email)) continue;
     amazonEmailLines(email, parsed).forEach((line, index) => {
-      lines.push({ vendor: 'amazon', email, shipmentKey: parsed.shipmentKey, lineNo: index + 1, ...line });
+      lines.push({ vendor: 'amazon', email, orderNumber: parsed.orderNumber, shipmentKey: parsed.shipmentKey, lineNo: index + 1, ...line });
     });
   }
   return lines;
@@ -174,25 +184,53 @@ async function amazonLines(conn, since) {
 // invoice keeps, and every hold. One unreadable invoice never stops the rest.
 async function siteOneLines(since) {
   const lines = [];
+  const failures = [];
   for (const email of await siteOne.findSiteOneInvoiceEmails(since)) {
     let found;
     try {
       found = await siteOneInvoiceLines(email, { now: Date.now(), since });
-    } catch {
+    } catch (err) {
+      // Never silent: the summary lists every invoice the replay couldn't
+      // read, and the run exits non-zero, so an incomplete replay never
+      // passes for a complete one. (An invoice the live lane can't read is
+      // not an error — siteOneInvoiceLines returns its 'unreadable'
+      // placeholder line.)
+      failures.push({ emailId: email.id, subject: email.subject, message: err.message });
       continue;
     }
     if (!found) continue;
-    for (const line of found.lines) lines.push({ vendor: 'siteone', email, shipmentKey: found.invoice.number, ...line });
+    for (const line of found.lines) lines.push({ vendor: 'siteone', email, orderNumber: found.invoice.number, shipmentKey: found.invoice.number, ...line });
   }
-  return lines;
+  return { lines, failures };
 }
 
-// The same purchase line recorded twice (the same title and quantity, held
-// or placed the same way) is one row.
+// Lines the live undelivered-shipment pass (undelivered-shipments.js)
+// recorded from an authenticated Shipped email whose Delivered email never
+// came: each is held for a person as 'no_delivery_email' and hands its
+// shipment to a person for good, so none ever reaches the agent. Read from
+// what the live lane actually recorded rather than re-deriving its timing
+// rules; listed so the replay's population is complete.
+async function undeliveredLines(conn, since) {
+  const rows = await conn('purchase_receipt_lines').where({ status: 'no_delivery_email' }).where('created_at', '>=', since)
+    .select('vendor', 'order_number', 'shipment_key', 'line_no', 'raw_title', 'quantity');
+  return rows.map((row) => ({
+    vendor: row.vendor, orderNumber: row.order_number, shipmentKey: row.shipment_key, lineNo: row.line_no,
+    item: { title: row.raw_title, quantity: Number(row.quantity) }, recordedStatus: 'no_delivery_email',
+  }));
+}
+
+// The live lane's own purchase-line identity — purchase_receipt_lines'
+// unique (vendor, order_number, shipment_key, line_no), with a missing order
+// number keyed 'unknown' as receipt-processor.js keys it. Two emails for the
+// same line are one line; the same title bought on two orders is two.
+function lineKey(line) {
+  return [line.vendor, line.orderNumber || 'unknown', line.shipmentKey, line.lineNo].join('|');
+}
+
 function dedupe(lines) {
   const seen = new Set();
   return lines.filter((line) => {
-    const key = [line.vendor, line.item.title.trim().toLowerCase(), line.item.quantity, line.forcedStatus || '', line.holdAs || ''].join('|');
+    const key = lineKey(line);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -218,21 +256,27 @@ function outcomeSummary(outcome) {
 
 async function main() {
   const since = parseSince(arg('since'));
+  const limit = parseLimit(arg('limit'));
   await assertReadOnly(sharedDb);
   const conn = readOnlyConn();
   try {
-    const [amazon, siteOneAll] = await Promise.all([amazonLines(conn, since), siteOneLines(since)]);
+    const [amazon, siteOneRead, undelivered] = await Promise.all([amazonLines(conn, since), siteOneLines(since), undeliveredLines(conn, since)]);
     // Oldest first, as the live agent works its queue: --limit then caps the
     // same lines the live agent would reach first.
-    const lines = dedupe([...amazon, ...siteOneAll].sort(byReceivedAt));
+    const lines = dedupe([...amazon, ...siteOneRead.lines].sort(byReceivedAt));
     console.log(`${lines.length} distinct purchase line(s) since ${since.toISOString()} `
-      + `(${amazon.length} Amazon, ${siteOneAll.length} SiteOne before dedupe).`);
+      + `(${amazon.length} Amazon, ${siteOneRead.lines.length} SiteOne before dedupe), `
+      + `plus ${undelivered.length} undelivered-shipment line(s) the live lane held for a person.`);
 
-    const rows = [];
-    const tally = {};
+    const rows = undelivered.map((line) => ({ line, status: line.recordedStatus, text: '' }));
+    const tally = undelivered.length ? { no_delivery_email: undelivered.length } : {};
     let handedToAgent = 0;
     let llmCalls = 0;
     let allowedCategories = null;
+    // One paid call per distinct question: a line whose exact inputs (title,
+    // quantity, vendor, invoice evidence) were already decided reuses that
+    // answer instead of paying again.
+    const decided = new Map();
 
     for (const line of lines) {
       // The live lane (receipt-processor.js processReceiptLine) records
@@ -256,7 +300,13 @@ async function main() {
         continue;
       }
       handedToAgent += 1;
-      if (llmCalls >= LIMIT) {
+      const siteOneFields = line.vendor === 'siteone' ? await siteOneLineFields(conn, { email_id: line.email.id, line_no: line.lineNo }) : null;
+      const question = JSON.stringify([line.vendor, line.item.title, line.item.quantity, siteOneFields]);
+      if (decided.has(question)) {
+        rows.push({ line, status: `agent (${found.status})`, text: `${decided.get(question)} (same as an earlier line)` });
+        continue;
+      }
+      if (llmCalls >= limit) {
         rows.push({ line, status: `agent (${found.status})`, text: '(skipped — --limit reached)' });
         continue;
       }
@@ -266,12 +316,13 @@ async function main() {
       // replay waits on the model.
       if (!allowedCategories) allowedCategories = await loadAllowedCategories(conn);
       const catalog = await loadActiveCatalog(conn);
-      const siteOneFields = line.vendor === 'siteone' ? await siteOneLineFields(conn, { email_id: line.email.id, line_no: line.lineNo }) : null;
       llmCalls += 1;
       const outcome = await decideForTitle(conn, dispatchWithFallback, {
         rawTitle: line.item.title, quantity: line.item.quantity, vendor: line.vendor, siteOneFields,
       }, { allowedCategories, ...catalog });
-      rows.push({ line, status: `agent (${found.status})`, text: outcomeSummary(outcome) });
+      const text = outcomeSummary(outcome);
+      decided.set(question, text);
+      rows.push({ line, status: `agent (${found.status})`, text });
     }
 
     console.log('');
@@ -283,7 +334,13 @@ async function main() {
     console.log('');
     const counts = Object.entries(tally).sort(([a], [b]) => a.localeCompare(b)).map(([status, n]) => `${status} ${n}`).join(', ');
     console.log(`Without the agent: ${counts || 'nothing'}.`);
-    console.log(`${handedToAgent} line(s) the agent would take; ${llmCalls} got a real LLM decision (--limit=${LIMIT}).`);
+    console.log(`${handedToAgent} line(s) the agent would take; ${llmCalls} real LLM decision(s) (--limit=${limit}).`);
+    if (siteOneRead.failures.length) {
+      console.log('');
+      console.log(`INCOMPLETE: ${siteOneRead.failures.length} SiteOne invoice email(s) could not be read, so their lines are missing above:`);
+      for (const failure of siteOneRead.failures) console.log(`  email ${failure.emailId} "${failure.subject}": ${failure.message}`);
+      process.exitCode = 1;
+    }
   } finally {
     await conn.destroy();
     await sharedDb.destroy();
@@ -301,4 +358,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { assertReadOnly, parseSince };
+module.exports = { assertReadOnly, parseSince, parseLimit, lineKey };
