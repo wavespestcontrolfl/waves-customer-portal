@@ -219,6 +219,27 @@ jest.setTimeout(30000);
     expect(saved).toMatchObject({ status: 'agent_pending', agent_attempts: 1 });
   });
 
+  test('an admin add that waits on the agent\'s create never duplicates the item (agent first)', async () => {
+    let signalLocked;
+    const locked = new Promise((resolve) => { signalLocked = resolve; });
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    // The agent's insert, holding its transaction (and the catalog lock) open.
+    const agentSide = mockConn.transaction(async (trx) => {
+      await inventoryOperations.createCatalogProduct({ name: 'Bifen XTS', category: 'insecticide', unitSize: '96 oz', inventoryUnit: 'oz' },
+        { trx, source: 'inventory_agent_create', guard: async () => false });
+      signalLocked();
+      await held;
+    });
+    await locked;
+    const adminSide = inventoryOperations.createCatalogProduct({ name: ' bifen xts ', category: 'insecticide', unitSize: '96 oz', inventoryUnit: 'oz' });
+    await new Promise((resolve) => { setTimeout(resolve, 300); });
+    release();
+    await agentSide;
+    expect(await adminSide).toBeNull();
+    expect(await mockConn('products_catalog').whereRaw('lower(btrim(name)) = ?', ['bifen xts'])).toHaveLength(1);
+  });
+
   test('a needs_size line: the model reads the title\'s size, the catalog container is set once, and the line logs', async () => {
     const [bare] = await mockConn('products_catalog').insert({
       name: 'Granular Bait', active: true, category: 'bait', container_size: null, inventory_unit: null, inventory_on_hand: 0,

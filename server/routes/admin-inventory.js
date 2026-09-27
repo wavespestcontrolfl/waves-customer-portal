@@ -3335,6 +3335,7 @@ router.post('/', async (req, res, next) => {
       name, category, subcategory, activeIngredient, epaRegNumber, formulation, moaGroup,
       defaultUnit, unitSize, inventoryOnHand, inventoryUnit, lowStockThreshold,
     }, { actorId: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || null });
+    if (!product) return res.status(409).json({ error: 'An active product with this name already exists' });
 
     res.status(201).json(product);
   } catch (err) { next(err); }

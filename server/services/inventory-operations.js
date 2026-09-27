@@ -259,8 +259,13 @@ async function createCatalogProduct(fields, options = {}) {
   const initialStock = numberOrNull(inventoryOnHand);
   const run = async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CATALOG_CREATE_LOCK]);
-    // options.guard(trx) runs under the lock; a truthy result means "don't
-    // create": the call returns null and inserts nothing.
+    // Under the lock, for every caller: an active product with the same
+    // name (trimmed, case-insensitive) means this item already exists, so
+    // nothing is inserted and the call returns null. options.guard(trx) adds
+    // a caller's own refusal the same way (the agent's stricter check).
+    const sameName = await trx('products_catalog').where({ active: true })
+      .whereRaw('lower(btrim(name)) = ?', [String(name || '').trim().toLowerCase()]).first('id');
+    if (sameName) return null;
     if (options.guard && await options.guard(trx)) return null;
     const [inserted] = await trx('products_catalog').insert({
       name, category: category || null, subcategory: subcategory || null,
