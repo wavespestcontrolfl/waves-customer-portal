@@ -9634,8 +9634,11 @@ export default function Customer360ProfileV2({
     profileActionErr,
   } = useCustomerProfileRecord({ customerId, customerIdRef, isAdmin, lastMutation });
   const resolveAddressReview = async () => {
-    await reloadCustomer();
-    onCustomerMutation?.({ customerId, action: "update" });
+    try {
+      await reloadCustomer();
+    } finally {
+      onCustomerMutation?.({ customerId, action: "update" });
+    }
   };
   const {
     resumeBilling,

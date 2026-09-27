@@ -956,6 +956,42 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(onCustomerMutation).toHaveBeenCalledOnce();
   });
 
+  it('reports a resolved address review when the profile reload fails', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const onCustomerMutation = vi.fn();
+    const review = {
+      enabled: true,
+      customer: {
+        id: 'customer-a', first_name: 'Avery', last_name: 'Customer', address_line1: '100 Retry Ave',
+        address_line2: '', city: 'Naples', state: 'FL', zip: '34102', latitude: null, longitude: null,
+      },
+      review: { status: 'provider_unavailable', reason: 'provider_unavailable', source: 'automatic' },
+      revision: 'revision-1',
+    };
+    let customerReads = 0;
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      const path = String(url).split('?')[0];
+      if (path.endsWith('/admin/customer-geocodes/customer-a/resolve') && options.method === 'POST') return response(review);
+      if (path.endsWith('/admin/customer-geocodes/customer-a')) return response(review);
+      if (path.endsWith('/admin/customers/customer-a')) {
+        customerReads += 1;
+        return customerReads === 1
+          ? response(customerDetail('customer-a', 'Avery'))
+          : response({ error: 'Synthetic profile reload failure' }, 503);
+      }
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} onCustomerMutation={onCustomerMutation} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+    fireEvent.click(await screen.findByRole('button', { name: /Primary service location review/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry saved address' }));
+
+    await waitFor(() => expect(onCustomerMutation).toHaveBeenCalledWith({ customerId: 'customer-a', action: 'update' }));
+    expect(onCustomerMutation).toHaveBeenCalledOnce();
+    expect(await screen.findByText(/customer profile could not refresh/i)).toBeInTheDocument();
+  });
+
   it('saves a city correction without resubmitting unchanged shared contacts or billing settings', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     const detail = customerDetail('customer-a', 'Avery');

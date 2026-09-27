@@ -130,7 +130,7 @@ describe("CustomerGeocodeReviewPanel", () => {
     expect(JSON.parse(post[1].body)).toEqual({ revision: "revision-1", action });
   });
 
-  it("paginates the full queue with the server offset", async () => {
+  it("keeps the current-page draft and disables pagination until it is closed", async () => {
     const first = record();
     const second = record({ customer: { ...record().customer, id: "customer-26", first_name: "Page two" } });
     const urls = [];
@@ -145,12 +145,31 @@ describe("CustomerGeocodeReviewPanel", () => {
     expect(screen.getByText("Showing 1–1 of 26")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Review location" }));
     fireEvent.change(screen.getByLabelText("Evidence"), { target: { value: "This page-one draft is intentionally left behind." } });
+    expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByLabelText("Evidence")).toHaveValue("This page-one draft is intentionally left behind.");
+    expect(urls.some((url) => url.includes("limit=25&offset=25"))).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: "Next" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     expect(await screen.findByRole("button", { name: "Page two Customer" })).toBeInTheDocument();
-    expect(screen.queryByText(/current saved review is unavailable/i)).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Evidence")).not.toBeInTheDocument();
     expect(urls.some((url) => url.includes("limit=25&offset=25"))).toBe(true);
     expect(screen.getByRole("button", { name: "Previous" })).toBeEnabled();
+  });
+
+  it("preserves an open draft while the panel is collapsed and reopened", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => response({ enabled: true, records: [record()], total: 1 })));
+    render(<CustomerGeocodeReviewPanel />);
+    const panelButton = await screen.findByRole("button", { name: /Address review queue/ });
+    fireEvent.click(panelButton);
+    fireEvent.click(screen.getByRole("button", { name: "Review location" }));
+    fireEvent.change(screen.getByLabelText("Evidence"), { target: { value: "Preserve this collapsed draft." } });
+
+    fireEvent.click(panelButton);
+    expect(screen.getByLabelText("Evidence")).not.toBeVisible();
+    fireEvent.click(panelButton);
+    expect(screen.getByLabelText("Evidence")).toHaveValue("Preserve this collapsed draft.");
   });
 
   it("does not present the previous page under a failed offset and retries that offset", async () => {
@@ -545,6 +564,36 @@ describe("CustomerGeocodeReviewPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Verify pin" }));
     await waitFor(() => expect(bodies).toHaveLength(2));
     expect(bodies[1].revision).toBe("revision-2");
+  });
+
+  it("opens the latest record and requires acknowledgment after a direct action conflicts", async () => {
+    const original = record({
+      customer: { ...record().customer, latitude: null, longitude: null },
+      review: { status: "provider_unavailable" },
+    });
+    const latest = record({
+      ...original,
+      revision: "revision-2",
+      customer: { ...original.customer, address_line1: "200 Latest Ave" },
+    });
+    let reads = 0;
+    vi.stubGlobal("fetch", vi.fn((url, options = {}) => {
+      if (options.method === "POST") return response({ error: "This review changed elsewhere." }, 409);
+      reads += 1;
+      return response({ enabled: true, records: [reads === 1 ? original : latest], total: 1 });
+    }));
+
+    render(<CustomerGeocodeReviewPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry saved address" }));
+
+    expect(await screen.findByText("200 Latest Ave, Bradenton, FL, 34205")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "I reviewed the latest record" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry saved address" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "I reviewed the latest record" }));
+    expect(screen.getByRole("button", { name: "Retry saved address" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
   });
 
   it("does not let an old customer save refresh or replace the next customer", async () => {

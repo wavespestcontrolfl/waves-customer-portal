@@ -294,6 +294,10 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
         const conflictMessage = saveError.message || "This review changed elsewhere.";
         await load({ preserveDraft: true });
         if (!current()) return;
+        if (activeIdRef.current !== record.customer.id) {
+          activeIdRef.current = record.customer.id;
+          setActiveId(record.customer.id);
+        }
         setConflictId(record.customer.id);
         setError(`${conflictMessage}${/[.!?]$/.test(conflictMessage) ? "" : "."} Your entries are preserved, but saving is paused until you review the latest address and pin.`);
       } else {
@@ -308,7 +312,7 @@ function useGeocodeReview({ customerId, onResolved, refreshToken }) {
   const acknowledgeConflict = () => { setConflictId(null); setError(""); };
   const editRecord = (customerId) => {
     setActiveId((id) => id === customerId ? null : customerId);
-    acknowledgeConflict();
+    setError("");
   };
   return { state, offset, setOffset, activeId, conflictId, savingId, error, loadError, detailLoading, load, resolve, acknowledgeConflict, editRecord };
 }
@@ -338,7 +342,7 @@ function ReviewContents({ customerId, onSelectCustomer, model }) {
           key={record.customer.id}
           record={record}
           active={activeId === record.customer.id}
-          actionsDisabled={Boolean(savingId) || Boolean(activeId && activeId !== record.customer.id)}
+          actionsDisabled={Boolean(savingId) || Boolean(conflictId === record.customer.id) || Boolean(activeId && activeId !== record.customer.id)}
           saving={savingId === record.customer.id}
           error={activeId === record.customer.id ? error : ""}
           conflicted={conflictId === record.customer.id}
@@ -353,8 +357,8 @@ function ReviewContents({ customerId, onSelectCustomer, model }) {
         <div className="pt-3 border-t border-hairline border-zinc-200 flex flex-wrap items-center justify-between gap-2 text-14 text-ink-secondary">
           <span>Showing {offset + 1}–{Math.min(offset + state.records.length, state.total)} of {state.total}</span>
           <div className="flex gap-2">
-            <Button variant="secondary" disabled={offset === 0 || Boolean(savingId)} onClick={() => setOffset((value) => Math.max(0, value - PAGE_SIZE))}>Previous</Button>
-            <Button variant="secondary" disabled={offset + PAGE_SIZE >= state.total || Boolean(savingId)} onClick={() => setOffset((value) => value + PAGE_SIZE)}>Next</Button>
+            <Button variant="secondary" disabled={offset === 0 || Boolean(savingId) || Boolean(activeId)} onClick={() => setOffset((value) => Math.max(0, value - PAGE_SIZE))}>Previous</Button>
+            <Button variant="secondary" disabled={offset + PAGE_SIZE >= state.total || Boolean(savingId) || Boolean(activeId)} onClick={() => setOffset((value) => value + PAGE_SIZE)}>Next</Button>
           </div>
         </div>
       )}
@@ -380,7 +384,7 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
         <span className="flex items-center gap-2 text-14 font-medium text-zinc-900"><MapPin size={16} />{customerId ? "Primary service location review" : "Address review queue"}</span>
         <span className="flex items-center gap-2 text-14 text-ink-secondary">{!customerId && state.total > 0 ? state.total : ""}<ChevronDown size={16} className={cn("transition-transform", open && "rotate-180")} /></span>
       </button>
-      {open && <ReviewContents customerId={customerId} onSelectCustomer={onSelectCustomer} model={model} />}
+      <div hidden={!open}><ReviewContents customerId={customerId} onSelectCustomer={onSelectCustomer} model={model} /></div>
     </Card>
     </UiSurface>
   );
