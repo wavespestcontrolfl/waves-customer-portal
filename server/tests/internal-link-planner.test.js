@@ -40,6 +40,16 @@ const {
 // ── anchorCandidates ────────────────────────────────────────────────
 
 describe('anchorCandidates', () => {
+  test('drops phrases that do not name a narrower target subject before the planner cap', () => {
+    const out = anchorCandidates({
+      url: '/lawn-weed-control-bradenton-fl/',
+      keyword: 'lawn care in bradenton',
+      title: 'Lawn Weed Control in Bradenton, FL',
+    });
+    const phrases = out.map((c) => c.phrase.toLowerCase());
+    expect(phrases).not.toContain('lawn care in bradenton');
+    expect(phrases).toContain('lawn weed control in bradenton, fl');
+  });
   test('priority order: keyword > "service in city" > "city service" > title', () => {
     const out = anchorCandidates({
       url: '/pest-control-bradenton-fl/',

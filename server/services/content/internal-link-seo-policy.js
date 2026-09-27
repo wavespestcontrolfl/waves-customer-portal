@@ -326,8 +326,15 @@ function anchorNamesTargetSubject(anchorText, target = {}) {
   return false;
 }
 
+const IRREGULAR_SINGULARS = { mice: 'mouse', lice: 'louse', geese: 'goose', larvae: 'larva', pupae: 'pupa' };
+
+// Plural → singular for subject comparison, applied to BOTH sides, so
+// "mosquitoes"/"mosquito", "flies"/"fly", "mice"/"mouse" compare equal.
 function singular(token) {
-  return token.length > 4 && token.endsWith('s') && !token.endsWith('ss') ? token.slice(0, -1) : token;
+  if (IRREGULAR_SINGULARS[token]) return IRREGULAR_SINGULARS[token];
+  if (token.length > 4 && token.endsWith('ies')) return `${token.slice(0, -3)}y`;
+  if (token.length > 4 && /(?:oes|ches|shes|sses|xes|zes)$/.test(token)) return token.slice(0, -2);
+  return token.length > 3 && token.endsWith('s') && !token.endsWith('ss') ? token.slice(0, -1) : token;
 }
 
 function paragraphHash(text) {

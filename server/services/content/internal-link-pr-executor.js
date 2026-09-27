@@ -13,6 +13,9 @@ const GitHubClient = require('../content-astro/github-client');
 const frontmatter = require('../content-astro/frontmatter');
 const planner = require('./internal-link-planner');
 const policy = require('./internal-link-seo-policy');
+const judge = require('./internal-link-judge');
+const protectedPages = require('./protected-pages');
+const { runExclusive } = require('../../utils/cron-lock');
 // Text-level checks are OWNED by the planner and shared here — the planner
 // applies every one of them before its site-wide cap, so it never plans a
 // task this executor's gate would reject on corpus-knowable grounds.
@@ -72,7 +75,24 @@ class InternalLinkPrExecutor {
     return evaluateDryRunTask(task, { sourcePage: source, targetPage: target });
   }
 
-  async runPrBatch({ limit = envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR', 3), taskIds = null, scanLimit = null } = {}) {
+  // Every PR-opening caller (runner, candidate sweep) goes through here, so
+  // the one-open-link-PR rule lives here, serialized by an advisory lock so
+  // two callers can't both see "none open" and open two PRs.
+  async runPrBatch(opts = {}) {
+    const out = await runExclusive('internal-link-pr-batch', async () => {
+      const open = await this._openLinkPr();
+      if (open) return { status: 'pr_already_open', count: 0, results: [], pr_url: open.astro_pr_url || null };
+      return this._runPrBatchUnlocked(opts);
+    }, { recordHealth: false, waitForSlot: false });
+    if (out?.skipped) return { status: 'lock_busy', count: 0, results: [] };
+    return out;
+  }
+
+  async _openLinkPr() {
+    return db(TABLE).whereIn('status', ['pr_reserved', 'pr_open']).first('id', 'astro_pr_url');
+  }
+
+  async _runPrBatchUnlocked({ limit = envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR', 3), taskIds = null, scanLimit = null } = {}) {
     // scanLimit lets the sweep look past candidates that fail revalidation
     // (each failure is persisted, so they drop out of later sweeps).
     const tasks = await this._loadPatchCandidateTasks({ limit: Math.max(limit, Number(scanLimit) || 0), taskIds });
@@ -86,8 +106,36 @@ class InternalLinkPrExecutor {
     const maxLinksPerTarget = envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_TARGET_PER_PR', 2);
 
     for (const task of tasks) {
-      const source = await this._loadSourcePage(task);
-      const target = await this._loadTargetPage(task);
+      // A stale row (source/target renamed or deleted) must not abort the
+      // batch: persist the failure and move on, like runDryRun does.
+      let source;
+      let target;
+      try {
+        source = await this._loadSourcePage(task);
+        target = await this._loadTargetPage(task);
+      } catch (err) {
+        await this._persistDryRunResult(task.id, {
+          task_id: task.id,
+          status: 'failed',
+          failure_reason: String(err?.message || err).slice(0, 500),
+          executor_version: EXECUTOR_VERSION,
+        });
+        continue;
+      }
+      // Link TARGETS may be protected money pages; the SOURCE is the page
+      // this PR edits, so it keeps the protected-page guard. A check error
+      // fails closed without persisting (retried next sweep).
+      const sourceProtection = await this._sourceProtection(source, task);
+      if (sourceProtection.error) continue;
+      if (sourceProtection.protected) {
+        await this._persistDryRunResult(task.id, {
+          task_id: task.id,
+          status: 'skipped',
+          skip_reason: `source_protected_page:${sourceProtection.reason || 'protected'}`,
+          executor_version: EXECUTOR_VERSION,
+        });
+        continue;
+      }
       const validation = evaluateDryRunTask(task, {
         sourcePage: source,
         targetPage: target,
@@ -140,6 +188,20 @@ class InternalLinkPrExecutor {
       }
       if (!frontmatterUnchanged(source.body, patchedContent)) {
         await this._persistDryRunResult(task.id, { ...validation, status: 'failed', failure_reason: 'frontmatter_changed' });
+        continue;
+      }
+
+      // Reader check (internal-link-judge): link PRs merge unattended, so an
+      // LLM reads the link in context before it is committed. No verdict
+      // (provider outage) leaves the candidate for the next sweep.
+      const verdict = await this._judgeLink({ task, source, target, validation, targetUrl });
+      if (!verdict.ok) continue;
+      if (!verdict.approve) {
+        await this._persistDryRunResult(task.id, {
+          ...validation,
+          status: 'skipped',
+          skip_reason: `llm_judge_rejected:${verdict.reason}`.slice(0, 500),
+        });
         continue;
       }
 
@@ -221,12 +283,199 @@ class InternalLinkPrExecutor {
   // current main and the live page before touching it.
   async runCandidateSweep({ limit = envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR', 3) } = {}) {
     if (!envBool('AUTONOMOUS_INTERNAL_LINK_CANDIDATE_SWEEP', true)) return { status: 'disabled' };
-    if (!/^(false|0|off)$/i.test(String(process.env.SHADOW_MODE_ADD_INTERNAL_LINKS || '').trim())) {
-      return { status: 'shadow' };
+    if (!shadowOff()) return { status: 'shadow' };
+    // Settle finished PRs first (merged/closed → off pr_open) and recover
+    // crash-orphaned reservations (runPostMergeVerification runs that sweep),
+    // so a finished or dead PR never blocks runPrBatch's one-open-PR guard.
+    try {
+      await this.runPostMergeVerification({ limit: envInt('AUTONOMOUS_INTERNAL_LINK_VERIFY_LIMIT', 10) });
+    } catch (err) {
+      logger.warn(`[internal-link-pr-executor] pre-sweep reconciliation failed: ${err.message}`);
     }
-    const open = await db(TABLE).whereIn('status', ['pr_reserved', 'pr_open']).first('id', 'astro_pr_url');
-    if (open) return { status: 'pr_already_open', pr_url: open.astro_pr_url || null };
     return this.runPrBatch({ limit, scanLimit: envInt('AUTONOMOUS_INTERNAL_LINK_SWEEP_SCAN_LIMIT', 15) });
+  }
+
+  // Unattended merge for internal-link PRs (owner 2026-09-27: "fully
+  // autonomous, run some checks before deploying live"). One PR per call.
+  // Every check is re-proven against the PR's CURRENT head:
+  //   1. the head is still the commit this executor pushed (no foreign push);
+  //   2. the diff touches exactly the task source files, and each head file
+  //      with the new link unwrapped is byte-identical to main — a link
+  //      insertion and nothing else, and main hasn't moved under it;
+  //   3. the hub Cloudflare preview built that head successfully;
+  //   4. Codex left no findings on that head. A clean Codex verdict merges
+  //      at once; with no verdict (pending, or the bot's usage limit) the PR
+  //      merges after AUTONOMOUS_INTERNAL_LINK_CODEX_GRACE_MIN (default 120).
+  // Findings close the PR and park its tasks as skipped; a moved main closes
+  // it and returns the tasks to patch_candidate for the next sweep.
+  // Kill switch: AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE=false.
+  async runAutoMerge({ now = new Date() } = {}) {
+    if (!envBool('AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE', true)) return { status: 'disabled' };
+    if (!shadowOff()) return { status: 'shadow' };
+    const tasks = await db(TABLE).where('status', 'pr_open').whereNotNull('astro_pr_url').orderBy('updated_at', 'asc').select('*');
+    if (!tasks.length) return { status: 'no_open_pr' };
+    const prUrl = tasks[0].astro_pr_url;
+    const prTasks = tasks.filter((t) => t.astro_pr_url === prUrl);
+    const prNumber = parsePrNumber(prUrl);
+    if (!prNumber) return { status: 'pr_number_unknown', pr_url: prUrl };
+
+    const pr = await GitHubClient.getPr(prNumber);
+    if (!pr || String(pr.state).toLowerCase() !== 'open') {
+      // Merged/closed PRs are settled by runPostMergeVerification.
+      return { status: 'pr_not_open', pr_number: prNumber };
+    }
+    const headSha = String(pr.head?.sha || '').toLowerCase();
+    const pushed = prTasks.map((t) => String(t.pr_commit_sha || '').toLowerCase());
+    if (!headSha || pushed.some((sha) => !sha || sha !== headSha)) {
+      return { status: 'hold', reason: 'head_not_executor_commit', pr_number: prNumber };
+    }
+
+    const diff = await this._checkLinkOnlyDiff(pr, prTasks);
+    if (!diff.ok) {
+      await this._closeLinkPr(pr, prTasks, {
+        status: 'patch_candidate',
+        note: `Auto-merge diff check failed (${diff.reason}); PR closed, task returned to the candidate pool.`,
+      });
+      return { status: 'closed', reason: diff.reason, pr_number: prNumber };
+    }
+
+    const { latestDeploymentForBranch, extractStatus, deploymentCommitSha } = require('../content-astro/pages-poll');
+    const deploy = await latestDeploymentForBranch(pr.head?.ref);
+    if (!deploy) return { status: 'hold', reason: 'preview_build_pending', pr_number: prNumber };
+    const buildStatus = extractStatus(deploy).status;
+    if (String(deploymentCommitSha(deploy) || '').toLowerCase() !== headSha) {
+      return { status: 'hold', reason: 'preview_build_stale_commit', pr_number: prNumber };
+    }
+    if (buildStatus === 'failure') {
+      await this._closeLinkPr(pr, prTasks, {
+        status: 'failed',
+        failureReason: 'internal_link_preview_build_failed',
+        note: 'Hub preview build failed on the link PR head; PR closed.',
+      });
+      return { status: 'closed', reason: 'preview_build_failed', pr_number: prNumber };
+    }
+    if (buildStatus !== 'success') return { status: 'hold', reason: `preview_build_${buildStatus || 'pending'}`, pr_number: prNumber };
+
+    const codex = await this._codexVerdict(prNumber, headSha);
+    if (codex.findings) {
+      await this._closeLinkPr(pr, prTasks, {
+        status: 'skipped',
+        skipReason: 'codex_findings',
+        note: `Codex left ${codex.findings} finding(s) on ${headSha.slice(0, 10)}; PR closed without merging.`,
+      });
+      return { status: 'closed', reason: 'codex_findings', pr_number: prNumber };
+    }
+    const graceMs = envInt('AUTONOMOUS_INTERNAL_LINK_CODEX_GRACE_MIN', 120) * 60 * 1000;
+    const openedAt = Date.parse(pr.created_at || '') || 0;
+    if (!codex.clean && new Date(now).getTime() - openedAt < graceMs) {
+      return { status: 'hold', reason: 'codex_review_pending', pr_number: prNumber };
+    }
+
+    const merged = await GitHubClient.mergePr(prNumber, {
+      method: 'squash',
+      sha: pr.head.sha,
+      title: pr.title,
+      message: `Auto-merged: link-only diff, green hub preview, ${codex.clean ? 'clean Codex review' : 'no Codex findings within the grace window'}.`,
+    });
+    const mergedAt = new Date();
+    for (const task of prTasks) {
+      await this._markTaskMerged(task.id, { mergedAt, commitSha: merged?.sha || null });
+    }
+    logger.info(`[internal-link-pr-executor] auto-merged link PR #${prNumber} (${prTasks.length} link(s), codex ${codex.clean ? 'clean' : 'silent'})`);
+    return { status: 'merged', pr_number: prNumber, count: prTasks.length, codex: codex.clean ? 'clean' : 'silent' };
+  }
+
+  async _checkLinkOnlyDiff(pr, prTasks) {
+    const files = await GitHubClient.listPrFiles(pr.number);
+    const changed = new Set((files || []).map((f) => f.filename));
+    const expected = new Set(prTasks.map((t) => t.source_file));
+    // Tasks may name a pre-migration path (.md → .mdx); match on the stem.
+    const stem = (p) => String(p || '').replace(/\.mdx?$/, '');
+    const expectedStems = new Set([...expected].map(stem));
+    if (!changed.size || changed.size !== prTasks.length || [...changed].some((f) => !expectedStems.has(stem(f)))) {
+      return { ok: false, reason: 'diff_files_unexpected' };
+    }
+    for (const file of changed) {
+      const task = prTasks.find((t) => stem(t.source_file) === stem(file));
+      const [head, base] = await Promise.all([
+        GitHubClient.getFile(file, pr.head.sha),
+        GitHubClient.getFile(file, pr.base?.ref || 'main'),
+      ]);
+      if (!head?.content || !base?.content) return { ok: false, reason: 'diff_file_unreadable' };
+      const targetUrl = policy.normalizeInternalUrl(task.target_url);
+      const linkRe = new RegExp(`\\[([^\\]\\n]+)\\]\\(${escapeRegExp(targetUrl)}\\)`, 'g');
+      const links = head.content.match(linkRe) || [];
+      if (links.length !== 1) return { ok: false, reason: 'diff_link_count' };
+      if (head.content.replace(linkRe, '$1') !== base.content) return { ok: false, reason: 'diff_not_link_only_or_main_moved' };
+    }
+    return { ok: true };
+  }
+
+  async _codexVerdict(prNumber, headSha) {
+    const publisher = require('../content-astro/astro-publisher');
+    const { codexReviewStatus, isCodexAuthor } = publisher._internals;
+    const [comments, reviews, inline] = await Promise.all([
+      GitHubClient.listIssueComments(prNumber),
+      GitHubClient.listPrReviews(prNumber),
+      GitHubClient.listPrReviewComments(prNumber),
+    ]);
+    const onHead = (sha) => String(sha || '').toLowerCase() === headSha;
+    const findings = (inline || []).filter((c) => isCodexAuthor(c?.user?.login) && (onHead(c.commit_id) || onHead(c.original_commit_id))).length;
+    const clean = !findings && codexReviewStatus({ comments, reviews, headSha }).clean === true;
+    return { clean, findings };
+  }
+
+  async _closeLinkPr(pr, prTasks, { status, skipReason = null, failureReason = null, note }) {
+    try {
+      await GitHubClient.createIssueComment(pr.number, note);
+    } catch (err) {
+      logger.warn(`[internal-link-pr-executor] close note failed for PR #${pr.number}: ${err.message}`);
+    }
+    await GitHubClient.closePr(pr.number);
+    try {
+      await GitHubClient.retireBranch(pr.head?.ref);
+    } catch (err) {
+      logger.warn(`[internal-link-pr-executor] branch cleanup failed for PR #${pr.number}: ${err.message}`);
+    }
+    for (const task of prTasks) {
+      await db(TABLE).where({ id: task.id, status: 'pr_open' }).update({
+        status,
+        skip_reason: skipReason,
+        failure_reason: failureReason,
+        astro_pr_url: null,
+        pr_branch: null,
+        pr_commit_sha: null,
+        reviewer_notes: [String(task.reviewer_notes || '').trim(), `[${new Date().toISOString()}] system: ${note} (was ${pr.html_url || `#${pr.number}`})`]
+          .filter(Boolean).join('\n').slice(-5000),
+        updated_at: new Date(),
+      });
+    }
+    logger.info(`[internal-link-pr-executor] closed link PR #${pr.number}: ${note}`);
+  }
+
+  async _sourceProtection(source, task) {
+    const url = policy.normalizeInternalUrl(source.url || task.source_url || source.canonical_url);
+    if (!url) return { protected: false };
+    try {
+      const prot = await protectedPages.isProtected(url, { db });
+      if (prot?.reason === 'protected_check_error' || prot?.source === 'error') return { error: true };
+      return { protected: !!prot?.protected, reason: prot?.reason || null };
+    } catch (err) {
+      logger.warn(`[internal-link-pr-executor] source protection check failed for ${url}: ${err.message}`);
+      return { error: true };
+    }
+  }
+
+  async _judgeLink({ task, source, target, validation, targetUrl }) {
+    return judge.judgeLink({
+      anchor: task.anchor_text,
+      paragraph: validation.link_context_before || task.context_snippet || '',
+      sourceTitle: source.title,
+      sourceUrl: validation.source_url || task.source_url,
+      targetTitle: target.title,
+      targetUrl,
+      targetSummary: markdownToVisibleText(frontmatter.parse(target.body || '').content || '').slice(0, 800),
+    });
   }
 
   async _validateRenderedSourceAnchor(task, validation) {
@@ -969,6 +1218,12 @@ function envInt(name, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+// Same reading as autonomous-runner isShadow('add_internal_links'): only an
+// explicit false/0/off takes the lane live.
+function shadowOff() {
+  return /^(false|0|off)$/i.test(String(process.env.SHADOW_MODE_ADD_INTERNAL_LINKS || '').trim());
+}
+
 function envBool(name, fallback = false) {
   const raw = process.env[name];
   if (raw == null || raw === '') return fallback;
@@ -1017,7 +1272,7 @@ function buildInternalLinkPrBody({ branch, selected }) {
   return [
     `**Autonomous internal-link PR**`,
     ``,
-    `Adds ${selected.length} review-only internal link${selected.length === 1 ? '' : 's'} from validated \`patch_candidate\` tasks.`,
+    `Adds ${selected.length} internal link${selected.length === 1 ? '' : 's'} from validated \`patch_candidate\` tasks.`,
     ``,
     `## Safety Checks`,
     ``,
@@ -1039,12 +1294,13 @@ function buildInternalLinkPrBody({ branch, selected }) {
     ``,
     `> Spoke-project previews (e.g. north-port, venice) return **404** for hub-only pages — that is expected and is **not** a reason to reject this PR. Only the hub preview/render matters here.`,
     ``,
-    `## Review`,
+    `## Auto-merge`,
     ``,
-    `- [ ] Codex review completed`,
-    `- [ ] Human editorial review confirms each link is useful to readers`,
-    `- [ ] Preview page renders the expected crawlable link (on the **hub** project — ignore spoke 404s)`,
-    `- [ ] Diff contains only intended internal-link insertions`,
+    `Each link passed an LLM reader check before this PR opened. The portal merges this PR without a human once, on the current head:`,
+    `- the diff is exactly these link insertions (each file with the link unwrapped equals main),`,
+    `- the hub Cloudflare preview built this head successfully, and`,
+    `- Codex left no findings on this head (a clean verdict merges at once; no verdict merges after the grace window).`,
+    `Codex findings, a failed preview build, or a moved main close this PR instead.`,
     ``,
     `Generated by waves-customer-portal internal-link executor.`,
     ``,

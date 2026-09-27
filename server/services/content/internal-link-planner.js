@@ -79,7 +79,9 @@ function anchorCandidates(target) {
     const k = phrase.toLowerCase();
     if (seen.has(k)) return false;
     seen.add(k);
-    return policy.validateAnchorPolicy(phrase).ok;
+    // Mirror the executor's anchor_not_target_specific rule before the
+    // planner's cap, so doomed generic phrases can't fill every slot.
+    return policy.validateAnchorPolicy(phrase).ok && policy.anchorNamesTargetSubject(phrase, target);
   });
 }
 

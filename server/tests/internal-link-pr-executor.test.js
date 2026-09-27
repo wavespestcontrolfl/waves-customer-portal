@@ -9,6 +9,12 @@ jest.mock('../services/content-astro/github-client', () => ({
   createIssueComment: jest.fn(),
 }));
 
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_name, fn) => fn()) }));
+jest.mock('../services/content/protected-pages', () => ({ isProtected: jest.fn(async () => ({ protected: false })) }));
+jest.mock('../services/content/internal-link-judge', () => ({
+  judgeLink: jest.fn(async () => ({ ok: true, approve: true, reason: 'fits' })),
+}));
+
 const executor = require('../services/content/internal-link-pr-executor');
 const { InternalLinkPrExecutor } = executor;
 const GitHubClient = require('../services/content-astro/github-client');
@@ -36,6 +42,7 @@ const {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  jest.spyOn(InternalLinkPrExecutor.prototype, '_openLinkPr').mockResolvedValue(undefined);
   delete db.transaction;
   global.fetch = jest.fn(async () => ({
     ok: true,
@@ -476,7 +483,7 @@ describe('internal-link dry-run executor helpers', () => {
     expect(result.status).toBe('patch_candidate');
   });
 
-  test('opens a review-only Astro PR for validated patch candidates', async () => {
+  test('opens an auto-merge Astro PR for validated patch candidates', async () => {
     GitHubClient.createBranch.mockResolvedValue({});
     GitHubClient.putFile.mockResolvedValue({ commit: { sha: 'link-commit-sha' } });
     GitHubClient.createPr.mockResolvedValue({
@@ -538,7 +545,7 @@ describe('internal-link dry-run executor helpers', () => {
     expect(GitHubClient.createPr).toHaveBeenCalledWith(expect.objectContaining({
       head: expect.stringMatching(/^content\/internal-link-pest-control-bradenton-fl-/),
       title: expect.stringContaining('SEO links: 1 internal link'),
-      body: expect.stringContaining('Diff contains only intended internal-link insertions'),
+      body: expect.stringContaining('the diff is exactly these link insertions'),
     }));
     // PR body steers reviewers to the hub preview so spoke 404s aren't a false reject.
     const prBody = GitHubClient.createPr.mock.calls[0][0].body;
@@ -1099,62 +1106,203 @@ describe('internal-link dry-run executor helpers', () => {
   });
 });
 
+
 describe('internal-link candidate sweep', () => {
-  const saved = {};
   const keys = ['SHADOW_MODE_ADD_INTERNAL_LINKS', 'AUTONOMOUS_INTERNAL_LINK_CANDIDATE_SWEEP', 'AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR', 'AUTONOMOUS_INTERNAL_LINK_SWEEP_SCAN_LIMIT'];
+  const saved = {};
   beforeEach(() => { for (const k of keys) { saved[k] = process.env[k]; delete process.env[k]; } });
   afterEach(() => { for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
 
-  function openPrQuery(row) {
-    const q = { whereIn: jest.fn(() => q), first: jest.fn(async () => row) };
-    db.mockImplementation(() => q);
-    return q;
-  }
-
-  test('does nothing while add_internal_links is in shadow mode', async () => {
+  test('does nothing while add_internal_links is in shadow mode or the kill switch is off', async () => {
     const instance = new InternalLinkPrExecutor();
     instance.runPrBatch = jest.fn();
     expect(await instance.runCandidateSweep()).toEqual({ status: 'shadow' });
-    process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'true';
-    expect(await instance.runCandidateSweep()).toEqual({ status: 'shadow' });
-    expect(instance.runPrBatch).not.toHaveBeenCalled();
-  });
-
-  test('honors the kill switch', async () => {
     process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
     process.env.AUTONOMOUS_INTERNAL_LINK_CANDIDATE_SWEEP = 'false';
-    const instance = new InternalLinkPrExecutor();
-    instance.runPrBatch = jest.fn();
     expect(await instance.runCandidateSweep()).toEqual({ status: 'disabled' });
     expect(instance.runPrBatch).not.toHaveBeenCalled();
   });
 
-  test('waits while a link PR is still open', async () => {
-    process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
-    const q = openPrQuery({ id: 't1', astro_pr_url: 'https://github.com/x/y/pull/9' });
-    const instance = new InternalLinkPrExecutor();
-    instance.runPrBatch = jest.fn();
-    expect(await instance.runCandidateSweep()).toEqual({ status: 'pr_already_open', pr_url: 'https://github.com/x/y/pull/9' });
-    expect(q.whereIn).toHaveBeenCalledWith('status', ['pr_reserved', 'pr_open']);
-    expect(instance.runPrBatch).not.toHaveBeenCalled();
-  });
-
-  test('ships unclaimed candidates with a scan window past the PR cap', async () => {
+  test('settles finished PRs before shipping candidates with a scan window past the PR cap', async () => {
     process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
     process.env.AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR = '2';
-    openPrQuery(undefined);
     const instance = new InternalLinkPrExecutor();
-    instance.runPrBatch = jest.fn(async () => ({ status: 'pr_open', count: 2 }));
+    const order = [];
+    instance.runPostMergeVerification = jest.fn(async () => { order.push('verify'); return { count: 0, results: [] }; });
+    instance.runPrBatch = jest.fn(async () => { order.push('batch'); return { status: 'pr_open', count: 2 }; });
     expect(await instance.runCandidateSweep()).toEqual({ status: 'pr_open', count: 2 });
+    expect(order).toEqual(['verify', 'batch']);
     expect(instance.runPrBatch).toHaveBeenCalledWith({ limit: 2, scanLimit: 15 });
   });
+});
 
-  test('runPrBatch loads the scan window, not just the cap', async () => {
+describe('internal-link PR batch guards', () => {
+  test('refuses to open a second PR while one is open, for every caller', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._openLinkPr = jest.fn(async () => ({ id: 't1', astro_pr_url: 'https://github.com/x/y/pull/9' }));
+    instance._loadPatchCandidateTasks = jest.fn();
+    const result = await instance.runPrBatch({ taskIds: ['t2'], limit: 1 });
+    expect(result).toMatchObject({ status: 'pr_already_open', pr_url: 'https://github.com/x/y/pull/9' });
+    expect(instance._loadPatchCandidateTasks).not.toHaveBeenCalled();
+  });
+
+  test('loads the scan window, not just the cap', async () => {
     const instance = new InternalLinkPrExecutor();
     instance._loadPatchCandidateTasks = jest.fn(async () => []);
     await instance.runPrBatch({ limit: 1, scanLimit: 15 });
     expect(instance._loadPatchCandidateTasks).toHaveBeenCalledWith({ limit: 15, taskIds: null });
-    await instance.runPrBatch({ limit: 3 });
-    expect(instance._loadPatchCandidateTasks).toHaveBeenLastCalledWith({ limit: 3, taskIds: null });
+  });
+
+  test('a stale candidate is persisted as failed and the batch moves on', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._loadPatchCandidateTasks = jest.fn(async () => [
+      { id: 'stale', source_file: 'src/content/blog/gone.md', target_url: '/termite-inspection/', anchor_text: 'x' },
+      { id: 'good', source_file: 'src/content/blog/termite-swarmers-bathroom.md', target_url: '/termite-inspection/', anchor_text: 'termite inspection in Florida' },
+    ]);
+    instance._loadSourcePage = jest.fn(async (task) => {
+      if (task.id === 'stale') throw new Error('source_file_not_found:src/content/blog/gone.md');
+      return { ...page('src/content/blog/termite-swarmers-bathroom.md', sourceBody), sha: 's' };
+    });
+    instance._loadTargetPage = jest.fn(async () => page('src/content/services/termite-inspection.md', targetBody));
+    instance._persistDryRunResult = jest.fn();
+    instance._validateRenderedSourceAnchor = jest.fn(async () => ({ ok: true }));
+    instance._reserveTasksForPr = jest.fn(async () => false);
+    await instance.runPrBatch({ limit: 1, scanLimit: 5 });
+    expect(instance._persistDryRunResult).toHaveBeenCalledWith('stale', expect.objectContaining({ status: 'failed', failure_reason: expect.stringContaining('source_file_not_found') }));
+    expect(instance._reserveTasksForPr).toHaveBeenCalledWith([expect.objectContaining({ task: expect.objectContaining({ id: 'good' }) })], expect.any(Object));
+  });
+
+  test('a protected source page is skipped; a check error leaves the task for later', async () => {
+    const protectedPages = require('../services/content/protected-pages');
+    const instance = new InternalLinkPrExecutor();
+    instance._loadPatchCandidateTasks = jest.fn(async () => [
+      { id: 't1', source_file: 'src/content/blog/termite-swarmers-bathroom.md', target_url: '/termite-inspection/', anchor_text: 'termite inspection in Florida' },
+    ]);
+    instance._loadSourcePage = jest.fn(async () => ({ ...page('src/content/blog/termite-swarmers-bathroom.md', sourceBody), sha: 's' }));
+    instance._loadTargetPage = jest.fn(async () => page('src/content/services/termite-inspection.md', targetBody));
+    instance._persistDryRunResult = jest.fn();
+    instance._reserveTasksForPr = jest.fn();
+
+    protectedPages.isProtected.mockResolvedValueOnce({ protected: true, reason: 'money_page' });
+    expect(await instance.runPrBatch({ limit: 1 })).toMatchObject({ status: 'no_candidates' });
+    expect(protectedPages.isProtected).toHaveBeenCalledWith('/termite-swarmers-bathroom/', expect.any(Object));
+    expect(instance._persistDryRunResult).toHaveBeenCalledWith('t1', expect.objectContaining({ status: 'skipped', skip_reason: 'source_protected_page:money_page' }));
+
+    instance._persistDryRunResult.mockClear();
+    protectedPages.isProtected.mockResolvedValueOnce({ protected: true, reason: 'protected_check_error', source: 'error' });
+    expect(await instance.runPrBatch({ limit: 1 })).toMatchObject({ status: 'no_candidates' });
+    expect(instance._persistDryRunResult).not.toHaveBeenCalled();
+    expect(instance._reserveTasksForPr).not.toHaveBeenCalled();
+  });
+
+  test('an LLM judge rejection skips the link; no verdict leaves it for the next sweep', async () => {
+    const judge = require('../services/content/internal-link-judge');
+    const instance = new InternalLinkPrExecutor();
+    instance._loadPatchCandidateTasks = jest.fn(async () => [
+      { id: 't1', source_file: 'src/content/blog/termite-swarmers-bathroom.md', target_url: '/termite-inspection/', anchor_text: 'termite inspection in Florida' },
+    ]);
+    instance._loadSourcePage = jest.fn(async () => ({ ...page('src/content/blog/termite-swarmers-bathroom.md', sourceBody), sha: 's' }));
+    instance._loadTargetPage = jest.fn(async () => page('src/content/services/termite-inspection.md', targetBody));
+    instance._validateRenderedSourceAnchor = jest.fn(async () => ({ ok: true }));
+    instance._persistDryRunResult = jest.fn();
+    instance._reserveTasksForPr = jest.fn();
+
+    judge.judgeLink.mockResolvedValueOnce({ ok: true, approve: false, reason: 'tangent in this paragraph' });
+    expect(await instance.runPrBatch({ limit: 1 })).toMatchObject({ status: 'no_candidates' });
+    expect(instance._persistDryRunResult).toHaveBeenCalledWith('t1', expect.objectContaining({ status: 'skipped', skip_reason: 'llm_judge_rejected:tangent in this paragraph' }));
+
+    instance._persistDryRunResult.mockClear();
+    judge.judgeLink.mockResolvedValueOnce({ ok: false, reason: 'judge_unavailable:no_key' });
+    expect(await instance.runPrBatch({ limit: 1 })).toMatchObject({ status: 'no_candidates' });
+    expect(instance._persistDryRunResult).not.toHaveBeenCalled();
+    expect(instance._reserveTasksForPr).not.toHaveBeenCalled();
+  });
+});
+
+describe('internal-link PR auto-merge', () => {
+  const keys = ['SHADOW_MODE_ADD_INTERNAL_LINKS', 'AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE', 'AUTONOMOUS_INTERNAL_LINK_CODEX_GRACE_MIN'];
+  const saved = {};
+  const HEAD = 'a'.repeat(40);
+  const prUrl = 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/77';
+  const baseBody = 'Intro.\n\nA termite inspection in Florida helps.\n';
+  const headBody = 'Intro.\n\nA [termite inspection in Florida](/termite-inspection/) helps.\n';
+  let instance;
+
+  function openTasks(rows) {
+    const q = { where: jest.fn(() => q), whereNotNull: jest.fn(() => q), orderBy: jest.fn(() => q), select: jest.fn(async () => rows) };
+    db.mockImplementation(() => q);
+  }
+
+  beforeEach(() => {
+    for (const k of keys) { saved[k] = process.env[k]; delete process.env[k]; }
+    process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'false';
+    openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, source_file: 'src/content/blog/a.md', target_url: '/termite-inspection/' }]);
+    GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', title: 'SEO links', created_at: new Date(Date.now() - 3 * 3600e3).toISOString(), head: { sha: HEAD, ref: 'content/internal-link-x' }, base: { ref: 'main' } });
+    GitHubClient.listPrFiles = jest.fn(async () => [{ filename: 'src/content/blog/a.md' }]);
+    GitHubClient.getFile.mockImplementation(async (_path, ref) => ({ content: ref === HEAD ? headBody : baseBody }));
+    GitHubClient.mergePr = jest.fn(async () => ({ sha: 'b'.repeat(40), merged: true }));
+    GitHubClient.closePr = jest.fn();
+    GitHubClient.retireBranch = jest.fn();
+    GitHubClient.listIssueComments = jest.fn(async () => []);
+    GitHubClient.listPrReviews = jest.fn(async () => []);
+    GitHubClient.listPrReviewComments = jest.fn(async () => []);
+    instance = new InternalLinkPrExecutor();
+    instance._markTaskMerged = jest.fn();
+    instance._closeLinkPr = jest.fn();
+    jest.spyOn(require('../services/content-astro/pages-poll'), 'latestDeploymentForBranch')
+      .mockResolvedValue({ latest_stage: { status: 'success' }, deployment_trigger: { metadata: { branch: 'content/internal-link-x', commit_hash: HEAD } } });
+  });
+  afterEach(() => { for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
+
+  test('merges a link-only PR with a green preview once Codex has been silent past the grace window', async () => {
+    const result = await instance.runAutoMerge();
+    expect(result).toMatchObject({ status: 'merged', pr_number: 77, codex: 'silent' });
+    expect(GitHubClient.mergePr).toHaveBeenCalledWith(77, expect.objectContaining({ sha: HEAD, method: 'squash' }));
+    expect(instance._markTaskMerged).toHaveBeenCalledWith('t1', expect.objectContaining({ commitSha: 'b'.repeat(40) }));
+  });
+
+  test('holds inside the grace window while Codex has not answered', async () => {
+    GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', created_at: new Date().toISOString(), head: { sha: HEAD, ref: 'content/internal-link-x' }, base: { ref: 'main' } });
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'codex_review_pending' });
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('closes the PR when Codex left findings on the head', async () => {
+    GitHubClient.listPrReviewComments.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector[bot]' }, commit_id: HEAD, body: 'P1 …' }]);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'codex_findings' });
+    expect(instance._closeLinkPr).toHaveBeenCalledWith(expect.objectContaining({ number: 77 }), expect.any(Array), expect.objectContaining({ status: 'skipped', skipReason: 'codex_findings' }));
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('closes and returns tasks to the pool when the diff is more than the link (or main moved)', async () => {
+    GitHubClient.getFile.mockImplementation(async (_path, ref) => ({ content: ref === HEAD ? `${headBody}Extra line.\n` : baseBody }));
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'diff_not_link_only_or_main_moved' });
+    expect(instance._closeLinkPr).toHaveBeenCalledWith(expect.any(Object), expect.any(Array), expect.objectContaining({ status: 'patch_candidate' }));
+  });
+
+  test('closes when the PR touches a file no task names', async () => {
+    GitHubClient.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/a.md' }, { filename: 'astro.config.mjs' }]);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'diff_files_unexpected' });
+  });
+
+  test('never merges a head the executor did not push, or a stale/failed preview', async () => {
+    GitHubClient.getPr.mockResolvedValueOnce({ number: 77, state: 'open', head: { sha: 'c'.repeat(40), ref: 'x' }, base: { ref: 'main' } });
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'head_not_executor_commit' });
+
+    const pagesPoll = require('../services/content-astro/pages-poll');
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ latest_stage: { status: 'success' }, deployment_trigger: { metadata: { commit_hash: 'd'.repeat(40) } } });
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'preview_build_stale_commit' });
+
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ latest_stage: { status: 'failure' }, deployment_trigger: { metadata: { commit_hash: HEAD } } });
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'preview_build_failed' });
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('kill switch and shadow mode disable it', async () => {
+    process.env.AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE = 'false';
+    expect(await instance.runAutoMerge()).toEqual({ status: 'disabled' });
+    delete process.env.AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE;
+    process.env.SHADOW_MODE_ADD_INTERNAL_LINKS = 'true';
+    expect(await instance.runAutoMerge()).toEqual({ status: 'shadow' });
   });
 });

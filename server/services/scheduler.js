@@ -2294,6 +2294,37 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Internal-link candidate sweep failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // WEEKLY MONDAY 10AM ET — plan internal links to the pages Search Console
+  // has just off page one (position 8–20), ranked by impressions, ahead of
+  // the 10:30 sweep. Kill switch: AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS=false.
+  cron.schedule('0 10 * * 1', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    try {
+      await runExclusive('internal-link-gsc-targets', async () => {
+        const targetPlanner = require('./content/internal-link-target-planner');
+        const result = await targetPlanner.planGscTargets();
+        logger.info(`Internal-link GSC targets: ${result?.status || 'unknown'} targets=${result?.targets ?? 0} queued=${result?.queued ?? 0} candidates=${result?.candidates ?? 0}`);
+      });
+    } catch (err) { logger.error(`Internal-link GSC target planning failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // EVERY 15 MIN — auto-merge the open internal-link PR once its checks pass
+  // (link-only diff, green hub preview, no Codex findings on the head); see
+  // InternalLinkPrExecutor.runAutoMerge. No human approval step (owner
+  // 2026-09-27). Kill switch: AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE=false.
+  cron.schedule('*/15 * * * *', async () => {
+    if (!isEnabled('autonomousContentEngine')) return;
+    try {
+      await runExclusive('internal-link-auto-merge', async () => {
+        const executor = require('./content/internal-link-pr-executor');
+        const result = await executor.runAutoMerge();
+        if (result?.status && !['no_open_pr', 'shadow', 'disabled'].includes(result.status)) {
+          logger.info(`Internal-link auto-merge: ${result.status}${result.reason ? ` (${result.reason})` : ''}${result.pr_number ? ` PR #${result.pr_number}` : ''}`);
+        }
+      });
+    } catch (err) { logger.error(`Internal-link auto-merge failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // DAILY 1PM ET — Autonomous Content Engine catch-up. A deploy restarting
   // the container mid-batch killed the 9am run in place on 2026-06-12 —
   // zero posts AND zero alerts, with claimable work still queued. The

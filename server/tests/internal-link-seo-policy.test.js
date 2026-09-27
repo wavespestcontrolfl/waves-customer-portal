@@ -298,3 +298,13 @@ describe('internal-link SEO policy anchor names the target subject', () => {
     expect(result.issues.map((i) => i.code)).toContain('anchor_not_target_specific');
   });
 });
+
+describe('internal-link SEO policy subject plurals', () => {
+  test.each([
+    ['mosquito control', '/mosquito-control-bradenton-fl/', 'mosquitoes bradenton'],
+    ['cluster fly', '/pest-control/cluster-flies/', ''],
+    ['a mouse', '/rodent/mice-in-attic/', ''],
+  ])('%p matches its plural target subject', (anchor, url, keyword) => {
+    expect(policy.anchorNamesTargetSubject(anchor, { url, keyword })).toBe(true);
+  });
+});
