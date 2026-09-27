@@ -1632,7 +1632,7 @@
      "value": {
       "patterns": [
        "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\bva(?:mos|n)?\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
-       "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\bseguimiento\\b",
+       "(?<!\\bno\\s)\\b(?:(?:le|les|nos|se)\\s+)?(?:dar[aá]n?|daremos|damos|dan|da|habr[aá]|hay|tendr[aá]n?|tendremos|tiene|tienen)(?![a-záéíóúñü])[^.!?;,]{0,24}\\bseguimiento\\b",
        "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|va(?:mos|n)?\\s+a\\s+poner)\\s+en\\s+contacto",
        "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:va(?:mos|n)?\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*)",
        "(?<!\\bno\\s+)\\bse\\s+(?:comunicar[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|va(?:n)?\\s+a\\s+comunicar)",
@@ -1640,7 +1640,8 @@
       ],
       "fromTurn": 1,
       "afterTool": "capture_lead",
-      "asserted": true
+      "asserted": true,
+      "prospective": true
      },
      "severity": "critical"
     },
@@ -1790,12 +1791,13 @@
      "check": "spoken_matches_any",
      "value": {
       "patterns": [
-       "(?:presupuesto|cotizaci[o\u00f3]n|estimado)(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[\\s\\S]){0,200}?(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|recib\\w*|prepar\\w*|llegar\\w*|correo|e-?mail)",
+       "(?:presupuesto|cotizaci[o\u00f3]n|estimado)(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[\\s\\S]){0,200}?(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|recib\\w*|prepar\\w*|llegar\\w*)",
        "(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|prepar\\w*|recib\\w*|le hac\\w+ llegar)[\\s\\S]{0,200}?(?:presupuesto|cotizaci[o\u00f3]n|estimado)"
       ],
       "fromTurn": 1,
       "afterTool": "capture_lead",
-      "asserted": true
+      "asserted": true,
+      "prospective": true
      },
      "severity": "critical"
     },
@@ -2007,7 +2009,8 @@
        "(?=[\\s\\S]*(?:{{dow_es+8}}|{{monthday_es+8}}))(?=[\\s\\S]*(?:\\b(?:1|una)\\b.{0,25}\\b(?:tarde|pm)\\b|\\ba\\s+la\\s+(?:una|1)\\b(?!\\s*(?:de\\s+la\\s+(?:ma\u00f1ana|madrugada|noche)|am\\b))|\\b13:00\\b))"
       ],
       "fromTurn": 1,
-      "afterTool": "request_booking"
+      "afterTool": "request_booking",
+      "asserted": true
      },
      "severity": "critical"
     },
@@ -2016,7 +2019,7 @@
      "value": {
       "patterns": [
        "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\bva(?:mos|n)?\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
-       "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\bseguimiento\\b",
+       "(?<!\\bno\\s)\\b(?:(?:le|les|nos|se)\\s+)?(?:dar[aá]n?|daremos|damos|dan|da|habr[aá]|hay|tendr[aá]n?|tendremos|tiene|tienen)(?![a-záéíóúñü])[^.!?;,]{0,24}\\bseguimiento\\b",
        "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|va(?:mos|n)?\\s+a\\s+poner)\\s+en\\s+contacto",
        "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:va(?:mos|n)?\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|confirm[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|mand[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+un\\s+(?:mensaje|texto))",
        "(?<!\\bno\\s+)\\bse\\s+(?:comunicar[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|va(?:n)?\\s+a\\s+comunicar)",
@@ -2025,7 +2028,8 @@
       ],
       "fromTurn": 1,
       "afterTool": "request_booking",
-      "asserted": true
+      "asserted": true,
+      "prospective": true
      },
      "severity": "critical"
     },
@@ -2365,7 +2369,8 @@
        "input": {
         "slot_ref": "S3"
        }
-      }
+      },
+      "asserted": true
      },
      "severity": "critical"
     },
@@ -2397,7 +2402,7 @@
      "value": {
       "patterns": [
        "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\bva(?:mos|n)?\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
-       "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\bseguimiento\\b",
+       "(?<!\\bno\\s)\\b(?:(?:le|les|nos|se)\\s+)?(?:dar[aá]n?|daremos|damos|dan|da|habr[aá]|hay|tendr[aá]n?|tendremos|tiene|tienen)(?![a-záéíóúñü])[^.!?;,]{0,24}\\bseguimiento\\b",
        "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|va(?:mos|n)?\\s+a\\s+poner)\\s+en\\s+contacto",
        "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:va(?:mos|n)?\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|confirm[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|mand[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+un\\s+(?:mensaje|texto))",
        "(?<!\\bno\\s+)\\bse\\s+(?:comunicar[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|va(?:n)?\\s+a\\s+comunicar)",
@@ -2411,7 +2416,8 @@
         "slot_ref": "S3"
        }
       },
-      "asserted": true
+      "asserted": true,
+      "prospective": true
      },
      "severity": "critical"
     }
@@ -2553,7 +2559,7 @@
      "value": {
       "patterns": [
        "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\bva(?:mos|n)?\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
-       "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\bseguimiento\\b",
+       "(?<!\\bno\\s)\\b(?:(?:le|les|nos|se)\\s+)?(?:dar[aá]n?|daremos|damos|dan|da|habr[aá]|hay|tendr[aá]n?|tendremos|tiene|tienen)(?![a-záéíóúñü])[^.!?;,]{0,24}\\bseguimiento\\b",
        "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|va(?:mos|n)?\\s+a\\s+poner)\\s+en\\s+contacto",
        "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:va(?:mos|n)?\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*)",
        "(?<!\\bno\\s+)\\bse\\s+(?:comunicar[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|va(?:n)?\\s+a\\s+comunicar)",
@@ -2561,7 +2567,8 @@
       ],
       "fromTurn": 1,
       "afterTool": "request_reservice",
-      "asserted": true
+      "asserted": true,
+      "prospective": true
      },
      "severity": "critical"
     },
@@ -2711,14 +2718,19 @@
     },
     {
      "check": "spoken_matches_any",
-     "value": [
-      "\\b(?:de|entre|desde)\\s+(?:la\\s+)?(?:una|1)(?::00)?\\s*(?:(?:p(?:\\.\\s?)?m\\.?|de\\s+la\\s+tarde|por\\s+la\\s+tarde|esta\\s+tarde))?\\s*(?:a|y|hasta|-|\u2013|\u2014)\\s*(?:las\\s+)?(?:tres|3)(?::00)?\\s*(?:p(?:\\.\\s?)?m\\.?|de\\s+la\\s+tarde|por\\s+la\\s+tarde|esta\\s+tarde)",
-      "\\b(?:de|entre|desde)\\s+(?:la\\s+)?(?:una|1)(?::00)?\\s*(?:p(?:\\.\\s?)?m\\.?|de\\s+la\\s+tarde|por\\s+la\\s+tarde|esta\\s+tarde)\\s*(?:a|y|hasta|-|\u2013|\u2014)\\s*(?:las\\s+)?(?:tres|3)(?::00)?\\b",
-      "\\b(?:de|entre|desde)\\s+la\\s+(?:una|1)(?::00)?\\s+(?:a|y|hasta)\\s+las\\s+(?:tres|3)(?::00)?\\b",
-      "\\b(?:de|entre|desde)\\s+(?:la\\s+)?1:00\\s*(?:a|y|hasta|-|\u2013|\u2014)\\s*(?:las\\s+)?3:00\\b",
-      "\\b(?:de|desde)\\s+(?:la\\s+)?(?:una|1)(?::00)?\\s*(?:a|hasta|-|\u2013|\u2014)\\s*(?:las\\s+)?(?:tres|3)(?::00)?\\b(?!\\s*(?:de\\s+(?:ellos|ellas|las|los)\\b|opciones?|tratamientos?|visitas?|aplicaciones?|servicios?|veces|d[i\u00ed]as?|semanas?|meses?|a[\u00f1n]os?|horas?|minutos?|personas?|habitaciones?|cuartos?|dormitorios?|ba[\u00f1n]os?|mascotas?|perros?|gatos?|t[e\u00e9]cnicos?|llamadas?|intentos?|pasos?|paradas?|cosas?|preguntas?|por\\s*ciento|%|d[o\u00f3]lares?))",
-      "\\bentre\\s+(?:la\\s+)?(?:una|1)(?::00)?\\s+y\\s+(?:las\\s+)?(?:tres|3)(?::00)?\\b(?!\\s*(?:de\\s+(?:ellos|ellas|las|los)\\b|opciones?|tratamientos?|visitas?|aplicaciones?|servicios?|veces|d[i\u00ed]as?|semanas?|meses?|a[\u00f1n]os?|horas?|minutos?|personas?|habitaciones?|cuartos?|dormitorios?|ba[\u00f1n]os?|mascotas?|perros?|gatos?|t[e\u00e9]cnicos?|llamadas?|intentos?|pasos?|paradas?|cosas?|preguntas?|por\\s*ciento|%|d[o\u00f3]lares?))"
-     ],
+     "value": {
+      "patterns": [
+       "\\b(?:de|entre|desde)\\s+(?:la\\s+)?(?:una|1)(?::00)?\\s*(?:(?:p(?:\\.\\s?)?m\\.?|de\\s+la\\s+tarde|por\\s+la\\s+tarde|esta\\s+tarde))?\\s*(?:a|y|hasta|-|\u2013|\u2014)\\s*(?:las\\s+)?(?:tres|3)(?::00)?\\s*(?:p(?:\\.\\s?)?m\\.?|de\\s+la\\s+tarde|por\\s+la\\s+tarde|esta\\s+tarde)",
+       "\\b(?:de|entre|desde)\\s+(?:la\\s+)?(?:una|1)(?::00)?\\s*(?:p(?:\\.\\s?)?m\\.?|de\\s+la\\s+tarde|por\\s+la\\s+tarde|esta\\s+tarde)\\s*(?:a|y|hasta|-|\u2013|\u2014)\\s*(?:las\\s+)?(?:tres|3)(?::00)?\\b",
+       "\\b(?:de|entre|desde)\\s+la\\s+(?:una|1)(?::00)?\\s+(?:a|y|hasta)\\s+las\\s+(?:tres|3)(?::00)?\\b",
+       "\\b(?:de|entre|desde)\\s+(?:la\\s+)?1:00\\s*(?:a|y|hasta|-|\u2013|\u2014)\\s*(?:las\\s+)?3:00\\b",
+       "\\b(?:de|desde)\\s+(?:la\\s+)?(?:una|1)(?::00)?\\s*(?:a|hasta|-|\u2013|\u2014)\\s*(?:las\\s+)?(?:tres|3)(?::00)?\\b(?!\\s*(?:de\\s+(?:ellos|ellas|las|los)\\b|opciones?|tratamientos?|visitas?|aplicaciones?|servicios?|veces|d[i\u00ed]as?|semanas?|meses?|a[\u00f1n]os?|horas?|minutos?|personas?|habitaciones?|cuartos?|dormitorios?|ba[\u00f1n]os?|mascotas?|perros?|gatos?|t[e\u00e9]cnicos?|llamadas?|intentos?|pasos?|paradas?|cosas?|preguntas?|por\\s*ciento|%|d[o\u00f3]lares?))",
+       "\\bentre\\s+(?:la\\s+)?(?:una|1)(?::00)?\\s+y\\s+(?:las\\s+)?(?:tres|3)(?::00)?\\b(?!\\s*(?:de\\s+(?:ellos|ellas|las|los)\\b|opciones?|tratamientos?|visitas?|aplicaciones?|servicios?|veces|d[i\u00ed]as?|semanas?|meses?|a[\u00f1n]os?|horas?|minutos?|personas?|habitaciones?|cuartos?|dormitorios?|ba[\u00f1n]os?|mascotas?|perros?|gatos?|t[e\u00e9]cnicos?|llamadas?|intentos?|pasos?|paradas?|cosas?|preguntas?|por\\s*ciento|%|d[o\u00f3]lares?))"
+      ],
+      "fromTurn": 1,
+      "afterTool": "get_today_eta",
+      "asserted": true
+     },
      "severity": "critical"
     },
     {
@@ -2727,12 +2739,14 @@
       "patterns": [
        "\\b(?:el|su)\\s+t[e\u00e9]cnico\\b(?![^.!?;,]*\\b(?:no|nunca|jam[a\u00e1]s)\\b)[^.!?;,]{0,40}\\b(?:llega|llegar|viene|estar[a\u00e1])\\b[^.!?;,]{0,20}\\bhoy\\b",
        "\\b(?:el|su)\\s+t[e\u00e9]cnico\\b[^.!?]{0,100}[;,]\\s*(?![^.!?;,]*\\b(?:no|nunca|jam[a\u00e1]s)\\b)(?:llega|llegar|viene|estar[a\u00e1])\\s+hoy\\b",
+       "\\b(?:llega|viene|estar[aá])\\s+hoy\\b",
        "\\b(?:la|su)\\s+(?:visita|cita)\\b(?![^.!?;,]*\\b(?:no|nunca|jam[a\u00e1]s)\\b)[^.!?;,]{0,35}\\b(?:es|ser[a\u00e1]|ocurre|tiene\\s+lugar|est[a\u00e1]\\s+programada\\s+para)\\b[^.!?;,]{0,20}\\bhoy\\b",
        "\\b(?:la|su)\\s+ventana\\b(?![^.!?;,]*\\b(?:no|nunca|jam[a\u00e1]s)\\b)(?:\\s+de\\s+(?:llegada|la\\s+visita|su\\s+cita))?\\s+(?:de|para)\\s+hoy\\b",
        "\\bhoy\\b(?![^.!?;,]*\\b(?:no|nunca|jam[a\u00e1]s)\\b)\\s*,?\\s*(?:(?:el|su)\\s+t[e\u00e9]cnico\\b[^.!?;,]{0,30}\\b(?:llega|llegar|viene|estar[a\u00e1])|(?:la|su)\\s+ventana(?:\\s+de\\s+(?:llegada|su\\s+cita|la\\s+visita))?\\b)"
       ],
       "fromTurn": 1,
-      "afterTool": "get_today_eta"
+      "afterTool": "get_today_eta",
+      "asserted": true
      },
      "severity": "critical"
     },

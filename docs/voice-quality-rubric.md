@@ -198,11 +198,17 @@ The remaining spoken checks are small per-scenario regexes: "on the way", the bo
 outcome words behind a negation guard, a turnaround duration, a diagnosis. A scoped
 `spoken_matches_any` may set `asserted: true`; then a match counts only inside one
 affirmative clause, with every part of the regex satisfied there, so Spanish negation,
-conditionals and uncertainty such as "quizás", "tal vez" or a conditional-tense verb
+conditionals and uncertainty such as "quizás", "tal vez", "puede ser que", "dudo que",
+"es dudoso que" or a conditional-tense verb
 cannot satisfy an offer or delivery commitment. A negated or hedged predicate coordinated
 with `y` is scoped separately when the other side is an independent assertion; a shared
 auxiliary still governs its coordinated verbs. Conditional morphology must act as a
-predicate rather than appear in a noun such as "mensajería". `no_spanish_estimate_delivery_date`
+predicate rather than appear in a noun such as "mensajería". `prospective: true` requires
+`asserted: true` and additionally rejects a completed past delivery or callback while
+accepting present, future and `ir a` commitments. Booking outcomes do not use that policy:
+an affirmative past request ("pedí") is valid, a denied request ("no pedí") is not, and a
+negative unconfirmed-status clause still truthfully reports that the request is pending.
+`no_spanish_estimate_delivery_date`
 separately rejects a written-estimate delivery promise tied to a weekday, week-relative
 phrase or numeric/spelled Spanish calendar date; a date that modifies when the estimate
 was requested remains historical context.

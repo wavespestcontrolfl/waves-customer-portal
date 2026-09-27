@@ -50,17 +50,21 @@ const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); 
 
 const SPANISH_ASSERTION_VERB = '(?:enviar|mandar|recibir|llegar|entregar|preparar|ofrecer|tener|haber|estar|quedar|hacer|llamar|contactar|comunicar|escribir|confirmar|devolver|poner|dar)';
 const SPANISH_REGULAR_CONDITIONAL = '[a-záéíóúñü]+(?:ar|er|ir)[ií]a(?:mos|n|s)?';
-const SPANISH_IRREGULAR_CONDITIONAL = '(?:cabr|dir|habr|har|podr|pondr|querr|sabr|saldr|tendr|valdr|vendr)[ií]a(?:mos|n|s)?';
+const SPANISH_IRREGULAR_FUTURE_STEM = '(?:cabr|dir|habr|har|podr|pondr|querr|sabr|saldr|tendr|valdr|vendr)';
+const SPANISH_IRREGULAR_CONDITIONAL = `${SPANISH_IRREGULAR_FUTURE_STEM}[ií]a(?:mos|n|s)?`;
 const SPANISH_CONDITIONAL_FORM_RE = new RegExp(`\\b(?:${SPANISH_REGULAR_CONDITIONAL}|${SPANISH_IRREGULAR_CONDITIONAL})\\b`, 'gi');
 const SPANISH_DIRECT_CONDITIONAL_RE = new RegExp(`^(?:(?:${SPANISH_ASSERTION_VERB}|ser|deber)[ií]a(?:mos|n|s)?|${SPANISH_IRREGULAR_CONDITIONAL})$`, 'i');
 const SPANISH_ASSERTION_VERB_RE = new RegExp(`\\b${SPANISH_ASSERTION_VERB}[a-záéíóúñü]*\\b`, 'i');
 const SPANISH_CONDITIONAL_NOUN_LEAD_RE = /\b(?:el|la|los|las|un|una|unos|unas|este|esta|ese|esa|mi|tu|su|por|de|del|en|con|sin|para)\s*$/i;
 const SPANISH_CONDITIONAL_NOUN_TAIL_RE = /^\s+(?:para|que)\b/i;
-const SPANISH_UNCERTAINTY_RE = /\b(?:quiz[aá]s?|tal\s+vez|acaso|posiblemente|probablemente|puede\s+que|es\s+(?:posible|probable)\s+que|si|no\s+(?:s[eé]|sabemos|estoy\s+segur[oa]|estamos\s+segur[oa]s?)\s+si)\b/i;
+const SPANISH_UNCERTAINTY_RE = /\b(?:quiz[aá]s?|tal\s+vez|acaso|posiblemente|probablemente|puede\s+(?:ser\s+)?que|dudo\s+que|es\s+(?:(?:posible|probable)\s+que|dudoso\s+que)|si|no\s+(?:s[eé]|sabemos|estoy\s+segur[oa]|estamos\s+segur[oa]s?)\s+si)\b/i;
 const SPANISH_NEGATION_RE = /\b(?:no|nunca|jam[aá]s|tampoco)\b/i;
 const SPANISH_EXPLICIT_SUBJECT_ASSERTION_RE = new RegExp(`^\\s*(?:(?:el|la|los|las|un|una|este|esta|ese|esa|mi|tu|su|nuestro|nuestra)\\s+(?:[a-záéíóúñü]+\\s+){0,4}|(?:yo|nosotros|nosotras|ellos|ellas|usted|ustedes)\\s+)(?:(?:le|les|nos|se)\\s+)?(?:va(?:mos|n)?\\s+a\\s+)?${SPANISH_ASSERTION_VERB}[a-záéíóúñü]*\\b`, 'i');
 const SPANISH_CLITIC_ASSERTION_RE = new RegExp(`^\\s*(?:le|les|nos|se)\\s+(?:va(?:mos|n)?\\s+a\\s+)?${SPANISH_ASSERTION_VERB}[a-záéíóúñü]*\\b`, 'i');
 const SPANISH_PENDING_STATUS_RE = /(?=[\s\S]*\b(?:cita|visita|solicitud|hora|horario)\b)(?=[\s\S]*\b(?:no|pendiente)\b)[\s\S]*\b(?:confirmad|reservad|agendad|programad|lista|hecha)[a-záéíóúñü]*\b/i;
+const SPANISH_NON_PENDING_NEGATION_RE = /\b(?:nunca|jam[aá]s|tampoco)\b|\bno\s+(?!(?:est[aá]|qued[oó]|fue|ha\s+sido)(?![a-záéíóúñü]))/i;
+const SPANISH_COMPLETED_ASSERTION_RE = /(?<![a-záéíóúñü])(?:(?:se\s+)?(?:llam|contact|comunic|confirm|envi|mand|prepar|entreg|lleg|recib|ofrec|escrib|devolv)(?:ó|ió|aron|ieron|aba|aban|ía|ían)|(?:ha|han|hemos|había|habían|fue|fueron)\s+(?:enviad|mandad|preparad|entregad|recibid|ofrecid|llamad|contactad|comunicad|confirmad)[oa]s?|(?:ha|han|hemos|había|habían|fue|fueron)\s+(?:escrito|devuelto|hecho|puesto)|(?:dio|dieron|puso|pusieron|hizo|hicieron))(?![a-záéíóúñü])/i;
+const SPANISH_FUTURE_ASSERTION_RE = new RegExp(`(?<![a-záéíóúñü])(?:(?:${SPANISH_ASSERTION_VERB}|${SPANISH_IRREGULAR_FUTURE_STEM})(?:é|ás|á|emos|éis|án)|va(?:mos|n)?\\s+a\\s+${SPANISH_ASSERTION_VERB})(?![a-záéíóúñü])`, 'i');
 const SPANISH_WITHOUT_PREDICATE_RE = /\bsin\s+(?:llegar\s+a\s+)?(?:enviar|mandar|recibir|entregar|ofrecer|tener|haber)\b/i;
 const SPANISH_REASSURANCE_RE = /^\s*(?:no\s+(?:se\s+)?preocupe|no\s+hay\s+problema|sin\s+problema)\b[\s,:—–]*/i;
 const SPANISH_CERTAINTY_RE = /\b(?:sin\s+duda|no\s+s[oó]lo)\b/gi;
@@ -79,9 +83,9 @@ function spanishClaimIsUncertain(claim) {
 }
 
 /** A regex hit wholly satisfied by one affirmative clause. */
-function assertedSpokenMatch(text, re) {
+function assertedSpokenMatch(text, re, { prospective = false } = {}) {
   const global = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
-  for (const statement of String(text || '').split(SENTENCE_SPLIT_RE)) {
+  const candidates = String(text || '').split(SENTENCE_SPLIT_RE).flatMap((statement) => {
     const candidates = [statement];
     for (const conjunction of statement.matchAll(SPANISH_COORDINATION_RE)) {
       const left = statement.slice(0, conjunction.index);
@@ -93,21 +97,23 @@ function assertedSpokenMatch(text, re) {
         || (SPANISH_PENDING_STATUS_RE.test(left) && SPANISH_CLITIC_ASSERTION_RE.test(right));
       if (leftNonasserted && independentRight) candidates.push(right);
     }
-    for (const candidate of candidates) {
-      const seen = new Set();
-      for (let at = 0; at < candidate.length; at += 1) {
-        const bounds = clauseBounds(candidate, at);
-        const key = bounds.join(':');
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const claim = candidate.slice(...bounds).replace(SPANISH_REASSURANCE_RE, '').replace(SPANISH_CERTAINTY_RE, '');
-        const denied = clauseIsNegated(claim) || SPANISH_NEGATION_RE.test(claim) || SPANISH_WITHOUT_PREDICATE_RE.test(claim);
-        const uncertain = spanishClaimIsUncertain(claim);
-        global.lastIndex = 0;
-        const match = global.exec(claim);
-        if (match && !denied && !uncertain) return match;
-      }
-    }
+    return candidates;
+  });
+  const claims = candidates.flatMap((candidate) => {
+    return Array.from({ length: candidate.length }, (_, at) => clauseBounds(candidate, at))
+      .filter((bounds, at, all) => all.findIndex((other) => other[0] === bounds[0] && other[1] === bounds[1]) === at)
+      .map((bounds) => candidate.slice(...bounds).replace(SPANISH_REASSURANCE_RE, '').replace(SPANISH_CERTAINTY_RE, ''));
+  });
+  for (const claim of claims) {
+    const pendingStatus = SPANISH_PENDING_STATUS_RE.test(claim);
+    const denied = SPANISH_WITHOUT_PREDICATE_RE.test(claim) || SPANISH_NON_PENDING_NEGATION_RE.test(claim)
+      || (!pendingStatus && (clauseIsNegated(claim) || SPANISH_NEGATION_RE.test(claim)));
+    const uncertain = spanishClaimIsUncertain(claim);
+    global.lastIndex = 0;
+    const match = global.exec(claim);
+    const evidence = match ? claim.slice(match.index, match.index + match[0].length + 1) : '';
+    const completed = prospective && SPANISH_COMPLETED_ASSERTION_RE.test(evidence) && !SPANISH_FUTURE_ASSERTION_RE.test(evidence);
+    if (match && !denied && !uncertain && !completed) return match;
   }
   return null;
 }
