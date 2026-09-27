@@ -6,6 +6,7 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }))
 jest.mock('../services/llm/deep', () => ({ createDeepMessage: jest.fn() }));
 
 const db = require('../models/db');
+const { createDeepMessage } = require('../services/llm/deep');
 const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, callDirectionBlock } = require('../services/call-self-audit');
 
 const SAMPLE = (over = {}) => ({
@@ -62,6 +63,22 @@ test('a lead stamped vendor_logged counts as a disposition mismatch', async () =
   mockDb({ calls: [SAMPLE({ disposition: 'vendor_logged', ai_extraction: JSON.stringify({ is_lead: true }) })] });
   const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{"is_lead":true,"is_spam":false,"is_voicemail":false,"appointment_agreed":false,"quote_promised":false,"complaint":false,"excerpt":"wants service"}' }] }) });
   expect(res.dispositionRate).toBeGreaterThan(0);
+});
+
+test('the internal factory (no injected createMessage) requests effort:\'medium\' on the DEEP call (2026-09-26: a bounded field-diff audit, not deep reasoning)', async () => {
+  createDeepMessage.mockResolvedValue({ content: [{ type: 'text', text: '{"is_lead":true,"is_spam":false,"is_voicemail":false,"appointment_agreed":false,"quote_promised":false,"complaint":false,"excerpt":"ok"}' }] });
+  mockDb({ calls: [SAMPLE()] });
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = 'test-key';
+  try {
+    await runSelfAudit({});
+  } finally {
+    if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey;
+  }
+  expect(createDeepMessage).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.objectContaining({ laneId: 'call_self_audit', effort: 'medium' }),
+  );
 });
 
 // Owner directive 2026-09-26: every call-agent rule is audited the same way

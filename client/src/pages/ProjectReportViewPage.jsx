@@ -10,6 +10,7 @@ import { CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import DocumentActionBar from '../components/DocumentActionBar';
 import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
+import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { useGlassSurface } from '../glass/glass-engine';
 import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
@@ -382,6 +383,9 @@ export default function ProjectReportViewPage() {
   // PDF is a server-side artifact linked below, never rendered here.)
   const isCertificate = data?.projectType === 'pre_treatment_termite_certificate';
   const isPaperDocument = isCertificate || data?.projectType === 'wdo_inspection';
+  // The applicator is the tech who PERFORMED the linked visit, which can
+  // differ from the project's creator (technicianName) — Codex r2 #5032.
+  const applicatorLine = applicatorIdLine(data?.applicatorName || data?.technicianName, data?.applicatorFdacsId);
   const glassActive = !isPaperDocument;
   useGlassSurface(glassActive);
 
@@ -782,6 +786,25 @@ export default function ProjectReportViewPage() {
             {followupPhotos.length > 0 && (
               <div style={{ marginTop: 12 }}>
                 <PhotoGrid photos={followupPhotos} noCard />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* The server's verdict (projectPoisonControl): the canonical typed
+            treatment evidence for the visit or its follow-up, or a rodent
+            bait-station visit — never the WDO / certificate documents. */}
+        {data.poisonControl === true && (
+          <div data-glass="card" data-testid="project-poison-control" style={{ ...cardStyle, marginTop: 16 }}>
+            <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 8 }}>
+              Poison Control
+            </div>
+            <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+              <PoisonControlCopy linkStyle={{ color: ESTIMATE_TEXT, fontWeight: 700, whiteSpace: 'nowrap' }} />
+            </div>
+            {applicatorLine && (
+              <div data-testid="project-applicator-id" style={{ fontSize: 14, color: ESTIMATE_TEXT, fontWeight: 600, lineHeight: 1.5, marginTop: 8 }}>
+                {applicatorLine}
               </div>
             )}
           </div>

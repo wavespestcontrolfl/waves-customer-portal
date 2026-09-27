@@ -72,7 +72,13 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // Feeds the deterministic callback_number_needed triage flag
 // (call-triage-flags.js) when no spoken callback number also covers it.
 // Optional/nullable: older payloads still validate.
-const SCHEMA_VERSION = '1.14.0';
+// 1.15.0: additive enum widening — caller.relationship_to_property gains
+// home_buyer (owner ruling 2026-09-26: a buyer under contract ordering their
+// own WDO inspection is authorized like a lender or realtor). Buyers used to
+// land on "other", which also covers strangers, so no rule could single them
+// out. Feeds isAuthorizedWdoArrangerBooking (call-triage-flags.js). Older
+// payloads still validate.
+const SCHEMA_VERSION = '1.15.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);
