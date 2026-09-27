@@ -1,18 +1,33 @@
 import { describe, expect, it } from "vitest";
 import { formatMeasuredAmount, formatMeasuredRange } from "./mix-amount";
 
+const FRACTION_VALUE = { "": 0, "⅛": 0.125, "¼": 0.25, "⅜": 0.375, "½": 0.5, "⅝": 0.625, "¾": 0.75, "⅞": 0.875 };
+function spoonTeaspoons(text) {
+  const match = /^(\d*)([⅛¼⅜½⅝¾⅞]?) tsp/.exec(text);
+  return match ? Number(match[1] || 0) + FRACTION_VALUE[match[2]] : null;
+}
+
 describe("formatMeasuredAmount", () => {
-  it("never shows mL: small liquid doses read as measuring-spoon teaspoons", () => {
-    expect(formatMeasuredAmount(0.16, "fl_oz")).toBe("1 tsp");
-    expect(formatMeasuredAmount(0.32, "fl oz")).toBe("2 tsp");
-    expect(formatMeasuredAmount(0.29, "fl_oz")).toBe("1¾ tsp");
+  it("never shows mL: a small liquid dose reads as measuring-spoon teaspoons", () => {
     expect(formatMeasuredAmount(0.5, "fl_oz")).toBe("3 tsp");
+    expect(formatMeasuredAmount(1 / 6, "fl oz")).toBe("1 tsp");
+    expect(formatMeasuredAmount(0.0625, "fl_oz")).toBe("⅜ tsp");
   });
 
-  it("uses eighths below half a teaspoon", () => {
-    expect(formatMeasuredAmount(0.04, "fl_oz")).toBe("¼ tsp");
-    expect(formatMeasuredAmount(0.0625, "fl_oz")).toBe("⅜ tsp");
-    expect(formatMeasuredAmount(0.01, "fl_oz")).toBe("under ⅛ tsp");
+  it("rounds a single prescribed dose down, never up, and shows the exact fl oz when it had to round", () => {
+    // Fixed rate 8 fl oz / 100 gal in a 4-gal FlowZone: 2 tsp would be 0.333 fl oz, over the prescription.
+    expect(formatMeasuredAmount(0.32, "fl_oz")).toBe("1⅞ tsp (0.32 fl oz)");
+    expect(formatMeasuredAmount(0.16, "fl_oz")).toBe("⅞ tsp (0.16 fl oz)");
+    expect(formatMeasuredAmount(0.04, "fl_oz")).toBe("⅛ tsp (0.04 fl oz)");
+    expect(formatMeasuredAmount(0.01, "fl_oz")).toBe("under ⅛ tsp (0.01 fl oz)");
+  });
+
+  it("never shows a spoon amount above the prescribed dose", () => {
+    for (let hundredths = 1; hundredths < 100; hundredths += 1) {
+      const flOz = hundredths / 100;
+      const tsp = spoonTeaspoons(formatMeasuredAmount(flOz, "fl_oz"));
+      if (tsp != null) expect(tsp / 6).toBeLessThanOrEqual(flOz + 1e-9);
+    }
   });
 
   it("keeps 1 fl oz and up in fluid ounces for the ounce cup", () => {
@@ -22,7 +37,7 @@ describe("formatMeasuredAmount", () => {
   });
 
   it("converts amounts stored in mL or liters instead of showing them", () => {
-    expect(formatMeasuredAmount(10, "ml")).toBe("2 tsp");
+    expect(formatMeasuredAmount(10, "ml")).toBe("2 tsp (0.338 fl oz)");
     expect(formatMeasuredAmount(59.147, "mL")).toBe("2 fl oz");
     expect(formatMeasuredAmount(1, "l")).toBe("33.81 fl oz");
     expect(formatMeasuredAmount(0, "ml")).toBe("0 fl oz");
@@ -69,8 +84,8 @@ describe("formatMeasuredRange", () => {
     expect(formatMeasuredRange(4.4, 8.8, "fl_oz")).toBe("4.4 fl oz – 8.8 fl oz");
   });
 
-  it("formats a single amount when there is no high end", () => {
-    expect(formatMeasuredRange(0.16, null, "fl_oz")).toBe("1 tsp");
+  it("treats a fixed rate (no high end) as a single dose that never rounds up", () => {
+    expect(formatMeasuredRange(0.32, null, "fl_oz")).toBe("1⅞ tsp (0.32 fl oz)");
   });
 
   it("formats dry ranges without mL", () => {

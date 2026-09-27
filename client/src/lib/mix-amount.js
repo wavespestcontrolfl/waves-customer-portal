@@ -26,12 +26,12 @@ function plainNumber(n) {
   return n >= 100 ? Math.round(n).toString() : n.toFixed(n < 1 ? 3 : 2).replace(/\.?0+$/, "");
 }
 
-// Below ½ tsp the spoon set's ⅛ step matters; above it, quarters.
+// A range end moves inward ("up" for the low end, "down" for the high end):
+// below ½ tsp the spoon set's ⅛ step matters; above it, quarters.
 function roundTeaspoons(tsp, mode) {
   const steps = tsp < 0.5 ? 8 : 4;
   const scaled = tsp * steps;
-  const whole = mode === "up" ? Math.ceil(scaled - 1e-9) : mode === "down" ? Math.floor(scaled + 1e-9) : Math.round(scaled);
-  return whole / steps;
+  return (mode === "up" ? Math.ceil(scaled - 1e-9) : Math.floor(scaled + 1e-9)) / steps;
 }
 
 function teaspoonText(tsp) {
@@ -47,25 +47,27 @@ function asFlOz(amount, normalized) {
   return null;
 }
 
-function liquidText(flOz, mode) {
+// A single prescribed dose never rounds up: the spoon amount is the largest
+// eighth-teaspoon at or below it, with the exact fl oz beside it when the
+// two differ, so the measure never exceeds what was prescribed.
+function liquidText(flOz) {
   if (flOz <= 0) return "0 fl oz";
   if (flOz >= 1) return `${plainNumber(flOz)} fl oz`;
-  const tsp = roundTeaspoons(flOz * TSP_PER_FL_OZ, mode);
-  if (tsp <= 0) return mode === "up" ? "⅛ tsp" : "under ⅛ tsp";
-  return teaspoonText(tsp);
+  const exact = flOz * TSP_PER_FL_OZ;
+  const tsp = Math.floor(exact * 8 + 1e-9) / 8;
+  const precise = `${plainNumber(flOz)} fl oz`;
+  if (tsp <= 0) return `under ⅛ tsp (${precise})`;
+  return exact - tsp < 0.005 ? teaspoonText(tsp) : `${teaspoonText(tsp)} (${precise})`;
 }
 
-/**
- * One mix amount. `round` only matters for the teaspoon step: "nearest" for a
- * single planned amount, "up" / "down" for the ends of a label range.
- */
-export function formatMeasuredAmount(amount, unit, { round = "nearest" } = {}) {
+/** One mix amount: a prescribed dose, an on-hand quantity, or a per-area rate. */
+export function formatMeasuredAmount(amount, unit) {
   if (amount == null || amount === "") return null;
   const n = Number(amount);
   if (!Number.isFinite(n)) return null;
   const normalized = normalizeUnit(unit);
   const flOz = asFlOz(n, normalized);
-  if (flOz != null) return liquidText(flOz, round);
+  if (flOz != null) return liquidText(flOz);
   if (normalized === "oz" && n > 0 && n < 1) return `${(n * G_PER_OZ).toFixed(1).replace(/\.0$/, "")} g`;
   const u = displayUnit(unit);
   return `${plainNumber(n)}${u ? ` ${u}` : ""}`;
