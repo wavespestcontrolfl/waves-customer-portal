@@ -1053,6 +1053,23 @@ const gates = {
   // reschedule flips status, and the SMS line renders empty again.
   reserviceStreamline: process.env.GATE_RESERVICE_STREAMLINE === 'true',
 
+  // Re-service picker one-tap pest chips (owner-approved 2026-09-26): the
+  // /reservice/:token picker's optional details box gets a row of one-tap
+  // pest chips (server/services/reservice-request.js — ants/roaches/spiders/
+  // wasps/other for pest, weeds/bugs in the lawn/brown patches/other for
+  // lawn) above the now-secondary "Anything else?" textarea, and GET's
+  // payload carries pestChoices for the customer's bookable lanes. Nested
+  // inside reserviceSelfServe — with that gate dark the whole route 404s
+  // before this one is ever read. Customer-facing surface, so opt-in in
+  // EVERY environment (fail-closed ==='true'). Kill switch: unset
+  // GATE_RESERVICE_PEST_CHIPS — GET drops pestChoices, POST ignores any
+  // posted `pests`, and the picker renders byte-identical to before this
+  // gate existed (the plain "What are you seeing?" textarea only). The
+  // customer_request/_source/_pests columns themselves (migration
+  // 20260927100000) are additive and are stamped from the details box
+  // regardless of this gate — only the pest-chip normalization is gated.
+  reservicePestChips: process.env.GATE_RESERVICE_PEST_CHIPS === 'true',
+
   // Re-service ranking demotion (owner ruling 2026-09-24: "prefer new
   // customers over existing — new-customer bookings get first pick of open
   // time; re-service/callback pickers rank after"). Nested inside
