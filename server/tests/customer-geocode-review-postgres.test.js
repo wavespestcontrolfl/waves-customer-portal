@@ -109,8 +109,13 @@ postgres('durable customer geocode review in PostgreSQL', () => {
     expect(Number(after.customer.latitude)).toBe(PIN.lat);
     expect(Number(after.customer.longitude)).toBe(PIN.lng);
     expect(after.review.status).toBe('geocoded');
-    expect((await listReviewQueue({}, mockConnection)).records[0].revision).toBe(after.revision);
-    const queued = (await listReviewQueue({}, mockConnection)).records[0].customer;
+    expect((await listReviewQueue({}, mockConnection)).total).toBe(0);
+
+    await saveReview(mockConnection, await customer(), { status: 'needs_pin', reason: 'manual_review_required' });
+    const held = await getReviewDetail(CUSTOMER, mockConnection);
+    const queuedRecord = (await listReviewQueue({}, mockConnection)).records[0];
+    expect(queuedRecord.revision).toBe(held.revision);
+    const queued = queuedRecord.customer;
     expect(Number(queued.latitude)).toBe(PIN.lat);
     expect(Number(queued.longitude)).toBe(PIN.lng);
 
@@ -119,6 +124,17 @@ postgres('durable customer geocode review in PostgreSQL', () => {
       source: 'county_records', evidence: 'Synthetic parcel check', latitude: PIN.lat, longitude: PIN.lng,
     });
     expect((await getReviewDetail(CUSTOMER, mockConnection)).review.status).toBe('verified');
+    expect((await listReviewQueue({}, mockConnection)).total).toBe(0);
+  });
+  test('a primary pin diverging from a verified customer mirror remains in the review queue', async () => {
+    await verify();
+    await mockConnection('customer_properties').where({ customer_id: CUSTOMER }).update({
+      latitude: PIN.lat + 0.01, longitude: PIN.lng - 0.01,
+    });
+
+    const detail = await getReviewDetail(CUSTOMER, mockConnection);
+    expect(detail.review).toMatchObject({ status: 'needs_pin', reason: 'pin_changed' });
+    expect((await listReviewQueue({}, mockConnection)).records[0].revision).toBe(detail.revision);
   });
   test('provider outside-area results stay visible until staff confirms disposition', async () => {
     geocodeAddressWithStatus.mockResolvedValueOnce({ location: null, permanent: true, reason: 'outside_service_area' });
