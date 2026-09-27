@@ -13437,7 +13437,9 @@ export function CompletionPanel({
     const method = String(p?.applicationMethod || p?.method || "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
     return (!!method && !["bait_placement", "station_check", "trunk_injection"].includes(method))
       || isNonBaitPesticideSelection(p);
-  }) || Object.values(actionScopeByLabel).some((meta) => meta?.treatmentApplied === true);
+  }) || activeSelectedLabels(selectedProtocolActionLabels).some((label) => (
+    actionScopeByLabel[label]?.treatmentApplied === true && actionScopeByLabel[label]?.dryDown !== false
+  ));
   // Re-entry stepper seeds (owner rule 2026-08-11): what a hands-off
   // completion would persist for this visit. Re-fetched whenever spray
   // evidence appears/disappears so a bait/inspection identity that gains a
@@ -14394,7 +14396,9 @@ export function CompletionPanel({
     const listMonth = protocolActionMeta?.visit?.month;
     if (isLawn || generating || !protocolActionsLoaded || !protocolActions.length || !listMonth || listMonth === "Any") return;
     const offered = new Set(protocolActions.map((action) => (action.label || action.note || action.raw || "").trim()));
-    const stale = selectedProtocolActionLabels.filter((label) => !offered.has(String(label).trim()));
+    const stale = selectedProtocolActionLabels.filter((label) => (
+      actionScopeByLabel[label]?.completionChoice !== true && !offered.has(String(label).trim())
+    ));
     if (!stale.length) return;
     if (typeof preGenerationNotesRef.current === "string") {
       preGenerationNotesRef.current = withoutProtocolMarkerLines(preGenerationNotesRef.current, stale);
@@ -14407,7 +14411,7 @@ export function CompletionPanel({
       stale.forEach((label) => { delete next[label]; });
       return next;
     });
-  }, [isLawn, generating, protocolActionsLoaded, protocolActions, protocolActionMeta, selectedProtocolActionLabels]);
+  }, [isLawn, generating, protocolActionsLoaded, protocolActions, protocolActionMeta, selectedProtocolActionLabels, actionScopeByLabel]);
 
   useEffect(() => {
     // The flag decides whether this request carries completion defaults; a
@@ -15645,7 +15649,23 @@ export function CompletionPanel({
     // recommendations the completion submits, so it can't run mid-request
     // and it clears an untouched installed draft.
     if (generating) return;
-    invalidateGeneratedReportOnTypedEdit();
+    const detachedAfterInvalidation = invalidateGeneratedReportOnTypedEdit();
+    if (!detachedAfterInvalidation) {
+      const markerTags = kind === "protocol"
+        ? new Set(["protocol", "protocol optional", "action"])
+        : new Set([kind === "observation" ? "found" : "next"]);
+      const normalizedLabel = String(label || "").trim().toLowerCase();
+      setNotes((current) => current
+        .split("\n")
+        .filter((line) => {
+          const match = line.match(/^\s*\[([^\]]+)\]\s+(.+)$/);
+          return !match
+            || !markerTags.has(match[1].trim().toLowerCase())
+            || match[2].trim().toLowerCase() !== normalizedLabel;
+        })
+        .join("\n")
+        .trim());
+    }
     if (kind === "protocol") {
       setSelectedProtocolActionLabels((prev) =>
         prev.filter((item) => item !== label),
@@ -15951,14 +15971,19 @@ export function CompletionPanel({
       (isLawn && lawnAssessmentReady === "failed");
     return { payload, hasReportInput };
   }
-  function recordActionScope(label, scope, treatmentApplied) {
-    if (!label || (scope !== "interior" && scope !== "exterior")) return;
+  function recordActionScope(label, scope, treatmentApplied, completionChoice = false, dryDown) {
+    const scoped = scope === "interior" || scope === "exterior";
+    if (!label || (!scoped && !completionChoice)) return;
     setActionScopeByLabel((prev) => ({
       ...prev,
-      [label]: { scope, treatmentApplied: treatmentApplied === true },
+      [label]: {
+        ...(scoped ? { scope, treatmentApplied: treatmentApplied === true } : {}),
+        ...(dryDown === false ? { dryDown: false } : {}),
+        ...(completionChoice ? { completionChoice: true } : {}),
+      },
     }));
   }
-  function applyProtocolAction(action, { conflictLabels = [] } = {}) {
+  function applyProtocolAction(action, { conflictLabels = [], completionChoice = false } = {}) {
     if (!action) return;
     // Same freeze + invalidation contract as every other payload mutation:
     // a productless protocol action (or one whose product is already
@@ -15972,7 +15997,7 @@ export function CompletionPanel({
     // the same metadata, and the product is already on the visit — so it
     // must not clear a valid untouched report (codex r80).
     if (
-      selectedProtocolActionLabels.includes(noteText)
+      activeSelectedLabels(selectedProtocolActionLabels).includes(noteText)
       && (!action.product?.id
         || selectedProducts.find((p) => p.productId === action.product.id))
     ) {
@@ -15980,7 +16005,7 @@ export function CompletionPanel({
     }
     const detachedAfterInvalidation = invalidateGeneratedReportOnTypedEdit();
     appendUniqueLabel(setSelectedProtocolActionLabels, noteText);
-    recordActionScope(noteText, action.scope, action.treatmentApplied);
+    recordActionScope(noteText, action.scope, action.treatmentApplied, completionChoice, action.dryDown);
     if (!detachedAfterInvalidation) {
       const conflictSet = new Set(conflictLabels);
       const prefix = action.conditional ? "Protocol optional" : "Protocol";
@@ -16805,7 +16830,16 @@ export function CompletionPanel({
     // first).
     {
       const freeTextProblems = [];
+      const completedActions = uniqueLines([
+        ...activeSelectedLabels(selectedProtocolActionLabels),
+        ...taggedNoteLines("protocol"), ...taggedNoteLines("protocol optional"), ...taggedNoteLines("action"),
+      ]);
       const mergedCounts = [
+        [
+          "Completed actions",
+          completedActions.length,
+          completedActions,
+        ],
         [
           "Observations",
           activeSelectedLabels(selectedObservationLabels).length +
@@ -17192,18 +17226,24 @@ export function CompletionPanel({
       // and must not reach the customer report (codex P2 r7 #3701).
       const reportProtocolActions = activeSelectedLabels(
         selectedProtocolActionLabels,
-      ).filter(
-        (label) =>
-          specialtyProtocolActions.length > 0
-            ? specialtyProtocolActions.some((action) => action.label === label)
-            : !isLawn ||
-              (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
-              (protocolActionsLoaded &&
-                protocolActions.some(
-                  (action) =>
-                    (action.label || action.note || action.raw || "") === label,
-                )),
-      );
+      ).filter((label) => {
+        if (specialtyProtocolActions.length > 0) {
+          return specialtyProtocolActions.some((action) => action.label === label);
+        }
+        // Saved scope/provenance remains authoritative when a visible draft is
+        // restored after its choice list becomes unavailable. Specialty
+        // membership stays first and cannot be bypassed by saved metadata.
+        const savedScope = actionScopeByLabel[label];
+        if (savedScope?.completionChoice === true
+          || savedScope?.scope === "interior" || savedScope?.scope === "exterior") return true;
+        return !isLawn ||
+          (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
+          (protocolActionsLoaded &&
+            protocolActions.some(
+              (action) =>
+                (action.label || action.note || action.raw || "") === label,
+            ));
+      });
       const reportProtocolActionScopes = reportProtocolActions
         .map((label) => {
           const meta = actionScopeByLabel[label];
@@ -17214,9 +17254,15 @@ export function CompletionPanel({
               ? specialtyActionScope({ areas: completionAreasServiced, defaultScope: meta.scope })
               : meta.scope,
             treatmentApplied: meta.treatmentApplied === true,
+            ...(meta.dryDown === false ? { dryDown: false } : {}),
           };
         })
         .filter(Boolean);
+      // The server also reconstructs actions from marker notes. Remove rejected
+      // selections there so a stale draft cannot restore them again.
+      const excludedProtocolLabels = selectedProtocolActionLabels
+        .filter((label) => !reportProtocolActions.includes(label));
+      const reportTechnicianNotes = withoutProtocolMarkerLines(notes, excludedProtocolLabels);
       const reportObservations = [
         ...activeSelectedLabels(selectedObservationLabels),
         ...observationFreeText(),
@@ -17258,7 +17304,7 @@ export function CompletionPanel({
       const body = {
         ...(reviewedPricing ? { pricingReview: reviewedPricing.review } : {}),
         idempotencyKey: completionIdempotencyKeyRef.current,
-        technicianNotes: notes,
+        technicianNotes: reportTechnicianNotes,
         // Tips from your tech — ids only; the server resolves the copy and
         // freezes it into structured_notes.techTips (freezeTechTips). Only
         // when the picker actually loaded: a restored draft's picks behind a
