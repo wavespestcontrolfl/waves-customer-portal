@@ -16,6 +16,7 @@ const SmartRebooker = require('../rebooker');
 const logger = require('../logger');
 const { toDateStr } = require('./dates');
 const routeTiers = require('./route-tiers');
+const flexTier = require('./flex-tier');
 const { classifyServiceCategory } = require('./service-category');
 const { assertCapabilitiesActive } = require('../technician-capabilities');
 const { etDateString } = require('../../utils/datetime-et');
@@ -132,12 +133,16 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
  *     lock/tier window, active non-archived customer, usable geo) plus the
  *     active-plan check — a one-time/booster/template/lapsed sibling is
  *     never dragged through an automatic move
- *   - reminder freeze (route tiers on): any sibling inside the sendable
- *     band, or an unreadable check, refuses (fail closed)
- *   - drift / tier legality (route tiers on): each sibling's OWN durable
- *     anchor and tier radius must admit best.date (the orchestrator checks
- *     the tapped row only) — a sibling at its cumulative ±5-day limit must
- *     not be dragged past it; unreadable anchor evidence refuses (fail closed)
+ *   - reminder freeze (route tiers OR flex tier on): any sibling inside the
+ *     sendable band, or an unreadable check, refuses (fail closed) — flex
+ *     tier ALSO checks each sibling's own schedule directly (a sibling with
+ *     no reminder row at all is invisible to the evidence check alone)
+ *   - drift / tier legality (route tiers on) OR flex-window legality (flex
+ *     tier on): each sibling's OWN durable anchor and tier radius (tiers),
+ *     or its OWN freshly re-read series-neighbor window (flex — never a
+ *     reused snapshot, so a sibling occurrence inserted or edited since is
+ *     still caught), must admit best.date (the orchestrator checks the
+ *     tapped row only); unreadable evidence refuses (fail closed)
  *   - technician reassignment: the chosen tech must not be DEACTIVATED for
  *     a sibling's service category (the scorer's hard filter)
  *   - preferred time (codex r16 P1): each sibling's DERIVED start (the plan
@@ -162,19 +167,238 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
 // placement's technician (the unit mover strips technicianId from member
 // moves, so the rebooker's "kept" tech is the OLD one there and would both
 // block a valid move away from an Off category and miss the destination).
-function makeMoveGuard({ service, best }) {
+// FLEX-TIER series fence: a plain re-read on `trx` does NOT serialize against
+// a concurrent series writer — READ COMMITTED never shows its uncommitted
+// insert/edit, and nothing here blocks it from committing right after this
+// row's move, crossing the bound we just checked. Every writer that reads-
+// then-writes a recurring series (top-up/auto-extend, rebooker series moves,
+// dispatch series cancel, recurring-alert actions) takes the canonical
+// `recurring-series-maintenance` advisory lock keyed by the series parent
+// (admin-schedule.js acquireRecurringSeriesMaintenanceLock — key derivation
+// kept byte-identical, as that helper requires). Taking it here before the
+// neighbor read makes the bounds hold through this row's commit. TRY-lock,
+// never wait: this runs after the move's row locks, so a blocking wait could
+// invert lock order against a writer holding the fence; a busy series is
+// simply refused (fail closed — the 04:10 pass retries tomorrow).
+// Parents sorted so multi-series grouped moves acquire in a stable order.
+async function fenceFlexSeries(trx, rows, refuse) {
+  const parents = [...new Set(rows.map((r) => r.recurring_parent_id).filter(Boolean).map(String))].sort();
+  for (const parentId of parents) {
+    const result = await trx.raw(
+      'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
+      ['recurring-series-maintenance', parentId],
+    );
+    if (result?.rows?.[0]?.locked !== true) {
+      const row = rows.find((r) => String(r.recurring_parent_id) === parentId);
+      throw refuse(row.id, 'has a series update in progress (no move, fail closed)');
+    }
+  }
+}
+
+// The flex window for each of `rows`, read fresh on `trx` under the series
+// fence: series neighbors (loadSeriesNeighbors, row-locked — see its `lock`
+// note: the fence alone never stops an ordinary single-occurrence
+// reschedule of a neighbor) and the durable drift anchor (route-tiers'
+// loadAnchorMap/resolveAnchor — the earliest pre-auto-dispatch date on
+// record), so the ±5 days are measured from the visit's original date and an
+// earlier night's move never resets them. Refuses (fail closed) on an
+// unreadable or busy read, an unknown anchor or neighbor set, or best.date
+// outside a window.
+async function assertFlexWindows(trx, rows, best, today, refuse) {
+  const neighborMap = await flexTier.loadSeriesNeighbors(trx, rows, { lock: true });
+  if (neighborMap === null) throw refuse(rows[0].id, 'series occurrence order is unreadable or being edited (no move, fail closed)');
+  const anchorMap = await routeTiers.loadAnchorMap(trx, rows.map((r) => r.id));
+  if (anchorMap === null) throw refuse(rows[0].id, 'drift-anchor evidence is unreadable (no move, fail closed)');
+  for (const r of rows) {
+    const anchor = routeTiers.resolveAnchor(r, anchorMap);
+    if (!anchor) throw refuse(r.id, 'has no derivable drift anchor (no move, fail closed)');
+    const neighbors = neighborMap.get(r.id);
+    if (!neighbors) throw refuse(r.id, 'is missing from its own series read (no move, fail closed)');
+    const window = flexTier.flexTierMoveWindow({
+      origDate: r.scheduled_date, anchorDate: anchor, today, neighbors,
+    });
+    if (!flexTier.flexWindowAdmits(window, r.scheduled_date, best.date)) {
+      throw refuse(r.id, `cannot legally move to ${best.date} (outside its ±${flexTier.FLEX_TIER_RADIUS_DAYS}-day flex window of its current and original date ${anchor}, the ${routeTiers.MIN_DESTINATION_DAYS_OUT}-day destination floor, clamped by its series' adjacent occurrence)`);
+    }
+  }
+}
+
+// The unplaced due-date shape (a recurring_dispatch_due_date visit with no
+// window_start yet) is a first placement, not a day-move: it has no
+// appointment time to freeze on and no scheduled slot to bound. Its own
+// due-date ±3-day and eligibility guards still apply (checkMemberEligibility).
+function isUnplacedDueDate(row) {
+  return Boolean(row.recurring_dispatch_due_date && !row.window_start);
+}
+
+// FLEX-TIER (Codex pre-push P1): the series' adjacent-occurrence bounds are
+// not pinned by the rebooker's `expect` CAS on this row (which covers only
+// this row's own columns) — a sibling occurrence can be inserted or edited
+// any time before THIS row's own commit. So the freeze (from the canonical
+// arrival), the series neighbors and the drift anchor are all re-read fresh,
+// on `trx` — the SAME transaction this row's own write commits in, under the
+// series fence (fenceFlexSeries) — right before that commit, through the
+// same assertFlexWindows the grouped-sibling check uses. Extracted so
+// makeMoveGuard's closure never grows from this. No-ops outside flex mode,
+// for a non-recurring-child row, or the unplaced due-date shape.
+// The row must also clear the freeze at its DESTINATION
+// (flexTier.destinationFrozen — a same-day re-time to an earlier hour can
+// land inside it): `destination` is the placement the rebooker is about to
+// write for THIS row, in this transaction — the tapped row's, or a grouped
+// member's own derived window — so the check is as late as the write itself
+// (the member guard's earlier planning-time check alone could go stale while
+// the members before it move).
+async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, destination) {
+  if (guardMode !== 'flex' || row.is_recurring !== true || !row.recurring_parent_id
+    || isUnplacedDueDate(row)) return;
+  const now = new Date();
+  if (await flexTier.ownScheduleFrozen(trx, row, now)) {
+    throw refuse(row.id, 'is within 73 hours of its own scheduled time (frozen, independent of reminder evidence)');
+  }
+  if (destination && flexTier.destinationFrozen(row, destination.date, destination.windowStart, now)) {
+    throw refuse(row.id, `would start within 73 hours at its destination (${destination.date} ${destination.windowStart || 'no start'}) — frozen`);
+  }
+  await fenceFlexSeries(trx, [row], refuse);
+  await assertFlexWindows(trx, [row], best, etDateString(new Date()), refuse);
+}
+
+function makeMoveGuard({ service, best, config = {} }) {
   const refuse = (rowId, why) => Object.assign(
     new Error(`Cannot auto-move this stop: service ${rowId} ${why}`),
     { statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', isOperational: true },
   );
-  return async ({ trx, technicianId, service: movingRow }) => {
+  return async ({
+    trx, technicianId, service: movingRow, destination,
+  }) => {
     const row = movingRow || service;
     if (row.recurring_dispatch_due_date && row.customer_confirmed === true) {
       throw refuse(row.id, 'was confirmed by the customer');
     }
+    await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
   };
+}
+
+// makeMemberGuard's own status/preferred-time pre-checks, extracted (Codex
+// pre-push P1) so adding the flex-tier sibling checks below never raises
+// the closure's already over-budget complexity — every extraction here is
+// the SAME logic, byte for byte, just relocated.
+function checkMemberStatusAndTiming(siblings, targets, config, refuse) {
+  for (const m of siblings) {
+    if (!['pending', 'confirmed'].includes(String(m.status || ''))) throw refuse(m.id, `is ${m.status}`);
+  }
+  if (config.prefs && config.prefs.preferred_time_window) {
+    for (const t of (targets || [])) {
+      if (t.isPrimary || !t.startHHMM) continue;
+      if (violatesPreferredTime(t.startHHMM, config.prefs)) throw refuse(t.id, `would start at ${t.startHHMM}, outside the customer's preferred time window`);
+    }
+  }
+}
+
+// eligibility.js's ctx for a grouped member check under the active guard
+// mode — mirrors index.js's buildEligCtx (apply.js cannot import it without
+// a circular require, so the same small, pure mapping is kept here too).
+function buildMemberEligCtx(guardMode, config, today) {
+  const base = { today, lockBoundary: config.lockBoundary, lockWindowDays: config.lockWindowDays };
+  if (guardMode === 'tiers') return { ...base, routeTiers: { enabled: true, today } };
+  if (guardMode === 'flex') return { ...base, flexTier: { enabled: true } };
+  return base;
+}
+
+// Per-sibling due-date drift, archived-customer, eligibility and active-plan
+// checks — extracted from makeMemberGuard's closure (see
+// checkMemberStatusAndTiming above).
+async function checkMemberEligibility(rows, best, eligCtx, trx, refuse) {
+  for (const r of rows) {
+    if (r.recurring_dispatch_due_date) {
+      const drift = routeTiers.daysBetween(toDateStr(r.recurring_dispatch_due_date), best.date);
+      if (drift == null || Math.abs(drift) > 3) throw refuse(r.id, 'would leave its recurring due date ±3 days');
+    }
+    if (r.customer_deleted_at) throw refuse(r.id, 'belongs to an archived customer');
+    const elig = isEligibleForAutoDispatch(r, eligCtx);
+    if (!elig.eligible) throw refuse(r.id, `is not auto-dispatchable (${elig.reason_code}: ${elig.reason_description})`);
+    const plan = await isRecurringPlanActive(r, trx);
+    if (!plan.active) throw refuse(r.id, `is on an inactive plan (${plan.reason_code})`);
+  }
+}
+
+// ROUTE-TIERS sibling legality (extracted, unchanged behavior): each
+// sibling's OWN durable anchor and tier radius must admit best.date.
+async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse) {
+  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), new Date());
+  if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
+  const frozen = siblings.find((m) => freeze.frozen.has(m.id));
+  if (frozen) throw refuse(frozen.id, 'is inside its 72-hour reminder window (frozen)');
+  // Same legality math as the orchestrator's pass-1/apply-time checks, per
+  // SIBLING: its own anchor (durable evidence, fail closed), its own
+  // days-out tier radius, the destination floor — best.date must fall
+  // inside the sibling's window or the grouped move is refused.
+  const anchorMap = await routeTiers.loadAnchorMap(trx, rows.map((r) => r.id));
+  if (anchorMap === null) throw refuse(siblings[0].id, 'drift-anchor evidence is unreadable (no move, fail closed)');
+  for (const r of rows) {
+    const anchor = routeTiers.resolveAnchor(r, anchorMap);
+    if (!anchor) throw refuse(r.id, 'has no derivable drift anchor (no move, fail closed)');
+    const daysOut = routeTiers.daysBetween(today, toDateStr(r.scheduled_date));
+    const radius = routeTiers.tierRadiusForDaysOut(daysOut);
+    const window = radius > 0 ? routeTiers.tierMoveWindow({ origDate: r.scheduled_date, anchorDate: anchor, today, radius }) : null;
+    if (!window || best.date < window.dateFrom || best.date > window.dateTo) {
+      throw refuse(r.id, `cannot legally move to ${best.date} (${daysOut} days out, tier radius ±${radius}, drift budget ±${routeTiers.DRIFT_BUDGET_DAYS} of anchor ${anchor})`);
+    }
+  }
+}
+
+// FLEX-TIER sibling legality (Codex pre-push P1): the SAME rules as the
+// tapped row (makeMoveGuard) — the 73h freeze (reminder evidence, fail
+// closed on an unreadable read, OR-ed with each sibling's OWN canonical
+// arrival since a sibling can equally lack a reminder row) and its own
+// anchored series-neighbor window, re-read fresh here under the series
+// fence (fenceFlexSeries) — never reused from any earlier snapshot, so a
+// sibling occurrence inserted or edited since is still caught, and none can
+// land before this move commits. Each sibling's DESTINATION must clear the
+// freeze too: best.date + that member's own derived start from the unit
+// mover's `targets` (a member with no target fails closed).
+async function checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets) {
+  const now = new Date();
+  const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), now, flexTier.FLEX_TIER_FREEZE_HOURS);
+  if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
+  const frozen = siblings.find((m) => freeze.frozen.has(m.id));
+  if (frozen) throw refuse(frozen.id, 'is inside its 73-hour reminder window (frozen)');
+  // Same exemption as checkFlexOwnBounds: an unplaced due-date sibling has
+  // no time to freeze on or slot to bound (Codex pre-push P1).
+  const placed = rows.filter((r) => !isUnplacedDueDate(r));
+  if (!placed.length) return;
+  for (const r of placed) {
+    if (await flexTier.ownScheduleFrozen(trx, r, now)) {
+      throw refuse(r.id, 'is within 73 hours of its own scheduled time (frozen, independent of reminder evidence)');
+    }
+    const target = (targets || []).find((t) => String(t.id) === String(r.id));
+    const start = target ? target.startHHMM : null;
+    if (flexTier.destinationFrozen(r, best.date, start, now)) {
+      throw refuse(r.id, `would start within 73 hours at its destination (${best.date} ${start || 'no start'}) — frozen`);
+    }
+  }
+  await fenceFlexSeries(trx, placed, refuse);
+  await assertFlexWindows(trx, placed, best, today, refuse);
+}
+
+// The target date must not already hold another occurrence of a sibling's
+// recurring series (extracted, unchanged behavior).
+async function checkSameSeriesClash(trx, rows, best, memberIds, refuse) {
+  for (const r of rows) {
+    if (!r.recurring_parent_id && r.is_recurring !== true) continue;
+    const parentId = r.recurring_parent_id || r.id;
+    // Mirrors candidate-slots' sibling-date exclusion: every non-cancelled,
+    // non-request row (including reschedule holds for due placement),
+    // except the members moving together.
+    const clash = await trx('scheduled_services')
+      .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
+      .whereNotIn('id', memberIds)
+      .whereNotIn('status', r.recurring_dispatch_due_date ? ['cancelled'] : ['cancelled', 'rescheduled'])
+      .where('scheduled_date', best.date)
+      .first('id');
+    if (clash) throw refuse(r.id, `already has another visit of its series on ${best.date}`);
+  }
 }
 
 function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
@@ -185,15 +409,7 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
   return async ({ trx, members, targets }) => {
     const siblings = (members || []).filter((m) => String(m.id) !== String(service.id));
     if (!siblings.length) return;
-    for (const m of siblings) {
-      if (!['pending', 'confirmed'].includes(String(m.status || ''))) throw refuse(m.id, `is ${m.status}`);
-    }
-    if (config.prefs && config.prefs.preferred_time_window) {
-      for (const t of (targets || [])) {
-        if (t.isPrimary || !t.startHHMM) continue;
-        if (violatesPreferredTime(t.startHHMM, config.prefs)) throw refuse(t.id, `would start at ${t.startHHMM}, outside the customer's preferred time window`);
-      }
-    }
+    checkMemberStatusAndTiming(siblings, targets, config, refuse);
     const rows = await trx('scheduled_services as ss')
       .leftJoin('customers as c', 'ss.customer_id', 'c.id')
       .whereIn('ss.id', siblings.map((m) => m.id))
@@ -202,63 +418,19 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
         'c.latitude as customer_latitude', 'c.longitude as customer_longitude');
     const memberIds = (members || []).map((m) => m.id);
     const today = etDateString(new Date());
-    const eligCtx = {
-      today,
-      lockBoundary: config.lockBoundary,
-      lockWindowDays: config.lockWindowDays,
-      ...(config.routeTiersEnabled === true ? { routeTiers: { enabled: true, today } } : {}),
-    };
-    for (const r of rows) {
-      if (r.recurring_dispatch_due_date) {
-        const drift = routeTiers.daysBetween(toDateStr(r.recurring_dispatch_due_date), best.date);
-        if (drift == null || Math.abs(drift) > 3) throw refuse(r.id, 'would leave its recurring due date ±3 days');
-      }
-      if (r.customer_deleted_at) throw refuse(r.id, 'belongs to an archived customer');
-      const elig = isEligibleForAutoDispatch(r, eligCtx);
-      if (!elig.eligible) throw refuse(r.id, `is not auto-dispatchable (${elig.reason_code}: ${elig.reason_description})`);
-      const plan = await isRecurringPlanActive(r, trx);
-      if (!plan.active) throw refuse(r.id, `is on an inactive plan (${plan.reason_code})`);
-    }
+    const { guardMode } = config;
+    const eligCtx = buildMemberEligCtx(guardMode, config, today);
+    await checkMemberEligibility(rows, best, eligCtx, trx, refuse);
     if (isSaturday(best.date)) {
       const weekend = rows.find((r) => r.skip_weekends === true);
       if (weekend) throw refuse(weekend.id, `skips weekends and ${best.date} is a Saturday`);
     }
-    if (config.routeTiersEnabled === true) {
-      const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), new Date());
-      if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
-      const frozen = siblings.find((m) => freeze.frozen.has(m.id));
-      if (frozen) throw refuse(frozen.id, 'is inside its 72-hour reminder window (frozen)');
-      // Same legality math as the orchestrator's pass-1/apply-time checks,
-      // per SIBLING: its own anchor (durable evidence, fail closed), its own
-      // days-out tier radius, the destination floor — best.date must fall
-      // inside the sibling's window or the grouped move is refused.
-      const anchorMap = await routeTiers.loadAnchorMap(trx, rows.map((r) => r.id));
-      if (anchorMap === null) throw refuse(siblings[0].id, 'drift-anchor evidence is unreadable (no move, fail closed)');
-      for (const r of rows) {
-        const anchor = routeTiers.resolveAnchor(r, anchorMap);
-        if (!anchor) throw refuse(r.id, 'has no derivable drift anchor (no move, fail closed)');
-        const daysOut = routeTiers.daysBetween(today, toDateStr(r.scheduled_date));
-        const radius = routeTiers.tierRadiusForDaysOut(daysOut);
-        const window = radius > 0 ? routeTiers.tierMoveWindow({ origDate: r.scheduled_date, anchorDate: anchor, today, radius }) : null;
-        if (!window || best.date < window.dateFrom || best.date > window.dateTo) {
-          throw refuse(r.id, `cannot legally move to ${best.date} (${daysOut} days out, tier radius ±${radius}, drift budget ±${routeTiers.DRIFT_BUDGET_DAYS} of anchor ${anchor})`);
-        }
-      }
+    if (guardMode === 'tiers') {
+      await checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse);
+    } else if (guardMode === 'flex') {
+      await checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets);
     }
-    for (const r of rows) {
-      if (!r.recurring_parent_id && r.is_recurring !== true) continue;
-      const parentId = r.recurring_parent_id || r.id;
-      // Mirrors candidate-slots' sibling-date exclusion: every non-cancelled,
-      // non-request row (including reschedule holds for due placement),
-      // except the members moving together.
-      const clash = await trx('scheduled_services')
-        .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
-        .whereNotIn('id', memberIds)
-        .whereNotIn('status', r.recurring_dispatch_due_date ? ['cancelled'] : ['cancelled', 'rescheduled'])
-        .where('scheduled_date', best.date)
-        .first('id');
-      if (clash) throw refuse(r.id, `already has another visit of its series on ${best.date}`);
-    }
+    await checkSameSeriesClash(trx, rows, best, memberIds, refuse);
     // Every sibling against the receiving tech, committed rows, tech changed
     // or not (see assertCapabilitiesActive).
     await assertCapabilitiesActive(trx, best.technician_id || service.technician_id || null, rows, refuse);
@@ -289,7 +461,7 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
   options.memberGuard = makeMemberGuard({ service, best, config, techChanged });
   // The tapped row itself re-passes the capability fence inside the rebooker's
   // move transaction (a standalone visit has no member guard).
-  options.moveGuard = makeMoveGuard({ service, best });
+  options.moveGuard = makeMoveGuard({ service, best, config });
 
   if (fresh.recurring_dispatch_due_date) {
     const drift = routeTiers.daysBetween(toDateStr(fresh.recurring_dispatch_due_date), best.date);
@@ -622,4 +794,58 @@ async function unitMoveSize(service, best = null) {
   }
 }
 
-module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize, makeMemberGuard, makeMoveGuard };
+/**
+ * Pass-1 preview of the grouped-member guard for the flexible tier (Codex
+ * #4995 r4 P2). makeMemberGuard otherwise first runs in apply mode, inside
+ * the unit mover — so a dry-run night could recommend a grouped move that
+ * apply refuses (a sibling inside its own 73 h, or outside its own anchored
+ * window), and the owner reviews exactly that dry run before switching to
+ * apply. This runs the SAME guard against the visit's open members and their
+ * predicted destination starts (visit-groups predictMemberWindows — the unit
+ * mover's own planning, from the same member fields it reads), reading only.
+ * Returns null when the move would pass or the visit is not grouped, else
+ * { code, description } for a refusal or an unplannable unit, which
+ * suppresses the recommendation; a read failure throws (the run records it).
+ */
+async function previewGroupMove(service, best, config, conn = db) {
+  if (!service.visit_id) return null;
+  try {
+    const { predictMemberWindows } = require('../visit-groups');
+    const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
+    const members = await conn('scheduled_services').where({ visit_id: service.visit_id })
+      .whereNotIn('status', TERMINAL_ROW_STATUSES)
+      .select('id', 'status', 'technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+    if (members.length < 2) return null;
+    const visit = await conn('service_visits').where({ id: service.visit_id }).first('window_start');
+    const predicted = predictMemberWindows({
+      members, primaryId: service.id, visitWindowStart: visit ? visit.window_start : null,
+      requestedStart: best.start_time, requestedEnd: best.end_time, newDateStr: best.date,
+    });
+    if (!predicted.ok) {
+      return { code: 'GROUP_MEMBER_GUARD', description: `Grouped visit cannot move as a unit to this slot (${predicted.code})` };
+    }
+    // Each member's start as the unit mover derives it (its target, else its own window).
+    const targets = predicted.targets.map((t, i) => ({
+      id: members[i].id, isPrimary: t.isPrimary, startHHMM: norm(t.start) || norm(members[i].window_start),
+    }));
+    const techChanged = !!best.technician_id && String(best.technician_id) !== String(service.technician_id || '');
+    await makeMemberGuard({ service, best, config, techChanged })({ trx: conn, members, targets });
+    return null;
+  } catch (err) {
+    // A guard refusal (409) suppresses the recommendation; any other error —
+    // an unreadable group or evidence read — propagates, so the run records
+    // the failure instead of passing it off as an ordinary refusal.
+    if (err && err.statusCode === 409) {
+      return { code: 'GROUP_MEMBER_GUARD', description: `Grouped visit would be refused at apply — ${err.message}` };
+    }
+    throw err;
+  }
+}
+
+module.exports = {
+  applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize, makeMemberGuard, makeMoveGuard, previewGroupMove,
+  // Exported for direct unit tests of the flex-tier apply-time guards (Codex
+  // pre-push P1) — otherwise only reachable through the full member/move
+  // guard closures.
+  checkFlexOwnBounds, checkFlexSiblingBounds, checkTiersSiblingBounds,
+};

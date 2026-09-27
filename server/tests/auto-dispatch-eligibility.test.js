@@ -159,3 +159,40 @@ test.each([null, '09:00'])('customer confirmation freezes a deferred occurrence 
     window_start: windowStart, customer_confirmed: true,
   }), CTX)).toMatchObject({ eligible: false, reason_code: 'CUSTOMER_CONFIRMED' });
 });
+
+// GATE_AUTO_DISPATCH_FLEX_TIER — a series' first visit (the parent template
+// row) and any one-time/first-time visit stay Fixed-tier, excluded by the
+// SAME checks flex-tier relies on (NON_RECURRING / PARENT_TEMPLATE_ROW);
+// eligibility.js imposes no days-out lock of its own for Flexible-tier
+// visits — that lock is the 73h reminder freeze, decided later in index.js.
+describe('GATE_AUTO_DISPATCH_FLEX_TIER ctx', () => {
+  const FLEX_CTX = { ...CTX, flexTier: { enabled: true } };
+
+  test('a series first visit (parent/template row) stays Fixed-tier — excluded even with the flex ctx', () => {
+    expect(isEligibleForAutoDispatch(svc({ recurring_parent_id: null }), FLEX_CTX))
+      .toMatchObject({ eligible: false, reason_code: 'PARENT_TEMPLATE_ROW' });
+  });
+
+  test('a one-time visit stays Fixed-tier — excluded even with the flex ctx', () => {
+    expect(isEligibleForAutoDispatch(svc({ is_recurring: false, recurring_parent_id: null }), FLEX_CTX))
+      .toMatchObject({ eligible: false, reason_code: 'NON_RECURRING' });
+  });
+
+  test('a 2nd+ occurrence just inside the legacy 14-day lock window is eligible under the flex ctx', () => {
+    // 2026-06-25 is inside CTX's legacy 14-day lock (locked under plain CTX,
+    // see "inside the 14-day lock window" above) — the flex ctx imposes no
+    // days-out lock at all, so the visit clears eligibility here; the 73h
+    // freeze itself is checked later, against the live reminder row.
+    expect(isEligibleForAutoDispatch(svc({ scheduled_date: '2026-06-25' }), FLEX_CTX))
+      .toMatchObject({ eligible: true });
+  });
+
+  test('still denies on every other check (locked/excluded/inactive/status) under the flex ctx', () => {
+    expect(isEligibleForAutoDispatch(svc({ auto_dispatch_locked: true }), FLEX_CTX))
+      .toMatchObject({ eligible: false, reason_code: 'MANUALLY_LOCKED' });
+    expect(isEligibleForAutoDispatch(svc({ customer_active: false }), FLEX_CTX))
+      .toMatchObject({ eligible: false, reason_code: 'CUSTOMER_INACTIVE' });
+    expect(isEligibleForAutoDispatch(svc({ status: 'cancelled' }), FLEX_CTX))
+      .toMatchObject({ eligible: false, reason_code: 'CANCELLED' });
+  });
+});

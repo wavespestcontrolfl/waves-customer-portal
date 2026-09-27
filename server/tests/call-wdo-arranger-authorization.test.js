@@ -9,6 +9,11 @@
 // no am/pm and out-of-vocabulary words — and this ruling is deliberately a
 // separate, narrower rule that does not touch that grammar.
 //
+// Same day, second owner ruling ("WDO buyers"): a buyer under contract
+// ordering their own WDO inspection is covered too. Schema 1.15.0 gives
+// buyers their own caller relationship, home_buyer. "other" stays an
+// unspecified third party and is still NOT covered.
+//
 // Anonymized extraction shapes only — no real names/emails/phones.
 const {
   isAuthorizedWdoArrangerBooking,
@@ -50,6 +55,23 @@ describe('isAuthorizedWdoArrangerBooking (predicate)', () => {
 
   test('real_estate_agent + WDO + confirmed is authorized', () => {
     expect(isAuthorizedWdoArrangerBooking(wdoExtraction({ caller: { relationship_to_property: 'real_estate_agent', on_site_authorization: false } }))).toBe(true);
+  });
+
+  test('home_buyer (buyer under contract) + WDO + confirmed is authorized', () => {
+    expect(isAuthorizedWdoArrangerBooking(wdoExtraction({ caller: { relationship_to_property: 'home_buyer', on_site_authorization: false } }))).toBe(true);
+  });
+
+  test('home_buyer gets the same inspection-only and confirmed-time limits as a lender', () => {
+    const buyer = { relationship_to_property: 'home_buyer', on_site_authorization: false };
+    expect(isAuthorizedWdoArrangerBooking(wdoExtraction({ caller: buyer, scheduling: { status: 'requested', confirmed_start_at: null } }))).toBe(false);
+    expect(isAuthorizedWdoArrangerBooking(wdoExtraction({
+      caller: buyer,
+      service_request: { ...wdoExtraction().service_request, service_intent: 'active_infestation_treatment', specific_service_name: 'WDO Treatment Service' },
+    }))).toBe(false);
+    expect(isAuthorizedWdoArrangerBooking(wdoExtraction({
+      caller: buyer,
+      service_request: { ...wdoExtraction().service_request, primary_service_category: 'pest_general', specific_service_name: 'General Pest Control', service_intent: 'active_infestation_treatment' },
+    }))).toBe(false);
   });
 
   test('case/whitespace on the relationship is normalized', () => {
@@ -143,8 +165,28 @@ describe('computeDeterministicTriageFlags — WDO arranger demotion', () => {
     expect(flags).toContain('caller_not_authorized');
   });
 
-  test('other (buyer under contract) + WDO + confirmed still raises the flag', () => {
+  test('other (unspecified third party) + WDO + confirmed still raises the flag', () => {
     const flags = computeDeterministicTriageFlags(wdoExtraction({ caller: { relationship_to_property: 'other', on_site_authorization: false } }));
+    expect(flags).toContain('caller_not_authorized');
+  });
+
+  test('home_buyer + WDO + confirmed raises no caller_not_authorized', () => {
+    const flags = computeDeterministicTriageFlags(wdoExtraction({ caller: { relationship_to_property: 'home_buyer', on_site_authorization: false } }));
+    expect(flags).not.toContain('caller_not_authorized');
+  });
+
+  test('home_buyer + non-WDO service (general pest) + confirmed still raises the flag', () => {
+    const flags = computeDeterministicTriageFlags(wdoExtraction({
+      caller: { relationship_to_property: 'home_buyer', on_site_authorization: false },
+      service_request: {
+        primary_service_category: 'pest_general',
+        specific_service_name: 'General Pest Control',
+        service_intent: 'active_infestation_treatment',
+        urgency: 'within_one_week',
+        pests_observed: [],
+        pests_observed_status: 'not_discussed',
+      },
+    }));
     expect(flags).toContain('caller_not_authorized');
   });
 
@@ -209,13 +251,31 @@ describe('canAutoRoute — the pipeline decision for a 17ed9362-shaped call', ()
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
-  test('other (buyer under contract) + WDO + confirmed: still blocked', () => {
+  test('other (unspecified third party) + WDO + confirmed: still blocked', () => {
     const r = canAutoRoute(wdoExtraction({ caller: { relationship_to_property: 'other', on_site_authorization: false } }), {
       contactPhone: ANI,
       addressValidation: AV_CLEAN,
     });
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('home_buyer + WDO + confirmed: deterministic AND model-emitted caller_not_authorized are both suppressed', () => {
+    const r = canAutoRoute(wdoExtraction({
+      caller: { relationship_to_property: 'home_buyer', on_site_authorization: false },
+      triage_flags: ['caller_not_authorized'],
+    }), { contactPhone: ANI, addressValidation: AV_CLEAN });
+    expect(r.allowed).toBe(true);
+    expect(r.appointmentBlockingFlags || []).not.toContain('caller_not_authorized');
+    expect(r.failedOpenFlags || []).not.toContain('caller_not_authorized');
+  });
+
+  test('home_buyer + WDO but only requested (not confirmed): still blocked', () => {
+    const r = canAutoRoute(wdoExtraction({
+      caller: { relationship_to_property: 'home_buyer', on_site_authorization: false },
+      scheduling: { status: 'requested', confirmed_start_at: null },
+    }), { contactPhone: ANI, addressValidation: AV_CLEAN });
+    expect(r.allowed).toBe(false);
   });
 
   test('tenant + WDO + confirmed: still blocked', () => {
@@ -278,9 +338,20 @@ describe('codex #4890 r1 — audit trail and shadow bridge', () => {
       .toEqual(['no_sms_consent_captured']);
   });
 
-  test('the model copy survives for a buyer (relationship other)', () => {
-    const buyer = wdoExtraction({ caller: { relationship_to_property: 'other', on_site_authorization: false } });
-    expect(suppressUnsupportedModelFlags(['caller_not_authorized'], buyer)).toEqual(['caller_not_authorized']);
+  test('the model copy survives for an unspecified third party (relationship other)', () => {
+    const other = wdoExtraction({ caller: { relationship_to_property: 'other', on_site_authorization: false } });
+    expect(suppressUnsupportedModelFlags(['caller_not_authorized'], other)).toEqual(['caller_not_authorized']);
+  });
+
+  test('the model copy is dropped for a home_buyer ordering a confirmed WDO inspection', () => {
+    const buyer = wdoExtraction({ caller: { relationship_to_property: 'home_buyer', on_site_authorization: false } });
+    expect(suppressUnsupportedModelFlags(['caller_not_authorized'], buyer)).toEqual([]);
+  });
+
+  test('the home_buyer contract has its own decision version, listed after the lender/realtor one', () => {
+    expect(V2_DECISION_VERSIONS).toContain('v2-1.48.0');
+    expect(V2_DECISION_VERSIONS.indexOf('v2-1.48.0')).toBeGreaterThan(V2_DECISION_VERSIONS.indexOf('v2-1.44.0'));
+    expect(V2_DECISION_VERSIONS.indexOf(V2_DECISION_VERSION)).toBeGreaterThanOrEqual(V2_DECISION_VERSIONS.indexOf('v2-1.48.0'));
   });
 
   test('the route-decision version is bumped for the new routing contract and stays in the version list', () => {
@@ -419,7 +490,7 @@ describe('codex #4890 P2 — the card-retirement finalization transaction takes 
   const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
   const txStart = source.indexOf('const finalized = await db.transaction(async (trx) => {');
-  const retireMarker = source.indexOf('Superseded — a lender or realtor arranging a confirmed WDO inspection is an authorized caller');
+  const retireMarker = source.indexOf('Superseded — a lender, realtor or home buyer ordering a confirmed WDO inspection is an authorized caller');
 
   test('the finalization transaction and the WDO-authorized retire block are both found in source', () => {
     expect(txStart).toBeGreaterThan(-1);
