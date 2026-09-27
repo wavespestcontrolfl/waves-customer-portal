@@ -199,7 +199,7 @@ async function findCapacitySlots(opts) {
       if (!context) continue;
       if (opts.arrivalWindow?.serviceId && (await require('../technician-capabilities')
         .inactiveCapabilitiesForServices(db, [tech.id], [context.target])).length) continue;
-      const floor = Math.max(SHIFT.startMinutes, opts.earliestStartMin || 0,
+      const floor = Math.max(SHIFT.startMinutes, startFloorFor(date, opts.earliestStartMin, opts.startFloorByDate),
         date === today ? parts.hour * 60 + parts.minute + 30 : 0);
       // Enumerate every on-the-hour start through the shift close and let
       // placementFitsShift (scheduling/policy.js) decide admission from the
@@ -518,11 +518,11 @@ function toPackingBoundAnchor(stop) {
 // share a function scope with the day/tech enumeration around it.
 // `geo` carries the invariants resolved once per findAvailableSlots call:
 // { newStop, dateFrom, stopBuffer, candidateExpectedMinutes, durationMinutes,
-//   dayOpen, earliestStartMin, todayEt, todayFloorMin }.
+//   dayOpen, earliestStartMin, startFloorByDate, todayEt, todayFloorMin }.
 function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
   const {
     newStop, dateFrom, stopBuffer, candidateExpectedMinutes,
-    durationMinutes, dayOpen, earliestStartMin, todayEt, todayFloorMin,
+    durationMinutes, dayOpen, earliestStartMin, startFloorByDate, todayEt, todayFloorMin,
   } = geo;
   const baselineDrive = driveMin(prev, next);
   const driveIn = driveMin(prev, newStop);
@@ -557,7 +557,8 @@ function evaluateGap(prev, next, { date, tech, dayStops, geo }) {
     dayOpen,
     prevIsStop ? earliestFromPrevStop : (prev.endMin + driveIn),
     date === todayEt ? todayFloorMin : 0,
-    earliestStartMin, // honor a hard time-window lower bound (0 = no-op)
+    // honor a hard time-window lower bound, all dates or per date (0 = no-op)
+    startFloorFor(date, earliestStartMin, startFloorByDate),
   );
   // Must allow drive from new → next before next.startMin (its real,
   // never-adjusted window start — a promise to whoever holds it). Against a
@@ -732,6 +733,11 @@ function candidatesForDay(date, tech, params) {
 //   collapses to e.g. 08:00 and a valid later preferred start (e.g. 13:00 for an afternoon
 //   preference) is never generated. Floors earliestStart so the gap yields a candidate
 //   at/after the window start instead. Default 0 = no effect (identical legacy behavior).
+// @param {Object<string, number>} [opts.startFloorByDate] The same lower bound for
+//   named dates only ({ 'YYYY-MM-DD': minutes }), combined with earliestStartMin by max
+//   and honored wherever earliestStartMin is. Auto-dispatch's flexible tier passes the
+//   73-hour freeze boundary's date, so an open gap on that date yields its first start
+//   past the boundary instead of a frozen earlier one that would hide it. Default none.
 // @param {number} [opts.bufferMinutes=0] Turnaround minutes between the new stop and a
 //   NEIGHBOURING STOP (never an HQ leg) on top of the modeled drive. Customer-facing
 //   callers pass travel-gap.js customerFacingBufferMinutes() (GATE_SLOT_TRAVEL_GAP);
@@ -772,6 +778,7 @@ function normalizeFindTimeOptions(opts) {
     excludeServiceIds = [],
     slotStepMinutes = 1,
     earliestStartMin = 0,
+    startFloorByDate = null,
     bufferMinutes = 0,
     packEnds = false,
     serviceKey = null,
@@ -796,9 +803,15 @@ function normalizeFindTimeOptions(opts) {
   return {
     lat, lng, durationMinutes, dateFrom, dateTo, technicianId, topN,
     dayStartHour, dayEndHour, includeWeekends, slotStepMinutes,
-    earliestStartMin, packEnds, serviceKey, expectedMinutes,
+    earliestStartMin, startFloorByDate, packEnds, serviceKey, expectedMinutes,
     stopBuffer, wantsPackedEnds, wantsExpectedMinutesCredit, excludeSet,
   };
+}
+
+// The caller's start floor (minutes from midnight) for one date: the
+// all-dates earliestStartMin, raised by any startFloorByDate entry for it.
+function startFloorFor(date, earliestStartMin, startFloorByDate) {
+  return Math.max(earliestStartMin || 0, (startFloorByDate && startFloorByDate[date]) || 0);
 }
 
 // Loads this request's technician/service/date context: assignable
@@ -896,7 +909,7 @@ async function findAvailableSlots(opts) {
   const {
     lat, lng, durationMinutes, dateFrom, dateTo, technicianId, topN,
     dayStartHour, dayEndHour, includeWeekends, slotStepMinutes,
-    earliestStartMin, serviceKey, expectedMinutes,
+    earliestStartMin, startFloorByDate, serviceKey, expectedMinutes,
     stopBuffer, wantsPackedEnds, wantsExpectedMinutesCredit, excludeSet,
   } = normalizeFindTimeOptions(opts);
   // The requesting estimate's OWN uncommitted holds are not route stops for
@@ -958,7 +971,7 @@ async function findAvailableSlots(opts) {
   // per-gap call site stays a single readable line.
   const geo = {
     newStop, dateFrom, stopBuffer, candidateExpectedMinutes,
-    durationMinutes, dayOpen, earliestStartMin, todayEt, todayFloorMin,
+    durationMinutes, dayOpen, earliestStartMin, startFloorByDate, todayEt, todayFloorMin,
   };
 
   const dayParams = {

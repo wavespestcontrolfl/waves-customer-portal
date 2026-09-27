@@ -27,14 +27,13 @@ function fetchMap(routes) {
 
 function fakeDatabase(rows) {
   const updates = [];
+  const query = {};
+  query.whereIn = jest.fn(() => query);
+  query.orderByRaw = jest.fn(() => query);
+  query.orderBy = jest.fn(() => query);
+  query.limit = jest.fn(async () => rows);
   function database(table) {
     if (table !== 'content_registry') throw new Error(`Unexpected table ${table}`);
-    const query = {
-      whereIn: () => query,
-      orderByRaw: () => query,
-      orderBy: () => query,
-      limit: async () => rows,
-    };
     return {
       select: () => query,
       where: (_field, id) => ({
@@ -46,6 +45,7 @@ function fakeDatabase(rows) {
     };
   }
   database.updates = updates;
+  database.query = query;
   return database;
 }
 
@@ -65,6 +65,39 @@ describe('content registry live status helpers', () => {
       .toBe('https://www.wavespestcontrol.com/canonical-first/');
     expect(liveStatus.extractRobots(html)).toBe('noindex,nofollow');
     expect(liveStatus.isNoindex(html)).toBe(true);
+  });
+
+  test('prefers an absolute spoke canonical over a relative Astro live route', () => {
+    expect(liveStatus.targetUrlForRow({
+      live_url: '/termite/spoke-post/',
+      canonical_url: 'https://www.sarasotaflpestcontrol.com/different-canonical/',
+    })).toBe('https://www.sarasotaflpestcontrol.com/termite/spoke-post/');
+  });
+
+  test('refuses initial and redirected live checks outside the content fleet', async () => {
+    const initialFetch = jest.fn();
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'off-fleet', live_url: 'http://169.254.169.254/latest/meta-data/' },
+      { fetchImpl: initialFetch },
+    )).resolves.toEqual(expect.objectContaining({
+      live_status: 'unknown',
+      error: 'No URL available for registry row',
+    }));
+    expect(initialFetch).not.toHaveBeenCalled();
+
+    const redirectFetch = jest.fn(fetchMap({
+      'https://www.wavespestcontrol.com/redirect-out/': response(302, '', {
+        location: 'http://127.0.0.1/admin',
+      }),
+    }));
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'redirect-out', canonical_url_normalized: '/redirect-out/' },
+      { fetchImpl: redirectFetch },
+    )).resolves.toEqual(expect.objectContaining({
+      live_status: 'error',
+      error: expect.stringMatching(/outside the content fleet/),
+    }));
+    expect(redirectFetch).toHaveBeenCalledTimes(1);
   });
 
   test('classifies direct canonicalized pages', async () => {
@@ -198,6 +231,35 @@ describe('content registry live status helpers', () => {
     }));
   });
 
+  test('bounded loads prioritize never and least recently checked rows', async () => {
+    const database = fakeDatabase([]);
+
+    await liveStatus.loadRegistryRows(database, { statuses: ['astro_only'], limit: 300 });
+
+    expect(database.query.orderByRaw).toHaveBeenNthCalledWith(1, 'live_status_checked_at ASC NULLS FIRST');
+    expect(database.query.limit).toHaveBeenCalledWith(300);
+  });
+
+  test('commit mode advances the rotation watermark when live fields are unchanged', async () => {
+    const database = fakeDatabase([{
+      id: 'row-stable', canonical_url_normalized: '/stable/', http_status: '200', live_status: 'live',
+      redirect_target_url: null, canonical_target_url: null, noindex_detected: false,
+      sitemap_present: null, sitemap_status: 'unknown', live_status_checked_at: null,
+    }]);
+    const now = new Date('2026-09-27T02:45:00Z');
+
+    const result = await liveStatus.runContentRegistryLiveStatusCheck({
+      database, commit: true, statuses: ['astro_only'], useSitemap: false, now,
+      fetchImpl: fetchMap({
+        'https://www.wavespestcontrol.com/stable/': response(200, '<html></html>', {}, 'https://www.wavespestcontrol.com/stable/'),
+      }),
+    });
+
+    expect(result.summary.updated_count).toBe(0);
+    expect(database.updates).toHaveLength(1);
+    expect(database.updates[0].payload.live_status_checked_at).toEqual(now);
+  });
+
   test('commit mode updates only changed registry mirror fields', async () => {
     const database = fakeDatabase([{
       id: 'row-5',
@@ -274,6 +336,50 @@ describe('content registry live status helpers', () => {
 
     expect(paths.has('/blog/live-post/')).toBe(true);
     expect(paths.has('/blog-sitemap.xml/')).toBe(false);
+  });
+
+  test('loads and applies the sitemap for each checked fleet host', async () => {
+    const database = fakeDatabase([
+      { id: 'hub', canonical_url_normalized: '/hub-post/' },
+      {
+        id: 'spoke',
+        live_url: '/spoke-post/',
+        canonical_url: 'https://www.sarasotaflpestcontrol.com/spoke-post/',
+      },
+    ]);
+    const fetchImpl = jest.fn(fetchMap({
+      'https://www.wavespestcontrol.com/sitemap.xml': response(200, `
+        <urlset><url><loc>https://www.wavespestcontrol.com/hub-post/</loc></url></urlset>
+      `),
+      'https://www.sarasotaflpestcontrol.com/sitemap.xml': response(200, `
+        <urlset><url><loc>https://www.sarasotaflpestcontrol.com/spoke-post/</loc></url></urlset>
+      `),
+      'https://www.wavespestcontrol.com/hub-post/': response(200, '<html></html>'),
+      'https://www.sarasotaflpestcontrol.com/spoke-post/': response(200, '<html></html>'),
+    }));
+
+    const result = await liveStatus.runContentRegistryLiveStatusCheck({ database, fetchImpl });
+
+    expect(result.rows).toEqual([
+      expect.objectContaining({ id: 'hub', sitemap_status: 'present' }),
+      expect.objectContaining({ id: 'spoke', sitemap_status: 'present' }),
+    ]);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://www.sarasotaflpestcontrol.com/sitemap.xml',
+      expect.objectContaining({ redirect: 'manual' }),
+    );
+  });
+
+  test('does not follow off-fleet sitemap entries or redirects', async () => {
+    const fetchImpl = jest.fn(fetchMap({
+      'https://www.wavespestcontrol.com/sitemap.xml': response(200, `
+        <sitemapindex><sitemap><loc>http://169.254.169.254/sitemap.xml</loc></sitemap></sitemapindex>
+      `),
+    }));
+
+    await expect(liveStatus.fetchSitemapPaths({ fetchImpl }))
+      .rejects.toThrow(/outside the content fleet/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   test('status normalization preserves default, all, and empty semantics', async () => {

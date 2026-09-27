@@ -348,6 +348,7 @@ const PROPERTY_PREFERENCES = {
 // Overwrites land on the instance, shadowing the ApiClient prototype — the
 // real token plumbing (adoptTokens/clearTokens) keeps working underneath.
 Object.assign(api, {
+  getPhotoIds: async () => ({ items: [] }),
   getWateringPlan: async () => ({ available: false }),
   // auth
   getMe: async () => CUSTOMER,

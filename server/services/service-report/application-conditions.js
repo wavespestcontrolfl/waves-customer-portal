@@ -1,4 +1,3 @@
-const FawnWeather = require('../fawn-weather');
 const logger = require('../logger');
 
 function finiteNumber(value) {
@@ -115,17 +114,14 @@ async function fetchOpenMeteoConditions({ latitude, longitude } = {}) {
   }
 }
 
+// Open-Meteo only. A FAWN-first branch sat here, but FAWN's feed URL 400'd,
+// so every report and FDACS ledger row has always come from Open-Meteo.
+// Now that FAWN works (fawn-weather.js), it stays off this path on purpose:
+// FAWN has no trailing-24h rain or sky, and its nearest station can be up to
+// 35 mi from the property — whether application records should use station
+// data is an owner decision, not a side effect of the FAWN fix (2026-09-26).
 async function fetchApplicationConditions({ latitude, longitude } = {}) {
-  const coords = { latitude, longitude };
-  try {
-    const fawnSnapshot = await FawnWeather.getCurrent(coords);
-    const fawnConditions = normalizeFawnConditions(fawnSnapshot);
-    if (fawnConditions) return fawnConditions;
-  } catch (err) {
-    logger.warn(`[application-conditions] FAWN condition capture failed: ${err.message}`);
-  }
-
-  return fetchOpenMeteoConditions(coords);
+  return fetchOpenMeteoConditions({ latitude, longitude });
 }
 
 // Sum of daily precipitation (inches) over a window. Returns null if ANY day is

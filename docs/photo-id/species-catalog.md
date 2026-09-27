@@ -132,13 +132,15 @@ there, and it also prevents a built entry from remaining on the staging list.
 
 ## Nothing reaches customers yet
 
-This catalog is dark: it has no route, no UI, and no gate. Before any part of
-it reaches a customer — the app's result card, the website's
-`/pest-identifier/` pages, or anywhere else — a later PR needs to:
+This catalog is dark: its only caller ships behind a gate that defaults off.
+Before any part of it reaches a customer — the app's result card, the
+website's `/pest-identifier/` pages, or anywhere else — these need to happen:
 
-1. Wire an actual caller (the app result card, the engine's alias resolution,
-   or both) and add `GATE_PHOTO_ID_V2` (or similar) so the wiring itself ships
-   dark first.
+1. Wire an actual caller behind a dark gate. Done for the Waves app's pest
+   Photo ID only: `GATE_PHOTO_ID_V2` (off unless exactly `true`) sends
+   `POST /api/photo-id/pest` through `identifyPestV2` and serves the stored v2
+   answer back on `GET /api/photo-id/pest/:id` and the history list. The
+   website's `/pest-identifier/` pages and SMS photo triage are still v1.
 2. Have the owner review each remaining draft's complete authored content.
    Record `review.status: "owner_approved"` and the matching `approval_hash`
    only from that real decision; never copy a hash from another revision or

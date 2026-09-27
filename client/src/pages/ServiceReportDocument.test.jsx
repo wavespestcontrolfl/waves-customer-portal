@@ -199,6 +199,80 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toContain('Keep shrubs trimmed back from the exterior walls');
   });
 
+  it('prints a tappable Poison Control line when a product was applied', () => {
+    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    const line = screen.getByTestId('doc-poison-control');
+    const link = screen.getByRole('link', { name: '1-800-222-1222' });
+    expect(line).toContainElement(link);
+    expect(link).toHaveAttribute('href', 'tel:+18002221222');
+    expect(line.textContent).toMatch(/call 911/);
+  });
+
+  it('prints no Poison Control line on a visit that applied nothing', () => {
+    const termiteCheck = {
+      id: 'st-1',
+      method: 'station_check',
+      product: { name: 'Trelona ATBS Termite Bait Station', category: 'termite bait' },
+    };
+    for (const applications of [[], [termiteCheck]]) {
+      const { container, unmount } = render(<ServiceReportDocument data={{ ...BASE_DATA, applications }} token="tok123" />);
+      expect(container.textContent).not.toContain('Poison Control');
+      expect(container.querySelector('a[href="tel:+18002221222"]')).toBeNull();
+      unmount();
+    }
+  });
+
+  it('prints Poison Control on its own for a rodent bait-station visit or a productless treatment', () => {
+    // a station device row: servicing it is not an application, but the
+    // station holds rodenticide
+    const rodentCheck = {
+      id: 'st-2',
+      method: 'station_check',
+      product: { name: 'Protecta Rodent Bait Station' },
+    };
+    for (const data of [
+      { ...BASE_DATA, applications: [rodentCheck] },
+      { ...BASE_DATA, applications: [], typedReport: { ...BASE_DATA.typedReport, type: 'rodent_bait_station' } },
+      { ...BASE_DATA, applications: [], applicationMade: true },
+    ]) {
+      const { container, unmount } = render(<ServiceReportDocument data={data} token="tok123" />);
+      expect(screen.queryByText('Products applied')).toBeNull();
+      expect(screen.getByText('Poison Control')).toBeInTheDocument();
+      const block = screen.getByTestId('doc-poison-control');
+      expect(block.querySelector('a[href="tel:+18002221222"]')).not.toBeNull();
+      // no product list on the page, so the line never points at one
+      expect(block.textContent).not.toMatch(/names each product/);
+      unmount();
+    }
+  });
+
+  it('names the applicator only on application evidence, never on a bait-station check', () => {
+    const rodentCheck = { id: 'st-3', method: 'station_check', product: { name: 'Protecta Rodent Bait Station' } };
+    const withId = { ...BASE_DATA, applicatorFdacsId: 'JE000001' };
+    const { unmount } = render(<ServiceReportDocument data={{ ...withId, applications: [rodentCheck], applicationMade: false }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).not.toContain('FDACS ID');
+    unmount();
+    render(<ServiceReportDocument data={{ ...withId, applications: [], applicationMade: true }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).toContain('FDACS ID card #JE000001');
+  });
+
+  it('prints Poison Control when the application verdict is unknown (product read failed)', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [], applicationMade: null, applicatorFdacsId: 'JE000001' }} token="tok123" />);
+    const block = screen.getByTestId('doc-poison-control');
+    expect(block.querySelector('a[href="tel:+18002221222"]')).not.toBeNull();
+    expect(block.textContent).not.toContain('FDACS ID');
+  });
+
+  it('prints the applicator FDACS ID card number beside Poison Control when the server sends one', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, applicatorFdacsId: 'JE000001' }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).toContain('Applicator: Adam · FDACS ID card #JE000001');
+  });
+
+  it('prints no applicator line when the server withholds the number', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, applicatorFdacsId: null }} token="tok123" />);
+    expect(screen.getByTestId('doc-poison-control').textContent).not.toContain('FDACS ID');
+  });
+
   it('does not claim treatment areas on a visit with no applications', () => {
     // the server always builds mapSvg, even for inspection-only visits
     const data = { ...BASE_DATA, applications: [], mapSvg: '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>' };
@@ -751,6 +825,7 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
       findings: [
         { id: 'observation-1', category: 'observation', severity: 'medium', title: 'Gate code 4417, bill the office', detail: '', recommendation: '' },
         { id: 'observation-2', category: 'conducive_condition', severity: 'medium', title: 'Owner concern: lockbox code is 9902', detail: null, recommendation: null },
+        { id: 'observation-3', category: 'observation', severity: 'medium', title: 'Yellowjacket activity was observed around the inspected exterior areas.', detail: 'Recorded during the structured service closeout.', recommendation: '' },
         { id: 'f3', category: 'pest_activity', severity: 'high', title: 'Ant trail at the slider', detail: 'Treated and monitored.' },
       ],
     };
@@ -758,6 +833,8 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toContain('Gate code');
     expect(container.textContent).not.toContain('lockbox');
     expect(container.textContent).not.toContain('9902');
+    expect(container.textContent).toContain('Yellowjacket activity was observed around the inspected exterior areas.');
+    expect(container.textContent).toContain('Recorded during the structured service closeout.');
     expect(container.textContent).toMatch(/Ant trail at the slider/);
   });
 

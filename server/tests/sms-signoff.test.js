@@ -144,3 +144,86 @@ describe('stripTrailingSignature', () => {
     });
   });
 });
+
+// #4975: opt-in `anySigner` for text a model writes from arbitrary input —
+// a dash sign-off by a name the patterns do not know, in unambiguous form only.
+describe('stripTrailingSignature — anySigner', () => {
+  const any = (text) => stripTrailingSignature(text, { anySigner: true });
+
+  test.each([
+    ['We can help. — Sarah', 'We can help.'],
+    ['We can help!\n— Sarah', 'We can help!'],
+    ['Would you like to schedule?\n— Sarah', 'Would you like to schedule?'],
+    ['— Sarah', ''],
+    ['We can help. — sarah', 'We can help.'],
+    ['We can help. — Élodie', 'We can help.'],
+    ['We can help.\n\n— Sarah Jones, Waves Team', 'We can help.'],
+    // Codex r4 + r5 on #4975: closer-marked sign-offs by any name.
+    ['We can help.\nThanks,\nSarah', 'We can help.'],
+    ['We can help.\nBest regards,\nSarah Jones, Waves Team', 'We can help.'],
+    ['Talk soon!\nSarah', 'Talk soon!'],
+    ['We can help.\nThanks!\nSarah Jones', 'We can help.\nThanks!'],
+    // Codex r7 on #4975: the company joined by from/at/with, and a signature
+    // under a list (blank line or not) is not a list value.
+    ['We can help. — Sarah from Waves', 'We can help.'],
+    ['We can help.\n— Sarah with the Waves team', 'We can help.'],
+    ['We can help.\nThanks,\nSarah at Waves Pest Control', 'We can help.'],
+    ['Options:\n- Lawn Care\n\n— Adam, Waves Pest Control', 'Options:\n- Lawn Care'],
+    ['Options:\n- Lawn Care\n\n— Sarah', 'Options:\n- Lawn Care'],
+    ['Options:\n- Lawn Care\n— Adam, Waves Pest Control', 'Options:\n- Lawn Care'],
+  ])('%j → %j', (text, expected) => {
+    expect(any(text)).toBe(expected);
+  });
+
+  test.each([
+    'Which service? — Lawn Care',
+    'We serve your area — Sarasota.',
+    'Totally. — Tuesday works.',
+    'Your technician is — Sarah',
+    'Your technician is\n— Sarah',
+    'Your technician is:\nSarah',
+    'Your technician is \n— Sarah',
+    'Your technician this week:\nSarah',
+    'Who will be coming?\nSarah Jones',
+    'Here are the options,\nLawn Care',
+    // Codex r5 on #4975: a bare capitalized final line is not enough —
+    // short calls to action have the same shape as a name.
+    'We can help with ants.\nReply YES',
+    'We can help with ants.\nCall Today',
+    'We can help with ants.\nSchedule Online',
+    'We can help.\nSarah Jones',
+    'Thanks, Sarah!',
+    'See you Tuesday — Mike will be your tech.',
+    // Codex r6 on #4975: a dashed value under a label, an information
+    // question or a list item is the answer, not a sign-off.
+    'Which service:\n— Lawn Care',
+    'Your technician:\n— Sarah',
+    'Your technician is:\n— Sarah',
+    'Who will be coming?\n— Sarah',
+    'Your technician is:\n— Adam',
+    'Options:\n- Lawn Care\n- Pest Control',
+  ])('%j is not a sign-off and is kept', (text) => {
+    expect(any(text)).toBe(text);
+  });
+
+  test('without anySigner an unknown name is left alone (existing callers unchanged)', () => {
+    expect(stripTrailingSignature('We can help. — Sarah')).toBe('We can help. — Sarah');
+  });
+
+  test('the customer\'s own first name is the addressee and stays; a closer + other name on one line goes only when the customer is known', () => {
+    const as = (addresseeFirstName) => ({ anySigner: true, addresseeFirstName });
+    expect(stripTrailingSignature('Talk soon!\nSarah', as('Sarah'))).toBe('Talk soon!\nSarah');
+    expect(stripTrailingSignature('Talk soon!\nSarah', as('Tom'))).toBe('Talk soon!');
+    // Codex r5 on #4975: same-line closer + name.
+    expect(stripTrailingSignature('We can help. Thanks, Sarah', as('Pat'))).toBe('We can help.');
+    expect(stripTrailingSignature('We can help. Thanks, Sarah', as('Sarah'))).toBe('We can help. Thanks, Sarah');
+    expect(stripTrailingSignature('We can help. Thanks, Sarah', as(undefined))).toBe('We can help. Thanks, Sarah');
+  });
+});
+
+// Pre-push audit on #4975: the addressee check compares the first word of a
+// full name ("Sarah Jones") with the customer's first name.
+test('anySigner keeps a closer block that names the customer by full name', () => {
+  expect(stripTrailingSignature('Thanks,\nSarah Jones!', { anySigner: true, addresseeFirstName: 'Sarah' })).toBe('Thanks,\nSarah Jones!');
+  expect(stripTrailingSignature('We can help.\nSarah Jones', { anySigner: true, addresseeFirstName: 'Sarah' })).toBe('We can help.\nSarah Jones');
+});
