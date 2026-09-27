@@ -133,3 +133,12 @@ describe('computeContactGaps — legacy surname sentinels on the linked customer
     expect(gaps.lastName).toBe(true);
   });
 });
+
+describe('computeContactGaps — appended placeholder surname', () => {
+  test('"Pat Customer" reads as a missing last name', () => {
+    expect(computeContactGaps({ estimate: { customer_name: 'Pat Customer', customer_email: 'x@example.com' } }).lastName).toBe(true);
+  });
+  test('a real two-word name is untouched', () => {
+    expect(computeContactGaps({ estimate: { customer_name: 'Customer Sample', customer_email: 'x@example.com' } }).lastName).toBe(false);
+  });
+});

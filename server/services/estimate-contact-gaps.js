@@ -36,7 +36,10 @@ function cleanedNameTokens(value) {
     .replace(/\s{2,}/g, ' ')
     .trim()
     .split(/\s+/)
-    .filter(Boolean);
+    .filter(Boolean)
+    // A trailing 'Customer' is the accept placeholder surname appended to a
+    // single real name ("Pat Customer") — not a surname (codex #5102 r4 P2).
+    .filter((token, i, all) => !(i > 0 && i === all.length - 1 && token.toLowerCase() === 'customer'));
 }
 
 // The 'Customer' placeholder is what splitName/estimate-accept stamp when

@@ -9018,7 +9018,10 @@ function EstimateViewPageInner({ websiteMode = false }) {
                 onEmailChange={setContactEmail}
                 onEmailBlur={() => setContactEmailTouched(true)}
                 emailInvalid={contactEmailTouched && contactEmailInvalid}
-                disabled={ctaPhase === 'submitting'}
+                // Locked for the whole confirm, including the inline card
+                // confirmSetup() wait (ctaPhase stays 'review' there) — the
+                // running confirm already captured these values.
+                disabled={ctaPhase === 'submitting' || inlineConfirmBusy || replacingPaymentMethod}
               />
             ) : null}
             confirmLabelOverride={inlineAutoPayActive && inlineCardIntent

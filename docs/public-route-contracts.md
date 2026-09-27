@@ -373,9 +373,13 @@ true, and blocks Accept on a typed-but-malformed email.
 `{ error, code: 'CONTACT_LAST_NAME_INVALID' | 'CONTACT_EMAIL_INVALID' }` before
 any mutation; a blank or absent value is never an error (a tab loaded before
 this shipped still accepts). Values fill GAPS only and never overwrite: the
-estimate row is written inside the acceptance transaction, after the row lock
-and eligibility checks, compare-and-set (name only if still the value read,
-email only if still blank), so a rejected accept changes nothing; the
+gap verdict is recomputed and the estimate row written inside the acceptance
+transaction on the locked row, after the eligibility checks, so a rejected
+accept changes nothing and a failed check fails the accept (retryable) rather
+than dropping the input. Customer resolution (phone match) runs on the
+pre-fill identity, so a submitted email never steers which profile the accept
+lands on; an authored proposal's `preparedFor` that matched the old name moves
+with it (and `proposalDelivery` drops), as in the contact-fanout name sync; the
 matched/linked/new customer gets `last_name` only when blank or `'Customer'`
 and `email` only when blank (whitespace-only counts as blank). Only fields the
 server's own `contactGaps` verdict flags are ever written — a value for a field

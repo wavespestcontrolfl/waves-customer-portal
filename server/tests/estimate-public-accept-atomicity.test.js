@@ -1909,6 +1909,27 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(cust.last_name.toUpperCase()).toBe(longLast);
   });
 
+  test('a submitted email never steers the phone match away from the unique address match', async () => {
+    const est = recurringPestEstimate({
+      id: 'est-contact-17',
+      token: 'tok-contact-17-x0123456789',
+      customer_id: null,
+      customer_name: 'Testy Sample',
+      customer_email: null,
+    });
+    resetStore(est);
+    const line1 = String(est.address || '').split(',')[0];
+    db.__state.tables.customers = [
+      { id: 'cust-addr', first_name: 'Testy', last_name: 'Sample', email: null, phone: est.customer_phone, address_line1: line1, deleted_at: null, updated_at: new Date('2026-01-01') },
+      { id: 'cust-mail', first_name: 'Other', last_name: 'Person', email: 'someone@example.com', phone: est.customer_phone, address_line1: '1 Elsewhere Rd', deleted_at: null, updated_at: new Date('2026-02-01') },
+    ];
+    conversionOk('cust-addr');
+
+    const res = await putAccept('tok-contact-17-x0123456789', { contactEmail: 'someone@example.com' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_id).toBe('cust-addr');
+  });
+
   test('a crafted request for a field the page never offered writes nothing (estimate already has full name + email)', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-10',

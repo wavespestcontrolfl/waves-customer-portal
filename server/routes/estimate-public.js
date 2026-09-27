@@ -9078,22 +9078,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
 
     // Missing-contact capture (owner ruling 2026-09-27): the accept card
     // asks for whatever's actually missing — last name and/or email — right
-    // above the Accept button. Sanitize/validate first (a malformed email
-    // 400s before any mutation); a blank/absent value is never an error —
-    // last name is server-optional (a stale tab loaded before this deployed
-    // must still be able to accept; the client enforces required) and email
-    // is optional/skippable by design. Applied ONLY to genuine gaps, and
-    // ONLY before customer resolution below, so the new-profile insert /
-    // ensureCustomerAccount and the phone-match disambiguation all see the
-    // real values instead of the 'Customer' placeholder / blank email.
-    // Never overwrites an existing value — computeContactGaps and the
-    // customers-table fills below (fillExistingCustomerLastName/Email) are
-    // both gap-guarded independently. The patch is applied IN MEMORY here
-    // and PERSISTED only inside the acceptance transaction, after the
-    // estimate row lock and every eligibility check (codex pre-push P1): a
-    // rejected accept must not change stored contact details, and the
-    // persisted write is compare-and-set so a concurrent accept that read
-    // the same gap cannot overwrite a value that has since landed.
+    // above the Accept button. Only sanitize/validate here (a malformed
+    // value 400s before any mutation); a blank/absent value is never an
+    // error — last name is server-optional (a stale tab loaded before this
+    // deployed must still be able to accept; the client enforces required)
+    // and email is optional by design. The gap verdict, the estimate write
+    // and the customer fills all happen inside the accept transaction below.
     const { value: sanitizedContactLastName, error: contactLastNameError } = sanitizeContactLastName(req.body?.contactLastName);
     if (contactLastNameError) {
       return res.status(400).json({ error: contactLastNameError.message, code: contactLastNameError.code });
@@ -9102,45 +9092,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     if (contactEmailError) {
       return res.status(400).json({ error: contactEmailError.message, code: contactEmailError.code });
     }
-    let pendingEstimateContactPatch = null;
     // Only the fields the server itself flags as gaps are ever written —
-    // the same verdict /data advertised. A crafted request carrying a
-    // value for a field the page never offered writes nothing (codex
-    // #5102 r1 P0): customer fills below use these, not the raw inputs.
+    // the same verdict /data advertised, recomputed INSIDE the accept
+    // transaction on the locked row (codex #5102 r1 P0, r4 P2): a crafted
+    // value for a field the page never offered writes nothing, and a failed
+    // gap check fails the accept (retryable) instead of silently dropping
+    // what the customer typed. Nothing touches the in-memory estimate
+    // before customer resolution (codex #5102 r4 P1): a submitted email
+    // must never steer matchAcceptCustomerByPhone toward another profile.
     let contactFillLastName = null;
     let contactFillEmail = null;
-    if (sanitizedContactLastName || sanitizedContactEmail) {
-      try {
-        const linkedCustomerForGaps = estimate.customer_id
-          ? await db('customers').where({ id: estimate.customer_id }).first('last_name', 'email')
-          : null;
-        const contactFillGaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
-        const estimateContactPatch = {};
-        if (sanitizedContactLastName && contactFillGaps.lastName) contactFillLastName = sanitizedContactLastName;
-        if (sanitizedContactEmail && contactFillGaps.email) contactFillEmail = sanitizedContactEmail;
-        if (contactFillLastName) {
-          // Cleaned tokens (codex #5102 r1 P2): a legacy "undefined Smith"
-          // row keeps no 'undefined' first name.
-          const firstToken = contactGapNameTokens(estimate.customer_name)[0] || 'Customer';
-          // estimates.customer_name is varchar(100).
-          estimateContactPatch.customer_name = `${firstToken} ${contactFillLastName}`.slice(0, 100);
-        }
-        if (contactFillEmail) {
-          estimateContactPatch.customer_email = contactFillEmail;
-        }
-        if (Object.keys(estimateContactPatch).length) {
-          // Remember the pre-patch values for the in-transaction
-          // compare-and-set, then mutate the in-memory row so every
-          // downstream read in this handler (matchAcceptCustomerByPhone's
-          // several call sites, the new-profile nameParts split, firstName
-          // below) sees the supplied values instead of re-fetching.
-          pendingEstimateContactPatch = { patch: estimateContactPatch, priorName: estimate.customer_name ?? null };
-          Object.assign(estimate, estimateContactPatch);
-        }
-      } catch (e) {
-        logger.error(`[estimate-accept] contact-gap fill failed for estimate ${estimate.id}: ${e.message}`);
-      }
-    }
+    let acceptContactView = null;
 
     const firstName = (estimate.customer_name || '').split(' ')[0] || 'there';
 
@@ -10837,22 +10799,28 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           .update({ status: 'resolved', updated_at: trx.fn.now() });
       }
 
-      // Persist the accept-card contact patch now that the estimate row is
-      // locked and the accept is past its eligibility checks — rolls back
-      // with the transaction on any later failure. Compare-and-set: the
-      // name only if it still reads what we patched against, the email only
-      // if still blank, so a concurrent writer's value is never overwritten.
-      if (pendingEstimateContactPatch) {
-        const { patch, priorName } = pendingEstimateContactPatch;
-        // The estimate row is already FOR UPDATE-locked above, so this
-        // read-then-write is race-free; the email gap uses the same
-        // normalized predicate as computeContactGaps (whitespace-only is
-        // blank), so a field the page asked for is never silently dropped.
-        const lockedContact = await trx('estimates').where({ id: estimate.id }).first('customer_name', 'customer_email', 'estimate_data');
+      // Accept-card contact fill, decided and persisted HERE: the estimate
+      // row is FOR UPDATE-locked above and the accept is past its
+      // eligibility checks, so the gap verdict is judged on the locked row
+      // (a concurrent writer's value simply closes the gap) and the write
+      // rolls back with the transaction on any later failure. A read error
+      // propagates and fails the accept rather than discarding the input.
+      if (sanitizedContactLastName || sanitizedContactEmail) {
+        const lockedContact = await trx('estimates').where({ id: estimate.id })
+          .first('customer_id', 'customer_name', 'customer_email', 'estimate_data');
         if (lockedContact) {
+          const linkedCustomerForGaps = lockedContact.customer_id
+            ? await trx('customers').where({ id: lockedContact.customer_id }).first('last_name', 'email')
+            : null;
+          const lockedGaps = computeContactGaps({ estimate: lockedContact, linkedCustomer: linkedCustomerForGaps });
+          if (sanitizedContactLastName && lockedGaps.lastName) contactFillLastName = sanitizedContactLastName;
+          if (sanitizedContactEmail && lockedGaps.email) contactFillEmail = sanitizedContactEmail;
           const contactWrite = {};
-          if (patch.customer_name && (lockedContact.customer_name ?? null) === priorName) {
-            contactWrite.customer_name = patch.customer_name;
+          if (contactFillLastName) {
+            // Cleaned tokens (codex #5102 r1 P2): a legacy "undefined Smith"
+            // row keeps no 'undefined' first name. varchar(100) column.
+            const firstToken = contactGapNameTokens(lockedContact.customer_name)[0] || 'Customer';
+            contactWrite.customer_name = `${firstToken} ${contactFillLastName}`.slice(0, 100);
             // An authored proposal snapshots its own preparedFor, which
             // normalizeProposal PREFERS over the column (codex #5102 r3 P1).
             // Same rule as customer-contact-fanout's name sync: a
@@ -10860,43 +10828,35 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // "PDF emailed" marker drops whenever the PDF-visible name moves
             // (patched preparedFor, or none — the PDF fell back to the
             // column). A CUSTOM preparedFor (landlord → tenant) is left
-            // alone with its marker. The row is FOR UPDATE-locked above.
+            // alone with its marker.
             let lockedData = lockedContact.estimate_data;
             if (typeof lockedData === 'string') {
               try { lockedData = JSON.parse(lockedData); } catch { lockedData = null; }
             }
             if (lockedData && typeof lockedData === 'object') {
               const preparedFor = lockedData.proposal?.preparedFor;
-              const priorKey = String(priorName ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+              const priorKey = String(lockedContact.customer_name ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
               const patchPreparedFor = !!(preparedFor
                 && String(preparedFor).trim().toLowerCase().replace(/\s+/g, ' ') === priorKey);
               if ((patchPreparedFor || !preparedFor) && (patchPreparedFor || 'proposalDelivery' in lockedData)) {
                 const { proposalDelivery: _droppedDelivery, ...rest } = lockedData;
                 const nextData = patchPreparedFor
-                  ? { ...rest, proposal: { ...rest.proposal, preparedFor: patch.customer_name } }
+                  ? { ...rest, proposal: { ...rest.proposal, preparedFor: contactWrite.customer_name } }
                   : rest;
                 contactWrite.estimate_data = JSON.stringify(nextData);
               }
             }
           }
-          if (patch.customer_email && !contactGapHasEmail(lockedContact.customer_email)) {
-            contactWrite.customer_email = patch.customer_email;
-          }
+          if (contactFillEmail) contactWrite.customer_email = contactFillEmail;
           if (Object.keys(contactWrite).length) {
             await trx('estimates').where({ id: estimate.id }).update(contactWrite);
           }
-          // A concurrent writer may have won: everything downstream
-          // (customer resolution, the new-profile insert, notifications)
-          // uses what is actually stored, not the in-memory patch — and a
-          // lost field is not copied onto the customer either, so the
-          // customer and the accepted estimate never disagree.
-          estimate.customer_name = contactWrite.customer_name ?? lockedContact.customer_name;
-          estimate.customer_email = contactWrite.customer_email ?? lockedContact.customer_email;
-          if (!contactWrite.customer_name) contactFillLastName = null;
-          if (!contactWrite.customer_email) contactFillEmail = null;
-        } else {
-          contactFillLastName = null;
-          contactFillEmail = null;
+          // Applied to the in-memory estimate only AFTER customer
+          // resolution below; the new-profile insert reads it directly.
+          acceptContactView = {
+            customer_name: contactWrite.customer_name ?? lockedContact.customer_name,
+            customer_email: contactWrite.customer_email ?? lockedContact.customer_email,
+          };
         }
       }
       // Existing-customer email fill through the shared claim guard. A
@@ -10912,7 +10872,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         const reason = claim?.emailDroppedReason || '';
         if (claim && !claim.emailApplied && reason && reason !== 'email already on file' && reason !== 'email filled concurrently') {
           await trx('estimates').where({ id: estimate.id }).where('customer_email', contactFillEmail).update({ customer_email: null });
-          if (estimate.customer_email === contactFillEmail) estimate.customer_email = null;
+          if (acceptContactView && acceptContactView.customer_email === contactFillEmail) acceptContactView.customer_email = null;
           contactFillEmail = null;
         }
       };
@@ -11010,7 +10970,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           if (contactFillLastName) await fillExistingCustomerLastName(trx, customerId, contactFillLastName);
           await applyAcceptContactEmailFill(customerId);
         } else {
-          const nameParts = (estimate.customer_name || 'New Customer').split(' ');
+          const nameParts = ((acceptContactView ? acceptContactView.customer_name : estimate.customer_name) || 'New Customer').split(' ');
+          const newProfileEmail = (acceptContactView ? acceptContactView.customer_email : estimate.customer_email) || null;
           const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
           // Account layer: attach-or-create BEFORE the profile insert — portal
           // login's refresh session FKs customer_accounts, and the account is
@@ -11024,7 +10985,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // could clip it; customers.last_name holds the full 50.
             lastName: contactFillLastName || nameParts.slice(1).join(' ') || 'Customer',
             phone: estimate.customer_phone,
-            email: estimate.customer_email || null,
+            email: newProfileEmail,
           });
           // Structured address when the free-text snapshot parses ("street,
           // city, ST zip" — the Places shape the builder stores); the legacy
@@ -11039,7 +11000,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             first_name: nameParts[0] || 'New',
             last_name: contactFillLastName || nameParts.slice(1).join(' ') || 'Customer',
             phone: estimate.customer_phone,
-            email: estimate.customer_email || null,
+            email: newProfileEmail,
             address_line1: (parsedAcceptAddress && !parsedAcceptAddress.partial ? parsedAcceptAddress.address_line1 : estimate.address) || '',
             // Canonicalized unit segment (codex #3244 r7): without it the
             // primary-property backfill and every addressKey compare see a
@@ -11063,6 +11024,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
         await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
       }
+      // Customer resolved on the pre-fill identity; from here on (billing,
+      // notifications, the success payload) the accept reads the stored
+      // contact values.
+      if (acceptContactView) Object.assign(estimate, acceptContactView);
 
       // Bank tender re-judged UNDER THE CUSTOMER LOCK against the customer the
       // accept actually landed on (Codex #3723 r3 P1): the pre-transaction
