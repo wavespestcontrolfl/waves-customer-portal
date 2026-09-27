@@ -1268,6 +1268,10 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         includeCTA,
         issueReference: editorialReference || undefined,
         persist: false,
+        // Interactive admin composer (synchronous HTTP request) — 'high'
+        // instead of the autopilot's 'max' so a draft can't hang the UI
+        // (owner ruling 2026-09-27; see createNewsletterDraft's JSDoc).
+        effort: 'high',
       });
       // Return the locked event ids so the Compose flow can carry them into
       // the /sends save (the saved row needs them for times_featured tracking).
@@ -1287,6 +1291,8 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         tone,
         includeCTA,
         persist: false,
+        // Interactive admin composer — see the flagship branch above.
+        effort: 'high',
       });
       return res.json({ success: true, draft });
     }
@@ -1368,13 +1374,26 @@ No prose outside the JSON.`;
 ${audience ? `Audience: ${audience}` : ''}
 ${tone ? `Tone: ${tone}` : ''}`;
 
-    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+    // Legacy free-form/template branch of this SAME interactive /draft-ai
+    // handler — moved to the newsletterWriter policy too (owner ruling
+    // 2026-09-27), at effort 'high' (not the policy's default 'max') since
+    // this runs synchronously inside the admin composer's HTTP request.
+    // 8000 tokens: Opus 5+ always thinks and spends that from max_tokens
+    // ahead of the JSON reply (the old 2000-token cap was sized for a
+    // non-thinking Sonnet reply and would starve the JSON under 'high' effort's
+    // thinking).
+    const legacyPolicy = {
+      ...MODELS.TEXT_POLICIES.newsletterWriter,
+      primary: { ...MODELS.TEXT_POLICIES.newsletterWriter.primary, effort: 'high' },
+    };
+    const response = await dispatchWithFallback(legacyPolicy, {
       laneId: 'newsletter',
-      maxTokens: 2000,
+      maxTokens: 8000,
+      timeoutMs: 5 * 60 * 1000,
       jsonMode: true,
       system: systemPrompt,
       text: userPrompt,
-    });
+    }, { reserveFallbackBudget: true });
     if (!response.ok || !response.json) throw new Error('Newsletter AI providers did not return valid JSON');
     const draft = response.json;
     res.json({ success: true, draft });
@@ -2451,6 +2470,9 @@ router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, ne
       includeCTA: true,
       issueReference: snapshot.target_send_at || wk.week_of,
       persist: false,
+      // Interactive admin composer (calendar "Draft" button, synchronous
+      // HTTP request) — see createNewsletterDraft's JSDoc.
+      effort: 'high',
     });
 
     const result = await db.transaction(async (trx) => {

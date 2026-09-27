@@ -11,8 +11,10 @@ const {
   missingAssessmentFallbacks,
   curationEnabled,
   buildCurationCandidateQuery,
+  buildRescoreCandidateQuery,
+  rescoreCuratedEvent,
 } = require('../services/event-curation');
-const { FACTOR_MAXES, REJECTION_CODES } = require('../services/event-scoring');
+const { FACTOR_MAXES, REJECTION_CODES, featureScoreFloor } = require('../services/event-scoring');
 
 const EVENTS = [
   {
@@ -115,6 +117,135 @@ describe('event-curation buildCurationPrompt', () => {
     ], '2026-06-11');
     expect(long).toContain('line1 line2');
     expect(long).not.toContain('x'.repeat(301));
+  });
+
+  // 2026-09-27 calibration (owner ruling): the model was underscoring
+  // source_confidence/accessibility/audience_fit for exactly the events the
+  // rubric wants approved — an official venue publishing its own event, a
+  // major touring headliner or pro sports match, an event that just doesn't
+  // state a price or age range. Anchors added to stop that without touching
+  // the hard-policy rejection codes or penalty flags.
+  test('calibrates source_confidence, accessibility, audience_fit and specialness so the model stops underscoring official/major events', () => {
+    expect(prompt).toMatch(/source_confidence.*9.?[-–]10|9-10.*source_confidence/is);
+    expect(prompt).toContain('official venue');
+    expect(prompt).toMatch(/museum|performing-arts|tourism board|municipal calendar/);
+    expect(prompt).toMatch(/do NOT zero or heavily penalize/i);
+    expect(prompt).toMatch(/touring headliner|pro sports/i);
+    expect(prompt).toMatch(/do not dock audience_fit/i);
+    // The hard-policy codes and penalty flags are untouched by the calibration pass.
+    for (const code of REJECTION_CODES) expect(prompt).toContain(code);
+    expect(prompt).toContain('generic_class');
+  });
+});
+
+describe('event-curation rescoreCuratedEvent (deterministic, no model call)', () => {
+  const STORED_ROW = (overrides = {}) => ({
+    id: 'e-rescore-1',
+    start_at: new Date(Date.now() + 10 * 24 * 3600 * 1000).toISOString(),
+    score_breakdown: JSON.stringify({
+      factors: {
+        specialness: 23, reader_pull: 17, audience_fit: 12, planning_value: 13,
+        local_relevance: 8, source_confidence: 10, accessibility: 3,
+      },
+      penalty_flags: [],
+      // A stored row from before the 2026-09-27 removal still carries the
+      // retired derived flags — the rescore must recompute WITHOUT them.
+      derived_penalty_flags: ['missing_price', 'unclear_age'],
+      final: 73,
+      tier: 'shortlist',
+      family_status: 'confirmed',
+    }),
+    rejection_codes: '[]',
+    audience_tags: '["parents_night"]',
+    novelty_type: 'touring',
+    editorial_evidence: '["Official event page identifies the performer and one-night date."]',
+    curation_note: 'Scored 73/100',
+    ...overrides,
+  });
+
+  test('a row penalized under the retired rules now recomputes above the old stored score and clears the floor', () => {
+    const decision = rescoreCuratedEvent(STORED_ROW());
+    // 23+17+12+13+8+10+3 = 86, no penalties apply any more (short_notice
+    // doesn't fire 10 days out) — well above the stored 73 and the feature floor.
+    expect(decision.score).toBe(86);
+    expect(decision.score).toBeGreaterThan(73);
+    expect(decision.approve).toBe(true);
+    expect(decision.score).toBeGreaterThanOrEqual(featureScoreFloor());
+    // The retired flags are gone from the recomputed breakdown.
+    expect(decision.breakdown.derived_penalty_flags).toEqual([]);
+  });
+
+  test('short_notice still applies on rescore — it is not one of the retired flags', () => {
+    const soon = STORED_ROW({ start_at: new Date(Date.now() + 2 * 3600 * 1000).toISOString() });
+    const decision = rescoreCuratedEvent(soon);
+    expect(decision.breakdown.derived_penalty_flags).toEqual(['short_notice']);
+    expect(decision.score).toBe(76); // 86 - 10
+  });
+
+  test('a hard-policy rejection code from the original assessment still blocks approval on rescore', () => {
+    const rejected = STORED_ROW({ rejection_codes: '["retail_promotion"]' });
+    const decision = rescoreCuratedEvent(rejected);
+    expect(decision.approve).toBe(false);
+    expect(decision.tier).toBe('rejected_policy');
+  });
+
+  test('a model-asserted penalty flag from the original assessment is preserved on rescore', () => {
+    const withPenalty = STORED_ROW({
+      score_breakdown: JSON.stringify({
+        factors: {
+          specialness: 10, reader_pull: 10, audience_fit: 10, planning_value: 10,
+          local_relevance: 10, source_confidence: 10, accessibility: 5,
+        },
+        penalty_flags: ['generic_class'],
+        derived_penalty_flags: [],
+        final: 50,
+        tier: 'below_shortlist',
+      }),
+    });
+    const decision = rescoreCuratedEvent(withPenalty);
+    // 65 - 15 (generic_class) = 50, unchanged — the model penalty isn't retired.
+    expect(decision.score).toBe(50);
+  });
+
+  test('missing or malformed score_breakdown returns null — left for a human, nothing thrown', () => {
+    expect(rescoreCuratedEvent(STORED_ROW({ score_breakdown: null }))).toBeNull();
+    expect(rescoreCuratedEvent(STORED_ROW({ score_breakdown: '{}' }))).toBeNull();
+    expect(rescoreCuratedEvent(STORED_ROW({ score_breakdown: 'not json' }))).toBeNull();
+    // An unknown rejection code can't actually reach a stored row in practice
+    // (the column is always written from a pre-filtered normalizeAssessment
+    // result), but the same fail-closed allowlist check applies here too —
+    // never trust an unrecognized code enough to reason about approval.
+    expect(rescoreCuratedEvent(STORED_ROW({ rejection_codes: '["not_a_real_code"]' }))).toBeNull();
+  });
+
+  test('accepts already-parsed object/array columns (not just JSON strings)', () => {
+    const parsed = STORED_ROW({
+      score_breakdown: {
+        factors: {
+          specialness: 25, reader_pull: 20, audience_fit: 15, planning_value: 15,
+          local_relevance: 10, source_confidence: 10, accessibility: 5,
+        },
+        penalty_flags: [],
+        derived_penalty_flags: [],
+      },
+      rejection_codes: [],
+      audience_tags: [],
+      editorial_evidence: [],
+    });
+    const decision = rescoreCuratedEvent(parsed);
+    expect(decision.score).toBe(100);
+  });
+});
+
+describe('event-curation buildRescoreCandidateQuery', () => {
+  test('targets pending, already-curated, upcoming rows with a stored breakdown', () => {
+    const { sql, bindings } = buildRescoreCandidateQuery(500).toSQL();
+    expect(sql).toMatch(/"admin_status" = \?/);
+    expect(bindings).toContain('pending');
+    expect(sql).toMatch(/"curated_at" is not null/i);
+    expect(sql).toMatch(/"score_breakdown" is not null/i);
+    expect(sql).toMatch(/"merged_into" is null/i);
+    expect(sql).toMatch(/"start_at" >= \?/);
   });
 });
 

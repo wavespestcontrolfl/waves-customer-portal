@@ -4,6 +4,21 @@
  * Draft creation filters events, but stored drafts can outlive policy changes
  * or carry manually supplied ids. Proofing and delivery therefore re-load the
  * locked rows and fail closed before any external mail or send-state claim.
+ *
+ * Owner ruling 2026-09-27: "For recurring it should be the first event for
+ * the year." Any recurring identity — daily/weekly/monthly/custom/seasonal/
+ * annual recurrence, event_type recurring_series/ongoing, or an
+ * unknown-recurrence identity that actually repeats — is eligible only for
+ * its first occurrence of the ET calendar year, proven by prior-year
+ * continuity, series-debut evidence, or (annual only) simply not having run
+ * yet this year. isFirstOccurrenceOfYear / loadYearIdentityPool implement
+ * this against a full-calendar-year identity pool (unlike the ±90-day
+ * loadRoutineIdentityPool below), and both filterRepeatedDateIdentities and
+ * assessFlagshipEventSelection apply it, so every consumer of either
+ * function picks it up automatically. isPreviouslyFeaturedIdentity and
+ * event-freshness.js's isEditoriallyNewEvent carry the companion rule: an
+ * identity already featured in the SAME calendar year is never eligible
+ * again that year (this replaced the old 300-day annual-only cooldown).
  */
 
 const db = require('../models/db');
@@ -12,6 +27,10 @@ const {
   isEligibleForFreshDigest,
   isEditoriallyNewEvent,
   isSeriesDebutEvent,
+  isAnnualEvent,
+  isRecurringIdentityEvent,
+  isRoutineRecurringEvent,
+  etYearOf,
   normalizeDigestTitle,
   excludeRepeatedDateIdentities,
   dedupeDigestEvents,
@@ -42,9 +61,15 @@ function isPreviouslyFeaturedIdentity(event, featuredHistory, reference) {
     // canonical title identity carries feature history across ingestion rows.
     if (!sameTitle) return false;
 
-    // Annual occurrences can return after the same 300-day cooldown used for
-    // row-local feature history. Missing timestamps fail closed.
-    if (event.event_type === 'annual' || event.recurrence_type === 'annual') {
+    // Recurring identities (owner ruling 2026-09-27: "for recurring it
+    // should be the first event for the year") can return once a NEW ET
+    // calendar year starts — replacing the old 300-day annual-only cooldown.
+    // A one-time identity stays blocked forever once featured. `prior` may
+    // carry different event_type/recurrence_type metadata than the current
+    // ingestion row (a re-scrape can normalize it differently), so either
+    // side calling itself recurring is enough to grant the calendar-year
+    // re-check.
+    if (isRecurringIdentityEvent(event) || isRecurringIdentityEvent(prior)) {
       return !isEditoriallyNewEvent({
         ...event,
         times_featured: Math.max(1, Number(prior.times_featured) || 0),
@@ -167,6 +192,104 @@ function isFirstOccurrenceInPool(event, pool) {
 }
 
 /**
+ * Every occurrence of `event`'s identity found in `pool` (isSameSeriesSibling
+ * — normalized title plus venue/city context), `event` itself included.
+ * A recurrence_type='unknown' row has no reliable metadata of its own, so
+ * isRecurringIdentityEvent needs this count to tell an actually-repeating
+ * identity (the same Tuesday trivia night, week after week) from a genuine
+ * one-off that merely lacks a recurrence label.
+ */
+function identityOccurrenceCount(event, pool) {
+  let count = 1;
+  for (const sibling of (Array.isArray(pool) ? pool : [])) {
+    if (!sibling || String(sibling.id) === String(event?.id)) continue;
+    if (isSameSeriesSibling(event, sibling)) count += 1;
+  }
+  return count;
+}
+
+/**
+ * Owner ruling 2026-09-27: "For recurring it should be the first event for
+ * the year." An occurrence of a recurring identity is first-of-year only
+ * when BOTH:
+ *   (a) no other occurrence of the identity in `pool` starts earlier in the
+ *       SAME ET calendar year, and
+ *   (b) that is actually provable — prior-year continuity (a sibling in
+ *       `pool` from the year before), explicit series-debut evidence, or —
+ *       annual only, one occurrence per year by nature — simply not yet
+ *       having proof it ran this year (the separate already-featured-this-
+ *       year check in isEditoriallyNewEvent / isPreviouslyFeaturedIdentity
+ *       covers the rest of that case).
+ * Fails closed on every branch: a recurring identity that can't prove it is
+ * first is excluded, never guessed into eligibility. `pool` must include
+ * expired/rejected/merged-into-self rows (they are still occurrence
+ * evidence) — see loadYearIdentityPool.
+ */
+function isFirstOccurrenceOfYear(event, pool, reference = new Date()) {
+  if (!event?.start_at) return false;
+  const start = new Date(event.start_at).getTime();
+  if (Number.isNaN(start)) return false;
+  const eventYear = etYearOf(event.start_at, reference);
+
+  const siblings = (Array.isArray(pool) ? pool : []).filter((sibling) => (
+    sibling && String(sibling.id) !== String(event?.id) && isSameSeriesSibling(event, sibling)
+  ));
+
+  const hasEarlierThisYear = siblings.some((sibling) => {
+    if (!sibling.start_at || etYearOf(sibling.start_at, reference) !== eventYear) return false;
+    const siblingStart = new Date(sibling.start_at).getTime();
+    return !Number.isNaN(siblingStart) && siblingStart < start;
+  });
+  if (hasEarlierThisYear) return false; // (a)
+
+  const hasPriorYearOccurrence = siblings.some((sibling) => (
+    sibling.start_at && etYearOf(sibling.start_at, reference) === eventYear - 1
+  ));
+  if (hasPriorYearOccurrence) return true; // (b) continuity
+
+  if (event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)) return true; // (b) debut
+
+  if (isAnnualEvent(event)) return true; // (b) annual — one per year by nature
+
+  return false; // fail closed: can't prove it, so it isn't
+}
+
+/**
+ * Broad pool for the calendar-year first-occurrence rule. Unlike
+ * loadRoutineIdentityPool this (1) spans full ET calendar years — "did it
+ * run last year", "is anything else this identity earlier THIS year" both
+ * need whole-year visibility, not a rolling ±90-day window — and (2)
+ * INCLUDES merged/rejected/expired rows: a duplicate merged into this same
+ * identity, or a listing that later expired, is still real evidence the
+ * identity occurred on that date. Identity matching (isSameSeriesSibling,
+ * keyed on each row's OWN stored title/venue/city) naturally excludes a row
+ * that was actually merged into an unrelated identity, since that row's own
+ * fields — never the merge target's — are what get compared.
+ */
+async function loadYearIdentityPool(knex, events, reference = new Date()) {
+  const rows = Array.isArray(events) ? events : [];
+  const years = [etYearOf(reference, reference)];
+  for (const event of rows) {
+    if (event?.start_at) years.push(etYearOf(event.start_at, reference));
+  }
+  const minYear = Math.min(...years) - 1; // the prior year, for continuity
+  const maxYear = Math.max(...years);
+  return knex('events_raw')
+    .select('id', 'title', 'start_at', 'venue_name', 'city', 'merged_into')
+    .where('start_at', '>=', parseETDateTime(`${minYear}-01-01T00:00:00`))
+    .where('start_at', '<=', parseETDateTime(`${maxYear}-12-31T23:59:59`));
+}
+
+/** Cheap, over-inclusive check for whether any row in a batch could possibly
+ * need the calendar-year pool, so a batch of plain one-time events never
+ * pays for (or, in tests, unexpectedly triggers) the extra DB round trip. */
+function mayNeedYearPool(events) {
+  return (Array.isArray(events) ? events : []).some((event) => (
+    isRecurringIdentityEvent(event, { occurrenceCount: Infinity })
+  ));
+}
+
+/**
  * DB-backed routine-identity gate shared by planning and final validation.
  * The bounded ±90-day horizon catches next week's sibling and a prior-only
  * sibling (including a rejected row, which is still recurrence evidence)
@@ -174,13 +297,16 @@ function isFirstOccurrenceInPool(event, pool) {
  */
 async function filterRepeatedDateIdentities(
   events,
-  { knex = db, reference = new Date(), identityPool = null } = {},
+  { knex = db, reference = new Date(), identityPool = null, yearPool = identityPool } = {},
 ) {
   const rows = Array.isArray(events) ? events : [];
   if (!rows.length) return [];
   const pool = identityPool || await loadRoutineIdentityPool(knex, reference);
   const repeatedTitles = repeatedDateTitleKeys(pool);
-  return rows.filter((event) => {
+  const calendarYearPool = yearPool
+    || (mayNeedYearPool(rows) ? await loadYearIdentityPool(knex, rows, reference) : []);
+
+  return rows.map((event) => {
     // Two carve-outs survive the repeated-title exclusion: an operator STAR
     // (deliberate editorial override, consumed on ship) and the single-use
     // series DEBUT — whose own later occurrences share its normalized title
@@ -189,11 +315,30 @@ async function filterRepeatedDateIdentities(
     // debut carve-out applies ONLY to the series' first occurrence in the
     // pool. Both remain subject to every row-level gate
     // (isEligibleForFreshDigest).
-    if (event?.admin_status === 'featured') return true;
+    if (event?.admin_status === 'featured') return event;
+
+    // Owner ruling 2026-09-27: ANY recurring identity — including the
+    // annual/seasonal/unknown-with-repeats types the routine list above
+    // never covered — is eligible only for its first occurrence of the ET
+    // calendar year.
+    const occurrenceCount = identityOccurrenceCount(event, calendarYearPool);
+    if (isRecurringIdentityEvent(event, { occurrenceCount })) {
+      if (!isFirstOccurrenceOfYear(event, calendarYearPool, reference)) return null;
+      const debutProof = event?.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event);
+      if (isRoutineRecurringEvent(event) && !debutProof) {
+        // Proven by continuity, not debut wording — isEligibleForFreshDigest's
+        // routine hard-block only recognizes debut evidence on its own, so
+        // stamp the pool-verified marker it also accepts.
+        return { ...event, __recurringFirstOfYear: true };
+      }
+      return event;
+    }
+
     if (event?.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)
-        && isFirstOccurrenceInPool(event, pool)) return true;
-    return !repeatedTitles.has(normalizeDigestTitle(event?.title));
-  });
+        && isFirstOccurrenceInPool(event, pool)) return event;
+    if (repeatedTitles.has(normalizeDigestTitle(event?.title))) return null;
+    return event;
+  }).filter(Boolean);
 }
 
 function assessFlagshipEventSelection(
@@ -202,6 +347,7 @@ function assessFlagshipEventSelection(
   reference = new Date(),
   featuredHistory = [],
   issueIdentityPool = rows,
+  yearIdentityPool = issueIdentityPool,
 ) {
   if (!isFlagshipType(send?.newsletter_type)) {
     return { valid: true, errors: [], events: [], flagship: false };
@@ -238,9 +384,25 @@ function assessFlagshipEventSelection(
     const starred = event.admin_status === 'featured';
     const debut = event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event)
       && isFirstOccurrenceInPool(event, issueIdentityPool);
+
+    // Owner ruling 2026-09-27: any recurring identity — including the
+    // annual/seasonal/unknown-with-repeats types the repeated-title check
+    // above never covered — is eligible only for its first occurrence of the
+    // ET calendar year. A continuity-proven (not debut-worded) routine
+    // occurrence also needs isEligibleForFreshDigest's own hard block
+    // cleared, so it gets the same pool-verified marker
+    // filterRepeatedDateIdentities stamps.
+    const occurrenceCount = identityOccurrenceCount(event, yearIdentityPool);
+    const isRecurringIdentity = isRecurringIdentityEvent(event, { occurrenceCount });
+    const firstOfYear = !isRecurringIdentity || isFirstOccurrenceOfYear(event, yearIdentityPool, reference);
+    const eligibilityCheckEvent = (isRecurringIdentity && firstOfYear && isRoutineRecurringEvent(event) && !debut)
+      ? { ...event, __recurringFirstOfYear: true }
+      : event;
+
     if (!approved || !inIssueWindow
         || (!starred && !debut && repeatedTitles.has(normalizeDigestTitle(event.title)))
-        || !isEligibleForFreshDigest(event, reference)
+        || (!starred && isRecurringIdentity && !firstOfYear)
+        || !isEligibleForFreshDigest(eligibilityCheckEvent, reference)
         || (!starred && isPreviouslyFeaturedIdentity(event, featuredHistory, reference))) {
       errors.push(`Locked event is no longer eligible: ${event.title || event.id}.`);
       continue;
@@ -293,12 +455,20 @@ async function validateFlagshipEventSelection(send, { knex = db, reference = new
     .whereIn('id', [...new Set(ids)]);
   const featuredHistory = await loadFeaturedIdentityHistory(knex);
   const routineIdentityPool = await loadRoutineIdentityPool(knex, reference);
-  return assessFlagshipEventSelection(typedSend, rows, reference, featuredHistory, routineIdentityPool);
+  const yearIdentityPool = mayNeedYearPool(rows)
+    ? await loadYearIdentityPool(knex, rows, reference)
+    : [];
+  return assessFlagshipEventSelection(
+    typedSend, rows, reference, featuredHistory, routineIdentityPool, yearIdentityPool,
+  );
 }
 
 module.exports = {
   parseLockedEventIds,
   isFirstOccurrenceInPool,
+  identityOccurrenceCount,
+  isFirstOccurrenceOfYear,
+  loadYearIdentityPool,
   isPreviouslyFeaturedIdentity,
   loadFeaturedIdentityHistory,
   filterPreviouslyFeaturedIdentities,

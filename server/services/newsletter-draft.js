@@ -1643,6 +1643,24 @@ function buildFlagshipTextBody(draft) {
   return out.filter(Boolean).join('\n\n');
 }
 
+// Owner ruling 2026-09-27: newsletterWriter (Opus 5.5) thinks on every
+// request and spends that from max_tokens ahead of the JSON reply
+// (anthropic-wire.js THINKING_FLOOR_TOKENS=8192 is only a floor — 'max'
+// effort's actual thinking depth runs well past it), so the prior 8192-token
+// cap — sized for a non-thinking Sonnet reply — would starve the ~8k-token
+// Beehiiv-parity JSON reply. 32000 gives headroom for max-effort thinking
+// plus the full reply.
+const NEWSLETTER_WRITE_MAX_TOKENS = 32000;
+// Generous enough for max effort end to end; explicit so callAnthropic
+// passes { timeout } to the SDK (avoids the "streaming is strongly
+// recommended" error a large max_tokens with no explicit timeout can throw
+// on a non-streaming request) and so the fallback chain's own deadline math
+// runs off a real number instead of DEFAULT_FALLBACK_BUDGET_MS (4 min, too
+// short for 'max' effort). reserveFallbackBudget (passed at the call site)
+// splits this across legs instead of handing a stalled Opus leg the whole
+// budget, so the OpenAI fallback still gets real time.
+const NEWSLETTER_WRITE_TIMEOUT_MS = 10 * 60 * 1000;
+
 /**
  * Create a newsletter draft via Claude and persist it.
  *
@@ -1657,6 +1675,10 @@ function buildFlagshipTextBody(draft) {
  * @param {boolean} [opts.includeCTA] - Whether to include CTA
  * @param {string|Date} [opts.issueReference] - Issue Tuesday/target used for event policy windows
  * @param {import('knex').Knex.Transaction} [opts.trx] - Optional Knex transaction
+ * @param {string} [opts.effort] - Anthropic effort override for the
+ *   newsletterWriter policy's primary leg (default: the policy's own 'max').
+ *   Interactive routes pass 'high' so a synchronous HTTP request can't hang
+ *   the admin composer.
  * @returns {Promise<{send: Object, draft: Object}>}
  */
 async function createNewsletterDraft({
@@ -1671,6 +1693,14 @@ async function createNewsletterDraft({
   issueReference,
   trx,
   persist = true,
+  // Owner ruling 2026-09-27: the newsletter is WRITTEN by Opus 5.5. Autopilot
+  // (the weekly cron, pest-insider-autopilot.js) never passes this — it gets
+  // the policy's own 'max' effort. The interactive admin composer routes
+  // (routes/admin-newsletter.js /draft-ai, /calendar/:id/draft-from-plan)
+  // pass 'high' instead: a synchronous HTTP request can't afford a
+  // multi-minute max-effort call without risking the admin UI (and any
+  // upstream proxy) timing out on the operator.
+  effort,
 }) {
   const knex = trx || db;
   // The issue's Tuesday (not "now") anchors both the seasonal-month framing
@@ -1761,16 +1791,23 @@ async function createNewsletterDraft({
 ${audience ? `Audience: ${audience}` : ''}
 ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
 
-  // 3. Call the Sonnet → OpenAI Terra content policy. 8192 tokens — the Beehiiv-parity schema is richer
-  // (captions, scoop labels, checklists) and a 10-event lineup at 4096
-  // risked mid-JSON truncation.
-  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+  // 3. Call the newsletterWriter policy (Opus 5.5 effort 'max' → OpenAI
+  // Terra fallback; owner ruling 2026-09-27). `effort` overrides the
+  // policy's own 'max' only when the caller asked for a lighter interactive
+  // path (see the JSDoc above) — the fallback leg has no effort concept, so
+  // only the primary route needs the override.
+  const basePolicy = MODELS.TEXT_POLICIES.newsletterWriter;
+  const draftPolicy = effort && effort !== basePolicy.primary.effort
+    ? { ...basePolicy, primary: { ...basePolicy.primary, effort } }
+    : basePolicy;
+  const response = await dispatchWithFallback(draftPolicy, {
     laneId: 'newsletter',
-    maxTokens: 8192,
+    maxTokens: NEWSLETTER_WRITE_MAX_TOKENS,
+    timeoutMs: NEWSLETTER_WRITE_TIMEOUT_MS,
     jsonMode: true,
     system: systemPrompt,
     text: userPrompt,
-  });
+  }, { reserveFallbackBudget: true });
   if (!response.ok || !response.json) throw new Error('Newsletter AI providers did not return valid JSON');
 
   // 4. The shared dispatcher parses JSON and crosses providers on malformed output.

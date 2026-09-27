@@ -130,18 +130,27 @@ async function applyListwiseRerank(scored) {
     // Cross-provider per repo policy: generated structured output goes
     // through a named TEXT_POLICIES entry + the shared dispatcher, so an
     // Anthropic outage fails over to OpenAI instead of silently skipping
-    // the re-rank (and only then fails open).
+    // the re-rank (and only then fails open). Owner ruling 2026-09-27: this
+    // is part of the same 'newsletter' lane as the draft itself — moved to
+    // newsletterWriter (Opus 5.5, effort 'max' — this is a cron/autopilot
+    // call, not interactive, so it gets the full effort like the draft).
     const MODELS = require('../config/models');
     const { dispatchWithFallback } = require('./llm/call');
     const lines = pool.map((ev) => `- id: ${ev.id}\n  title: ${ev.title}\n  score: ${ev.editorial_score}\n  desc: ${(ev.description || '').replace(/\s+/g, ' ').slice(0, 180)}`);
-    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+    // 4000 tokens: Opus 5+ always thinks and spends that from max_tokens
+    // ahead of the JSON reply — the old 1200-token cap was sized for a
+    // non-thinking Sonnet reply and left no headroom above the automatic
+    // 8192-token thinking floor (anthropic-wire.js), let alone 'max' effort's
+    // actual thinking depth.
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.newsletterWriter, {
       laneId: 'newsletter',
-      maxTokens: 1200,
+      maxTokens: 4000,
+      timeoutMs: 5 * 60 * 1000,
       jsonMode: true,
       jsonSchema: RANKING_SCHEMA,
       system: 'You are a precise, demanding local-events editor.',
       text: `Rank ALL of these candidate events from the one local readers would be MOST disappointed to learn about only after it happened, down to the least. Judge reader disappointment — rarity, draw, one-time-ness — not category variety. Use every id exactly once.\n\n${lines.join('\n')}`,
-    });
+    }, { reserveFallbackBudget: true });
     const text = response?.json ? JSON.stringify(response.json) : (response?.text || '');
     const ranking = parseListwiseRanking(text, pool.map((ev) => ev.id));
     // A mostly-missing ranking is noise, not signal.

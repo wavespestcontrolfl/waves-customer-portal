@@ -66,11 +66,31 @@ const { dispatchWithFallback } = require('./llm/call');
 // assessment is ~10× the old approve/note payload, so the batch is
 // smaller and the token ceiling higher. A fully fresh backlog drains
 // within a few runs.
-const CURATION_RUN_LIMIT = 120;
+// 60 covers the ~25/day inflow with room; with the 10-minute batch budget
+// below, a full run stays inside the lane's 1-hour hard timeout.
+const CURATION_RUN_LIMIT = 60;
 const CLASSIFY_BATCH = 12;
-const CLASSIFY_MAX_TOKENS = 6000;
+// Owner ruling 2026-09-27: curation scoring moved to Opus 5.5 at effort
+// 'max' (MODELS.TEXT_POLICIES.newsletterWriter). Opus 5+ always thinks and
+// spends that from max_tokens ahead of the JSON reply (anthropic-wire.js
+// THINKING_FLOOR_TOKENS=8192 is only a floor, not a budget for 'max' effort's
+// actual thinking depth), so the old 6000-token cap — sized for a
+// non-thinking Sonnet reply — risked truncating a 12-event structured batch
+// mid-JSON. 24000 gives headroom for max-effort thinking plus the reply.
+const CLASSIFY_MAX_TOKENS = 24000;
+// Per-batch wall-clock budget. At most CURATION_RUN_LIMIT/CLASSIFY_BATCH = 5
+// sequential batches per run; 10 minutes/batch (≈5 per leg once the fallback
+// reserve is split off — max effort on a 12-event batch needs it) keeps a
+// full run under 50 minutes, inside the events_curation lane's 1-hour hard_timeout
+// (agent-control/lane-policies.js LONG_BATCH). reserveFallbackBudget so a
+// slow/failed Opus leg still leaves the OpenAI fallback real time instead of
+// losing the whole share to the primary.
+const CLASSIFY_TIMEOUT_MS = 10 * 60 * 1000;
 const FORWARD_WINDOW_DAYS = 90;
 const NOTE_MAX = 200;
+// Rescore pass (deterministic, no model call — see runScoreRescore): bounded
+// generously since it's pure SQL + arithmetic, not an LLM call.
+const RESCORE_RUN_LIMIT = 1000;
 
 function curationEnabled() {
   return process.env.EVENT_AUTO_CURATION !== 'false';
@@ -191,7 +211,7 @@ Plenty of people "might go" to a library workshop, a boutique promotion, or an o
 Score each event on these factors (integers, each capped at its maximum):
 ${factorLines}
 
-High marks: specialness = inaugural / one-night-only / opening weekend / touring act / special themed edition / annual signature / limited engagement. reader_pull = a clear "send this to your spouse" hook with regional draw. audience_fit = strong family activity or credible parents' night out with known age suitability. planning_value = Friday-Sunday timing, enough notice, usable date/time/ticket info. local_relevance = locally distinctive, reasonable drive for its significance. source_confidence = official organizer/venue page with current, verifiable details. accessibility = clear pricing, all-ages access where applicable, a free or reasonably priced option.
+High marks: specialness = inaugural / one-night-only / opening weekend / touring act / special themed edition / annual signature / limited engagement — a major touring headliner or a pro sports team's home match is high specialness and reader_pull regardless of who else it skews toward; score the draw, not a narrow definition of "special". reader_pull = a clear "send this to your spouse" hook with regional draw. audience_fit = judge the event on its OWN terms — a strong family activity, a credible parents' night out, OR a broadly appealing event for the general adult reader (concert, sports, festival) can all score high; do not dock audience_fit just because an event skews toward one audience instead of splitting evenly across several. planning_value = Friday-Sunday timing, enough notice, usable date/time/ticket info. local_relevance = locally distinctive, reasonable drive for its significance. source_confidence = the listing's OWN reliability as a source, not whether it also states a price — an official venue page, museum, performing-arts hall, tourism board, or municipal calendar publishing ITS OWN event is a 9-10 by default; only dock it for a stale, third-party, or otherwise unverifiable listing. accessibility = judge what's actually knowable — public and reasonably reachable, and if the listing does say it's ticketed or free that supports a higher score — but do NOT zero or heavily penalize an otherwise normal, attendable public event just because the feed happens not to state a price or minimum age; those two facts are frequently absent from official listings and are not by themselves an accessibility problem.
 
 Penalty flags — set when true (fixed point values are applied in code, you only flag):
   generic_class — ordinary workshop/class with no exceptional element
@@ -270,15 +290,21 @@ function parseCurationResponse(parsed, candidateIds) {
 
 async function classifyBatch(events, todayIso) {
   // A miss on both legs throws, exactly like the old SDK path — the run
-  // loop's catch leaves the batch un-examined for the next run.
-  const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
-    laneId: 'events_editorial',
+  // loop's catch leaves the batch un-examined for the next run. Owner
+  // ruling 2026-09-27: curation scoring rides the newsletterWriter policy
+  // (Opus 5.5, effort max) — its own laneId ('events_curation', split from
+  // the old shared 'events_editorial' laneId so ledger/Control-center rows
+  // attribute correctly; event-normalizer.js keeps 'events_editorial' on
+  // contentDraft).
+  const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.newsletterWriter, {
+    laneId: 'events_curation',
     system: 'You are a precise, demanding events editor.',
     text: buildCurationPrompt(events, todayIso),
     jsonMode: true,
     jsonSchema: CURATION_SCHEMA,
     maxTokens: CLASSIFY_MAX_TOKENS,
-  });
+    timeoutMs: CLASSIFY_TIMEOUT_MS,
+  }, { reserveFallbackBudget: true });
   if (!res.ok || !res.json) throw new Error(`event curation LLM unavailable (${res.reason || 'no_json'})`);
   return parseCurationResponse(res.json, events.map((e) => e.id));
 }
@@ -369,6 +395,132 @@ async function applyDecision(event, rawAssessment, reference = new Date()) {
 }
 
 /**
+ * Rescore candidates: upcoming (start_at in the future), still-pending,
+ * already-curated (curated_at set) rows with a stored score_breakdown.
+ * NOT filtered by freshness/eligibility the way fetchCurationCandidates is —
+ * a rescore only recomputes the deterministic math from what's already
+ * stored, so it doesn't need those hard gates (they already ran when the
+ * row was first curated, and haven't changed since).
+ */
+function buildRescoreCandidateQuery(limit = RESCORE_RUN_LIMIT) {
+  return db('events_raw')
+    .select('id', 'start_at', 'score_breakdown', 'rejection_codes', 'audience_tags', 'novelty_type', 'editorial_evidence', 'curation_note')
+    .where('admin_status', 'pending')
+    .whereNotNull('curated_at')
+    .whereNotNull('score_breakdown')
+    .whereNotNull('start_at')
+    .whereNull('merged_into')
+    .where('start_at', '>=', new Date())
+    .orderBy('start_at', 'asc')
+    .limit(limit);
+}
+
+/**
+ * Deterministic rescore of one already-curated row — NO model call. Rebuilds
+ * the model's original structured assessment from what's already stored
+ * (score_breakdown.factors / .penalty_flags / .family_status,
+ * rejection_codes, audience_tags, novelty_type, editorial_evidence) and runs
+ * it back through the same assessEvent() the initial curation used, so the
+ * decision math (and any future scoring-rule change) never has two
+ * implementations. Returns null when the stored breakdown is missing or
+ * malformed (nothing to reconstruct from — left for a human, same as
+ * curation's own missing/malformed path).
+ */
+function rescoreCuratedEvent(row) {
+  let breakdown = row.score_breakdown;
+  if (typeof breakdown === 'string') { try { breakdown = JSON.parse(breakdown); } catch { breakdown = null; } }
+  if (!breakdown || typeof breakdown !== 'object' || Array.isArray(breakdown) || !breakdown.factors) return null;
+
+  const parseArray = (value) => {
+    let v = value;
+    if (typeof v === 'string') { try { v = JSON.parse(v); } catch { v = []; } }
+    return Array.isArray(v) ? v : [];
+  };
+
+  const rawAssessment = {
+    scores: breakdown.factors,
+    penalty_flags: breakdown.penalty_flags,
+    rejection_codes: parseArray(row.rejection_codes),
+    audience_tags: parseArray(row.audience_tags),
+    novelty_type: row.novelty_type,
+    family_status: breakdown.family_status,
+    editorial_reason: row.curation_note,
+    evidence: parseArray(row.editorial_evidence),
+  };
+  if (malformedAssessmentReason(rawAssessment)) return null;
+  return assessEvent(row, rawAssessment);
+}
+
+/**
+ * Persist one rescore decision. Guarded on admin_status='pending' like
+ * applyDecision's approval branch (a concurrent operator decision always
+ * wins) — but UNLIKE applyDecision, curated_at is never touched: the row was
+ * already examined by the model, this only recomputes deterministic math
+ * under whatever rules are live now. The score is written whether or not it
+ * now clears the floor, so the Event Inbox never shows a score computed
+ * under retired penalty rules.
+ */
+async function applyRescore(row, decision) {
+  const note = (decision.editorialReason
+    || (decision.rejectionCodes.length
+      ? `Policy: ${decision.rejectionCodes.join(', ')}`
+      : `Scored ${decision.score}/100`)
+  ).slice(0, NOTE_MAX);
+  const assessmentFields = {
+    editorial_score: decision.score,
+    score_breakdown: JSON.stringify(decision.breakdown),
+    curation_note: note,
+    updated_at: db.fn.now(),
+  };
+  if (decision.approve) {
+    const updated = await db('events_raw')
+      .where({ id: row.id, admin_status: 'pending' })
+      .whereNull('merged_into')
+      .update({ ...assessmentFields, admin_status: 'approved', approved_via: 'auto_curation' });
+    if (updated) return 'approved';
+  }
+  const updated = await db('events_raw')
+    .where({ id: row.id, admin_status: 'pending' })
+    .whereNull('merged_into')
+    .update(assessmentFields);
+  return updated ? (decision.approve ? 'raced' : 'rescored') : 'skipped';
+}
+
+/**
+ * Daily deterministic rescore (no model call, no cost): recomputes the
+ * editorial score of every upcoming, still-pending, already-curated event
+ * from its stored assessment under whatever penalty rules are LIVE NOW, and
+ * auto-approves through the same guarded path as fresh curation when the
+ * recomputed score clears the feature floor with zero rejection codes.
+ *
+ * Exists because curation examines each event ONCE (curated_at) — an event
+ * penalized under a rule that later changes (e.g. the 2026-09-27
+ * missing_price/unclear_age removal) would otherwise sit under-scored and
+ * pending forever, never re-examined. Idempotent: re-running recomputes the
+ * same deterministic value from the same stored factors every time, and an
+ * approved row drops out of the admin_status='pending' candidate set on the
+ * next run. Shares the EVENT_AUTO_CURATION kill switch with fresh curation —
+ * both auto-approve through the same path.
+ */
+async function runScoreRescore({ limit = RESCORE_RUN_LIMIT } = {}) {
+  if (!curationEnabled()) {
+    return { disabled: true, candidates: 0, rescored: 0, approved: 0 };
+  }
+  const rows = await buildRescoreCandidateQuery(limit);
+  let rescored = 0;
+  let approved = 0;
+  for (const row of rows) {
+    const decision = rescoreCuratedEvent(row);
+    if (!decision) continue;
+    const outcome = await applyRescore(row, decision);
+    if (outcome === 'approved' || outcome === 'rescored' || outcome === 'raced') rescored += 1;
+    if (outcome === 'approved') approved += 1;
+  }
+  logger.info(`[event-curation] rescore: ${rescored}/${rows.length} candidates updated, ${approved} newly approved (feature floor ${featureScoreFloor()})`);
+  return { candidates: rows.length, rescored, approved };
+}
+
+/**
  * Cron entry point. Returns a summary for logging/tests.
  */
 async function runAutoCuration({ limit = CURATION_RUN_LIMIT } = {}) {
@@ -376,6 +528,14 @@ async function runAutoCuration({ limit = CURATION_RUN_LIMIT } = {}) {
     logger.info('[event-curation] disabled via EVENT_AUTO_CURATION=false');
     return { disabled: true, examined: 0, approved: 0 };
   }
+
+  // Deterministic rescore of already-curated upcoming events runs first
+  // (same daily cron, no extra registration needed) — cheap (no model
+  // call), so it never risks the classify batches' token/time budget below.
+  const rescore = await runScoreRescore().catch((err) => {
+    logger.error(`[event-curation] rescore pass failed: ${err.message}`);
+    return { candidates: 0, rescored: 0, approved: 0 };
+  });
 
   const { candidates, policyDrops } = await fetchCurationCandidates(limit);
 
@@ -400,7 +560,9 @@ async function runAutoCuration({ limit = CURATION_RUN_LIMIT } = {}) {
   }
 
   if (!candidates.length) {
-    return { examined: 0, approved: 0, policyDropped: policyDrops.length };
+    return {
+      examined: 0, approved: 0, policyDropped: policyDrops.length, rescore,
+    };
   }
 
   const byId = new Map(candidates.map((e) => [String(e.id), e]));
@@ -430,11 +592,14 @@ async function runAutoCuration({ limit = CURATION_RUN_LIMIT } = {}) {
   }
 
   logger.info(`[event-curation] examined ${examined}/${candidates.length}, approved ${approved}, policy-dropped ${policyDrops.length} (feature floor ${featureScoreFloor()})`);
-  return { examined, approved, candidates: candidates.length, policyDropped: policyDrops.length };
+  return {
+    examined, approved, candidates: candidates.length, policyDropped: policyDrops.length, rescore,
+  };
 }
 
 module.exports = {
   runAutoCuration,
+  runScoreRescore,
   // Exported for unit tests — pure pieces.
   buildCurationPrompt,
   CURATION_SCHEMA,
@@ -442,5 +607,8 @@ module.exports = {
   missingAssessmentFallbacks,
   curationEnabled,
   buildCurationCandidateQuery,
+  buildRescoreCandidateQuery,
+  rescoreCuratedEvent,
+  applyRescore,
   applyDecision,
 };

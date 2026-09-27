@@ -30,11 +30,18 @@
  *   - On failure: increments consecutive_failures, stores last_error.
  *     The dashboard can render a health badge from this; the cron
  *     does NOT auto-disable a failing source (operator decides).
+ *
+ * Claude-extracted startAt (scrape pages, news-mode RSS articles) is parsed
+ * through parseExtractedStartAt, NOT a bare `new Date()` — see that
+ * function's header for the ET-offset-dropping bug (prod, found
+ * 2026-09-27) it fixes, and extractedEventDedupKeys for the matching dedup
+ * key shape (ET calendar day + ET wall-clock time, with a legacy-shape
+ * fallback so the key-format change itself doesn't mint duplicates).
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { yieldTrackingUpdateFor, checkAndNotifySourceHealth } = require('./event-source-health');
 
 // On a re-pull that moves an event's date from the PAST back into the FUTURE
@@ -229,6 +236,76 @@ function parseDateOrNull(raw) {
     // malformed feed date doesn't fail the whole source ingestion run.
     return null;
   }
+}
+
+// Parse a Claude-extracted `startAt`. The extraction prompt asks for "ISO
+// 8601 datetime in America/New_York timezone", but the model doesn't always
+// include a UTC offset/Z suffix — sometimes it answers "2026-09-19T19:30:00"
+// (naive, meant as ET wall-clock), sometimes "2026-09-19T19:30:00-04:00"
+// (explicit offset). `parseDateOrNull` (bare `new Date()`) reads the naive
+// form as SERVER-local time; Railway runs with TZ=UTC, so a naive "19:30:00"
+// lands verbatim as 19:30 UTC instead of the correct 23:30 UTC (7:30pm EDT)
+// — silently DROPPING the ET→UTC offset entirely. Because ET is always
+// behind UTC, this always makes the stored instant too EARLY, never too
+// late, by exactly the ET offset in force (4h EDT / 5h EST) — confirmed
+// against prod on 2026-09-27: 13 of 14 near-duplicate pairs from the scrape
+// extraction path differed by EXACTLY 4 hours, earlier-wrong /
+// later-correct, e.g. "Sarasota Paradise vs. Greenville Triumph SC"
+// (Lakewood Ranch) stored 19:30Z (wrong; a naive-string pull) alongside
+// 23:30Z (right; an offset-bearing pull) for the same 7:30pm ET kickoff.
+//
+// Route every extracted startAt through parseETDateTime, which treats a
+// naive "YYYY-MM-DDTHH:MM[:SS]" string as an ET wall-clock time (DST-safe —
+// see its own header) and falls back to `new Date(input)` for anything else
+// (an explicit offset, a trailing Z, or unparseable text), matching
+// parseDateOrNull's behavior exactly in those cases.
+function parseExtractedStartAt(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  // parseETDateTime only reads a naive string as ET without fractional
+  // seconds; "…T19:30:00.000" would otherwise fall through to UTC parsing.
+  const d = parseETDateTime(raw.trim().replace(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.\d+$/, '$1'));
+  return d instanceof Date && !Number.isNaN(d.getTime()) ? d : null;
+}
+
+// ET wall-clock 'HH:MM' for a given instant — minute precision, matching the
+// granularity Claude actually extracts (it never reports seconds).
+function etWallClockHHMM(date) {
+  const { hour, minute } = etParts(date);
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+// Dedup-key pair for a Claude-extracted event: the CURRENT key shape plus
+// the LEGACY (pre-fix) shape for the same title+start+url, so a caller can
+// migrate an existing legacy-shaped row onto the new shape instead of
+// minting a duplicate purely from the key-format change (see
+// upsertExtractedEvents).
+//
+// Current shape keys on title + ET calendar day + ET wall-clock time (HH:MM,
+// not the full UTC instant) + url. This is deliberately NOT the full ISO
+// instant: keying on the ET wall-clock reading — the thing the source page
+// actually advertises — makes the key immune to any residual TZ-conversion
+// drift in `start` (today's bug included), since two pulls that read the
+// same advertised time now always land on the same wall-clock string even
+// if some future bug perturbed the computed instant by seconds/ms. Minute
+// precision still keeps two genuinely different same-day showtimes at the
+// same URL (e.g. a 2pm matinee vs a 7:30pm evening show on one listing page)
+// as distinct rows, since their HH:MM differs.
+//
+// Legacy shape (pre-fix) keys on title + the full UTC ISO instant + url —
+// exactly what normalizeExtractedEvent computed before this change. It only
+// matches an existing row whose STORED instant already equals THIS pull's
+// (now-correct) `start` — i.e. a source that happened to extract the right
+// time even before the fix shipped. It does NOT retroactively match a row
+// still holding the old, timezone-dropped instant; reconciling those is a
+// data-quality cleanup, not something a key-shape change should do own its
+// own (see the ops note in ingestSource's module docstring / PR notes).
+function extractedEventDedupKeys(title, start, urlKey) {
+  const titleKey = title.toLowerCase().slice(0, 80);
+  const startKey = start ? `${etDateString(start)}T${etWallClockHHMM(start)}` : '';
+  const externalId = `${titleKey}|${startKey}|${urlKey}`.slice(0, 256);
+  const legacyStartKey = start ? start.toISOString() : '';
+  const legacyExternalId = `${titleKey}|${legacyStartKey}|${urlKey}`.slice(0, 256);
+  return { externalId, legacyExternalId };
 }
 
 // Allowlist URL protocols. RSS data is external/untrusted; rendering a
@@ -655,7 +732,9 @@ function isWellFormedExtractedEvent(ev) {
 /**
  * Validate one Claude-extracted event and shape it for upsert.
  * Pure — returns null when the event should be dropped, else
- * { row } where row holds the events_raw columns.
+ * { row, legacyExternalId } where row holds the events_raw columns and
+ * legacyExternalId is the pre-key-shape-change dedup key for the same
+ * title+start+url (see extractedEventDedupKeys / upsertExtractedEvents).
  *
  * opts.requireStart — drop events without a parseable start date.
  * News-mode RSS sets this: the articles contract says "no stated event
@@ -671,7 +750,7 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   const title = typeof ev.title === 'string' ? ev.title.trim().slice(0, 512) : '';
   if (!title) return null;
 
-  const start = parseDateOrNull(ev.startAt);
+  const start = parseExtractedStartAt(ev.startAt);
   if (opts.requireStart && !start) return null;
   if (start && start.getTime() > cutoffMs) return null;
   if (start && start.getTime() < nowMs - 24 * 60 * 60 * 1000) return null;
@@ -679,7 +758,7 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   // Compute canonicalized fields BEFORE the dedup key so the key is
   // stable across pulls. Claude's raw startAt/eventUrl strings can
   // drift between runs (different timezone formatting, trailing
-  // slashes, etc) — the parsed Date's toISOString() and the
+  // slashes, etc) — the parsed Date's ET wall-clock reading and the
   // safeHttpUrl() canonical form don't.
   const description = typeof ev.description === 'string' && ev.description ? ev.description.slice(0, 2000) : null;
   const venueName = typeof ev.venueName === 'string' && ev.venueName ? ev.venueName.slice(0, 256) : null;
@@ -689,15 +768,13 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   const eventUrl = fitUrl(safeHttpUrl(ev.eventUrl));
   const imageUrl = fitUrl(safeHttpUrl(ev.imageUrl));
 
-  // Synthesize a stable dedup key from canonical title+date+url.
-  // Extracted events don't have a UID/guid, so we key on the
-  // post-normalization fields. Title is lowercased so casing drift
-  // from Claude (e.g. "Boat Parade" vs "BOAT PARADE") doesn't
-  // create duplicates either.
-  const titleKey = title.toLowerCase().slice(0, 80);
-  const startKey = start ? start.toISOString() : '';
-  const urlKey = eventUrl || '';
-  const externalId = `${titleKey}|${startKey}|${urlKey}`.slice(0, 256);
+  // Synthesize a stable dedup key from canonical title+date+url — see
+  // extractedEventDedupKeys for the shape and why it keys on the ET
+  // wall-clock time rather than the full UTC instant. Extracted events
+  // don't have a UID/guid, so we key on the post-normalization fields.
+  // Title is lowercased so casing drift from Claude (e.g. "Boat Parade" vs
+  // "BOAT PARADE") doesn't create duplicates either.
+  const { externalId, legacyExternalId } = extractedEventDedupKeys(title, start, eventUrl || '');
 
   // Clamp to varchar(128) — events_raw.city per migration
   // 20260427000003. Claude can return long location strings; without
@@ -726,6 +803,7 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
       event_url: eventUrl,
       image_url: imageUrl,
     },
+    legacyExternalId,
   };
 }
 
@@ -737,7 +815,27 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
   for (const ev of claudeEvents) {
     const normalized = normalizeExtractedEvent(source, ev, nowMs, opts);
     if (!normalized) { dropped += 1; continue; }
-    const { row } = normalized;
+    const { row, legacyExternalId } = normalized;
+
+    // Migrate an existing legacy-shaped row (the pre-fix full-ISO-instant
+    // key) onto the new key shape FIRST, so the upsert below lands on that
+    // SAME row instead of minting a duplicate purely from the key-format
+    // change — this pull's `row.external_id` uses the new shape, but a row
+    // pulled before this change may still be stored under the old one for
+    // the identical title+start+url. Only renames when a legacy row exists
+    // AND no row already claims the new key for this source (that would
+    // violate the (source_id, external_id) unique constraint) — in that
+    // rare case the legacy row is left as-is and the upsert below merges
+    // into the already-new-shaped row instead, so nothing is duplicated
+    // and nothing throws.
+    if (legacyExternalId && legacyExternalId !== row.external_id) {
+      await db('events_raw')
+        .where({ source_id: source.id, external_id: legacyExternalId })
+        .whereNotExists(
+          db('events_raw').select(1).where({ source_id: source.id, external_id: row.external_id }),
+        )
+        .update({ external_id: row.external_id });
+    }
 
     await db('events_raw')
       .insert(row)
@@ -1163,6 +1261,9 @@ module.exports = {
   buildExtractionSystemPrompt,
   extractEventsWithClaude, // exported for the thinking-block regression test
   normalizeExtractedEvent,
+  parseExtractedStartAt, // exported for the ET-timezone-drift regression tests
+  extractedEventDedupKeys, // exported for the dedup-key-stability regression tests
+  upsertExtractedEvents, // exported for the legacy-key-migration DB test
   recurrenceMetadataFromIcalEvent,
   recoverEventObjectsFromTruncatedJson,
   escapeBareXmlEntities,

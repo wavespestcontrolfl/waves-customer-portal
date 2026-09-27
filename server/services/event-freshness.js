@@ -7,6 +7,23 @@
  *   isEligibleForFreshDigest(event) — hard gate: can this event appear?
  *   scoreFreshEvent(event) — rank eligible events for the weekly lineup
  *   isRoutineRecurringEvent(event) — reject routine/repeated programming
+ *   isRecurringIdentityEvent(event) — broader "this identity recurs" test
+ *     (daily/weekly/monthly/custom/seasonal/annual recurrence, recurring_series/
+ *     ongoing event types, or an unknown-recurrence identity with ≥2 tracked
+ *     occurrences) used by the calendar-year first-occurrence rule below.
+ *
+ * Owner ruling 2026-09-27: "For recurring it should be the first event for
+ * the year." Any recurring identity — including annual/seasonal and an
+ * unknown-recurrence identity that repeats, not only the daily/weekly/
+ * monthly/custom/recurring_series/ongoing "routine" set below — is
+ * newsletter-eligible ONLY for its first occurrence of the ET calendar year,
+ * and only once we can actually prove it is first (prior-year continuity,
+ * series-debut evidence, or — annual only — simply not having run yet this
+ * year). This replaces the old 300-day annual-refresh cooldown; see
+ * isEditoriallyNewEvent, isPreviouslyFeaturedIdentity, and
+ * newsletter-event-selection.js's isFirstOccurrenceOfYear / loadYearIdentityPool
+ * for the full mechanism. Fails closed: a recurring identity that cannot
+ * prove it is first is excluded, never guessed into eligibility.
  *
  * Plus helpers:
  *   cityToZone(city) — map a city name to a newsletter coverage zone
@@ -84,15 +101,18 @@ const FRESHNESS_SCORES = {
   needs_review: 40,
 };
 
-// Routine programming is intentionally outside the weekend guide's editorial
-// contract. Annual events and finite seasonal runs can still be genuinely new;
-// open-ended daily/weekly/monthly/custom recurrence cannot — with ONE owner
-// carve-out (2026-07-17): the DEBUT of a recurring series is news exactly
-// once. "Weekly yoga in the park" never earns a slot, but "grand opening of
-// the weekly night market" can — and only until it has been featured.
+// Routine programming (open-ended daily/weekly/monthly/custom recurrence, or
+// event_type recurring_series/ongoing) is intentionally outside the weekend
+// guide's editorial contract by default — with ONE owner carve-out
+// (2026-07-17): the DEBUT of a recurring series is news exactly once.
+// "Weekly yoga in the park" never earns a slot, but "grand opening of the
+// weekly night market" can — and only until it has been featured. This hard
+// block is a SUBSET of the broader calendar-year first-occurrence rule
+// (owner ruling 2026-09-27, see module header): annual and seasonal
+// recurrence, which are NOT in this routine list, get their first-of-year
+// eligibility from that rule directly rather than from a hard block here.
 const ROUTINE_EVENT_TYPES = Object.freeze(['recurring_series', 'ongoing']);
 const ROUTINE_RECURRENCE_TYPES = Object.freeze(['daily', 'weekly', 'monthly', 'custom']);
-const ANNUAL_REFRESH_DAYS = 300;
 const FLAGSHIP_SEND_HOUR_ET = 6;
 const FLAGSHIP_SEND_TOLERANCE_MINUTES = 15;
 
@@ -131,22 +151,60 @@ function isSeriesDebutEvent(event = {}) {
   return SERIES_DEBUT_TEXT_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+/** event_type OR recurrence_type says "annual" — the two fields disagree on
+ * old/manually-edited rows often enough that every annual check reads both. */
+function isAnnualEvent(event = {}) {
+  return event.event_type === 'annual' || event.recurrence_type === 'annual';
+}
+
 /**
- * Hard editorial-newness gate. A normal event may appear only once. Annual
- * occurrences can return after a 300-day cooldown, but only when a trustworthy
- * last_featured_at timestamp proves the prior appearance is old enough.
+ * Broader than isRoutineRecurringEvent: true for ANY identity the owner's
+ * 2026-09-27 ruling treats as recurring — the routine daily/weekly/monthly/
+ * custom/recurring_series/ongoing set, annual, seasonal recurrence, or an
+ * unknown-recurrence identity that has actually repeated. recurrence_type
+ * 'unknown' has no reliable metadata of its own, so callers who can see the
+ * identity's occurrence history pass `occurrenceCount` (this row plus every
+ * matching sibling found); without it, an unknown-recurrence row is treated
+ * as one-time (fails closed toward NOT granting the once-per-year carve-out
+ * rather than guessing it recurs).
  */
-function isEditoriallyNewEvent(event = {}, reference = new Date()) {
+function isRecurringIdentityEvent(event = {}, { occurrenceCount = null } = {}) {
+  if (isRoutineRecurringEvent(event)) return true;
+  if (isAnnualEvent(event)) return true;
+  if (String(event.recurrence_type || '').toLowerCase() === 'seasonal') return true;
+  if (String(event.recurrence_type || '').toLowerCase() === 'unknown') {
+    return Number(occurrenceCount) >= 2;
+  }
+  return false;
+}
+
+/** ET calendar year for a date-like value, falling back to reference's ET year
+ * when the value is missing/unparseable. */
+function etYearOf(value, reference = new Date()) {
+  const parsed = value ? new Date(value) : null;
+  if (parsed && !Number.isNaN(parsed.getTime())) return etParts(parsed).year;
+  return etParts(reference).year;
+}
+
+/**
+ * Hard editorial-newness gate. A one-time (non-recurring) identity may
+ * appear only once, ever. A RECURRING identity (owner ruling 2026-09-27:
+ * "for recurring it should be the first event for the year") may return
+ * once a NEW ET calendar year starts from its last feature — replacing the
+ * old 300-day annual-only cooldown. A missing/unparseable last_featured_at
+ * fails closed (blocked): we can't prove which year it ran.
+ */
+function isEditoriallyNewEvent(event = {}, reference = new Date(), { occurrenceCount = null } = {}) {
   const timesFeatured = Math.max(0, Number(event.times_featured) || 0);
   const hasFeaturedAt = Boolean(event.last_featured_at);
   if (timesFeatured === 0 && !hasFeaturedAt) return true;
 
-  const isAnnual = event.event_type === 'annual' || event.recurrence_type === 'annual';
-  if (!isAnnual || !hasFeaturedAt) return false;
+  if (!isRecurringIdentityEvent(event, { occurrenceCount }) || !hasFeaturedAt) return false;
 
   const lastFeatured = new Date(event.last_featured_at);
   if (Number.isNaN(lastFeatured.getTime())) return false;
-  return -etDayDistance(lastFeatured, reference) >= ANNUAL_REFRESH_DAYS;
+
+  return etYearOf(lastFeatured, reference) < etYearOf(event.start_at, reference);
 }
 
 function canonicalEventUrl(value) {
@@ -325,8 +383,15 @@ function isEligibleForFreshDigest(event, reference = new Date()) {
   // Series-debut carve-out: a routine-recurring row passes only while its
   // stored classification says fresh_series_launch AND the debut evidence
   // still holds on a never-featured row. The first feature bumps
-  // times_featured, so the allowance is single-shot by construction.
-  const isSeriesDebut = event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event);
+  // times_featured, so the allowance is single-shot by construction. The
+  // SECOND carve-out, `__recurringFirstOfYear`, is a pool-verified marker
+  // stamped ONLY by newsletter-event-selection.js's filterRepeatedDateIdentities
+  // / assessFlagshipEventSelection (never present on a raw DB row) once they
+  // have proven a routine identity is genuinely first this ET calendar year
+  // via prior-year continuity — evidence this pure, pool-less function has no
+  // way to check on its own (owner ruling 2026-09-27).
+  const isSeriesDebut = (event.freshness_status === 'fresh_series_launch' && isSeriesDebutEvent(event))
+    || event.__recurringFirstOfYear === true;
   if (isRoutineRecurringEvent(event) && !isSeriesDebut) return false;
   // Admin 'featured' = deliberately starred for the upcoming issue. It
   // overrides the once-only newness rejection — covering rows whose counters
@@ -336,9 +401,13 @@ function isEligibleForFreshDigest(event, reference = new Date()) {
   // the same event issue after issue. Every other hard gate still applies.
   if (!isEditoriallyNewEvent(event, reference) && event.admin_status !== 'featured') return false;
 
-  // Hard reject on terminal freshness states regardless of event_type
+  // Hard reject on terminal freshness states regardless of event_type. A
+  // continuity-proven (non-debut) routine row still carries the stored
+  // 'stale_recurring' classification from classifyFreshness (which has no
+  // pool access and can't know about continuity) — isSeriesDebut is the
+  // pool-verified override for that one case.
   if (event.freshness_status === 'expired') return false;
-  if (event.freshness_status === 'stale_recurring') return false;
+  if (event.freshness_status === 'stale_recurring' && !isSeriesDebut) return false;
 
   if (event.start_at) {
     const startDate = new Date(event.start_at);
@@ -599,11 +668,13 @@ module.exports = {
   FRESHNESS_SCORES,
   ROUTINE_EVENT_TYPES,
   ROUTINE_RECURRENCE_TYPES,
-  ANNUAL_REFRESH_DAYS,
   FLAGSHIP_SEND_HOUR_ET,
   FLAGSHIP_SEND_TOLERANCE_MINUTES,
   isRoutineRecurringEvent,
   isSeriesDebutEvent,
+  isAnnualEvent,
+  isRecurringIdentityEvent,
+  etYearOf,
   isEditoriallyNewEvent,
   canonicalEventUrl,
   normalizeDigestTitle,
