@@ -307,16 +307,14 @@ async function clearVisitLocations(trx, customer, primary, matchingVisits) {
   }) : 0;
 }
 
-async function clearRecurringLocations(trx, customer, primary, parents, hasRejectedPin, latitude, longitude) {
-  const visitLatitude = pinAtScale(latitude, 6);
-  const visitLongitude = pinAtScale(longitude, 6);
+async function clearRecurringLocations(trx, customer, primary, parents, rejectedPins) {
   let count = 0;
   for (const parent of parents) {
     const effective = { ...parent, ...recurringServiceAddress(parent) };
     if (!visitMatchesPrimary(effective, customer, primary)
       || (!primaryLinked(effective, primary)
-        && (!hasRejectedPin || pinAtScale(effective.lat, 6) !== visitLatitude
-          || pinAtScale(effective.lng, 6) !== visitLongitude))) continue;
+        && !rejectedPins.some(pin => pinAtScale(effective.lat, 6) === pin.latitude
+          && pinAtScale(effective.lng, 6) === pin.longitude))) continue;
     count += await trx('scheduled_services')
       .where({ id: parent.id, customer_id: customer.id })
       .update({
@@ -333,20 +331,25 @@ async function clearRecurringLocations(trx, customer, primary, parents, hasRejec
   return count;
 }
 
-async function clearMatchingPins(trx, customer, primary, storedReview, visitContext, { clearMirrors = false } = {}) {
+async function clearMatchingPins(trx, customer, primary, storedReview, visitContext, {
+  clearMirrors = false, additionalPins = [],
+} = {}) {
   const latitude = Number(storedReview?.latitude);
   const longitude = Number(storedReview?.longitude);
-  const hasRejectedPin = storedReview?.latitude != null && storedReview?.longitude != null
-    && Number.isFinite(latitude) && Number.isFinite(longitude);
+  const rejectedPins = [storedReview, ...additionalPins].flatMap(pin => {
+    if (pin?.latitude == null || pin?.longitude == null) return [];
+    const pinLatitude = pinAtScale(pin.latitude, 6);
+    const pinLongitude = pinAtScale(pin.longitude, 6);
+    return Number.isFinite(pinLatitude) && Number.isFinite(pinLongitude)
+      ? [{ latitude: pinLatitude, longitude: pinLongitude }] : [];
+  }).filter((pin, index, pins) => pins.findIndex(candidate => candidate.latitude === pin.latitude
+    && candidate.longitude === pin.longitude) === index);
   const matchingVisits = visitContext.visits.filter(row => visitMatchesPrimary(row, customer, primary))
-    .filter(row => primaryLinked(row, primary) || (hasRejectedPin
-      && pinAtScale(row.lat, 6) === pinAtScale(latitude, 6)
-      && pinAtScale(row.lng, 6) === pinAtScale(longitude, 6)));
+    .filter(row => primaryLinked(row, primary) || rejectedPins.some(pin =>
+      pinAtScale(row.lat, 6) === pin.latitude && pinAtScale(row.lng, 6) === pin.longitude));
   const mirrors = await clearLocationMirrors(trx, customer, primary, latitude, longitude, clearMirrors);
   const visits = await clearVisitLocations(trx, customer, primary, matchingVisits);
-  const templates = await clearRecurringLocations(
-    trx, customer, primary, visitContext.parents, hasRejectedPin, latitude, longitude,
-  );
+  const templates = await clearRecurringLocations(trx, customer, primary, visitContext.parents, rejectedPins);
   return { ...mirrors, visits, templates, visitIds: matchingVisits.map(row => row.id) };
 }
 

@@ -279,7 +279,10 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
     const matchingId = randomUUID();
     const protectedId = randomUUID();
     const linkedDifferentId = randomUUID();
+    const additionalMirrorId = randomUUID();
     const independentId = randomUUID();
+    const additionalParentId = randomUUID();
+    const additionalPin = { latitude: 27.41, longitude: -82.41 };
     const template = {
       property_id: PRIMARY_ID, service_address_line1: ADDRESS.address_line1,
       service_address_line2: null, service_address_city: ADDRESS.city,
@@ -291,6 +294,12 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
         status: 'completed', is_recurring: true, recurring_ongoing: true,
         recurring_template_overrides: { appointment_address: template },
       }),
+      visitRow(additionalParentId, {
+        status: 'completed', is_recurring: true, recurring_ongoing: true,
+        recurring_template_overrides: { appointment_address: {
+          ...template, property_id: null, lat: additionalPin.latitude, lng: additionalPin.longitude,
+        } },
+      }),
       visitRow(matchingId, { lat: 27.498124, lng: -82.574813, zone: 'legacy', route_order: 4 }),
       visitRow(protectedId, {
         lat: 27.498124, lng: -82.574813, zone: 'legacy', route_order: 5, auto_dispatch_locked: true,
@@ -298,15 +307,20 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
       visitRow(linkedDifferentId, {
         property_id: PRIMARY_ID, lat: 27.45, lng: -82.45, zone: 'legacy', route_order: 7,
       }),
+      visitRow(additionalMirrorId, {
+        lat: additionalPin.latitude, lng: additionalPin.longitude, zone: 'legacy', route_order: 8,
+      }),
       visitRow(independentId, { lat: 27.4, lng: -82.4, zone: 'independent', route_order: 6 }),
     ]);
 
     const locked = await context({ includeProtected: true, verifyPin: false });
-    await expect(clearMatchingPins(trx, customer, primary, OLD_PIN, locked)).resolves.toEqual({
-      customer: 1, property: 0, visits: 3, templates: 1,
-      visitIds: expect.arrayContaining([matchingId, protectedId, linkedDifferentId]),
+    await expect(clearMatchingPins(trx, customer, primary, OLD_PIN, locked, {
+      additionalPins: [additionalPin],
+    })).resolves.toEqual({
+      customer: 1, property: 0, visits: 4, templates: 2,
+      visitIds: expect.arrayContaining([matchingId, protectedId, linkedDifferentId, additionalMirrorId]),
     });
-    for (const id of [matchingId, protectedId, linkedDifferentId]) {
+    for (const id of [matchingId, protectedId, linkedDifferentId, additionalMirrorId]) {
       expect(await trx('scheduled_services').where({ id }).first()).toMatchObject({
         lat: null, lng: null, zone: null, route_order: null,
       });
@@ -315,6 +329,8 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
       lat: '27.400000', lng: '-82.400000', zone: 'independent', route_order: 6,
     });
     expect(recurringServiceAddress(await trx('scheduled_services').where({ id: parentId }).first()))
+      .toMatchObject({ lat: null, lng: null, zone: null });
+    expect(recurringServiceAddress(await trx('scheduled_services').where({ id: additionalParentId }).first()))
       .toMatchObject({ lat: null, lng: null, zone: null });
   });
 
