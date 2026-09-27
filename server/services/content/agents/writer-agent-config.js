@@ -34,6 +34,11 @@ const {
   outOfAreaCities,
 } = require('../content-guardrails');
 const { HYPE_TERMS, COMMERCIAL_TERMS } = require('../title-meta-spam-gate');
+// Same single-source-of-truth rule for the related-post link minimum: the
+// content-quality-gate HARD check `related_posts_linked` enforces exactly
+// this number (capped by however many the brief lists), so the prompt can
+// never ask for a count the gate doesn't actually require.
+const { RELATED_POSTS_LINK_MINIMUM } = require('../content-quality-gate');
 
 // The FAQ-blocked list is interpolated into the system prompt straight from
 // content-guardrails so the writer's instructions can never drift from the
@@ -103,6 +108,10 @@ INPUT — a content brief with:
   - required_sections: ordered list the page must include
   - schema_types: structured-data types to emit
   - internal_links_to_add: URLs that must appear as anchors in the body
+  - voice_constraints.related_posts (supporting-blog only, may be absent):
+    8-12 REAL, LIVE Waves blog posts related to this topic — additional
+    internal-link targets you MAY use (not a checklist). See RELATED POSTS
+    below.
   - seo_requirements: generated-blog SEO/conversion requirements
   - word_count_target: e.g. "900-1500" — intent-complete, not pad
   - voice_constraints: tone + forbidden + required_phrases
@@ -120,8 +129,9 @@ rule follows in later sections, but this checklist is binding on its own:
   price it is, links an approved source, and carries an "as of <Month Year>"
   date — never in a table or marked-up paragraph, never a Waves price.
 - [UNKNOWN_INTERNAL_ROUTE] Internal links come ONLY from the closed set the
-  METADATA + INTERNAL LINKS section defines (internal_links_to_add + the
-  injected allowlist + real /{service-slug}-{city}-fl/ pages). NEVER invent a
+  METADATA + INTERNAL LINKS section defines (internal_links_to_add +
+  voice_constraints.related_posts when present + the injected allowlist +
+  real /{service-slug}-{city}-fl/ pages). NEVER invent a
   route. Formatting near-misses of a real route (missing trailing slash,
   absolute wavespestcontrol.com URL, ?query/#hash) are normalized
   automatically; a route that does not exist kills the draft.
@@ -161,6 +171,11 @@ rule follows in later sections, but this checklist is binding on its own:
   WaveGuard plan coverage — one-time, termite, rodent, mosquito, and
   tree-and-shrub-only topics and DIY guides are NOT re-service eligible, so
   promising a callback there invents an offer.
+- [RELATED_POSTS_NOT_LINKED] (supporting-blog only, when the brief carries
+  voice_constraints.related_posts) — link natural in-text anchors to AT
+  LEAST ${RELATED_POSTS_LINK_MINIMUM} of them (or ALL of them if the brief
+  lists fewer). See RELATED POSTS below for the full rule; this is a HARD
+  gate like the others on this list, not a nudge.
 - COMPARISON DRAFTS [COMPARISON_UNKNOWN_COMPETITOR /
   COMPARISON_UNCLASSIFIED_OPTION / COMPARISON_RIGGED_RANKING /
   COMPARISON_COMPETITOR_IN_PROSE]: NEVER invent or compose a business name —
@@ -310,12 +325,34 @@ wasted):
   the list and verify each URL appears before calling emit_draft.
 - INTERNAL LINK TARGETS are a CLOSED set (binding — a deterministic gate
   parks any draft that links elsewhere). You may link ONLY to: the URLs in
-  internal_links_to_add; these site pages: ${ALLOWED_INTERNAL_LINKS_LIST};
-  and real city-service pages of the form /{service-slug}-{city}-fl/
-  (e.g. /pest-control-bradenton-fl/, /pest-control-quote-sarasota-fl/).
-  NEVER invent any other internal URL — no /pest-library/<pest>/ subpages,
-  no guessed blog-post slugs, no made-up routes. A dead internal link parks
-  the whole draft.
+  internal_links_to_add; the posts in voice_constraints.related_posts (when
+  present — see RELATED POSTS below); these site pages:
+  ${ALLOWED_INTERNAL_LINKS_LIST}; and real city-service pages of the form
+  /{service-slug}-{city}-fl/ (e.g. /pest-control-bradenton-fl/,
+  /pest-control-quote-sarasota-fl/). NEVER invent any other internal URL —
+  no /pest-library/<pest>/ subpages, no guessed blog-post slugs, no made-up
+  routes, even one you believe exists from general knowledge of the site. A
+  dead internal link parks the whole draft.
+- RELATED POSTS (supporting-blog only, when the brief carries
+  voice_constraints.related_posts): these are REAL, LIVE Waves blog posts
+  the brief already verified exist — a ranked list of up to 12, each with a
+  title, canonical path, and primary keyword. HARD requirement
+  [RELATED_POSTS_NOT_LINKED] — a deterministic gate parks the draft on a
+  miss, exactly like the other codes in HARD PUBLISH GATES above: add
+  natural in-text links to AT LEAST ${RELATED_POSTS_LINK_MINIMUM} of them
+  (or ALL of them if the brief lists fewer than
+  ${RELATED_POSTS_LINK_MINIMUM} — a brief with only 1 or 2 candidates still
+  requires linking every one it has), but only where the related topic
+  genuinely comes up in the prose — real anchor text tied to what that
+  sentence is about, never a bare "click here" and never a stacked list of
+  unrelated links dropped in to hit the count.
+  Relinking the same post twice still counts as one. When the brief lists
+  ${RELATED_POSTS_LINK_MINIMUM} or more, you are never required to use all of them
+  — pick the ones that genuinely fit, and you may use more than
+  ${RELATED_POSTS_LINK_MINIMUM} when the topic naturally calls for it. This
+  list is the ONLY source of blog-post links you may use — never link a
+  blog post that is not on it, in internal_links_to_add, or in the static
+  allowlist above, no matter how confident you are that the page exists.
 
 PAGE-TYPE OUTPUT STANDARDS:
 - city-service:

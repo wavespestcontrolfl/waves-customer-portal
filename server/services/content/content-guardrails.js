@@ -1937,6 +1937,9 @@ function isExactTagAt(text, start, name) {
 // A child expression that renders NOTHING: an empty string or a boolean/
 // nullish literal, with optional comment trivia around it.
 const WHITESPACE_ENTITY_RE = /&(?:nbsp|ensp|emsp|thinsp|#0*(?:32|160|8194|8195|8201)|#x0*(?:20|a0|2002|2003|2009));?/gi;
+function blankWhitespaceEntities(text) {
+  return String(text || '').replace(WHITESPACE_ENTITY_RE, ' ');
+}
 // An ARRAY whose slots are all non-rendering (or elided) renders nothing
 // either ({[]}, {[null]}, {[false, '']}; Codex #3646 r39).
 const NON_RENDERING_CHILD_RE = (() => {
@@ -1945,6 +1948,9 @@ const NON_RENDERING_CHILD_RE = (() => {
   const arr = '\\[' + trivia + '(?:' + lit + '?' + trivia + ',' + trivia + ')*' + '(?:' + lit + trivia + ')?' + '\\]';
   return new RegExp('\\{' + trivia + '(?:' + lit + '|' + arr + ')' + trivia + '\\}', 'g');
 })();
+function blankNonRenderingExpressions(text) {
+  return String(text || '').replace(NON_RENDERING_CHILD_RE, ' ');
+}
 // Returns the link's RENDERED anchor text ('' when self-closing, empty,
 // hidden-only, or unclosed) — the emptiness rule and the brief's anchor
 // binding both read it.
@@ -1980,7 +1986,7 @@ function affiliateLinkVisibleText(masked, strView, start, attrs) {
         // fragment delimiters (<></>) render nothing either (Codex #508 r5/r6).
         // Whitespace character references (&nbsp; &#32; …) decode to
         // whitespace the anchor cannot show either (Codex #508 r8).
-        return text.replace(/<>|<\/>/g, '').replace(NON_RENDERING_CHILD_RE, '').replace(WHITESPACE_ENTITY_RE, ' ').trim();
+        return blankNonRenderingExpressions(text.replace(/<>|<\/>/g, '')).replace(WHITESPACE_ENTITY_RE, ' ').trim();
       }
     } else {
       const a = tagAttrsAt(masked, t.index);
@@ -6611,6 +6617,8 @@ module.exports = {
   // certainty-only hidden-text blanker — the completion gate judges HTML
   // CTA anchors by their VISIBLE wording.
   blankDefinitelyHiddenContent,
+  blankWhitespaceEntities,
+  blankNonRenderingExpressions,
   // quote-aware tag walker + balanced MDX-expression blanker — the ONE tag
   // scanner (astro-publisher's body-image scan masks with these, never a
   // parallel regex).
@@ -6622,6 +6630,7 @@ module.exports = {
   normalizeReferenceLabel,
   parseLinkDestination,
   eachMarkdownLink,
+  blankReferenceDefinitions,
   isThematicBreak,
   isInterruptingBlock,
   blankHiddenContent,
@@ -6654,6 +6663,20 @@ module.exports = {
   SAFE_MDX_COMPONENTS,
   ALLOWED_INTERNAL_LINKS,
   isKnownGoodInternalRoute,
+  // Consumed by content-quality-gate's related_posts_linked check (with the
+  // already-exported eachMarkdownLink, markdownReferenceDefinitions,
+  // normalizeReferenceLabel, parseLinkDestination, blankReferenceDefinitions
+  // above) so it counts
+  // REAL, RENDERED, non-image link destinations — masking non-rendered
+  // markdown and expression-string prose first, resolving reference-style
+  // links against their ACTUAL definitions, and skipping unused reference
+  // definitions and image references — instead of a naive body substring
+  // search or an unconditional destination collector, either of which a
+  // comment, an unused `[a]: /x/` definition, a reference-style image, or a
+  // longer URL sharing a prefix could satisfy without an actual clickable
+  // anchor (Codex #4984 r2+r3 P1s).
+  blankExpressionStringLiterals,
+  normalizeInternalPath,
   // deterministic pre-gate repair for unambiguous citation artifacts —
   // consumed by brief-driven-tools emit_draft; kept here beside
   // CITATION_RESIDUE_RE so stripper and detector can never drift.
