@@ -372,6 +372,13 @@ describe('rescheduleAgreementEvidence', () => {
     expect(evidence('Caller: Can we move my visit to Thursday at two?\nAgent: I will do that if you can confirm with your husband.').ok).toBe(false);
     expect(evidence('Caller: Can we move my visit?\nAgent: Would Thursday at two work for you?\nAgent: You are all set.').ok).toBe(false);
     expect(evidence('Caller: Can we move my visit?\nAgent: Would Thursday at two work for you?\nCaller: Yes.\nAgent: You are all set.').ok).toBe(true);
+    // The answer must accept: a hedge or a question is not an answer.
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: Let me think.\nAgent: You are all set.').ok).toBe(false);
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: Is that the earliest?\nAgent: You are all set.').ok).toBe(false);
+    // Holding the move after agreeing takes it back.
+    for (const hold of ['Actually, hold off on moving it.', 'Please leave it unchanged.']) {
+      expect(evidence(`Caller: Can we do Thursday at two?\nAgent: We will see you then.\nCaller: ${hold}`).ok).toBe(false);
+    }
   });
 
   test('"I am" is not a time, and a courtesy "if" does not condition the commitment', () => {

@@ -84,7 +84,7 @@ const HEDGE_MARKERS = [
   ' need to check ', ' need to look ', ' see what i have ', ' see what we have ',
   ' see if i have ', ' see if we have ', ' check the schedule ', ' look at the schedule ',
   // The caller deferring to someone or to later ("I need to ask my husband").
-  ' need to ask ', ' have to ask ', ' let me ask ', ' check with my ', ' talk to my ', ' think about it ',
+  ' need to ask ', ' have to ask ', ' let me ask ', ' check with my ', ' talk to my ', ' think about it ', ' let me think ', ' i ll think ',
   // A place in line, or a callback, is not an appointment ("I'll put you
   // down on the waiting list", "for a callback about Thursday").
   ' waiting list ', ' wait list ', ' waitlist ', ' standby ', ' cancellation list ', ' callback ', ' call back ', ' a call about ',
@@ -105,6 +105,7 @@ const REFUSAL_MARKERS = [
   ' changed my mind ', ' change my mind ', ' on second thought ', ' leave it as is ', ' keep it as is ',
   ' leave it where it is ', ' keep it where it is ', ' instead ',
   ' cancel it ', ' cancel the appointment ', ' cancel my appointment ', ' cancel the visit ', ' cancel my visit ',
+  ' hold off ', ' leave it unchanged ', ' leave it the same ', ' keep it the same ', ' leave it alone ', ' leave it be ',
 ];
 
 // The agent's affirming close: a commitment, the agent taking the slot on
@@ -333,11 +334,11 @@ function callerRepliesToSlot(turns, refs, slot, runStart, anchorIdx) {
   return replies;
 }
 
-// After the agent's commitment the caller only closes the call: any caller
-// question ("can we do three?", "anything else available?") is still on the
-// slot.
-function callerReopensSlot(turns, affirmIdx) {
-  return turns.slice(affirmIdx + 1).some((t) => !t.agent && sentenceSpans(t.raw).some((sentence) => sentence.question));
+// After the slot's final mention the caller answers or closes the call: any
+// caller question ("Is that the earliest?", "can we do three?", "anything
+// else available?") is still on the slot.
+function callerReopensSlot(turns, anchorIdx) {
+  return turns.slice(anchorIdx + 1).some((t) => !t.agent && sentenceSpans(t.raw).some((sentence) => sentence.question));
 }
 
 // Words that start a new clause: "Friday doesn't work, BUT we'll see you
@@ -488,7 +489,7 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
     ? t.ns.replace(/^(?:no|nope|nah)\b/, '') : t.ns));
   if (negatesSlotWord(dayClause, dayWord, slotEndIn(dayClause, dayWord, hourWord), slot.hour24)
     || negatesSlotWord(hourClause, hourWord, slotEndIn(hourClause, hourWord, dayWord), slot.hour24)
-    || [slotClauses[2], ...callerMeanwhile, ...laterTurns].some((ns) => hasNegation(ns) || talksOtherTime(ns, slot.hour24)) || callerReopensSlot(turns, affirmIdx)) {
+    || [slotClauses[2], ...callerMeanwhile, ...laterTurns].some((ns) => hasNegation(ns) || talksOtherTime(ns, slot.hour24)) || callerReopensSlot(turns, anchorIdx)) {
     return failAt('slot_refused', affirmIdx);
   }
 
