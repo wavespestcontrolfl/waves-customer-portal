@@ -43,14 +43,6 @@ jest.mock('../services/scheduling/day-stops', () => ({
   ...jest.requireActual('../services/scheduling/day-stops'),
   preloadServiceLocations: jest.fn().mockResolvedValue(undefined),
 }));
-// Same-trip first-application billing alert (#5021): this suite's own
-// concern is the tech-blind occupancy gate, not the billing alert
-// (that module has its own exhaustive Postgres suite). The mock trx here
-// has no real DB, so mock the whole module out rather than let the real
-// function run a query against it.
-jest.mock('../services/first-application-sibling-split', () => ({
-  flagFirstApplicationSiblingDivergenceSafely: jest.fn().mockResolvedValue({ action: 'skipped' }),
-}));
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
@@ -391,28 +383,6 @@ describe('reschedule — shared occupancy conflict gate', () => {
     // the check would leave the same READ COMMITTED race it exists to close.
     const dateLockOrder = trx.raw.mock.invocationCallOrder[0];
     expect(dateLockOrder).toBeLessThan(findConflictingVisits.mock.invocationCallOrder[0]);
-  });
-
-  // The billing-alert "Safely" wrapper fails CLOSED: a genuine failure
-  // raising the alert propagates, so it rejects the WHOLE reschedule() call
-  // and (on real Postgres) rolls the date write back with it — a move must
-  // never commit without its alert.
-  test('an injected failure in the billing alert propagates — the reschedule call rejects rather than silently committing the date move', async () => {
-    const { trxScheduled } = wireRescheduleMocks(service());
-    const flagMock = require('../services/first-application-sibling-split').flagFirstApplicationSiblingDivergenceSafely;
-    const injected = new Error('injected billing alert failure');
-    flagMock.mockRejectedValueOnce(injected);
-
-    await expect(SmartRebooker.reschedule(
-      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_sms',
-    )).rejects.toThrow('injected billing alert failure');
-
-    // The mock CAS write ran (mirroring a real trx's own uncommitted
-    // statements) but the transaction's own promise rejected — on real
-    // Postgres that rejection is exactly what rolls the scheduled_date
-    // write back with it, instead of a swallow-and-commit behavior.
-    expect(trxScheduled.update).toHaveBeenCalled();
-    expect(flagMock).toHaveBeenCalled();
   });
 
   describe('null window_end — derived occupancy span (was: gate skipped entirely)', () => {

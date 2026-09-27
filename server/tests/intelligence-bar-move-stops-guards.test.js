@@ -15,14 +15,6 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-// Same-trip first-application billing alert (#5021): this suite's own
-// concern is the IB batch mover's own guards, not the billing alert
-// (that module has its own exhaustive Postgres suite). The mock trx here
-// has no real DB, so mock the whole module out rather than let the real
-// function run a query against it.
-jest.mock('../services/first-application-sibling-split', () => ({
-  flagFirstApplicationSiblingDivergenceSafely: jest.fn().mockResolvedValue({ action: 'skipped' }),
-}));
 jest.mock('../services/tech-status', () => ({
   clearTechCurrentJob: jest.fn().mockResolvedValue(null),
 }));

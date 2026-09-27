@@ -1638,9 +1638,13 @@ class SmartRebooker {
       // Caller-supplied guard for THIS row on the move transaction (auto-dispatch
       // re-reads the receiving tech's capabilities here; the unit mover runs the
       // matching options.memberGuard for grouped members). Refuses before the
-      // first write; nothing to undo.
+      // first write; nothing to undo. `destination` is where THIS row lands —
+      // for a grouped member, its own derived window — so a guard can judge
+      // the placement being written rather than the caller's plan.
       if (typeof options.moveGuard === 'function') {
-        await options.moveGuard({ trx, technicianId: keptTechId, service });
+        await options.moveGuard({
+          trx, technicianId: keptTechId, service, destination: { date: newDateStr, windowStart: updates.window_start },
+        });
       }
       // A reviewed move also pins the route whose destination was probed.
       // A tech CHANGE pins the observed prior technician in the CAS: the
@@ -1737,27 +1741,6 @@ class SmartRebooker {
         original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
         new_window: win.start ? `${win.start}-${win.end}` : null,
       });
-
-      // Same-trip first-application billing alert (owner ruling, #5021
-      // redesign — "alert only, no hold"): a date-only move of this row may
-      // pull an unpriced sibling off the shared first-application invoice's
-      // date. Raises a durable admin alert rather than touching money or
-      // holding anything — see first-application-sibling-split.js. Fails
-      // closed: a failure here propagates and rolls back this move (the
-      // "safely" wrapper logs, then re-throws).
-      //
-      // deferSiblingDivergenceAlert (Codex pre-push finding): visit-groups.js
-      // moveVisitAsUnit sets this on every member's own per-member call —
-      // a grouped move that lands BOTH siblings on the SAME new day would
-      // otherwise raise a false alarm off member 1's commit (still on the
-      // old day relative to the just-moved member), even though the group
-      // ends up perfectly realigned once member 2 lands moments later.
-      // moveVisitAsUnit calls the chokepoint itself, once, after every
-      // member has landed, judged on the group's FINAL state.
-      if (!options.deferSiblingDivergenceAlert && dateOnly(newDate) !== dateOnly(originalDate)) {
-        await require('./first-application-sibling-split')
-          .flagFirstApplicationSiblingDivergenceSafely(trx, serviceId, 'single-visit reschedule');
-      }
     });
 
     // Tech-facing notice (tech-visit-notifications.js), post-commit,
@@ -3333,18 +3316,6 @@ class SmartRebooker {
         new_window: win.start ? `${win.start}-${win.end}` : null,
         series_move_id: seriesMoveId,
       });
-
-      // Same-trip first-application billing alert (owner ruling, #5021
-      // redesign — "alert only, no hold"): the anchor's own date always
-      // changes on this path (the caller only reaches rescheduleSeries when
-      // it does) — it may pull an unpriced sibling off its date. See the
-      // single-visit path above for the fail-closed rationale and for
-      // deferSiblingDivergenceAlert (moveVisitAsUnit's own end-of-batch
-      // reconciliation).
-      if (!options.deferSiblingDivergenceAlert && dateOnly(newDate) !== dateOnly(service.scheduled_date)) {
-        await require('./first-application-sibling-split')
-          .flagFirstApplicationSiblingDivergenceSafely(trx, serviceId, 'series reschedule');
-      }
 
       return touched;
     }).catch(async (err) => {

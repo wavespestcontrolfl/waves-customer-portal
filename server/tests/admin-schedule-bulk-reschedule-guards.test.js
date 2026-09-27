@@ -58,14 +58,6 @@ jest.mock('../services/appointment-reminders', () => ({
 jest.mock('../services/tech-status', () => ({
   clearTechCurrentJob: jest.fn().mockResolvedValue(null),
 }));
-// Same-trip first-application billing alert (#5021): this suite's own
-// concern is the bulk-reschedule route's own guards, not the billing alert
-// (that module has its own exhaustive Postgres suite). The mock trx here
-// has no real DB, so mock the whole module out rather than let the real
-// function run a query against it.
-jest.mock('../services/first-application-sibling-split', () => ({
-  flagFirstApplicationSiblingDivergenceSafely: jest.fn().mockResolvedValue({ action: 'skipped' }),
-}));
 const mockIoEmit = jest.fn();
 jest.mock('../sockets', () => ({
   getIo: jest.fn(() => ({ to: jest.fn(() => ({ emit: mockIoEmit })) })),
@@ -277,40 +269,6 @@ test('a past scheduledDate produces per-row failed[] entries instead of moving a
     { id: 'svc-1', reason: 'scheduledDate must be a valid YYYY-MM-DD date that is not in the past' },
     { id: 'svc-2', reason: 'scheduledDate must be a valid YYYY-MM-DD date that is not in the past' },
   ]);
-});
-
-// The billing-alert "Safely" wrapper fails CLOSED: a genuine failure
-// raising the alert propagates, making THIS row's own transaction reject —
-// the per-id try/catch in the route already reports that as a per-row
-// failure (existing convention for any other in-trx throw), never a 500
-// for the whole batch.
-test('an injected failure in the billing alert lands this row in failed[] — the batch keeps going and the date is not moved', async () => {
-  const updateChain = chain();
-  wireTrx({
-    scheduled_services: [
-      chain({ first: jest.fn().mockResolvedValue({ ...SVC }) }),
-      chain(), // always-on advisory occupancy probe (clean)
-      updateChain,
-    ],
-    reschedule_log: [chain()],
-  });
-  require('../services/first-application-sibling-split')
-    .flagFirstApplicationSiblingDivergenceSafely.mockRejectedValueOnce(new Error('injected billing alert failure'));
-
-  const { status, body } = await bulk({
-    action: 'reschedule',
-    serviceIds: ['svc-1'],
-    payload: { scheduledDate: '2099-01-15' },
-  });
-
-  expect(status).toBe(200);
-  expect(body.updated).toEqual([]);
-  expect(body.failed).toEqual([{ id: 'svc-1', reason: 'injected billing alert failure' }]);
-  // The mock CAS write ran (mirroring a real trx's own uncommitted
-  // statements) but the row's own transaction promise rejected — on real
-  // Postgres that rejection is exactly what rolls the scheduled_date write
-  // back with it, instead of the old swallow-and-commit behavior.
-  expect(updateChain.update).toHaveBeenCalled();
 });
 
 test('a live en_route row moves WITH the lifecycle rewind and gets an admin_bulk reschedule_log row', async () => {

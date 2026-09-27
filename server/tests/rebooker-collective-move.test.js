@@ -38,14 +38,6 @@ jest.mock('../services/scheduling/blackout-dates', () => ({
 jest.mock('../services/outbound-review-confirm', () => ({
   activateLegacyOutboundReviewRowIfNeeded: jest.fn().mockResolvedValue(false),
 }));
-// suite's own concern is collective-move behavior, not the billing-review
-// alert (that module has its own exhaustive Postgres suite). The mock trx
-// here has no real DB, so mock the whole module out rather than let the
-// real function run against it — every date-changing
-// would otherwise hit a real query against an unmocked trx.
-jest.mock('../services/first-application-sibling-split', () => ({
-  flagFirstApplicationSiblingDivergenceSafely: jest.fn().mockResolvedValue({ action: 'skipped' }),
-}));
 
 const fs = require('fs');
 const path = require('path');

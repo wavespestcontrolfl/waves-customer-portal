@@ -22,14 +22,6 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-// suite's own concern is the IB appointment tools, not the billing-review
-// alert (that module has its own exhaustive Postgres suite). The mock trx
-// here has no real DB, so mock the whole module out rather than let the
-// real function run against it — every date-changing
-// would otherwise hit a real query against an unmocked trx.
-jest.mock('../services/first-application-sibling-split', () => ({
-  flagFirstApplicationSiblingDivergenceSafely: jest.fn().mockResolvedValue({ action: 'skipped' }),
-}));
 jest.mock('../services/tech-status', () => ({
   clearTechCurrentJob: jest.fn().mockResolvedValue(null),
 }));
@@ -57,6 +49,13 @@ const { executeTool } = require('../services/intelligence-bar/tools');
 
 // Real ET "today" — the date a same-day move targets.
 const TODAY_ET = jest.requireActual('../utils/datetime-et').etDateString();
+
+// A dues-billed member (explicit monthly lane with a rate). create_appointment
+// sets no price, so its billing gate (ADMIN-BUG-R12) only lets through a
+// customer whose billing covers an unpriced visit; the create tests below use
+// this profile to keep exercising their own guards. The gate's own cases are
+// in the ADMIN-BUG-R12 describe.
+const MEMBER_BILLING = { billing_mode: 'monthly_membership', monthly_rate: 89 };
 
 // An UPDATE result that resolves to the row count like knex AND answers
 // `.returning([...])` with the committed rows (the reschedule writer reads
@@ -100,10 +99,11 @@ function chain(overrides = {}) {
 
 function wireDb(queues) {
   db.mockImplementation((table) => {
-    // The retired-for-sale catalog lookup (quarterly T&S gate, #4786):
-    // no retired rows unless a test queues its own.
+    // The retired-for-sale catalog lookup (quarterly T&S gate, #4786) and the
+    // booking's catalog price read: an empty catalog unless a test queues
+    // its own rows.
     if (table === 'services' && !queues.services) {
-      return { whereIn() { return this; }, select: () => Promise.resolve([]) };
+      return { where() { return this; }, whereIn() { return this; }, select: () => Promise.resolve([]) };
     }
     const q = queues[table];
     if (!q || q.length === 0) throw new Error(`Unexpected db('${table}') call`);
@@ -154,8 +154,8 @@ describe('create_appointment', () => {
   test('inserts status pending with flat-60 window_end from a 12-hour time', async () => {
     const insertChain = chain();
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
     });
 
@@ -176,8 +176,8 @@ describe('create_appointment', () => {
 
   test('registers the durable reminder row with the insert — registration only, no confirmation SMS', async () => {
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain(), chain()], // first chain: the always-on advisory probe (clean)
     });
 
@@ -206,8 +206,8 @@ describe('create_appointment', () => {
     // registration instead would not help — selfHealMissingReminderRows
     // registers any row-less future visit at 08:00 ARMED within 15 minutes.)
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain()],
     });
     await executeTool('create_appointment', {
@@ -222,8 +222,8 @@ describe('create_appointment', () => {
   test('a reminder-registration failure never fails the already-committed create', async () => {
     AppointmentReminders.registerAppointment.mockRejectedValueOnce(new Error('reminders down'));
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain()],
     });
     const result = await executeTool('create_appointment', {
@@ -235,8 +235,8 @@ describe('create_appointment', () => {
 
   test('success log carries ids only — never the customer name (no-PII-in-logs rule)', async () => {
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain()],
     });
     await executeTool('create_appointment', {
@@ -253,8 +253,8 @@ describe('create_appointment', () => {
     for (const [word, start, end] of [['morning', '08:00', '09:00'], ['afternoon', '12:00', '13:00']]) {
       const insertChain = chain();
       wireDb({
-        customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+        customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
         scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
       });
       const result = await executeTool('create_appointment', {
@@ -269,8 +269,8 @@ describe('create_appointment', () => {
   test('no time_window inserts null start/end (still pending)', async () => {
     const insertChain = chain();
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [insertChain],
     });
     await executeTool('create_appointment', {
@@ -287,8 +287,8 @@ describe('create_appointment', () => {
     // no scheduled_services insert.
     datetimeEt.sameDayWindowElapsed.mockReturnValueOnce(true);
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       // No scheduled_services queue — an insert would throw Unexpected db().
     });
 
@@ -304,8 +304,8 @@ describe('create_appointment', () => {
     datetimeEt.sameDayWindowElapsed.mockReturnValueOnce(false);
     const insertChain = chain();
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
     });
 
@@ -341,8 +341,8 @@ describe('create_appointment', () => {
   test('a 4:00 PM start still derives the flat-60 17:00 end (no midnight rejection)', async () => {
     const insertChain = chain();
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
     });
 
@@ -363,8 +363,8 @@ describe('create_appointment — shared admin window rules (scheduling/window-ru
   test('a 7:00 AM start is accepted (no day-start floor) and inserts 07:00-08:00', async () => {
     const insertChain = chain();
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
     });
     const result = await executeTool('create_appointment', {
@@ -385,8 +385,8 @@ describe('create_appointment — shared admin window rules (scheduling/window-ru
   test('10:00 AM passes and inserts the normalized 10:00-11:00 window', async () => {
     const insertChain = chain();
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
     });
     const result = await executeTool('create_appointment', {
@@ -404,8 +404,8 @@ describe('create_appointment — shared admin window rules (scheduling/window-ru
       });
       const insertChain = chain();
       wireDb({
-        customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+        customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
         scheduled_services: [probe, insertChain],
       });
       const result = await executeTool('create_appointment', {
@@ -415,6 +415,302 @@ describe('create_appointment — shared admin window rules (scheduling/window-ru
       expect(result.warning).toMatch(/2099-01-15/);
       expect(insertChain.insert).toHaveBeenCalled();
     } finally { /* no env to restore — the probe is always on */ }
+  });
+});
+
+describe('create_appointment — billing gate (ADMIN-BUG-R12)', () => {
+  // The executor sets no price. A customer whose billing needs a number ON
+  // the visit would get a visit that completes with no invoice, so the
+  // booking is refused with the Schedule screen's own billable-amount verdict.
+  const customerRow = (billing) => ({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...billing });
+  const book = (serviceType = 'One-Time Pest Control Service') => executeTool('create_appointment', {
+    customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: serviceType, time_window: '9:00 AM',
+  });
+  // Preflight read only: a refused booking never opens the transaction, and
+  // no scheduled_services queue exists, so any probe or insert would throw.
+  const expectRefusedBeforeAnyLock = (result) => {
+    expect(result.error).toMatch(/This visit needs a price/);
+    expect(result.error).toMatch(/Nothing was booked/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  };
+  const wireBooking = (preflightRow, lockedRow = preflightRow) => {
+    const insertChain = chain();
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue(preflightRow) }),
+        chain({ first: jest.fn().mockResolvedValue(lockedRow) })],
+      scheduled_services: [chain(), insertChain], // leading chain: the advisory probe (clean)
+    });
+    return insertChain;
+  };
+
+  test('an explicit per-visit customer is refused before any lock or write', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(customerRow({ billing_mode: 'per_visit' })) })] });
+    const result = await book();
+    expectRefusedBeforeAnyLock(result);
+    expect(result.error).toMatch(/propose the booking again with price/);
+  });
+
+  test('a one-time customer is refused', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(customerRow({ billing_mode: 'one_time' })) })] });
+    expectRefusedBeforeAnyLock(await book());
+  });
+
+  test('a lead-shaped row (no billing mode, no tier, no rate) is refused', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(customerRow({})) })] });
+    expectRefusedBeforeAnyLock(await book('Waves Assessment'));
+  });
+
+  test('a legacy row with a sentinel tier and a rate is refused — completion mints nothing for it', async () => {
+    // resolveBillingLane infers per_visit (sentinel tier), and with no
+    // create-invoice stamp, no membership tier and no visit price,
+    // shouldAutoInvoiceCompletion declines: the monthly_rate is never billed.
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(customerRow({ waveguard_tier: 'One-Time', monthly_rate: 150 })) })] });
+    expectRefusedBeforeAnyLock(await book());
+  });
+
+  test('annual prepay is refused — an unpriced uncovered visit bills nothing', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(customerRow({ billing_mode: 'annual_prepay', waveguard_tier: 'Gold', monthly_rate: 89 })) })] });
+    expectRefusedBeforeAnyLock(await book('Quarterly Pest Control Service'));
+  });
+
+  test('an explicit member with no monthly rate is refused', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(customerRow({ billing_mode: 'monthly_membership', monthly_rate: 0 })) })] });
+    expectRefusedBeforeAnyLock(await book('Quarterly Pest Control Service'));
+  });
+
+  test('per-application with no fee on file is refused, naming the fee remedy', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(customerRow({ billing_mode: 'per_application', per_application_fee: null })) })] });
+    const result = await book('Quarterly Pest Control Service');
+    expectRefusedBeforeAnyLock(result);
+    expect(result.error).toMatch(/or set a per-application fee on the customer profile/);
+  });
+
+  test('per-application with a fee on file books (the fee bills the visit)', async () => {
+    const insertChain = wireBooking(customerRow({ billing_mode: 'per_application', per_application_fee: 95 }));
+    const result = await book('Quarterly Pest Control Service');
+    expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(insertChain.insert).toHaveBeenCalledTimes(1);
+  });
+
+  test('an inferred member (real tier + rate, no billing mode) books', async () => {
+    const insertChain = wireBooking(customerRow({ waveguard_tier: 'Gold', monthly_rate: 89 }));
+    const result = await book('Quarterly Pest Control Service');
+    expect(result.success).toBe(true);
+    expect(insertChain.insert).toHaveBeenCalledTimes(1);
+  });
+
+  test('free-by-design visit types book for a per-visit customer', async () => {
+    for (const serviceType of ['Pest Control Re-Service', 'Waves Pest Control Appointment Service']) {
+      jest.clearAllMocks();
+      const insertChain = wireBooking(customerRow({ billing_mode: 'per_visit' }));
+      const result = await book(serviceType);
+      expect(result.success).toBe(true);
+      expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ service_type: serviceType });
+    }
+  });
+
+  test('a billing change committed after the preflight is refused on the LOCKED row, before the insert', async () => {
+    // Preflight reads a member; by the time the booking transaction locks the
+    // customer row, the lane is per_visit. The locked verdict governs.
+    const insertChain = wireBooking(
+      customerRow({ billing_mode: 'monthly_membership', monthly_rate: 89 }),
+      customerRow({ billing_mode: 'per_visit', monthly_rate: 89 }),
+    );
+    const result = await book();
+    expect(result.error).toMatch(/This visit needs a price/);
+    expect(result.preview_changed).toBe(true);
+    expect(insertChain.insert).not.toHaveBeenCalled();
+    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+  });
+});
+
+describe('create_appointment — the visit carries a price like a Schedule-screen booking (owner 2026-09-27)', () => {
+  const ONE_TIME_PEST = {
+    id: 'svc-otp', name: 'One-Time Pest Control Service', short_name: null,
+    service_key: 'one_time_pest_control', base_price: '250.00', category: 'pest',
+  };
+  const TERMITE_LIQUID = {
+    id: 'svc-tl', name: 'Termite Liquid Treatment Service', short_name: null,
+    service_key: 'termite_liquid', base_price: null, category: 'termite',
+  };
+  const PER_VISIT = { id: 'cust-1', first_name: 'Ada', last_name: 'L', billing_mode: 'per_visit' };
+  const catalog = (rows) => chain({ select: jest.fn().mockResolvedValue(rows) });
+  // Preflight + locked reads of the customer and the catalog; the insert
+  // echoes its price back so the result can report it.
+  const wirePriced = ({ customer = PER_VISIT, lockedCustomer = customer, rows, lockedRows = rows }) => {
+    const insertChain = chain();
+    insertChain.returning.mockImplementation(async () => [{ id: 'appt-1', ...insertChain.insert.mock.calls[0][0] }]);
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue(customer) }), chain({ first: jest.fn().mockResolvedValue(lockedCustomer) })],
+      services: [catalog(rows), catalog(lockedRows)],
+      scheduled_services: [chain(), insertChain], // leading chain: the advisory probe (clean)
+    });
+    return insertChain;
+  };
+  const book = (extra = {}) => executeTool('create_appointment', {
+    customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'One-Time Pest Control Service', time_window: '9:00 AM', ...extra,
+  });
+
+  test('with no stated price, the catalog price the Schedule screen pre-fills is stamped, with the catalog link and the create-invoice flag', async () => {
+    const insertChain = wirePriced({ rows: [ONE_TIME_PEST] });
+    const result = await book({ _booking_price: 250, _booking_service_id: 'svc-otp' });
+    expect(result).toMatchObject({ success: true, appointment_id: 'appt-1', price: 250 });
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({
+      estimated_price: 250,
+      primary_line_price: 250,
+      create_invoice_on_complete: true,
+      service_id: 'svc-otp',
+      service_key_snapshot: 'one_time_pest_control',
+      service_category_snapshot: 'pest',
+    });
+  });
+
+  test('the catalog default is the Schedule modal\'s pre-fill: the price range minimum, not the base price', async () => {
+    // CreateAppointmentModal addServiceFromCatalog pre-fills
+    // price_range_min ?? base_price — a $125-minimum / $175-base service
+    // books at $125 on the Schedule screen, so it must here too.
+    const ranged = { ...ONE_TIME_PEST, id: 'svc-ranged', price_range_min: '125.00', base_price: '175.00' };
+    const insertChain = wirePriced({ rows: [ranged] });
+    const result = await book({ _booking_price: 125, _booking_service_id: 'svc-ranged' });
+    expect(result.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 125, primary_line_price: 125, service_id: 'svc-ranged' });
+  });
+
+  test('a shared short name never picks a catalog row: the booking is refused with the candidates, nothing written', async () => {
+    // The live catalog shares "Lawn Care" across five services (recurring
+    // and one-time) — a first match would price and bill the wrong one.
+    const lawn = [
+      { id: 'svc-lq', name: 'Quarterly Lawn Care Service', short_name: 'Lawn Care', service_key: 'lawn_care_quarterly', base_price: null, category: 'lawn', billing_type: 'recurring' },
+      { id: 'svc-lo', name: 'One-Time Lawn Care Service', short_name: 'Lawn Care', service_key: 'lawn_care_one_time', base_price: '95.00', category: 'lawn', billing_type: 'one_time' },
+    ];
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })], services: [catalog(lawn)] });
+    const result = await book({ service_type: 'Lawn Care' });
+    expect(result.error).toMatch(/names several catalog services \(Quarterly Lawn Care Service, One-Time Lawn Care Service\)/);
+    expect(db.transaction).not.toHaveBeenCalled();
+    // The exact name still resolves its one row.
+    const insertChain = wirePriced({ rows: lawn });
+    const ok = await book({ service_type: 'One-Time Lawn Care Service', _booking_price: 95, _booking_service_id: 'svc-lo' });
+    expect(ok.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 95, service_id: 'svc-lo' });
+  });
+
+  test('a dues-billed member\'s plan service carries no catalog default — dues cover it, as on the Schedule screen', async () => {
+    const foam = {
+      id: 'svc-foam', name: 'Recurring Termite Foam Service', short_name: null, service_key: 'foam_recurring',
+      price_range_min: '146.00', base_price: '164.00', category: 'termite', billing_type: 'recurring',
+    };
+    const insertChain = wirePriced({ customer: { ...PER_VISIT, ...MEMBER_BILLING }, rows: [foam] });
+    const result = await book({ service_type: foam.name, _booking_price: null, _booking_service_id: 'svc-foam' });
+    expect(result.success).toBe(true);
+    const payload = insertChain.insert.mock.calls[0][0];
+    expect(payload).toMatchObject({ service_id: 'svc-foam' });
+    expect(payload).not.toHaveProperty('estimated_price');
+    expect(payload).not.toHaveProperty('create_invoice_on_complete');
+  });
+
+  test('the same plan service for a per-visit customer carries the catalog default, and a member\'s stated price still stands', async () => {
+    const foam = {
+      id: 'svc-foam', name: 'Recurring Termite Foam Service', short_name: null, service_key: 'foam_recurring',
+      price_range_min: '146.00', base_price: '164.00', category: 'termite', billing_type: 'recurring',
+    };
+    let insertChain = wirePriced({ rows: [foam] });
+    let result = await book({ service_type: foam.name, _booking_price: 146, _booking_service_id: 'svc-foam' });
+    expect(result.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 146, create_invoice_on_complete: true });
+    jest.clearAllMocks();
+    insertChain = wirePriced({ customer: { ...PER_VISIT, ...MEMBER_BILLING }, rows: [foam] });
+    result = await book({ service_type: foam.name, price: 200, _booking_price: 200, _booking_service_id: 'svc-foam' });
+    expect(result.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 200, create_invoice_on_complete: true });
+  });
+
+  test('a stated price wins over the catalog price', async () => {
+    const insertChain = wirePriced({ rows: [ONE_TIME_PEST] });
+    const result = await book({ price: 180, _booking_price: 180, _booking_service_id: 'svc-otp' });
+    expect(result.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 180, primary_line_price: 180, service_id: 'svc-otp' });
+  });
+
+  test('a stated price books a service the catalog has no price for — the case that used to be refused', async () => {
+    const insertChain = wirePriced({ rows: [TERMITE_LIQUID] });
+    const result = await book({ service_type: 'Termite Liquid Treatment Service', price: 1200, _booking_price: 1200, _booking_service_id: 'svc-tl' });
+    expect(result.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 1200, create_invoice_on_complete: true, service_id: 'svc-tl' });
+  });
+
+  test('a member\'s one-off catalog service is priced too, exactly as the Schedule screen books it', async () => {
+    const insertChain = wirePriced({ customer: { ...PER_VISIT, ...MEMBER_BILLING }, rows: [ONE_TIME_PEST] });
+    const result = await book({ _booking_price: 250, _booking_service_id: 'svc-otp' });
+    expect(result.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 250, create_invoice_on_complete: true });
+  });
+
+  test('the one-time mosquito default comes from the Schedule screen\'s lot ladder, not the flat catalog price', async () => {
+    const mosquito = {
+      id: 'svc-mq', name: 'One-Time Mosquito Control Service', short_name: null,
+      service_key: 'mosquito_one_time', base_price: '156.00', category: 'mosquito',
+    };
+    const customer = { ...PER_VISIT, lot_sqft: 43560 };
+    const expected = (await require('../routes/admin-schedule').buildAppointmentPricing({
+      serviceRecord: mosquito, serviceType: mosquito.name, serviceId: mosquito.id, customer,
+    })).finalPrice;
+    expect(expected).toBeGreaterThan(0);
+    expect(expected).not.toBe(156);
+    const insertChain = wirePriced({ customer, rows: [mosquito] });
+    const result = await book({ service_type: mosquito.name, _booking_price: expected, _booking_service_id: 'svc-mq' });
+    expect(result.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0].estimated_price).toBe(expected);
+  });
+
+  test('a price that differs from the one the card showed is refused before any lock or write', async () => {
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })],
+      services: [catalog([ONE_TIME_PEST])],
+    });
+    const result = await book({ _booking_price: 200, _booking_service_id: 'svc-otp' });
+    expect(result).toMatchObject({ preview_changed: true });
+    expect(result.error).toMatch(/price or catalog service changed since the card was shown/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a priced booking with no card pin is refused — no card ever showed that price', async () => {
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })],
+      services: [catalog([ONE_TIME_PEST])],
+    });
+    const result = await book();
+    expect(result).toMatchObject({ preview_changed: true });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a catalog price that changes under the lock is refused, and nothing is inserted', async () => {
+    const insertChain = wirePriced({ rows: [ONE_TIME_PEST], lockedRows: [{ ...ONE_TIME_PEST, base_price: '275.00' }] });
+    const result = await book({ _booking_price: 250, _booking_service_id: 'svc-otp' });
+    expect(result).toMatchObject({ preview_changed: true });
+    expect(result.error).toMatch(/price or catalog service changed since the card was shown/);
+    expect(insertChain.insert).not.toHaveBeenCalled();
+    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+  });
+
+  test('a free visit type never carries a price: a stated one is refused', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })] });
+    const result = await book({ service_type: 'Pest Control Re-Service', price: 99 });
+    expect(result.error).toMatch(/free visit type/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a stated price needs a real catalog service — an invented service type is refused, nothing written', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })], services: [catalog([ONE_TIME_PEST])] });
+    const result = await book({ service_type: 'Spider web sweep', price: 150, _booking_price: 150, _booking_service_id: null });
+    expect(result.error).toMatch(/is not a catalog service/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a catalog row only matches the service the operator named — no partial match prices a different service', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })], services: [catalog([ONE_TIME_PEST])] });
+    const result = await book({ service_type: 'Pest Control' });
+    expect(result.error).toMatch(/This visit needs a price/);
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 });
 

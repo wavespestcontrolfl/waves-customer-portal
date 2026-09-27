@@ -1405,20 +1405,6 @@ async function moveStopsToDay(input, actionContext = {}) {
       }
       c.committedTechId = committedRows[0]?.technician_id || null;
     }
-    // Same-trip first-application billing alert (owner ruling, #5021
-    // redesign — "alert only, no hold"): this batch mover writes
-    // scheduled_date directly and must call it too. Run after every row in
-    // this batch has committed its date write so a batch that moves BOTH
-    // siblings of a combined invoice to the SAME new day is judged on the
-    // batch's FINAL state, not a mid-loop snapshot. Raises a durable admin
-    // alert rather than touching money — see
-    // first-application-sibling-split.js. Fails closed (the "safely"
-    // wrapper re-throws), so a failure here rolls back this whole batch.
-    for (const c of classified) {
-      if (c.observedDate === dateStr) continue;
-      await require('../first-application-sibling-split')
-        .flagFirstApplicationSiblingDivergenceSafely(trx, c.s.id, 'intelligence-bar batch move');
-    }
     return overlappedIds;
   });
   try {

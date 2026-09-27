@@ -1,15 +1,17 @@
 /**
- * Same-trip first-application billing ALERT (owner ruling, 2026-09-27
- * redesign — "alert only, no hold"; supersedes the #5021 round-3..7 hold
- * design). A reserved-accept slot selling two recurring programs mints ONE
- * draft invoice for the combined same-day total, linked to the reserved
- * (priced) row; the promoted sibling is left estimated_price NULL on
- * purpose (covered by that invoice while the two visits share a date).
- * Once a reschedule pulls the unpriced sibling off the priced row's day,
- * this module raises a durable admin alert (notification-service.
- * notifyAdmin, category 'billing') IN THE SAME TRANSACTION as the date
- * write — it never touches the invoice's money, never holds collection,
- * never takes a new lock. The office splits the invoice by hand.
+ * Same-trip first-application billing ALERT — periodic sweep (owner
+ * ruling, 2026-09-27 redesign; supersedes the #5021 round-3..9 "alert from
+ * every writer" design). A reserved-accept slot selling two recurring
+ * programs mints ONE draft invoice for the combined same-day total, linked
+ * to the reserved (priced) row; the promoted sibling is left
+ * estimated_price NULL on purpose (covered by that invoice while the two
+ * visits share a date). A periodic sweep (server/services/scheduler.js)
+ * re-derives every open first-application invoice's estimate group fresh
+ * and opens/refreshes or clears ONE durable admin alert
+ * (notification-service.notifyAdmin, category 'billing') per estimate —
+ * it never touches the invoice's money, never holds collection, never
+ * takes a new lock beyond notifyAdmin's own dedupe advisory lock. The
+ * office splits the invoice by hand.
  *
  * Real PostgreSQL verification; run with
  * SIBLING_RESPLIT_TEST_DATABASE_URL pointing to a disposable local, managed
@@ -31,13 +33,13 @@ if (testUrl && !local && !managed && !ci) {
 }
 const suite = local || managed || ci ? describe : describe.skip;
 
-suite('first-application-sibling-split — same-trip billing alert on date change', () => {
+suite('first-application-sibling-split — periodic sweep', () => {
   let db;
   const {
-    flagFirstApplicationSiblingDivergence,
-    flagFirstApplicationSiblingDivergenceSafely,
+    loadCandidates,
+    evaluateCandidate,
+    clearStandingAlerts,
   } = require('../services/first-application-sibling-split');
-  const notificationService = require('../services/notification-service');
 
   beforeAll(() => { db = require('knex')({ client: 'pg', connection: testUrl }); });
   afterAll(async () => { await db?.destroy(); await require('../models/db').destroy(); });
@@ -52,16 +54,17 @@ suite('first-application-sibling-split — same-trip billing alert on date chang
   // A reserved pest row (priced — the invoice-holder) + a promoted lawn
   // parent (unpriced sibling), both accepted off the same estimate on the
   // same day, exactly like a same-day accept that sold two recurring
-  // programs into one reserved slot. Returns ids plus a reader for
-  // post-state. `matchInvoiceText: false` mints an invoice whose
-  // title/notes do NOT match the auto-generated pay-per-application
-  // pattern, for the "invoice text unrecognizable" case.
+  // programs into one reserved slot. `matchInvoiceText: false` mints an
+  // invoice whose title/notes do NOT match the auto-generated
+  // pay-per-application pattern (never a sweep candidate). `invoiceStatus`
+  // lets a test mint an already-settled invoice.
   const SAME_DATE = '2026-10-01';
   async function fixture(trx, {
     reservedPrice = 153.60,
     sameDate = SAME_DATE,
     matchInvoiceText = true,
     noInvoice = false,
+    invoiceStatus = 'draft',
   } = {}) {
     const customerId = randomUUID();
     const estimateId = randomUUID();
@@ -86,8 +89,8 @@ suite('first-application-sibling-split — same-trip billing alert on date chang
       invoiceId = randomUUID();
       await trx('invoices').insert({
         id: invoiceId, customer_id: customerId, scheduled_service_id: pestId,
-        token: randomUUID(), invoice_number: `QA-${randomUUID().slice(0, 20)}`,
-        status: 'draft',
+        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+        status: invoiceStatus,
         title: matchInvoiceText ? 'First Service Application' : 'Custom invoice title',
         notes: matchInvoiceText
           ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`
@@ -96,15 +99,9 @@ suite('first-application-sibling-split — same-trip billing alert on date chang
         subtotal: reservedPrice, total: reservedPrice,
       });
     }
-    return { customerId, estimateId, pestId, lawnId, invoiceId };
-  }
-
-  async function readState(trx, { pestId, lawnId }) {
-    const [pest, lawn] = await Promise.all([
-      trx('scheduled_services').where({ id: pestId }).first(),
-      trx('scheduled_services').where({ id: lawnId }).first(),
-    ]);
-    return { pest, lawn };
+    return {
+      customerId, estimateId, pestId, lawnId, invoiceId,
+    };
   }
 
   async function readBell(conn, dedupeKey) {
@@ -112,20 +109,37 @@ suite('first-application-sibling-split — same-trip billing alert on date chang
       .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first();
   }
 
-  test('a diverging unpriced sibling raises exactly one durable alert row, in the SAME transaction as the move — invoice/visit money untouched', () => rollbackTest(async (trx) => {
+  // Runs the sweep's own candidate-discovery + per-candidate evaluation on
+  // ONE connection (the test's own transaction) — the same two calls
+  // runFirstApplicationSiblingSplitSweep makes per candidate, just without
+  // the outer runExclusive lock or the per-candidate transaction split
+  // (rollbackTest already isolates the whole test in one transaction).
+  async function sweepOnce(trx, estimateId) {
+    const candidates = await loadCandidates(trx);
+    const mine = candidates.filter((c) => c.source_estimate_id === estimateId);
+    const results = [];
+    for (const candidate of mine) {
+      results.push(await evaluateCandidate(trx, candidate));
+    }
+    return results;
+  }
+
+  test('a diverging unpriced sibling raises exactly one durable alert row — invoice/visit money untouched', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
-    const result = await flagFirstApplicationSiblingDivergence(trx, ids.lawnId);
-    expect(result.action).toBe('alert_raised');
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('alerted');
     expect(result.estimateId).toBe(ids.estimateId);
-    expect(result.invoiceId).toBe(ids.invoiceId);
     expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
 
-    const state = await readState(trx, ids);
-    // Never touched: neither visit's price moved.
-    expect(Number(state.pest.estimated_price)).toBe(153.60);
-    expect(state.lawn.estimated_price).toBeNull();
-    const invoice = await trx('invoices').where({ id: ids.invoiceId }).first();
+    const [pest, lawn, invoice] = await Promise.all([
+      trx('scheduled_services').where({ id: ids.pestId }).first(),
+      trx('scheduled_services').where({ id: ids.lawnId }).first(),
+      trx('invoices').where({ id: ids.invoiceId }).first(),
+    ]);
+    // Never touched: neither visit's price moved, nor the invoice total.
+    expect(Number(pest.estimated_price)).toBe(153.60);
+    expect(lawn.estimated_price).toBeNull();
     expect(Number(invoice.total)).toBe(153.60);
 
     const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
@@ -134,15 +148,20 @@ suite('first-application-sibling-split — same-trip billing alert on date chang
     expect(bells).toHaveLength(1);
     expect(bells[0].link).toBe(`/admin/invoices?invoice=${ids.invoiceId}`);
     expect(bells[0].body).toContain('split it by hand');
-    expect(bells[0].body).toContain(`Invoice`);
+    expect(bells[0].body).toContain('Invoice');
     expect(bells[0].read_at).toBeNull();
+    const metadata = typeof bells[0].metadata === 'string' ? JSON.parse(bells[0].metadata) : bells[0].metadata;
+    // P2 fix: metadata carries customerId so NotificationService's
+    // demo/App-Store-review test-account suppression can apply.
+    expect(metadata.customerId).toBe(ids.customerId);
+    expect(metadata.divergingSiblingIds).toEqual([ids.lawnId]);
   }));
 
-  test('the SAME still-open divergence, evaluated again, never opens a second alert row', () => rollbackTest(async (trx) => {
+  test('the SAME still-open divergence, swept again, never opens a second alert row', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
-    await flagFirstApplicationSiblingDivergence(trx, ids.lawnId);
-    await flagFirstApplicationSiblingDivergence(trx, ids.lawnId);
+    await sweepOnce(trx, ids.estimateId);
+    await sweepOnce(trx, ids.estimateId);
 
     const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
     const bells = await trx('notifications').where({ recipient_type: 'admin', category: 'billing' })
@@ -150,149 +169,144 @@ suite('first-application-sibling-split — same-trip billing alert on date chang
     expect(bells).toHaveLength(1);
   }));
 
-  test('a rolled-back move leaves no alert behind', async () => {
-    const outer = await db.transaction();
-    let ids;
-    try {
-      ids = await fixture(outer);
-      await outer('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
-      const result = await flagFirstApplicationSiblingDivergence(outer, ids.lawnId);
-      expect(result.action).toBe('alert_raised');
-      // Prove it's really there before the rollback.
-      const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
-      expect(await readBell(outer, dedupeKey)).toBeTruthy();
-    } finally {
-      await outer.rollback();
-    }
-    // A FRESH connection, outside the rolled-back transaction — nothing
-    // persisted: neither the customer/estimate fixture rows nor the alert.
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
-    expect(await readBell(db, dedupeKey)).toBeUndefined();
-    expect(await db('scheduled_services').where({ id: ids.lawnId }).first()).toBeUndefined();
-  });
-
-  test('recurrence reopens the bell — a divergence read/dismissed by the office, then recurring, is unread again', () => rollbackTest(async (trx) => {
+  test('realigned on a later tick — the standing alert is auto-cleared (marked read)', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
-    await flagFirstApplicationSiblingDivergence(trx, ids.lawnId);
+    await sweepOnce(trx, ids.estimateId);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
+
+    // The sibling moves back onto the anchor's day.
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: SAME_DATE });
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('cleared');
+    expect(result.reason).toBe('realigned');
+
+    const cleared = await readBell(trx, dedupeKey);
+    expect(cleared.read_at).not.toBeNull();
+    const metadata = typeof cleared.metadata === 'string' ? JSON.parse(cleared.metadata) : cleared.metadata;
+    expect(metadata.autoCleared).toBe(true);
+  }));
+
+  test('the invoice settles (paid) on a later tick — the standing alert is auto-cleared even though the visits still diverge', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await sweepOnce(trx, ids.estimateId);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
+
+    await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'paid' });
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('cleared');
+    expect(result.reason).toBe('invoice_settled');
+    expect((await readBell(trx, dedupeKey)).read_at).not.toBeNull();
+  }));
+
+  test('recurrence reopens the bell — dismissed by the office while still-open, then a genuine new divergence reopens it unread', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await sweepOnce(trx, ids.estimateId);
     const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
     const firstBell = await readBell(trx, dedupeKey);
     expect(firstBell.read_at).toBeNull();
 
-    // Office reads/dismisses it.
+    // Office reads/dismisses it while the divergence is still technically
+    // present, then the sibling realigns (clearing it the system's own
+    // way) and diverges again — the SAME estimate, the SAME diverging
+    // sibling id, a genuine recurrence.
     await trx('notifications').where({ id: firstBell.id }).update({ read_at: new Date() });
-
-    // The visits realign (no divergence — no alert call happens for a
-    // realignment; nothing to assert there), then diverge again — the
-    // SAME estimate, the SAME diverging sibling id, a genuine recurrence.
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: SAME_DATE });
+    await sweepOnce(trx, ids.estimateId);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-03' });
-    await flagFirstApplicationSiblingDivergence(trx, ids.lawnId);
+    await sweepOnce(trx, ids.estimateId);
 
     const reopened = await readBell(trx, dedupeKey);
     expect(reopened.id).toBe(firstBell.id);
     expect(reopened.read_at).toBeNull();
   }));
 
-  test('invoice text unrecognizable — the alert still fires, without a link, naming the estimate', () => rollbackTest(async (trx) => {
+  test('invoice text unrecognizable — never a sweep candidate, no alert', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx, { matchInvoiceText: false });
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
-    const result = await flagFirstApplicationSiblingDivergence(trx, ids.lawnId);
-    expect(result.action).toBe('alert_raised');
-    expect(result.invoiceId).toBeNull();
-
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
-    const bell = await readBell(trx, dedupeKey);
-    expect(bell).toBeTruthy();
-    expect(bell.link).toBe(`/admin/estimates/${ids.estimateId}`);
-    expect(bell.body).toContain(`Check the first-application invoice for estimate #${ids.estimateId}`);
+    const results = await sweepOnce(trx, ids.estimateId);
+    expect(results).toEqual([]);
   }));
 
-  test('no first-application invoice at all — the alert still fires the same way', () => rollbackTest(async (trx) => {
+  test('no first-application invoice at all — never a sweep candidate, no alert', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx, { noInvoice: true });
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
-    const result = await flagFirstApplicationSiblingDivergence(trx, ids.lawnId);
-    expect(result.action).toBe('alert_raised');
-    expect(result.invoiceId).toBeNull();
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
-    expect(await readBell(trx, dedupeKey)).toBeTruthy();
+    const results = await sweepOnce(trx, ids.estimateId);
+    expect(results).toEqual([]);
   }));
 
-  test('fully priced siblings — no alert', () => rollbackTest(async (trx) => {
+  test('a priced (but still diverging) sibling still alerts (Codex P1 fix)', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02', estimated_price: 42 });
-    const result = await flagFirstApplicationSiblingDivergence(trx, ids.lawnId);
-    expect(result.action).toBe('skipped');
-    expect(result.reason).toBe('no_diverging_sibling');
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
-    expect(await readBell(trx, dedupeKey)).toBeUndefined();
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('alerted');
+    expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
+  }));
+
+  test('siblings realigned and both priced — no alert', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ estimated_price: 42 });
+    const results = await sweepOnce(trx, ids.estimateId);
+    expect(results.every((r) => r.action !== 'alerted')).toBe(true);
   }));
 
   test('an already-completed sibling is a settled fact, not a diverging candidate', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId })
       .update({ scheduled_date: '2026-10-02', completed_at: new Date() });
-    const result = await flagFirstApplicationSiblingDivergence(trx, ids.lawnId);
-    expect(result.action).toBe('skipped');
-    expect(result.reason).toBe('no_diverging_sibling');
+    const results = await sweepOnce(trx, ids.estimateId);
+    expect(results.every((r) => r.action !== 'alerted')).toBe(true);
   }));
 
   test('the priced (invoice-holding) row itself moving off the sibling\'s date raises the same alert', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.pestId }).update({ scheduled_date: '2026-10-05' });
-    const result = await flagFirstApplicationSiblingDivergence(trx, ids.pestId);
-    expect(result.action).toBe('alert_raised');
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('alerted');
     expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
   }));
 
-  test('a recurring child\'s own date is unrelated to the accept-time split — skipped', () => rollbackTest(async (trx) => {
-    const ids = await fixture(trx);
-    const childId = randomUUID();
-    await trx('scheduled_services').insert({
-      id: childId, customer_id: ids.customerId, source_estimate_id: ids.estimateId,
-      recurring_parent_id: ids.lawnId, scheduled_date: '2026-11-01',
-      service_type: 'Lawn Care', status: 'confirmed', is_recurring: true, estimated_price: null,
-    });
-    const result = await flagFirstApplicationSiblingDivergence(trx, childId);
-    expect(result).toEqual({ action: 'skipped', reason: 'not_estimate_anchor' });
-  }));
-
-  test('no source_estimate_id at all — skipped', () => rollbackTest(async (trx) => {
-    const customerId = randomUUID();
-    await trx('customers').insert({ id: customerId, first_name: 'No estimate fixture', phone: `qa-${customerId.slice(0, 8)}`, active: true });
-    const soloId = randomUUID();
-    await trx('scheduled_services').insert({
-      id: soloId, customer_id: customerId, scheduled_date: '2026-10-01',
-      service_type: 'One-time visit', status: 'confirmed', estimated_price: 100,
-    });
-    const result = await flagFirstApplicationSiblingDivergence(trx, soloId);
-    expect(result).toEqual({ action: 'skipped', reason: 'not_estimate_anchor' });
-  }));
-
-  test('no priced member in the group at all — skipped', () => rollbackTest(async (trx) => {
-    const ids = await fixture(trx, { noInvoice: true });
-    await trx('scheduled_services').where({ id: ids.pestId }).update({ estimated_price: null });
-    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
-    const result = await flagFirstApplicationSiblingDivergence(trx, ids.lawnId);
-    expect(result.action).toBe('skipped');
-    expect(result.reason).toBe('no_priced_anchor');
-  }));
-
-  test('an alert-write failure rolls back the whole move — no date change, no partial alert', async () => {
-    const spy = jest.spyOn(notificationService, 'notifyAdmin').mockRejectedValueOnce(new Error('injected notifyAdmin failure'));
+  test('a rolled-back sweep leaves no alert behind', async () => {
+    const outer = await db.transaction();
     let ids;
+    let dedupeKey;
     try {
-      await expect(db.transaction(async (trx) => {
-        ids = await fixture(trx);
-        await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
-        await flagFirstApplicationSiblingDivergenceSafely(trx, ids.lawnId, 'injected-failure test');
-      })).rejects.toThrow('injected notifyAdmin failure');
+      ids = await fixture(outer);
+      await outer('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      const [result] = await sweepOnce(outer, ids.estimateId);
+      expect(result.action).toBe('alerted');
+      dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+      expect(await readBell(outer, dedupeKey)).toBeTruthy();
+    } finally {
+      await outer.rollback();
+    }
+    // A FRESH connection, outside the rolled-back transaction — nothing
+    // persisted: neither the fixture rows nor the alert.
+    expect(await readBell(db, dedupeKey)).toBeUndefined();
+    expect(await db('scheduled_services').where({ id: ids.lawnId }).first()).toBeUndefined();
+  });
+
+  test('clearStandingAlerts is idempotent — clearing with nothing open is a no-op', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    const cleared = await clearStandingAlerts(trx, `first_application_sibling_divergence:${ids.estimateId}:`);
+    expect(cleared).toBe(0);
+  }));
+
+  test('an alert-write failure surfaces per-candidate — the failing estimate is reported, never silently dropped', () => rollbackTest(async (trx) => {
+    const notificationService = require('../services/notification-service');
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const spy = jest.spyOn(notificationService, 'notifyAdmin').mockRejectedValueOnce(new Error('injected notifyAdmin failure'));
+    try {
+      const candidates = await loadCandidates(trx);
+      const mine = candidates.find((c) => c.source_estimate_id === ids.estimateId);
+      await expect(evaluateCandidate(trx, mine)).rejects.toThrow('injected notifyAdmin failure');
     } finally {
       spy.mockRestore();
     }
-    // Nothing committed — not even the fixture rows themselves, since the
-    // date write and the alert share the SAME transaction as the fixture
-    // insert in this test.
-    expect(await db('scheduled_services').where({ id: ids.lawnId }).first()).toBeUndefined();
-  });
+  }));
 });

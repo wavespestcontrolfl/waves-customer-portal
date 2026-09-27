@@ -1,81 +1,92 @@
-// Same-trip first-application billing ALERT (redesigned per owner ruling,
-// 2026-09-27 — "alert only, no hold"; supersedes the #5021 round-3..7 hold
-// design entirely — see the PR body for the full ruling history). A
+// Same-trip first-application billing ALERT — periodic SWEEP design
+// (owner ruling, 2026-09-27; supersedes the #5021 round-3..9 "alert from
+// every writer" design — see the PR body for the full ruling history). A
 // reserved-accept slot that sells MORE than one recurring program mints ONE
 // combined "First service application" invoice, linked to the RESERVED
-// row. Every OTHER program's promoted parent is left with estimated_price
-// NULL on purpose — treated as covered by that shared invoice while both
-// visits share a date (see estimate-converter.js reservedAcceptPerVisitSplit
-// and estimate-first-application-invoice.js
+// row (invoices.scheduled_service_id). Every OTHER program's promoted
+// parent is left with estimated_price NULL on purpose — treated as covered
+// by that shared invoice while both visits share a date (see
+// estimate-converter.js reservedAcceptPerVisitSplit and
+// estimate-first-application-invoice.js
 // findFirstApplicationInvoiceForEstimateService, whose own date-keyed match
 // simply stops matching once a member's date diverges — no code change
 // needed there).
 //
 // PRIOR DESIGNS (superseded, see PR #5021's body for the full history):
-// round 1-2 auto-split the shared invoice's money at move time (Codex found
-// a new money-correctness gap every round). Round 3-7 replaced that with a
-// durable, invoice-row hold (new columns, a manual clear route, an
-// auto-clear, durable-provenance fallbacks, a dedicated advisory lock) — but
-// each round's fix to make the hold correctly IDENTIFY and LOCK the invoice
-// across every money seam (send-claim, provider handoff, InvoiceService.
-// update, lock ordering against a concurrent edit) surfaced a new structural
-// gap, round after round. The owner's conclusion: a hold is the wrong shape
-// for this problem, because it requires perfectly tracking one invoice's
-// identity and state across every money-moving seam in the app.
+// round 1-2 auto-split the shared invoice's money at move time. Round 3-7
+// replaced that with a durable, invoice-row hold. Round 8-9 replaced the
+// hold with an in-transaction admin alert fired from every date-changing
+// writer (admin-schedule.js, visit-groups.js, rebooker.js,
+// intelligence-bar/schedule-tools.js + tools.js) — but Codex round 5 found
+// that shape structurally leaky: a grouped move judged mid-batch raised a
+// false alarm on an interim state (bulk-reschedule landing both siblings on
+// the SAME new day), a sibling that picked up ANY price was excluded from
+// ever alerting even though the shared invoice still charged for it, and
+// the dedupe-reopen decision raced the alert's own advisory lock. Fixing
+// each writer's own view of "did this move actually diverge the group" was
+// the wrong shape — every writer would need its own final-state
+// reconciliation forever.
 //
-// OWNER RULING (this design): never touch the invoice, never hold
-// collection, never lock anything new. In the SAME transaction as the date
-// write, write a DURABLE admin alert (notification-service.notifyAdmin,
-// category 'billing') — keyed on the ESTIMATE and the diverging visit ids,
-// never on finding the invoice by text-matching its title/notes. The alert
-// fires whenever a date write leaves at least one UNPRICED member of a
-// same-trip group (source_estimate_id, top-of-series, sharing a customer)
-// on a different day than the group's PRICED (reserved/invoice-holding)
-// member — the unpriced member is the one relying on the shared invoice, so
-// that specific divergence is what the office must split by hand.
+// OWNER RULING (this design): stop alerting from the movers entirely. A
+// periodic SWEEP (every 10-15 minutes, see server/services/scheduler.js)
+// finds every OPEN (non-settled) first-application invoice, re-derives its
+// estimate group fresh from current data, and opens/refreshes or clears
+// ONE durable admin alert per estimate — judged on live state, never on
+// which write just happened. No auto-split, no invoice hold: the office
+// splits the invoice by hand.
 //
-// The alert best-effort includes the shared invoice's own link/number, by
-// reusing estimate-first-application-invoice.js's authoritative text-match
-// (selectFirstApplicationInvoiceMatch) — but the alert does NOT depend on
-// that match succeeding: a renamed/retitled invoice (or one this lookup
-// otherwise can't recognize) still gets the alert, just without a link,
-// telling the office to go find the estimate's first-application invoice
-// by hand. There is no durable "resolved" state to track (no invoice
-// columns, no clear route) — the notification itself, plus its dedupe
-// key/version, IS the durable record. A later recurrence of the SAME
-// divergence (the same estimate + same diverging visit ids) after the
-// office already read/dismissed the earlier alert reopens the bell
-// (unread again); a repeat call describing the SAME still-open divergence
-// does not spam a second bell.
+// Candidate discovery (loadCandidates): bounded by invoices.status NOT IN
+// the settled vocabulary (indexed column) joined to its anchor row via
+// invoices.scheduled_service_id (also indexed) — the two columns every
+// non-settled first-application invoice is cheap to find by. The
+// title/notes shape check (isAutoGeneratedPayPerApplicationInvoice, from
+// estimate-first-application-invoice.js — reused, never re-derived) narrows
+// that small set down to real first-application invoices in JS, same as
+// every other caller of that helper.
 //
-// Fails CLOSED: if raising the alert throws, the caller's own transaction
-// — including the date write itself — rolls back. Silently committing the
-// date move without a durable alert would recreate the exact
-// combined-charge/unpriced-sibling gap this module exists to catch, so a
-// retryable failure on the whole move is the safe side of that choice
-// (kept from the prior design's own round-4 fix, applied here from the
-// start since there was never a working "swallow and log" version of this
-// design).
+// Divergence identification (evaluateGroupDivergence/divergingSiblings) is
+// keyed ONLY on estimate + visit ids — customer_id + source_estimate_id +
+// recurring_parent_id IS NULL, never on invoice title/notes text (that text
+// match is solely how a candidate INVOICE is found above, same as every
+// other caller). A sibling now diverges whether or not it has picked up its
+// own estimated_price (Codex P1: a priced sibling still shares the same
+// combined charge) — completed members are excluded (a completed visit's
+// billing outcome is a settled fact a plain date move can't change).
 //
-// Deliberately takes NO new lock (no sibling-group advisory lock, no
-// invoice row lock): the alert's own dedupe key (estimate id + sorted
-// diverging visit ids) plus notifyAdmin's existing per-dedupeKey advisory
-// lock already serialize two concurrent callers that would otherwise both
-// try to raise the same alert — nothing here ever mutates a row that a
-// concurrent writer could be racing over, so there is no deadlock class to
-// close with an extra lock.
+// Settlement is judged from the invoice's OWN status only (paid, prepaid,
+// or the canonical cancelled/refunded/void vocabulary
+// InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES already defines) —
+// never from the visits' estimated_price.
 //
-// Callers (every date-changing writer that can move a same-trip first-
-// application visit, unchanged wiring from the prior design):
-//   rebooker.js rescheduleOnce (single) + rescheduleSeries (series anchor)
-//   admin-schedule.js bulk-reschedule route (per row) + update-details
-//   intelligence-bar/schedule-tools.js moveStopsToDay (every stop in the
-//     batch, judged on the batch's final per-row state)
-//   intelligence-bar/tools.js rescheduleAppointment
-//   visit-groups.js moveVisitAsUnit — reaches this through rebooker's own
-//     per-member rescheduleOnce call; no separate wiring needed.
+// Durable record: the admin notification itself (notification-service.
+// notifyAdmin, category 'billing'), keyed on estimate id + the sorted
+// diverging visit ids — no invoice column, no separate "resolved" table.
+// When the condition no longer holds (dates realigned, or the invoice
+// settles/voids), the standing alert for that estimate is marked read with
+// an `autoCleared` stamp (same convention as supplies-consumption.js's
+// clearMissedDeductionBells / ops-digest.js's resolved stamp) — the closest
+// "resolve" mechanism notifications already support; there is no bespoke
+// clear route to build here.
+//
+// Race safety (Codex P2): the reopen-after-dismissal decision — reuse the
+// existing alert's dedupeVersion while it's still unread, mint a fresh one
+// if it was dismissed or never existed — takes the SAME advisory lock
+// notifyAdmin's own dedupe path takes, and holds it continuously (same
+// session, same transaction) through notifyAdmin's own write, so a
+// concurrent dismissal can never land between the decision and the write.
+//
+// Durability: each candidate estimate group is evaluated in its OWN
+// transaction. A failure on one group is logged and left for the next
+// tick to retry — it never blocks or rolls back any other group's
+// evaluation in the same run.
 
+const db = require('../models/db');
 const logger = require('./logger');
+const InvoiceService = require('./invoice');
+
+const SETTLED_INVOICE_STATUSES = Object.freeze(['paid', 'prepaid', ...InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES]);
+const SWEEP_LIMIT = 500;
+const DEDUPE_PREFIX = (estimateId) => `first_application_sibling_divergence:${estimateId}:`;
 
 function dateOnly(value) {
   if (!value) return null;
@@ -83,175 +94,246 @@ function dateOnly(value) {
   return String(value).split('T')[0].slice(0, 10);
 }
 
-// Locates the moved row's estimate-accept group — a plain, unlocked read
-// (see the module header: no new lock is taken anywhere in this module).
-// Only a top-of-series (or one-time) row can be part of a first-application
-// invoice's reserved/promoted group — a later CHILD occurrence's date is
-// unrelated to the accept-time split.
-async function loadEstimateGroup(trx, scheduledServiceId) {
-  const moved = await trx('scheduled_services')
-    .where({ id: scheduledServiceId })
-    .first('id', 'customer_id', 'source_estimate_id', 'recurring_parent_id');
-  if (!moved || !moved.customer_id || !moved.source_estimate_id || moved.recurring_parent_id) {
-    return { skip: { action: 'skipped', reason: 'not_estimate_anchor' } };
-  }
-  const members = await trx('scheduled_services')
-    .where({ customer_id: moved.customer_id, source_estimate_id: moved.source_estimate_id })
-    .whereNull('recurring_parent_id')
-    .orderBy('id')
-    .select('id', 'scheduled_date', 'estimated_price', 'completed_at');
-  if (members.length < 2) return { skip: { action: 'skipped', reason: 'no_siblings', moved } };
-  return { moved, members };
+function isInvoiceSettled(status) {
+  return SETTLED_INVOICE_STATUSES.includes(String(status));
 }
 
-// The group's PRICED (reserved/invoice-holding) member — the one whose own
-// quoted price covers the combined same-day total, and therefore the row
-// every unpriced sibling's coverage is anchored to. No priced member at all
-// means this isn't (or is no longer) a reserved-accept split group.
-function findPricedAnchor(members) {
-  return members.find((m) => m.estimated_price != null) || null;
-}
-
-// Members currently diverging from the anchor's date: unpriced (relying on
-// the shared invoice — see the module header) and not already completed (a
-// completed row's billing outcome is a settled fact a plain date move can't
-// change).
+// Members currently diverging from the anchor's date: not the anchor
+// itself, not already completed (a completed row's billing outcome is a
+// settled fact a plain date move can't change) — deliberately NOT filtered
+// on estimated_price (Codex P1: a sibling that has picked up its own price
+// still shares the same combined charge on the invoice until someone
+// actually splits it).
 function divergingSiblings(anchor, members) {
   const anchorDate = dateOnly(anchor.scheduled_date);
   return members.filter((m) => String(m.id) !== String(anchor.id)
-    && m.estimated_price == null
     && !m.completed_at
     && dateOnly(m.scheduled_date) !== anchorDate);
 }
 
-// Best-effort invoice lookup for the alert's own link/number — reuses
-// estimate-first-application-invoice.js's authoritative text-match
-// precedence (selectFirstApplicationInvoiceMatch) so this never re-derives
-// its own notion of "which invoice." Returns null on no match (a renamed
-// invoice, or genuinely none) — the alert still fires either way, see
-// raiseDivergenceAlert.
-async function findFirstApplicationInvoiceForAlert(trx, memberIds) {
-  const { selectFirstApplicationInvoiceMatch } = require('./estimate-first-application-invoice');
-  const candidates = await trx('invoices')
-    .whereIn('scheduled_service_id', memberIds)
-    .whereNot('status', 'void')
-    .orderBy('created_at', 'desc')
-    .select('*');
-  const { invoice, liveBeside } = selectFirstApplicationInvoiceMatch(candidates);
-  return liveBeside || invoice || null;
+// The pure detection predicate: given the group's anchor row, every member
+// row, and the shared invoice's current status, decide whether to alert,
+// clear a standing alert, or do nothing. No DB access — the sweep and every
+// unit test call this the same way.
+function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
+  if (!anchor || !Array.isArray(members) || members.length < 2) {
+    return { action: 'clear', reason: 'no_group' };
+  }
+  if (isInvoiceSettled(invoiceStatus)) {
+    return { action: 'clear', reason: 'invoice_settled' };
+  }
+  const diverging = divergingSiblings(anchor, members);
+  if (!diverging.length) {
+    return { action: 'clear', reason: 'realigned' };
+  }
+  return { action: 'alert', reason: 'diverged', diverging };
 }
 
-// Decides the dedupeVersion to hand notifyAdmin for this dedupeKey — reads
-// the CURRENT standing notification (if any) for it first, in the same
-// trx, so the version we submit reflects whether this is the SAME
-// still-unread divergence (keep its existing version — no needless
-// re-bell) or a fresh occurrence (no standing row, or the standing one was
-// already read/dismissed — a genuine recurrence, which must always
-// re-bell). A plain read (no lock): notifyAdmin's own per-dedupeKey
-// advisory lock is what actually serializes the write that follows, so a
-// race here can only affect which side of "same version" vs "fresh
-// version" a concurrent caller picks — never correctness of the alert
-// itself.
-async function nextDedupeVersion(trx, dedupeKey) {
-  const existing = await trx('notifications')
+const CANDIDATE_COLUMNS = [
+  'i.id as invoice_id', 'i.status as invoice_status', 'i.invoice_number', 'i.title', 'i.notes',
+  'anchor.id as anchor_id', 'anchor.customer_id', 'anchor.source_estimate_id',
+  'anchor.scheduled_date as anchor_scheduled_date', 'anchor.completed_at as anchor_completed_at',
+];
+
+// invoiceId values every currently-UNREAD sibling-divergence alert names in
+// its own metadata (stamped there when raised — see raiseDivergenceAlert).
+// Small and cheap by construction: bounded by however many such alerts are
+// presently unread, never by total invoice history.
+async function loadStaleAlertInvoiceIds(conn) {
+  const alerts = await conn('notifications')
     .where({ recipient_type: 'admin' })
-    .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-    .first('read_at', 'metadata');
+    .whereNull('read_at')
+    .whereRaw("metadata->>'dedupeKey' LIKE 'first_application_sibling_divergence:%'")
+    .select('metadata');
+  const ids = new Set();
+  for (const row of alerts) {
+    let meta = row.metadata;
+    if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+    if (meta && meta.invoiceId) ids.add(meta.invoiceId);
+  }
+  return [...ids];
+}
+
+// Every currently OPEN (non-settled) first-application invoice, joined to
+// its anchor (reserved/priced) scheduled_services row — bounded by two
+// indexed columns (invoices.status, invoices.scheduled_service_id) — PLUS
+// any invoice a currently-unread standing alert still names even though it
+// no longer qualifies above (settled since the alert was raised — a PK
+// lookup, bounded by the small unread-alert set above): without this
+// second half, an invoice that settles between ticks would silently drop
+// out of every future sweep and its alert would never auto-clear.
+async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
+  const openRows = await conn('invoices as i')
+    .join('scheduled_services as anchor', 'anchor.id', 'i.scheduled_service_id')
+    .whereNotIn('i.status', SETTLED_INVOICE_STATUSES)
+    .whereNotNull('anchor.source_estimate_id')
+    .whereNull('anchor.recurring_parent_id')
+    .orderBy('i.created_at', 'asc')
+    .limit(limit)
+    .select(CANDIDATE_COLUMNS);
+  if (openRows.length >= limit) {
+    logger.warn(`[first-application-sibling-split] candidate scan hit its ${limit}-row limit — some open first-application invoices may not be swept this tick`);
+  }
+  const { isAutoGeneratedPayPerApplicationInvoice } = require('./estimate-first-application-invoice');
+  const matched = openRows.filter((row) => isAutoGeneratedPayPerApplicationInvoice({ title: row.title, notes: row.notes }));
+
+  const staleInvoiceIds = await loadStaleAlertInvoiceIds(conn);
+  const covered = new Set(matched.map((r) => r.invoice_id));
+  const missing = staleInvoiceIds.filter((id) => !covered.has(id));
+  if (!missing.length) return matched;
+  const staleRows = await conn('invoices as i')
+    .join('scheduled_services as anchor', 'anchor.id', 'i.scheduled_service_id')
+    .whereIn('i.id', missing)
+    .select(CANDIDATE_COLUMNS);
+  return [...matched, ...staleRows];
+}
+
+async function loadGroupMembers(conn, { customerId, sourceEstimateId }) {
+  return conn('scheduled_services')
+    .where({ customer_id: customerId, source_estimate_id: sourceEstimateId })
+    .whereNull('recurring_parent_id')
+    .orderBy('id')
+    .select('id', 'scheduled_date', 'completed_at');
+}
+
+// Marks read (with an autoCleared stamp) every UNREAD standing alert for
+// this estimate whose dedupeKey carries the given prefix — optionally
+// excluding one key that is about to be raised/refreshed instead. Same
+// "plain update, best-effort" shape as supplies-consumption.js's
+// clearMissedDeductionBells / ops-digest.js's resolved stamp — the closest
+// existing "resolve a dedupe-keyed notification" convention; there is no
+// larger resolve mechanism to build here.
+async function clearStandingAlerts(conn, prefix, { exceptKey = null } = {}) {
+  let q = conn('notifications').where({ recipient_type: 'admin' }).whereNull('read_at')
+    .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${prefix}%`]);
+  if (exceptKey) q = q.whereRaw("metadata->>'dedupeKey' <> ?", [exceptKey]);
+  return q.update({
+    read_at: conn.fn.now(),
+    metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ autoCleared: true })]),
+  });
+}
+
+// Raises (or refreshes) the durable admin alert for this exact diverging
+// set — see the module header for the race-safety note. Never touches the
+// invoice or any visit row.
+async function raiseDivergenceAlert(conn, {
+  estimateId, anchor, diverging, invoice, customerId, dedupeKey,
+}) {
+  // Takes the SAME advisory lock notifyAdmin's own dedupe path takes, and
+  // holds it (same connection/transaction) through notifyAdmin's write
+  // below — the reopen-after-dismissal read below and that write can never
+  // straddle a concurrent dismissal (Codex P2).
+  await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
+  const existing = await conn('notifications').where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('read_at', 'metadata');
+  let dedupeVersion = new Date().toISOString();
   if (existing && !existing.read_at) {
     let meta = existing.metadata;
     if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-    if (meta && typeof meta.dedupeVersion === 'string') return meta.dedupeVersion;
+    if (meta && typeof meta.dedupeVersion === 'string') dedupeVersion = meta.dedupeVersion;
   }
-  return new Date().toISOString();
-}
-
-// Raises the durable admin alert, IN THE SAME TRANSACTION as the date
-// write (`trx`) — see the module header for why this must propagate a
-// failure rather than swallow it (no try/catch here on purpose).
-async function raiseDivergenceAlert(trx, { estimateId, diverging, invoice }) {
-  const sortedIds = [...new Set(diverging.map((d) => String(d.id)))].sort();
-  const dedupeKey = `first_application_sibling_divergence:${estimateId}:${sortedIds.join(',')}`;
-  const dedupeVersion = await nextDedupeVersion(trx, dedupeKey);
+  const anchorDate = dateOnly(anchor.scheduled_date);
+  const detail = diverging.map((d) => `visit ${d.id} now on ${dateOnly(d.scheduled_date)} (was ${anchorDate})`).join('; ');
   const invoiceRef = invoice
-    ? `Invoice ${invoice.invoice_number || invoice.id}.`
+    ? `Invoice ${invoice.invoice_number || invoice.invoice_id}.`
     : `Check the first-application invoice for estimate #${estimateId}.`;
   await require('./notification-service').notifyAdmin(
     'billing',
     'First-application invoice may need to be split by hand',
-    `Visits from one estimate were moved to different days. The combined first-application invoice may now charge for both on one day — split it by hand. ${invoiceRef}`,
+    `Same-trip visits from one estimate landed on different days: ${detail}. The combined first-application invoice still charges for both — split it by hand. ${invoiceRef}`,
     {
-      link: invoice ? `/admin/invoices?invoice=${invoice.id}` : `/admin/estimates/${estimateId}`,
+      link: invoice ? `/admin/invoices?invoice=${invoice.invoice_id}` : `/admin/estimates/${estimateId}`,
       bell: true,
-      metadata: { estimateId: String(estimateId), divergingSiblingIds: sortedIds },
+      metadata: {
+        estimateId: String(estimateId),
+        divergingSiblingIds: diverging.map((d) => String(d.id)),
+        customerId: customerId ? String(customerId) : null,
+        // Read back by loadStaleAlertInvoiceIds so an invoice that settles
+        // between sweep ticks (and so drops out of loadCandidates' own
+        // non-settled scan) is still found and its alert auto-cleared.
+        invoiceId: invoice ? String(invoice.invoice_id) : null,
+      },
       dedupeKey,
       dedupeVersion,
       refreshOnDedupe: true,
-      trx,
+      trx: conn,
     },
   );
 }
 
-/**
- * Called after ANY write that changes scheduled_date on a top-of-series (or
- * one-time) scheduled_services row, inside the SAME transaction as that
- * write. Side-effect-free unless it actually finds an unpriced sibling
- * diverging from the group's priced (reserved) member's date — cheap and
- * safe to call unconditionally.
- *
- * Because this runs in the SAME transaction as the date write, a crash,
- * deadlock, or a failure raising the alert rolls the whole move back with
- * it — there is no window where a move commits without its alert (see the
- * module header's fail-closed note).
- *
- * @param {import('knex').Knex.Transaction} trx - the caller's OPEN transaction
- * @param {string} scheduledServiceId - the row whose date just changed (post-write id)
- */
-async function flagFirstApplicationSiblingDivergence(trx, scheduledServiceId) {
-  if (!trx || !scheduledServiceId) return { action: 'skipped', reason: 'missing_args' };
+// Re-derives one candidate's estimate group fresh and acts on the verdict —
+// the whole unit a single transaction covers.
+async function evaluateCandidate(conn, candidate) {
+  const {
+    anchor_id: anchorId, customer_id: customerId, source_estimate_id: estimateId,
+    invoice_id: invoiceId, invoice_status: invoiceStatus, invoice_number: invoiceNumber,
+    anchor_scheduled_date: anchorScheduledDate, anchor_completed_at: anchorCompletedAt,
+  } = candidate;
+  const members = await loadGroupMembers(conn, { customerId, sourceEstimateId: estimateId });
+  const anchor = members.find((m) => String(m.id) === String(anchorId))
+    || { id: anchorId, scheduled_date: anchorScheduledDate, completed_at: anchorCompletedAt };
+  const verdict = evaluateGroupDivergence({ anchor, members, invoiceStatus });
+  const prefix = DEDUPE_PREFIX(estimateId);
+  if (verdict.action === 'clear') {
+    const cleared = await clearStandingAlerts(conn, prefix);
+    return {
+      estimateId, action: 'cleared', reason: verdict.reason, cleared,
+    };
+  }
+  const sortedIds = [...new Set(verdict.diverging.map((d) => String(d.id)))].sort();
+  const dedupeKey = `${prefix}${sortedIds.join(',')}`;
+  // Any OTHER standing alert for this estimate (a different diverging set
+  // than the one we're about to raise/refresh) is stale — clear it first.
+  await clearStandingAlerts(conn, prefix, { exceptKey: dedupeKey });
+  await raiseDivergenceAlert(conn, {
+    estimateId,
+    anchor,
+    diverging: verdict.diverging,
+    customerId,
+    invoice: invoiceId ? { invoice_id: invoiceId, invoice_number: invoiceNumber } : null,
+    dedupeKey,
+  });
+  return { estimateId, action: 'alerted', divergingSiblingIds: sortedIds };
+}
 
-  const group = await loadEstimateGroup(trx, scheduledServiceId);
-  if (group.skip) return group.skip;
-  const { moved, members } = group;
-
-  const anchor = findPricedAnchor(members);
-  if (!anchor) return { action: 'skipped', reason: 'no_priced_anchor', moved };
-
-  const diverging = divergingSiblings(anchor, members);
-  if (!diverging.length) return { action: 'skipped', reason: 'no_diverging_sibling', moved };
-
-  const invoice = await findFirstApplicationInvoiceForAlert(trx, members.map((m) => m.id));
-  await raiseDivergenceAlert(trx, { estimateId: moved.source_estimate_id, diverging, invoice });
+async function runSweepInner() {
+  const candidates = await loadCandidates(db);
+  let alerted = 0;
+  let cleared = 0;
+  let failed = 0;
+  for (const candidate of candidates) {
+    try {
+      const result = await db.transaction((trx) => evaluateCandidate(trx, candidate));
+      if (result.action === 'alerted') alerted += 1;
+      else if (result.action === 'cleared' && result.cleared) cleared += 1;
+    } catch (err) {
+      failed += 1;
+      logger.error(`[first-application-sibling-split] sweep failed for estimate ${candidate.source_estimate_id}: ${err.message}`);
+    }
+  }
+  if (failed) {
+    throw new Error(`${failed} of ${candidates.length} first-application sibling-split group(s) failed this tick — left for the next run`);
+  }
   return {
-    action: 'alert_raised',
-    estimateId: moved.source_estimate_id,
-    invoiceId: invoice ? invoice.id : null,
-    divergingSiblingIds: diverging.map((d) => d.id),
+    scanned: candidates.length, alerted, cleared, failed,
   };
 }
 
-/**
- * Same as flagFirstApplicationSiblingDivergence, with one logged line on a
- * genuine failure before re-throwing — every call site runs this inside its
- * OWN caller transaction, so the caller's await rejects too and the whole
- * move (including the date write) rolls back rather than committing without
- * its alert. See the module header's fail-closed note.
- */
-async function flagFirstApplicationSiblingDivergenceSafely(trx, scheduledServiceId, context = '') {
-  try {
-    return await flagFirstApplicationSiblingDivergence(trx, scheduledServiceId);
-  } catch (err) {
-    logger.error(`[first-application-sibling-split] divergence alert failed for ${scheduledServiceId}${context ? ` (${context})` : ''} — propagating so the move rolls back rather than committing without it: ${err.message}`);
-    throw err;
-  }
+async function runFirstApplicationSiblingSplitSweep() {
+  const { runExclusive } = require('../utils/cron-lock');
+  return runExclusive('first-application-sibling-split-sweep', runSweepInner);
 }
 
 module.exports = {
-  flagFirstApplicationSiblingDivergence,
-  flagFirstApplicationSiblingDivergenceSafely,
+  runFirstApplicationSiblingSplitSweep,
   dateOnly,
-  // Exported for direct unit coverage of the lookup/classification pieces.
-  loadEstimateGroup,
-  findPricedAnchor,
+  isInvoiceSettled,
   divergingSiblings,
-  findFirstApplicationInvoiceForAlert,
+  evaluateGroupDivergence,
+  loadCandidates,
+  loadGroupMembers,
+  clearStandingAlerts,
+  raiseDivergenceAlert,
+  evaluateCandidate,
+  SETTLED_INVOICE_STATUSES,
 };
