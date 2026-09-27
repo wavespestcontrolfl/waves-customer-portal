@@ -1613,15 +1613,16 @@ const gates = {
   outboundVoicemailSms: process.env.GATE_OUTBOUND_VOICEMAIL_SMS === 'true',
 
   // Missed-call text-back (services/missed-call-text-back.js): an UNKNOWN
-  // caller (no customer on file — a lead is fine) calls a Waves line,
+  // caller (no customer record on file) calls a Waves line,
   // nobody answers, they wait >= 25s (missed-call-bell's own floor) and
   // hang up with no voicemail — one text goes from the exact line they
   // called ("it's Waves... text us here... or call back anytime"). Same
   // fail-CLOSED rule as the other text-back lanes: customer-facing
   // auto-send, explicit opt-in in every environment. Owner sets
   // GATE_MISSED_CALL_TEXT_BACK=true to go live. Off → the post-call hook
-  // and the durable sweep both no-op immediately (gate read first, before
-  // any query) — no text, no call_log write, no claim taken.
+  // and the durable sweep send nothing (gate read first, before any call
+  // query) — no text, no call_log write, no claim taken. The sweep still
+  // reconciles claims this lane left orphaned while it was on.
   missedCallTextBack: process.env.GATE_MISSED_CALL_TEXT_BACK === 'true',
 
   // GrowthBook experimentation — master gate for A/B experiment assignment on

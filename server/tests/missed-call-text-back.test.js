@@ -13,6 +13,9 @@ jest.mock('../config/twilio-numbers', () => ({
   isInternalNumber: (n) => n === '+19412975749',
   isTechLine: (n) => n === '+19413529161',
   tollFree: { number: '+18559260203' },
+  mainLine: { number: '+19412975749' },
+  // Unset in the registry's own sense: falls back to the main line.
+  internalAlertCallerId: jest.fn(() => '+19412975749'),
   findByNumber: jest.fn((n) => (['+19412975749', '+19412972817', '+18559260203', '+19413529161'].includes(n) ? { id: 'known' } : null)),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -185,6 +188,14 @@ describe('fromNumberForDialed — send FROM the line the caller dialed, only whe
   });
   test('a field-tech line is never used (owner ruling: automated texts never originate there)', () => {
     expect(fromNumberForDialed('+19413529161')).toBeNull();
+  });
+  test('a dedicated internal-alert caller ID is never used, even though the registry reports it as a line', () => {
+    const TWILIO_NUMBERS = require('../config/twilio-numbers');
+    TWILIO_NUMBERS.internalAlertCallerId.mockReturnValueOnce('+19412972817');
+    expect(fromNumberForDialed('+19412972817')).toBeNull();
+  });
+  test('an internal-alert caller ID that falls back to the main line leaves the main line usable', () => {
+    expect(fromNumberForDialed('+19412975749')).toBe('+19412975749');
   });
   test('an unregistered number skips rather than falling back to a default line', () => {
     expect(fromNumberForDialed('+19995550000')).toBeNull();
