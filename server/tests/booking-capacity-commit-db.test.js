@@ -5,7 +5,7 @@
 // the REAL arrival-route whole-route simulation used inline by
 // createSelfBooking: a feasible slot remains feasible, a later same-tech stop
 // outside the candidate's window passes the legacy overlap predicate but is
-// rejected by checkArrivalPlacement, and — Codex #4992 r1 P1 — when
+// invalidates the prepared proof under live row locks, and — Codex #4992 r1 P1 — when
 // evaluateArrivalPlacement
 // certifies feasibility through its clockOrder/storedOrderStale fallback
 // (a corrected order, not the day's STALE stored route_order values),
@@ -25,7 +25,7 @@ jest.mock('../services/geocoder', () => ({
 }));
 
 const knex = require('knex');
-const { checkArrivalPlacement, persistArrivalOrder } = require('../services/scheduling/arrival-route');
+const { prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('../services/scheduling/arrival-route');
 const { findConflictingVisits } = require('../services/scheduling/occupancy');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { geocodeAddress } = require('../services/geocoder');
@@ -60,8 +60,7 @@ async function insertNonOverlappingRouteOverload(conn) {
   });
 }
 
-const probe = (trx) => checkArrivalPlacement({
-  conn: trx,
+const prepare = () => prepareArrivalCapacity({
   date: CANDIDATE.date,
   technicianId: CANDIDATE.technicianId,
   prospective: {
@@ -73,6 +72,13 @@ const probe = (trx) => checkArrivalPlacement({
   windowStart: CANDIDATE.windowStart,
   windowEnd: CANDIDATE.windowEnd,
   durationMinutes: CANDIDATE.durationMinutes,
+});
+const verify = (prepared) => verifyArrivalCapacity(prepared, {
+  conn: mockConn,
+  windowStart: CANDIDATE.windowStart,
+  windowEnd: CANDIDATE.windowEnd,
+  durationMinutes: CANDIDATE.durationMinutes,
+  serviceTypes: [CANDIDATE.serviceType],
 });
 
 describeDb('booking commit whole-route dependency on real PostgreSQL', () => {
@@ -94,7 +100,11 @@ describeDb('booking commit whole-route dependency on real PostgreSQL', () => {
     // No production URL, permanent tables, migration execution, or triggers —
     // connection-local temp copies of the deployed schema, empty, dropped on
     // commit (this test always rolls back instead).
-    for (const table of ['scheduled_services', 'customers', 'technicians', 'tech_schedule_blocks']) {
+    for (const table of [
+      'scheduled_services', 'customers', 'technicians', 'tech_schedule_blocks',
+      'technician_absences', 'technician_capabilities', 'system_settings',
+      'schedule_blackout_dates', 'audit_log',
+    ]) {
       await mockConn.raw('CREATE TEMP TABLE ?? ON COMMIT DROP AS SELECT * FROM public.?? WITH NO DATA', [table, table]);
     }
     await mockConn('technicians').insert({ id: TECH, name: 'Fixture technician', active: true, employment_status: 'active', field_dispatchable: true });
@@ -108,13 +118,12 @@ describeDb('booking commit whole-route dependency on real PostgreSQL', () => {
   afterEach(async () => { await mockConn.rollback(); });
 
   test('feasible slot still books: resolves with the certified fit', async () => {
-    await expect(probe(mockConn))
+    await expect(prepare().then(verify))
       .resolves.toEqual(expect.objectContaining({ feasible: true }));
   });
 
   test('a non-overlapping later stop that overloads the route makes the slot infeasible (createSelfBooking refuses it as SLOT_TAKEN)', async () => {
-    await expect(probe(mockConn))
-      .resolves.toEqual(expect.objectContaining({ feasible: true }));
+    const prepared = await prepare();
     await insertNonOverlappingRouteOverload(mockConn);
 
     // This is the actual guard createSelfBooking runs immediately before the
@@ -127,7 +136,9 @@ describeDb('booking commit whole-route dependency on real PostgreSQL', () => {
       windowEnd: CANDIDATE.windowEnd,
     })).resolves.toEqual([]);
 
-    await expect(probe(mockConn)).resolves.toEqual(expect.objectContaining({ feasible: false }));
+    await expect(verify(prepared)).rejects.toMatchObject({
+      code: 'SLOT_UNAVAILABLE', reason: 'route_changed',
+    });
   });
 
   test('Codex #4992 r1: a stale stored order certified through the clockOrder fallback is PERSISTED, not left stale', async () => {
@@ -142,7 +153,7 @@ describeDb('booking commit whole-route dependency on real PostgreSQL', () => {
     await mockConn('scheduled_services').where({ id: NORTH }).update({ route_order: 2 });
     await mockConn('scheduled_services').where({ id: SOUTH }).update({ route_order: 1 });
 
-    const fit = await probe(mockConn);
+    const fit = await verify(await prepare());
     expect(fit).toEqual(expect.objectContaining({ feasible: true }));
 
     // The real commit inserts the row BEFORE persisting the fit's order

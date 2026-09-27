@@ -77,6 +77,19 @@ test('a typed address that uniquely matches a returning customer is offered at t
     .resolves.toEqual({ ...storedPin, disclosable: false });
 });
 
+test('a dedicated unit only reuses the pin for the matching household', async () => {
+  const storedPin = { lat: 27.35, lng: -82.52 };
+  listResults.customers = [{ id: CUSTOMER_ID, ...ADDRESS, address_line2: 'Apt A' }];
+  firstResults.customers = customerRow({
+    address_line2: 'Apt A', latitude: storedPin.lat, longitude: storedPin.lng,
+  });
+
+  await expect(resolveOfferCoords({ ...CALLER, address: TYPED, unit: 'Apt A' }))
+    .resolves.toEqual({ ...storedPin, disclosable: false });
+  await expect(resolveOfferCoords({ ...CALLER, address: TYPED, unit: 'Apt B' }))
+    .resolves.toEqual({ lat: 27.3, lng: -82.5, disclosable: true });
+});
+
 test('a new visitor (no estimate, no matching customer) keeps the caller\'s own coordinates, disclosable', async () => {
   listResults.customers = [];
 

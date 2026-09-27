@@ -585,7 +585,10 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       expect(transactionStarted).toBe(false);
       return exactPin;
     });
-    const capacitySpy = jest.spyOn(require('../services/scheduling/arrival-route'), 'checkArrivalPlacement')
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const prepared = { options: { prospective: exactPin } };
+    const prepareSpy = jest.spyOn(arrivalRoute, 'prepareArrivalCapacity').mockResolvedValue(prepared);
+    const verifySpy = jest.spyOn(arrivalRoute, 'verifyArrivalCapacity')
       .mockResolvedValue({ feasible: true, routeOrder: ['__candidate__'] });
     const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
     try {
@@ -599,13 +602,17 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       expect(fencedCustomer.latitude).toBeNull();
       expect(conflictSpy).toHaveBeenCalledWith(expect.objectContaining({ travel: expect.objectContaining(exactPin) }));
       if (capacity === 'true' && commit === 'true') {
-        expect(capacitySpy).toHaveBeenCalledWith(expect.objectContaining({ prospective: expect.objectContaining(exactPin) }));
-      } else expect(capacitySpy).not.toHaveBeenCalled();
+        expect(prepareSpy).toHaveBeenCalledWith(expect.objectContaining({ prospective: expect.objectContaining(exactPin) }));
+        expect(verifySpy).toHaveBeenCalledWith(prepared, expect.objectContaining({ conn: expect.any(Function) }));
+      } else {
+        expect(prepareSpy).not.toHaveBeenCalled();
+        expect(verifySpy).not.toHaveBeenCalled();
+      }
       expect(geocodeSpy).toHaveBeenCalledTimes(1);
       const { recurringServiceAddress } = require('../services/booking/visit-financial-stamps');
       expect(recurringServiceAddress(row)).toMatchObject({ lat: exactPin.lat, lng: exactPin.lng, service_address_line1: CUST.address_line1 });
     } finally {
-      geocodeSpy.mockRestore(); capacitySpy.mockRestore(); conflictSpy.mockRestore();
+      geocodeSpy.mockRestore(); prepareSpy.mockRestore(); verifySpy.mockRestore(); conflictSpy.mockRestore();
       if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
       else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
       if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
@@ -621,7 +628,9 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     returnScheduledInsert = true;
     const arrivalRoute = require('../services/scheduling/arrival-route');
     const fit = { feasible: true, routeOrder: ['earlier', '__candidate__', 'later'] };
-    const capacitySpy = jest.spyOn(arrivalRoute, 'checkArrivalPlacement').mockResolvedValue(fit);
+    const prepared = { options: { prospective: { lat: LAT, lng: LNG } } };
+    const prepareSpy = jest.spyOn(arrivalRoute, 'prepareArrivalCapacity').mockResolvedValue(prepared);
+    const verifySpy = jest.spyOn(arrivalRoute, 'verifyArrivalCapacity').mockResolvedValue(fit);
     const persistSpy = jest.spyOn(arrivalRoute, 'persistArrivalOrder').mockImplementation(async () => {
       expect(capturedScheduledInsert).toBeDefined();
       throw new Error(SENTINEL);
@@ -630,9 +639,9 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     try {
       await runToScheduledInsert();
       expect(persistSpy).toHaveBeenCalledTimes(1);
-      expect(persistSpy).toHaveBeenCalledWith(capacitySpy.mock.calls[0][0].conn, fit, 'scheduled-1');
+      expect(persistSpy).toHaveBeenCalledWith(verifySpy.mock.calls[0][1].conn, fit, 'scheduled-1');
     } finally {
-      capacitySpy.mockRestore(); persistSpy.mockRestore(); conflictSpy.mockRestore();
+      prepareSpy.mockRestore(); verifySpy.mockRestore(); persistSpy.mockRestore(); conflictSpy.mockRestore();
       if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
       else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
       if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
@@ -645,8 +654,13 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
-    const capacitySpy = jest.spyOn(require('../services/scheduling/arrival-route'), 'checkArrivalPlacement')
-      .mockResolvedValue({ feasible: false, reason: 'arrival_window' });
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const prepared = { options: { prospective: { lat: LAT, lng: LNG } } };
+    const prepareSpy = jest.spyOn(arrivalRoute, 'prepareArrivalCapacity').mockResolvedValue(prepared);
+    const verifySpy = jest.spyOn(arrivalRoute, 'verifyArrivalCapacity').mockRejectedValue(Object.assign(
+      new Error('This time is no longer available. Please choose another appointment.'),
+      { code: 'SLOT_UNAVAILABLE', reason: 'arrival_window', statusCode: 409, isOperational: true },
+    ));
     const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
     try {
       const sig = mintSlotOfferField(offerPayload());
@@ -655,10 +669,12 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
         status: 409,
         code: 'SLOT_TAKEN',
       });
-      expect(capacitySpy).toHaveBeenCalledTimes(1);
+      expect(prepareSpy).toHaveBeenCalledTimes(1);
+      expect(verifySpy).toHaveBeenCalledTimes(1);
       expect(capturedScheduledInsert).toBeUndefined();
     } finally {
-      capacitySpy.mockRestore();
+      prepareSpy.mockRestore();
+      verifySpy.mockRestore();
       conflictSpy.mockRestore();
       if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
       else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
@@ -683,7 +699,10 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       expect(transactionStarted).toBe(false);
       return exactPin;
     });
-    const capacitySpy = jest.spyOn(require('../services/scheduling/arrival-route'), 'checkArrivalPlacement')
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const prepared = { options: { prospective: exactPin } };
+    const prepareSpy = jest.spyOn(arrivalRoute, 'prepareArrivalCapacity').mockResolvedValue(prepared);
+    const verifySpy = jest.spyOn(arrivalRoute, 'verifyArrivalCapacity')
       .mockResolvedValue({ feasible: true, routeOrder: ['__candidate__'] });
     const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
     const laneSpy = jest.spyOn(require('../services/reservice-scheduler'), 'openCallbackExistsForLane').mockResolvedValue(false);
@@ -698,10 +717,11 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       expect(loadedCustomer.latitude).toBeNull();
       expect(fencedCustomer.latitude).toBeNull();
       expect(conflictSpy).toHaveBeenCalledWith(expect.objectContaining({ travel: expect.objectContaining(exactPin) }));
-      expect(capacitySpy).toHaveBeenCalledWith(expect.objectContaining({ prospective: expect.objectContaining(exactPin) }));
+      expect(prepareSpy).toHaveBeenCalledWith(expect.objectContaining({ prospective: expect.objectContaining(exactPin) }));
+      expect(verifySpy).toHaveBeenCalledWith(prepared, expect.objectContaining({ conn: expect.any(Function) }));
       expect(geocodeSpy).toHaveBeenCalledTimes(1);
     } finally {
-      geocodeSpy.mockRestore(); capacitySpy.mockRestore(); conflictSpy.mockRestore(); laneSpy.mockRestore();
+      geocodeSpy.mockRestore(); prepareSpy.mockRestore(); verifySpy.mockRestore(); conflictSpy.mockRestore(); laneSpy.mockRestore();
       if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
       else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
       if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
@@ -855,33 +875,33 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     } finally { geocodeSpy.mockRestore(); reviewSpy.mockRestore(); }
   });
 
-  test('an exact pin correction inside the signed grid drives both commit-time route checks for the unstamped visit', async () => {
+  test('an exact pin correction after traffic preparation requires a fresh offer', async () => {
     const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
     const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
     const freshPin = { lat: 27.339, lng: -82.531 };
     fencedCustomer = { ...CUST, latitude: freshPin.lat, longitude: freshPin.lng };
     const arrivalRoute = require('../services/scheduling/arrival-route');
     const occupancy = require('../services/scheduling/occupancy');
-    const capacitySpy = jest.spyOn(arrivalRoute, 'checkArrivalPlacement')
-      .mockResolvedValue({ feasible: true, routeOrder: ['__candidate__'] });
+    const prepareSpy = jest.spyOn(arrivalRoute, 'prepareArrivalCapacity').mockResolvedValue({
+      options: { prospective: { lat: LAT, lng: LNG } },
+    });
+    const verifySpy = jest.spyOn(arrivalRoute, 'verifyArrivalCapacity');
     const conflictSpy = jest.spyOn(occupancy, 'findConflictingVisits').mockResolvedValue([]);
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
     try {
-      await runToScheduledInsert();
-      expect(conflictSpy).toHaveBeenCalledWith(expect.objectContaining({
-        travel: expect.objectContaining(freshPin),
+      await expect(createSelfBooking(confirmPayload(mintSlotOfferField(offerPayload()))))
+        .resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+      expect(prepareSpy).toHaveBeenCalledWith(expect.objectContaining({
+        prospective: expect.objectContaining({ lat: LAT, lng: LNG }),
       }));
-      expect(capacitySpy).toHaveBeenCalledWith(expect.objectContaining({
-        prospective: expect.objectContaining(freshPin),
-      }));
-      // The row has no visit pin, so dispatch inherits this same fenced
-      // customer pin; the capacity simulation cannot diverge from it.
-      expect(capturedScheduledInsert).not.toHaveProperty('lat');
-      expect(capturedScheduledInsert).not.toHaveProperty('lng');
+      expect(verifySpy).not.toHaveBeenCalled();
+      expect(conflictSpy).not.toHaveBeenCalled();
+      expect(capturedScheduledInsert).toBeUndefined();
     } finally {
       conflictSpy.mockRestore();
-      capacitySpy.mockRestore();
+      prepareSpy.mockRestore();
+      verifySpy.mockRestore();
       if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
       else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
       if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;

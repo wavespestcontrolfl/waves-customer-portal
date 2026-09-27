@@ -188,18 +188,21 @@ fields only: /api/booking/availability builds each public slot field by field
 shared grid / day-end / lunch-gate rules above, which apply in both modes.
 Commit-time capacity re-check (`GATE_BOOK_CAPACITY_COMMIT`, owner-approved
 2026-09-26; needs `GATE_SCHEDULING_CAPACITY` live too): every `createSelfBooking`
-commit — `/api/booking/confirm` here and the re-service commit below — re-runs
-the SAME single-candidate whole-route placement evaluation the offer used
-(`arrival-route.js`'s `checkArrivalPlacement`, the exact function
-`findCapacitySlots` certifies each offered slot through) against the LIVE
-tech-day, inside the transaction and under the SAME tech-day advisory lock the
-commit already holds (no second locking scheme). This closes the gap the
+commit — `/api/booking/confirm` here and the re-service commit below — prepares
+the traffic-aware whole-route proof before scheduling locks, then reuses
+`arrival-route.js`'s `verifyArrivalCapacity` under the transaction's existing
+tech-day advisory lock. Verification locks the relevant route rows, requires
+the live fingerprint to match the prepared route, and evaluates without a
+provider request while locks are held. This closes the gap the
 overlap-only re-check (`findConflictingVisits`) leaves: another booking landing
 on the tech-day between offer and confirm can push a LATER stop's promised
 window past its promise, or the day over capacity, without ever overlapping
 the confirmed window — that booking now refuses with the existing `SLOT_TAKEN`
 409 (the same shape and client recovery as every other slot race on this
 route) instead of committing a route the offer engine would no longer certify.
+If the customer's exact service point changes after traffic preparation,
+confirm asks for a fresh offer instead of reusing legs prepared for the old
+point, even when both points share the public rounded grid.
 A zone/no-tech confirm (no technician bound) has no single route to re-check
 and keeps only the overlap gate, unchanged. Either gate off skips this
 whole-route capacity re-check.
@@ -208,17 +211,20 @@ Public-confirm location freshness applies with either capacity gate on or
 off. After the scheduling and customer-communications fences, the customer
 row is held `FOR SHARE` through the insert. A complete live pin in another
 signed-offer grid cell returns `LOCATION_CHANGED_RETRY` (409); a same-cell
-exact correction drives the final travel/capacity probes. Customers without
-a complete stored pair are geocoded from their server-owned address before
-locks. The address and missing pair must still be unchanged under the fence,
+exact correction drives the final overlap probe when the capacity commit gate
+is off, while an already-prepared traffic proof requires a fresh offer.
+Customers without a complete stored pair are geocoded from their server-owned
+address before locks. The address and missing pair must still be unchanged under the fence,
 and a matching staff geocode-review hold refuses the fallback. A valid
 server-resolved pair must match the signed grid and is stamped with its
 address on the new visit so dispatch uses the same location the commit
 certified. The customer profile is not rewritten, cleared pins are not
 restored, and no geocoder request runs while scheduling locks are held.
-The offer side resolves the same location: `/api/booking/availability` and
-`/find-slots` build an existing customer's offers (the estimate's customer,
-else the unique customer at the typed address) at that commit location — the
+The official `/book` client sends its estimate identity and dedicated unit on
+every availability, date-browse, and `/find-slots` request. The offer side
+resolves the same location: `/api/booking/availability` and `/find-slots` build
+an existing customer's offers (the estimate's customer, else the unique
+unit-aware customer at the typed address) at that commit location — the
 stored pin, else a staff-verified pin or the canonical geocode — over any
 caller coordinates, and echo it only rounded; `/reservice/:token` builds its
 offers on it too. Everyone else keeps the caller's coordinates or address.
@@ -2159,9 +2165,10 @@ offering times. Search and confirm return HTTP 409
 `{ error, code: 'LOCATION_REVIEW_REQUIRED' }` before building availability or
 committing. A complete stored pair, a stale/nonblocking review, or the review
 gate being off retains the existing pre-check behavior. If the booking
-transaction later returns `LOCATION_CHANGED_RETRY` (including an address or
-review change after the pre-check), confirm maps it to that same 409 recovery
-without refreshed slots. The page clears its selected slot and availability,
+transaction later returns `LOCATION_CHANGED_RETRY` or
+`CUSTOMER_CHANGED_RETRY` (including an address or review change after the
+pre-check), confirm reloads the token row and maps it to that same 409 recovery
+without stale refreshed slots. The page clears its selected slot and availability,
 hides time search, and asks the customer to text or call Waves to confirm the
 service address. Ordinary `SLOT_TAKEN`/`DAY_FULL` races still refresh times.
 find-slots mirrors the

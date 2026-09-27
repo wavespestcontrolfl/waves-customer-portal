@@ -1013,14 +1013,20 @@ async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
 // echoed exactly — it is a customer record's pin. Everyone else keeps
 // resolveBookingCoords. estimate_id is a raw public value: only a UUID
 // (LEAD_ID_RE's shape) is looked up.
-async function resolveOfferCoords({ lat, lng, address, city, estimate_id }) {
+async function resolveOfferCoords({ lat, lng, address, city, unit, estimate_id }) {
   let customerId = estimate_id && LEAD_ID_RE.test(String(estimate_id))
     ? (await db('estimates').where('id', estimate_id).first('customer_id'))?.customer_id
     : null;
   if (!customerId && address) {
     const parsed = parseRawAddress(address);
     const line1 = parsed.line1 || address;
-    customerId = (await findUniqueCustomerByAddress(line1, city || parsed.city, parsed.zip, submittedInlineUnit(line1)))?.id;
+    const submittedUnit = String(unit || '').trim() || submittedInlineUnit(line1);
+    customerId = (await findUniqueCustomerByAddress(
+      line1,
+      city || parsed.city,
+      parsed.zip,
+      submittedUnit,
+    ))?.id;
   }
   const customer = customerId
     ? await db('customers').where({ id: customerId })
@@ -1808,7 +1814,7 @@ router.get('/availability', async (req, res, next) => {
     }
 
     const {
-      lat, lng, address, city, estimate_id,
+      lat, lng, address, city, unit, estimate_id,
       service_type, duration_minutes,
       date_from, date_to,
     } = req.query;
@@ -1820,7 +1826,7 @@ router.get('/availability', async (req, res, next) => {
       max_self_books_per_day: 3,
     };
 
-    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({ lat, lng, address, city, estimate_id });
+    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({ lat, lng, address, city, unit, estimate_id });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
@@ -1913,7 +1919,7 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
     }
 
     const {
-      query, lat, lng, address, city, estimate_id,
+      query, lat, lng, address, city, unit, estimate_id,
       service_type, duration_minutes,
     } = req.body || {};
     const cleanQuery = String(query || '').trim();
@@ -1927,7 +1933,7 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
       max_self_books_per_day: 3,
     };
 
-    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({ lat, lng, address, city, estimate_id });
+    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({ lat, lng, address, city, unit, estimate_id });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
@@ -3115,6 +3121,32 @@ async function createSelfBooking(payload = {}) {
       const preloadedBookingLocation = shouldResolveMissingBookingLocation
         ? await preloadBookingLocation(preFenceCustomer)
         : null;
+      // Spend the traffic budget before scheduling locks. The verifier below
+      // reuses this request-local travel object only when the locked route's
+      // fingerprint still matches, and never makes a provider request.
+      let preparedCapacity = null;
+      if (technician_id && bookCapacityCommitLive() && capacityEnabled()) {
+        const preparedPin = storedBookingPin(preFenceCustomer)
+          || storedBookingPin({
+            latitude: preloadedBookingLocation?.lat,
+            longitude: preloadedBookingLocation?.lng,
+          })
+          || storedBookingPin({ latitude: bookingLat, longitude: bookingLng });
+        const { prepareArrivalCapacity } = require('../services/scheduling/arrival-route');
+        preparedCapacity = await prepareArrivalCapacity({
+          date: slotDateStr,
+          technicianId: technician_id,
+          prospective: {
+            lat: preparedPin?.lat ?? null,
+            lng: preparedPin?.lng ?? null,
+            estimated_duration_minutes: duration,
+            service_type: resolvedServiceType,
+          },
+          windowStart: slot_start,
+          windowEnd: endTime,
+          durationMinutes: duration,
+        });
+      }
       txResult = await db.transaction(async (trx) => {
       // RUNG 1 — date-wide occupancy lock, FIRST (see the ORDERING CONTRACT
       // in services/scheduling/occupancy.js). This path's own conflict gate
@@ -3266,14 +3298,27 @@ async function createSelfBooking(payload = {}) {
         bookingLng = freshPin?.lng ?? null;
         // Public offers bind the pin on the same rounded grid used by the
         // availability response. A move to another grid cell invalidates the
-        // offer; an exact correction inside the same cell is safe because the
-        // resolved exact pin below drives every commit-time route check and
-        // the customer row is FOR SHARE-fenced through the visit insert.
+        // offer. An exact correction inside the same cell can still drive the
+        // overlap check; when a traffic proof was prepared, the exact-point
+        // comparison below requires a fresh offer instead.
         // Re-service callbacks have no signed location key. They still must
         // refuse an invalidated/held fallback, including when capacity is off
         // or no technician is bound; a null pin cannot reach the visit insert.
         if ((shouldResolveMissingBookingLocation && !freshPin)
           || (!callbackVisit && bookingOfferLocationKey(bookingLat, bookingLng) !== offerLocationKey)) {
+          throw Object.assign(new Error('Your address just changed — please pick a time again.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'LOCATION_CHANGED_RETRY',
+          });
+        }
+        // The prepared traffic legs are exact-coordinate inputs. A profile
+        // correction inside the public signature's rounded grid is safe for
+        // overlap-only commits, but cannot reuse traffic prepared for the old
+        // point. Retry before verify instead of certifying a different door.
+        const preparedPoint = preparedCapacity?.options?.prospective;
+        if (preparedPoint
+          && (Number(preparedPoint.lat) !== bookingLat || Number(preparedPoint.lng) !== bookingLng)) {
           throw Object.assign(new Error('Your address just changed — please pick a time again.'), {
             statusCode: 409,
             isOperational: true,
@@ -3698,47 +3743,21 @@ async function createSelfBooking(payload = {}) {
         });
       }
 
-      // Commit-time whole-route capacity re-check (GATE_BOOK_CAPACITY_COMMIT,
-      // owner-approved 2026-09-26 dispatch backlog). The overlap checks above
-      // answer "did another visit land on this exact window"; under
-      // GATE_SCHEDULING_CAPACITY the OFFER was certified by arrival-route.js's
-      // WHOLE-ROUTE simulation (find-time's findCapacitySlots), so a booking
-      // landing on this tech-day since can push a LATER stop past its promise
-      // or the day over capacity without overlapping this window. Re-run the
-      // same single-candidate evaluation (checkArrivalPlacement) against the
-      // live day, on this transaction under the tech-day lock already held
-      // (rung 1) — never a second locking scheme. A zone/no-tech confirm has
-      // no single route to simulate; the overlap checks stay its only guard.
-      // The certified fit is applied onto the row below once it has an id:
-      // it may certify through the clockOrder fallback (a corrected order,
-      // not the day's stale stored route_order), and discarding it would
-      // leave dispatch a route that no longer keeps every promise (Codex r1
-      // P1 on #4992).
-      let capacityCommitFit;
-      if (technician_id && bookCapacityCommitLive() && capacityEnabled()) {
-        const { checkArrivalPlacement } = require('../services/scheduling/arrival-route');
-        capacityCommitFit = await checkArrivalPlacement({
+      // Verify the traffic-aware prepared proof under the existing tech-day
+      // lock. A changed route fingerprint or infeasible live fit refuses the
+      // slot; a verified corrected order is persisted after insertion.
+      const capacityServiceTypes = callbackVisit
+        ? [resolvedServiceType]
+        : normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]);
+      const capacityCommitFit = preparedCapacity
+        ? await require('../services/scheduling/arrival-route').verifyArrivalCapacity(preparedCapacity, {
           conn: trx,
-          date: slotDateStr,
-          technicianId: technician_id,
-          prospective: {
-            lat: Number.isFinite(bookingLat) ? bookingLat : null,
-            lng: Number.isFinite(bookingLng) ? bookingLng : null,
-            estimated_duration_minutes: duration,
-            service_type: resolvedServiceType,
-          },
           windowStart: slot_start,
           windowEnd: endTime,
           durationMinutes: duration,
-        });
-        if (!capacityCommitFit.feasible) {
-          throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
-            statusCode: 409,
-            isOperational: true,
-            code: 'SLOT_TAKEN',
-          });
-        }
-      }
+          serviceTypes: capacityServiceTypes,
+        })
+        : null;
 
       const [bookingRow] = await trx('self_booked_appointments').insert({
         customer_id: custId,
@@ -3981,7 +4000,7 @@ async function createSelfBooking(payload = {}) {
       // customer's CURRENT address" outcome the consultation page's
       // sendBookingFailure answers the same way it answers a slot race
       // (409, refreshed availability), never the global error handler.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED') {
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SLOT_UNAVAILABLE' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED') {
         // Undo a profile this request just created: leaving it would make
         // the customer's retry with a different slot hit the
         // phone-already-on-file 409 and strand them entirely. The row is
@@ -4009,7 +4028,8 @@ async function createSelfBooking(payload = {}) {
         // code rides along so the reservice route can distinguish the lane
         // dedupe from a slot race; /confirm's response shape is unchanged
         // (it reads only error + customersOnly fields).
-        return { ok: false, status: 409, error: txErr.message, code: txErr.code || null };
+        return { ok: false, status: 409, error: txErr.message,
+          code: txErr.code === 'SLOT_UNAVAILABLE' ? 'SLOT_TAKEN' : (txErr.code || null) };
       }
       throw txErr;
     }

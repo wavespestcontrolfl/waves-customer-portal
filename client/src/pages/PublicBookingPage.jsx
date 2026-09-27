@@ -365,6 +365,8 @@ export default function PublicBookingPage() {
         // day → time picker can show real per-day openings, not a single slot.
         expand: 'open',
       });
+      if (address.line2) params.set('unit', address.line2);
+      if (estimateIdParam) params.set('estimate_id', estimateIdParam);
       if (coords?.lat && coords?.lng) {
         params.set('lat', String(coords.lat));
         params.set('lng', String(coords.lng));
@@ -765,6 +767,8 @@ export default function PublicBookingPage() {
 
   const slotSearchBody = () => ({
     address: address.formatted || address.line1,
+    ...(address.line2 ? { unit: address.line2 } : {}),
+    ...(estimateIdParam ? { estimate_id: estimateIdParam } : {}),
     service_type: service.id,
     duration_minutes: service.duration,
     ...(coords?.lat && coords?.lng ? { lat: coords.lat, lng: coords.lng } : {}),
@@ -823,6 +827,8 @@ export default function PublicBookingPage() {
         date_from: date,
         date_to: date,
       });
+      if (address.line2) params.set('unit', address.line2);
+      if (estimateIdParam) params.set('estimate_id', estimateIdParam);
       if (coords?.lat && coords?.lng) { params.set('lat', String(coords.lat)); params.set('lng', String(coords.lng)); }
       const res = await fetch(`${API_BASE}/booking/availability?${params}`);
       const data = await res.json().catch(() => ({}));
@@ -1098,30 +1104,19 @@ export default function PublicBookingPage() {
                 />
               </div>
               <div>
-                {/* Availability/slots key off the street line, so typing here
-                    must not reset them (plain setAddress, not updateAddress).
-                    The address-matched account AND any phone-looked-up contact
-                    MUST reset though — Apt B is not Apt A's household, and the
-                    prior household's name/email must not prefill the contact
-                    step. The match re-checks on blur with the unit included. */}
+                {/* Unit is part of the offer identity: Apt B must never keep
+                    Apt A's slots, coordinates, account match, or contact.
+                    The match re-checks on blur with the unit included. */}
                 <input
                   type="text"
                   aria-label="Apartment or unit (optional)"
                   value={address.line2}
                   onChange={(e) => {
                     const v = e.target.value;
-                    setAddress(a => ({ ...a, line2: v }));
-                    // Invalidate any in-flight address/phone lookup: a late
-                    // response for Apt A must not re-bind onto Apt B (and this
-                    // handler just cleared the matched account + contact).
-                    addressLookupSeqRef.current += 1;
+                    updateAddress(a => ({ ...a, line2: v }));
+                    // Invalidate any in-flight phone lookup too: a late
+                    // response for Apt A must not re-bind onto Apt B.
                     phoneLookupSeqRef.current += 1;
-                    // A pending browse's finally is now short-circuited by the
-                    // seq bump — clear its loading flag so it can't stick.
-                    setBrowseLoading(false);
-                    setExistingCustomerId(null);
-                    setAddressMayMatchCustomer(false);
-                    setContact({ firstName: '', lastName: '', phone: '', email: '' });
                   }}
                   onBlur={() => { if (address.line1) checkExistingCustomerByAddress(address); }}
                   placeholder="Apt / Unit # (optional)"

@@ -535,11 +535,12 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           alreadyBooked: booked,
         });
       }
-      // A matching staff review can land after the pre-check or while the
-      // booking transaction waits on its fences. It is an address recovery
-      // state, not a slot race: do not rebuild the same geocoded offers that
-      // createSelfBooking is required to reject.
-      if (result.code === 'LOCATION_CHANGED_RETRY') {
+      // An address or review can change after the pre-check or while the
+      // transaction waits on its fences. Reload the token row so a retired
+      // link stays indistinguishable, then enter address recovery; never
+      // rebuild slots from the stale customer object loaded above.
+      if (result.code === 'LOCATION_CHANGED_RETRY' || result.code === 'CUSTOMER_CHANGED_RETRY') {
+        if (!await loadByToken(req.params.token)) return res.status(404).json({ error: 'Not found' });
         return res.status(409).json(locationReviewFailure());
       }
       // Any other 409 out of the transaction is a slot-level race

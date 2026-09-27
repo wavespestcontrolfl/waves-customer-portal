@@ -555,14 +555,18 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(conditionLine).toMatch(/txErr\.code === 'LOCATION_CHANGED_RETRY'/);
     // Codex #4737 r9 P2: the fingerprint-side twin of the same race.
     expect(conditionLine).toMatch(/txErr\.code === 'CUSTOMER_CHANGED_RETRY'/);
+    // The prepared-proof verifier uses SLOT_UNAVAILABLE internally. The
+    // public booking contract keeps its existing SLOT_TAKEN recovery code.
+    expect(conditionLine).toMatch(/txErr\.code === 'SLOT_UNAVAILABLE'/);
     // Still inside the same branch that returns { ok:false, status:409, ...
     // code } rather than re-throwing — pin the branch body, not just the
     // condition line, so moving LOCATION_CHANGED_RETRY to its own
     // differently-shaped branch would also fail this test.
     const throwIdx = src.indexOf('throw txErr;', convertIdx);
-    const returnIdx = src.indexOf("return { ok: false, status: 409, error: txErr.message, code: txErr.code || null };", convertIdx);
+    const returnIdx = src.indexOf('return { ok: false, status: 409, error: txErr.message,', convertIdx);
     expect(returnIdx).toBeGreaterThan(convertIdx);
     expect(returnIdx).toBeLessThan(throwIdx);
+    expect(src.slice(returnIdx, throwIdx)).toContain("txErr.code === 'SLOT_UNAVAILABLE' ? 'SLOT_TAKEN'");
   });
 
   // Codex #4737 r9 P1: the consultation page's lead-scoped dedupe — the lead

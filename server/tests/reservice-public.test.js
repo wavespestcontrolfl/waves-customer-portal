@@ -646,6 +646,66 @@ describe('staff geocode review blocks coordinate-less re-service offers', () => 
     expect(coords).toHaveBeenCalled();
   });
 
+  test('a customer change during commit reloads the token and never refreshes slots from the stale row', async () => {
+    setReview(null);
+    const booking = require('../routes/booking')._internals;
+    jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({ advance_days_min: 1, advance_days_max: 14 });
+    jest.spyOn(booking, 'customerBookingLocation').mockResolvedValue({ lat: 27.34, lng: -82.53 });
+    const build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({
+      slots: [], nearby: false,
+      days: [{
+        date: slotDate,
+        slots: [{ start_time: '09:00', end_time: '09:20', technician_id: 'tech-1', start_label: '9:00 AM', end_label: '9:20 AM' }],
+      }],
+    });
+    jest.spyOn(booking, 'createSelfBooking').mockImplementation(async () => {
+      firstResults.customers = customer({ address_line1: '456 Changed Avenue' });
+      return {
+        ok: false, status: 409, code: 'CUSTOMER_CHANGED_RETRY',
+        error: 'Your account details just changed — please refresh and book again.',
+      };
+    });
+    const mockedDb = require('../models/db');
+    const customerReadsBefore = mockedDb.mock.calls.filter(([table]) => table === 'customers').length;
+
+    const res = response();
+    await commitHandler()({
+      params: { token }, body: { lane: 'pest', date: slotDate, start_time: '09:00' },
+    }, res, jest.fn());
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'LOCATION_REVIEW_REQUIRED', error: expect.stringMatching(/confirm your service address/i),
+    }));
+    expect(build).toHaveBeenCalledTimes(1);
+    const customerReadsAfter = mockedDb.mock.calls.filter(([table]) => table === 'customers').length;
+    expect(customerReadsAfter - customerReadsBefore).toBeGreaterThanOrEqual(2);
+  });
+
+  test('a customer change that retires the token stays a generic 404 without stale slots', async () => {
+    setReview(null);
+    const booking = require('../routes/booking')._internals;
+    jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({ advance_days_min: 1, advance_days_max: 14 });
+    jest.spyOn(booking, 'customerBookingLocation').mockResolvedValue({ lat: 27.34, lng: -82.53 });
+    const build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({
+      slots: [], nearby: false,
+      days: [{ date: slotDate, slots: [{ start_time: '09:00', end_time: '09:20', technician_id: 'tech-1' }] }],
+    });
+    jest.spyOn(booking, 'createSelfBooking').mockImplementation(async () => {
+      firstResults.customers = null;
+      return { ok: false, status: 409, code: 'CUSTOMER_CHANGED_RETRY', error: 'changed' };
+    });
+
+    const res = response();
+    await commitHandler()({
+      params: { token }, body: { lane: 'pest', date: slotDate, start_time: '09:00' },
+    }, res, jest.fn());
+
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json).toHaveBeenCalledWith({ error: 'Not found' });
+    expect(build).toHaveBeenCalledTimes(1);
+  });
+
   test('an ordinary DAY_FULL race still refreshes and returns SLOT_TAKEN', async () => {
     firstResults.customers = customer({ latitude: 27.34, longitude: -82.53 });
     setReview(review('needs_pin'));
