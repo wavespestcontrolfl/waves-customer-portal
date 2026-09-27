@@ -613,9 +613,19 @@ async function claimMetadata(conn, callId, value) {
 // canonical send path already owns).
 async function claimForDispatch(conn, callId) {
   const claimed_at = new Date().toISOString();
+  // jsonb_build_object's key argument is variadic/polymorphic — Postgres
+  // cannot infer a bare named parameter's type from it alone (unlike the
+  // `->`/`->>` operators below, which fix the type from their own
+  // signature), and Knex expands each :key occurrence into its OWN
+  // positional $N even though they all carry the same value. Without the
+  // explicit ::text cast, Postgres rejects the whole claim with "could not
+  // determine data type of parameter $1" — every dispatch attempt then
+  // fails the claim and the row is never sent (codex r3 P1; the mocked
+  // raw-query unit tests can't catch this, since they never touch a real
+  // Postgres parser).
   const result = await conn.raw(
     `UPDATE call_log SET metadata = COALESCE(metadata, '{}'::jsonb) ||
-       jsonb_build_object(:key, (metadata->:key) || jsonb_build_object('status', 'claimed', 'claimed_at', :claimed_at::text))
+       jsonb_build_object(:key::text, (metadata->:key) || jsonb_build_object('status', 'claimed', 'claimed_at', :claimed_at::text))
      WHERE id = :id AND metadata->:key->>'status' = 'pending'
      RETURNING id`,
     { key: METADATA_KEY, claimed_at, id: callId },
