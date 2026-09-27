@@ -505,6 +505,19 @@ class OpportunityQueue {
    */
   async recoverStaleClaims() {
     const cutoff = new Date(Date.now() - STALE_CLAIM_MS);
+    // A worker can durably record its current-claim PR and then crash before
+    // moving the queue row to pending_review. Preserve that reconciliation
+    // evidence: the poller requires the queue park to close/retire a PR that
+    // an ordinary edit superseded. Claims without such evidence are terminal.
+    const currentClaimPrReason = `(SELECT r.skip_reason FROM autonomous_runs r
+      WHERE r.opportunity_id = opportunity_queue.id
+        AND r.queue_claim_id IS NOT DISTINCT FROM opportunity_queue.claim_id
+        AND r.outcome = 'completed_pending_review'
+        AND r.skip_reason IN ('astro_pr_pending_merge', 'metadata_pr_pending_merge')
+        AND r.astro_pr_url IS NOT NULL
+        AND r.published_url IS NULL
+      ORDER BY r.created_at DESC LIMIT 1)`;
+    const supersededAt = new Date();
     const superseded = await db('opportunity_queue')
       .where('status', 'claimed')
       .where('claimed_at', '<', cutoff)
@@ -512,11 +525,11 @@ class OpportunityQueue {
       .whereRaw(`jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), ?)`, [PAGE_EDIT_SUPERSEDED_KEY])
       .whereRaw(`skip_reason IS DISTINCT FROM 'named_competitor_publishing'`)
       .update({
-        status: 'skipped',
+        status: db.raw(`CASE WHEN ${currentClaimPrReason} IS NOT NULL THEN 'pending_review' ELSE 'skipped' END`),
         claimed_at: null,
-        skip_reason: PAGE_EDIT_SUPERSEDED_REASON,
-        completed_at: new Date(),
-        updated_at: new Date(),
+        skip_reason: db.raw(`COALESCE(${currentClaimPrReason}, ?)`, [PAGE_EDIT_SUPERSEDED_REASON]),
+        completed_at: db.raw(`CASE WHEN ${currentClaimPrReason} IS NOT NULL THEN NULL ELSE ?::timestamptz END`, [supersededAt]),
+        updated_at: supersededAt,
       });
     const recovered = await db('opportunity_queue')
       .where('status', 'claimed')

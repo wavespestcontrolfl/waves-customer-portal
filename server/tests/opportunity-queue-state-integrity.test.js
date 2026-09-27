@@ -36,6 +36,10 @@ function chain(overrides = {}) {
   return q;
 }
 
+function rawCallContaining(fragment) {
+  return db.raw.mock.calls.find(([sql]) => String(sql).includes(fragment));
+}
+
 afterEach(() => {
   jest.clearAllMocks();
   delete process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS;
@@ -107,7 +111,7 @@ describe('claimNext lifetime attempt budget', () => {
 
     await queue.claimNext({});
 
-    const [sql, bindings] = db.raw.mock.calls[0];
+    const [sql, bindings] = rawCallContaining('attempt_count = CASE');
     expect(sql).toMatch(/attempt_count = CASE WHEN status = 'pending_review' THEN 1 ELSE attempt_count \+ 1 END/);
     expect(sql).toMatch(/attempt_count < \?::int/);
     expect(bindings[1]).toBe(5);
@@ -120,7 +124,7 @@ describe('claimNext lifetime attempt budget', () => {
 
     await queue.claimNext({});
 
-    const [, bindings] = db.raw.mock.calls[0];
+    const [, bindings] = rawCallContaining('attempt_count = CASE');
     expect(bindings[1]).toBe(3);
   });
 
@@ -154,20 +158,21 @@ describe('recoverStaleClaims vs named-competitor approval claims', () => {
     expect(rawClause[1]).toMatch(/skip_reason IS DISTINCT FROM 'named_competitor_publishing'/);
   });
 
-  test('stale superseded backfill claims retire explicitly and keep the durable marker out of ordinary recovery', async () => {
+  test('stale superseded claims preserve a current-claim PR park and otherwise retire explicitly', async () => {
     const supersededUpdates = [];
     const ordinaryUpdates = [];
+    db.raw.mockImplementation((sql, bindings = []) => ({ __raw: sql, bindings }));
     const supersededQ = chain({ update: jest.fn((patch) => { supersededUpdates.push(patch); return Promise.resolve(1); }) });
     const ordinaryQ = chain({ update: jest.fn((patch) => { ordinaryUpdates.push(patch); return Promise.resolve(0); }) });
     db.mockImplementationOnce(() => supersededQ).mockImplementationOnce(() => ordinaryQ);
 
     await expect(queue.recoverStaleClaims()).resolves.toBe(1);
 
-    expect(supersededUpdates[0]).toMatchObject({
-      status: 'skipped',
-      claimed_at: null,
-      skip_reason: 'superseded_by_ordinary_page_edit',
-    });
+    expect(supersededUpdates[0].claimed_at).toBeNull();
+    expect(supersededUpdates[0].status.__raw).toMatch(/current-claim|queue_claim_id IS NOT DISTINCT FROM opportunity_queue\.claim_id|THEN 'pending_review' ELSE 'skipped'/);
+    expect(supersededUpdates[0].skip_reason.__raw).toContain("r.skip_reason IN ('astro_pr_pending_merge', 'metadata_pr_pending_merge')");
+    expect(supersededUpdates[0].skip_reason.bindings).toEqual(['superseded_by_ordinary_page_edit']);
+    expect(supersededUpdates[0].completed_at.__raw).toMatch(/THEN NULL ELSE \?::timestamptz/);
     expect(ordinaryQ._filters).toEqual(expect.arrayContaining([
       ['raw', expect.stringContaining("jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), ?)"), ['page_edit_superseded']],
     ]));
@@ -372,7 +377,7 @@ describe('listicle_family lane fence (kill-switch contract)', () => {
 
       await queue.claimNext({});
 
-      const [sql] = db.raw.mock.calls[0];
+      const [sql] = rawCallContaining("UPDATE opportunity_queue");
       expect(sql).toContain(`AND bucket <> 'listicle_family'`);
     } finally {
       spy.mockRestore();
@@ -385,7 +390,7 @@ describe('listicle_family lane fence (kill-switch contract)', () => {
 
     await queue.claimNext({}); // dev-open gates: lane open
 
-    const [sql] = db.raw.mock.calls[0];
+    const [sql] = rawCallContaining("UPDATE opportunity_queue");
     expect(sql).not.toContain(`bucket <> 'listicle_family'`);
   });
 
@@ -442,7 +447,7 @@ describe('citability_backfill lane fence (kill-switch contract, 2026-09-25)', ()
 
       await queue.claimNext({});
 
-      const [sql] = db.raw.mock.calls[0];
+      const [sql] = rawCallContaining("UPDATE opportunity_queue");
       expect(sql).toContain(`AND bucket <> 'citability_backfill'`);
       // Only THIS lane is fenced — the listicle gates were left on.
       expect(sql).not.toContain(`bucket <> 'listicle_family'`);
@@ -457,7 +462,7 @@ describe('citability_backfill lane fence (kill-switch contract, 2026-09-25)', ()
 
     await queue.claimNext({}); // dev-open gates: lane open
 
-    const [sql] = db.raw.mock.calls[0];
+    const [sql] = rawCallContaining("UPDATE opportunity_queue");
     expect(sql).not.toContain(`bucket <> 'citability_backfill'`);
     expect(sql).toContain("jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')");
   });
