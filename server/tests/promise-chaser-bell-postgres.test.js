@@ -113,6 +113,8 @@ const OUR_NUMBER = '+19415550100';
       party: 'waves', kind: 'callback', status: 'open', source: 'ai',
       description: 'Call the lead back with pricing',
       evidence: JSON.stringify([]),
+      // The column default in production; CREATE TABLE AS copies no defaults.
+      renewal_trail: true,
       created_at: new Date(now - 4 * 3600000), updated_at: new Date(now - 4 * 3600000),
       ...extra,
     };
@@ -1294,9 +1296,38 @@ const OUR_NUMBER = '+19415550100';
       expect(triggerNotification).toHaveBeenCalledTimes(1);
     });
 
+    test('a legacy CONFIRMED send_estimate with no renewal event never rings — a pre-trail reopen is indistinguishable from a bare confirm (Codex #5019 r19 P0)', async () => {
+      const earlier = callRow(240);
+      const reviewedAt = new Date(now - 100 * 60000);
+      const commitment = commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the quote', renewal_trail: null, human_state: 'confirmed', reviewed_at: reviewedAt });
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      expect(await sweepPromiseChasers()).toBe(0);
+      expect(triggerNotification).not.toHaveBeenCalled();
+    });
+
+    test('a legacy CONFIRMED send_estimate reopened after the trail existed rings on its commitment_reopen boundary (Codex #5019 r19 P0)', async () => {
+      const earlier = callRow(240);
+      const reopenedAt = new Date(now - 100 * 60000);
+      const commitment = commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the quote', renewal_trail: null, human_state: 'confirmed', reviewed_at: reopenedAt });
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+      await mockConn('audit_log').insert({
+        id: randomUUID(), actor_type: 'admin', action: 'commitment_reopen',
+        resource_type: 'call_commitment', resource_id: commitment.id,
+        metadata: JSON.stringify({ renewed_at: reopenedAt.toISOString() }), created_at: reopenedAt,
+      });
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+    });
+
     test('a send_estimate EDITED before commitment_edit events existed keeps reviewed_at as its boundary — stale pre-edit evidence is not kept (Codex #5019 r18 P0)', async () => {
       const earlier = callRow(240);
-      const commitment = commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the quote' });
+      const commitment = commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the quote', renewal_trail: null });
       const reached = callRow(200, { direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, duration_seconds: 90 });
       const back = callRow(0);
       await mockConn('call_log').insert([earlier, reached, back]);

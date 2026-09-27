@@ -243,13 +243,22 @@ async function findPromiseToRing(call, now) {
   // serially per row). A lookup failure holds the whole callback, exactly
   // as a thrown followedUpIds already did — never a ring on unverified
   // renewal state.
+  // A legacy promise whose renewal cannot be known (renewalBoundaryUnknown)
+  // never rings: its pre-renewal evidence and callbacks cannot be told apart
+  // from the current obligation's.
   const renewedById = new Map();
+  const unknown = new Set();
   try {
-    for (const r of open) renewedById.set(String(r.id), await commitments.obligationRenewedAt(db, r));
+    for (const r of open) {
+      if (await commitments.renewalBoundaryUnknown(db, r)) unknown.add(r.id);
+      else renewedById.set(String(r.id), await commitments.obligationRenewedAt(db, r));
+    }
   } catch (err) {
     logger.warn(`[promise-chaser-bell] renewal lookup failed: ${err.message}`);
     return null;
   }
+  open = open.filter((r) => !unknown.has(r.id));
+  if (!open.length) return null;
   const renewedFloors = new Map([...renewedById].filter(([, at]) => at));
   const followed = await followedUpIds(db, open, { renewed: renewedFloors }).catch((err) => {
     logger.warn(`[promise-chaser-bell] follow-up lookup failed: ${err.message}`);

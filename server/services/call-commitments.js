@@ -1757,6 +1757,21 @@ async function resolveFulfillment(conn, commitment, call) {
 // neither can carry that history on its own — see applyHumanUpdate's
 // writers for both event families). Null for anything that is not a
 // reviewed, party:'waves' SLA commitment.
+// True when a non-callback SLA promise's renewal boundary cannot be known:
+// a row from before renewal_trail existed, now 'confirmed', with no
+// commitment_edit / commitment_reopen event. The old path left a reopen, and
+// an edit followed by a confirm, looking exactly like a bare confirm, and no
+// record tells them apart (Codex #5019 r19 P0) — a caller that would act on
+// the boundary declines instead of guessing.
+async function renewalBoundaryUnknown(conn, commitment) {
+  if (!commitment || commitment.party !== 'waves' || commitment.kind === 'callback') return false;
+  if (commitment.renewal_trail === true || commitment.human_state !== 'confirmed') return false;
+  if (!require('./followup-sla-watcher').SLA_KINDS.includes(commitment.kind)) return false;
+  const event = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
+    .whereIn('action', ['commitment_edit', 'commitment_reopen']).first('id');
+  return !event;
+}
+
 async function obligationRenewedAt(conn, commitment) {
   if (!commitment || commitment.party !== 'waves') return null;
   if (!['confirmed', 'edited'].includes(commitment.human_state)) return null;
@@ -1786,13 +1801,14 @@ async function obligationRenewedAt(conn, commitment) {
       .whereIn('action', ['commitment_edit', 'commitment_reopen']).select('created_at', 'metadata');
     const meta = (e) => { try { return typeof e.metadata === 'string' ? JSON.parse(e.metadata) : (e.metadata || {}); } catch { return {}; } };
     const times = [commitment.source === 'human' ? commitment.created_at : null, ...events.map((e) => meta(e).renewed_at || e.created_at)];
-    // A row edited before these events existed has none: while none exists
-    // at all, an 'edited' row's reviewed_at is the only boundary on record
-    // (at worst later than the edit, never earlier) — the same legacy rule
-    // the callback branch below applies to a pre-card edit (Codex #5019
-    // r18 P0). Once any event exists, reviewed_at may have been advanced by
-    // an ordinary confirm and is not a boundary.
-    if (commitment.human_state === 'edited' && !events.length) times.push(commitment.reviewed_at);
+    // A row edited before these events existed (renewal_trail NULL) has
+    // none: while none exists at all, a legacy 'edited' row's reviewed_at is
+    // the only boundary on record (at worst later than the edit, never
+    // earlier) — the same legacy rule the callback branch below applies to
+    // a pre-card edit (Codex #5019 r18 P0). A newer row's edit that wrote no
+    // event restated nothing, so it is no boundary; once any event exists,
+    // reviewed_at may have been advanced by an ordinary confirm.
+    if (commitment.renewal_trail !== true && commitment.human_state === 'edited' && !events.length) times.push(commitment.reviewed_at);
     const ms = times.filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
     return ms.length ? new Date(Math.max(...ms)) : null;
   }
@@ -2732,6 +2748,7 @@ module.exports = {
   callbackEditEventMetadata,
   addHumanCommitment,
   obligationRenewedAt,
+  renewalBoundaryUnknown,
   buildCallOutcomes,
   OVERDUE_IMPLICIT_DAYS,
   PROMPT_KINDS,
