@@ -69,6 +69,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
   test.each([
     'Ghost ants are common in Florida kitchens this time of year.',
     'Your technician follows the product label directions for every application.',
+    'There is no chance of rain tomorrow, so we can treat.',
+    'There is a chance of mild irritation, so follow the label.',
   ])('leaves compliant replies untouched: %s', (reply) => {
     expect(scrubUnsafeClaims({ ...base, reply }).reply).toBe(reply);
   });
@@ -243,6 +245,12 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['The product is in no way harmful to children.', ''],
     ['There is no chance this treatment will hurt your kids.', ''],
     ['There is no possibility that this pesticide could harm pets.', ''],
+    ['There is no chance of side effects from this pesticide.', ''],
+    ['Zero chance of harm to your pets.', ''],
+    ['The treatment causes no irritation.', ''],
+    ["There's no chance your kids get sick from this.", ''],
+    ['No hay ninguna posibilidad de efectos secundarios.', ''],
+    ['Cero probabilidad de daño.', ''],
     ['This pesticide is not considered hazardous to children.', ''],
     ['The product is not classified as toxic to pets.', ''],
     ['The treatment is not regarded as dangerous for dogs.', ''],
@@ -422,6 +430,13 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['After 4 PM.', 'Is it ok for the dog to come back in?'],
     ['En 2 horas.', '¿Cuándo podemos volver?'],
     ['Usually 45 minutes, then let it dry for an hour.', 'How long does lawn service take?'],
+    ['You can re-enter now.', 'When can I re-enter after treatment?'],
+    ['You may go back inside now.', 'When can I re-enter after treatment?'],
+    ['You can go back inside.', 'When can I re-enter after treatment?'],
+    ['Go ahead and go back in.', 'When can I re-enter after treatment?'],
+    ['It should be dry by now, so you can go back in.', 'When can I re-enter after treatment?'],
+    ['Your dog can go back out.', 'When can my dog go back out after the spray?'],
+    ['Puede volver a entrar ahora.', '¿Cuándo puedo volver a entrar?'],
   ])('flags: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
   });
@@ -443,6 +458,10 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['About 90 days.', 'How long does the treatment last?'],
     ['We can come back Tuesday at 10 AM.', 'When can you come back?'],
     ['Tuesday works.', 'Can we get back to you tomorrow?'],
+    ['Once the treated areas are dry, per the label — your technician will confirm timing for your home.', 'When can I re-enter after treatment?'],
+    ['Please bring your dog inside while we treat the yard.', 'Can my dog be in the yard while you treat?'],
+    ['Una vez que esté seco, según la etiqueta; su técnico le confirmará.', '¿Cuándo puedo volver a entrar?'],
+    ['No pueden volver hasta que esté seco.', '¿Cuándo pueden volver los niños?'],
   ])('leaves alone: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });
