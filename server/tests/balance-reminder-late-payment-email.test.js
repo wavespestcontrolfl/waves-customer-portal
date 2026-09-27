@@ -242,12 +242,6 @@ describe('late-payment email sidecar', () => {
       triggerEventId: 'late_payment:inv-1:7',
       idempotencyKey: 'late_payment_email:inv-1:7',
       suppressionGroupKey: 'transactional_required',
-      // A provider retry of this row re-runs the shared billing email check.
-      billingReplayContext: {
-        schema_version: 1, customer_id: 'cust-1', invoice_id: 'inv-1', category: 'billing',
-        source_entry_point: 'late_payment_email', notificationEventKey: 'late_payment:inv-1:7',
-        rendered_balance: '129.00',
-      },
       payload: expect.objectContaining({
         first_name: 'Taylor',
         invoice_title: 'Quarterly Pest Control',
@@ -411,19 +405,6 @@ describe('late-payment email sidecar', () => {
       input, recipientEmail: 'billing@example.com', templateKey: 'billing_late_payment_30_day',
     }));
     expect(dispatch).toHaveBeenCalledWith('authority-trx');
-  });
-
-  test('an invoice-amount email pins the invoice amount its retry rechecks on the invoice', async () => {
-    setDbQueues({ invoices: [chain({ first: invoice() })], customer_interactions: [chain()] });
-    EmailTemplates.sendTemplate.mockResolvedValueOnce({ sent: true });
-    await BalanceReminder.sendLatePaymentEmail({
-      customer: customer(), invoice: invoice(), balance: { totalBalance: 75, oldestDueDate: '2026-05-19' },
-      smsTemplateKey: 'late_payment_30d', invoiceTitle: 'Quarterly Pest Control', serviceDateClause: '',
-      payUrl: 'https://portal.wavespestcontrol.com/pay/token-1', amountScope: 'invoice',
-    });
-    const context = EmailTemplates.sendTemplate.mock.calls[0][0].billingReplayContext;
-    expect(context).toMatchObject({ rendered_amount: '75.00' });
-    expect(context).not.toHaveProperty('rendered_balance');
   });
 
   test('an unreadable billing context is a retryable not-sent, never a blind send', async () => {
@@ -975,86 +956,6 @@ describe('balance reminder pay link', () => {
   });
 });
 
-describe('latePaymentEmailStillOwed (a stored late-payment email\'s provider retry)', () => {
-  const balance = { totalBalance: 129, invoiceIds: ['inv-1'], oldestInvoiceId: 'inv-1' };
-  const ask = () => BalanceReminder.latePaymentEmailStillOwed({
-    customerId: 'cust-1', invoiceId: 'inv-1', renderedTotal: '129.00',
-  });
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    InvoiceFollowUps.hasActiveSequence.mockReset().mockResolvedValue(false);
-    InvoiceFollowUps.isDunningStopped.mockReset().mockResolvedValue(false);
-    StripeService.isInvoiceAwaitingMicrodepositVerification.mockReset().mockResolvedValue(false);
-  });
-  afterEach(() => jest.restoreAllMocks());
-
-  test('still owed while the overdue total is the one it showed and no dunning stop started', async () => {
-    jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
-    setDbQueues({}, { plan: chain({ first: null }), microdeposits: chain({ result: [] }) });
-    await expect(ask()).resolves.toEqual({ owed: true });
-  });
-
-  test('the locked recheck reads on the held connection and leaves the payment processor out', async () => {
-    const held = jest.fn();
-    const readBalance = jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
-    held.mockImplementation(() => chain({ first: null }));
-    await expect(BalanceReminder.latePaymentEmailStillOwed({
-      customerId: 'cust-1', invoiceId: 'inv-1', renderedTotal: '129.00', database: held, processor: false,
-    })).resolves.toEqual({ owed: true });
-    expect(readBalance).toHaveBeenCalledWith('cust-1', held);
-    expect(InvoiceFollowUps.hasActiveSequence).toHaveBeenCalledWith('inv-1', held);
-    expect(held).toHaveBeenCalledWith('payment_plans');
-    expect(held).not.toHaveBeenCalledWith('invoices');
-    expect(StripeService.isInvoiceAwaitingMicrodepositVerification).not.toHaveBeenCalled();
-  });
-
-  test('an invoice-amount email checks only its own invoice\'s dunning stops, not the account total', async () => {
-    const readBalance = jest.spyOn(BalanceReminder, 'getCustomerBalance');
-    setDbQueues({}, { plan: chain({ first: null }), microdeposits: chain({ result: [] }) });
-    await expect(BalanceReminder.latePaymentEmailStillOwed({ customerId: 'cust-1', invoiceId: 'inv-1' }))
-      .resolves.toEqual({ owed: true });
-    expect(readBalance).not.toHaveBeenCalled();
-    expect(InvoiceFollowUps.hasActiveSequence.mock.calls).toEqual([['inv-1', db]]);
-    InvoiceFollowUps.isDunningStopped.mockResolvedValue(true);
-    setDbQueues({}, { plan: chain({ first: null }), microdeposits: chain({ result: [] }) });
-    await expect(BalanceReminder.latePaymentEmailStillOwed({ customerId: 'cust-1', invoiceId: 'inv-1' }))
-      .resolves.toEqual({ owed: false, reason: 'dunning-stopped' });
-  });
-
-  test.each([
-    ['the overdue total changed', { totalBalance: 99 }, null],
-    ['nothing is overdue any more', null, null],
-    ['a follow-up sequence took over', {}, 'sequence'],
-    ['a payment plan started', {}, 'plan'],
-  ])('refuses when %s', async (_label, balanceOverride, stop) => {
-    jest.spyOn(BalanceReminder, 'getCustomerBalance')
-      .mockResolvedValue(balanceOverride === null ? null : { ...balance, ...balanceOverride });
-    if (stop === 'sequence') InvoiceFollowUps.hasActiveSequence.mockResolvedValue(true);
-    setDbQueues({}, {
-      plan: chain({ first: stop === 'plan' ? { id: 'plan-1' } : null }),
-      microdeposits: chain({ result: [] }),
-    });
-    await expect(ask()).resolves.toMatchObject({ owed: false });
-  });
-
-  // The shared check turns a thrown answer into a retry later; a swallowed
-  // read error would read as "stopped" and end the retry for good.
-  test.each([
-    ['the follow-up read', () => InvoiceFollowUps.hasActiveSequence.mockRejectedValue(new Error('db down'))],
-    ['the micro-deposit lookup', () => StripeService.isInvoiceAwaitingMicrodepositVerification
-      .mockRejectedValue(new Error('stripe unavailable'))],
-  ])('an error in %s is thrown, not answered as a dunning stop', async (_label, fail) => {
-    jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
-    fail();
-    setDbQueues({}, {
-      plan: chain({ first: null }),
-      microdeposits: chain({ result: [{ id: 'inv-1', stripe_payment_intent_id: 'pi-inv-1' }] }),
-    });
-    await expect(ask()).rejects.toThrow();
-  });
-});
-
 describe('account-level dunning stops', () => {
   const paths = [
     ['latePaymentCheck', null],
@@ -1123,8 +1024,8 @@ describe('account-level dunning stops', () => {
       const queries = armReminder(entry, channels, { stop, stoppedId });
       await BalanceReminder[entry]();
       expectNoContact(queries);
-      if (stop === 'sequence') expect(InvoiceFollowUps.hasActiveSequence).toHaveBeenCalledWith(stoppedId, db);
-      if (stop === 'dunning') expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith(stoppedId, db);
+      if (stop === 'sequence') expect(InvoiceFollowUps.hasActiveSequence).toHaveBeenCalledWith(stoppedId);
+      if (stop === 'dunning') expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith(stoppedId);
       if (stop === 'plan') {
         expect(queries.plan.whereIn).toHaveBeenCalledWith('invoice_id', expect.arrayContaining([stoppedId]));
         expect(queries.plan.where).toHaveBeenCalledWith({ status: 'active' });
@@ -1150,8 +1051,8 @@ describe('account-level dunning stops', () => {
       expect(queries.activity.insert).toHaveBeenCalled();
       expect(queries.microdeposits.whereIn).toHaveBeenCalledWith('id', ['inv-2', 'inv-3', 'inv-1']);
       for (const id of ['inv-1', 'inv-2', 'inv-3']) {
-        expect(InvoiceFollowUps.hasActiveSequence).toHaveBeenCalledWith(id, db);
-        expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith(id, db);
+        expect(InvoiceFollowUps.hasActiveSequence).toHaveBeenCalledWith(id);
+        expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith(id);
       }
     });
   });
@@ -1170,7 +1071,7 @@ describe('account-level dunning stops', () => {
     });
     try {
       await BalanceReminder.latePaymentCheck();
-      expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith('inv-1', db);
+      expect(InvoiceFollowUps.isDunningStopped).toHaveBeenCalledWith('inv-1');
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
       expect(ContactLedger.recordContact).not.toHaveBeenCalled();

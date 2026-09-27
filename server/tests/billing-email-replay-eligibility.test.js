@@ -7,8 +7,6 @@ jest.mock('../services/annual-prepay-renewals', () => ({ getCardExpiryExemptions
 jest.mock('../services/messaging/deferred-replay-registry', () => ({ invoiceStillCollectible: jest.fn() }));
 jest.mock('../services/invoice-helpers', () => ({ selfPayAtDispatch: jest.fn() }));
 jest.mock('../services/collections/rail-guard', () => ({ collectionsChannelPermitted: jest.fn() }));
-jest.mock('../services/workflows/balance-reminder', () => ({ latePaymentEmailStillOwed: jest.fn() }));
-jest.mock('../services/invoice-followups', () => ({ followupEmailStillOwed: jest.fn() }));
 
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { getChargeableAutopayMethod } = require('../services/autopay-eligibility');
@@ -16,11 +14,7 @@ const { getCardExpiryExemptions } = require('../services/annual-prepay-renewals'
 const { invoiceStillCollectible } = require('../services/messaging/deferred-replay-registry');
 const { selfPayAtDispatch } = require('../services/invoice-helpers');
 const { collectionsChannelPermitted } = require('../services/collections/rail-guard');
-const {
-  billingEmailReplayEligible, billingEmailReplayProducerRefusal,
-} = require('../services/messaging/billing-email-replay-eligibility');
-const BalanceReminder = require('../services/workflows/balance-reminder');
-const InvoiceFollowUps = require('../services/invoice-followups');
+const { billingEmailReplayEligible } = require('../services/messaging/billing-email-replay-eligibility');
 
 const customerId = '11111111-1111-4111-8111-111111111111';
 
@@ -168,89 +162,6 @@ describe('invoice replay eligibility', () => {
     await expect(billingEmailReplayEligible({ customer_id: customerId, invoice_id: 'inv-1',
       source_entry_point: 'invoice_receipt_sms' }, databaseWith()))
       .resolves.toEqual({ eligible: false, reason: code, retryable });
-  });
-});
-
-describe('a moved billing sender\'s provider retry (owner ruling 2026-09-27)', () => {
-  const meta = { customer_id: customerId, invoice_id: 'inv-1', category: 'billing',
-    source_entry_point: 'late_payment_email', notificationEventKey: 'late_payment:inv-1:30' };
-  afterEach(() => { delete process.env.GATE_COLLECTIONS_POLICY; });
-
-  test('a late-payment email retry is refused once its invoice is no longer collectible', async () => {
-    const database = databaseWith();
-    invoiceStillCollectible.mockResolvedValueOnce({ eligible: false, reason: 'invoice-terminal:paid' });
-    await expect(billingEmailReplayEligible(meta, database))
-      .resolves.toMatchObject({ eligible: false, reason: 'invoice-terminal:paid' });
-    expect(invoiceStillCollectible).toHaveBeenCalledWith(expect.objectContaining({ invoice_id: 'inv-1' }), database);
-  });
-
-  test('a follow-up email retry re-checks the invoice with its sequence and rendered-amount pins', async () => {
-    const database = databaseWith();
-    const followup = { customer_id: customerId, invoice_id: 'inv-1', category: 'invoice',
-      source_entry_point: 'invoice_followup_email', notificationEventKey: 'invoice_followup:inv-1:d7_reminder',
-      followup_sequence_id: 'seq-1', rendered_amount: '129.00' };
-    invoiceStillCollectible.mockResolvedValueOnce({ eligible: false, reason: 'amount-changed' });
-    await expect(billingEmailReplayEligible(followup, database))
-      .resolves.toMatchObject({ eligible: false, reason: 'amount-changed' });
-    expect(invoiceStillCollectible).toHaveBeenCalledWith(expect.objectContaining({
-      followup_sequence_id: 'seq-1', rendered_amount: '129.00',
-    }), database);
-  });
-
-  test('a still-collectible late-payment email retries without consulting the collections policy again', async () => {
-    process.env.GATE_COLLECTIONS_POLICY = 'true';
-    invoiceStillCollectible.mockResolvedValueOnce({ eligible: true });
-    selfPayAtDispatch.mockReturnValueOnce(async () => ({ ok: true }));
-    await expect(billingEmailReplayEligible(meta, databaseWith())).resolves.toEqual({ eligible: true });
-    expect(collectionsChannelPermitted).not.toHaveBeenCalled();
-  });
-});
-
-describe('a moved sender\'s own rules before the shared check', () => {
-  const meta = { customer_id: customerId, invoice_id: 'inv-1', category: 'billing',
-    source_entry_point: 'late_payment_email', notificationEventKey: 'late_payment:inv-1:30', rendered_balance: '129.00' };
-
-  test('the late-payment sender answers with its own balance and dunning rules', async () => {
-    BalanceReminder.latePaymentEmailStillOwed.mockResolvedValueOnce({ owed: true });
-    await expect(billingEmailReplayProducerRefusal(meta)).resolves.toBeNull();
-    expect(BalanceReminder.latePaymentEmailStillOwed).toHaveBeenCalledWith({
-      customerId, invoiceId: 'inv-1', renderedTotal: '129.00',
-    });
-  });
-
-  test('under the locks it asks again on the held connection, without the payment processor', async () => {
-    const database = jest.fn();
-    BalanceReminder.latePaymentEmailStillOwed.mockResolvedValueOnce({ owed: true });
-    await expect(billingEmailReplayProducerRefusal(meta, { database })).resolves.toBeNull();
-    expect(BalanceReminder.latePaymentEmailStillOwed).toHaveBeenCalledWith({
-      customerId, invoiceId: 'inv-1', renderedTotal: '129.00', database, processor: false,
-    });
-  });
-
-  test('"no longer owed" is resendable, and an unreadable answer retries later', async () => {
-    BalanceReminder.latePaymentEmailStillOwed.mockResolvedValueOnce({ owed: false, reason: 'dunning-stopped' });
-    await expect(billingEmailReplayProducerRefusal(meta))
-      .resolves.toEqual({ eligible: false, reason: 'dunning-stopped', resendable: true });
-    BalanceReminder.latePaymentEmailStillOwed.mockRejectedValueOnce(new Error('stripe unavailable'));
-    await expect(billingEmailReplayProducerRefusal(meta))
-      .resolves.toEqual({ eligible: false, reason: 'billing-email-producer-check-unavailable', retryable: true });
-  });
-
-  test('the follow-up engine answers for a follow-up email with its own sequence rules', async () => {
-    InvoiceFollowUps.followupEmailStillOwed.mockResolvedValueOnce({ owed: false, reason: 'sequence-not-active' });
-    await expect(billingEmailReplayProducerRefusal({ customer_id: customerId, invoice_id: 'inv-1',
-      source_entry_point: 'invoice_followup_email', followup_sequence_id: 'seq-1',
-      notificationEventKey: 'invoice_followup:inv-1:d7_reminder' }))
-      .resolves.toEqual({ eligible: false, reason: 'sequence-not-active', resendable: true });
-    expect(InvoiceFollowUps.followupEmailStillOwed)
-      .toHaveBeenCalledWith({ sequenceId: 'seq-1', invoiceId: 'inv-1', stepId: 'd7_reminder' });
-  });
-
-  test('a routed notice carries no producer rule here', async () => {
-    await expect(billingEmailReplayProducerRefusal({ ...meta, source_entry_point: 'autopay_pre_charge_reminder' }))
-      .resolves.toBeNull();
-    expect(BalanceReminder.latePaymentEmailStillOwed).not.toHaveBeenCalled();
-    expect(InvoiceFollowUps.followupEmailStillOwed).not.toHaveBeenCalled();
   });
 });
 

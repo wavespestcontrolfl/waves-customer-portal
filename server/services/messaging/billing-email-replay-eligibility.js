@@ -8,12 +8,6 @@ const INVOICE_GUARDS = new Set([
   'invoice_followup_sequence', 'balance_reminder_workflow',
   'balance_reminder_late_payment_check', 'late_payment_checker',
 ]);
-// A billing email sender moved onto the shared check (owner ruling
-// 2026-09-27): its provider retry re-checks that the invoice is still
-// collectible. The collections policy is not consulted again: a provider
-// retry is the same contact the policy already allowed, and the sender's own
-// ledger row would otherwise count against it.
-const { SENDER_BINDINGS } = require('../billing-email-replay-context');
 const EXPIRY_ENTRY_POINTS = new Set(['autopay_card_expiry_warning', 'payment_expiry_workflow']);
 
 function refused(reason, retryable = false) {
@@ -153,7 +147,7 @@ async function invoiceRefusal(meta, database) {
   const sendRefusal = await require('./invoice-send-replay-eligibility').invoiceSendRefusal(meta, database);
   if (sendRefusal) return sendRefusal;
   if (!meta.invoice_id) return null;
-  if (INVOICE_GUARDS.has(meta.source_entry_point) || SENDER_BINDINGS[meta.source_entry_point]) {
+  if (INVOICE_GUARDS.has(meta.source_entry_point)) {
     const verdict = await require('./deferred-replay-registry').invoiceStillCollectible(meta, database);
     if (verdict.eligible !== true) return refused(verdict.reason, verdict.retryable === true);
   }
@@ -201,36 +195,6 @@ async function billingEmailReplayEligible(meta, database = db) {
   }
 }
 
-// A moved sender's own "would I still send this?" rules: asked in full
-// before the shared check takes its locks (they may call the payment
-// processor), then again on the held connection at every locked recheck,
-// including the provider boundary, with the processor left out.
-// A "no longer owed" answer is resendable: the sender's next send of the
-// same email can still deliver it. An unreadable answer retries later.
-const PRODUCER_RULES = Object.freeze({
-  late_payment_email: (meta, options) => require('../workflows/balance-reminder').latePaymentEmailStillOwed({
-    customerId: meta.customer_id, invoiceId: meta.invoice_id, renderedTotal: meta.rendered_balance, ...options,
-  }),
-  // The step it rendered is the event key's tail (invoice_followup:<invoice>:<step>).
-  invoice_followup_email: (meta, options) => require('../invoice-followups').followupEmailStillOwed({
-    sequenceId: meta.followup_sequence_id, invoiceId: meta.invoice_id,
-    stepId: String(meta.notificationEventKey || '').slice(`invoice_followup:${meta.invoice_id}:`.length),
-    ...options,
-  }),
-});
-
-// locked: { database } of the held connection; omitted, the unlocked pass.
-async function billingEmailReplayProducerRefusal(meta, locked = null) {
-  const rule = PRODUCER_RULES[meta?.source_entry_point];
-  if (!rule) return null;
-  try {
-    const verdict = await rule(meta, locked ? { database: locked.database, processor: false } : {});
-    return verdict?.owed === true ? null : { eligible: false, reason: verdict?.reason || 'no-longer-owed', resendable: true };
-  } catch {
-    return refused('billing-email-producer-check-unavailable', true);
-  }
-}
-
 // Producer-state eligibility only. Recipient resolution and provider-boundary
 // send authorization remain the caller's responsibility when this is wired.
-module.exports = { billingEmailReplayEligible, billingEmailReplayProducerRefusal };
+module.exports = { billingEmailReplayEligible };

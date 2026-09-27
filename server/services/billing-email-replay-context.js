@@ -5,44 +5,8 @@ const { validDateOnly } = require('../utils/date-only');
 // messaging/invoice-send-replay-eligibility.js imports it, so a source that
 // stores an invoice-pinned context always gets the invoice re-check.
 const INVOICE_SEND_SOURCES = new Set(['invoice_send_via_sms', 'invoice_send_deferred']);
-// Billing email senders moved onto the shared billing email check (owner
-// ruling 2026-09-27) store a context on their OWN email row, so a provider
-// retry of that row re-runs the check too. Each binds its row by template,
-// trigger and idempotency key: a context copied onto any other row is
-// ignored. The trigger and key share the suffix after their prefixes, the
-// invoice id opens that suffix, and the row carries the binding's category
-// tag. `pins` are the fields its retry re-checks (see complete()).
-const SENDER_BINDINGS = Object.freeze({
-  late_payment_email: Object.freeze({
-    category: 'billing',
-    categoryTag: 'billing',
-    // Plus exactly one amount pin (see complete()): rendered_balance for an
-    // account-total email, rendered_amount for an invoice-amount one.
-    pins: ['invoice_id'],
-    templates: new Set([
-      'billing_late_payment_7_day', 'billing_late_payment_14_day', 'billing_late_payment_30_day',
-      'billing_late_payment_60_day', 'billing_late_payment_90_day',
-    ]),
-    triggerPrefix: 'late_payment:',
-    keyPrefix: 'late_payment_email:',
-  }),
-  // The invoice follow-up email: its retry also re-checks the sequence (a
-  // stopped one refuses) and the amount it rendered (a changed balance
-  // refuses; the next touch re-renders).
-  invoice_followup_email: Object.freeze({
-    category: 'invoice',
-    categoryTag: 'invoice_followup',
-    pins: ['invoice_id', 'followup_sequence_id', 'rendered_amount'],
-    templates: new Set([
-      'invoice.followup_3_day', 'invoice.followup_7_day', 'invoice.followup_14_day', 'invoice.followup_30_day',
-    ]),
-    triggerPrefix: 'invoice_followup:',
-    keyPrefix: 'invoice_followup_email:',
-  }),
-});
 const SOURCES = new Set([
   ...INVOICE_SEND_SOURCES,
-  ...Object.keys(SENDER_BINDINGS),
   'autopay_pre_charge_reminder',
   'autopay_card_expiry_warning',
   'payment_expiry_workflow',
@@ -57,7 +21,6 @@ const STRING_FIELDS = Object.freeze({
   customer_id: 160, invoice_id: 160, source_entry_point: 80, notificationEventKey: 240,
   collections_ledger_id: 160, payment_method_id: 160, expiry_stage: 20,
   appointment_id: 160, appointment_service_type: 160, followup_sequence_id: 160, rendered_amount: 40,
-  rendered_balance: 40,
 });
 
 function boundedString(value, max) {
@@ -119,31 +82,7 @@ function complete(context) {
   if (context.source_entry_point === 'invoice_followup_sequence') {
     return has('invoice_id', 'followup_sequence_id', 'rendered_amount', 'collections_ledger_id');
   }
-  if (context.source_entry_point === 'late_payment_email'
-    && (context.rendered_balance != null) === (context.rendered_amount != null)) return false;
-  const binding = SENDER_BINDINGS[context.source_entry_point];
-  if (binding) return has(...binding.pins) && context.category === binding.category;
   return has('invoice_id', 'collections_ledger_id');
-}
-
-function senderReplayTemplate(templateKey) {
-  return Object.values(SENDER_BINDINGS).some((binding) => binding.templates.has(templateKey));
-}
-
-// Whether a moved sender's context belongs on the row it is stored with (or
-// read back from). Null for a context that is not a moved sender's: the
-// routed notice keeps its own binding in email-template-library.js.
-function senderReplayBindsRow(context, facts = {}) {
-  const binding = SENDER_BINDINGS[context?.source_entry_point];
-  if (!binding) return null;
-  const trigger = String(facts.triggerEventId || '');
-  const suffix = trigger.slice(binding.triggerPrefix.length);
-  return binding.templates.has(facts.templateKey)
-    && facts.recipientType === 'customer' && String(facts.recipientId) === context.customer_id
-    && trigger.startsWith(binding.triggerPrefix) && trigger === context.notificationEventKey
-    && suffix.startsWith(`${context.invoice_id}:`)
-    && facts.idempotencyKey === `${binding.keyPrefix}${suffix}`
-    && (facts.categories || []).includes(binding.categoryTag);
 }
 
 function sanitizeBillingReplayContext(context) {
@@ -152,7 +91,6 @@ function sanitizeBillingReplayContext(context) {
   if (!copyStrings(context, out) || !copyDates(context, out) || !copyExpiry(context, out)) return null;
   if (!out.customer_id || !out.notificationEventKey) return null;
   if (out.rendered_amount != null && !/^\d+\.\d{2}$/.test(out.rendered_amount)) return null;
-  if (out.rendered_balance != null && !/^\d+\.\d{2}$/.test(out.rendered_balance)) return null;
   if (!CATEGORIES.has(context.category) || !SOURCES.has(out.source_entry_point)) return null;
   out.category = context.category;
   return complete(out) ? out : null;
@@ -189,7 +127,6 @@ function buildBillingReplayContext(input, authorityContext, notificationEventKey
     appointment_rendered_on: meta.appointment_rendered_on,
     followup_sequence_id: meta.followup_sequence_id,
     rendered_amount: meta.rendered_amount,
-    rendered_balance: meta.rendered_balance,
   });
 }
 
@@ -197,7 +134,4 @@ function isBillingReplaySource(input) {
   return SOURCES.has(boundedString(replaySourceEntryPoint(input), STRING_FIELDS.source_entry_point));
 }
 
-module.exports = {
-  buildBillingReplayContext, sanitizeBillingReplayContext, isBillingReplaySource, INVOICE_SEND_SOURCES,
-  SENDER_BINDINGS, senderReplayTemplate, senderReplayBindsRow,
-};
+module.exports = { buildBillingReplayContext, sanitizeBillingReplayContext, isBillingReplaySource, INVOICE_SEND_SOURCES };

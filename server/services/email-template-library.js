@@ -16,9 +16,7 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { isInternalTestEmail } = require('./internal-test-customers');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
-const {
-  sanitizeBillingReplayContext, senderReplayTemplate, senderReplayBindsRow,
-} = require('./billing-email-replay-context');
+const { sanitizeBillingReplayContext } = require('./billing-email-replay-context');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
@@ -595,9 +593,6 @@ function parsedStringArray(value) {
 function billingReplayContextForSnapshot(context, facts = {}) {
   const out = sanitizeBillingReplayContext(context);
   if (!out) return null;
-  // A billing email sender moved onto the shared check binds its own row.
-  const senderBinding = senderReplayBindsRow(out, facts);
-  if (senderBinding !== null) return senderBinding ? out : null;
   const expectedTemplate = out.category === 'payment_receipt' ? 'billing.receipt_notice' : 'billing.notice';
   const expectedKey = `billing_channel_email:${out.notificationEventKey}:email`;
   if (facts.templateKey !== expectedTemplate || facts.recipientType !== 'customer'
@@ -608,7 +603,7 @@ function billingReplayContextForSnapshot(context, facts = {}) {
 
 function readStoredBillingReplayContext(message) {
   const templateKey = String(message?.template_key || '').trim();
-  if (!BILLING_REPLAY_TEMPLATES.has(templateKey) && !senderReplayTemplate(templateKey)) return null;
+  if (!BILLING_REPLAY_TEMPLATES.has(templateKey)) return null;
   const payload = parsedObject(message.payload_snapshot);
   const categories = parsedStringArray(message.categories);
   const recipientEmail = String(message.recipient_email_snapshot || '').trim().toLowerCase();

@@ -267,22 +267,6 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
       idempotencyKey: `invoice_followup_email:${row.invoice_id}:${step.id}`,
       categories: ['invoice_followup', step.id],
       suppressionGroupKey: 'transactional_required',
-      // A provider retry of this row re-runs the shared billing email check,
-      // with the invoice, the sequence and the rendered amount re-checked.
-      // An operator's explicit send skips the customer's choices, so its
-      // retry does not start enforcing them.
-      ...(enforceBillingPreference ? {
-        billingReplayContext: {
-          schema_version: 1,
-          customer_id: String(customer.id),
-          invoice_id: String(row.invoice_id),
-          category: 'invoice',
-          source_entry_point: 'invoice_followup_email',
-          notificationEventKey: `invoice_followup:${row.invoice_id}:${step.id}`,
-          followup_sequence_id: String(row.id),
-          rendered_amount: invoiceAmountDue(latestInvoice).toFixed(2),
-        },
-      } : {}),
       withProviderHandoff: enforceBillingPreference
         ? (dispatch) => dispatchUnderBillingEmailAuthority({
           input: authorityInput, recipientEmail: to, templateKey, dispatch, state,
@@ -2000,8 +1984,8 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
  * Called by late-payment-checker.js to decide whether an invoice is already
  * handled by the per-invoice sequence (so we skip the account-level reminder).
  */
-async function hasActiveSequence(invoiceId, database = db) {
-  const seq = await database('invoice_followup_sequences')
+async function hasActiveSequence(invoiceId) {
+  const seq = await db('invoice_followup_sequences')
     .where({ invoice_id: invoiceId })
     .whereIn('status', ['active', 'paused', 'autopay_hold'])
     .first();
@@ -2024,35 +2008,9 @@ async function isDunningStopped(invoiceId, database = db) {
   return !!seq;
 }
 
-// Whether a stored follow-up email is still one this engine would send: its
-// sequence is not paused (an admin or an autopay hold) or stopped, and the
-// invoice has not moved to a micro-deposit verification (fireTouch sends the
-// verification copy instead). A completed sequence still counts: its final
-// touch completes it the moment it fires. A later step sent since (an
-// operator's "send now") supersedes it: the sequence sits at most one step
-// past the one it rendered (the touch advances it; a held SMS leg keeps it).
-// A provider retry of the stored email asks this before it re-runs the
-// shared billing email check (billing-email-replay-eligibility.js), and
-// again under its locks (database, processor: false).
-async function followupEmailStillOwed({ sequenceId, invoiceId, stepId, database = db, processor = true }) {
-  const seq = await database('invoice_followup_sequences').where({ id: sequenceId }).first('status', 'step_index');
-  if (!seq || ['paused', 'autopay_hold', 'stopped'].includes(String(seq.status || ''))) return { owed: false, reason: 'sequence-not-active' };
-  const rendered = config.steps.findIndex((step) => step.id === stepId);
-  if (rendered < 0 || Number(seq.step_index) > rendered + 1) return { owed: false, reason: 'sequence-advanced' };
-  if (processor && gates.divertMicrodepositDunning) {
-    const invoice = await database('invoices').where({ id: invoiceId }).first('id', 'stripe_payment_intent_id');
-    if (invoice?.stripe_payment_intent_id
-      && await StripeService.isInvoiceAwaitingMicrodepositVerification(invoice, { throwOnError: true })) {
-      return { owed: false, reason: 'microdeposit-verification-pending' };
-    }
-  }
-  return { owed: true };
-}
-
 module.exports = {
   scheduleForInvoice,
   runPending,
-  followupEmailStillOwed,
   // Used by the scheduled-SMS executor to suppress stale deferred
   // invoice/dunning replays (paid/void overnight).
   isTerminalInvoice,

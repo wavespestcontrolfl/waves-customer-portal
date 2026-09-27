@@ -32,8 +32,24 @@ function isProviderBlockedEvent(ev) {
   return event === 'blocked' || (event === 'bounce' && type === 'blocked');
 }
 
+// A late-payment or invoice follow-up email the provider blocks is never
+// re-sent from its stored copy (owner ruling 2026-09-27): the amount, due
+// date and dunning state it froze can all change before a retry, and each
+// one would have to be re-proven at the provider boundary. It settles as
+// not sent; the sender's next stage renders fresh from live data.
+const SENDER_RENDERED_TEMPLATES = new Set([
+  'billing_late_payment_7_day', 'billing_late_payment_14_day', 'billing_late_payment_30_day',
+  'billing_late_payment_60_day', 'billing_late_payment_90_day',
+  'invoice.followup_3_day', 'invoice.followup_7_day', 'invoice.followup_14_day', 'invoice.followup_30_day',
+]);
+
+function isSenderRenderedEmail(message) {
+  return SENDER_RENDERED_TEMPLATES.has(String(message?.template_key || '').trim());
+}
+
 function isTransactionalRetryEligible(message) {
   if (!message || message.has_attachments) return false;
+  if (isSenderRenderedEmail(message)) return false;
   if (String(message.recipient_type || '').toLowerCase() === 'test') return false;
   // Applicant emails (recruiting-comms.js) have no email_templates row and
   // their own eligibility (application state); they stay off this rail.
@@ -475,6 +491,10 @@ async function recordRetrySend(message, result) {
 }
 
 async function retryOne(message) {
+  // A row scheduled before the ruling took effect settles the same way.
+  if (isSenderRenderedEmail(message)) {
+    return stopRetry(message, { status: 'failed', reason: 'Not re-sent from stored copy; the sender\'s next stage renders fresh.' });
+  }
   let suppression;
   try {
     suppression = await activeSuppressionForMessage(message);
@@ -705,6 +725,7 @@ module.exports = {
   asArray,
   isProviderBlockedEvent,
   isTransactionalRetryEligible,
+  isSenderRenderedEmail,
   retryStateForProviderBlock,
   alertIfProviderRetriesExhausted,
   recoverStaleClaims,
