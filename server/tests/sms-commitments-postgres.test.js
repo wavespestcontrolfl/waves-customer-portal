@@ -2075,7 +2075,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       { customer_id: otherCustomer, status: 'accepted', service_interest: 'Lawn' }]).returning('id');
     const deposit = (estimateId, status, receivedAt) => ({ estimate_id: estimateId, amount: 150, status, received_at: receivedAt,
       stripe_payment_intent_id: `pi_deposit_${randomUUID()}` });
-    const [received, credited] = await mockPg('estimate_deposits').insert([deposit(estimate.id, 'received', after),
+    const [received, credited] = await mockPg('estimate_deposits').insert([{ ...deposit(estimate.id, 'received', after), amount: 49, card_surcharge: 1.42 },
       deposit(estimate.id, 'credited', after)]).returning('id');
     await mockPg('estimate_deposits').insert([deposit(estimate.id, 'pending', null), deposit(estimate.id, 'refunding', after),
       deposit(estimate.id, 'refunded', after), deposit(estimate.id, 'received', before), deposit(foreign.id, 'received', after)]);
@@ -2084,9 +2084,12 @@ postgres('SMS commitments on PostgreSQL', () => {
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
     const deposits = evidence.records.filter((r) => r.payment_source === 'deposit');
     expect(deposits.map((r) => r.id).sort()).toEqual([received.id, credited.id].sort());
-    expect(deposits[0]).toMatchObject({ estimate_id: estimate.id, property_id: context.properties[0].id,
-      text: `Deposit of $150.00 on the Termite estimate received ${etDateString(after)}` });
-    expect(admissibleWitness(deposits[0], commitment)).toBe(true);
+    const byId = Object.fromEntries(deposits.map((r) => [r.id, r]));
+    // A card deposit shows the surcharge and the charged total its statement carries.
+    expect(byId[received.id]).toMatchObject({ estimate_id: estimate.id, property_id: context.properties[0].id,
+      text: `Deposit of $49.00 plus a $1.42 card surcharge ($50.42 charged) on the Termite estimate received ${etDateString(after)}` });
+    expect(byId[credited.id].text).toBe(`Deposit of $150.00 on the Termite estimate received ${etDateString(after)}`);
+    expect(admissibleWitness(byId[received.id], commitment)).toBe(true);
   });
 
   test('Codex #4996 r1: a deposit witness holds its estimate at close — an estimate writer holding it, the estimate passing to another customer, or a refund starting fails the close', async () => {
@@ -2292,14 +2295,15 @@ postgres('SMS commitments on PostgreSQL', () => {
     const stripeRow = (pi, metadata) => ({ customer_id: message.customer_id, amount: 89, status: 'paid', payment_date: etDateString(after),
       processor: 'stripe', stripe_payment_intent_id: pi, metadata: JSON.stringify(metadata), created_at: after });
     const [autopay, claimedPaid, disputedPaid] = await mockPg('payments').insert([
-      stripeRow('pi_autopay', { type: 'monthly_autopay', billed_month: '2026-09' }),
+      // StripeService.charge stamps the month it collects for, and no type; a retry keeps the original month.
+      stripeRow('pi_autopay', { base_amount: 89, card_surcharge: 0, idempotency_key: 'monthly:synthetic:2026-08', billed_month: '2026-08' }),
       stripeRow('pi_invoice', {}),
       stripeRow('pi_disputed', { dispute_id: 'dp_synthetic', dispute_invoice_id: disputed.id })]).returning('id');
     const commitment = { kind: 'other', description: "Did this month's autopay go through?", sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const ledger = evidence.records.filter((r) => r.payment_source === 'ledger');
     expect(ledger.map((r) => r.id)).toEqual([autopay.id]);
-    expect(ledger[0]).toMatchObject({ property_id: null, text: `Payment of $89.00 recorded ${etDateString(after)} (monthly autopay for 2026-09)` });
+    expect(ledger[0]).toMatchObject({ property_id: null, text: `Payment of $89.00 recorded ${etDateString(after)} (monthly plan charge for 2026-08)` });
     expect(admissibleWitness(ledger[0], commitment)).toBe(true);
     expect(Object.fromEntries(evidence.records.filter((r) => r.payment_source === 'invoice').map((r) => [r.invoice_id, r.id])))
       .toEqual({ [claimed.id]: claimedPaid.id, [disputed.id]: disputedPaid.id });
@@ -2370,6 +2374,22 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(await tick(minutes(3))).toMatchObject({ scanned: 1 });
       expect(verify.mock.calls.map(([row]) => row.id)).toEqual([target]);
       expect(verify.mock.calls.map(([row]) => row.id)).not.toContain(callback.id);
+    });
+
+    test('Codex #4996 r6: an ask money can never answer (a refund request) is stamped so at intake and never woken by money', async () => {
+      expect((await mockPg('call_commitments').where({ id: target }).first()).sms_context).toMatchObject({ money_answerable: true });
+      // A second text from the same customer asks for a refund.
+      const refundText = { ...message, id: randomUUID(), message_body: 'Please refund the double charge' };
+      await mockPg('sms_log').insert(refundText);
+      await recordMessageOperations(mockPg, refundText, { dropped: 0, facts: [], obligations: [{ ...result.obligations[0],
+        quote: 'Please refund the double charge', description: 'Refund the double charge' }] }, await loadMessageContext(mockPg, refundText));
+      const refund = await mockPg('call_commitments').where({ sms_log_id: refundText.id }).first();
+      expect(refund.sms_context).toMatchObject({ money_answerable: false });
+      await mockPg('call_commitments').update({ due_at: null });
+      await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(minutes(2)),
+        metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'zelle' }), created_at: minutes(2), updated_at: minutes(2) });
+      expect(await tick(minutes(3))).toMatchObject({ scanned: 1 });
+      expect(verify.mock.calls.map(([row]) => row.id)).toEqual([target]);
     });
 
     test('another customer\'s payment, and a deposit being refunded, are not events', async () => {

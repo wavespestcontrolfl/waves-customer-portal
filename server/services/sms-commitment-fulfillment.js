@@ -161,6 +161,18 @@ const refundNote = (refunded) => (Number(refunded) > 0 ? `; $${Number(refunded).
 // A method is shown only as one of these; the free-form method some writers
 // accept (the /prepaid route) never reaches the model.
 const KNOWN_TENDERS = new Set(['cash', 'check', 'zelle', 'venmo', 'paypal', 'card', 'ach', 'other']);
+// A deposit's amount is its face value; a card deposit also collected a
+// surcharge (estimate-deposits.js), so the charged total is what the
+// customer's statement shows (Codex #4996 r6).
+function depositText(row, service) {
+  const faceCents = Math.round(Number(row.amount) * 100);
+  const surchargeCents = Math.round(Number(row.card_surcharge || 0) * 100);
+  const dollars = (cents) => `$${(cents / 100).toFixed(2)}`;
+  return `Deposit of ${dollars(faceCents)}`
+    + `${surchargeCents > 0 ? ` plus a ${dollars(surchargeCents)} card surcharge (${dollars(faceCents + surchargeCents)} charged)` : ''}`
+    + `${service ? ` on the ${String(service).slice(0, 80)} estimate` : ''} received ${etDateString(new Date(row.received_at))}`
+    + refundNote(row.refunded_amount);
+}
 const tender = (method) => (KNOWN_TENDERS.has(String(method || '').toLowerCase()) ? ` (${String(method).toLowerCase()})` : '');
 
 async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
@@ -304,7 +316,9 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           // Only the structured method (CREDIT_PAYMENT_METHODS, validated at
           // the admin-customers.js writer) does, when set.
           .select('lp.id', 'lp.amount', 'lp.refund_amount', 'lp.payment_date', 'lp.created_at', conn.raw("lp.metadata->>'method' as method"),
-            conn.raw("CASE WHEN (lp.metadata->>'type') = 'monthly_autopay' THEN COALESCE(lp.metadata->>'billed_month', '') END AS autopay_month"),
+            // The monthly-dues charge stamps the month it collects for
+            // (stripe.js, billing-cron.js); a retry keeps the original month.
+            conn.raw("lp.metadata->>'billed_month' AS billed_month"),
             conn.raw(`${settledAt('lp')} AS settled_at`)),
         // A received (or already credited-forward) estimate deposit —
         // estimate_deposits is its own ledger with no payments row
@@ -316,8 +330,8 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .whereIn('ed.status', ['received', 'credited']).whereRaw('ed.refunded_amount < ed.amount')
           .where('ed.received_at', '>', after).where('ed.received_at', '<=', now)
           .orderBy('ed.received_at', 'desc').limit(LIMIT + 1)
-          .select('ed.id', 'ed.estimate_id', 'ed.amount', 'ed.refunded_amount', 'ed.received_at', 'estimates.property_id as property_id',
-            'estimates.service_interest'),
+          .select('ed.id', 'ed.estimate_id', 'ed.amount', 'ed.card_surcharge', 'ed.refunded_amount', 'ed.received_at',
+            'estimates.property_id as property_id', 'estimates.service_interest'),
         // A prepayment staff record on a visit (cash at the door, Zelle —
         // the /prepaid route and series prepay) exists only as the visit's
         // prepaid stamp until completion books it against the invoice, so
@@ -339,12 +353,10 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
             text: `Payment of $${Number(row.payment_amount).toFixed(2)} toward invoice ${row.invoice_number || row.invoice_id}`
               + `${row.title ? ` (${row.title})` : ''} received ${etDateString(new Date(row.settled_at))}${refundNote(row.refund_amount)}`
               + `${paidInFull ? '; the invoice is paid in full' : ''}` })),
-          ledger.map(({ method, autopay_month: autopayMonth, ...row }) => ({ ...row, payment_source: 'ledger', property_id: null,
+          ledger.map(({ method, billed_month: billedMonth, ...row }) => ({ ...row, payment_source: 'ledger', property_id: null,
             text: `Payment of $${Number(row.amount).toFixed(2)} recorded ${dateOnlyString(row.payment_date)}${tender(method)}`
-              + `${autopayMonth == null ? '' : ` (monthly autopay${/^\d{4}-\d{2}$/.test(autopayMonth) ? ` for ${autopayMonth}` : ''})`}${refundNote(row.refund_amount)}` })),
-          deposits.map(({ service_interest: service, ...row }) => ({ ...row, payment_source: 'deposit',
-            text: `Deposit of $${Number(row.amount).toFixed(2)}${service ? ` on the ${String(service).slice(0, 80)} estimate` : ''}`
-              + ` received ${etDateString(new Date(row.received_at))}${refundNote(row.refunded_amount)}` })),
+              + `${/^\d{4}-\d{2}$/.test(billedMonth || '') ? ` (monthly plan charge for ${billedMonth})` : ''}${refundNote(row.refund_amount)}` })),
+          deposits.map(({ service_interest: service, ...row }) => ({ ...row, payment_source: 'deposit', text: depositText(row, service) })),
           prepaidVisits.map(({ prepaid_method: method, prepaid_total: total, prepaid_visits: visits, ...row }) => ({ ...row, payment_source: 'prepaid',
             text: `Prepayment of $${Number(row.prepaid_amount).toFixed(2)}${tender(method)} recorded ${etDateString(new Date(row.prepaid_at))}`
               + ` for the ${row.service_type} visit on ${dateOnlyString(row.scheduled_date)}`
@@ -841,4 +853,4 @@ ${stringifySmsEvidence({ obligation: commitment, records, witness_refs: witnessR
   return groundFulfillment(result.json, evidence, commitment, { eventOnly });
 }
 
-module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS };
+module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentCanAnswer };

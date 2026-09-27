@@ -19,7 +19,7 @@ const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplici
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentCanAnswer } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -488,7 +488,12 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
         // by a property that became the sole one later (Codex #4816 r20).
         sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyId,
           property_ambiguous: !propertyId,
-          customer_id: customer.id, source_at: message.created_at },
+          customer_id: customer.id, source_at: message.created_at,
+          // Whether money landing can answer this ask at all (a refund or a
+          // payment-method change never is): the event page reads it, since
+          // an ask's words never change after intake (Codex #4996 r6).
+          ...(PAYMENT_WITNESS_KINDS.includes(item.kind)
+            ? { money_answerable: paymentCanAnswer({ description: item.description, evidence: [{ quote: item.quote }] }) } : {}) },
       };
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
     // The existing notifier writes only through trx. Preview rolls this back
@@ -728,7 +733,9 @@ const unseen = (column) => `${column} <= ? AND ${column} > ${UNSEEN_FLOOR}`;
 // late webhook records a settlement from hours or days ago
 // (stripe-webhook.js), which the watermark has long passed.
 const PAYMENT_CHANGED_AT = "GREATEST(pm.updated_at, COALESCE((pm.metadata->>'settled_event_at')::timestamptz, pm.created_at))";
-const MONEY_KIND = `cc.kind IN (${PAYMENT_WITNESS_KINDS.map((v) => `'${v}'`).join(', ')})`;
+// Rows captured before the flag existed stay eligible.
+const MONEY_KIND = `cc.kind IN (${PAYMENT_WITNESS_KINDS.map((v) => `'${v}'`).join(', ')})
+  AND COALESCE((cc.sms_context->>'money_answerable')::boolean, true)`;
 // Whose estimate a deposit is on: the customer's own, or an unowned one a
 // lead of theirs names. A superset of whereEstimateCustomerOwnership (which
 // also drops estimates another lead claims) is enough to trigger a check;
