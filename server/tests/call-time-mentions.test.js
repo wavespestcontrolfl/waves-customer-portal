@@ -43,6 +43,10 @@ describe('parseDayMentions', () => {
     expect(parseDayMentions('next Thursday or Monday', STARTED).map((m) => m.weekday)).toEqual([4, 1]);
   });
 
+  test('"this week" or "next week" beside a weekday picks that calendar week\'s date', () => {
+    expect(datesIn('Thursday next week, next week Friday, Thursday of this week.')).toEqual([['2026-10-01'], ['2026-10-02'], []]);
+  });
+
   test('mentions come back in spoken order with their token spans', () => {
     expect(parseDayMentions('not friday we will see you tomorrow', STARTED).map((m) => [m.kind, m.pos, m.end]))
       .toEqual([['weekday', 1, 2], ['tomorrow', 6, 7]]);

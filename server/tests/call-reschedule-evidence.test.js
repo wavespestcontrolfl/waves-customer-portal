@@ -395,6 +395,12 @@ describe('rescheduleAgreementEvidence', () => {
     expect(evidence('Caller: Can we move my visit?\nAgent: We will see you Thursday at two.\nCaller: I need to confirm with my husband.').ok).toBe(false);
   });
 
+  test('"this week" / "next week" beside a weekday picks that week\'s date', () => {
+    const nextWeek = 'Caller: Can we move my visit?\nAgent: We will see you Thursday next week at two.';
+    expect(evidence(nextWeek)).toMatchObject({ ok: false, reason: 'last_day_ref_mismatch' });
+    expect(evidence(nextWeek, '2026-10-01T14:00:00-04:00').ok).toBe(true);
+  });
+
   test('a relative day after the agreed slot is a correction', () => {
     for (const said of ['Please move it a week later.', 'Make it next week.', 'Actually, another day would be better.']) {
       expect(evidence(`Caller: Can we do Thursday at two?\nAgent: We will see you Thursday at two.\nCaller: ${said}\nAgent: I will do that.`).ok).toBe(false);

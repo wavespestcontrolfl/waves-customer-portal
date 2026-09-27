@@ -135,6 +135,23 @@ function weekdayDates(name, started, next = false) {
   return [dayAfterCall(started, off), dayAfterCall(started, off + 7)];
 }
 
+// "This week" / "next week" said right before or after a weekday ("Thursday
+// next week", "next week Thursday", "Thursday of this week") picks the
+// weekday's date in that calendar week (Sunday to Saturday), dropping the
+// other: { dates, before, after } with the tokens it took on each side, or
+// null when there is no such phrase.
+function weekOfWeekday(toks, pos, end, dates, started) {
+  const after = ['of', 'this', 'next'].includes(toks[end]) ? toks.slice(end, end + 3) : [];
+  const phrase = toks.slice(end, end + 2).join(' ');
+  const said = [phrase, after.join(' ').replace(/^of /, ''), toks.slice(pos - 2, pos).join(' ')].find((p) => p === 'this week' || p === 'next week');
+  if (!said) return null;
+  const weekStart = addETDays(started, -etParts(started).dayOfWeek + (said === 'next week' ? 7 : 0));
+  const from = etDateString(weekStart);
+  const to = etDateString(addETDays(weekStart, 6));
+  const tookAfter = phrase === said ? 2 : (after.length === 3 && after.join(' ') === `of ${said}` ? 3 : 0);
+  return { dates: dates.filter((d) => d >= from && d <= to), before: tookAfter ? 0 : 2, after: tookAfter };
+}
+
 /**
  * Day mentions in one turn, in spoken order: { candidates: Set<YYYY-MM-DD>,
  * kind, pos, end, weekday? } with pos/end the turn-level token span and
@@ -150,9 +167,10 @@ function parseDayMentions(turnText, started) {
     // A stated year after a month and day ("December 24th, 2027") names that
     // year's date only.
     const year = hit.kind === 'month_day' && /^20\d{2}$/.test(toks[i + hit.len] || '') ? toks[i + hit.len] : null;
-    const dates = year ? [`${year}${hit.dates[0].slice(4)}`] : hit.dates;
-    const end = i + hit.len + (year ? 1 : 0);
-    mentions.push({ candidates: new Set(dates), kind: hit.kind, pos: i, end, ...(hit.weekday != null ? { weekday: hit.weekday } : {}) });
+    const week = hit.weekday != null ? weekOfWeekday(toks, i, i + hit.len, hit.dates, started) : null;
+    const dates = year ? [`${year}${hit.dates[0].slice(4)}`] : (week ? week.dates : hit.dates);
+    const end = i + hit.len + (year ? 1 : 0) + (week ? week.after : 0);
+    mentions.push({ candidates: new Set(dates), kind: hit.kind, pos: week ? i - week.before : i, end, ...(hit.weekday != null ? { weekday: hit.weekday } : {}) });
     i = end - 1;
   }
   return mentions;
