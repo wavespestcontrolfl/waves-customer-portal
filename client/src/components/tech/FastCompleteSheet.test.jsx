@@ -286,7 +286,6 @@ describe('FastCompleteSheet', () => {
 
   test.each([
     ['completion_resume_payload_mismatch'],
-    ['idempotency_key_mismatch'],
   ])('a 409 %s means an earlier attempt saved the visit', async (code) => {
     const request = makeRequest();
     const base = request.getMockImplementation();
@@ -306,6 +305,33 @@ describe('FastCompleteSheet', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
     expect(await screen.findByText(/already saved. The office will finish anything still pending/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  test('a 409 idempotency_key_mismatch is a recoverable conflict, never shown as saved', async () => {
+    // The server also answers it for pending/failed attempts with no record.
+    const request = makeRequest();
+    const base = request.getMockImplementation();
+    request.mockImplementation(async (path, options) => {
+      if (path.endsWith('/complete')) {
+        request.calls.push({ path, options });
+        throw Object.assign(new Error('Idempotency key reused with a different completion payload.'), { status: 409, code: 'idempotency_key_mismatch' });
+      }
+      return base(path, options);
+    });
+    const onClose = vi.fn();
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={onClose} />);
+
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+
+    expect(await screen.findByText(/Close and reopen it from the schedule to see where it stands/)).toBeTruthy();
+    expect(screen.queryByText('Re-service complete')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Complete re-service' }).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalled();
   });
 
   test('a conflict no retry can fix (future-dated visit) shows the reason and lets the tech leave', async () => {

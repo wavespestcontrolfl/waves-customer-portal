@@ -93,15 +93,20 @@ function liveAddressLine(address) {
 //  saved       — the visit is already saved: this or an earlier attempt
 //                committed (a lost response, another device, or a partly
 //                finished earlier try whose changed body the resume check
-//                refuses — the office's Billing Recovery finishes those).
+//                refuses — completion_resume_payload_mismatch is only
+//                answered once a record exists; the office's Billing
+//                Recovery finishes those).
 //  correctable — a definitive pre-commit rejection: fix and resubmit under a
 //                fresh key (the full form's shared rule).
 //  retry       — outcome unknown or still running (network drop, 5xx, an
 //                attempt pending or finishing its side effects): resend the
 //                SAME body under the SAME key so the server replays/resumes.
 //  terminal    — a conflict no retry can fix (a future-dated, closed or
-//                changed visit): show it and let the tech leave.
-const SAVED_CODES = new Set(['service_already_completed', 'completion_resume_payload_mismatch', 'idempotency_key_mismatch']);
+//                changed visit, or an idempotency_key_mismatch, which the
+//                server also answers for pending/failed attempts with no
+//                record, so it is never proof of a save): show it and let
+//                the tech leave.
+const SAVED_CODES = new Set(['service_already_completed', 'completion_resume_payload_mismatch']);
 const IN_PROGRESS_CODES = new Set(['service_completion_pending', 'completion_pending', 'completion_side_effects_running']);
 function completionFailureOutcome(err) {
   const status = Number(err?.status);
@@ -109,6 +114,16 @@ function completionFailureOutcome(err) {
   if (shouldResetCompletionIdempotencyKey(err)) return 'correctable';
   if (!Number.isFinite(status) || status >= 500 || (status === 409 && IN_PROGRESS_CODES.has(err?.code))) return 'retry';
   return 'terminal';
+}
+
+function outcomeMessage(outcome, err) {
+  if (outcome === 'retry') {
+    return `${err?.message || 'Completion failed'} We couldn't confirm it saved. Tap Retry to send the same completion again.`;
+  }
+  if (err?.code === 'idempotency_key_mismatch') {
+    return 'Another completion for this visit is in progress or was changed. Close and reopen it from the schedule to see where it stands.';
+  }
+  return err?.message || 'Completion failed';
 }
 
 function genIdempotencyKey() {
@@ -292,9 +307,7 @@ function useFastCompleteSubmit({ base, request }) {
         setDone({ summary: 'This visit was already saved. The office will finish anything still pending.' });
       } else {
         setFailure(outcome === 'correctable' ? null : outcome);
-        setError(outcome === 'retry'
-          ? `${err?.message || 'Completion failed'} We couldn't confirm it saved. Tap Retry to send the same completion again.`
-          : (err?.message || 'Completion failed'));
+        setError(outcomeMessage(outcome, err));
       }
       setSubmitting(false);
       inFlight.current = false;
