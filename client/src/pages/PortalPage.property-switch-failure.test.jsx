@@ -39,6 +39,8 @@ const property = (id, street) => ({ id, firstName: 'Sample', lastName: 'Account'
 
 beforeEach(() => {
   vi.clearAllMocks();
+  Object.defineProperty(window, 'scrollY', { configurable: true, value: 240 });
+  window.scrollTo = vi.fn();
   vi.spyOn(console, 'error').mockImplementation(() => {});
   window.history.replaceState({}, '', '/');
   api.getSchedule.mockResolvedValue({ upcoming: [] });
@@ -70,6 +72,9 @@ afterEach(() => {
 it('tells the customer when switching to another property fails', async () => {
   render(<BrowserRouter><PortalPage /></BrowserRouter>);
   fireEvent.click(await screen.findByRole('button', { name: 'Account menu' }, { timeout: 5000 }));
+  expect(document.documentElement.style.overflow).toBe('hidden');
+  expect(document.body.style.position).toBe('');
+  expect(document.body.style.top).toBe('');
   const other = (await screen.findAllByRole('button')).find((b) => /2 Second Ave/.test(b.textContent) && !b.disabled);
   expect(other).toBeTruthy();
   fireEvent.click(other);
