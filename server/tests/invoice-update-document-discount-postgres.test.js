@@ -156,6 +156,56 @@ postgres('InvoiceService.update — unbacked document-level discount fence', () 
     return { customerId, invoiceId, lineDiscountId, docDiscountId };
   }
 
+  // Codex round-4 P0: with stacking off, create() lets the SAME catalog
+  // discount be picked BOTH as a document-level discountIds entry AND as a
+  // separate line-item discount on the same invoice — two invoice_discounts
+  // rows sharing one discount_id, only one of them backed by a line. A
+  // set-membership match ("does this id appear on any current line?") sees
+  // the id once and wrongly waves both rows through; matching by OCCURRENCE
+  // COUNT catches the excess.
+  async function fixtureWithCappedSameIdMixedDiscount() {
+    const customerId = await insertCustomer('Synthetic capped-same-id-mixed-discount fixture');
+    const invoiceId = randomUUID();
+    const sharedDiscountId = randomUUID();
+    await trx('invoices').insert({
+      id: invoiceId, customer_id: customerId,
+      token: randomUUID(), invoice_number: `QA-${randomUUID().slice(0, 20)}`,
+      status: 'draft', title: 'First Service Application',
+      line_items: JSON.stringify([
+        { description: 'First service application', quantity: 1, unit_price: 100, amount: 100 },
+        {
+          description: 'Fixed discount', quantity: 1, unit_price: -100, amount: -100,
+          discount_id: sharedDiscountId,
+        },
+      ]),
+      // Uncapped this would be $200 (the SAME $100 fixed catalog discount
+      // picked once as a line-item discount and once as a document-level
+      // discountIds entry) against a $100 subtotal — capped at $100.
+      discount_amount: 100, subtotal: 100, total: 0,
+    });
+    await trx('invoice_discounts').insert([
+      { invoice_id: invoiceId, discount_id: sharedDiscountId, discount_dollars: 50 },
+      { invoice_id: invoiceId, discount_id: sharedDiscountId, discount_dollars: 50 },
+    ]);
+    return { customerId, invoiceId, sharedDiscountId };
+  }
+
+  test('a capped discount where the SAME catalog id backs a line AND rides as a document-level pick refuses the retotal', async () => {
+    const { invoiceId, sharedDiscountId } = await fixtureWithCappedSameIdMixedDiscount();
+    await expect(InvoiceService.update(invoiceId, {
+      line_items: [
+        { description: 'First service application', quantity: 1, unit_price: 300, amount: 300 },
+        {
+          description: 'Fixed discount', quantity: 1, unit_price: -100, amount: -100,
+          discount_id: sharedDiscountId,
+        },
+      ],
+    })).rejects.toThrow(/document-level discount with no backing line item/i);
+    const stored = await trx('invoices').where({ id: invoiceId }).first();
+    expect(Number(stored.total)).toBe(0);
+    expect(Number(stored.discount_amount)).toBe(100);
+  });
+
   // The legitimate counterpart: a SINGLE line-item discount that happens to
   // equal 100% of the subtotal. discount_amount === subtotal here too, but
   // there was never any capping/scaling (uncappedDiscount was never >

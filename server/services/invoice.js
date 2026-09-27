@@ -285,9 +285,16 @@ async function invoiceHasUnbackedDocumentDiscount(invoice, lineItems, conn) {
 
   // Ambiguous shape. invoice_discounts (recordInvoiceDiscounts, best-effort
   // at create time) is the only persisted provenance of which discount rows
-  // actually contributed. A row whose discount_id matches none of the
-  // invoice's current negative lines is a document-level pick with no line
-  // backing it, regardless of what the cents sum alone would suggest.
+  // actually contributed. Matched by OCCURRENCE COUNT per discount_id, never
+  // mere set membership (Codex round-4 P0): with stacking off, create() lets
+  // the SAME catalog discount be picked BOTH as a document-level discountIds
+  // entry AND as a separate line-item discount on the same invoice — two
+  // audit rows sharing one discount_id, only one of them backed by a line.
+  // A set-membership check ("does this id appear on any current line?")
+  // would see the id once and wave both rows through. If invoice_discounts
+  // has MORE rows for a given discount_id than the invoice has current
+  // negative lines carrying that same discount_id, the excess is an
+  // unbacked document-level occurrence of that catalog discount.
   //
   // A NULL discount_id row is never a document-level pick: create()'s
   // manualDiscounts (the discountIds picks) always resolve a real catalog
@@ -301,18 +308,26 @@ async function invoiceHasUnbackedDocumentDiscount(invoice, lineItems, conn) {
     try {
       const rows = await conn("invoice_discounts").where({ invoice_id: invoice.id });
       if (rows.length > 0) {
-        const lineDiscountIds = new Set(
-          items
-            .filter((li) => {
-              const qty = li?.quantity != null ? Number(li.quantity) : 1;
-              const rawAmt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
-              return Number.isFinite(rawAmt) && rawAmt < 0;
-            })
-            .map((li) => (li?.discount_id != null ? String(li.discount_id) : null))
-            .filter(Boolean),
-        );
-        return rows.some(
-          (r) => r.discount_id && !lineDiscountIds.has(String(r.discount_id)),
+        const lineDiscountIdCounts = new Map();
+        items
+          .filter((li) => {
+            const qty = li?.quantity != null ? Number(li.quantity) : 1;
+            const rawAmt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+            return Number.isFinite(rawAmt) && rawAmt < 0;
+          })
+          .forEach((li) => {
+            if (li?.discount_id == null) return;
+            const key = String(li.discount_id);
+            lineDiscountIdCounts.set(key, (lineDiscountIdCounts.get(key) || 0) + 1);
+          });
+        const rowIdCounts = new Map();
+        rows.forEach((r) => {
+          if (!r.discount_id) return;
+          const key = String(r.discount_id);
+          rowIdCounts.set(key, (rowIdCounts.get(key) || 0) + 1);
+        });
+        return [...rowIdCounts].some(
+          ([key, count]) => count > (lineDiscountIdCounts.get(key) || 0),
         );
       }
     } catch {
