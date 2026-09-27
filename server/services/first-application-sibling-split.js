@@ -95,6 +95,25 @@
 // clear (maybeAutoClearBillingReview) deliberately does NOT record a
 // resolution — realignment alone means nobody actually reviewed anything,
 // so a later divergence there must always re-open normally.
+//
+// ROUND-4 FIX (#5021 Codex P1): the resolution record above is only ever
+// re-checked by a LATER DATE CHANGE on some member of the group —
+// flagFirstApplicationInvoiceReviewOnDateChange is the ONLY caller of
+// isDivergenceAlreadyResolved. Nothing re-validated a resolved (or
+// auto-cleared) invoice when InvoiceService.update() changed its OWN money
+// afterward — e.g. an edited line item quietly adding the sibling's charge
+// back onto the total — while the siblings stayed on different days. No
+// date write happens in that case, so the chokepoint above never runs, and
+// a resolved-but-still-diverged invoice could recombine unreviewed.
+// reopenBillingReviewOnInvoiceMoneyChange (below) is InvoiceService.
+// update()'s own chokepoint for that: called in the SAME transaction as
+// the edit, it is deliberately simple rather than resolution-aware — ANY
+// money change on an invoice whose siblings are STILL diverged reopens (or
+// leaves open) the review, whether the invoice was previously resolved,
+// auto-cleared, or never reviewed at all. A no-op edit (title/notes/due
+// date only, or a line-item resend with byte-identical amounts) never
+// reaches the DB at all: the money-fingerprint compare that gates it is
+// pure JS.
 const logger = require('./logger');
 const db = require('../models/db');
 const { isInvoiceUndeliveredForBillingReview, billingReviewVersion } = require('./invoice-helpers');
@@ -276,17 +295,29 @@ function divergingSiblings(invoiceRow, members) {
 // the first opening. Accumulating a further sibling while STILL open keeps
 // the ORIGINAL openedAt (see openBillingReview) and so the same version —
 // deliberate: that is one continuous, still-unread review, not a new one.
-async function raiseBillingReviewAlert(trx, invoice, moved, diverging, { held, dedupeVersion }) {
+async function raiseBillingReviewAlert(trx, invoice, moved, diverging, { held, dedupeVersion, trigger = 'date_change' }) {
   try {
     const divergingDetail = diverging.length
       ? ` Sibling visit(s) diverged: ${diverging.map((d) => d.id).join(', ')}.`
       : '';
-    const title = held
-      ? 'First-application invoice needs manual review — a same-trip visit moved days'
-      : 'First-application invoice already sent — a same-trip visit moved days, review the split by hand';
+    // ROUND-4: this same alert also fires when reopenBillingReviewOnInvoice-
+    // MoneyChange finds the siblings STILL diverged after an invoice edit —
+    // nothing moved dates just now, so "a sibling that just moved" would be
+    // inaccurate for that trigger. Same record, same bell, worded for what
+    // actually happened.
+    const divergedClause = trigger === 'invoice_edit'
+      ? 'this invoice was just edited (its money changed) while a sibling visit is still on a different day'
+      : 'a sibling that just moved to a different day';
+    const title = trigger === 'invoice_edit'
+      ? (held
+        ? 'First-application invoice needs manual review — money changed while a sibling visit stays on a different day'
+        : 'First-application invoice already sent — money changed while a sibling visit stays on a different day, review by hand')
+      : (held
+        ? 'First-application invoice needs manual review — a same-trip visit moved days'
+        : 'First-application invoice already sent — a same-trip visit moved days, review the split by hand');
     const body = held
-      ? `Estimate #${moved.source_estimate_id}: a visit shared a first-application invoice (${invoice.invoice_number || invoice.id}) with a sibling that just moved to a different day.${divergingDetail} The invoice-holding visit still bills the FULL combined amount at its own completion; a diverging sibling with no price of its own will complete WITHOUT billing unless the office prices it by hand, and one that WAS given its own price still leaves the shared invoice's total unreduced — either way this is a mismatch. Automatic collection on this invoice (auto-charge, saved-card charge, scheduled send) is on hold until the office resolves this by hand and clears the review (Admin → Invoices → this invoice).`
-      : `Estimate #${moved.source_estimate_id}: a visit shared a first-application invoice (${invoice.invoice_number || invoice.id}) with a sibling that just moved to a different day, AFTER that invoice was already sent to the customer.${divergingDetail} The invoice already reached the customer at its combined total — nothing is on hold — but the split is now wrong: review it by hand (adjust the invoice, credit, or bill the sibling separately), then clear the review (Admin → Invoices → this invoice).`;
+      ? `Estimate #${moved.source_estimate_id}: a visit shared a first-application invoice (${invoice.invoice_number || invoice.id}) with ${divergedClause}.${divergingDetail} The invoice-holding visit still bills the FULL combined amount at its own completion; a diverging sibling with no price of its own will complete WITHOUT billing unless the office prices it by hand, and one that WAS given its own price still leaves the shared invoice's total unreduced — either way this is a mismatch. Automatic collection on this invoice (auto-charge, saved-card charge, scheduled send) is on hold until the office resolves this by hand and clears the review (Admin → Invoices → this invoice).`
+      : `Estimate #${moved.source_estimate_id}: a visit shared a first-application invoice (${invoice.invoice_number || invoice.id}) with ${divergedClause}, AFTER that invoice was already sent to the customer.${divergingDetail} The invoice already reached the customer at its combined total — nothing is on hold — but the split is now wrong: review it by hand (adjust the invoice, credit, or bill the sibling separately), then clear the review (Admin → Invoices → this invoice).`;
     await trx.transaction((logTrx) => require('./notification-service').notifyAdmin(
       'billing',
       title,
@@ -321,7 +352,7 @@ async function raiseBillingReviewAlert(trx, invoice, moved, diverging, { held, d
 // drop the FIRST sibling from the record — maybeAutoClearBillingReview
 // requires every one of them back on the invoice's date before it will
 // auto-clear.
-async function openBillingReview(trx, invoice, moved, diverging) {
+async function openBillingReview(trx, invoice, moved, diverging, { trigger = 'date_change' } = {}) {
   let existingContext = invoice.billing_review_context;
   if (typeof existingContext === 'string') {
     try { existingContext = JSON.parse(existingContext); } catch { existingContext = null; }
@@ -364,7 +395,7 @@ async function openBillingReview(trx, invoice, moved, diverging) {
       billing_review_reason: invoice.billing_review_reason || (held ? 'sibling_date_diverged' : 'sibling_date_diverged_after_delivery'),
       billing_review_context: JSON.stringify(context),
     });
-  await raiseBillingReviewAlert(trx, invoice, moved, diverging, { held, dedupeVersion: openedAt.toISOString() });
+  await raiseBillingReviewAlert(trx, invoice, moved, diverging, { held, dedupeVersion: openedAt.toISOString(), trigger });
   return { action: 'review_opened', invoiceId: invoice.id, opened: !alreadyOpen };
 }
 
@@ -493,6 +524,63 @@ function isDivergenceAlreadyResolved(invoice, diverging) {
     && context.resolvedInvoiceMoneyFingerprint === invoiceMoneyOnlyFingerprint(invoice);
 }
 
+// ROUND-4 FIX (#5021 Codex P1) — InvoiceService.update()'s own chokepoint.
+// Called in the SAME transaction as the edit, with the invoice row exactly
+// as it stood immediately before the write (`previousInvoiceRow`) and
+// exactly as it stands immediately after (`currentInvoiceRow`, already
+// committed — update() calls this AFTER its own UPDATE lands, still inside
+// the transaction). Cheap on the overwhelming majority of edits: the money
+// fingerprint compare is pure JS with zero queries, so a title/notes/due-
+// date-only edit — or a line-item resend with byte-identical amounts —
+// returns before touching the DB at all.
+//
+// Deliberately NOT resolution-aware (simpler and safe, matching the owner
+// ruling this module already follows elsewhere): this reopens (or leaves
+// open) the review whenever the invoice's protected money fields changed
+// AND the group is still diverged, regardless of whether the invoice was
+// previously resolved by hand, auto-cleared, or never reviewed at all — a
+// review that's already OPEN is left alone (it's already held/alerted;
+// openBillingReview's own chokepoint owns further accumulation).
+//
+// Runs the SAME group-lookup and divergence check the date-change path
+// uses, under the SAME row locks (loadLockedEstimateGroup's forUpdate on
+// every member, findLockedFirstApplicationInvoice's forUpdate on the
+// invoice candidates) — so this can't race a concurrent date move or a
+// concurrent clear.
+async function reopenBillingReviewOnInvoiceMoneyChange(trx, previousInvoiceRow, currentInvoiceRow) {
+  if (!trx || !currentInvoiceRow?.id) return { action: 'skipped', reason: 'missing_args' };
+  if (currentInvoiceRow.billing_review_opened_at) {
+    // Already open — already held/alerted; nothing new for an edit to do.
+    return { action: 'skipped', reason: 'review_already_open', invoiceId: currentInvoiceRow.id };
+  }
+  if (invoiceMoneyOnlyFingerprint(previousInvoiceRow) === invoiceMoneyOnlyFingerprint(currentInvoiceRow)) {
+    return { action: 'skipped', reason: 'no_money_change', invoiceId: currentInvoiceRow.id };
+  }
+  if (!currentInvoiceRow.scheduled_service_id) {
+    return { action: 'skipped', reason: 'no_linked_visit', invoiceId: currentInvoiceRow.id };
+  }
+  const group = await loadLockedEstimateGroup(trx, currentInvoiceRow.scheduled_service_id);
+  if (group.skip) return group.skip;
+  const { moved, members } = group;
+  const located = await findLockedFirstApplicationInvoice(trx, moved, members);
+  if (located.skip) return located.skip;
+  const { invoice, invoiceRow } = located;
+  // The authoritative live/canceled/refunded precedence (selectFirstApplication-
+  // InvoiceMatch) can select a DIFFERENT invoice than the one just edited —
+  // e.g. this edit landed on a row that's since been superseded by a
+  // replacement. Nothing for THIS edit to re-check in that case; the
+  // current authoritative invoice's own future edit (or a date change)
+  // re-validates it.
+  if (String(invoice.id) !== String(currentInvoiceRow.id)) {
+    return { action: 'skipped', reason: 'invoice_superseded', invoiceId: currentInvoiceRow.id };
+  }
+  const diverging = divergingSiblings(invoiceRow, members);
+  if (!diverging.length) {
+    return { action: 'skipped', reason: 'no_diverging_sibling', invoiceId: currentInvoiceRow.id };
+  }
+  return openBillingReview(trx, invoice, moved, diverging, { trigger: 'invoice_edit' });
+}
+
 // The trivial auto-clear (owner ruling): EVERY sibling this review recorded
 // as diverging at open time (billing_review_context.divergingSiblingIds) is
 // now back on the invoice-holding row's date, AND the invoice's own money
@@ -611,25 +699,38 @@ async function flagFirstApplicationInvoiceReviewOnDateChange(trx, scheduledServi
 }
 
 /**
- * Same as flagFirstApplicationInvoiceReviewOnDateChange, but never blocks
- * the caller's own write: runs in its own SAVEPOINT (a nested transaction
- * off the caller's trx), so a failure inside it rolls back only its own
- * statements and leaves the caller's transaction perfectly usable for
- * whatever it does next. A plain try/catch around the direct call does NOT
- * achieve this on Postgres: the first failing statement aborts the WHOLE
- * transaction it ran in, and every later statement on that connection —
- * including the caller's own COMMIT — fails until something rolls it back.
- * Every date-changing writer enumerated in the PR (rebooker, admin-schedule
- * bulk + update-details, the Intelligence Bar's moveStopsToDay +
- * rescheduleAppointment, visit-groups' moveVisitAsUnit via rebooker) should
- * call this, not the plain function, directly.
+ * Same as flagFirstApplicationInvoiceReviewOnDateChange, but isolates a
+ * FAILURE inside the flag from the caller's own already-written statements:
+ * runs in its own SAVEPOINT (a nested transaction off the caller's trx), so
+ * a failing statement in here rolls back only its own work, not the
+ * caller's date write too — on Postgres, a plain try/catch around a failing
+ * statement does NOT achieve this: the first failing statement aborts the
+ * WHOLE transaction it ran in, and every later statement on that
+ * connection — including the caller's own COMMIT — fails until something
+ * rolls it back.
+ *
+ * ROUND-4 FIX (#5021 Codex P1) — fails CLOSED, it does not swallow: a
+ * genuine failure in here (a real thrown error — a DB error, a bug — never
+ * one of the ordinary skip results, which are returned, not thrown) is
+ * logged for visibility and then RE-THROWN. Every call site runs this
+ * INSIDE its own caller's own transaction, so the caller's await rejects
+ * too and knex rolls the WHOLE thing back, including the date write itself
+ * — recreating the combined-charge/unpriced-sibling gap with only a log
+ * entry (the bug this fix closes) is worse than a retryable failure on the
+ * whole move. Every date-changing writer enumerated in the PR (rebooker,
+ * admin-schedule bulk + update-details, the Intelligence Bar's
+ * moveStopsToDay + rescheduleAppointment, visit-groups' moveVisitAsUnit via
+ * rebooker) calls this, not the plain function, directly, and handles the
+ * rejection in its OWN existing error convention (a per-row batch reports
+ * that row failed rather than losing the whole batch; a single-row writer
+ * lets the rejection propagate as its own retryable error).
  */
 async function flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, scheduledServiceId, context = '') {
   try {
     return await trx.transaction((nested) => flagFirstApplicationInvoiceReviewOnDateChange(nested, scheduledServiceId));
   } catch (err) {
-    logger.error(`[first-application-sibling-split] review flag failed for ${scheduledServiceId}${context ? ` (${context})` : ''} — caller's own write still commits: ${err.message}`);
-    return { action: 'error', reason: err.message };
+    logger.error(`[first-application-sibling-split] review flag failed for ${scheduledServiceId}${context ? ` (${context})` : ''} — propagating so the date move rolls back rather than committing unreviewed: ${err.message}`);
+    throw err;
   }
 }
 
@@ -637,6 +738,7 @@ module.exports = {
   flagFirstApplicationInvoiceReviewOnDateChange,
   flagFirstApplicationInvoiceReviewOnDateChangeSafely,
   clearBillingReview,
+  reopenBillingReviewOnInvoiceMoneyChange,
   dateOnly,
   // Exported for direct unit coverage of the lookup/classification pieces.
   loadLockedEstimateGroup,

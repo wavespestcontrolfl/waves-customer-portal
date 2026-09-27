@@ -7797,6 +7797,24 @@ const InvoiceService = {
           "Only unpaid invoices can be edited — its status or payment state changed while you were editing",
         );
       }
+      // Same-trip first-application billing-review chokepoint (round-4,
+      // Codex #5021 P1): a manually-cleared (or auto-cleared) shared
+      // invoice was only ever re-checked by a LATER DATE CHANGE on some
+      // member of its estimate-accept group — a plain money edit here
+      // (line items / tax rate) never ran that check, so a resolved-but-
+      // still-diverged invoice could quietly recombine unreviewed. Same
+      // transaction as this edit, under the row lock already taken above —
+      // see first-application-sibling-split.js's own header for why this
+      // is deliberately NOT resolution-aware (simpler and safe: reopens
+      // whenever money changed AND the group is still diverged, whether or
+      // not the invoice was ever formally resolved). Not wrapped in its own
+      // savepoint (unlike the date-change chokepoint's "Safely" wrapper):
+      // this genuinely-unexpected failure should abort the edit itself,
+      // same as every other guard in this transaction (e.g. the due-date
+      // resequence below) — a money edit that can't be re-validated for
+      // divergence must not commit either.
+      await require("./first-application-sibling-split")
+        .reopenBillingReviewOnInvoiceMoneyChange(client, lockedRow, edited);
       // Phase 2: an edited accrued invoice changes the statement total — reroll in
       // the SAME transaction so a reroll failure ABORTS the edit; we never commit
       // a changed invoice beside a stale statement subtotal/tax/total.

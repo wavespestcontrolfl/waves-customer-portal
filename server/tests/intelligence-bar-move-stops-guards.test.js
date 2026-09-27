@@ -15,6 +15,17 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// Same-trip first-application billing-review chokepoint (#5021): this
+// suite's own concern is the IB batch mover's own guards, not the billing-
+// review flag (that module has its own exhaustive Postgres suite). The
+// mock trx here has no real `.transaction` (savepoint) support, so mock the
+// whole module out — round-4 made the "Safely" wrapper propagate a genuine
+// failure instead of swallowing it, and a real (unmocked) call against this
+// suite's plain mock trx would now throw TypeError on every date-changing
+// batch-move test.
+jest.mock('../services/first-application-sibling-split', () => ({
+  flagFirstApplicationInvoiceReviewOnDateChangeSafely: jest.fn().mockResolvedValue({ action: 'skipped' }),
+}));
 jest.mock('../services/tech-status', () => ({
   clearTechCurrentJob: jest.fn().mockResolvedValue(null),
 }));

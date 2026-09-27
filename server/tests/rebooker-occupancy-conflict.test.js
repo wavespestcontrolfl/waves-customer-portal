@@ -43,6 +43,17 @@ jest.mock('../services/scheduling/day-stops', () => ({
   ...jest.requireActual('../services/scheduling/day-stops'),
   preloadServiceLocations: jest.fn().mockResolvedValue(undefined),
 }));
+// Same-trip first-application billing-review chokepoint (#5021): this
+// suite's own concern is the tech-blind occupancy gate, not the billing-
+// review flag (that module has its own exhaustive Postgres suite). The
+// mock trx here has no real `.transaction` (savepoint) support, so mock the
+// whole module out — round-4 made the "Safely" wrapper propagate a genuine
+// failure instead of swallowing it, and a real (unmocked) call against this
+// suite's plain mock trx would now throw TypeError on every date-changing
+// test.
+jest.mock('../services/first-application-sibling-split', () => ({
+  flagFirstApplicationInvoiceReviewOnDateChangeSafely: jest.fn().mockResolvedValue({ action: 'skipped' }),
+}));
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
@@ -383,6 +394,30 @@ describe('reschedule — shared occupancy conflict gate', () => {
     // the check would leave the same READ COMMITTED race it exists to close.
     const dateLockOrder = trx.raw.mock.invocationCallOrder[0];
     expect(dateLockOrder).toBeLessThan(findConflictingVisits.mock.invocationCallOrder[0]);
+  });
+
+  // Round-4 (Codex #5021 P1): flagFirstApplicationInvoiceReviewOnDateChange-
+  // Safely used to SWALLOW a genuine failure and return {action:'error'} —
+  // the caller's own date write still committed with only a log entry, no
+  // durable review. It now propagates, so a failure inside it rejects the
+  // WHOLE reschedule() call and (on real Postgres) rolls the date write
+  // back with it.
+  test('an injected failure in the billing-review flag propagates — the reschedule call rejects rather than silently committing the date move', async () => {
+    const { trxScheduled } = wireRescheduleMocks(service());
+    const flagMock = require('../services/first-application-sibling-split').flagFirstApplicationInvoiceReviewOnDateChangeSafely;
+    const injected = new Error('injected billing-review flag failure');
+    flagMock.mockRejectedValueOnce(injected);
+
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_sms',
+    )).rejects.toThrow('injected billing-review flag failure');
+
+    // The mock CAS write ran (mirroring a real trx's own uncommitted
+    // statements) but the transaction's own promise rejected — on real
+    // Postgres that rejection is exactly what rolls the scheduled_date
+    // write back with it, instead of the old swallow-and-commit behavior.
+    expect(trxScheduled.update).toHaveBeenCalled();
+    expect(flagMock).toHaveBeenCalled();
   });
 
   describe('null window_end — derived occupancy span (was: gate skipped entirely)', () => {

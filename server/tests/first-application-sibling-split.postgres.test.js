@@ -38,7 +38,7 @@ suite('first-application-sibling-split — same-trip billing review on date chan
     clearBillingReview,
     dateOnly,
   } = require('../services/first-application-sibling-split');
-  const { assertInvoiceCollectible, billingReviewVersion } = require('../services/invoice-helpers');
+  const { assertInvoiceCollectible, billingReviewVersion, isInvoiceUndeliveredForBillingReview } = require('../services/invoice-helpers');
   const InvoiceService = require('../services/invoice');
 
   beforeAll(() => { db = require('knex')({ client: 'pg', connection: testUrl }); });
@@ -428,11 +428,20 @@ suite('first-application-sibling-split — same-trip billing review on date chan
     expect((await readState(trx, ids)).invoice.billing_review_opened_at).toBeTruthy();
   }));
 
-  describe('flagFirstApplicationInvoiceReviewOnDateChangeSafely — savepoint isolation', () => {
-    test('a bad scheduledServiceId never poisons the caller\'s transaction', () => rollbackTest(async (trx) => {
-      const result = await flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, 'not-a-valid-uuid', 'test');
-      expect(result.action).toBe('error');
-      // The caller's own transaction is still usable.
+  describe('flagFirstApplicationInvoiceReviewOnDateChangeSafely — savepoint isolation, fails CLOSED', () => {
+    // Round-4 (Codex #5021 P1): the wrapper used to swallow a genuine
+    // failure and return {action:'error'} while the CALLER's date write
+    // still committed — recreating the combined-charge gap with only a log
+    // entry. It now re-throws so the caller's own transaction rolls back
+    // the whole move; the savepoint still isolates the failing statement
+    // itself, so trx (this test's OWN transaction, one level up from the
+    // savepoint) stays usable even though the wrapper's promise rejected.
+    test('a bad scheduledServiceId propagates so the caller\'s own transaction rolls back', () => rollbackTest(async (trx) => {
+      await expect(flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, 'not-a-valid-uuid', 'test'))
+        .rejects.toThrow();
+      // The savepoint isolated ONLY the failing statement — trx itself
+      // (one level up) is still usable, e.g. for a caller inspecting state
+      // before re-throwing further, or for this test's own cleanup.
       await trx('customers').insert({ id: randomUUID(), first_name: 'still usable', phone: `qa-${randomUUID().slice(0, 8)}`, active: true });
     }));
 
@@ -485,6 +494,38 @@ suite('first-application-sibling-split — same-trip billing review on date chan
       await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
       await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
       expect((await readState(trx, ids)).invoice.billing_review_opened_at).toBeTruthy();
+      const claim = await InvoiceService.claimInvoiceForSend(ids.invoiceId, { database: trx });
+      expect(claim.claimed).toBe(true);
+    }));
+  });
+
+  describe('round-4 (Codex P1): a DRAFT invoice carrying a delivery stamp is treated as delivered', () => {
+    // Pure-function check — no DB: a draft row is ambiguous the same way
+    // 'scheduled'/'sending' already are (bookkeeping can restore or retain
+    // 'draft' after the invoice actually reached the customer; the existing
+    // first-delivery-claim tests explicitly cover a draft row carrying
+    // email_sent_at). Applying the delivery-stamp check to 'draft' too is
+    // what stops that row from reading as unconditionally undelivered.
+    test('isInvoiceUndeliveredForBillingReview: a draft WITH a delivery stamp reads as delivered; a draft with none still reads as undelivered', () => {
+      expect(isInvoiceUndeliveredForBillingReview({ status: 'draft', email_sent_at: new Date() })).toBe(false);
+      expect(isInvoiceUndeliveredForBillingReview({ status: 'draft', sms_sent_at: new Date() })).toBe(false);
+      expect(isInvoiceUndeliveredForBillingReview({ status: 'draft', sent_at: new Date() })).toBe(false);
+      expect(isInvoiceUndeliveredForBillingReview({ status: 'draft' })).toBe(true);
+    });
+
+    test('a draft invoice with email_sent_at set is ALERT ONLY — assertInvoiceCollectible does NOT refuse, and it never blocks a resend', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { invoiceStatus: 'draft', invoiceExtra: { email_sent_at: new Date() } });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(result.action).toBe('review_opened');
+      const state = await readState(trx, ids);
+      // The durable record + bell still fire — same as any other divergence
+      // — but the invoice already reached the customer, so the reason and
+      // the collectibility check both read it as delivered, not held.
+      expect(state.invoice.billing_review_opened_at).toBeTruthy();
+      expect(state.invoice.billing_review_reason).toBe('sibling_date_diverged_after_delivery');
+      expect(state.invoice.status).toBe('draft');
+      expect(() => assertInvoiceCollectible(state.invoice)).not.toThrow();
       const claim = await InvoiceService.claimInvoiceForSend(ids.invoiceId, { database: trx });
       expect(claim.claimed).toBe(true);
     }));
