@@ -1388,11 +1388,33 @@ const CITABILITY_GAP_CHECKS = {
   how_to_choose: checkCitabilityHowToChoose,
 };
 
+// On a backfill the structural traits bind as STRUCTURE: a planned
+// comparison / how_to_choose gap, or one the prior page already carried,
+// is met only by the table or the criteria section itself. The nudge
+// checks answer "not applicable" once the choice framing is gone, so a
+// refresh could otherwise rename a heading and skip the work (Codex P2s,
+// 2026-09-26).
+const STRUCTURAL_TRAITS = {
+  comparison: (body) => COMPARISON_TABLE_RE.test(body),
+  how_to_choose: (body) => {
+    const n = howToChooseSectionCriteria(body);
+    return n >= HOW_TO_CHOOSE_MIN_CRITERIA && n <= HOW_TO_CHOOSE_MAX_CRITERIA;
+  },
+};
+
+function structurePresent(gap, body) {
+  return STRUCTURAL_TRAITS[gap](renderedCitabilityBody(body));
+}
+
 function checkCitabilityBackfillGapsCleared(draft, brief, context) {
   if (!isCitabilityBackfillBrief(brief)) return { ok: true, reason: 'not_citability_backfill' };
   if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
   const unresolved = [];
   for (const gap of brief.gsc_signal.citability_gaps) {
+    if (STRUCTURAL_TRAITS[gap]) {
+      if (!structurePresent(gap, draft.body)) unresolved.push(`${gap}(structure_missing)`);
+      continue;
+    }
     const check = CITABILITY_GAP_CHECKS[gap];
     if (!check) continue;
     const r = check(draft, brief, context || {});
@@ -1407,6 +1429,10 @@ function checkCitabilityBackfillGapsCleared(draft, brief, context) {
     const regressed = [];
     for (const [gap, check] of Object.entries(CITABILITY_GAP_CHECKS)) {
       if (brief.gsc_signal.citability_gaps.includes(gap)) continue;
+      if (STRUCTURAL_TRAITS[gap]) {
+        if (structurePresent(gap, prevBody) && !structurePresent(gap, draft.body)) regressed.push(gap);
+        continue;
+      }
       if (check(prevDraft, brief, {}).ok && !check(draft, brief, context).ok) regressed.push(gap);
     }
     if (regressed.length) return { ok: false, reason: `citability_traits_regressed:${regressed.join(',')}` };

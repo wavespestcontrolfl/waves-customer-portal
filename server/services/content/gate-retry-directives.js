@@ -72,6 +72,7 @@ const GATE_RETRY_INSTRUCTIONS = {
   CITABILITY_NAMED_SOURCES: 'Citability (non-blocking): attribute technical claims in prose to the specific named authority the evidence came from ("per UF/IFAS", "the EPA product label") instead of "experts say" — never invent a source.',
   CITABILITY_CONCRETE_SPECIFICS: 'Citability (non-blocking): where the evidence supplies a measurement, state the number with its unit instead of a vague stand-in ("a few weeks", "water deeply") — never invent a number, never a dollar amount.',
   CITABILITY_COMPARISON: 'Citability (non-blocking): this post frames a choice — render ONE <ComparisonTable> with neutral decision criteria as rows, in CATEGORY mode unless the brief authorizes NAMED-COMPETITOR mode.',
+  CITABILITY_BACKFILL_GAPS_CLEARED: 'Citability refresh (binding): close every planned citability gap in required_sections with the actual structure — a named source in prose, a stated measurement, a <ComparisonTable>, a How-to-choose H2 with 3–5 criteria — and keep every table, How-to-choose section, named source and measurement the live page already has.',
   CITABILITY_HOW_TO_CHOOSE: 'Citability (non-blocking): add an H2 "How to choose …" with 3–5 top-level bulleted criteria, each an observable check → the option it points to.',
 };
 

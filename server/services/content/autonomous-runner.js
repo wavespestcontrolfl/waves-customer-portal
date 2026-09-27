@@ -295,6 +295,11 @@ class AutonomousRunner {
     run.page_type = brief.page_type;
     run.action_type = brief.action_type || opp.action_type;
     run.shadow_mode = isShadow(run.action_type);
+    // In-memory only (finalize persists named columns): the composed brief's
+    // live gap list and target, for the early-gate retry feedback below.
+    run.citability_backfill_brief = brief.gsc_signal?.bucket === 'citability_backfill'
+      ? { gsc_signal: brief.gsc_signal, target_url: brief.target_url || brief.page_url || opp.page_url || null }
+      : null;
 
     const finalProtected = await this._checkProtectedPage(opp, brief);
     if (finalProtected?.protected) {
@@ -1940,7 +1945,7 @@ class AutonomousRunner {
         // return here BEFORE the quality gate runs, so its weight-0
         // citability nudges would never reach this sole redraft (Codex r7
         // P2). Append them as non-blocking findings.
-        const nudges = this._citabilityNudgeFindings(run, opp);
+        const nudges = await this._citabilityNudgeFindings(run, opp);
         recorded = await this._recordGateRetry(opp, skipReason, [...(blocking || []), ...nudges], claimToken);
       } catch (err) {
         logger.warn(`[autonomous-runner] gate-retry record failed for ${opp.id}: ${err.message}`);
@@ -1972,21 +1977,42 @@ class AutonomousRunner {
    * Weight-0 citability nudges for the current draft, shaped as retry
    * findings. Blog targets only (supporting-blog runs, or citability
    * backfill refreshes — a non-blog refresh target is resolved later, so
-   * other refreshes are left alone). Never throws.
+   * other refreshes are left alone). A backfill also gets its hard
+   * completion contract, judged against the live page. Never throws.
    */
-  _citabilityNudgeFindings(run, opp) {
+  async _citabilityNudgeFindings(run, opp) {
     try {
       const draft = run?.draft_payload;
       if (!draft || typeof draft !== 'object') return [];
       const isBackfill = opp?.bucket === 'citability_backfill';
       if (run.page_type !== 'supporting-blog' && !isBackfill) return [];
-      const gate = getQualityGate();
-      const checks = gate?._internals?.PAGE_TYPE_CHECKS?.['supporting-blog'] || [];
+      const internals = getQualityGate()?._internals || {};
+      const checks = internals.PAGE_TYPE_CHECKS?.['supporting-blog'] || [];
+      let brief = {};
+      let context = {};
+      if (isBackfill) {
+        // Early gates fire before the quality gate hydrates the prior page,
+        // and this is the row's only retry: without the prior version the
+        // dropped-measurement compare and the no-regression contract stay
+        // silent until the terminal attempt (Codex P2, 2026-09-26).
+        brief = run.citability_backfill_brief
+          || { gsc_signal: { bucket: 'citability_backfill', citability_gaps: opp.signal_metadata?.citability_gaps || [] } };
+        const url = brief.target_url || opp.page_url || draft.url;
+        const publisher = getAstroPublisher();
+        const prior = url && publisher?.loadExistingPageBody
+          ? await publisher.loadExistingPageBody(url).catch(() => null)
+          : null;
+        if (prior && typeof prior.body === 'string') context = { previousVersion: prior };
+      }
       const out = [];
       for (const c of checks) {
         if (!c.name.startsWith('citability_') || c.isHard) continue;
-        const r = c.evaluate(draft, {}, {});
+        const r = c.evaluate(draft, brief, context);
         if (r && !r.ok) out.push({ severity: 'P3', code: c.name.toUpperCase(), message: r.reason || 'citability nudge' });
+      }
+      if (isBackfill && typeof internals.checkCitabilityBackfillGapsCleared === 'function') {
+        const r = internals.checkCitabilityBackfillGapsCleared(draft, brief, context);
+        if (r && !r.ok) out.push({ severity: 'P1', code: 'CITABILITY_BACKFILL_GAPS_CLEARED', message: r.reason });
       }
       return out;
     } catch (err) {

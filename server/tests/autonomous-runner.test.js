@@ -3864,15 +3864,36 @@ describe('_citabilityNudgeFindings — early-gate retries carry citability feedb
   });
   const draft = { title: 'Bait vs. Spray for Ghost Ants', body: 'Experts say ants trail after rain. Wait a few weeks.', frontmatter: {} };
 
-  test('a supporting-blog draft yields its citability misses as non-blocking P3 findings', () => {
-    const out = runner._citabilityNudgeFindings({ page_type: 'supporting-blog', draft_payload: draft }, {});
+  test('a supporting-blog draft yields its citability misses as non-blocking P3 findings', async () => {
+    const out = await runner._citabilityNudgeFindings({ page_type: 'supporting-blog', draft_payload: draft }, {});
     expect(out.map((f) => f.code)).toEqual(['CITABILITY_NAMED_SOURCES', 'CITABILITY_CONCRETE_SPECIFICS', 'CITABILITY_COMPARISON']);
     expect(out.every((f) => f.severity === 'P3')).toBe(true);
   });
-  test('non-blog runs and missing drafts yield nothing; backfill refreshes are included', () => {
-    expect(runner._citabilityNudgeFindings({ page_type: 'refresh', draft_payload: draft }, {})).toEqual([]);
-    expect(runner._citabilityNudgeFindings({ page_type: 'supporting-blog' }, {})).toEqual([]);
-    expect(runner._citabilityNudgeFindings({ page_type: 'refresh', draft_payload: draft }, { bucket: 'citability_backfill' })).toHaveLength(3);
+  test('non-blog runs and missing drafts yield nothing; backfill refreshes are included', async () => {
+    expect(await runner._citabilityNudgeFindings({ page_type: 'refresh', draft_payload: draft }, {})).toEqual([]);
+    expect(await runner._citabilityNudgeFindings({ page_type: 'supporting-blog' }, {})).toEqual([]);
+    expect(await runner._citabilityNudgeFindings({ page_type: 'refresh', draft_payload: draft }, { bucket: 'citability_backfill' })).toHaveLength(3);
+  });
+  test('a backfill retry is judged against the live page: dropped measurements + the hard contract (Codex P2)', async () => {
+    // The runner loads the publisher lazily at call time, so register the
+    // mock on the live registry (not inside isolateModules).
+    const loadExistingPageBody = jest.fn().mockResolvedValue({ body: 'Mow at 4 inches. Water 30 minutes. Reapply in 6 weeks.' });
+    jest.resetModules();
+    jest.dontMock('../services/content/content-quality-gate');
+    jest.doMock('../services/content-astro/astro-publisher', () => ({ loadExistingPageBody }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const backfillRunner = new AutonomousRunner();
+    const out = await backfillRunner._citabilityNudgeFindings({
+      page_type: 'refresh',
+      draft_payload: { title: 'Lawn Care in Venice', body: 'Per UF/IFAS, mow high. Water well.', frontmatter: {} },
+      citability_backfill_brief: { gsc_signal: { bucket: 'citability_backfill', citability_gaps: ['named_sources'] }, target_url: '/lawn/mowing/' },
+    }, { bucket: 'citability_backfill', page_url: '/lawn/mowing/' });
+    expect(loadExistingPageBody).toHaveBeenCalledWith('/lawn/mowing/');
+    expect(out).toEqual(expect.arrayContaining([
+      expect.objectContaining({ severity: 'P3', code: 'CITABILITY_CONCRETE_SPECIFICS', message: 'refresh_dropped_measurements_3_to_0' }),
+      expect.objectContaining({ severity: 'P1', code: 'CITABILITY_BACKFILL_GAPS_CLEARED', message: 'citability_traits_regressed:concrete_specifics' }),
+    ]));
+    jest.dontMock('../services/content-astro/astro-publisher');
   });
   test('every nudge code has a canonical retry directive', () => {
     const { GATE_RETRY_INSTRUCTIONS } = require('../services/content/gate-retry-directives');

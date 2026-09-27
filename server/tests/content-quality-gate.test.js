@@ -1581,6 +1581,28 @@ describe('citability backfill completion (Codex r6 P2s)', () => {
     expect(checkImprovementOverPrior({ body: 'Ants.' }, backfill(['named_sources']), prior).ok).toBe(false);
     expect(checkImprovementOverPrior(small, backfill(['named_sources']), {}).ok).toBe(false);
   });
+  test('planned structural gaps need the structure itself — reframing the heading does not clear them (Codex P2)', () => {
+    const planned = backfill(['comparison', 'how_to_choose']);
+    const ctx = { previousVersion: { body: '## Bait or spray?\nPer UF/IFAS, both work.' } };
+    const reframed = checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: '## Treatment overview\nPer UF/IFAS, both work.' }, planned, ctx);
+    expect(reframed).toEqual({ ok: false, reason: 'planned_gaps_unresolved:comparison(structure_missing),how_to_choose(structure_missing)' });
+    const table = '<ComparisonTable columns={["a","b"]} rows={[]} />';
+    const done = checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: `## Treatment overview\nPer UF/IFAS, both work.\n${table}\n## How to choose\n- If A → B\n- If C → D\n- If E → F` }, planned, ctx);
+    expect(done).toEqual({ ok: true });
+  });
+  test('removing the choice framing along with the structures is still a regression (Codex P2)', () => {
+    const table = '<ComparisonTable columns={["a","b"]} rows={[]} />';
+    const prevBody = `## Bait or spray?\nExperts say both work.\n${table}\n## How to choose\n- If A → B\n- If C → D\n- If E → F`;
+    const r = checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: '## Treatment overview\nPer UF/IFAS, both work.' }, backfill(['named_sources']), { previousVersion: { body: prevBody } });
+    expect(r).toEqual({ ok: false, reason: 'citability_traits_regressed:comparison,how_to_choose' });
+  });
+  test('softening a calendar window is a dropped measurement on refresh (Codex P2)', () => {
+    const { checkCitabilityConcreteSpecifics } = require('../services/content/content-quality-gate')._internals;
+    const ctx = { previousVersion: { body: 'Per UF/IFAS, mosquitoes peak June 1 – Sept 30.' } };
+    const soft = { body: 'Per UF/IFAS, mosquitoes peak in summer.' };
+    expect(checkCitabilityConcreteSpecifics(soft, {}, ctx)).toEqual({ ok: false, reason: 'refresh_dropped_measurements_1_to_0' });
+    expect(checkCitabilityBackfillGapsCleared(soft, backfill(['named_sources']), ctx)).toEqual({ ok: false, reason: 'citability_traits_regressed:concrete_specifics' });
+  });
   test('a trait the prior page satisfied may not regress on a targeted edit (Codex r8 P2)', () => {
     const table = '<ComparisonTable columns={["a","b"]} rows={[]} />';
     const howTo = '## How to choose\n- If A → B\n- If C → D\n- If E → F';
@@ -1588,8 +1610,8 @@ describe('citability backfill completion (Codex r6 P2s)', () => {
     const ctx = { previousVersion: { body: prevBody } };
     const planned = backfill(['named_sources']);
     const dropped = checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: '## Bait or spray?\nPer UF/IFAS, both work.' }, planned, ctx);
-    // Dropping the table makes how_to_choose n/a — the comparison regression alone fails the draft.
-    expect(dropped).toEqual({ ok: false, reason: 'citability_traits_regressed:comparison' });
+    // Dropping the table does not make the prior how-to section optional (Codex P2).
+    expect(dropped).toEqual({ ok: false, reason: 'citability_traits_regressed:comparison,how_to_choose' });
     const droppedHowTo = checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: `## Bait or spray?\nPer UF/IFAS, both work.\n${table}` }, planned, ctx);
     expect(droppedHowTo).toEqual({ ok: false, reason: 'citability_traits_regressed:how_to_choose' });
     const kept = checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: `## Bait or spray?\nPer UF/IFAS, both work.\n${table}\n${howTo}` }, planned, ctx);
