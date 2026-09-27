@@ -1492,7 +1492,11 @@ rule and the existing authored copy pack. Ask Waves normalizes legacy termite
 bond aliases, names, and `bondYears` through the acceptance converter's
 canonical identity rule; on mixed estimates, named warranty questions return
 only that service's purchased term, while generic questions label each term's
-service scope.
+service scope. A current top-level bond selector governs historical snapshots.
+Without that selector, the unversioned saved rows and frozen pricing must
+agree on the purchased bond term; explicit removal, contradictory terms, or
+zero-price decisions suppress coverage regardless of snapshot order. A raw
+termite-bait row's `selectedBondTerm` also participates in this check.
 Ask Waves also requires separate recurring-terms eligibility: rodent,
 commercial, bundle, and unknown scope never inherit residential callbacks,
 money-back, or no-contract terms merely because the page permits a

@@ -641,6 +641,98 @@ describe('estimate assistant no-guarantee context', () => {
   });
 
   test.each([
+    ['recurring removal', { recurring: { services: [{ service: 'termite_bond_10yr', selectedBondTerm: 'none', mo: 15 }] } }],
+    ['nested removal', { results: { recurring: { services: [{ serviceKey: 'termite_bond_10yr', selectedBondTerm: null, mo: 15 }] } } }],
+    ['raw removal', { lineItems: [{ service: 'termite_bond', bondTerm: 'none', monthly: 0 }] }],
+    ['raw bait selector removal', { lineItems: [{ service: 'termite_bait', selectedBondTerm: 'none', monthly: 34 }] }],
+    ['contradictory current term', { recurring: { services: [{ service: 'termite_bond_5yr', bondTerm: '10yr', mo: 18 }] } }],
+    ['conflicting unversioned terms', { recurring: { services: [{ service: 'termite_bond_5yr', bondTerm: '5yr', mo: 18 }] } }],
+    ['zero-price current term', { recurring: { services: [{ service: 'termite_bond_10yr', bondTerm: '10yr', mo: 0, annual: 0 }] } }],
+  ])('%s cannot be overwritten by an older engine bond or frozen pricing', (_name, current) => {
+    const savedBond = { service: 'termite_bond_10yr', label: 'Termite Bond (10-Year Term)',
+      bondTerm: '10yr', bondYears: 10, perTreatment: 45, visitsPerYear: 4 };
+    for (const frozenPricing of [false, true]) {
+      const context = buildEstimateAssistantContext({
+        estimate: { monthly_total: 49 },
+        estData: { result: current, engineResult: { recurring: { services: [{ ...savedBond, mo: 15 }] } } },
+        pricingBundle: frozenPricing ? { frequencies: [{ key: 'quarterly', monthly: 49,
+          included: [savedBond], perServiceTreatments: [savedBond] }] } : {},
+        noGuaranteeClaims: true,
+      });
+      expect({ frozenPricing, terms: context.recurringServices.flatMap((row) => row.purchasedTerms || []) })
+        .toEqual({ frozenPricing, terms: [] });
+      expect(answerEstimateQuestionFallback('What warranty did I buy?', context))
+        .not.toMatch(/Purchased termite bond|\d+-year term with re-treatment coverage/i);
+    }
+  });
+
+  test('a current top-level bond selector resolves historical term disagreement', () => {
+    const bond = { service: 'termite_bond_5yr', label: 'Termite Bond (5-Year Term)',
+      bondTerm: '5yr', bondYears: 5, perTreatment: 54, visitsPerYear: 4 };
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 18 },
+      estData: { inputs: { termiteBondTerm: '5yr' },
+        result: { recurring: { services: [{ ...bond, mo: 18 }] } },
+        engineResult: { lineItems: [{ service: 'termite_bond', bondTerm: '10yr', bondYears: 10, monthly: 15 }] } },
+      pricingBundle: { frequencies: [{ key: 'quarterly', monthly: 18, included: [bond], perServiceTreatments: [bond] }] },
+      noGuaranteeClaims: true,
+    });
+    expect(context.recurringServices.flatMap((row) => row.purchasedTerms || []))
+      .toEqual(['Purchased termite bond: 5-year term with re-treatment coverage.']);
+  });
+
+  test('matching legacy bond snapshots retain purchased coverage without a selector', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 18 },
+      estData: { result: { recurring: { services: [{ name: 'Termite Bond (5-Year Term)', annual: 216, years: null }] } },
+        engineResult: { lineItems: [{ service: 'termite_bond', bondTerm: '5yr', bondYears: 5, monthly: 18 }] } },
+      noGuaranteeClaims: true,
+    });
+    expect(context.recurringServices.flatMap((row) => row.purchasedTerms || []))
+      .toEqual(['Purchased termite bond: 5-year term with re-treatment coverage.']);
+  });
+
+  test('a frozen treatment price cannot override its explicit included-row removal', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 15 },
+      pricingBundle: { frequencies: [{ key: 'quarterly', monthly: 15,
+        included: [{ service: 'termite_bond_10yr', selectedBondTerm: 'none' }],
+        perServiceTreatments: [{ service: 'termite_bond_10yr', bondTerm: '10yr', perTreatment: 45 }],
+      }] },
+      noGuaranteeClaims: true,
+    });
+    expect(context.recurringServices.flatMap((row) => row.purchasedTerms || [])).toEqual([]);
+  });
+
+  test.each(['none', null, '10yr'])('an engine-only mapped selector %j constrains its saved bond proof', (selectedBondTerm) => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 18 },
+      estData: { engineResult: { results: { tmBait: { selectedBondTerm } },
+        lineItems: [{ service: 'termite_bond', bondTerm: '5yr', bondYears: 5, monthly: 18 }] } },
+      noGuaranteeClaims: true,
+    });
+    expect(context.recurringServices.flatMap((row) => row.purchasedTerms || [])).toEqual([]);
+    expect(answerEstimateQuestionFallback('What warranty did I buy?', context))
+      .not.toMatch(/Purchased termite bond|\d+-year term with re-treatment coverage/i);
+  });
+
+  test.each([null, '', '  '])('incomplete price %j may retain matching paid raw bond evidence', (monthly) => {
+    const incomplete = { service: 'termite_bond_5yr', label: 'Termite Bond (5-Year Term)', bondTerm: '5yr', monthly };
+    for (const frozenPricing of [false, true]) {
+      const context = buildEstimateAssistantContext({
+        estimate: { monthly_total: 18 },
+        estData: { result: { recurring: { services: [incomplete] } },
+          engineResult: { lineItems: [{ service: 'termite_bond', bondTerm: '5yr', bondYears: 5, monthly: 18 }] } },
+        pricingBundle: frozenPricing ? { frequencies: [{ key: 'quarterly', monthly: 18,
+          included: [incomplete], perServiceTreatments: [{ ...incomplete, perTreatment: 54 }] }] } : {},
+        noGuaranteeClaims: true,
+      });
+      expect({ frozenPricing, terms: context.recurringServices.flatMap((row) => row.purchasedTerms || []) })
+        .toEqual({ frozenPricing, terms: ['Purchased termite bond: 5-year term with re-treatment coverage.'] });
+    }
+  });
+
+  test.each([
     { warrantyTier: 'none', warrantyAdder: 0 },
     { warrantyTier: null, warrantyAdder: null },
     { warrantyTier: 'one_year_retreat', warrantyAdder: -1 },

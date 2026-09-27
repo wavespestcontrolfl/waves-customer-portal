@@ -188,10 +188,10 @@ function withTermiteBondPurchasedTerms(row, proofRow = row, selectedTerms = []) 
   return { ...row, service: row.service || service, purchasedTerms };
 }
 
-function serviceRowsFromEstimateData(estData = {}, selectedBondTerms = []) {
+function rawRecurringServiceRows(estData = {}) {
   const containers = [...new Set([estData.result, estData.engineResult, estData]
     .filter((value) => value && typeof value === 'object'))];
-  const services = containers.flatMap((result) => {
+  return containers.flatMap((result) => {
     const recurring = result.recurring || {};
     const nestedRecurring = result.results?.recurring || {};
     return [
@@ -208,12 +208,67 @@ function serviceRowsFromEstimateData(estData = {}, selectedBondTerms = []) {
             .some((value) => Number.isFinite(Number(value)) && Number(value) > 0);
           const commercial = lanes.some((lane) => lane.startsWith('commercial_'));
           return service.startsWith('termite_bond')
+            || (service === 'termite_bait' && Object.prototype.hasOwnProperty.call(row, 'selectedBondTerm'))
             || (commercial && (recurringValue || row.quoteRequired === true || row.requiresManualReview === true))
             || (recurringValue && lanes.includes('rodent'));
         })
         : []),
     ];
   });
+}
+
+function bondTermConstraintsForRow(row = {}) {
+  const normalized = normalizeBondTermService(row);
+  const service = cleanText([
+    normalized.service, normalized.serviceKey, normalized.service_key, normalized.key,
+  ].find(Boolean)).toLowerCase();
+  if (!service.startsWith('termite_bond') && service !== 'termite_bait') return [];
+  const selected = Object.prototype.hasOwnProperty.call(row, 'selectedBondTerm')
+    ? [row.selectedBondTerm] : [];
+  if (service === 'termite_bait') return selected;
+  const terms = ['bondTerm', 'bondYears', 'years']
+    .filter((key) => Object.prototype.hasOwnProperty.call(row, key))
+    .filter((key) => key === 'bondTerm' || (row[key] != null && row[key] !== ''))
+    .map((key) => key === 'bondTerm' ? row[key] : `${row[key]}yr`);
+  const keyedTerm = service.match(/^termite_bond_(.+)$/)?.[1];
+  const prices = ['perTreatment', 'perApp', 'perVisit', 'monthly', 'mo', 'annual', 'amount', 'price']
+    .filter((key) => Object.prototype.hasOwnProperty.call(row, key))
+    .filter((key) => row[key] != null && String(row[key]).trim() !== '')
+    .map((key) => Number(row[key]));
+  const removedPrice = prices.length > 0 && !prices.some((value) => Number.isFinite(value) && value > 0);
+  return [...selected, ...terms, ...(keyedTerm ? [keyedTerm] : []), ...(removedPrice ? ['none'] : [])];
+}
+
+function selectedBondTermsFromEstimateData(parsedData, rawServices, frequency) {
+  const selectors = [
+    ['inputs', 'termiteBondTerm'],
+    ['engineInputs', 'services', 'termite', 'bondTerm'],
+    ['engineRequest', 'services', 'termite', 'bondTerm'],
+    ['engineInputs', 'options', 'termiteBondTerm'],
+    ['engineRequest', 'options', 'termiteBondTerm'],
+    ['result', 'results', 'tmBait', 'selectedBondTerm'],
+    ['results', 'tmBait', 'selectedBondTerm'],
+  ].flatMap((path) => {
+    const source = path.slice(0, -1).reduce((value, key) => value?.[key], parsedData);
+    const key = path[path.length - 1];
+    return source && Object.prototype.hasOwnProperty.call(source, key) ? [source[key]] : [];
+  });
+  if (selectors.length) return { terms: selectors, authoritative: true };
+  // Without an authoritative selector these unversioned snapshots must agree.
+  // Neither list order nor a frozen pricing projection can restore an explicit
+  // removal, a contradictory term, or a zero-price current bond decision.
+  const engineStats = parsedData.engineResult?.results?.tmBait;
+  const engineSelector = engineStats && Object.prototype.hasOwnProperty.call(engineStats, 'selectedBondTerm')
+    ? [engineStats.selectedBondTerm] : [];
+  const terms = [
+    ...rawServices,
+    ...(Array.isArray(frequency?.included) ? frequency.included : []),
+    ...(Array.isArray(frequency?.perServiceTreatments) ? frequency.perServiceTreatments : []),
+  ].flatMap(bondTermConstraintsForRow).concat(engineSelector);
+  return { terms, authoritative: false };
+}
+
+function serviceRowsFromEstimateData(services = [], bondSelection = { terms: [], authoritative: false }) {
   const rows = services.map((service) => withTermiteBondPurchasedTerms({
     service: cleanText(service.service || service.serviceKey || service.service_key || service.key) || null,
     guaranteeLanes: guaranteeLanesForRow(service),
@@ -223,11 +278,11 @@ function serviceRowsFromEstimateData(estData = {}, selectedBondTerms = []) {
     monthly: Number(service.mo ?? service.monthly ?? service.monthlyTotal),
     visitsPerYear: Number(service.visitsPerYear ?? service.visits ?? service.apps),
     perApplication: Number(service.perTreatment ?? service.perApp ?? service.perVisit),
-  }, service, selectedBondTerms));
+  }, service, bondSelection.terms));
   // Once the saved selector states a term, contradicted historical bond rows
   // no longer participate in merging. Otherwise their empty terms could
   // replace the valid selected row. An explicit removal excludes every bond.
-  return rows.filter((row) => !selectedBondTerms.length
+  return rows.filter((row) => !bondSelection.authoritative
     || !row.service?.startsWith('termite_bond') || row.purchasedTerms.length);
 }
 
@@ -694,21 +749,10 @@ function buildEstimateAssistantContext({
   // The bond selector updates these inputs and mapped stats while historical
   // engineResult rows may remain. Explicit removal must also invalidate their
   // purchased scope, including a frozen pricing row that still shows the bond.
-  const selectedBondTerms = [
-    ['inputs', 'termiteBondTerm'],
-    ['engineInputs', 'services', 'termite', 'bondTerm'],
-    ['engineRequest', 'services', 'termite', 'bondTerm'],
-    ['engineInputs', 'options', 'termiteBondTerm'],
-    ['engineRequest', 'options', 'termiteBondTerm'],
-    ['result', 'results', 'tmBait', 'selectedBondTerm'],
-    ['results', 'tmBait', 'selectedBondTerm'],
-  ].flatMap((path) => {
-    const source = path.slice(0, -1).reduce((value, key) => value?.[key], parsedData);
-    const key = path[path.length - 1];
-    return source && Object.prototype.hasOwnProperty.call(source, key) ? [source[key]] : [];
-  });
-  const pricingRecurringRows = serviceRowsFromPricing(pricingBundle, frequency, selectedBondTerms);
-  const estimateRecurringRows = serviceRowsFromEstimateData(parsedData, selectedBondTerms);
+  const rawServices = rawRecurringServiceRows(parsedData);
+  const bondSelection = selectedBondTermsFromEstimateData(parsedData, rawServices, frequency);
+  const pricingRecurringRows = serviceRowsFromPricing(pricingBundle, frequency, bondSelection.terms);
+  const estimateRecurringRows = serviceRowsFromEstimateData(rawServices, bondSelection);
   const recurringServices = mergeServiceRows(
     pricingRecurringRows,
     estimateRecurringRows,
