@@ -2395,7 +2395,9 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   if (!receiptOptOut && (wantsRoutedMessage === true
     || (wantsRoutedMessage === null && (smsChannel || (channel === 'email' && emailDeterministicMiss && !smsOptedOut))))) {
     try {
-      await require('./invoice').sendReceipt(invoice.id, { hasEmailLeg: emailAttempted });
+      // Declare the email leg to the SMS channel gate only when it could
+      // deliver: a deterministic miss (switch off, no address) never did.
+      await require('./invoice').sendReceipt(invoice.id, { hasEmailLeg: emailAttempted && !emailDeterministicMiss });
     } catch (e) {
       // Send-window hold: the money and paid invoice are already committed
       // and this path has no retry — hand the receipt to the durable

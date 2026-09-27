@@ -1676,7 +1676,8 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({
       billingDeliveryCategory: 'payment_receipt',
     }));
-    expect(mockSendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: true });
+    // A refused email is no email leg for the SMS channel gate.
+    expect(mockSendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: false });
   });
 
   it('email-only channel with NO recipient email falls back to the SMS receipt; a transient email error does NOT', async () => {
@@ -1684,7 +1685,7 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     mockSendReceiptEmail.mockResolvedValueOnce({ ok: false, error: 'No receipt recipient email' });
     const r = await settleNoShowFee(pi());
     expect(r.settled).toBe(true);
-    expect(mockSendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: true });
+    expect(mockSendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: false });
 
     // Transient provider failure: stays email-preferring, invoice unstamped
     // for the admin needs-receipt path — no surprise text.
