@@ -173,13 +173,12 @@ function hasConflictingClaim(claims, matchedClaim) {
   });
 }
 
-// A digit immediately followed by a container word — "4 Boxes", "2 Cases" —
-// a SECOND quantity of containers beside a count claim's own item count
-// ("Rat Traps 12 Count 4 Boxes" is not simply 12 traps; the "4 Boxes" is an
-// unread multiplier this lane can't resolve). None of these words overlap
-// the count-item nouns COUNT_UNIT_WORD_RE recognizes, so a count claim's own
-// noun never trips this on its own.
-const OTHER_CONTAINER_QTY_RE = /\b\d+\s*(?:box(?:es)?|case(?:s)?|pack(?:s)?|bag(?:s)?|bottle(?:s)?|jug(?:s)?|pail(?:s)?|can(?:s)?|tube(?:s)?|carton(?:s)?|unit(?:s)?|piece(?:s)?|pcs)\b/i;
+// A number of two or more followed by a container word — "4 Boxes",
+// "2-Cases", "3 Pails" — is a quantity of containers this lane never reads.
+// A quantity of exactly one ("1 Bottle") multiplies nothing, so it passes.
+// None of these words overlap the count-item nouns COUNT_UNIT_WORD_RE
+// recognizes, so a count claim's own noun never trips this on its own.
+const OTHER_CONTAINER_QTY_RE = /\b(?!0*1\b)\d+[\s-]*(?:box(?:es)?|case(?:s)?|pack(?:s)?|bag(?:s)?|bottle(?:s)?|jug(?:s)?|pail(?:s)?|bucket(?:s)?|tub(?:s)?|jar(?:s)?|can(?:s)?|canister(?:s)?|container(?:s)?|tube(?:s)?|pouch(?:es)?|packet(?:s)?|carton(?:s)?|tray(?:s)?|kit(?:s)?|unit(?:s)?|piece(?:s)?|pcs)\b/i;
 
 // Strips every occurrence of a count claim's OWN noun (singular or plural —
 // "Count"/"Counts", "cartridge"/"cartridges") from `text`, wherever it
@@ -197,15 +196,22 @@ function stripClaimNoun(text, unitWord) {
 // containers in a form this lane doesn't count, as amountPerItem holds them.
 // A count claim ("25 cartridges") is different: the plural noun IS the
 // counted item, not a second quantity — but only that claim's OWN noun is
-// exempt (item 3, 2026-09-27 round 7 review). Once it's stripped out, any
-// OTHER container wording left over — a second count noun ("4 Boxes"), or
-// another PLURAL_CONTAINER_RE word — still holds the line: "Rat Traps 12
-// Count 4 Boxes" logs neither a bare 12 nor a guessed 48.
+// exempt (item 3, 2026-09-27 round 7 review).
 function hasLeftoverContainerQuantity({ multipack, matchedClaim, leftover }) {
   if (multipack) return false;
   if (matchedClaim.unit !== 'each') return PLURAL_CONTAINER_RE.test(leftover) || PLURAL_COUNT_NOUN_RE.test(leftover);
-  const withoutOwnNoun = stripClaimNoun(leftover, matchedClaim.unitWord);
-  return OTHER_CONTAINER_QTY_RE.test(withoutOwnNoun) || PLURAL_CONTAINER_RE.test(withoutOwnNoun);
+  return PLURAL_CONTAINER_RE.test(stripClaimNoun(leftover, matchedClaim.unitWord));
+}
+
+// A numeric container quantity left over once the pack marker AND the
+// matched size claim are both gone ("4 Boxes") is an unread multiplier
+// WHETHER OR NOT a pack marker was also recognized: "Rat Traps 12 Count 4
+// Boxes" is neither 12 nor a guessed 48 traps, adding "(Pack of 2)" doesn't
+// make it 24, and "Taurus SC 78 oz 4 Boxes" is not 78 oz (2026-09-27
+// pre-push audit). A count claim's own noun is stripped first, as above.
+function hasUnreadContainerQuantity({ matchedClaim, leftover }) {
+  const rest = matchedClaim.unit === 'each' ? stripClaimNoun(leftover, matchedClaim.unitWord) : leftover;
+  return OTHER_CONTAINER_QTY_RE.test(rest);
 }
 
 // A weight or volume reading may not skip an item count the title states:
@@ -232,6 +238,7 @@ const READING_RULES = [
   // amountPerItem's own ambiguity guard.
   { reason: 'leftover_pack_wording', fails: (c) => PACK_CLAIM_RE.test(c.leftover) },
   { reason: 'plural_containers_without_pack_marker', fails: (c) => hasLeftoverContainerQuantity(c) },
+  { reason: 'unread_container_quantity', fails: (c) => hasUnreadContainerQuantity(c) },
   { reason: 'item_count_not_consumed', fails: (c) => hasUnconsumedItemCount(c) },
   { reason: 'bad_line_quantity', fails: (c) => !Number.isFinite(c.lineQty) || c.lineQty <= 0 },
 ];

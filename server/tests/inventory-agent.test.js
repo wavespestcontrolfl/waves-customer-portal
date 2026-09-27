@@ -198,13 +198,45 @@ describe('validateReading — count items', () => {
   // count-sized product.
   test('a leftover container quantity beside a count claim still holds — only the claim\'s own noun is exempt', () => {
     expect(validateReading({ size_number: 12, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Rat Traps 12 Count 4 Boxes', lineQuantity: 1 }))
-      .toMatchObject({ ok: false, reason: 'plural_containers_without_pack_marker' });
+      .toMatchObject({ ok: false, reason: 'unread_container_quantity' });
     expect(validateReading({ size_number: 12, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Victor Rat Traps 12 Count', lineQuantity: 1 }))
       .toMatchObject({ ok: true, sizeNumber: 12, unit: 'each' });
     // "Cartridges" recurs as a plain descriptive word earlier in the title —
     // the SAME noun as the "25 cartridges" claim, not a second container.
     expect(validateReading({ size_number: 25, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Trelona Compressed Termite Bait Cartridges 25 cartridges', lineQuantity: 1 }))
       .toMatchObject({ ok: true, sizeNumber: 25, unit: 'each' });
+  });
+});
+
+describe('validateReading — a numeric container quantity is never skipped', () => {
+  // 2026-09-27 pre-push audit: the pack-marker branch used to return before
+  // this check, so adding "(Pack of 2)" to "Rat Traps 12 Count 4 Boxes"
+  // validated 24 traps and silently dropped the "4 Boxes".
+  test('a pack marker does not excuse a second container quantity', () => {
+    expect(validateReading({ size_number: 12, size_unit: 'each', pack_count: 2 }, { rawTitle: 'Rat Traps 12 Count 4 Boxes (Pack of 2)', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'unread_container_quantity' });
+    expect(validateReading({ size_number: 78, size_unit: 'oz', pack_count: 2 }, { rawTitle: 'Taurus SC 78 oz 4-Boxes (Pack of 2)', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'unread_container_quantity' });
+  });
+
+  test('a measured reading is held beside a container quantity too, marker or not', () => {
+    expect(validateReading({ size_number: 78, size_unit: 'oz', pack_count: 1 }, { rawTitle: 'Taurus SC 78 oz 4 Boxes', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'unread_container_quantity' });
+    expect(validateReading({ size_number: 5, size_unit: 'lb', pack_count: 1 }, { rawTitle: 'Granular Bait 5 lb 3 Buckets', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'unread_container_quantity' });
+    expect(validateReading({ size_number: 5, size_unit: 'lb', pack_count: 2 }, { rawTitle: 'Granular Bait 5 lb 3 Pails (Pack of 2)', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'unread_container_quantity' });
+  });
+
+  test('a pack marker alone, a bare plural container word, or a single container still validates', () => {
+    expect(validateReading({ size_number: 12, size_unit: 'each', pack_count: 2 }, { rawTitle: 'Victor Rat Traps 12 Count (Pack of 2)', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, sizeNumber: 12, unit: 'each', packCount: 2, amount: 24 });
+    expect(validateReading({ size_number: 78, size_unit: 'oz', pack_count: 2 }, { rawTitle: 'Taurus SC 78 oz Bottles (Pack of 2)', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, packCount: 2, amount: 156 });
+    expect(validateReading({ size_number: 78, size_unit: 'oz', pack_count: 1 }, { rawTitle: 'Taurus SC 78 oz 1 Bottle', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, amount: 78 });
+    expect(validateReading({ size_number: 12, size_unit: 'each', pack_count: 2 }, { rawTitle: 'Rat Traps 12 Count 1 Box (Pack of 2)', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, amount: 24 });
   });
 });
 
