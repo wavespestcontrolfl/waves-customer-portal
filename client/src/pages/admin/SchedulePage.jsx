@@ -13635,7 +13635,15 @@ export function CompletionPanel({
   const protocolCompletionDefaultsSeededRef = useRef(false);
   useEffect(() => {
     if (protocolCompletionDefaultsSeededRef.current) return;
-    if (isTypedFindings || isBedBugVisit || isLawn) return;
+    // NOT gated on isTypedFindings: the "Products Applied" section renders
+    // unconditionally in every completion lane, typed or not (it sits right
+    // after the typed findings/companion sections, never inside an
+    // isTypedFindings guard) — cockroach_control IS a typed visit
+    // (findingsType 'cockroach'), and it is the one program this hook is
+    // FOR today. bed bug stays excluded (it carries no
+    // completionDefaultProducts, so this is belt-and-suspenders, not load-
+    // bearing); lawn keeps its own governed mechanism.
+    if (isBedBugVisit || isLawn) return;
     // "Completed" only — a declined or inspection-only visit applied no
     // products, so it must not seed a Products list that implies it did.
     if (visitOutcome !== "completed") return;
@@ -13651,7 +13659,7 @@ export function CompletionPanel({
     if (!rows.length) return;
     protocolCompletionDefaultsSeededRef.current = true;
     setSelectedProducts(rows);
-  }, [protocolCompletionDefaults, products, service, isTypedFindings, isBedBugVisit, isLawn, visitOutcome, selectedProducts, draftLoading, showDraftPrompt]);
+  }, [protocolCompletionDefaults, products, service, isBedBugVisit, isLawn, visitOutcome, selectedProducts, draftLoading, showDraftPrompt]);
   const lawnDefaultMixSeededRef = useRef(false);
   const lawnDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
