@@ -3088,6 +3088,46 @@ restore alone admits a `send_failed` row); a failed restore is a durable
 Treat the gate, the generic-404
 indistinguishability, the fail-closed reprice, the explicit membership
 identity, and the no-comms contract as security-critical.)
+`/api/public/blog-read-depth` (write; anonymous, cookie-free blog
+scroll-depth counter — owner-approved 2026-09-27, "E2: cookie-free
+read-depth counts", extending the 2026-07-16 exception that lets
+Cloudflare's cookie-free counter run before cookie consent. The hub and
+every spoke blog post fire `fetch(url, { method: 'POST', body, keepalive:
+true, credentials: 'omit', mode: 'no-cors' })` at 25/50/75/100% scrolled and
+at the post's "keep reading" row; the response is opaque to the browser by
+design, so it matters only for tests/abuse posture. **Gated behind
+GATE_BLOG_READ_DEPTH** — read via `isEnabled('blogReadDepth')`
+(server/config/feature-gates.js); while dark, EVERY request gets the SAME
+generic unknown-route 404 (`middleware/errors.js` `notFoundBody`) before the
+route's own rate limiter, at any volume — the house dark-`GATE_*` contract
+(AGENTS.md). Mounted in `server/index.js` ABOVE the global `app.use('/api/',
+limiter)` and the global body parsers (own 120 req/min per-IP limiter
+applied AFTER the gate check, own `express.text({ type: () => true, limit:
+'1kb' })` parse) — a reader's scroll beacons never spend the shared budget a
+customer's quote-form or booking calls need. Deliberately mounted BELOW the
+global `cors({ origin: allowedOrigins })`: `allowedOrigins`
+(config/cors-origins.js) already derives from `SPOKE_SITE_KEYS`
+(services/content-astro/spoke-sites.js), which includes the hub, so every
+legitimate beacon origin is already on the credentialed allowlist, and the
+request itself is a CORS "simple" request (text/plain, POST, no custom
+headers) the browser never preflights — unlike `/api/public/pest-forecast`,
+this route needs no bare `*` and no position above `cors()`.
+Body: `{"p":"/{category}/{slug}/","m":"25"|"50"|"75"|"100"|"next"}`, parsed
+and validated in try/catch (malformed JSON, a non-object, or a body over 1
+KB → 400/413, nothing written). `p` must match one of the six live blog
+categories (`lawn-care|mosquito|pest-control|seasonal|termite|tree-shrub`)
+and be ≤200 chars; `m` must be one of the five milestone values — anything
+else is 400. `site` is derived ONLY from the `Origin` header (never the
+body) via the spoke registry's own `normalizeSpokeSites` — a
+missing/`null`/unknown origin drops the beacon with 204 and writes nothing.
+Storage is the ONLY thing this route does: `blog_read_depth_daily`, one row
+per `(day, site, path, milestone)` with an `INSERT ... ON CONFLICT DO UPDATE
+SET count = count + 1`, `day` computed in SQL as the America/New_York
+calendar day. The 204 is returned before the write settles (fire-and-forget;
+a write failure is warn-logged by error kind ONLY). No cookie, IP, user
+agent, referrer, or any other per-visitor identifier is ever read, stored,
+or logged — this is a pure aggregate count, never a session/visitor
+record.)
 The route-WIDE invariants — every public route must be listed here, the
 baseline token-route guards, the `/api/reports/:token/*` write rules,
 contract-token burn, and the estimate ask / find-slots gates — live in the

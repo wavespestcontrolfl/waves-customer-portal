@@ -435,6 +435,24 @@ app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req,
   next();
 });
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
+
+// Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
+// "E2: cookie-free read-depth counts") — routes/public-blog-read-depth.js.
+// The WHOLE router (dark-gate 404, its own per-IP limiter, no-store headers,
+// capped text-body parse) is mounted here, ABOVE the global `/api/` limiter
+// and the global body parsers below, so a reader's scroll beacons can never
+// spend the budget a customer's quote-form or booking calls need, and so a
+// dark probe gets the plain unknown-route 404 before any shared middleware
+// could answer with a revealing 429 instead. It sits BELOW the global
+// cors() above (not above it, unlike /api/public/pest-forecast): every
+// beacon origin — hub + every spoke — is already on the credentialed
+// allowlist (config/cors-origins.js derives it from the same spoke-sites
+// registry this route reads), and the request itself is a CORS "simple"
+// request (text/plain, POST, no custom headers) that the browser never
+// preflights, so cors() neither blocks it nor needs bypassing here. See the
+// router file's header comment for the full reasoning.
+app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'));
+
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints

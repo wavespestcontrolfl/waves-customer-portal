@@ -38,6 +38,17 @@
       ]
     },
     {
+      "router": "server/routes/public-blog-read-depth.js",
+      "mount": "/api/public/blog-read-depth",
+      "reason": "Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27, \"E2: cookie-free read-depth counts\") — dark behind GATE_BLOG_READ_DEPTH (generic unknown-route 404 while off, before the limiter below, house dark-GATE_* contract), its own 120 req/min per-IP rate limiter applied after the gate check, no-store/noindex privacy headers stamped first, and a 1 KB capped express.text() body parse. Site is derived ONLY from the Origin header against the fixed spoke-fleet registry (never the body); a missing/null/unknown origin drops the beacon with 204 and no write. Stores only an aggregate daily count (day/site/path/milestone) — no cookie, IP, user agent, or referrer ever read, stored, or logged. See docs/public-route-contracts.md.",
+      "routes": [
+        "POST /api/public/blog-read-depth",
+        "USE /api/public/blog-read-depth (express-rate-limit({ handler#8c637dbe }))",
+        "USE /api/public/blog-read-depth (inline function#0943925b)",
+        "USE /api/public/blog-read-depth (inline function#af835d81)"
+      ]
+    },
+    {
       "router": "server/routes/stripe-webhook.js",
       "mount": "/api/stripe/webhook",
       "reason": "Stripe webhook — signature-verified in-handler (stripe.webhooks.constructEvent over the raw body; rejects when STRIPE_WEBHOOK_SECRET is unset)",
