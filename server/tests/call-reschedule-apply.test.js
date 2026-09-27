@@ -133,13 +133,30 @@ describe('planRescheduleFromCall', () => {
   });
 
   // A name matching two programs resolves only among THOSE programs, and
-  // only when exactly one of them has a visit in span.
-  test('a name matching two programs resolves on the one of them in span', () => {
+  // never picks between them: both in span is a service question, and the
+  // other program's upcoming visit is one more visit the caller may mean.
+  test('a name matching two programs never picks between them', () => {
     const base = { v2: v2(), call: call(), customer: customer(), now: NOW };
     const farTwin = visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-12-01' });
-    expect(planRescheduleFromCall({ ...base, candidates: [visit(), farTwin] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    expect(planRescheduleFromCall({ ...base, candidates: [visit(), farTwin] }))
+      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'other-program'] });
     const nearTwin = visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-09-26' });
     expect(planRescheduleFromCall({ ...base, candidates: [visit(), nearTwin] }).reason).toBe('service_needs_review');
+    const lawn = visit({ id: 'lawn-visit', service_id: 'lawn-program', service_type: 'Lawn Care Service', scheduled_date: '2026-12-01' });
+    expect(planRescheduleFromCall({ ...base, candidates: [visit(), lawn] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+  });
+
+  // A call about two services may cover a visit this path would leave
+  // unmoved while it resolves the card: secondary categories keep it in
+  // review, named or not.
+  test('a call V2 files under more than one service category stays in review', () => {
+    const base = { call: call(), customer: customer(), now: NOW, candidates: [visit()] };
+    expect(planRescheduleFromCall({ ...base, v2: v2({ service_request: { secondary_categories: ['lawn_care'] } }) }).reason)
+      .toBe('service_needs_review');
+    expect(planRescheduleFromCall({ ...base, v2: v2({ service_request: { specific_service_name: null, secondary_categories: ['lawn_care'] },
+      confidence: { primary_service_category: 0.95 } }) }).reason).toBe('service_needs_review');
+    expect(planRescheduleFromCall({ ...base, v2: v2({ service_request: { secondary_categories: [] } }) }))
+      .toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 
   // No name falls back only within V2's own category: a termite call never
@@ -165,11 +182,10 @@ describe('planRescheduleFromCall', () => {
       .toBe('service_needs_review');
   });
 
-  // V2 records only the new slot, so nearness to it cannot say which of
-  // several upcoming visits the caller meant: with more than one, only a
-  // time change on a visit's own day is taken, and only when the call brings
-  // up none of the others.
-  test('with several upcoming visits only a same-day time change is taken', () => {
+  // V2 records only the new slot, so nothing on the call says which of
+  // several upcoming visits it replaces: with more than one, the call stays
+  // in review, even for a time change on a visit's own day.
+  test('with several upcoming visits the call stays in review', () => {
     const { hasAgentCommittedEvidence } = require('../services/call-triage-flags');
     const december = visit({ id: 'dec-visit', scheduled_date: '2026-12-24' });
     const plan = (startAt, transcription, now = NOW) => {
@@ -177,51 +193,21 @@ describe('planRescheduleFromCall', () => {
       return planRescheduleFromCall({ v2: v2({ scheduling: { confirmed_start_at: startAt } }), customer: customer(),
         candidates: [visit(), december], call: call({ transcription }), now });
     };
-    // Moves to another day stay in review, whichever visit the call names:
-    // September moved to December 17 (December 24 is nearer), December moved
-    // to October 1 (September is nearer), even September named outright.
+    // Moves to another day, whichever visit is nearer: September moved to
+    // December 17, December moved to October 1.
     expect(plan('2026-12-17T12:00:00-05:00', 'Caller: Move my September 24th visit to December 17th.\nAgent: Okay.'))
       .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
     expect(plan('2026-10-01T12:00:00-04:00', 'Caller: Move my December 24th visit to October 1st.\nAgent: Okay.'))
       .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
-    expect(plan('2026-09-25T10:00:00-04:00', 'Caller: Not the December one, move September 24th to Friday.\nAgent: Okay.').reason).toBe('ambiguous_visit');
-    // A same-day time change can only mean the visit already on that day
-    // (moving another onto it would double-book the program)...
-    expect(plan('2026-09-24T12:00:00-04:00', `Agent: ${QUOTE}\nCaller: Thank you.`)).toMatchObject({ action: 'apply', visitId: VISIT_ID });
-    // ...unless the call brings up another of them, by date or by month.
-    expect(plan('2026-09-24T12:00:00-04:00', `Caller: Not the December one.\nAgent: ${QUOTE}`).reason).toBe('ambiguous_visit');
-    expect(plan('2026-09-24T12:00:00-04:00', `Caller: Keep December 24th as it is.\nAgent: ${QUOTE}`).reason).toBe('ambiguous_visit');
-    // A month and day without a year may be next year's: "March 24th" said in
-    // September brings up the March 2027 visit.
-    const march = visit({ id: 'march-visit', scheduled_date: '2027-03-24' });
-    hasAgentCommittedEvidence.mockReturnValueOnce(true);
-    expect(planRescheduleFromCall({ v2: v2(), customer: customer(), candidates: [visit(), march], now: NOW,
-      call: call({ transcription: `Caller: Move my March 24th visit to September 24th at noon.\nAgent: ${QUOTE}` }) }))
-      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'march-visit'] });
-    // A date written as numbers counts too: "12/24" brings up December.
-    hasAgentCommittedEvidence.mockReturnValueOnce(true);
-    expect(planRescheduleFromCall({ v2: v2(), customer: customer(), candidates: [visit(), december], now: NOW,
-      call: call({ transcription: `Caller: Move my 12/24 visit to September 24 at noon.\nAgent: ${QUOTE}` }) }))
+    // A time change on September 24 itself: the call may be moving December's
+    // visit onto that day, whether or not it says so in words a parser reads.
+    expect(plan('2026-09-24T12:00:00-04:00', RETIME_TRANSCRIPT))
       .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
-    // An abbreviated month counts too: "Dec. 24" brings up December.
-    hasAgentCommittedEvidence.mockReturnValueOnce(true);
-    expect(planRescheduleFromCall({ v2: v2(), customer: customer(), candidates: [visit(), december], now: NOW,
-      call: call({ transcription: `Caller: Move my Dec. 24 visit to September 24 at noon.\nAgent: ${QUOTE}` }) }))
-      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
+    expect(plan('2026-09-24T12:00:00-04:00', `Caller: Move the later quarterly visit to September 24 at noon.\nAgent: ${QUOTE}`).reason)
+      .toBe('ambiguous_visit');
     // Once September is behind today, December 24 is the only upcoming visit.
     expect(plan('2026-12-17T12:00:00-05:00', 'Caller: Move it to December 17th.\nAgent: Okay.', new Date('2026-09-25T19:00:00Z')))
       .toMatchObject({ action: 'apply', visitId: 'dec-visit' });
-  });
-
-  // A name matching two programs: the other program's upcoming visit counts
-  // as one the caller may mean, so a move to another day stays in review.
-  test('the several-visits rule covers every program the call\'s service name matched', () => {
-    const { hasAgentCommittedEvidence } = require('../services/call-triage-flags');
-    const twin = visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-12-01' });
-    hasAgentCommittedEvidence.mockReturnValueOnce(true);
-    expect(planRescheduleFromCall({ v2: v2({ scheduling: { confirmed_start_at: '2026-09-25T10:00:00-04:00' } }), customer: customer(), now: NOW,
-      candidates: [visit(), twin], call: call({ transcription: 'Caller: Can my December 1st visit be Friday instead?\nAgent: Okay.' }) }))
-      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'other-program'] });
   });
 
   // The unresolved-catalog guard covers the single-program path too: an
@@ -396,7 +382,7 @@ describe('planRescheduleFromCall', () => {
     expect(out.action).toBe('apply');
   });
 
-  test('visit selection: none, ambiguous (in span), grouped, dispatch-owned pending, out-of-span sibling', () => {
+  test('visit selection: none, ambiguous (in span), grouped, dispatch-owned pending, a second upcoming visit', () => {
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates: [], now: NOW }).reason).toBe('no_visit_on_books');
     const two = planRescheduleFromCall({
       v2: v2(), call: call(), customer: customer(), now: NOW,
@@ -405,27 +391,22 @@ describe('planRescheduleFromCall', () => {
     expect(two).toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, '70000000-0000-4000-8000-000000000002'] });
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates: [visit({ visit_id: 'v1' })], now: NOW }).reason).toBe('grouped_visit');
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates: [visit({ source_action: 'ai_call_pipeline_followup' })], now: NOW }).reason).toBe('dispatch_owned_pending');
-    // A same-program sibling MONTHS out no longer manufactures ambiguity —
-    // proximity is judged first (the bug fix): a customer with several future
-    // occurrences of the same recurring program resolves on the one actually
-    // near the target instead of always landing on ambiguous_visit.
+    // A same-program sibling months out still counts: the call names the new
+    // slot, not which visit it replaces, so a second upcoming visit keeps it
+    // in review.
     const farSibling = planRescheduleFromCall({
       v2: v2(), call: call({ transcription: RETIME_TRANSCRIPT }), customer: customer(), now: NOW,
       candidates: [visit(), visit({ id: '70000000-0000-4000-8000-000000000003', scheduled_date: '2026-12-17', window_start: '14:00:00', window_end: '15:00:00' })],
     });
-    expect(farSibling).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    expect(farSibling).toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, '70000000-0000-4000-8000-000000000003'] });
   });
 
-  // The described bug: loadCandidates has no upper date bound, so a customer
-  // on a recurring plan with several quarterly visits on the books was ALWAYS
-  // ambiguous_visit before the span-first fix, even though only one of those
-  // visits was ever near the agreed date.
-  test('a customer with several quarterly visits on the books resolves on the one in span', () => {
+  // Only visits from today on are ones the call could mean: a quarterly
+  // customer whose next visit is the only one ahead resolves on it.
+  test('visits behind today do not make the one upcoming visit ambiguous', () => {
     const candidates = [
       visit({ id: 'q-past', scheduled_date: '2026-06-24' }),
       visit({ id: VISIT_ID, scheduled_date: '2026-09-24' }),
-      visit({ id: 'q-next', scheduled_date: '2026-12-24' }),
-      visit({ id: 'q-after', scheduled_date: '2027-03-24' }),
     ];
     expect(planRescheduleFromCall({ v2: v2(), call: call({ transcription: RETIME_TRANSCRIPT }), customer: customer(), candidates, now: NOW }))
       .toMatchObject({ action: 'apply', visitId: VISIT_ID });

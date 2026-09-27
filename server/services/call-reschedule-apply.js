@@ -29,13 +29,12 @@
  *     owns that). An explicit service name that matches nothing stays in
  *     review. No name falls back to the property's in-span visit of V2's own
  *     confident category (pest, mosquito or lawn only); a name matching
- *     several programs resolves only among those; two programs in span, or
- *     an in-span row whose catalog identity no longer resolves, stays in
- *     review. With more than one upcoming visit the call could mean, only a
- *     time change on the visit's own day is taken, and only when the call
- *     brings up none of the others. A
- *     grouped visit needs the whole-visit mover's
- *     disclosure a phone call never gave
+ *     several programs resolves only among those; two programs in span, a
+ *     call V2 files under more than one service category, or a row whose
+ *     catalog identity no longer resolves, stays in review. So does more
+ *     than one upcoming visit the call could mean: V2 records the new slot,
+ *     not which visit it replaces. A grouped visit needs the whole-visit
+ *     mover's disclosure a phone call never gave
  *   - the pipeline did not itself create an appointment from this call
  *   - the customer has no open portal reschedule request for that same
  *     appointment — that is a staff-owned track with its own preferred date,
@@ -76,7 +75,6 @@ const { lockTriageCall } = require('../utils/triage-locks');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { hasAgentCommittedEvidence, confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
-const { exactDatesNamed, monthsReferenced } = require('./call-time-mentions');
 const { addressKey } = require('./customer-properties');
 const { phoneMatchDigits } = require('../utils/phone');
 const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
@@ -88,9 +86,8 @@ const { createHash } = require('crypto');
 const logger = require('./logger');
 
 const MIN_SCHEDULING_CONFIDENCE = 0.8;
-// A visit is a candidate only within this span of the target date. Among
-// several upcoming visits, nearness to the destination alone never picks one:
-// only a same-day time change is taken then (planRescheduleFromCall).
+// A visit is a candidate only within this span of the target date. Nearness
+// never picks among several upcoming visits (planRescheduleFromCall).
 const CANDIDATE_SPAN_DAYS = 14;
 const LIVE_STATUSES = ['pending', 'confirmed', 'rescheduled'];
 // Automatic moves take ONLY these. A row parked at 'rescheduled' is out of
@@ -201,17 +198,6 @@ function authoritativeServiceName(row) {
   return row.service_id ? row.catalog_service_name : row.service_type;
 }
 
-// Does the call bring up any of these visits: its exact date (a month and
-// day, today, tomorrow), or its month named without a day ("the December one
-// is fine")?
-function otherVisitsMentioned(call, others) {
-  if (!others.length) return false;
-  const ctx = { transcript: call.transcription, callStartedAt: call.created_at };
-  const named = exactDatesNamed(ctx);
-  const looseMonths = monthsReferenced(ctx);
-  return others.some((row) => named.has(dateOnly(row.scheduled_date)) || looseMonths.has(dateOnly(row.scheduled_date).slice(0, 7)));
-}
-
 /**
  * Pure decision. `candidates` are the customer's live scheduled_services
  * rows (already filtered to LIVE_STATUSES by the loader); `now` is the
@@ -283,6 +269,11 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
       return key === targetKey;
     });
     if (!atProperty.length) return skip('no_visit_on_books');
+    // A call V2 files under more than one service ("move my pest and lawn
+    // visits to Thursday") may cover a visit this path would leave unmoved
+    // while it resolves the call's card: review, named or not.
+    const secondary = v2.service_request?.secondary_categories;
+    if (Array.isArray(secondary) ? secondary.length > 0 : secondary != null) return skip('service_needs_review');
     // Match the named service BEFORE proximity. A different program near the
     // destination cannot stand in for the requested visit outside the span.
     const namedServices = new Set(serviceNameCandidates(v2.service_request?.specific_service_name)
@@ -329,17 +320,13 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     const inSpan = inSpanOf(pool);
     if (new Set(inSpan.map(programOf)).size > 1) return skip('service_needs_review');
     if (inSpan.length > 1) return skip('ambiguous_visit', { candidateIds: inSpan.map((r) => r.id) });
-    // V2 records only the new slot, so nearness to it cannot say WHICH of
-    // several upcoming visits the caller meant ("move December to October 1"
-    // would pick September). With more than one, only a time change on a
-    // visit's own day is taken: a program never holds two visits on one day,
-    // so the visit already on the destination date is the only one it can
-    // mean, unless the call brings up another of them.
+    // V2 records only the new slot, never WHICH visit it replaces, so nothing
+    // on the call ties it to one of several upcoming visits: nearness picks
+    // September for "move December to October 1", and even a time change on
+    // the destination day can mean another visit ("move the later one to the
+    // 24th at noon"). Only a sole upcoming visit is taken.
     const upcoming = pool.filter(isUpcoming);
-    if (inSpan.length === 1 && upcoming.length > 1
-      && (dateOnly(inSpan[0].scheduled_date) !== newDate || otherVisitsMentioned(call, upcoming.filter((row) => row.id !== inSpan[0].id)))) {
-      return skip('ambiguous_visit', { candidateIds: upcoming.map((r) => r.id) });
-    }
+    if (upcoming.length > 1) return skip('ambiguous_visit', { candidateIds: upcoming.map((r) => r.id) });
     nearby = inSpan; // invariant preserved: length is 0 or 1 here
   }
   if (nearby.length === 0) return skip('no_visit_on_books');
