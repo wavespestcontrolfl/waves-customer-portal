@@ -138,13 +138,14 @@ async function balanceReminderVisitRefusal(meta, database) {
   if (meta.appointment_rendered_on !== etDateString()) return refused('balance-reminder-copy-stale');
   const visit = await database('scheduled_services')
     .where({ id: meta.appointment_id, customer_id: meta.customer_id })
-    .first('status', 'scheduled_date', 'service_type');
+    .first('status', 'scheduled_date', 'service_type', 'is_recurring');
   if (!visit || !['pending', 'confirmed'].includes(visit.status)
     || dateOnlyString(visit.scheduled_date) !== meta.appointment_date
     || String(visit.service_type || 'service') !== meta.appointment_service_type) {
     return refused('balance-reminder-visit-changed');
   }
   if (meta.source_entry_point === 'previsit_balance_reminder') {
+    if (visit.is_recurring !== true) return refused('previsit-visit-no-longer-recurring');
     const payer = await require('../payer').resolveForInvoice({
       database, customerId: meta.customer_id, scheduledServiceId: meta.appointment_id, throwOnError: true,
     });
@@ -179,7 +180,12 @@ async function previsitQuoteRefusal(meta, database) {
   const ids = meta.invoice_ids;
   if (!reservation || !Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || !id)
     || new Set(ids).size !== ids.length) return refused('previsit-quote-missing');
-  const invoices = ids.length ? await database('invoices').whereIn('id', ids).select('*') : [];
+  // Reuse the initial selector so a due-date extension or a reassignment
+  // away from a recurring visit removes the invoice from this rail.
+  const invoices = ids.length
+    ? (await require('../previsit-balance-reminder').overdueRecurringInvoices(meta.customer_id, new Date(), database))
+      .filter((invoice) => ids.includes(String(invoice.id)))
+    : [];
   if (invoices.length !== ids.length) return refused('previsit-quote-changed');
   const { isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer, invoiceAmountDue } = require('../invoice-helpers');
   let cents = await require('../previsit-balance-reminder').currentDuesAllowanceCents(meta.customer_id, database);
@@ -246,4 +252,4 @@ async function billingEmailReplayEligible(meta, database = db) {
 
 // Producer-state eligibility only. Recipient resolution and provider-boundary
 // send authorization remain the caller's responsibility when this is wired.
-module.exports = { billingEmailReplayEligible };
+module.exports = { billingEmailReplayEligible, balanceReminderVisitRefusal };

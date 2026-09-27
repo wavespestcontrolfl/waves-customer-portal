@@ -145,13 +145,13 @@ const OVERDUE_AFTER_DAYS = 7;
 // Past-due invoices that belong to the recurring relationship: linked to a
 // recurring scheduled visit, homeowner-billed (payer AR excluded). One-time
 // invoice debt deliberately never counts here.
-async function overdueRecurringInvoices(customerId, now = new Date()) {
+async function overdueRecurringInvoices(customerId, now = new Date(), database = db) {
   const dueCutoff = new Date(now.getTime() - OVERDUE_AFTER_DAYS * 86400000);
   // The follow-up engine records its sends on
   // invoice_followup_sequences.last_touch_at, NOT invoices.last_reminder_at
   // — the recent-touch guard must read the real timestamp or the 10:00
   // dun and this 10:05 sweep double-text the same invoice (Codex r4).
-  return db('invoices')
+  return database('invoices')
     .join('scheduled_services as ss', 'invoices.scheduled_service_id', 'ss.id')
     .leftJoin('invoice_followup_sequences as ifs', 'ifs.invoice_id', 'invoices.id')
     .where('invoices.customer_id', customerId)
@@ -288,7 +288,7 @@ async function deliverExplicitPrevisitReminder({ visit, amount, duesCents, expli
   const eventKey = previsitEventKey(visit);
   const invoiceIds = quotedInvoices.map((inv) => inv.id);
   const preSendCheck = quotedBalanceStillOwed({
-    customerId: visit.customer_id, scheduledServiceId: visit.id, quotedInvoices, quotedDuesCents: duesCents,
+    visit, quotedInvoices, quotedDuesCents: duesCents,
   });
   let result;
   try {
@@ -343,16 +343,23 @@ async function currentDuesAllowanceCents(customerId, database = db, now = new Da
 // overdue invoice must still be collectible, self-pay and owe exactly what
 // was quoted, and the late dues must still be owed. Any change holds the leg
 // (retryable) so the next sweep re-quotes from current state.
-function quotedBalanceStillOwed({ customerId, scheduledServiceId, quotedInvoices, quotedDuesCents }) {
+function quotedBalanceStillOwed({ visit, quotedInvoices, quotedDuesCents }) {
+  const customerId = visit.customer_id;
+  const visitPin = {
+    source_entry_point: TEMPLATE_KEY,
+    customer_id: customerId,
+    appointment_id: visit.id,
+    appointment_date: dateOnlyString(visit.scheduled_date),
+    appointment_service_type: visit.service_type || 'service',
+    appointment_rendered_on: etDateString(),
+  };
   const changed = (reason) => ({ ok: false, code: 'PREVISIT_QUOTE_CHANGED', reason, retryable: true });
   const recheck = async (database) => {
-    const payer = await require('./payer').resolveForInvoice({
-      database, customerId, scheduledServiceId, throwOnError: true,
-    });
-    if (payer.payerId) return changed('the visit is now payer billed');
+    const visitRefusal = await require('./messaging/billing-email-replay-eligibility')
+      .balanceReminderVisitRefusal(visitPin, database);
+    if (visitRefusal) return changed(visitRefusal.reason);
     const helpers = require('./invoice-helpers');
-    const ids = quotedInvoices.map((inv) => inv.id);
-    const live = ids.length ? await database('invoices').whereIn('id', ids) : [];
+    const live = quotedInvoices.length ? await overdueRecurringInvoices(customerId, new Date(), database) : [];
     for (const quoted of quotedInvoices) {
       const row = live.find((inv) => String(inv.id) === String(quoted.id));
       if (!row || String(row.customer_id) !== String(customerId)
