@@ -1,0 +1,183 @@
+// Reschedule-only whole-call agreement evidence. Fixtures are fictitious
+// (synthetic transcript lines, no real customer content).
+const { rescheduleAgreementEvidence } = require('../services/call-reschedule-evidence');
+
+// Wed Sep 23, 2026, 3pm ET — a fixed call-started anchor so relative day
+// words ("tomorrow", "Thursday", "Monday") resolve predictably.
+const CALL_STARTED_AT = '2026-09-23T19:00:00Z';
+const THURSDAY_2PM = '2026-09-24T14:00:00-04:00'; // the day after the call, 2pm ET
+
+function evidence(transcript, confirmedStartAt = THURSDAY_2PM) {
+  return rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStartedAt: CALL_STARTED_AT });
+}
+
+describe('rescheduleAgreementEvidence', () => {
+  test('day and hour agreed in separate exchanges both resolve to the slot', () => {
+    const r = evidence('Caller: Can we move my visit?\nAgent: Would Thursday work for you?\nCaller: Thursday is fine.\nAgent: Great, we will do two o clock then.');
+    expect(r).toMatchObject({ ok: true, reason: 'agreement_established' });
+  });
+
+  test('"tomorrow" plus a later hour in the same agent turn', () => {
+    const r = evidence('Caller: Can we do tomorrow?\nAgent: Sure, tomorrow at 2 PM works. We will see you then.');
+    expect(r.ok).toBe(true);
+  });
+
+  test('a spelled-out hour ("at two") resolves with business-hours inference', () => {
+    const r = evidence('Caller: Can you come by Thursday?\nAgent: We will see you Thursday at two.');
+    expect(r.ok).toBe(true);
+  });
+
+  test('"we will see you Monday at 11"', () => {
+    const r = evidence('Caller: Can we push it to Monday?\nAgent: We will see you Monday at 11.', '2026-09-28T11:00:00-04:00');
+    expect(r.ok).toBe(true);
+  });
+
+  test('a range reference counts its START as the hour ("mark it to two to four")', () => {
+    const r = evidence('Caller: Can you come Thursday afternoon?\nAgent: We will mark it to two to four on Thursday.');
+    expect(r.ok).toBe(true);
+  });
+
+  test('a later, different hour anywhere in the call fails closed', () => {
+    const r = evidence('Caller: Can we do Thursday at two?\nAgent: We will see you Thursday at two. Actually, let us do it at three instead.');
+    expect(r).toMatchObject({ ok: false, reason: 'last_hour_ref_mismatch' });
+  });
+
+  test('a later, different day anywhere in the call fails closed', () => {
+    const r = evidence('Caller: Can we do Thursday at two?\nAgent: We will see you Thursday at two. Actually, Friday works better for us.');
+    expect(r).toMatchObject({ ok: false, reason: 'last_day_ref_mismatch' });
+  });
+
+  test('a hedge AFTER the agreement fails closed, but the same hedge BEFORE it is fine', () => {
+    const after = evidence('Caller: Can we do Thursday at two?\nAgent: We will see you Thursday at two.\nAgent: Let me check on that.');
+    expect(after).toMatchObject({ ok: false, reason: 'hedge_on_slot' });
+    const before = evidence('Caller: Let me check on that.\nAgent: We will see you Thursday at two.');
+    expect(before.ok).toBe(true);
+  });
+
+  test('an agent question with no later answer fails', () => {
+    const r = evidence('Caller: Can we move it?\nAgent: Would Thursday at two work for you?');
+    expect(r).toMatchObject({ ok: false, reason: 'no_affirming_agent_turn' });
+  });
+
+  test('a caller-only "we will see you tomorrow" with no agent affirmation fails', () => {
+    const r = evidence('Caller: We will see you tomorrow at two then.\nAgent: Thanks for calling.');
+    expect(r).toMatchObject({ ok: false, reason: 'no_affirming_agent_turn' });
+  });
+
+  test('an availability condition makes the slot conditional, but an ordinary closer does not', () => {
+    const conditional = evidence('Caller: Can we do Thursday at two?\nAgent: If we have space. We will see you Thursday at two.');
+    expect(conditional).toMatchObject({ ok: false, reason: 'hedge_on_slot' });
+    const closer = evidence('Caller: Can we do Thursday at two?\nAgent: We will see you Thursday at two. If you need anything, give us a call.');
+    expect(closer.ok).toBe(true);
+  });
+
+  // Each day kind is found in its own pass; last-mention-wins must still
+  // follow the order the words were spoken in.
+  test('the last day and hour are the last ones SPOKEN, not the last kind parsed', () => {
+    const notFriday = 'Caller: Can we do Friday at two?\nAgent: Not Friday, we will see you tomorrow at two.';
+    expect(evidence(notFriday, '2026-09-25T14:00:00-04:00')).toMatchObject({ ok: false, reason: 'last_day_ref_mismatch' });
+    expect(evidence(notFriday).ok).toBe(true);
+    const noonNotEleven = 'Caller: Can we do Thursday?\nAgent: We will see you Thursday at 11, no, make it noon.';
+    expect(evidence(noonNotEleven, '2026-09-24T12:00:00-04:00').ok).toBe(true);
+    expect(evidence(noonNotEleven, '2026-09-24T11:00:00-04:00')).toMatchObject({ ok: false, reason: 'last_hour_ref_mismatch' });
+  });
+
+  test('a refusal after the agreement undoes it; refusing another day first does not', () => {
+    const withdrawn = evidence("Caller: Can we do Thursday at two?\nAgent: We will see you Thursday at two.\nCaller: Actually never mind, that won't work.");
+    expect(withdrawn).toMatchObject({ ok: false, reason: 'slot_refused' });
+    const otherDayFirst = evidence('Caller: Friday or Thursday at two?\nAgent: Friday does not work, but we will see you Thursday at two.');
+    expect(otherDayFirst.ok).toBe(true);
+  });
+
+  // A slot is always on the hour, so a time spoken with minutes never
+  // grounds it: 2:30 is not 2:00.
+  test('an hour spoken with minutes never grounds an on-the-hour slot', () => {
+    for (const said of ['at 2:30', 'at two thirty', 'at half past two', 'at 2:45 PM']) {
+      expect(evidence(`Caller: Can we do Thursday?\nAgent: We will see you Thursday ${said}.`))
+        .toMatchObject({ ok: false, reason: 'last_hour_ref_mismatch' });
+    }
+    expect(evidence('Caller: Can we do Thursday?\nAgent: We will see you Thursday at 2:00 PM.').ok).toBe(true);
+  });
+
+  test('a courtesy word after a refusal does not restore the agreement, and "let me see" is not an agreement', () => {
+    const courtesyAfterRefusal = evidence("Caller: Can we do Thursday at two?\nAgent: We will see you Thursday at two. Actually that won't work, alright.");
+    expect(courtesyAfterRefusal).toMatchObject({ ok: false, reason: 'slot_refused' });
+    const stillLooking = evidence('Caller: Can we do Thursday at two?\nAgent: Okay, let me see what I have for Thursday at two.');
+    expect(stillLooking).toMatchObject({ ok: false, reason: 'hedge_on_slot' });
+  });
+
+  // "Thursday at two won't work" then a polite "okay" is not an agreement.
+  test('a refusal of the slot itself, politely acknowledged, is not an agreement', () => {
+    const refusedThenOkay = evidence("Caller: Thursday at two won't work for me.\nAgent: Okay, no problem.");
+    expect(refusedThenOkay).toMatchObject({ ok: false, reason: 'slot_refused' });
+  });
+
+  // "I cannot make it Thursday at two" refuses the slot even though the refusal
+  // comes first; "Friday doesn't work, but ... Thursday at two" refuses Friday.
+  test('a refusal in the clause stating the slot fails, one in an earlier clause does not', () => {
+    expect(evidence('Caller: I cannot make it Thursday at two.\nAgent: Okay, no problem.'))
+      .toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence('Caller: Friday or Thursday at two?\nAgent: Friday does not work, but we will see you Thursday at two.').ok).toBe(true);
+  });
+
+  // "2pm" written together is still an hour: otherwise the caller's earlier
+  // "10" would be the last hour mentioned.
+  test('an hour written with its am/pm attached is still the last hour', () => {
+    const said = 'Caller: Can you do Thursday at 10?\nAgent: No, we will see you Thursday at 2pm.';
+    expect(evidence(said, '2026-09-24T10:00:00-04:00')).toMatchObject({ ok: false, reason: 'last_hour_ref_mismatch' });
+    expect(evidence(said).ok).toBe(true);
+  });
+
+  // A condition attached to the slot itself, however politely acknowledged.
+  test('an availability condition stated with the slot fails even after courtesies', () => {
+    expect(evidence('Agent: If we have space, Thursday at two.\nCaller: Thank you.\nAgent: No problem.'))
+      .toMatchObject({ ok: false, reason: 'hedge_on_slot' });
+  });
+
+  // "two ten" is 2:10, never an on-the-hour 2:00.
+  test('an hour followed by any spoken minutes is off the hour', () => {
+    for (const said of ['at two ten', 'at 2 10', 'at two oh five']) {
+      expect(evidence(`Caller: Can we do Thursday?\nAgent: We will see you Thursday ${said}.`))
+        .toMatchObject({ ok: false, reason: 'last_hour_ref_mismatch' });
+    }
+  });
+
+  // A later "great" about something else is not agreeing to the slot: the
+  // first agent turn after it must affirm it, and a new question changes the subject.
+  test('the first agent turn after the slot must affirm it, not a later answer on another topic', () => {
+    expect(evidence("Caller: Can we do Thursday at two?\nAgent: Would you like text reminders too?\nCaller: Sure.\nAgent: Great, I'll set that up."))
+      .toMatchObject({ ok: false, reason: 'no_affirming_agent_turn' });
+    // The agent may propose the slot as a question and affirm after the caller accepts.
+    expect(evidence('Agent: So you want to mark it Thursday two to four?\nCaller: That would be so much better.\nAgent: No worries, we will mark it.').ok).toBe(true);
+  });
+
+  // A bare "okay" that moves on to something else confirms nothing; a short
+  // yes to the slot does.
+  test('a bare yes confirms only when it states the slot or is nothing but a short yes', () => {
+    expect(evidence('Caller: Can we do Thursday at two?\nAgent: Okay, we also have a special on mosquito service this month.'))
+      .toMatchObject({ ok: false, reason: 'no_affirming_agent_turn' });
+    expect(evidence('Caller: So I will see you Thursday at two, correct?\nAgent: All right. Yep.').ok).toBe(true);
+    expect(evidence('Caller: Can we do Thursday?\nAgent: Okay, Thursday at two.').ok).toBe(true);
+  });
+
+  // Words that are Object.prototype keys are just words, not numbers.
+  test('a word like "constructor" beside an hour is not a number', () => {
+    expect(evidence('Caller: The constructor says Thursday at two works.\nAgent: We will see you Thursday at two.').ok).toBe(true);
+  });
+
+  // Structural fail-closed guards, no fixture speaks the slot at all.
+  test('an unlabeled transcript line fails closed rather than trusting turn order', () => {
+    const r = evidence('Hello, this is a call with no speaker labels.');
+    expect(r).toMatchObject({ ok: false, reason: 'unparseable_transcript' });
+  });
+
+  test('no day or hour reference anywhere in the call fails closed', () => {
+    const r = evidence('Caller: Thanks for calling.\nAgent: You are welcome, have a good day.');
+    expect(r).toMatchObject({ ok: false, reason: 'no_day_ref_in_call' });
+  });
+
+  test('an unparseable confirmed_start_at fails closed', () => {
+    const r = evidence('Caller: Can we do Thursday at two?\nAgent: We will see you Thursday at two.', 'not-a-real-timestamp');
+    expect(r).toMatchObject({ ok: false, reason: 'unparseable_or_out_of_range_slot' });
+  });
+});

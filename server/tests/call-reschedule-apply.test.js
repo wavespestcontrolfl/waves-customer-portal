@@ -6,12 +6,6 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../routes/admin-dispatch', () => ({ applySeriesMoveEffects: jest.fn().mockResolvedValue({}) }));
 jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue({}) }));
 jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jest.fn().mockResolvedValue({}) }));
-// Pass-through by default; one selection test stubs it to reach a target
-// the strict evidence window cannot ground yet.
-jest.mock('../services/call-triage-flags', () => {
-  const actual = jest.requireActual('../services/call-triage-flags');
-  return { ...actual, hasAgentCommittedEvidence: jest.fn(actual.hasAgentCommittedEvidence) };
-});
 jest.mock('../config/feature-gates', () => {
   const actual = jest.requireActual('../config/feature-gates');
   return { ...actual, isEnabled: jest.fn((name) => name === 'callAgentCommitTrustedLabels' || actual.isEnabled(name)) };
@@ -179,18 +173,16 @@ describe('planRescheduleFromCall', () => {
   // several upcoming visits it replaces: with more than one, the call stays
   // in review, even for a time change on a visit's own day.
   test('with several upcoming visits the call stays in review', () => {
-    const { hasAgentCommittedEvidence } = require('../services/call-triage-flags');
     const december = visit({ id: 'dec-visit', scheduled_date: '2026-12-24' });
-    const plan = (startAt, transcription, now = NOW) => {
-      hasAgentCommittedEvidence.mockReturnValueOnce(true);
-      return planRescheduleFromCall({ v2: v2({ scheduling: { confirmed_start_at: startAt } }), customer: customer(),
-        candidates: [visit(), december], call: call({ transcription }), now });
-    };
+    const plan = (startAt, transcription, { now = NOW, candidates = [visit(), december] } = {}) => planRescheduleFromCall({
+      v2: v2({ scheduling: { confirmed_start_at: startAt } }), customer: customer(), candidates, call: call({ transcription }), now });
+    const DEC17 = 'Agent: We will see you on Thursday December 17 at 12 PM.';
+    const OCT1 = 'Agent: We will see you on Thursday October 1 at 12 PM.';
     // Moves to another day, whichever visit is nearer: September moved to
     // December 17, December moved to October 1.
-    expect(plan('2026-12-17T12:00:00-05:00', 'Caller: Move my September 24th visit to December 17th.\nAgent: Okay.'))
+    expect(plan('2026-12-17T12:00:00-05:00', `Caller: Move my September 24th visit to December 17th at noon.\n${DEC17}`))
       .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
-    expect(plan('2026-10-01T12:00:00-04:00', 'Caller: Move my December 24th visit to October 1st.\nAgent: Okay.'))
+    expect(plan('2026-10-01T12:00:00-04:00', `Caller: Move my December 24th visit to October 1st at noon.\n${OCT1}`))
       .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
     // A time change on September 24 itself: the call may be moving December's
     // visit onto that day, whether or not it says so in words a parser reads.
@@ -199,7 +191,7 @@ describe('planRescheduleFromCall', () => {
     expect(plan('2026-09-24T12:00:00-04:00', `Caller: Move the later quarterly visit to September 24 at noon.\nAgent: ${QUOTE}`).reason)
       .toBe('ambiguous_visit');
     // Once September is behind today, December 24 is the only upcoming visit.
-    expect(plan('2026-12-17T12:00:00-05:00', 'Caller: Move it to December 17th.\nAgent: Okay.', new Date('2026-09-25T19:00:00Z')))
+    expect(plan('2026-12-17T12:00:00-05:00', `Caller: Move it to December 17th at noon.\n${DEC17}`, { now: new Date('2026-09-25T19:00:00Z') }))
       .toMatchObject({ action: 'apply', visitId: 'dec-visit' });
   });
 
@@ -306,12 +298,17 @@ describe('planRescheduleFromCall', () => {
     expect(planRescheduleFromCall({ ...args, customer: customer({ phone: '+445555550101' }) }).reason).toBe('caller_phone_not_on_file');
   });
 
-  test('agent evidence must ground to the same slot and an affirmative agent turn', () => {
+  // The automatic path's commitment gate is call-reschedule-evidence.js's
+  // whole-call rescheduleAgreementEvidence (its parsing is covered in
+  // call-reschedule-evidence.test.js); this checks the WIRING.
+  test('the whole-call agreement must establish the exact slot with an affirming agent turn', () => {
     const args = { v2: v2(), call: call(), customer: customer(), candidates: [visit()], now: NOW };
-    expect(planRescheduleFromCall({ ...args, v2: v2({ evidence: [] }) }).reason).toBe('ungrounded_agent_commitment');
-    expect(planRescheduleFromCall({ ...args, call: call({ transcription: `Caller: ${QUOTE}\nAgent: We will check.` }) }).reason).toBe('ungrounded_agent_commitment');
-    expect(planRescheduleFromCall({ ...args, call: call({ transcription: `Caller: Can you come?\nAgent: If we have space. ${QUOTE}` }) }).reason).toBe('ungrounded_agent_commitment');
-    expect(planRescheduleFromCall({ ...args, v2: v2({ scheduling: { confirmed_start_at: '2026-09-24T13:00:00-04:00' } }) }).reason).toBe('ungrounded_agent_commitment');
+    expect(planRescheduleFromCall({ ...args, call: call({ transcription: `Caller: ${QUOTE}\nAgent: We will check.` }) }).reason).toBe('reschedule_not_agreed');
+    expect(planRescheduleFromCall({ ...args, call: call({ transcription: `Caller: Can you come?\nAgent: If we have space. ${QUOTE}` }) }).reason).toBe('reschedule_not_agreed');
+    // The call agreed noon; V2 says 1 PM.
+    expect(planRescheduleFromCall({ ...args, v2: v2({ scheduling: { confirmed_start_at: '2026-09-24T13:00:00-04:00' } }) }).reason).toBe('reschedule_not_agreed');
+    // V2's agent_committed_booking flag and evidence array are no longer read here.
+    expect(planRescheduleFromCall({ ...args, v2: v2({ evidence: [], scheduling: { agent_committed_booking: false } }) })).toMatchObject({ action: 'apply' });
     expect(planRescheduleFromCall({ ...args, v2: v2({ scheduling: { confirmed_start_at: '2026-09-24T12:00:00-05:00' } }) }).reason).toBe('inconsistent_start_offset');
   });
 
@@ -353,7 +350,6 @@ describe('planRescheduleFromCall', () => {
   test.each([
     ['not_a_reschedule', { scheduling: { status: 'confirmed' } }],
     ['cancel_not_automated', { scheduling: { status: 'canceled' } }],
-    ['agent_did_not_commit', { scheduling: { agent_committed_booking: false } }],
     ['no_confirmed_start', { scheduling: { confirmed_start_at: null } }],
     ['low_scheduling_confidence', { confidence: { scheduling_window: MIN_SCHEDULING_CONFIDENCE - 0.01 } }],
     ['caller_not_decision_maker', { caller: { decision_maker_present: false } }],

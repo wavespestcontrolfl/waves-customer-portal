@@ -14,9 +14,15 @@
  *   - the caller is a matched, trusted customer: call_log.customer_id is
  *     set AND the call's counterpart number is that customer's phone on file
  *   - V2 extraction is valid, not spam, not voicemail, scheduling.status is
- *     reschedule_requested, the agent committed the booking, and the
- *     scheduling_window confidence clears MIN_SCHEDULING_CONFIDENCE, and
- *     the existing trusted-speaker-label gate is enabled
+ *     reschedule_requested, the scheduling_window confidence clears
+ *     MIN_SCHEDULING_CONFIDENCE, and the existing trusted-speaker-label gate
+ *     is enabled
+ *   - the AUTOMATIC path (not humanOverride) needs call-reschedule-evidence.js's
+ *     rescheduleAgreementEvidence to find a real whole-call agreement on the
+ *     exact confirmed_start_at slot; this REPLACES the V2
+ *     agent_committed_booking flag and hasAgentCommittedEvidence there.
+ *     humanOverride keeps requiring agent_committed_booking !== true and no
+ *     confirmed_start_at
  *   - confirmed_start_at is a real future instant exactly on the hour
  *   - exactly ONE upcoming live visit (pending or confirmed — a row parked
  *     at 'rescheduled' awaits a real rebook and stays a card; not dispatch-
@@ -71,7 +77,8 @@ const { etParts, etDateString, addETDays, etCalendarDayOf, deriveWindowEnd, wind
 const { lockTriageCall } = require('../utils/triage-locks');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
-const { hasAgentCommittedEvidence, confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
+const { confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
+const { rescheduleAgreementEvidence } = require('./call-reschedule-evidence');
 const { addressKey } = require('./customer-properties');
 const { phoneMatchDigits } = require('../utils/phone');
 const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
@@ -205,7 +212,6 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   if (scheduling.status !== 'reschedule_requested') return skip('not_a_reschedule');
   if (humanOverride && scheduling.agent_committed_booking === true) return skip('agent_committed_booking');
   if (humanOverride && scheduling.confirmed_start_at) return skip('confirmed_start_supersedes_proposal');
-  if (!humanOverride && scheduling.agent_committed_booking !== true) return skip('agent_did_not_commit');
   const targetStart = humanOverride ? scheduling.proposed_start_at : scheduling.confirmed_start_at;
   if (!targetStart) return skip(humanOverride ? 'no_proposed_start' : 'no_confirmed_start');
   const confidence = v2.confidence?.scheduling_window;
@@ -233,7 +239,14 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   const onHour = humanOverride ? parts.minute === 0 && target.getUTCSeconds() === 0 : confirmedStartOnTheHour(scheduling.confirmed_start_at);
   if (!onHour || target.getUTCMilliseconds() !== 0) return skip('off_grid_start_time');
   if (!humanOverride && !transcriptLabelsTrusted) return skip('untrusted_speaker_labels');
-  if (!humanOverride && !hasAgentCommittedEvidence(v2, call.transcription, call.created_at)) return skip('ungrounded_agent_commitment');
+  // Replaces BOTH the V2 agent_committed_booking flag (still checked above for
+  // humanOverride only) and hasAgentCommittedEvidence on this automatic path:
+  // a replay of 1,089 calls showed the flag under-scores real agreements
+  // badly enough that this service never moved a visit. hasAgentCommittedEvidence
+  // itself is untouched; it still grounds the NEW-booking path.
+  if (!humanOverride && !rescheduleAgreementEvidence({ transcript: call.transcription, confirmedStartAt: scheduling.confirmed_start_at, callStartedAt: call.created_at }).ok) {
+    return skip('reschedule_not_agreed');
+  }
   const newDate = etDateString(target);
   const newStart = `${pad2(parts.hour)}:${pad2(parts.minute)}`;
   if (etWallClockOfConfirmedStart(targetStart) !== `${newDate}T${newStart}`) return skip('inconsistent_start_offset');
