@@ -258,7 +258,7 @@ describe('invoice follow-up email sidecar', () => {
     ['operator-initiated', { email_enabled: false, invoice_channels: ['sms'] }, { operator: true }, null],
     ['unreadable authority context', {}, { readFailure: true }, 'billing_email_context_unavailable'],
     ['no recipient email at handoff', { email_enabled: true, invoice_channels: ['email', 'sms'] }, { handoff: noRecipient }, 'missing_email'],
-  ])('%s preserves email opt-out, SMS delivery, and sequence progress', async (_label, prefs, options, emailReason) => {
+  ])('%s: the email outcome, SMS delivery, and sequence progress', async (_label, prefs, options, emailReason) => {
     const emailSent = emailReason === null;
     // A send or a handoff refusal writes its own email audit row first.
     const reachedHandoff = emailSent || !!options.handoff;
