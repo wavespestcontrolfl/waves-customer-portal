@@ -187,9 +187,11 @@ describe('FastCompleteSheet', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
     expect(await screen.findByText(/couldn't confirm it saved/)).toBeTruthy();
 
-    // Edits are locked until the attempt resolves.
+    // Edits, closing and switching forms are locked until the attempt resolves.
     const roaches = screen.getByRole('button', { name: 'Roaches' });
     expect(roaches.disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Full form' }).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(completeBodies(request)).toHaveLength(2));
     const [first, second] = completeBodies(request);
@@ -219,6 +221,30 @@ describe('FastCompleteSheet', () => {
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Next stop' }));
     expect(onCompleted).toHaveBeenCalled();
+  });
+
+  test('a partly saved earlier attempt (resume payload mismatch) sends the tech to the full form', async () => {
+    const request = makeRequest();
+    const base = request.getMockImplementation();
+    request.mockImplementation(async (path, options) => {
+      if (path.endsWith('/complete')) {
+        request.calls.push({ path, options });
+        throw Object.assign(new Error('Resume payload mismatch.'), { status: 409, code: 'completion_resume_payload_mismatch' });
+      }
+      return base(path, options);
+    });
+    const onFullForm = vi.fn();
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onFullForm={onFullForm} />);
+
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+
+    expect(await screen.findByText(/Open the full form to finish it/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Complete re-service' }).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Full form' }));
+    expect(onFullForm).toHaveBeenCalled();
   });
 
   test('an added product blocks Complete until its amount is entered; edited amounts and units are submitted', async () => {
