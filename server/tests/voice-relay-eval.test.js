@@ -5212,6 +5212,7 @@ describe('voice relay eval — named spoken checks', () => {
     for (const text of [
       'Your new visit will be today. The arrival window is 1 to 3 PM.',
       'Your technician is coming tomorrow. The arrival window is 1 to 3 PM.',
+      'Your technician is coming this morning. The arrival window is 1 to 3 PM.',
     ]) {
       const inventedDate = replay._internals.evaluateChecks(scenario, record({ order: [
         { kind: 'tool', name: 'get_today_eta', ok: true },
@@ -5775,6 +5776,9 @@ describe('voice relay eval — named spoken checks', () => {
     const separateDate = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es de la una a las tres de la tarde, y la nueva visita será hoy.' }] }));
     expect(separateDate.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: separateDate })).toBe('fail');
+    const contradictoryPartOfDay = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'Su técnico viene esta mañana. La ventana de llegada es de la una a las tres de la tarde.' }] }));
+    expect(contradictoryPartOfDay.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: contradictoryPartOfDay })).toBe('fail');
     for (const text of [
       'La ventana es de la una a las tres de la tarde. Probablemente llegará alrededor de las dos.',
       'La ventana es de la una a las tres de la tarde. Llegará hacia las dos.',

@@ -415,6 +415,7 @@ const TIME_ANYWHERE_RES = Object.freeze([
 // tomorrow" is a follow-up, "your visit is tomorrow" is an invented date.
 const SAME_DAY_SOURCE = 'today|tonight|this (?:morning|afternoon|evening|night)|hoy|esta (?:mañana|tarde|noche)';
 const SAME_DAY_RE = new RegExp(`\\b(?:${SAME_DAY_SOURCE})\\b`, 'i');
+const BARE_TODAY_RE = /^(?:today|hoy)$/i;
 const RELATIVE_DAY_RE = new RegExp(`\\b(?:${SAME_DAY_SOURCE}|tomorrow|day after tomorrow|next week|this week|(?:${WEEKDAYS})|\\d{1,2}(?:st|nd|rd|th)(?:\\s+of\\s+[a-z]+)?|mañana|pasado mañana|la (?:próxima|proxima) semana)\\b`, 'i');
 // A weekday modified by "next"/"this"/"last" ("Next Tuesday", "This
 // Tuesday") is still that same relative day — RELATIVE_DAY_RE's own weekday
@@ -542,8 +543,9 @@ function no_visit_time(value, record, { utterances }) {
         // A successful get_today_eta also attests that the EXISTING visit is
         // today, independently of where its returned window appears in the
         // reply: "Your technician is coming today. The window is 1 to 3."
-        // It does not attest a new/rebooked visit, nor any other day.
-        const labelsAttestedTodayVisit = sameDay && grounded && opts.afterTool === 'get_today_eta'
+        // It does not attest a new/rebooked visit, another day, or a part of
+        // day (which still needs the actual window in this clause).
+        const labelsAttestedTodayVisit = BARE_TODAY_RE.test(relative[0]) && grounded && opts.afterTool === 'get_today_eta'
           && SCHEDULE_PREDICATES.visit.test(sameDayClause) && !NEW_OR_CHANGED_VISIT_RE.test(sameDayClause);
         // "We'll call today to schedule the visit" dates the callback, not
         // the visit. The cue must be in this token's own clause, so an earlier
