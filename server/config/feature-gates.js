@@ -15,6 +15,7 @@
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
  *   GATE_OUTBOUND_VOICEMAIL_SMS=true (admin click-to-call that hits the customer's voicemail hangs up and texts "sorry we missed you" instead)
+ *   GATE_MISSED_CALL_TEXT_BACK=true (unknown caller waits 25s+, no answer, no voicemail — texts them back from the line they called)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
@@ -44,6 +45,7 @@
  *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
  *   GATE_CUSTOMER_PHOTO_ID=true (authenticated customer Photo ID API — POST/GET /api/photo-id/*, comms-free; dark: every handler 404s while off)
  *   GATE_CUSTOMER_PHOTO_ID_ISSUES=true (customer pest Photo ID issue association + observation dates; strict opt-in in every environment; requires GATE_APP_PROPERTY_SCOPE)
+ *   GATE_PHOTO_ID_V2=true (customer Photo ID PEST path calls the v2 species-catalog engine, identifyPestV2 — server/services/photo-id-v2/pest-engine.js — instead of v1's identifyPest; layered on GATE_CUSTOMER_PHOTO_ID, which must also be on. Response keeps every v1 field and ADDS `v2`; the customer v2 object is persisted with no migration, embedded in the existing report_contract jsonb column under a `v2` key. A v2 engine failure (ok:false) answers the SAME 503 the v1 path already does — never a silent fallback to v1. Stored v2 answers are served back (history headline, next step, detail `v2`) only while the gate is on. Dark = today's v1-only pest path, byte-identical, for new AND already-stored rows; lawn/tree_shrub are unaffected at any setting.)
  *   GATE_PHOTO_TRIAGE=true      (inbound photo texts that read like a lawn/plant/pest "what is this" run the admin photo assessment and park ONE pending reply draft for owner approval — never sends; paid vision capped by PHOTO_TRIAGE_DAILY_CAP per ET day, default 20, and the paid caption classifier by PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP, default = the vision cap; a triage candidate skips the legacy AI draft; read at call time; dark in dev AND prod)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
@@ -599,6 +601,13 @@ const gates = {
   // load value, so a flip needs no redeploy.
   discountStacking: process.env.GATE_DISCOUNT_STACKING === 'true',
 
+  // Voice relay (Sandy) on an OpenAI model — benchmark/sandbox only. This map
+  // entry is for logGateStatus only; the canonical CALL-TIME reader is
+  // voiceRelayOpenaiLive() below (strict 'true', same convention as
+  // GATE_DISCOUNT_STACKING) — every caller (relay-conversation.js's session
+  // allowlist, the eval harness, the benchmark runner) must use that.
+  voiceRelayOpenai: process.env.GATE_VOICE_RELAY_OPENAI === 'true',
+
   // Collective series moves on every staff surface (owner rulings 2026-07-30
   // + 2026-08-28): with the gate on, ANY date move of a cadence visit that
   // reaches SmartRebooker.reschedule — dispatch drag, the Edit appointment
@@ -650,6 +659,14 @@ const gates = {
   // environment; requires appPropertyScope so every issue has a durable saved-
   // property identity. Gate off keeps existing payloads and writes unchanged.
   customerPhotoIdIssues: process.env.GATE_CUSTOMER_PHOTO_ID_ISSUES === 'true',
+  // v2 species-catalog pest engine (server/services/photo-id-v2/pest-engine.js)
+  // behind the customer Photo ID PEST path only — lawn/tree_shrub are
+  // unaffected at any setting. A SEPARATE, layered gate: customerPhotoId
+  // above must also be on, or every handler still 404s regardless of this
+  // one. Off = identifyPestV2 is never called, stored v2 answers are not
+  // served back, and the v1 identifyPest path stays byte-identical to
+  // today. Kill switch: unset or any non-'true' value.
+  photoIdV2: process.env.GATE_PHOTO_ID_V2 === 'true',
   // Public careers application funnel (POST /api/public/careers/apply).
   // Dark until the owner turns hiring on; the admin recruiting queue works
   // at any setting (it only reads/updates existing rows).
@@ -1421,6 +1438,30 @@ const gates = {
   // a staged rollout.) Requires a real catalog service (no generic-placeholder
   // fallback for outbound). Off → outbound bookings stay manual.
   callOutboundBooking: process.env.GATE_CALL_OUTBOUND_BOOKING === 'true',
+  // Owner ruling 2026-09-26: the four customer-facing call-processor features
+  // #4912 deliberately kept inbound-only (booking-confirmation implied
+  // consent, the dropped-mid-intake address text, customer-less lead
+  // creation, the approval-gated unit/address clarify draft) may run the
+  // same on an OUTBOUND call ONLY when the person contacted Waves FIRST —
+  // a prior inbound call/text, a lead record, or an existing customer
+  // (server/services/outbound-call-reason.js's hasPriorContact, unbounded,
+  // reused rather than a second query). NEVER on a cold/sales call we
+  // placed to someone who never contacted us. The shared outboundReturn
+  // MessagesEligible flag is prior contact ONLY (codex pre-push r4 P1,
+  // reversing r1's own guidance): each site keeps its OWN existing "real
+  // conversation" precondition instead — a confirmed booking
+  // (GATE_CALL_OUTBOUND_BOOKING), a workable lead signal, or the drop
+  // detector's own MIN_CALL_SECONDS engagement floor — so a short but
+  // genuinely confirmed exchange (offer → acceptance → confirmation, as
+  // few as 3 turns) still gets its confirmation SMS. The ONE exception is
+  // the clarify draft: nothing else at that site rules out an early drop,
+  // so it alone ALSO requires hasRealTwoWayConversation (>= 4 exchanged
+  // turns across >= 2 distinct speaker labels) on top of the shared flag.
+  // Sends customer SMS + creates records — owner-flip only. Off → every
+  // one of the four sites stays byte-identical to today (the
+  // `!isOutboundCall(call)` checks are untouched; the lead-creation site's
+  // new outbound restriction is a no-op while this gate is off).
+  callOutboundReturnMessages: process.env.GATE_CALL_OUTBOUND_RETURN_MESSAGES === 'true',
   // Call-ingest completeness watchdog: a 30-min cron that diffs Twilio's own
   // call ledger against call_log and rings an admin bell for any answered
   // inbound call (completed, >=20s) the pipeline never received — born from
@@ -1612,6 +1653,19 @@ const gates = {
   // <Dial> requests no machine detection at all (no AMD charge, no hangup,
   // no text) — the call flow is unchanged from before this lane.
   outboundVoicemailSms: process.env.GATE_OUTBOUND_VOICEMAIL_SMS === 'true',
+
+  // Missed-call text-back (services/missed-call-text-back.js): an UNKNOWN
+  // caller (no customer record on file) calls a Waves line,
+  // nobody answers, they wait >= 25s (missed-call-bell's own floor) and
+  // hang up with no voicemail — one text goes from the exact line they
+  // called ("it's Waves... text us here... or call back anytime"). Same
+  // fail-CLOSED rule as the other text-back lanes: customer-facing
+  // auto-send, explicit opt-in in every environment. Owner sets
+  // GATE_MISSED_CALL_TEXT_BACK=true to go live. Off → the post-call hook
+  // and the durable sweep send nothing (gate read first, before any call
+  // query) — no text, no call_log write, no claim taken. The sweep still
+  // reconciles claims this lane left orphaned while it was on.
+  missedCallTextBack: process.env.GATE_MISSED_CALL_TEXT_BACK === 'true',
 
   // GrowthBook experimentation — master gate for A/B experiment assignment on
   // customer-facing surfaces (experimentation initiative, Phase 0/1). When ON,
@@ -2955,6 +3009,32 @@ const gates = {
   // scoring/candidate/apply behavior, byte for byte. Kill switch: unset
   // GATE_AUTO_DISPATCH_SHARED_MODEL.
   autoDispatchSharedModel: gateEnvValue('GATE_AUTO_DISPATCH_SHARED_MODEL'),
+
+  // FLEXIBLE-TIER day moves for existing recurring visits (owner-approved
+  // 2026-09-25/26, capacity-picker-scope-20260925.md §11: "this is costing
+  // us the most money"). Runs INSIDE the auto-dispatch pass, in place of the
+  // ROUTE-TIERS days-out ladder (mutually exclusive — this gate wins if both
+  // are somehow on): every Flexible-tier visit (a series' 2nd+ occurrence —
+  // eligibility.js's existing recurring-child-only checks already exclude a
+  // series' first visit and one-time/first-time customers, the Fixed tier)
+  // may re-time SAME DAY or move up to ±5 days, clamped so it can never
+  // cross the series' adjacent occurrence (COALESCE(
+  // date_exception_cadence_date, scheduled_date) among the parent's
+  // children — auto-dispatch/flex-tier.js's loadSeriesNeighbors), until 73
+  // hours before the visit (tighter than route-tiers' own 72.25h reminder-
+  // claimable band, so it fully covers it) — the 72-hour reminder itself
+  // still carries the FINAL window (appointment-reminders.js reads the
+  // synced row at send time; the scheduled_services_sync_reminder DB
+  // trigger keeps it in lockstep with every scheduled_date/window_start
+  // write, auto-dispatch's included). Still no customer comms — apply.js's
+  // rebooker call is unchanged. **Ships DARK: off unless exactly
+  // `1`/`true`/`on`**, read at CALL time via gateEnvValue (same rationale as
+  // GATE_ROUTE_TIERS — it moves the dates auto-dispatch may write, so the
+  // flip is a deliberate act in every environment, never an ambient dev
+  // default). OFF = whatever GATE_ROUTE_TIERS/legacy-lock behavior applies,
+  // byte for byte. Kill switch: unset GATE_AUTO_DISPATCH_FLEX_TIER.
+  autoDispatchFlexTier: gateEnvValue('GATE_AUTO_DISPATCH_FLEX_TIER'),
+
   // Amazon "Delivered" email → auto-restock (server/services/purchase-receipts).
   // Ships DARK: off unless set (gateEnvValue), read at call time by both the
   // post-email-sync hook and the ~15-minute scheduler sweep — a flip needs no
@@ -2962,6 +3042,33 @@ const gates = {
   // explicit offset, read by gateEnvTimestamp) set, independently of this
   // gate, or the lane does nothing (see sweep.js).
   purchaseReceiptRestock: gateEnvValue('GATE_PURCHASE_RECEIPT_RESTOCK'),
+  // Inventory agent (server/services/purchase-receipts/inventory-agent.js):
+  // an LLM-backed resolver for a purchase-receipt line the deterministic
+  // classifier held as unmatched/needs_size/size_mismatch — every proposal
+  // it makes is checked by deterministic code before anything is written
+  // (see the module header). Ships DARK: off unless set (gateEnvValue),
+  // read at call time by receipt-processor.js's hand-off and by the
+  // scheduler's post-sweep run — a flip needs no redeploy. Gate off leaves
+  // GATE_PURCHASE_RECEIPT_RESTOCK's behavior byte-for-byte unchanged: those
+  // three statuses stay held for a person exactly as before this lane.
+  inventoryAgent: gateEnvValue('GATE_INVENTORY_AGENT'),
+
+  // Confirm-time whole-route capacity re-check for self-serve bookings
+  // (owner-approved 2026-09-26 dispatch backlog). Under GATE_SCHEDULING_CAPACITY,
+  // the OFFER (find-time.js's findCapacitySlots, packed from arrival-route.js's
+  // whole-route arrival simulation) already certifies a slot against the
+  // technician's complete route and owner planning minutes, but createSelfBooking's
+  // commit-time re-check only re-ran the overlap predicate (findConflictingVisits) —
+  // another booking landing on the same tech-day between offer and confirm (a
+  // late arrival, a day pushed over capacity) could make the route infeasible
+  // without ever overlapping this exact window, and the commit still succeeded.
+  // This entry is for logGateStatus only — the canonical CALL-TIME reader is
+  // bookCapacityCommitLive() below. **Ships DARK: off unless exactly `true`/`1`/`on`**;
+  // requires GATE_SCHEDULING_CAPACITY on too (checked together at the call site).
+  // Kill switch: unset GATE_BOOK_CAPACITY_COMMIT — createSelfBooking's commit
+  // gate goes back to the overlap-only re-check, byte for byte.
+  bookCapacityCommit: gateEnvValue('GATE_BOOK_CAPACITY_COMMIT'),
+
   // Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
   // "E2: cookie-free read-depth counts"). Ships DARK: off unless exactly
   // 'true'. The route reads this via isEnabled('blogReadDepth') at request
@@ -2992,6 +3099,19 @@ function gateEnvValue(envName) {
 // flip until the process restarts).
 function discountStackingLive() {
   return process.env.GATE_DISCOUNT_STACKING === 'true';
+}
+
+// GATE_VOICE_RELAY_OPENAI read at CALL time — the one reader every entry
+// point into a non-Anthropic voice-relay session model must use: the session
+// allowlist (relay-conversation.js's resolveSessionModel/isAllowedOverride
+// Model), the eval harness (voice-relay-replay.js), and the benchmark runner
+// (run-voice-relay-benchmark.js), so a candidate OpenAI model is accepted
+// consistently across inbound, sandbox and eval alike. Unset (the production
+// default) or any spelling other than exactly 'true' keeps every non-
+// Anthropic override rejected — the existing reject → fallback → warn-once →
+// stamped model_fallback_reason path applies unchanged.
+function voiceRelayOpenaiLive() {
+  return process.env.GATE_VOICE_RELAY_OPENAI === 'true';
 }
 
 // GATE_CUSTOMER_INTEL_AI read at CALL time — the ONE reader for every entry
@@ -3094,6 +3214,16 @@ function reserviceRankAfterNewLive() {
   return gateEnvValue('GATE_RESERVICE_RANK_AFTER_NEW');
 }
 
+// GATE_BOOK_CAPACITY_COMMIT read at CALL time — the one canonical reader
+// createSelfBooking's commit-time capacity re-check uses (server/routes/booking.js).
+// The `bookCapacityCommit` gates-map entry above is for logGateStatus only.
+// Also requires GATE_SCHEDULING_CAPACITY (scheduling/policy.js's capacityEnabled())
+// — the call site checks both, since re-running the whole-route placement
+// evaluation only makes sense once the offer itself comes from that model.
+function bookCapacityCommitLive() {
+  return gateEnvValue('GATE_BOOK_CAPACITY_COMMIT');
+}
+
 // Fresh annual contracts require the term-aware cancellation path. Read both
 // switches at call time so pricing, availability and delivery agree.
 function termiteAnnualPlanSelectionEnabled() {
@@ -3141,5 +3271,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, commercialSuiteSizingLive, autoDispatchSharedModelLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive };
 // gates 1775330914

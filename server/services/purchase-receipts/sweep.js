@@ -64,6 +64,11 @@ const SUMMARY_BUCKETS = {
   logged: 'logged', possible_duplicate: 'possibleDuplicate', unmatched: 'unmatched',
   size_mismatch: 'sizeMismatch', needs_size: 'needsSize', no_items: 'noItems', no_order_number: 'noOrderNumber',
   returned: 'returned', unverified: 'unverified', unreadable: 'unreadable',
+  // GATE_INVENTORY_AGENT hand-off (receipt-processor.js): queued for the
+  // agent, not held for a person — no bell (not in HELD_REASONS below), so
+  // it's its own bucket rather than counted as "held for a person" in
+  // summarize()'s one log line.
+  agent_pending: 'agentPending',
 };
 
 // Why a held line wasn't added — the second sentence of its bell.
@@ -90,9 +95,9 @@ function emptySummary() {
 
 // Counts for the scheduler's one log line.
 function summarize(result) {
-  const held = Object.values(SUMMARY_BUCKETS).filter((bucket) => bucket !== 'logged' && bucket !== 'unmatched')
+  const held = Object.values(SUMMARY_BUCKETS).filter((bucket) => !['logged', 'unmatched', 'agentPending'].includes(bucket))
     .reduce((sum, bucket) => sum + result[bucket].length, result.undelivered.length);
-  return { logged: result.logged.length, held, errors: result.errors.length };
+  return { logged: result.logged.length, held, errors: result.errors.length, agentPending: result.agentPending.length };
 }
 
 function adminNotifier(notify) {
@@ -107,6 +112,13 @@ function round(value) {
   return Math.round(value * 10000) / 10000;
 }
 
+// The logged bell's warning when a live restock request may cover the
+// delivery (shared with inventory-agent.js): cancel is the stock-neutral
+// close, since receiving the request would add this stock again.
+function openRestockRequestNote(productName) {
+  return `A restock request for ${productName} is still open. If this delivery covers it, cancel that request in the Intelligence Bar; marking it received would add the stock again.`;
+}
+
 async function ringLoggedBell(notifyAdmin, { receipt, email, item, outcome, trx }) {
   const unit = displayUnit(outcome.receivedUnit);
   let body = `${receipt.label} logged: ${outcome.product.name} +${outcome.receivedQty} ${unit} `
@@ -115,9 +127,7 @@ async function ringLoggedBell(notifyAdmin, { receipt, email, item, outcome, trx 
   // receipt-processor.js's header); a person decides whether this covers it.
   // Cancel is the stock-neutral close — receiving the request would add
   // this delivery a second time.
-  if (outcome.hasOpenRestockRequest) {
-    body += ` A restock request for ${outcome.product.name} is still open. If this delivery covers it, cancel that request in the Intelligence Bar; marking it received would add the stock again.`;
-  }
+  if (outcome.hasOpenRestockRequest) body += ` ${openRestockRequestNote(outcome.product.name)}`;
   await notifyAdmin('inventory', `${receipt.noun} logged`, body, {
     link: INVENTORY_LINK,
     bell: true,
@@ -319,4 +329,10 @@ async function runPurchaseReceiptRestockSweep({ notify } = {}) {
   return totals;
 }
 
-module.exports = { processReceiptEmail, runPurchaseReceiptRestockSweep, summarize };
+module.exports = {
+  processReceiptEmail, runPurchaseReceiptRestockSweep, summarize, openRestockRequestNote,
+  // Reused by inventory-agent.js's drainAgentQueue (never duplicated) — a
+  // line the agent gate stranded is restored to the status it would have
+  // held under without the agent, and rings the SAME "not added" bell text.
+  HELD_REASONS,
+};

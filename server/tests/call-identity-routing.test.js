@@ -21,7 +21,7 @@ const v2 = (over = {}) => ({
 describe('finding 1 — caller_not_authorized fires only for an explicit third party', () => {
   test('relationship classes', () => {
     for (const r of ['owner', 'spouse_partner', 'unknown', null, undefined, '']) expect(isExplicitlyNonOwner(r)).toBe(false);
-    for (const r of ['tenant', 'property_manager', 'real_estate_agent', 'lender', 'employee', 'hoa_board_member', 'other']) expect(isExplicitlyNonOwner(r)).toBe(true);
+    for (const r of ['tenant', 'property_manager', 'real_estate_agent', 'lender', 'home_buyer', 'employee', 'hoa_board_member', 'other']) expect(isExplicitlyNonOwner(r)).toBe(true);
   });
 
   test('the homeowner cancelling her own visit (audit #9) raises no authorization flag', () => {

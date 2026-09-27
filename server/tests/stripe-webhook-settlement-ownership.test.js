@@ -98,6 +98,8 @@ function resetMockState() {
     // What the settle-time re-read sees (null = same as the pre-lock read).
     settleReadInvoice: null,
     settleReadThrows: false,
+    // A payments row the fallback's FOR UPDATE read finds (null = none).
+    fallbackPayment: null,
     updates: [],
   });
 }
@@ -131,6 +133,7 @@ function mockMakeBuilder(table, { inTrx } = {}) {
     // PI's ACH is still in flight; inside it (the fallback's FOR UPDATE read)
     // there is never a pre-existing row — that is the path under test.
     if (table === 'payments') {
+      if (inTrx && b._forUpdate && mockState.fallbackPayment) return mockState.fallbackPayment;
       return (!inTrx && mockState.processingPaymentsUpdated > 0) ? { id: 'pay-processing' } : null;
     }
     return null;
@@ -163,7 +166,7 @@ jest.mock('../models/db', () => {
   db.fn = { now: () => 'NOW()' };
   db.transaction = jest.fn(async (fn) => {
     const trx = jest.fn((table) => mockMakeBuilder(table, { inTrx: true }));
-    trx.raw = jest.fn((sql) => ({ __raw: sql }));
+    trx.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
     trx.fn = { now: () => 'NOW()' };
     return fn(trx);
   });
@@ -171,6 +174,7 @@ jest.mock('../models/db', () => {
 });
 
 const { _handlePaymentIntentSucceeded: handlePaymentIntentSucceeded } = require('../routes/stripe-webhook');
+const { etDateString } = require('../utils/datetime-et');
 
 function succeededPI(overrides = {}) {
   return {
@@ -299,5 +303,46 @@ describe('the withdrawal is re-read under the settlement lock', () => {
     expect(alert.payload.alert_type).toBe('wh_payer_billed_settled');
     expect(alert.payload.alert_type.length).toBeLessThanOrEqual(30);
     expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeFalsy();
+  });
+});
+
+// /confirm can promote a bank (ACH) row from processing to paid when it sees
+// the PaymentIntent succeed before this event lands, with no Stripe time to
+// stamp (Codex #4996 r10): the settlement moment arrives with this event.
+describe('a paid row with no settlement stamp takes this event\'s settlement time', () => {
+  const EVENT_CREATED = 1790000000;
+  const settlementStamp = (u) => u.table === 'payments' && u.inTrx && u.payload.metadata && !('status' in u.payload);
+
+  test('a bank payment already paid with no settlement stamp is stamped with the event time and touched', async () => {
+    mockState.fallbackPayment = { id: 'pay-ach', status: 'paid', metadata: { payment_state: 'paid', payment_method: 'us_bank_account' } };
+
+    await handlePaymentIntentSucceeded(succeededPI({ payment_method_types: ['us_bank_account'] }), EVENT_CREATED);
+
+    // The processing flip also runs (and matches no row); the stamp is the update that sets no status.
+    const stamp = mockState.updates.find(settlementStamp);
+    expect(stamp).toBeTruthy();
+    expect(stamp.payload.updated_at).toBeInstanceOf(Date);
+    expect(stamp.payload.metadata.__raw).toContain('{settled_event_at}');
+    expect(stamp.payload.metadata.bindings).toEqual([new Date(EVENT_CREATED * 1000).toISOString()]);
+    // The cash-basis day moves to the settlement's Eastern date, as the processing flip's does.
+    expect(stamp.payload.payment_date).toBe(etDateString(new Date(EVENT_CREATED * 1000)));
+    expect(mockState.inserts.find((i) => i.table === 'payments')).toBeFalsy();
+  });
+
+  test('a card payment already paid with no settlement stamp (its charge was unreadable at /confirm) is stamped too', async () => {
+    mockState.fallbackPayment = { id: 'pay-card', status: 'paid', metadata: { payment_state: 'paid' } };
+
+    await handlePaymentIntentSucceeded(succeededPI(), EVENT_CREATED);
+
+    expect(mockState.updates.find(settlementStamp).payload.metadata.bindings).toEqual([new Date(EVENT_CREATED * 1000).toISOString()]);
+  });
+
+  test('a payment already carrying a settlement stamp is left alone', async () => {
+    mockState.fallbackPayment = { id: 'pay-card', status: 'paid',
+      metadata: JSON.stringify({ payment_state: 'paid', settled_event_at: '2026-09-20T14:00:00.000Z' }) };
+
+    await handlePaymentIntentSucceeded(succeededPI(), EVENT_CREATED);
+
+    expect(mockState.updates.find(settlementStamp)).toBeFalsy();
   });
 });

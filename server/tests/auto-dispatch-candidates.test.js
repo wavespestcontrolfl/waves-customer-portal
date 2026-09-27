@@ -118,6 +118,43 @@ describe('findValidCandidateSlots', () => {
     expect(candidates[0]).toMatchObject({ start_time: '16:00', end_time: '17:00' });
   });
 
+  // Codex #4995 P1: the flex window keeps the visit's own date open for a
+  // same-day re-time, so an EARLIER slot that day can sit inside the 73h
+  // freeze even though the visit's current time does not.
+  test('flex tier: drops a destination slot inside the 73h freeze or below the destination floor; later that day and on/after the floor stay; other modes unaffected', async () => {
+    // Mon 2026-10-05 13:00 ET (17:00Z). Thu 10-08 09:00 ET is 68h away;
+    // 15:00 is 74h. The destination floor is 10-10, so Fri 10-09 is not a
+    // legal day move (only the visit's own 10-08 is exempt from the floor).
+    const slots = [
+      { date: '2026-10-08', technician: { id: 't1', name: 'A' }, start_time: '09:00', end_time: '10:00', detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 2, score: 1 },
+      { date: '2026-10-08', technician: { id: 't1', name: 'A' }, start_time: '15:00', end_time: '16:00', detour_minutes: 2, total_drive_minutes: 12, stops_that_day: 2, score: 2 },
+      { date: '2026-10-09', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 3, total_drive_minutes: 14, stops_that_day: 2, score: 3 },
+      { date: '2026-10-10', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 4, total_drive_minutes: 16, stops_that_day: 2, score: 4 },
+    ];
+    findAvailableSlots.mockResolvedValue({ slots });
+    const service = { ...SERVICE, scheduled_date: '2026-10-08', window_start: '15:00' };
+    const nowDate = new Date('2026-10-05T17:00:00Z');
+    const flexCtx = {
+      ...ctx(), nowDate, tierWindow: { dateFrom: '2026-10-08', dateTo: '2026-10-13', dayMoveFrom: '2026-10-10' }, tierMeta: { mode: 'flex' },
+    };
+
+    const flex = await findValidCandidateSlots(service, prefs, flexCtx);
+    expect(flex.candidates.map((c) => `${c.date} ${c.start_time}`)).toEqual(['2026-10-08 15:00', '2026-10-10 08:00']);
+    expect(flex.drops.flex_frozen).toBe(1);
+    expect(flex.drops.flex_floor).toBe(1);
+    // Generation is floored too: the freeze ends Thu 10-08 14:00 ET, so
+    // find-time starts that date's gaps at 14:01 (Codex #4995 pre-push P1).
+    expect(findAvailableSlots.mock.calls[0][0].startFloorByDate).toEqual({ '2026-10-08': 14 * 60 + 1 });
+
+    // Route tiers (same window, its own mode): never these filters.
+    findAvailableSlots.mockClear();
+    const tiers = await findValidCandidateSlots(service, prefs, { ...flexCtx, tierMeta: { mode: 'tiers' } });
+    expect(tiers.candidates).toHaveLength(4);
+    expect(tiers.drops.flex_frozen).toBe(0);
+    expect(tiers.drops.flex_floor).toBe(0);
+    expect(findAvailableSlots.mock.calls[0][0].startFloorByDate).toBeUndefined();
+  });
+
   test('drops candidate dates already occupied by a same-series sibling', async () => {
     findAvailableSlots.mockResolvedValue({
       slots: [

@@ -11,8 +11,12 @@ jest.mock('../services/email-template-library', () => ({
   activeSuppressionFor: jest.fn(),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/billing-email-provider-replay', () => ({
+  isBillingEmailProviderReplay: jest.fn(() => false),
+  runBillingEmailProviderReplayHandoff: jest.fn(),
+}));
 jest.mock('../services/visit-completion-summary', () => ({
-  retrySummaryThroughHandoff: jest.fn(async (message, dispatch) => { const verdict = await dispatch(); return verdict && verdict.ok === false ? verdict : { ok: true }; }),
+  retrySummaryThroughHandoff: jest.fn(async (message, dispatch) => { const verdict = await dispatch(mockOwnershipTrx()); return verdict && verdict.ok === false ? verdict : { ok: true }; }),
   reconcileSummaryEmailRecovery: jest.fn(async () => ({ reconciled: true })),
 }));
 
@@ -20,7 +24,21 @@ const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
 const emailLib = require('../services/email-template-library');
 const NotificationService = require('../services/notification-service');
+const logger = require('../services/logger');
+const billingReplay = require('../services/billing-email-provider-replay');
 const recovery = require('../services/email-bounce-recovery');
+
+beforeEach(() => {
+  billingReplay.isBillingEmailProviderReplay.mockReturnValue(false);
+  billingReplay.runBillingEmailProviderReplayHandoff.mockReset();
+});
+function mockOwnershipTrx() {
+  return Object.assign((...args) => db(...args), {
+    isTransaction: true,
+    raw: jest.fn(async () => ({ rows: [{ locked: true }] })),
+  });
+}
+
 
 // Minimal chainable knex mock. Every builder method returns the chain; the
 // terminal-ish methods resolve to configurable values.
@@ -222,12 +240,17 @@ describe('attemptRecovery codex-fix behaviors', () => {
 
   test.each([
     ['sends a visit summary recovery through the locked handoff', { ok: true }, 1, 'resent'],
+    ['alerts a visit summary recovery when an ownership assignment is in progress', { ok: true, ownershipBusy: true }, 0, 'send_failed'],
     ['suppresses a visit summary recovery whose original recipient is no longer authorized', { ok: false, reason: 'visit_summary_recipient_changed' }, 0, 'recipient_unauthorized'],
   ])('%s', async (_label, fence, sends, finalStatus) => {
     const summary = require('../services/visit-completion-summary');
     summary.retrySummaryThroughHandoff.mockImplementationOnce(async (message, dispatch) => {
       expect(message.id).toBe('orig1');
-      if (fence.ok) return (await dispatch()) || fence;
+      if (fence.ok) {
+        const trx = mockOwnershipTrx();
+        if (fence.ownershipBusy) trx.raw.mockResolvedValue({ rows: [{ locked: false }] });
+        return (await dispatch(trx)) || fence;
+      }
       return fence;
     });
     emailLib.loadTemplateByKey.mockResolvedValue(undefined);
@@ -248,7 +271,12 @@ describe('attemptRecovery codex-fix behaviors', () => {
     );
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(sends);
     expect(mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries').pop().data).toMatchObject({ status: finalStatus });
-    if (fence.ok) {
+    if (fence.ownershipBusy) {
+      expect(res).toEqual({ error: 'Email ownership assignment in progress' });
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({
+        metadata: expect.objectContaining({ status: 'send_failed' }),
+      }));
+    } else if (fence.ok) {
       expect(res).toMatchObject({ resent: true });
     } else {
       expect(res).toEqual({ skipped: 'visit_summary_recipient_changed' });
@@ -812,6 +840,7 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     delete process.env.EMAIL_RECOVERY_MIN_CONFIDENCE;
     emailLib.loadTemplateByKey.mockResolvedValue(undefined); // falls to the email_suppressions fallback (no rows -> not suppressed)
     sendgrid.sendOne.mockReset();
+    NotificationService.notifyAdmin.mockReset();
   });
   afterEach(() => { process.env = { ...orig }; });
 
@@ -896,6 +925,125 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     expect(res).toMatchObject({ resent: true });
   });
 
+  test('a stored billing replay authorizes the original context and sends to the corrected destination', async () => {
+    const messageRow = { id: 'msg-billing-recovery', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'Billing update', send_attempt_token: 'recovery-attempt' };
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'pm-billing-recovery' });
+    billingReplay.isBillingEmailProviderReplay.mockReturnValue(true);
+    const heldDatabase = jest.fn();
+    const providerBoundaryCheck = jest.fn(async () => ({ ok: true }));
+    billingReplay.runBillingEmailProviderReplayHandoff.mockImplementationOnce(async (original, dispatch, options) => {
+      expect(original.id).toBe('orig-billing-recovery');
+      expect(options).toMatchObject({
+        recipientEmail: 'jane@gmail.com', authorityRecipientEmail: 'jane@gmial.com',
+        providerBoundaryCheck: expect.any(Function),
+      });
+      await dispatch(heldDatabase, providerBoundaryCheck);
+      return { handled: true, allowed: true };
+    });
+
+    const bounced = {
+      id: 'orig-billing-recovery', recipient_type: 'customer', recipient_id: 'c1',
+      recipient_email_snapshot: 'jane@gmial.com', template_key: 'billing.notice',
+      suppression_group_key_snapshot: 'transactional_required', categories: ['email_template', 'billing'],
+      trigger_event_id: 'precharge:c1:2030-06-10', idempotency_key: 'billing_channel_email:precharge:c1:2030-06-10:email',
+      payload_snapshot: { __billing_replay_context: { schema_version: 1 } },
+      html_snapshot: '<p>Billing update</p>', text_snapshot: 'Billing update',
+    };
+    await expect(recovery.attemptRecovery(bounced, { event: 'bounce', type: 'bounce' }))
+      .resolves.toMatchObject({ resent: true, corrected: 'jane@gmail.com' });
+
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
+      to: 'jane@gmail.com', database: heldDatabase, providerBoundaryCheck, suppressErrorLog: true,
+      customArgs: { email_message_id: messageRow.id, send_attempt_token: messageRow.send_attempt_token },
+    }));
+  });
+
+  test.each([false, true])('a refused billing replay never sends and always alerts operations (%s)', async (retryable) => {
+    const messageRow = { id: 'msg-billing-invalid', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', subject_snapshot: 'Billing update', send_attempt_token: 'recovery-attempt' };
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+    billingReplay.isBillingEmailProviderReplay.mockReturnValue(true);
+    const reason = retryable ? 'Billing email authority could not be verified'
+      : 'Stored billing replay context does not match the email message';
+    billingReplay.runBillingEmailProviderReplayHandoff.mockResolvedValueOnce({
+      handled: true, allowed: false, reason, retryable,
+    });
+
+    await expect(recovery.attemptRecovery({
+      id: 'orig-billing-invalid', recipient_type: 'customer', recipient_id: 'c1',
+      recipient_email_snapshot: 'jane@gmial.com', template_key: 'billing.notice',
+      suppression_group_key_snapshot: 'transactional_required', categories: ['email_template', 'billing'],
+      trigger_event_id: 'precharge:c1:2030-06-10', payload_snapshot: { __billing_replay_context: null },
+      html_snapshot: '<p>Billing update</p>', text_snapshot: 'Billing update',
+    }, { event: 'bounce', type: 'bounce' })).resolves.toEqual(retryable ? { error: reason } : { skipped: reason });
+
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(mockDb._calls).toContainEqual(expect.objectContaining({
+      table: 'email_messages', data: expect.objectContaining({ status: retryable ? 'failed' : 'blocked' }),
+    }));
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'alert', 'Email bounced — needs a correct address', expect.any(String),
+      expect.objectContaining({ metadata: expect.objectContaining({
+        status: retryable ? 'send_failed' : 'billing_replay_reauthorization_required',
+      }) }),
+    );
+  });
+
+  test.each([true, false])('billing ownership contention/query failure uses its manual failure alert (busy=%s)', async busy => {
+    const messageRow = { id: 'msg-billing-ownership', status: 'queued', subject_snapshot: 'Billing update' };
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+    billingReplay.isBillingEmailProviderReplay.mockReturnValue(true);
+    const reason = busy ? 'Email ownership assignment in progress' : 'Email ownership check temporarily unavailable';
+    billingReplay.runBillingEmailProviderReplayHandoff.mockImplementationOnce(async (_original, _dispatch, options) => {
+      const trx = mockOwnershipTrx();
+      if (busy) trx.raw.mockResolvedValue({ rows: [{ locked: false }] });
+      else trx.raw.mockRejectedValue(new Error('SQL binding private-owner@example.invalid'));
+      const verdict = await options.providerBoundaryCheck({ database: trx });
+      expect(verdict).toMatchObject({ ok: false, retryable: true, reason });
+      return { handled: true, allowed: false, ...verdict };
+    });
+    await expect(recovery.attemptRecovery({
+      id: 'orig-billing-ownership', recipient_type: 'customer', recipient_id: 'c1',
+      recipient_email_snapshot: 'jane@gmial.com', template_key: 'billing.notice',
+      suppression_group_key_snapshot: 'transactional_required', categories: ['email_template', 'billing'],
+      payload_snapshot: { __billing_replay_context: {} }, html_snapshot: '<p>Billing</p>',
+    }, { event: 'bounce', type: 'bounce' })).resolves.toEqual({ error: reason });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(JSON.stringify(mockDb._calls)).not.toContain('private-owner');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String),
+      expect.objectContaining({ metadata: expect.objectContaining({ status: 'send_failed' }) }));
+  });
+
+  test('a billing provider rejection retains its status without leaking its response body', async () => {
+    const messageRow = { id: 'msg-billing-private', status: 'queued', subject_snapshot: 'Billing update' };
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+    logger.warn.mockClear();
+    const body = 'rejected private-provider-recipient@example.invalid';
+    sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error(`SendGrid 400: ${body}`), { status: 400, body }));
+    billingReplay.isBillingEmailProviderReplay.mockReturnValue(true);
+    billingReplay.runBillingEmailProviderReplayHandoff.mockImplementationOnce(async (_original, dispatch) => {
+      await dispatch(jest.fn(), jest.fn());
+      return { handled: true, allowed: true };
+    });
+    const result = await recovery.attemptRecovery({
+      id: 'orig-billing-private', recipient_type: 'customer', recipient_id: 'c1',
+      recipient_email_snapshot: 'jane@gmial.com', template_key: 'billing.notice',
+      suppression_group_key_snapshot: 'transactional_required', categories: ['email_template', 'billing'],
+      payload_snapshot: { __billing_replay_context: {} }, html_snapshot: '<p>Billing</p>',
+    }, { event: 'bounce', type: 'bounce' });
+    expect(result).toEqual({ error: 'SendGrid bounce recovery failed (400)' });
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(body);
+    expect(JSON.stringify(mockDb._calls)).not.toContain(body);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'alert', 'Email bounced — needs a correct address', expect.any(String),
+      expect.objectContaining({ metadata: expect.objectContaining({ status: 'send_failed' }) }),
+    );
+  });
+
   test('round 9 structural fix (P1): a bounce-recovered deposit.receipt whose stored content still carries a withheld link is rewritten by sendOne and re-sent — the recovery row snapshot is updated to match', async () => {
     const messageRow = { id: 'msg-annual-rewrite', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' };
     const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
@@ -962,5 +1110,44 @@ describe('annual guard trigger-id parsing (pre-push audit P1)', () => {
     expect(guardEstimateIdFromTriggerEvent('estimate_extended:not-an-id:2026-09-19T00:00:00.000Z')).toBeNull();
     expect(guardEstimateIdFromTriggerEvent('invoice_reminder:12345')).toBeNull();
     expect(guardEstimateIdFromTriggerEvent(null)).toBeNull();
+  });
+});
+
+
+describe('final ownership send fence', () => {
+  const { lockEmailOwnershipForSend } = require('../utils/customer-comms-lock');
+  test('query errors become sanitized transient failures', async () => {
+    const trx = Object.assign(jest.fn(), { isTransaction: true, raw: jest.fn(async () => {
+      throw new Error('SQL binding synthetic-secret@example.invalid');
+    }) });
+    await expect(lockEmailOwnershipForSend(trx, 'synthetic-secret@example.invalid')).rejects.toMatchObject({
+      message: 'Email ownership check temporarily unavailable', code: 'EMAIL_OWNERSHIP_CHECK_UNAVAILABLE',
+    });
+    await expect(lockEmailOwnershipForSend(db, 'synthetic-secret@example.invalid')).rejects.toMatchObject({
+      message: 'Email ownership check temporarily unavailable', code: 'EMAIL_OWNERSHIP_CHECK_UNAVAILABLE',
+    });
+  });
+  test('ownership lookup errors log only SQLSTATE, never query bindings', async () => {
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    const failure = Object.assign(new Error('SQL binding synthetic-secret@example.invalid'), { code: 'XX000' });
+    const chain = { where: () => chain, whereRaw: () => chain, select: () => Promise.reject(failure) };
+    const database = () => chain;
+    await expect(recovery.correctedAddressOwnedByOther('synthetic-secret@example.invalid', 'c1', database)).resolves.toBe(true);
+    await expect(recovery.gmailMailboxOwnedByOther('synthetic.secret@gmail.com', 'c1', database)).resolves.toBe(true);
+    expect(logger.warn).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(logger.warn.mock.calls)).toContain('XX000');
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('synthetic-secret');
+  });
+  test('busy exact or Gmail keys refuse before another ownership read', async () => {
+    const trx = mockOwnershipTrx();
+    trx.raw.mockResolvedValueOnce({ rows: [{ locked: true }] }).mockResolvedValueOnce({ rows: [{ locked: false }] });
+    await expect(lockEmailOwnershipForSend(trx, 'synthetic.secret+tag@googlemail.com')).rejects.toMatchObject({
+      message: 'Email ownership assignment in progress', code: 'EMAIL_OWNERSHIP_CHECK_BUSY',
+    });
+    expect(trx.raw.mock.calls.map((call) => call[1][0])).toEqual([
+      'email-ownership:customer-email:synthetic.secret+tag@googlemail.com',
+      'email-ownership:customer-mailbox:syntheticsecret@gmail.com',
+    ]);
   });
 });

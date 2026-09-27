@@ -2353,10 +2353,13 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   // a receipt has to land somewhere (undeliverable-email fallback, same as
   // the consent gate / deposit twin). A transient provider error does NOT
   // fall back — the invoice stays unstamped for the admin needs-receipt path.
-  let emailDeterministicMiss = prefs?.email_enabled === false;
+  // A missing address comes back from the routed receipt (the shared
+  // billing email authority) as a deterministic miss. The portal-wide email
+  // switch never stops it (owner ruling 2026-09-26).
+  let emailDeterministicMiss = false;
   let emailAttempted = false;
   let emailDelivered = false;
-  if (!receiptOptOut && !emailDeterministicMiss && (wantsEmail === true
+  if (!receiptOptOut && (wantsEmail === true
     || (wantsEmail === null && (channel === 'email' || channel === 'both' || (smsChannel && smsOptedOut))))) {
     emailAttempted = true;
     try {
@@ -2392,7 +2395,9 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   if (!receiptOptOut && (wantsRoutedMessage === true
     || (wantsRoutedMessage === null && (smsChannel || (channel === 'email' && emailDeterministicMiss && !smsOptedOut))))) {
     try {
-      await require('./invoice').sendReceipt(invoice.id, { hasEmailLeg: emailAttempted });
+      // Declare the email leg to the SMS channel gate only when it could
+      // deliver: a deterministic miss (switch off, no address) never did.
+      await require('./invoice').sendReceipt(invoice.id, { hasEmailLeg: emailAttempted && !emailDeterministicMiss });
     } catch (e) {
       // Send-window hold: the money and paid invoice are already committed
       // and this path has no retry — hand the receipt to the durable

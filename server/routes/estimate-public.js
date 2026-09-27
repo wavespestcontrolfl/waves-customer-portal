@@ -22,6 +22,7 @@ const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
 const { groupLinkStillViewable } = require('../services/proposal-bid');
 const { refreshExpiredGroupNavigation } = require('../services/estimate-group-navigation');
+const { EstimateOwnerMovedError, lockEstimateOwnerForUpdate } = require('../services/customer-account-ownership');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
 // the links carry only the correlation estimate_id, so under the customers-only
@@ -15650,7 +15651,16 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     // unchanged state.
     let updateCount = 0;
     let memberActivatedMidWrite = false;
-    await db.transaction(async (trx) => {
+    const ownerMovedMidWrite = await db.transaction(async (trx) => {
+      // Fence the prefetched owner before either row lock. Booking, setup-fee
+      // stamping, series activation and stranded recovery all take this same
+      // key before their customer -> estimate ownership checks; serializing
+      // here prevents their row order from crossing this path's required
+      // estimate -> customer order. A merge can repoint the estimate between
+      // the caller's read and this transaction, so re-read the owner under the
+      // estimate lock and abort on ANY transition (including null <-> owned).
+      // Never acquire a newly observed owner's fence after locking the
+      // estimate: that would recreate the inversion with canonical merges.
       // Member exclusion is re-verified INSIDE the write, on a LOCKED customer
       // row. The strict live check above ran before this transaction, and a
       // plan activated in the gap would still commit new-customer terms onto
@@ -15665,7 +15675,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       // Lock ORDER matches the accept path (estimate row first, customer row
       // later inside the converter) so an add racing an acceptance can never
       // deadlock (GH codex r10 P2); the CAS below still decides the write.
-      await trx('estimates').where({ id: estimate.id }).forUpdate().first('id');
+      await lockEstimateOwnerForUpdate(trx, estimate);
       if (!memberEvidence && !(actor === 'staff' && mode === 'restore') && estimate.customer_id) {
         const customerRow = await trx('customers').where({ id: estimate.customer_id }).forUpdate().first();
         if (customerRow && customerRow.active !== false && isMembershipCustomerRow(customerRow)) {
@@ -15743,7 +15753,14 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
               : `Customer added ${label} back to their estimate.`,
         metadata: JSON.stringify({ serviceKey, label, mode, actor, previous, next }),
       });
+    }).catch((err) => {
+      if (err instanceof EstimateOwnerMovedError) return true;
+      throw err;
     });
+    if (ownerMovedMidWrite) {
+      const ownerMovedStatus = await zeroRowMutationStatus(estimate.id);
+      return { status: ownerMovedStatus, body: zeroRowMutationBody(ownerMovedStatus) };
+    }
     if (memberActivatedMidWrite) {
       return { status: 409, body: ({ error: 'reprice_unavailable' }) };
     }
