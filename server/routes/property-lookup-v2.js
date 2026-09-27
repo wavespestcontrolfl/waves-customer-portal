@@ -4811,11 +4811,22 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       );
       if (Number.isInteger(fallbackPalm) && fallbackPalm > 0 && fallbackPalm <= 200) tsPalmCount = fallbackPalm;
     }
+    // Of those palms, the operator's count of LARGE ones (canopy wider than
+    // ~15 ft) — admin estimate only; public quotes and the AI intake never
+    // ask (owner ruling 2026-09-26). Whole number, at most the palm count;
+    // meaningless without palms.
+    let tsLargePalmCount;
+    if (tsPalmCount !== undefined && !isBlankInput(p.largePalmCount)) {
+      const n = strictWholeNumber(p.largePalmCount);
+      if (!(n >= 0 && n <= tsPalmCount)) throw treeShrubInputError('Large palms must be a whole number no greater than the palm count.');
+      if (n > 0) tsLargePalmCount = n;
+    }
     services.treeShrub = {
       tier: tsTier,
       access: tsAccess,
       ...(resolvedTreeCount !== undefined ? { treeCount: resolvedTreeCount } : {}),
       ...(tsPalmCount !== undefined ? { palmCount: tsPalmCount } : {}),
+      ...(tsLargePalmCount !== undefined ? { largePalmCount: tsLargePalmCount } : {}),
     };
   }
   if (sel.has('PALM_INJECTION')) {
@@ -5412,7 +5423,7 @@ router.post('/calculate-estimate', async (req, res) => {
     if (pricingEngine.needsSync && pricingEngine.needsSync()) {
       await pricingEngine.syncConstantsFromDB();
     }
-    const v1Input = translateV2CallToV1Input(profile, selectedServices || [], options || {});
+    let v1Input = translateV2CallToV1Input(profile, selectedServices || [], options || {});
     // Canonical qualifying families of the MATCHED account (codex #3591 r16
     // P1): the estimator forwards only existingCustomerId (+ the quoted
     // address / group anchor); the keys are derived server-side through the
@@ -5432,6 +5443,8 @@ router.post('/calculate-estimate', async (req, res) => {
         retryable: true,
       });
     }
+    v1Input = await require('../services/pricing-engine/trusted-catalog-pricing')
+      .withTrustedCatalogPricing(v1Input);
     const v1 = pricingEngine.generateEstimate(v1Input);
     const mapped = mapV1ToLegacyShape(v1);
     res.json(mapped);

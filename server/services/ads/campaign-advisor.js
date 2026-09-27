@@ -30,6 +30,73 @@ function adsClientConfigured() {
   } catch { return false; }
 }
 
+// storeReport writes `grade` with no fallback (an undefined value there is
+// an undefined DB binding — Knex throws, storeReport's own try/catch
+// swallows it, and the daily report is silently never persisted) and the
+// list fields feed `.length` / iteration in storeReport and
+// normalizeRecommendations; the SMS summary reads grade and
+// overall_assessment straight off the object. The old validate only checked
+// "object, not array" — a reply like `{}` passed it and produced exactly
+// that silent no-op. Every item the Ads page and SMS render must also be
+// usable as given, so an off-contract answer fails its leg (the next
+// provider gets a turn) instead of being rewritten or trimmed after it was
+// accepted (Codex r14 + review on #4884):
+//  - a recommendation needs a non-empty `action`, a priority of high/medium/
+//    low (any case — the page groups by exact priority, so anything else
+//    would never be shown), and text-only rendered fields (the page renders
+//    them as React children, where an object throws; a {} rec was texted as
+//    "• undefined");
+//  - each secondary-list item needs its label and text-only rendered fields,
+//    and each insight must be non-empty text.
+// Same shape as seo-advisor.js's isUsableSeoReport.
+const ADS_REPORT_OBJECT_LISTS = ['recommendations', 'waste_alerts', 'scaling_opportunities', 'capacity_warnings', 'seo_insights'];
+const ADS_PRIORITIES = new Set(['high', 'medium', 'low']);
+const isRenderable = (v) => v == null || typeof v === 'string' || typeof v === 'number';
+const canonicalGrade = (v) => {
+  const g = typeof v === 'string' ? v.trim().toUpperCase() : '';
+  return /^[ABCDF][+-]?$/.test(g) ? g : null;
+};
+const isText = (v) => typeof v === 'string' && v.trim() !== '';
+const canonicalPriority = (v) => (typeof v === 'string' ? v.trim().toLowerCase() : '');
+// [label, ...other rendered fields] per secondary list.
+const ADS_LIST_FIELDS = {
+  waste_alerts: ['search_term', 'spend', 'conversions', 'action'],
+  scaling_opportunities: ['campaign', 'current_budget', 'suggested_budget', 'headroom_reason'],
+  capacity_warnings: ['area', 'utilization', 'recommendation'],
+  seo_insights: ['detail', 'type', 'action'],
+};
+// apply_action / manual_action feed `.replace()` on the page's manual-action
+// hint, so a non-string one crashed the view (Codex r20 on #4884).
+function isUsableRecommendation(rec) {
+  return isText(rec.action) && ADS_PRIORITIES.has(canonicalPriority(rec.priority))
+    && ['campaign', 'reasoning', 'estimated_impact', 'apply_value', 'campaign_id'].every((k) => isRenderable(rec[k]))
+    && ['apply_action', 'manual_action'].every((k) => rec[k] == null || typeof rec[k] === 'string');
+}
+function isUsableAdsReport(advice) {
+  if (!advice || typeof advice !== 'object' || Array.isArray(advice)) return false;
+  // The documented A/B/C/D/F (a +/- is kept): the pages colour a grade by
+  // its first letter, so " A " or "Excellent" showed the wrong status (Codex r21).
+  if (!canonicalGrade(advice.grade)) return false;
+  if (typeof advice.overall_assessment !== 'string' || !advice.overall_assessment.trim()) return false;
+  if (advice.insights != null && !(Array.isArray(advice.insights) && advice.insights.every(isText))) return false;
+  const listsOk = ADS_REPORT_OBJECT_LISTS.every((key) => advice[key] == null || (Array.isArray(advice[key]) && advice[key].every((v) => v && typeof v === 'object' && !Array.isArray(v))));
+  if (!listsOk) return false;
+  if (advice.recommendations != null && !advice.recommendations.every(isUsableRecommendation)) return false;
+  return Object.entries(ADS_LIST_FIELDS).every(([key, [label, ...fields]]) => advice[key] == null
+    || advice[key].every((item) => isText(item[label]) && fields.every((f) => isRenderable(item[f]))));
+}
+
+// After the leg was accepted: the only rewrite is the case of a priority the
+// check already accepted ("High" → "high"), so the page's exact grouping
+// shows it.
+function normalizeAdsReport(advice) {
+  advice.grade = canonicalGrade(advice.grade) || advice.grade;
+  if (Array.isArray(advice.recommendations)) {
+    for (const rec of advice.recommendations) rec.priority = canonicalPriority(rec.priority);
+  }
+  return advice;
+}
+
 class CampaignAdvisor {
   async generateDailyAdvice() {
     logger.info('Running AI Campaign Advisor...');
@@ -151,6 +218,7 @@ class CampaignAdvisor {
       // ceiling as the shared budget across both legs — a verbose day's
       // report needs more than the dispatcher's 2-minute-per-leg default.
       const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+        laneId: 'ads_advisor',
         maxTokens: 4000,
         jsonMode: true,
         timeoutMs: ADVISOR_TIMEOUT_MS,
@@ -234,15 +302,21 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
       }, {
         // The dispatcher's loose parse accepts any JSON value; the old
         // utils/llm-json parser accepted only a non-array object. Keep that
-        // contract: a wrongly shaped answer is a rejected leg, not a stored row.
-        validate: (result) => (result.json && typeof result.json === 'object' && !Array.isArray(result.json) ? null : 'not_an_object'),
+        // contract: a wrongly shaped answer is a rejected leg, not a stored
+        // row. Beyond shape, every field storeReport/sendSummary actually
+        // read must be present and usable (isUsableAdsReport) — see its
+        // comment.
+        validate: (result) => {
+          if (!result.json || typeof result.json !== 'object' || Array.isArray(result.json)) return 'not_an_object';
+          return isUsableAdsReport(result.json) ? null : 'schema_invalid';
+        },
       });
 
       // An unparseable or wrongly shaped answer is a rejected leg inside the
       // dispatcher (the next provider gets a turn); a two-leg miss lands in
       // the catch below and stores the deterministic fallback advice.
       if (!res.ok) throw new Error(`advice dispatch failed: ${res.reason}`);
-      const advice = res.json;
+      const advice = normalizeAdsReport(res.json);
 
       advice.date = etDateString(now);
       this.normalizeRecommendations(advice, campaigns);
@@ -482,3 +556,5 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
 }
 
 module.exports = new CampaignAdvisor();
+module.exports.isUsableAdsReport = isUsableAdsReport;
+module.exports.normalizeAdsReport = normalizeAdsReport;

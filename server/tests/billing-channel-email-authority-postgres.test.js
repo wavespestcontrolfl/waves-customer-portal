@@ -50,7 +50,9 @@ postgres('billing email recipient locks (PostgreSQL)', () => {
     admin = knex({ client: 'pg', connection, pool: { min: 0, max: 1 } });
     await admin.schema.createSchema(schema);
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 5 } });
-    for (const table of ['customers', 'notification_prefs']) {
+    // messaging_suppression: the locked Email recheck now consults the
+    // phone-keyed opt-out / manual DNC store too (fail closed on unknown).
+    for (const table of ['customers', 'notification_prefs', 'messaging_suppression']) {
       await mockPg.raw('CREATE TABLE ?? (LIKE ?? INCLUDING ALL)', [table, `public.${table}`]);
     }
     if (!(await mockPg.schema.hasColumn('notification_prefs', 'billing_channels'))) {
@@ -114,6 +116,11 @@ postgres('billing email recipient locks (PostgreSQL)', () => {
       await expect(mockPg.transaction(async (trx) => {
         await trx.raw("SET LOCAL lock_timeout = '100ms'");
         await lockCustomerEmail(trx, 'qa-billing@example.invalid');
+      })).rejects.toMatchObject({ code: '55P03' });
+      // A STOP / manual DNC for the customer's phone waits for the handoff.
+      await expect(mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '100ms'");
+        await require('../utils/customer-comms-lock').lockSmsPhone(trx, '+19415550100');
       })).rejects.toMatchObject({ code: '55P03' });
     } catch (err) {
       lockProofError = err;

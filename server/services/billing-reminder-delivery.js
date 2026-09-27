@@ -11,6 +11,15 @@ const TERMINAL_EMAIL_REFUSAL_CODES = new Set([
   'BILLING_EMAIL_NOT_SELECTED',
   'BILLING_EMAIL_DISABLED',
   'EMAIL_SUPPRESSED',
+  // The billing Email authority's all-channel (phone-keyed) suppression
+  // recheck (#4962): the same hard stops the provider-retry path resolves
+  // terminally, so a fresh reminder settles the leg instead of re-claiming
+  // it until the suppression happens to clear. An unreadable store
+  // (SUPPRESSION_LOOKUP_FAILED) stays retryable.
+  'SUPPRESSED_OPT_OUT',
+  'SUPPRESSED_MANUAL_DNC',
+  'SUPPRESSED_WRONG_NUMBER',
+  'SUPPRESSED_OTHER',
 ]);
 
 // A permanent Email refusal (no address, Email not selected, template
@@ -21,7 +30,7 @@ function isTerminalEmailRefusal(result) {
       || result.held === true || result.deliveryHeld === true
       || result.deliveryOutcome === 'uncertain') return false;
   const legacy = result.ok === false && (
-    (result.skipped === true && ['missing_email', 'billing_email_not_selected', 'template_unavailable'].includes(result.reason))
+    (result.skipped === true && ['missing_email', 'billing_email_not_selected', 'email_disabled', 'template_unavailable'].includes(result.reason))
     || (result.blocked === true && /^Suppressed: /.test(result.reason || ''))
   );
   const canonical = result.sent === false && result.blocked === true

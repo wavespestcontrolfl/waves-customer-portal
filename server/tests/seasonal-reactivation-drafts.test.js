@@ -18,6 +18,9 @@ jest.mock('../models/db', () => {
   const mockDb = jest.fn();
   mockDb.raw = jest.fn((expr) => expr);
   mockDb.fn = { now: jest.fn(() => 'NOW()') };
+  // The campaign gate probes the termite notice columns (and fails CLOSED
+  // on a probe error — Codex #4921 r8): a fully-migrated schema.
+  mockDb.schema = { hasColumn: jest.fn(async () => true) };
   return mockDb;
 });
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));

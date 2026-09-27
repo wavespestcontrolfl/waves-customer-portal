@@ -11,6 +11,7 @@
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
+ *   GATE_SERVICE_REPORT_COMPLETION_CHOICES=true (searchable completion choices plus prior same-line recommendations; dark by default)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
  *   GATE_OUTBOUND_VOICEMAIL_SMS=true (admin click-to-call that hits the customer's voicemail hangs up and texts "sorry we missed you" instead)
@@ -102,6 +103,7 @@
  *     below), so flipping only this gate silently keeps the legacy
  *     invoice-and-pay-link behavior. isPrepayCardAndChargeEnabled() enforces
  *     the conjunction; the flip checklist is all three vars.)
+ *   GATE_ANNUAL_PREPAY_ADDON_BILLING=true (completing an annual-prepay-covered visit with no invoice at all and clearly priced add-ons bills them as their own invoice with the pay link and the unpaid completion text; any invoice already on the visit — never collected by the completion — an issued invoice missing an add-on, or an unclear amount — a visit-wide discount, an add-on awaiting its price — gets one office alert instead, ADMIN-BUG-R13, owner ruling 2026-09-26; read at call time and frozen on the service record at the first gate-on pass; dark = today's behavior: the covered visit bills nothing for its add-ons and an office invoice carrying them is voided)
  *
  *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
  *   GATE_LAWN_COMPLETION_DEFAULTS=true (appointment-plan completion defaults; requires GATE_LAWN_PROPERTY_HISTORY; opt-in in every environment)
@@ -504,6 +506,15 @@ const gates = {
   // only be reached from Customer 360 as before. Kill switch: unset or any
   // non-'true' value; nothing is minted retroactively when it flips.
   prepayOnBook: process.env.GATE_PREPAY_ON_BOOK === 'true',
+
+  // Add-ons on an annual-prepay-covered visit billed at completion
+  // (ADMIN-BUG-R13): with no invoice at all, their own invoice through the
+  // shared scheduled mint, pay link + unpaid completion text; any invoice
+  // already on the visit, or an unclear amount, gets one office alert
+  // instead. logGateStatus only — the completion
+  // reads gateEnvValue('GATE_ANNUAL_PREPAY_ADDON_BILLING') at CALL time.
+  // Off: the covered visit bills nothing for its add-ons, as before.
+  annualPrepayAddonBilling: gateEnvValue('GATE_ANNUAL_PREPAY_ADDON_BILLING'),
 
   // Switching an ALREADY-ACCEPTED per-application customer to annual prepay
   // from the appointment sheet — the "changed their mind on site" case
@@ -1428,6 +1439,12 @@ const gates = {
   // Off → nothing is written; the Calls tab still renders rows already
   // recorded. Kill switch: unset. See services/call-commitments.js.
   callCommitments: process.env.GATE_CALL_COMMITMENTS === 'true',
+  // One-hour follow-up pager (owner ruling 2026-09-26): a promise made on a
+  // call (callback, quote, a time to come out) is due within one hour of
+  // 8 AM–8 PM ET time; a missed one rings one bell, and a standing bell lists
+  // everything missed in the last 24 hours. Internal only. Needs
+  // callCommitments. Off → no-op. See services/followup-sla-watcher.js.
+  followupSlaAlerts: process.env.GATE_FOLLOWUP_SLA_ALERTS === 'true',
   // Call reschedule apply: a matched existing customer's agent-committed move
   // of a visit already on the books (V2 reschedule_requested + confirmed
   // start) is applied to that visit through the rebooker, the access note
@@ -2208,6 +2225,20 @@ const gates = {
   // would calibrate the estimator while logGateStatus reported it disabled.
   driveTimeCalibration: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION'),
 
+  // Schedule tie-proximity display order (owner ruling 2026-09-26) — when two
+  // stops on a tech's day start within 30 minutes of each other, the one
+  // closer to the previous stop shows first, instead of falling back to
+  // whichever was booked first. DISPLAY ONLY: server/services/schedule-tie-
+  // proximity.js returns a `displayOrder` per stop; nothing writes
+  // route_order or any other column, and no customer communication is sent.
+  // Uses the existing shared drive-time estimator (GATE_DRIVE_TIME_CALIBRATION
+  // governs which one) — no new Google API calls. Off (default in every
+  // environment) → the mobile day/week list and the desktop day board's route-
+  // order badge sort by window start alone, exactly as before this gate
+  // existed. Consumers read gateEnvValue() at CALL time, so a flip needs no
+  // redeploy. Kill switch: unset GATE_SCHEDULE_TIE_PROXIMITY.
+  scheduleTieProximity: gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY'),
+
   // Slot Travel Gap — the customer-facing pickers (estimate, one-tap, /book,
   // reschedule, re-service, voice, rain-out, AI assistant) and every commit
   // gate behind them require modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES
@@ -2674,6 +2705,12 @@ const gates = {
   // Kill switch: unset. Read at CALL time so a flip needs no redeploy.
   techTips: gateEnvValue('GATE_TECH_TIPS'),
 
+  // Searchable service-report completion vocabulary plus dated recommendations
+  // from the customer's previous three visits on the same service line. Dark
+  // by default and independent of GATE_TECH_TIPS. The dispatch route reads the
+  // env at request time through gateEnvValue so unsetting it is a live kill.
+  serviceReportCompletionChoices: gateEnvValue('GATE_SERVICE_REPORT_COMPLETION_CHOICES'),
+
   // Ops queue (2026-09-02): the Agents hub "Queue" tab — a read-only
   // projection of every long-running lane's persisted state (pending /
   // parked / failed) in one place. No actions live there. OFF unless set,
@@ -2890,6 +2927,33 @@ const gates = {
   // estimateConsultationOfferLive() below, same leadInspectionLinkLive()
   // convention.
   estimateConsultationOffer: process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true',
+  // "Rather have us come look first?" consultation-offer LINK inside the
+  // estimate.engage_gone_quiet follow-up EMAIL (owner ruling 2026-09-26,
+  // decision 2 of the estimate-email consultation-offer lane) — a separate
+  // gate from the estimate PAGE's own GATE_ESTIMATE_CONSULTATION_OFFER
+  // above, since the two surfaces (a page a customer already opened vs an
+  // automated send) ship independently. Ships DARK: off unless exactly
+  // 'true', and requires GATE_LEAD_INSPECTION_LINK on as well (checked by
+  // estimateConsultationLead, the same shared eligibility the page uses).
+  // This entry is for logGateStatus only — the canonical CALL-TIME reader is
+  // estimateEmailConsultationOfferLive() below, same convention.
+  estimateEmailConsultationOffer: process.env.GATE_ESTIMATE_EMAIL_CONSULTATION_OFFER === 'true',
+  // Auto-Dispatch shared route model + day clustering (owner-approved
+  // 2026-09-26 dispatch-backlog item 3, incident: the 04:10 ET run scored a
+  // visit's CURRENT placement with plain haversine while CANDIDATES went
+  // through the arrival-route/planning-minutes simulation, then proposed
+  // moves the rebooker's own hard window-overlap probe refused — 17 applied,
+  // 72 SLOT_TAKEN failures). On: current and candidate placements score on
+  // ONE model (calibrated drive + owner planning minutes, the moving visit
+  // included), candidates are pre-filtered by the SAME window-overlap
+  // predicate the rebooker's writer enforces so a proposed move is one the
+  // writer will actually accept, and the density score term is replaced by a
+  // same-day-area clustering term (same 10-point weight). **Ships DARK: off
+  // unless exactly `true`/`1`/`on`**, canonical CALL-TIME reader
+  // autoDispatchSharedModelLive() below — off is today's auto-dispatch
+  // scoring/candidate/apply behavior, byte for byte. Kill switch: unset
+  // GATE_AUTO_DISPATCH_SHARED_MODEL.
+  autoDispatchSharedModel: gateEnvValue('GATE_AUTO_DISPATCH_SHARED_MODEL'),
   // Amazon "Delivered" email → auto-restock (server/services/purchase-receipts).
   // Ships DARK: off unless set (gateEnvValue), read at call time by both the
   // post-email-sync hook and the ~15-minute scheduler sweep — a flip needs no
@@ -2968,6 +3032,18 @@ function leadInspectionLinkLive() {
   return process.env.GATE_LEAD_INSPECTION_LINK === 'true';
 }
 
+// GATE_AUTO_DISPATCH_SHARED_MODEL read at CALL time via gateEnvValue (same
+// convention as GATE_ROUTE_TIERS / GATE_DRIVE_TIME_CALIBRATION — it moves
+// the numbers auto-dispatch ranks placements with, so the flip is deliberate
+// in every environment and needs no redeploy). The one canonical reader for
+// every entry point: candidate-slots.js (current-placement scoring + the
+// writer-agreement pre-filter), scoring.js (the clustering term), and
+// apply.js (the SLOT_TAKEN next-candidate fallback). The `autoDispatchSharedModel`
+// gates-map entry above is for logGateStatus only.
+function autoDispatchSharedModelLive() {
+  return gateEnvValue('GATE_AUTO_DISPATCH_SHARED_MODEL');
+}
+
 // GATE_ESTIMATE_CONSULTATION_OFFER read at CALL time — strict `=== 'true'`,
 // same convention as leadInspectionLinkLive(). The `estimateConsultationOffer`
 // gates-map entry above is for logGateStatus only; this is the one canonical
@@ -2976,6 +3052,18 @@ function leadInspectionLinkLive() {
 // itself must be live too) — checked by the builder, not duplicated here.
 function estimateConsultationOfferLive() {
   return process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true';
+}
+
+// GATE_ESTIMATE_EMAIL_CONSULTATION_OFFER read at CALL time — strict
+// `=== 'true'`, same convention as estimateConsultationOfferLive(). The
+// `estimateEmailConsultationOffer` gates-map entry above is for
+// logGateStatus only; this is the one canonical reader
+// server/services/estimate-email-consultation-offer.js uses. Like the page
+// offer, this additionally requires leadInspectionLinkLive() (checked
+// inside the shared estimateConsultationLead eligibility, not duplicated
+// here).
+function estimateEmailConsultationOfferLive() {
+  return process.env.GATE_ESTIMATE_EMAIL_CONSULTATION_OFFER === 'true';
 }
 
 // Self-booking day cap (owner ruling 2026-09-23) — the canonical reader
@@ -3045,5 +3133,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, commercialSuiteSizingLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, commercialSuiteSizingLive, autoDispatchSharedModelLive };
 // gates 1775330914

@@ -1067,6 +1067,11 @@ const TwilioService = {
       // handoff (codex #3495): entry-time capture predates template/
       // customer lookups and the push-first attempt, so a START received
       // during that preparation wrongly outranked the rejection.
+      // The visit and its property snapshotted BEFORE the provider handoff:
+      // a property switch that commits while the send is in flight must not
+      // re-scope an SMS already handed off (Codex #4816 r49/r50). Not inside
+      // dispatch(): the provider call stays the handoff's last await.
+      const noticeScopeStamp = await require('./messaging/notice-scope').noticeScope(options.appointmentId);
       let message;
       let dispatchStarted = false;
       // Pre-push audit P2 (twilio.js:953, round 12): dispatch() takes an
@@ -1364,6 +1369,12 @@ const TwilioService = {
               : {}),
             ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
             ...(options.reviewRequestId ? { review_request_id: options.reviewRequestId } : {}),
+            // The visit this send is about, on the primary row itself: the
+            // messaging audit is best-effort, and readers that scope by
+            // property (SMS commitment evidence) must not depend on it
+            // (Codex #4816 r41). Same key the push proof row uses.
+            // The visit and its send-time property (Codex #4816 r41/r49).
+            ...noticeScopeStamp,
           }),
         });
       } catch (logErr) {
