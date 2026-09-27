@@ -252,7 +252,7 @@ async function stampTarget(callId, token, promiseId) {
       metadata: db.raw(
         `jsonb_set(COALESCE(metadata,'{}'::jsonb), '{promise_chaser}',
           CASE WHEN metadata->'promise_chaser'->>'commitmentId' IS DISTINCT FROM ?
-            THEN (COALESCE(metadata->'promise_chaser','{}'::jsonb) - 'deliveredSubscriptionIds') || jsonb_build_object('commitmentId', ?::text)
+            THEN (COALESCE(metadata->'promise_chaser','{}'::jsonb) - 'deliveredSubscriptionIds' - 'deliveredDay') || jsonb_build_object('commitmentId', ?::text)
             ELSE COALESCE(metadata->'promise_chaser','{}'::jsonb) || jsonb_build_object('commitmentId', ?::text)
           END, true)`,
         [idText, idText, idText],
@@ -273,11 +273,15 @@ async function stampTarget(callId, token, promiseId) {
 //   it — the sweep retries on its own normal LEASE_MS cadence, by which
 //   point the other attempt has settled or its own lease has gone stale.
 // deliveredElsewhere — the union of deliveredSubscriptionIds any OTHER
-//   call's own partial push already persisted for this promise — merged
-//   into THIS call's own exclusion list before it ever dispatches, so a
-//   second call for the same promise (a lead who hangs up and immediately
-//   calls right back) never re-buzzes a device the first call already
-//   reached, even though that history lives on a different row.
+//   call's own partial push already persisted for this promise TODAY (ET)
+//   — merged into THIS call's own exclusion list before it ever
+//   dispatches, so a second call for the same promise (a lead who hangs
+//   up and immediately calls right back) never re-buzzes a device the
+//   first call already reached today, even though that history lives on
+//   a different row. Scoped to the SAME delivery day as the dedupe key
+//   dispatchPromiseNotification computes (waves-promise_chaser-<id>-<ET
+//   day>): a device excluded because of a stuck attempt from a PRIOR day
+//   would otherwise silently never get today's genuinely new bell.
 // Bounded to 48h so it stays a bounded index scan, not a table scan.
 async function promiseDeliveryState(promiseId, callId, now) {
   const rows = await db('call_log')
@@ -293,7 +297,9 @@ async function promiseDeliveryState(promiseId, callId, now) {
     if (!pc || typeof pc !== 'object') continue;
     if (pc.status === 'rung' && pc.at && etDateString(new Date(pc.at)) === today) alreadyRung = true;
     if (pc.status === 'pending' && pc.claimed_at && Date.now() - new Date(pc.claimed_at).getTime() < LEASE_MS) activeElsewhere = true;
-    if (Array.isArray(pc.deliveredSubscriptionIds)) pc.deliveredSubscriptionIds.forEach((id) => delivered.add(id));
+    if (pc.deliveredDay === today && Array.isArray(pc.deliveredSubscriptionIds)) {
+      pc.deliveredSubscriptionIds.forEach((id) => delivered.add(id));
+    }
   }
   return { alreadyRung, activeElsewhere, deliveredElsewhere: [...delivered] };
 }
@@ -460,12 +466,17 @@ async function dispatchPromiseNotification(call, promise, what, when, { viaSweep
   const { triggerNotification } = require('./notification-triggers');
   // Once per promise per ET day — a caller who rings twice in an afternoon
   // does not double the bell (notifyAdmin's own dedupe lock).
-  const dedupeKey = `waves-promise_chaser-${promise.id}-${etDateString(new Date())}`;
-  // Devices a PRIOR attempt already buzzed (a partial push — sent > 0,
-  // failed > 0 — persisted these on its own way to leaving the claim
-  // pending) never get buzzed again on this retry — payment-failure-
-  // notifications.js's own deliveredSubscriptionIds pattern.
-  const deliveredSoFar = Array.isArray(existing?.deliveredSubscriptionIds) ? existing.deliveredSubscriptionIds : [];
+  const today = etDateString(new Date());
+  const dedupeKey = `waves-promise_chaser-${promise.id}-${today}`;
+  // Devices a PRIOR attempt already buzzed TODAY (a partial push — sent >
+  // 0, failed > 0 — persisted these, day-stamped, on its own way to
+  // leaving the claim pending) never get buzzed again on this retry —
+  // payment-failure-notifications.js's own deliveredSubscriptionIds
+  // pattern. Never a PRIOR day's history: that belongs to a dedupe key
+  // this dispatch does not share, and excluding it would silently starve
+  // today's genuinely new bell of a device it never actually heard from.
+  const deliveredSoFar = existing?.deliveredDay === today && Array.isArray(existing?.deliveredSubscriptionIds)
+    ? existing.deliveredSubscriptionIds : [];
   const stats = await triggerNotification('promise_chaser', {
     customerId: call.customer_id || null,
     name: [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || null,
@@ -490,7 +501,10 @@ async function dispatchPromiseNotification(call, promise, what, when, { viaSweep
   // leaves the claim pending; only a definitive, non-retryable outcome may
   // settle.
   if (recheckError || stats?.error || stats?.retryable || stats?.prefsUnavailable) {
-    return { pending: { deliveredSubscriptionIds: mergedDeliveredIds } };
+    // Day-stamped so a later read (this row's own retry, or another row's
+    // promiseDeliveryState) knows which dedupe day this history belongs
+    // to, and never carries it into a day it was never actually about.
+    return { pending: { deliveredSubscriptionIds: mergedDeliveredIds, deliveredDay: today } };
   }
   // Genuine delivery only — a deliberate non-send (every admin opted out,
   // the bell policy silenced the category, or stillEligible just blocked a
@@ -580,9 +594,14 @@ async function ringPromiseChaserIfNeeded(callSid, { viaSweep = false } = {}) {
     // targeting when a PRIOR attempt persisted it (existing.commitmentId,
     // read before stampTarget below overwrites it); reused only when this
     // attempt is chasing that SAME promise again, never carried over onto
-    // an unrelated one it was never actually delivered against.
+    // an unrelated one it was never actually delivered against. Also never
+    // carried over from a PRIOR ET day: "once per promise per day" mints a
+    // fresh dedupe key (and so a fresh bell) every day, so yesterday's
+    // stuck partial delivery must not silently exclude a device from
+    // today's genuinely new one.
+    const today = etDateString(now);
     const priorTarget = existing?.commitmentId;
-    const ownDeliveredSoFar = priorTarget && String(priorTarget) === String(promise.id)
+    const ownDeliveredSoFar = priorTarget && String(priorTarget) === String(promise.id) && existing?.deliveredDay === today
       ? (existing?.deliveredSubscriptionIds || []) : [];
 
     // Stamp which promise this claim now targets BEFORE the cross-call
@@ -612,7 +631,13 @@ async function ringPromiseChaserIfNeeded(callSid, { viaSweep = false } = {}) {
 
     const existingWithCrossDelivered = {
       ...existing,
+      // Both inputs are already scoped to TODAY (ownDeliveredSoFar above;
+      // promiseDeliveryState's own deliveredElsewhere) — stamped here so
+      // dispatchPromiseNotification's own day check (a defense-in-depth,
+      // not a second filter) agrees rather than reading a stale prior day
+      // off this row's own untouched deliveredDay.
       deliveredSubscriptionIds: [...new Set([...ownDeliveredSoFar, ...cross.deliveredElsewhere])],
+      deliveredDay: today,
     };
     const result = await dispatchPromiseNotification(call, promise, what, when, { viaSweep, existing: existingWithCrossDelivered });
     if (result.pending) { await recordProgress(call.id, token, result.pending); return false; }

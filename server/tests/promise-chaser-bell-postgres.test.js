@@ -25,6 +25,7 @@ const { triggerNotification } = require('../services/notification-triggers');
 const { followedUpIds: followedUpIdsMock } = require('../services/followup-sla-watcher');
 const logger = require('../services/logger');
 const { gates } = require('../config/feature-gates');
+const { etDateString } = require('../utils/datetime-et');
 const { ringPromiseChaserIfNeeded, markScreenFailed, sweepPromiseChasers, pendingClaimFragment } = require('../services/promise-chaser-bell');
 
 jest.setTimeout(30000);
@@ -827,6 +828,7 @@ const OUR_NUMBER = '+19415550100';
           claimed_at: new Date(now - 20 * 60000).toISOString(),
           commitmentId: commitment.id,
           deliveredSubscriptionIds: ['sub-from-first-call'],
+          deliveredDay: etDateString(new Date(now)),
         },
       },
     });
@@ -961,5 +963,52 @@ const OUR_NUMBER = '+19415550100';
     // A's stale history — nothing else ran afterward to have done it.
     expect(row.metadata.promise_chaser.commitmentId).toBe(commitmentB.id);
     expect(row.metadata.promise_chaser.deliveredSubscriptionIds).toBeUndefined();
+  });
+
+  test("a partial push's delivered-device history from a PRIOR ET day never suppresses today's genuinely new bell for the same promise", async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const yesterday = etDateString(new Date(now - 24 * 60 * 60 * 1000));
+    // `back` is stuck 'pending' with YESTERDAY's partial-push history —
+    // "once per promise per day" mints a fresh dedupe key (and bell) each
+    // day, so this device was never actually notified about TODAY's.
+    const back = callRow(0, {
+      metadata: { promise_chaser: { status: 'pending', claimed_at: null, commitmentId: commitment.id, deliveredSubscriptionIds: ['sub-yesterday'], deliveredDay: yesterday } },
+    });
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    triggerNotification.mockResolvedValueOnce({
+      bellWritten: true, push: { sent: 1, failed: 0, deliveredSubscriptionIds: ['sub-yesterday'] },
+    });
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(true);
+    const [, , opts] = triggerNotification.mock.calls[0];
+    // Never excluded — yesterday's history belongs to a dedupe key this
+    // dispatch does not share.
+    expect(opts.deliveredSubscriptionIds).toEqual([]);
+
+    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(row.metadata.promise_chaser).toMatchObject({ status: 'rung', commitmentId: commitment.id });
+  });
+
+  test("a SEPARATE call's PRIOR-day delivery history for the same promise (promiseDeliveryState) is likewise never carried into today's dispatch", async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const yesterday = etDateString(new Date(now - 24 * 60 * 60 * 1000));
+    // A genuinely separate call, stuck 'pending' since yesterday with its
+    // own partial-push history against this exact promise.
+    const stuckSinceYesterday = callRow(300, {
+      metadata: { promise_chaser: { status: 'pending', claimed_at: null, commitmentId: commitment.id, deliveredSubscriptionIds: ['sub-yesterday'], deliveredDay: yesterday } },
+    });
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, stuckSinceYesterday, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    triggerNotification.mockResolvedValueOnce({
+      bellWritten: true, push: { sent: 1, failed: 0, deliveredSubscriptionIds: ['sub-yesterday'] },
+    });
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(true);
+    const [, , opts] = triggerNotification.mock.calls[0];
+    expect(opts.deliveredSubscriptionIds).toEqual([]);
   });
 });
