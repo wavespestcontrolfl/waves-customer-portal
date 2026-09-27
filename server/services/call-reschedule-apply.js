@@ -260,12 +260,32 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
       return serviceNameCandidates(authoritative).some((name) => namedServices.has(stripServiceSuffixes(name).toLowerCase()));
     });
     const programIds = new Set(matchingServices.map((row) => row.service_id || stripServiceSuffixes(row.catalog_service_name || row.service_type).toLowerCase()));
-    if (programIds.size !== 1) return skip('service_needs_review');
-    if (matchingServices.length > 1) return skip('ambiguous_visit', { candidateIds: matchingServices.map((r) => r.id) });
-    nearby = matchingServices.filter((row) => {
-      const d = dateOnly(row.scheduled_date);
-      return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
-    });
+    // Filter to span FIRST, then judge ambiguity on what's actually near the
+    // target date — not on every future occurrence of the same recurring
+    // program regardless of distance. loadCandidates has no upper date bound,
+    // so a customer with several quarterly visits on the books was ALWAYS
+    // ambiguous_visit before this fix (0/1,089 calls ever moved a visit).
+    if (programIds.size !== 1) {
+      // The stated service name is coarse, absent, or unmatched. Fall back to
+      // "what's actually on the books at this property near this date",
+      // ignoring the named service entirely — but only when exactly one
+      // program has a visit in span; two different programs both near the
+      // target stays in review same as before.
+      const inSpanAny = atProperty.filter((row) => {
+        const d = dateOnly(row.scheduled_date);
+        return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
+      });
+      const spanProgramIds = new Set(inSpanAny.map((row) => row.service_id || stripServiceSuffixes(row.catalog_service_name || row.service_type || '').toLowerCase()));
+      if (!inSpanAny.length || spanProgramIds.size !== 1) return skip('service_needs_review');
+      nearby = inSpanAny;
+    } else {
+      const inSpan = matchingServices.filter((row) => {
+        const d = dateOnly(row.scheduled_date);
+        return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
+      });
+      if (inSpan.length > 1) return skip('ambiguous_visit', { candidateIds: inSpan.map((r) => r.id) });
+      nearby = inSpan; // invariant preserved: length is 0 or 1 here
+    }
   }
   if (nearby.length === 0) return skip('no_visit_on_books');
   const visit = nearby[0];

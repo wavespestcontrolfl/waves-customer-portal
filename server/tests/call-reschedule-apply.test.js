@@ -100,23 +100,33 @@ describe('planRescheduleFromCall', () => {
     expect(planRescheduleFromCall({ ...args, candidates: [visit(), ...args.candidates.slice(1)] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 
-  test('a coarse category or an ambiguous program name needs staff review', () => {
-    const args = { v2: v2({ service_request: { specific_service_name: null } }), call: call(), customer: customer(), now: NOW, candidates: [visit()] };
-    expect(planRescheduleFromCall(args).reason).toBe('service_needs_review');
-    expect(planRescheduleFromCall({ ...args, v2: v2(), candidates: [visit(), visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-12-01' })] }).reason).toBe('service_needs_review');
+  // A coarse/absent/unmatched service name falls back to "what's on the
+  // books at this property near this date" — but only when that is
+  // unambiguous. Two different programs both in span, or nothing in span at
+  // all, still needs a human to pick.
+  test('a coarse or unmatched service name falls back to the one in-span program at the property', () => {
+    const base = { v2: v2({ service_request: { specific_service_name: null } }), call: call(), customer: customer(), now: NOW };
+    expect(planRescheduleFromCall({ ...base, candidates: [visit()] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    expect(planRescheduleFromCall({ ...base, candidates: [visit(), visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-09-25' })] }).reason).toBe('service_needs_review');
+    expect(planRescheduleFromCall({ ...base, candidates: [visit({ scheduled_date: '2026-12-01' })] }).reason).toBe('service_needs_review');
   });
 
   // A repoint leaves service_type stale, so the label alone can name the
   // requested program while the row now belongs to a different one (r8 P1).
+  // A second, distinct in-span program keeps the coarse-name fallback (item
+  // 2) from guessing either case — it only resolves a SINGLE in-span program.
   test('a stale service label cannot stand in for the catalog identity', () => {
-    // Both land as service_needs_review — nothing matched the request, so the
-    // office gets the card rather than the automation guessing from the label.
+    const sibling = visit({ id: 'sibling', service_id: 'lawn-monthly', service_type: 'Monthly Lawn Service', scheduled_date: '2026-09-25' });
+    // Both land as service_needs_review — nothing matched the request by
+    // catalog identity, and with a second in-span program present the
+    // fallback can't resolve it either, so the office gets the card rather
+    // than the automation guessing from the label.
     const repointed = visit({ service_id: 'mosquito-monthly', catalog_service_name: 'Monthly Mosquito Control Service' });
-    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [repointed] }).reason)
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [repointed, sibling] }).reason)
       .toBe('service_needs_review');
     // A row whose catalog entry is gone matches nothing rather than the label.
     const orphaned = visit({ catalog_service_name: null });
-    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [orphaned] }).reason)
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [orphaned, sibling] }).reason)
       .toBe('service_needs_review');
     // The catalog name still carries the alias contract.
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW,
@@ -262,7 +272,7 @@ describe('planRescheduleFromCall', () => {
     expect(out.action).toBe('apply');
   });
 
-  test('visit selection: none, ambiguous, grouped, dispatch-owned pending, far cadence sibling', () => {
+  test('visit selection: none, ambiguous (in span), grouped, dispatch-owned pending, out-of-span sibling', () => {
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates: [], now: NOW }).reason).toBe('no_visit_on_books');
     const two = planRescheduleFromCall({
       v2: v2(), call: call(), customer: customer(), now: NOW,
@@ -271,12 +281,30 @@ describe('planRescheduleFromCall', () => {
     expect(two).toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, '70000000-0000-4000-8000-000000000002'] });
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates: [visit({ visit_id: 'v1' })], now: NOW }).reason).toBe('grouped_visit');
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates: [visit({ source_action: 'ai_call_pipeline_followup' })], now: NOW }).reason).toBe('dispatch_owned_pending');
-    // The agreed destination does not identify which quarterly occurrence the caller meant.
-    const withSibling = planRescheduleFromCall({
+    // A same-program sibling MONTHS out no longer manufactures ambiguity —
+    // proximity is judged first (the bug fix): a customer with several future
+    // occurrences of the same recurring program resolves on the one actually
+    // near the target instead of always landing on ambiguous_visit.
+    const farSibling = planRescheduleFromCall({
       v2: v2(), call: call(), customer: customer(), now: NOW,
       candidates: [visit(), visit({ id: '70000000-0000-4000-8000-000000000003', scheduled_date: '2026-12-17', window_start: '14:00:00', window_end: '15:00:00' })],
     });
-    expect(withSibling).toMatchObject({ action: 'skip', reason: 'ambiguous_visit', candidateIds: [VISIT_ID, '70000000-0000-4000-8000-000000000003'] });
+    expect(farSibling).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+  });
+
+  // The described bug: loadCandidates has no upper date bound, so a customer
+  // on a recurring plan with several quarterly visits on the books was ALWAYS
+  // ambiguous_visit before the span-first fix, even though only one of those
+  // visits was ever near the agreed date.
+  test('a customer with several quarterly visits on the books resolves on the one in span', () => {
+    const candidates = [
+      visit({ id: 'q-past', scheduled_date: '2026-06-24' }),
+      visit({ id: VISIT_ID, scheduled_date: '2026-09-24' }),
+      visit({ id: 'q-next', scheduled_date: '2026-12-24' }),
+      visit({ id: 'q-after', scheduled_date: '2027-03-24' }),
+    ];
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates, now: NOW }))
+      .toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 
   test('duration falls back to estimated_duration_minutes, then 60', () => {
