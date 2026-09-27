@@ -774,17 +774,55 @@ async function settleTerminalKind(trx, { lineId, line, email, decision }, notify
 // incompatible default_unit holds for a person (writing the line + bell
 // itself) instead of silently reinterpreting it. Returns 'fixed' / 'unchanged'
 // / 'incompatible' — the caller folds 'fixed' into its own catalogChangeNote.
+// Every table that records or plans APPLYING a product in its application
+// unit — a visit's applied amount, a service's COGS usage, a protocol rate,
+// a compliance, nutrient or lawn-actuals record, an application limit. The
+// `why` texts read as "since the agent's decision" because the undo CLI's
+// adoption check (DOWNSTREAM_ADOPTION_TABLES) reuses this list.
+const APPLICATION_USAGE_TABLES = [
+  { table: 'service_product_usage', why: 'a service now maps this product for its COGS usage (service_product_usage)' },
+  { table: 'service_products', why: 'a completed visit recorded applying this product (service_products)' },
+  { table: 'protocol_template_products', why: 'a protocol template now uses this product (protocol_template_products)' },
+  { table: 'lawn_protocol_products', why: 'a lawn protocol now uses this product (lawn_protocol_products)' },
+  { table: 'lawn_protocol_product_actuals', why: 'a lawn visit recorded applying this product (lawn_protocol_product_actuals)' },
+  { table: 'property_application_history', why: 'an application of this product was recorded (property_application_history)' },
+  { table: 'property_nutrient_ledger', why: 'a nutrient ledger entry now uses this product (property_nutrient_ledger)' },
+  { table: 'product_limits', why: 'an application limit now covers this product (product_limits)' },
+];
+
+async function productHasApplicationUsage(trx, productId) {
+  for (const { table } of APPLICATION_USAGE_TABLES) {
+    if (await trx(table).where({ product_id: productId }).first('id')) return true;
+  }
+  return false;
+}
+
+// No inventory movement does not mean a product is unused:
+// complete-scheduled-service skips the stock deduction for an untracked
+// product, so ounce-based usage and mappings can exist with no movement at
+// all, and switching the application unit to each would leave every one of
+// them unable to deduct (2026-09-27 pre-push audit). Such a product holds
+// for a person ('in_use') instead of being quietly switched.
 async function fixCountDefaultUnit(trx, { productId, product }) {
   const defaultUnit = String(product.default_unit || '').trim();
   const looksUnset = !defaultUnit || normalizeInventoryUnit(defaultUnit) === 'oz';
   const hasAnyMovement = await trx('product_inventory_movements').where({ product_id: productId }).first('id');
   if (looksUnset && !hasAnyMovement) {
+    if (await productHasApplicationUsage(trx, productId)) return 'in_use';
     await trx('products_catalog').where({ id: productId }).update({ default_unit: 'each', updated_at: new Date() });
     return 'fixed';
   }
   if (convertInventoryQuantity(1, defaultUnit, 'each') == null) return 'incompatible';
   return 'unchanged';
 }
+
+const COUNT_UNIT_HOLDS = {
+  incompatible: { reason: 'application_unit_incompatible_with_count', body: "its application unit can't take a count; fix the product first." },
+  in_use: {
+    reason: 'application_unit_in_use',
+    body: 'it is already used on visits, services or protocols in its current application unit; switch it to each by hand only if it really is counted.',
+  },
+};
 
 // Every candidate field the prompt showed the model (candidateLine: name,
 // category, container_size, inventory_unit) must still read exactly as it
@@ -830,12 +868,8 @@ async function resolveExistingProduct(trx, { decision }) {
   }
   if (decision.unit === 'each') {
     const fixOutcome = await fixCountDefaultUnit(trx, { productId, product });
-    if (fixOutcome === 'incompatible') {
-      return { ok: false, stop: { hold: {
-        status: 'agent_unsure', reason: 'application_unit_incompatible_with_count',
-        body: "its application unit can't take a count; fix the product first.",
-      } } };
-    }
+    const hold = COUNT_UNIT_HOLDS[fixOutcome];
+    if (hold) return { ok: false, stop: { hold: { status: 'agent_unsure', ...hold } } };
     if (fixOutcome === 'fixed') {
       catalogChangeNote = catalogChangeNote ? `${catalogChangeNote}; set its application unit to each` : `set ${product.name}'s application unit to each`;
     }
@@ -1126,17 +1160,15 @@ async function productUnchangedSinceAgent(conn, line, movement) {
 }
 
 // Every table that maps a products_catalog row into real operations and
-// carries its own created_at — found by grepping the migrations for
-// `product_id` referencing products_catalog (item 4, 2026-09-27 round 7
-// review). productUnchangedSinceAgent's row hash only ever covers the
+// carries its own created_at — APPLICATION_USAGE_TABLES plus restock
+// requests, found by grepping the migrations for `product_id` referencing
+// products_catalog (item 4, 2026-09-27 round 7 review; the usage tables
+// widened by the 2026-09-27 pre-push audit). productUnchangedSinceAgent's row hash only ever covers the
 // product row ITSELF; it can't see a reference like these, so an undo that
 // only checked the hash could restore a "pre-agent" state a service, a
 // restock request or a protocol has since built on top of.
 const DOWNSTREAM_ADOPTION_TABLES = [
-  { table: 'service_product_usage', why: 'a service now maps this product for its COGS usage (service_product_usage)' },
-  { table: 'service_products', why: 'a completed visit recorded applying this product (service_products)' },
-  { table: 'protocol_template_products', why: 'a protocol template now uses this product (protocol_template_products)' },
-  { table: 'lawn_protocol_products', why: 'a lawn protocol now uses this product (lawn_protocol_products)' },
+  ...APPLICATION_USAGE_TABLES,
   // A restock request raised since the decision means the stock level the
   // agent recorded no longer means what it meant then — reversing it would
   // leave that request's own expectations pointed at the wrong number.

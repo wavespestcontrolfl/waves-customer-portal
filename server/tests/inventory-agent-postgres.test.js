@@ -25,7 +25,7 @@ const inventoryOperations = require('../services/inventory-operations');
 const notifications = require('../services/notification-service');
 const { undoLine } = require('../../ops/agents/inventory-agent-undo');
 
-const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails', 'email_attachments', 'service_product_usage'];
+const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails', 'email_attachments', 'service_product_usage', 'protocol_template_products'];
 const RECEIVED_AT = new Date('2026-09-27T15:00:00Z');
 const HOUR = 60 * 60 * 1000;
 
@@ -380,6 +380,33 @@ jest.setTimeout(30000);
     expect(await stockOf(trapProduct.id)).toBe(5); // never applied
     const [bell] = await bellsFor(line.id);
     expect(bell.body).toMatch(/application unit can't take a count/);
+  });
+
+  // 2026-09-27 pre-push audit: no movement doesn't mean unused — visit
+  // completion skips the deduction for an untracked product, so a protocol
+  // (or a visit, or a COGS mapping) can already apply it in ounces.
+  test('an EXISTING count product with no movement but an ounce-based protocol mapping holds instead of switching its application unit', async () => {
+    const [trapProduct] = await mockConn('products_catalog').insert({
+      name: 'Victor Rat Trap', active: true, category: 'supplies', container_size: '12 count', inventory_unit: null, default_unit: 'oz', inventory_on_hand: null,
+    }).returning('*');
+    await mockConn('protocol_template_products').insert({
+      protocol_template_id: randomUUID(), product_id: trapProduct.id, product_name_snapshot: 'Victor Rat Trap', rate: 1, rate_unit: 'oz',
+    });
+    const line = await pendingLine({ raw_title: 'Victor Rat Trap 12 Count', product_id: trapProduct.id, quantity: 5 });
+    const decision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: trapProduct.id, new_product: null,
+      reading: { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_text: null, pack_count: 1 },
+    };
+    const result = await run({ ok: true, json: decision });
+    expect(result).toMatchObject({ logged: 0, held: 1 });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'agent_unsure' });
+    expect(saved.agent_decision).toMatchObject({ reason: 'application_unit_in_use' });
+    const product = await mockConn('products_catalog').where({ id: trapProduct.id }).first();
+    expect(product).toMatchObject({ default_unit: 'oz', inventory_unit: null, inventory_on_hand: null });
+    expect(await mockConn('product_inventory_movements').where({ product_id: trapProduct.id })).toHaveLength(0);
+    const [bell] = await bellsFor(line.id);
+    expect(bell.body).toMatch(/already used on visits, services or protocols/);
   });
 
   test('a held count decision on a blank-container product leaves the catalog untouched (the savepoint rolls back)', async () => {
