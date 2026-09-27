@@ -3295,7 +3295,8 @@ fleet site — falling back to `/sitemap.xml`, which only the hub serves, as a
 redirect to that index; read with content-registry-live-status's
 `fetchSitemapPaths` and compared with `normalizeContentUrl`, cached 6 h per
 site; a failed refresh keeps the last good list and retries after 5 min; no
-list yet means the beacon is dropped), so invented slugs never create rows —
+list yet means the beacon is dropped; each sitemap outage is warn-logged once
+and its recovery once, with the fleet site key only), so invented slugs never create rows —
 today every blog post is hub-only, so spoke beacons find no blog paths and
 drop; and each `(day, site, path, milestone)` bucket stops at 2,000 a day
 (the upsert's `WHERE count < 2000`), so a forged flood can skew one post by
