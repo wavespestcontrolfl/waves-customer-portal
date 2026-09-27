@@ -35,6 +35,38 @@ function deny(reason_code, reason_description) {
   return { eligible: false, reason_code, reason_description };
 }
 
+// The date/day-move lock decision for one visit — pulled out of
+// isEligibleForAutoDispatch (already over the repo's complexity budget;
+// AGENTS.md forbids raising it further) so GATE_AUTO_DISPATCH_FLEX_TIER's
+// own branch lives in a dedicated, budgeted function instead of adding to
+// that one. Returns a deny() result, or null when the date itself imposes no
+// lock here:
+//   - an unplaced recurring due-date visit (no customer-promised time yet);
+//   - GATE_AUTO_DISPATCH_FLEX_TIER on — the Flexible tier's OWN lock is the
+//     73h reminder freeze, decided later in index.js from the live
+//     reminder row (flex-tier.js), never from days-out;
+//   - GATE_ROUTE_TIERS on and the visit clears its days-out tier radius.
+function resolveDateLockDenial(service, ctx, dateStr) {
+  if (service.recurring_dispatch_due_date && !service.window_start) return null;
+  if (ctx.flexTier && ctx.flexTier.enabled === true) return null;
+  if (ctx.routeTiers && ctx.routeTiers.enabled === true) {
+    // ROUTE-TIERS (GATE_ROUTE_TIERS on): the flat lock is replaced by the tier
+    // ladder — day-moves need a non-zero tier radius (>= 7 days out). Tier 3 /
+    // frozen visits belong to the intra-day reorder pass (route-reorder.js) or
+    // to nobody. Anything unparseable fails closed into the lock.
+    const daysOut = daysBetween(ctx.routeTiers.today || ctx.today, dateStr);
+    if (daysOut == null || tierRadiusForDaysOut(daysOut) === 0) {
+      return deny('TIER_LOCKED', `Inside route-tier day-move lock (under ${TIER2_MIN_DAYS_OUT} days out)`);
+    }
+    return null;
+  }
+  if (ctx.lockBoundary && dateStr <= ctx.lockBoundary) {
+    // Legacy flat lock (gate off): inclusive — anything on or before today+N days is locked.
+    return deny('INSIDE_LOCK_WINDOW', `Within ${ctx.lockWindowDays ?? 14}-day lock window (on/before ${ctx.lockBoundary})`);
+  }
+  return null;
+}
+
 function isEligibleForAutoDispatch(service, ctx = {}) {
   if (!service) return deny('NOT_FOUND', 'Service row missing');
 
@@ -62,22 +94,8 @@ function isEligibleForAutoDispatch(service, ctx = {}) {
 
   const dateStr = toDateStr(service.scheduled_date) || '';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return deny('INVALID_DATE', 'Missing/invalid scheduled_date');
-  if (service.recurring_dispatch_due_date && !service.window_start) {
-    // Due dates have no customer-promised time; placing one does not move a
-    // committed appointment. Candidate generation still excludes today/past.
-  } else if (ctx.routeTiers && ctx.routeTiers.enabled === true) {
-    // ROUTE-TIERS (GATE_ROUTE_TIERS on): the flat lock is replaced by the tier
-    // ladder — day-moves need a non-zero tier radius (>= 7 days out). Tier 3 /
-    // frozen visits belong to the intra-day reorder pass (route-reorder.js) or
-    // to nobody. Anything unparseable fails closed into the lock.
-    const daysOut = daysBetween(ctx.routeTiers.today || ctx.today, dateStr);
-    if (daysOut == null || tierRadiusForDaysOut(daysOut) === 0) {
-      return deny('TIER_LOCKED', `Inside route-tier day-move lock (under ${TIER2_MIN_DAYS_OUT} days out)`);
-    }
-  } else if (ctx.lockBoundary && dateStr <= ctx.lockBoundary) {
-    // Legacy flat lock (gate off): inclusive — anything on or before today+N days is locked.
-    return deny('INSIDE_LOCK_WINDOW', `Within ${ctx.lockWindowDays ?? 14}-day lock window (on/before ${ctx.lockBoundary})`);
-  }
+  const dateLockDenial = resolveDateLockDenial(service, ctx, dateStr);
+  if (dateLockDenial) return dateLockDenial;
 
   // customer_active comes from the LEFT JOIN; null (no customer row) is not a
   // positive churn signal, so only an explicit false skips.

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isProductApplication, epaReg } from './product-application';
+import { isProductApplication, epaReg, isRodenticideRow, reportHasRodenticide } from './product-application';
 
 const app = (name, method, extra = {}) => ({ method, product: { name, ...extra } });
 
@@ -33,5 +33,28 @@ describe('isProductApplication — one identity rule for the live report and the
   it('epaReg blanks the catalog "N/A" placeholder', () => {
     expect(epaReg({ product: { epa_reg: 'N/A' } })).toBe('');
     expect(epaReg({ product: { epa_reg: '7969-210' } })).toBe('7969-210');
+  });
+});
+
+describe('reportHasRodenticide — bait stations carry Poison Control though servicing is not an application', () => {
+  it('rodenticide and rodent bait rows count; termite bait and ordinary pest bait do not', () => {
+    expect(isRodenticideRow(app('Contrac Blox', 'station_check', { category: 'rodenticide' }))).toBe(true);
+    expect(isRodenticideRow(app('Protecta Rodent Bait Station', 'station_check'))).toBe(true);
+    expect(isRodenticideRow(app('Trelona ATBS Termite Bait Station', 'station_check'))).toBe(false);
+    expect(isRodenticideRow(app('Advion Ant Bait Gel', 'bait_placement'))).toBe(false);
+  });
+
+  it('a rodent bait-station visit counts by typed flow, companion, station program or recorded row', () => {
+    expect(reportHasRodenticide({ typedReport: { type: 'rodent_bait_station' } })).toBe(true);
+    expect(reportHasRodenticide({ companionReports: [{ type: 'rodent_bait_station' }] })).toBe(true);
+    expect(reportHasRodenticide({ stationMap: { program: 'rodent' } })).toBe(true);
+    expect(reportHasRodenticide({ applications: [app('Contrac Blox', 'station_check', { category: 'rodenticide' })] })).toBe(true);
+  });
+
+  it('trapping, termite stations and ordinary visits do not', () => {
+    expect(reportHasRodenticide({ typedReport: { type: 'rodent_trapping' }, stationMap: { program: 'trapping' } })).toBe(false);
+    expect(reportHasRodenticide({ typedReport: { type: 'termite_bait_station' }, stationMap: { program: 'termite' } })).toBe(false);
+    expect(reportHasRodenticide({ applications: [app('Talstar P', 'perimeter_spray')] })).toBe(false);
+    expect(reportHasRodenticide(null)).toBe(false);
   });
 });

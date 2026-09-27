@@ -256,6 +256,20 @@ app.use('/api/ops/digest', require('./middleware/no-store').noStore, (req, res, 
   next();
 });
 
+// Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
+// "E2: cookie-free read-depth counts") — routes/public-blog-read-depth.js.
+// The WHOLE router (no-store headers, dark-gate 404, its own per-IP limiter,
+// capped text-body parse, terminal 404) is mounted ABOVE the global cors()
+// below — which would otherwise answer an allowed-origin OPTIONS preflight
+// with 204 while the route is dark (codex P0 r1 on #5022) — and above the
+// global `/api/` limiter and body parsers, so a dark probe of any method
+// only ever sees the generic unknown-route 404 and a reader's beacons never
+// spend the budget quote-form or booking calls need. The router terminates
+// every request it receives, so nothing falls through to the request
+// logger further down. Beacons are no-cors `text/plain` POSTs whose
+// response the page never reads, so this route sets no CORS headers.
+app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'));
+
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
 app.use(cors({
@@ -435,6 +449,7 @@ app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req,
   next();
 });
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
+
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints

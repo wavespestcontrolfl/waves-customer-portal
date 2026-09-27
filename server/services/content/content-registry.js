@@ -10,9 +10,11 @@ const path = require('path');
 
 const db = require('../../models/db');
 const fm = require('../content-astro/frontmatter');
+const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 
 const DEFAULT_COLLECTION_ROOT = path.join('src', 'content');
 const WAVES_HOSTS = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
+const CONTENT_FLEET_HOSTS = new Set(SPOKE_SITE_KEYS.flatMap((host) => [host, `www.${host}`]));
 const LIVE_MIRROR_FIELDS = [
   'sitemap_status',
   'http_status',
@@ -21,6 +23,7 @@ const LIVE_MIRROR_FIELDS = [
   'canonical_target_url',
   'noindex_detected',
   'sitemap_present',
+  'live_status_checked_at',
 ];
 
 function normalizeContentUrl(value) {
@@ -47,6 +50,44 @@ function normalizeContentUrl(value) {
   const out = `${normalizedPath}/`;
   if (host && !WAVES_HOSTS.has(host)) return `https://${host}${out}`;
   return out;
+}
+
+function isContentFleetUrl(value) {
+  try {
+    const parsed = new URL(String(value || ''));
+    const standardPort = !parsed.port
+      || (parsed.protocol === 'https:' && parsed.port === '443')
+      || (parsed.protocol === 'http:' && parsed.port === '80');
+    return /^https?:$/.test(parsed.protocol)
+      && standardPort
+      && !parsed.username
+      && !parsed.password
+      && CONTENT_FLEET_HOSTS.has(parsed.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function registryLiveTargetUrl(row, baseUrl = 'https://www.wavespestcontrol.com') {
+  const liveUrl = row?.live_url;
+  if (/^https?:\/\//i.test(String(liveUrl || ''))) {
+    return isContentFleetUrl(liveUrl) ? String(liveUrl) : '';
+  }
+  const canonical = [row?.canonical_url, row?.canonical_url_normalized]
+    .find((value) => /^https?:\/\//i.test(String(value || '')));
+  if (liveUrl && canonical) {
+    try {
+      const resolved = new URL(String(liveUrl), canonical).toString();
+      return isContentFleetUrl(resolved) ? resolved : '';
+    } catch { /* fall through */ }
+  }
+  const value = liveUrl || canonical || row?.canonical_url_normalized;
+  if (!value) return '';
+  try {
+    const resolved = new URL(String(value), `${String(baseUrl).replace(/\/+$/, '')}/`).toString();
+    return isContentFleetUrl(resolved) ? resolved : '';
+  }
+  catch { return ''; }
 }
 
 function slugFromUrl(value) {
@@ -440,7 +481,15 @@ function isArchivedWorkflow(row = {}) {
 
 function preserveLiveMirrorFields(row, previous) {
   const prev = previous.byAstroPath.get(row.astro_source_path) || previous.byDbId.get(row.db_blog_id);
-  if (!prev || liveTargetChanged(row, prev)) return row;
+  if (!prev) return row;
+  // A duplicate/canonical conflict takes precedence over the reconciliation
+  // change label, but it must not hide an Astro source edit from live-truth
+  // invalidation. A newly available hash is also unverified against a legacy
+  // row that lacked one, so fail closed once rather than preserve stale truth.
+  const astroSourceChanged = Boolean(row.astro_file_hash && row.astro_file_hash !== prev.astro_file_hash);
+  if (astroSourceChanged || liveTargetChanged(row, prev)) {
+    return { ...row, live_status_checked_at: null };
+  }
   const out = { ...row };
   for (const field of LIVE_MIRROR_FIELDS) {
     if (typeof prev[field] !== 'undefined') out[field] = prev[field];
@@ -449,8 +498,8 @@ function preserveLiveMirrorFields(row, previous) {
 }
 
 function liveTargetChanged(row, prev) {
-  const current = normalizeContentUrl(row.live_url || row.canonical_url || row.canonical_url_normalized);
-  const previous = normalizeContentUrl(prev.live_url || prev.canonical_url || prev.canonical_url_normalized);
+  const current = normalizeContentUrl(registryLiveTargetUrl(row));
+  const previous = normalizeContentUrl(registryLiveTargetUrl(prev));
   return current !== previous;
 }
 
@@ -482,6 +531,7 @@ function finalizeRegistryRow(row) {
     reviewer: row.reviewer || null,
     published_at: row.published_at || null,
     last_updated_at: row.last_updated_at || null,
+    live_status_checked_at: row.live_status_checked_at || null,
     astro_repo_sha: row.astro_repo_sha || null,
     astro_frontmatter_hash: row.astro_frontmatter_hash || null,
     astro_body_hash: row.astro_body_hash || null,
@@ -971,6 +1021,8 @@ function readGitSha(root) {
 
 module.exports = {
   normalizeContentUrl,
+  isContentFleetUrl,
+  registryLiveTargetUrl,
   slugFromUrl,
   stableStringify,
   stableHash,

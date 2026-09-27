@@ -62,6 +62,11 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/messaging/billing-text-leg-dedupe.js',
+    snippet: "return conn('sms_log')",
+    reason: 'findLiveClaim: deliberately reads this module\'s own in-flight claim placeholder (status sending + billing_text_leg_claim marker) for one customer+notice; hiding reservations here would defeat the claim.',
+  },
+  {
     file: 'services/messaging/push-channel-routing.js',
     snippet: "? await trx('sms_log').where({ customer_id: customerId, from_phone: 'push' }).where(function sameNotice() {",
     reason: 'persistPushProof: existence check for this accepted push notice before writing its proof; a send reservation is never a push proof.',
