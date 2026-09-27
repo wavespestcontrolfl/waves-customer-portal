@@ -1614,6 +1614,12 @@ describe('citability rendered component and Markdown projection', () => {
     expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → choose A\n - When B → use B\n- For C → call C` }).ok).toBe(true);
     expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → choose A\n  - When B → use B\n- For C → call C` }))
       .toEqual({ ok: false, reason: 'how_to_choose_has_2_criteria_need_3+' });
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → choose A\n - When B → use B\n  - For C → call C` }).ok).toBe(true);
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n - If A → choose A\n  - When B → use B\n   - For C → call C` }).ok).toBe(true);
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → choose A\n - When B → use B\n   - For C → call C` }))
+      .toEqual({ ok: false, reason: 'how_to_choose_has_2_criteria_need_3+' });
+    expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → choose A\n   - When B → use B\n- For C → call C` }))
+      .toEqual({ ok: false, reason: 'how_to_choose_has_2_criteria_need_3+' });
   });
 });
 

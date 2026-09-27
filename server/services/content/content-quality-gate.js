@@ -1319,24 +1319,23 @@ function howToChooseSectionCriteria(body) {
   let best = -1;
   for (let i = 0; i < lines.length; i += 1) {
     if (!/^ {0,3}##\s+\S/.test(lines[i]) || !HOW_TO_CHOOSE_HEADING_RE.test(lines[i])) continue;
-    // Top-level criteria only: the first list item fixes the criterion
-    // indent; deeper (nested explanation) bullets never count (Codex r7 P2).
+    // Top-level criteria only; nested explanation bullets never count.
     let items = 0;
-    let topIndent = null;
+    let topContentColumn = null;
     for (let j = i + 1; j < lines.length && !/^ {0,3}#{1,2}\s/.test(lines[j]); j += 1) {
-      const m = lines[j].match(/^(\s*)[-*+]\s+(\S.*)$/);
+      const m = lines[j].match(/^(\s*)[-*+]([ \t]+)(\S.*)$/);
       if (!m) continue;
       const indent = m[1].replace(/\t/g, '    ').length;
-      // CommonMark permits up to three cosmetic leading spaces before a
-      // top-level marker. Lowering that baseline does not discard criteria
-      // already counted; deeper subsequent markers are still nested.
-      if (topIndent === null || indent < topIndent) topIndent = indent;
-      const criterion = visibleInlineText(m[2]).trim();
+      // CommonMark decides nesting against the preceding peer item's
+      // content column, not one global minimum marker indent. Thus 0/1/2
+      // and 1/2/3 marker columns are peers, while 0/1/3 nests the third
+      // marker beneath the second (whose content begins at column 3).
+      const topLevel = topContentColumn === null || indent < topContentColumn;
+      if (topLevel) topContentColumn = indent + 1 + m[2].replace(/\t/g, '    ').length;
+      const criterion = visibleInlineText(m[3]).trim();
       const hasCondition = /^(?:if|when|for|where|with|without|after|before|once)\b/i.test(criterion);
       const namesOption = /(?:→|->|\b(?:choose|pick|use|prefer|select|go with|call|hire|apply|install|schedule|start with|switch to)\b)/i.test(criterion);
-      // A one-column shift is still a peer marker in CommonMark. Two or
-      // more columns beyond the current baseline form nested list content.
-      if (indent <= topIndent + 1 && hasCondition && namesOption) items += 1;
+      if (topLevel && hasCondition && namesOption) items += 1;
     }
     best = Math.max(best, items);
   }
