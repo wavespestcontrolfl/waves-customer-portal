@@ -263,7 +263,32 @@ describe('foam slug: termite foam only (rodent foam sealing stays rodent)', () =
 
   it('keeps termite foam work on its slugs', () => {
     expect(glassServiceSlug('foam_recurring')).toBe('foam_recurring');
+    expect(glassServiceSlug('Foam Drill Treatment')).toBe('foam_recurring');
+    expect(glassServiceSlug('Drill & Foam Treatment')).toBe('foam_recurring');
+    expect(glassServiceSlug('Recurring Foam Treatment (Quarterly)')).toBe('foam_recurring');
     expect(glassServiceSlug('Termite Foam Treatment')).toBe('termite_foam');
+    expect(glassServiceSlug('Termidor Foam Treatment')).toBe('termite_foam');
+  });
+
+  it.each([
+    ['WDO Inspection', 'wdo_inspection'],
+    ['Pre-Slab Termiticide Treatment', 'pre_slab_termiticide'],
+    ['Bora-Care Wood Treatment', 'termite_bait'],
+    ['Borate Wood Treatment', 'termite_bait'],
+    ['Trelona Bait Monitoring', 'termite_bait'],
+    ['Lawn Care and Termite Bait Monitoring', 'lawn_care'],
+    ['Mosquito and Termite Bait Monitoring', 'mosquito'],
+    ['Plain Foam Treatment', null],
+  ])('shares termite scope without changing the primary slug for %s', (name, slug) => {
+    expect(glassServiceSlug(name)).toBe(slug);
+  });
+
+  it.each([
+    ['Pest Control with Foam Drill', 'pest_control'],
+    ['Lawn Care with Recurring Foam Treatment', 'lawn_care'],
+    ['Tree & Shrub with Termidor Foam', 'tree_shrub'],
+  ])('preserves the primary client slug for combined label %s', (name, slug) => {
+    expect(glassServiceSlug(name)).toBe(slug);
   });
 });
 

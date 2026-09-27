@@ -13,6 +13,7 @@
 import { useSyncExternalStore } from 'react';
 import { etDateString } from './timezone';
 import { PLAN_TERMS_COPY, copyAllowedInScope } from '@estimate-copy-claims';
+import { classifyTermiteScope, TERMITE_SCOPE } from '@estimate-termite-scope';
 
 // Estimate glass COPY release — category-scoped server-side. NOTE: only the
 // marketing COPY still rides this flag; the glass THEME is now unconditional
@@ -553,14 +554,26 @@ function ctaMicroForKeyList(keys) {
 // pest_control — the server can emit synthetic section keys (e.g. the
 // unsplittable multi-service 'bundle' section) that must NOT inherit
 // pest copy, so callers keep the server-provided wording on null.
+const EARLY_TERMITE_SLUG_BY_SCOPE = Object.freeze({
+  [TERMITE_SCOPE.WDO]: 'wdo_inspection',
+  [TERMITE_SCOPE.PRE_SLAB]: 'pre_slab_termiticide',
+});
+const TERMITE_SLUG_BY_SCOPE = Object.freeze({
+  ...EARLY_TERMITE_SLUG_BY_SCOPE,
+  [TERMITE_SCOPE.FOAM]: 'termite_foam',
+  [TERMITE_SCOPE.RECURRING_FOAM]: 'foam_recurring',
+  [TERMITE_SCOPE.TERMITE]: 'termite_bait',
+});
 export function glassServiceSlug(keyOrLabel) {
   const raw = String(keyOrLabel || '').toLowerCase();
-  // Only the WDO report itself is the regulated certificate surface — the
-  // standalone termite_inspection (FS 482.226) keeps its ordinary termite slug.
-  if (raw.includes('wdo') || raw.includes('wood destroying')) return 'wdo_inspection';
-  if (raw.includes('pre_slab') || raw.includes('pre-slab') || raw.includes('pre slab') || raw.includes('slab_pretreat') || /slab pre-?\s?treat/.test(raw)) return 'pre_slab_termiticide';
+  const termiteScope = classifyTermiteScope(raw);
+  // WDO/pre-slab certificate rows and explicitly named termite foam retain
+  // their established early precedence. Product-only/historical foam names
+  // still respect the primary pest/lawn/mosquito/tree ordering below.
+  const earlyTermiteSlug = EARLY_TERMITE_SLUG_BY_SCOPE[termiteScope]
+    || (termiteScope === TERMITE_SCOPE.FOAM && raw.includes('termite') ? 'termite_foam' : null);
+  if (earlyTermiteSlug) return earlyTermiteSlug;
   if (raw.includes('trap_only') || raw.includes('trap-only')) return 'trap_only';
-  if (raw.includes('termite_foam') || (raw.includes('termite') && raw.includes('foam'))) return 'termite_foam';
   // Commercial PEST rows (commercial_pest keys / "Commercial Pest Control"
   // labels) get their own stack — but ONLY once the server has released
   // commercial glass (cta.commercialGlass → setCommercialGlass). Scoped to
@@ -575,11 +588,8 @@ export function glassServiceSlug(keyOrLabel) {
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('tree') || raw.includes('shrub')) return 'tree_shrub';
-  // Foam sealant is rodent-exclusion material ("Rodent Exclusion – Foam
-  // Sealing"): only termite foam work takes the foam slug, the same split as
-  // the server's service-normalizer.js detectServiceCategory.
-  if (raw.includes('foam') && !/rodent|seal/.test(raw)) return 'foam_recurring';
-  if (raw.includes('termite')) return 'termite_bait';
+  const termiteSlug = TERMITE_SLUG_BY_SCOPE[termiteScope];
+  if (termiteSlug) return termiteSlug;
   if (raw.includes('palm')) return 'palm_injection';
   if (raw.includes('rodent') || raw.includes('bait station')) return 'rodent_bait';
   return null;
