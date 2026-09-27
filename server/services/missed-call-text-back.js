@@ -90,23 +90,31 @@ const BOUNDARY = {
   TOO_OLD: 'MISSED_CALL_TOO_OLD',
   CLAIMED: 'MISSED_CALL_PHONE_CLAIMED',
   CLAIM_BUSY: 'MISSED_CALL_CLAIM_IN_FLIGHT',
+  VOICEMAIL_TEXTED: 'MISSED_CALL_VOICEMAIL_TEXTED',
   SEND_IN_FLIGHT: 'MISSED_CALL_SEND_IN_FLIGHT',
   CHECK_FAILED: 'MISSED_CALL_CHECK_FAILED',
 };
 // Same lease length / shape as missed-call-bell.js — long enough to cover
 // the lookups + send, reclaimable by the sweep once stale.
 const LEASE_MS = 10 * 60 * 1000;
-// A DISPATCHING claim is held for one provider round trip; one this old was
-// left by an attempt that died between the claim and its outcome.
-const STALE_CLAIM_MS = LEASE_MS;
+// A DISPATCHING claim is held for one provider round trip — a short read
+// (the disclaimed-number check) and Twilio's own request (30 s client
+// timeout). Only after a full day is it treated as left by an attempt that
+// died between the claim and its outcome, so a sender that merely stalled
+// cannot resume and send beside a retry that took a recycled claim. The
+// cost of waiting is small: the claim's own call is long past its 30-minute
+// send slot either way, so only a repeat call within the day is affected.
+const STALE_CLAIM_MS = 24 * 60 * 60 * 1000;
 // The one send slot per call (see header): 30 minutes from the first moment
 // the call may be texted. An in-hours miss goes out within minutes; an
 // after-hours miss goes out between 8:00 and 8:30 AM ET.
 const SEND_SLOT_MS = 30 * 60 * 1000;
-// Belt on top of the slot: no call older than this is ever texted. The
-// longest legitimate wait — a call just before 8 PM ET whose slot moves to
-// the next morning — is about 12.5 hours.
-const MAX_CALL_AGE_MS = 14 * 60 * 60 * 1000;
+// Belt on top of the slot (sendSlotDeadline is the real bound): no call
+// older than this is ever texted, and the sweep reads no further back. The
+// longest legitimate wait — a call ending just before 8 PM ET whose slot
+// moves to 8:00–8:30 the next morning — is about 13 hours, and 14 on the
+// night the clocks fall back (a repeated hour); 16 leaves headroom.
+const MAX_CALL_AGE_MS = 16 * 60 * 60 * 1000;
 
 // Later-call outcomes that mean someone already spoke with the caller.
 const ANSWERED_BY_SOMEONE = ['human', 'ai_agent'];
@@ -512,6 +520,16 @@ function providerBoundaryCheck(row, phone, attempt) {
       if (contact === 'in_flight') {
         return { ok: false, code: BOUNDARY.SEND_IN_FLIGHT, reason: 'another text to this number is mid-handoff', retryable: true };
       }
+      // Yield to the voicemail lane at the boundary too: a delayed voicemail
+      // it claimed after the early check is caught here, right before this
+      // lane takes its own claim — wait while that claim is provisional,
+      // settle once it is consumed.
+      const voicemailClaim = await dbi('voicemail_sms_claims').where({ phone }).first('outcome');
+      if (voicemailClaim) {
+        return voicemailClaim.outcome === VOICEMAIL_CLAIM_IN_FLIGHT
+          ? { ok: false, code: BOUNDARY.CLAIM_BUSY, reason: 'the voicemail lane holds this number', retryable: true }
+          : { ok: false, code: BOUNDARY.VOICEMAIL_TEXTED, reason: 'the voicemail lane texted this number' };
+      }
       const claimed = await dbi('missed_call_text_claims')
         .insert({ phone, outcome: CLAIM.DISPATCHING, call_log_id: row.id })
         .onConflict('phone')
@@ -576,6 +594,7 @@ const BOUNDARY_SETTLES = {
   [BOUNDARY.CONTACTED]: 'already_contacted',
   [BOUNDARY.TOO_OLD]: 'too_old',
   [BOUNDARY.CLAIMED]: 'already_sent_to_phone',
+  [BOUNDARY.VOICEMAIL_TEXTED]: 'voicemail_lead_texted',
 };
 
 async function classifySendOutcome(result, phone, attempt, row, { releaseLease, settleFenced }) {

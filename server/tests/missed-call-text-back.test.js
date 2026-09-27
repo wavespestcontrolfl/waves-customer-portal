@@ -157,10 +157,18 @@ describe('bounded catch-up (tooOldToText) — one 30-minute send slot per call',
     expect(tooOldToText(row, Date.parse('2026-09-09T12:31:00Z'))).toBe(true); // 08:31 ET next day
   });
 
-  test('no first-time text ever goes out past the overall 14h belt', () => {
-    expect(MAX_CALL_AGE_MS).toBe(14 * 60 * MIN);
+  test('no first-time text ever goes out past the overall 16h belt', () => {
+    expect(MAX_CALL_AGE_MS).toBe(16 * 60 * MIN);
     const row = endedAt('2026-09-09T02:00:00Z');
-    expect(tooOldToText(row, Date.parse('2026-09-09T02:00:00Z') + 15 * 60 * MIN)).toBe(true);
+    expect(tooOldToText(row, Date.parse('2026-09-09T02:00:00Z') + 17 * 60 * MIN)).toBe(true);
+  });
+
+  test('the night the clocks fall back keeps the whole 8:00–8:30 AM slot (14h+ of absolute time)', () => {
+    // 2026-10-31 19:25 EDT; its slot would run past 20:00, so it moves to
+    // Sun 2026-11-01 08:00–08:30 EST — a repeated hour makes that 14h05m.
+    const row = endedAt('2026-10-31T23:25:00Z');
+    expect(tooOldToText(row, Date.parse('2026-11-01T13:28:00Z'))).toBe(false); // 08:28 EST
+    expect(tooOldToText(row, Date.parse('2026-11-01T13:31:00Z'))).toBe(true); // 08:31 EST
   });
 
   test('a late or retried status callback that rewrites updated_at never reopens the slot', () => {

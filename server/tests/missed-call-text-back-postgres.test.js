@@ -293,7 +293,7 @@ jest.setTimeout(30000);
     expect((await stored(row)).metadata.missed_call_text_outcome).toBe('sent');
   });
 
-  test('too old for a first-time text (past the 14h belt) settles skipped without sending', async () => {
+  test('too old for a first-time text (its send slot long gone) settles skipped without sending', async () => {
     const row = call(15 * 60); // 15 hours ago
     await database('call_log').insert(row);
     expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'too_old' });
@@ -519,6 +519,28 @@ jest.setTimeout(30000);
       expect(await claimRow()).toBeUndefined();
     });
 
+    test('a voicemail claim that appears after the early check is yielded to at the boundary: provisional waits, consumed settles', async () => {
+      sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, { before: () => voicemailClaim('claimed') }));
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'error', reason: 'MISSED_CALL_CLAIM_IN_FLIGHT' });
+      expect(await claimRow()).toBeUndefined();
+      expect((await stored(row)).metadata.missed_call_text_settled_at).toBeUndefined();
+
+      await database('voicemail_sms_claims').where({ phone: PHONE }).update({ outcome: 'sent' });
+      // The early check now sees the consumed voicemail claim and settles.
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'voicemail_lead_texted' });
+      expect(await claimRow()).toBeUndefined();
+    });
+
+    test('a voicemail claim consumed between the early check and the boundary settles the call at the boundary', async () => {
+      sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, { before: () => voicemailClaim('sent') }));
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'voicemail_lead_texted' });
+      expect(await claimRow()).toBeUndefined();
+    });
+
     test('a concurrent attempt mid-handoff holds the number: this call stays unsettled for a retry and leaves that claim alone', async () => {
       sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, {
         before: () => database('missed_call_text_claims').insert({ phone: PHONE, outcome: CLAIM.DISPATCHING }),
@@ -546,7 +568,7 @@ jest.setTimeout(30000);
       });
 
       test('the provider has no message to the number since the claim → the orphan is released and this call is texted', async () => {
-        await orphan(60);
+        await orphan(25 * 60);
         TwilioService.findOutboundMessageSince.mockResolvedValueOnce({ found: false });
         const row = call(READY_MINUTES_AGO);
         await database('call_log').insert(row);
@@ -556,7 +578,7 @@ jest.setTimeout(30000);
       });
 
       test('the provider shows a message since the claim → it was delivered; stamped sent, never texted twice', async () => {
-        await orphan(60);
+        await orphan(25 * 60);
         TwilioService.findOutboundMessageSince.mockResolvedValueOnce({ found: true });
         const row = call(READY_MINUTES_AGO);
         await database('call_log').insert(row);
@@ -566,7 +588,7 @@ jest.setTimeout(30000);
       });
 
       test('no answer from the provider keeps the claim (possibly delivered, never texted twice); the call waits unsettled', async () => {
-        await orphan(60);
+        await orphan(25 * 60);
         const row = call(READY_MINUTES_AGO);
         await database('call_log').insert(row);
         expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'pending', reason: 'claim_in_flight' });
@@ -589,7 +611,7 @@ jest.setTimeout(30000);
           to: PHONE, fromNumber: '+19412975749', body: 'orphaned attempt', messageType: 'missed_call_text_back',
         });
         expect(prepared.handle).toBeTruthy();
-        await orphan(60);
+        await orphan(25 * 60);
         TwilioService.findOutboundMessageSince.mockResolvedValueOnce({ found: false });
         const row = call(READY_MINUTES_AGO);
         await database('call_log').insert(row);
@@ -599,8 +621,8 @@ jest.setTimeout(30000);
 
       test('every sweep pass reconciles orphans on its own — no eligible call needed, gate off included', async () => {
         isEnabled.mockImplementation(() => false);
-        await orphan(60);
-        await database('missed_call_text_claims').insert({ phone: '+19415550103', outcome: CLAIM.DISPATCHING, created_at: new Date(NOW - 45 * 60 * 1000) });
+        await orphan(25 * 60);
+        await database('missed_call_text_claims').insert({ phone: '+19415550103', outcome: CLAIM.DISPATCHING, created_at: new Date(NOW - 26 * 60 * 60 * 1000) });
         TwilioService.findOutboundMessageSince.mockImplementation(async ({ to }) => ({ found: to === '+19415550103' }));
         expect(await sweepMissedCallTextBacks()).toEqual({ sent: 0, offered: 0 });
         expect(await claimRow()).toBeUndefined(); // no message since the claim: released
