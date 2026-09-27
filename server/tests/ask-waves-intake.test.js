@@ -2336,7 +2336,8 @@ describe('public-quote resolveEntryChannel allowlist', () => {
 describe('intake chokepoint worst-case latency (#4905)', () => {
   const { execFileSync } = require('child_process');
   const path = require('path');
-  const shapes = ['a ', 'my ', 'not ', "child's ", 'dry ', 'no les ', '- ', 'my child ', 'can i ', 'return ', 'avoid ', 'hospital ', 'spray ', 'my dog ate un poco ', 'my dog ate the some of '];
+  const shapes = ['a ', 'my ', 'not ', "child's ", 'dry ', 'no les ', '- ', 'my child ', 'can i ', 'return ', 'avoid ', 'hospital ', 'spray ', 'my dog ate un poco ', 'my dog ate the some of ',
+    'choked on the ', 'is choking on ', 'poison control ', 'unable to harm ', 'incapable of causing ', 'come back once ', 'please come back ', 'my cow swallowed the ', 'regrese en ', 'vuelva a entrar en '];
   const fill = (unit, n) => unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
   // Timed in a fresh Node process (tests/fixtures/ask-waves-latency-probe.js):
   // in this long-lived jest worker, process CPU also carries GC and
@@ -2345,7 +2346,9 @@ describe('intake chokepoint worst-case latency (#4905)', () => {
   // A super-linear regex still blows the budget there on every run.
   const timeInFreshProcess = (inputs) => {
     const out = execFileSync(process.execPath, [path.join(__dirname, 'fixtures', 'ask-waves-latency-probe.js')], {
-      input: JSON.stringify(inputs), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
+      // A super-linear regex fails fast instead of hanging CI (the child is
+      // synchronous, so jest's own test timeout cannot interrupt it).
+      input: JSON.stringify(inputs), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 30000,
     });
     return JSON.parse(out.split('\n').find((line) => line.startsWith('LATENCY ')).slice('LATENCY '.length));
   };
@@ -2363,7 +2366,7 @@ describe('intake chokepoint worst-case latency (#4905)', () => {
   });
 
   test('stays under budget for seeded random mixes of the matchers\' own vocabulary', () => {
-    const vocab = "my child dog ate swallowed the bait spray pesticide not no won't your pets safe after treatment until 4 PM re-enter inside outside hospital doctor now es seguro mascotas niños no molesta a sus después del tratamiento volver a entrar avoid dry was exposed to call 911 veterinary".split(' ');
+    const vocab = "my child dog ate swallowed the bait spray pesticide not no won't your pets safe after treatment until 4 PM re-enter inside outside hospital doctor now es seguro mascotas niños no molesta a sus después del tratamiento volver a entrar avoid dry was exposed to call 911 veterinary choked choking gagged on poison control unable incapable of causing harm come back once please cow sheep swallowed regrese vuelva en".split(' ');
     let seed = 42;
     const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
     const words = (n) => Array.from({ length: n }, () => vocab[Math.floor(rnd() * vocab.length)]).join(' ');
