@@ -61,6 +61,8 @@ const { isOpenLeadRow } = require('./lead-statuses');
 const { buildLeadConsultationSmsLine, isUsPhone } = require('./lead-consultation-link');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isRealProviderSend, isAmbiguousProviderOutcome } = require('./sms-auto-send');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
 const GATE = 'callBookingLinkText';
 const METADATA_KEY = 'call_booking_link_text';
@@ -84,8 +86,24 @@ const DISPATCH_BATCH = 50;
 // minimum delay this lane already imposes.
 const STAGING_GRACE_MINUTES = 15;
 // How long past its send time a staged call may stay mid-reprocess before
-// the send gives up (see dispatchClaimedCall's readiness fence).
+// the send gives up (see dispatchClaimedCall's readiness fence). Shared
+// with the retryable-send bound below — both measure "how stale can this
+// staged call get before we stop trying," from the SAME anchor
+// (entry.send_at), just for two different reasons a send hasn't landed yet.
 const NOT_READY_GIVE_UP_MS = 24 * 60 * 60 * 1000;
+// When sendCustomerMessage reports a retryable/deferred outcome with no
+// explicit nextAllowedAt (e.g. a transient provider failure), how soon the
+// next sweep tries again — short, since the 5-minute cron will pick it up
+// on one of its next several ticks either way.
+const RETRY_BACKOFF_MS = 30 * 60 * 1000;
+
+// Mirrors reschedule-link-promises.js's activationBoundary pattern: the
+// first live sweep anywhere fixes an instant in system_settings (or an
+// explicit env override wins), and staging only ever considers calls that
+// started at or after it — so flipping the gate on never picks up days of
+// pre-existing valid-but-unstaged calls and texts them all in one burst
+// (codex r1 P1). Own key/env, since this is a different gate/lane.
+const ACTIVATION_SETTINGS_KEY = 'call_booking_link_text_activated_at';
 
 // A call that ends without at least this much talk time is a hang-up, a
 // voicemail greeting, or a dropped call before the ask — never a "no visit
@@ -160,12 +178,26 @@ function leadIdOf(call) {
 // lead's sid can't be rolled onto this call (codex pre-push P1). leadIdOf
 // alone would read no_lead_linkage for every such fresh lead; falling back
 // to a SID lookup is required to ever resolve it.
-async function resolveLeadId(conn, call) {
+//
+// leads.twilio_call_sid carries no unique index (admin-estimate-
+// persistence.js's own revalidation query names the same gap) — checked
+// for an existing ambiguity-aware resolver first; that one deliberately
+// picks the newest row for a DIFFERENT purpose (revalidating a linkage
+// that already exists). Minting a fresh send to the WRONG lead is the
+// worse failure mode here, so this fails CLOSED instead (codex r1 P1):
+// two or more live rows sharing a sid resolve to no lead at all, not an
+// arbitrary pick.
+async function resolveLeadLinkage(conn, call) {
   const stamped = leadIdOf(call);
-  if (stamped) return stamped;
-  if (!call.twilio_call_sid) return null;
-  const lead = await conn('leads').where({ twilio_call_sid: call.twilio_call_sid }).whereNull('deleted_at').first('id');
-  return lead?.id || null;
+  if (stamped) return { leadId: stamped, ambiguous: false };
+  if (!call.twilio_call_sid) return { leadId: null, ambiguous: false };
+  const rows = await conn('leads').where({ twilio_call_sid: call.twilio_call_sid }).whereNull('deleted_at').limit(2).select('id');
+  if (rows.length > 1) return { leadId: null, ambiguous: true };
+  return { leadId: rows[0]?.id || null, ambiguous: false };
+}
+
+async function resolveLeadId(conn, call) {
+  return (await resolveLeadLinkage(conn, call)).leadId;
 }
 
 // call_log.customer_id alone does NOT mean "an existing customer" (codex
@@ -268,6 +300,25 @@ function callEndFor(call) {
   return start ? new Date(start.getTime() + durationMs) : null;
 }
 
+// How much of this call was actual TALK time, for the call_too_short
+// screen only (codex r1 P1) — never used for callEndFor/computeSendAt,
+// which need the call's wall-clock length, not just the customer's speaking
+// time. For an outbound call (a bridge especially), duration_seconds runs
+// from Twilio's Dial/bridge start and includes staff ringing and the
+// press-1 prompt before the customer ever picks up, while
+// recording_duration_seconds — present once the recording itself is
+// processed — measures only the recorded (customer) conversation. Inbound
+// calls have no such staff-ringing prefix, so they stay on the ordinary
+// callDurationSeconds (which itself already prefers recording_duration_
+// seconds over a missing/zero duration_seconds).
+function conversationSeconds(call) {
+  if (String(call.direction || '').startsWith('outbound')) {
+    const recorded = Number(call?.recording_duration_seconds);
+    if (Number.isFinite(recorded) && recorded > 0) return recorded;
+  }
+  return callDurationSeconds(call);
+}
+
 // The 2-hour-after / 8am-ET-next-morning rule. A call ending at/after 6 PM
 // ET (18:00) waits for the next ET calendar day's 8 AM open — the DST-safe
 // noon-anchor nextSendWindowOpenET already computes exactly that for any
@@ -278,6 +329,37 @@ function computeSendAt(callEnd) {
   const { hour } = etParts(callEnd);
   if (hour >= 18) return nextSendWindowOpenET(callEnd);
   return new Date(callEnd.getTime() + 2 * 60 * 60 * 1000);
+}
+
+// The Waves-owned line THIS call actually used, so the automated text rides
+// the SAME line the caller reached instead of deriveOutboundNumber's
+// location-based fallback (a Bradenton default when no fromNumber/
+// customerId narrows it — codex r1 P2). Mirrors outbound-voicemail-sms.js's
+// own replyFromNumber and dropped-call-sms.js's existing 8/20 fence in
+// spirit: reuse the line the customer already saw. Validated against the
+// registry — never a tech line (owner ruling: automated texts stay on the
+// location lines), a staff-forward/CSR cell, or the AI toll-free line. A
+// lead-webhook auto-bridge's own from_phone/to_phone are the INTERNAL alert
+// leg to staff (Adam's cell), never the customer-facing line — the line
+// that actually rings the lead rides metadata.bridgeCallerId instead
+// (server/routes/lead-webhook.js), checked first for that reason. No valid
+// line resolved → null, and the caller falls back to deriveOutboundNumber
+// exactly as before this check existed.
+//
+// PR #5012 (not yet merged) adds the identical validation for outbound
+// calls under the name outboundWavesCallerId
+// (server/services/outbound-call-reason.js) — merge the two into one
+// shared helper once it lands, rather than keeping two copies.
+function managedLineForCall(call) {
+  const meta = parseMetadata(call);
+  const outbound = String(call?.direction || '').startsWith('outbound');
+  const candidate = meta.bridgeCallerId || (outbound ? call?.from_phone : call?.to_phone);
+  if (!candidate) return null;
+  if (!TWILIO_NUMBERS.findByNumber(candidate)) return null;
+  if (TWILIO_NUMBERS.isTechLine(candidate)) return null;
+  if (TWILIO_NUMBERS.isStaffForwardNumber(candidate)) return null;
+  if (candidate === TWILIO_NUMBERS.tollFree.number) return null;
+  return candidate;
 }
 
 // Table-driven "never" rules (CLAUDE.md rule 20: table-drive repeated
@@ -293,10 +375,12 @@ const STAGING_CHECKS = [
   (call, extraction) => (!extraction ? 'no_extraction' : null),
   (call, extraction) => (extraction.meta?.is_voicemail || extraction.meta?.is_spam ? 'voicemail_or_spam' : null),
   (call, extraction) => (extraction.call_nature !== 'new_lead' ? 'not_new_lead_call' : null),
-  // callDurationSeconds, same as callEndFor: a recovered row can carry only
-  // recording_duration_seconds, and reading duration_seconds alone would
-  // stamp a real conversation call_too_short forever (codex pre-push P1).
-  (call) => (callDurationSeconds(call) < MIN_CONVERSATION_SECONDS ? 'call_too_short' : null),
+  // conversationSeconds, not callDurationSeconds (codex r1 P1 — see its own
+  // doc comment): an outbound bridge's duration_seconds includes staff
+  // ringing and the press-1 prompt, which would stamp a real customer
+  // conversation call_too_short. Also covers the earlier fix (a recovered
+  // row carrying only recording_duration_seconds).
+  (call) => (conversationSeconds(call) < MIN_CONVERSATION_SECONDS ? 'call_too_short' : null),
   (call, extraction) => (NON_CONVERSATION_DISPOSITIONS.has(extraction.recommended_disposition) ? 'not_a_conversation' : null),
   (call, extraction) => {
     const flags = new Set(Array.isArray(extraction.triage_flags) ? extraction.triage_flags : []);
@@ -358,6 +442,36 @@ function stagingIneligibleReason(call, extraction, leadId) {
   return null;
 }
 
+// Mirrors reschedule-link-promises.js's persistedActivationBoundary
+// exactly: unset, the boundary is READ FROM system_settings (this repo's
+// existing generic key/value store) rather than derived from this
+// process's own start time, which would move it forward on every restart.
+// The first live sweep anywhere to find nothing stored writes now() there;
+// every sweep after, on this process or any future one, reads the same
+// instant back. onConflict + a re-read means a multi-process race still
+// converges every process on the SAME winning instant.
+async function persistedActivationBoundary(conn) {
+  const existing = await conn('system_settings').where({ key: ACTIVATION_SETTINGS_KEY }).first('value');
+  if (existing?.value) return new Date(existing.value);
+  const { rows } = await conn.raw('SELECT now() AS now');
+  const now = rows[0].now;
+  await conn('system_settings').insert({
+    key: ACTIVATION_SETTINGS_KEY, value: now.toISOString(), category: 'call_booking_link_text',
+    description: 'First live-activation instant for GATE_CALL_BOOKING_LINK_TEXT; a call that started before it is historical, not a live never-booked lead to chase.',
+  }).onConflict('key').ignore();
+  const settled = await conn('system_settings').where({ key: ACTIVATION_SETTINGS_KEY }).first('value');
+  return settled?.value ? new Date(settled.value) : now;
+}
+
+// CALL_BOOKING_LINK_TEXT_ACTIVATED_AT (an ISO instant), when set, always
+// wins — read fresh each call, exactly like reschedule-link-promises' own
+// env override. Unset, falls back to the persisted boundary.
+async function activationBoundary(conn) {
+  const configured = process.env.CALL_BOOKING_LINK_TEXT_ACTIVATED_AT;
+  const parsed = configured ? new Date(configured) : null;
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : persistedActivationBoundary(conn);
+}
+
 /**
  * Evaluates and stamps every V2-extracted call this lane has not yet looked
  * at (bounded lookback). Never re-evaluates a call twice — the metadata key
@@ -365,6 +479,7 @@ function stagingIneligibleReason(call, extraction, leadId) {
  * never rescanned.
  */
 async function stage(conn = db, { now = new Date() } = {}) {
+  const boundary = await activationBoundary(conn);
   const cutoff = new Date(now.getTime() - STAGING_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
   const readyBy = new Date(now.getTime() - STAGING_GRACE_MINUTES * 60 * 1000);
   const calls = await conn('call_log')
@@ -389,7 +504,7 @@ async function stage(conn = db, { now = new Date() } = {}) {
   let ineligible = 0;
   for (const call of calls) {
     try {
-      const decided = await stageOne(conn, call, now);
+      const decided = await stageOne(conn, call, now, boundary);
       if (decided === 'pending') staged += 1; else ineligible += 1;
     } catch (err) {
       logger.warn(`[call-booking-link-text] stage failed for call ${call.id} (${err.code || err.name || 'error'})`);
@@ -403,11 +518,26 @@ async function stage(conn = db, { now = new Date() } = {}) {
   return { staged, ineligible };
 }
 
-async function stageOne(conn, call, now) {
-  const leadId = await resolveLeadId(conn, call);
+async function stageOne(conn, call, now, boundary = null) {
+  const staged_at = now.toISOString();
+  // Activation boundary: a call that started before the gate's first live
+  // activation is historical — never stage it, whatever else about it
+  // would otherwise be eligible (codex r1 P1).
+  if (boundary) {
+    const callAt = callStartedAt(call) || new Date(call.created_at);
+    if (callAt.getTime() < boundary.getTime()) {
+      await claimMetadata(conn, call.id, { status: 'skipped', reason: 'pre_activation', staged_at });
+      return 'skipped';
+    }
+  }
+  const linkage = await resolveLeadLinkage(conn, call);
+  if (linkage.ambiguous) {
+    await claimMetadata(conn, call.id, { status: 'skipped', reason: 'ambiguous_lead_linkage', staged_at });
+    return 'skipped';
+  }
+  const leadId = linkage.leadId;
   const extraction = extractionOf(call);
   const reason = stagingIneligibleReason(call, extraction, leadId) || (await outboundStagingReason(conn, call, leadId));
-  const staged_at = now.toISOString();
   if (reason) {
     await claimMetadata(conn, call.id, { status: 'skipped', reason, staged_at });
     return 'skipped';
@@ -499,7 +629,11 @@ async function linkSentRecently(conn, leadId, now) {
   const codes = await conn('short_codes').where({ kind: 'consultation', entity_type: 'leads', entity_id: leadId })
     .where('created_at', '>=', since).orderBy('created_at', 'desc').limit(20).pluck('code');
   if (!codes.length) return false;
-  const row = await conn('sms_log').where('direction', 'outbound').where('created_at', '>=', since)
+  // excludeUnresolvedSendReservations (codex r1 P2): 'sending' also covers
+  // a pre-provider reply/review-ask RESERVATION row — a placeholder that
+  // never reached Twilio, not delivery evidence. Every other caller of
+  // this helper applies it before its own further .where()s.
+  const row = await excludeUnresolvedSendReservations(conn('sms_log')).where('direction', 'outbound').where('created_at', '>=', since)
     .whereIn('status', ['queued', 'accepted', 'sending', 'sent', 'delivered', 'read'])
     .where((q) => { for (const code of codes) q.orWhere('message_body', 'like', `%/l/${code}%`); })
     .first('id');
@@ -613,9 +747,18 @@ async function dispatchClaimedCall(conn, call, now) {
 
   const built = await buildLeadConsultationSmsLine(lead.id, lead.first_name);
   if (!built.url) return skip(built.reason ? `link_unavailable:${built.reason}` : 'link_unavailable');
+  // The token is signed for built.phone — the builder's OWN fresh DB read,
+  // not lead.phone from the row this function fetched moments earlier
+  // (codex r1 P1). Sending to lead.phone while the phone changed in that
+  // narrow window would deliver a token that proves delivery to the OLD
+  // number while it actually reaches whoever holds the new one now. Skip
+  // rather than silently sending to the new number — a changed phone this
+  // close to send time deserves a human look, not an automated guess.
+  if (built.phone && built.phone !== lead.phone) return skip('phone_changed_before_send');
 
+  const managedLine = managedLineForCall(call);
   const result = await sendCustomerMessage({
-    to: lead.phone,
+    to: built.phone || lead.phone,
     body: built.line,
     channel: 'sms',
     audience: 'lead',
@@ -624,12 +767,35 @@ async function dispatchClaimedCall(conn, call, now) {
     identityTrustLevel: 'phone_provided_unverified',
     consentBasis: { status: 'transactional_allowed', source: 'call_booking_link_text' },
     entryPoint: 'call_booking_link_text',
-    metadata: { original_message_type: MESSAGE_TYPE, call_log_id: call.id, lead_id: lead.id },
+    metadata: { original_message_type: MESSAGE_TYPE, call_log_id: call.id, lead_id: lead.id, ...(managedLine ? { fromNumber: managedLine } : {}) },
   }).catch((err) => (isRealProviderSend(err?.providerOutcome) || isAmbiguousProviderOutcome(err?.providerOutcome)) ? err.providerOutcome : Promise.reject(err));
 
+  return recordSendOutcome(conn, call, entry, leadId, now, result);
+}
+
+// Bounded by the SAME 24h give-up this lane already applies to a stalled
+// reprocess (NOT_READY_GIVE_UP_MS), measured from the ORIGINAL send_at —
+// not from whenever the most recent retry happened to run.
+function pastRetryDeadline(entry, now) {
+  const originalSendAt = entry.send_at ? new Date(entry.send_at) : now;
+  if (Number.isNaN(originalSendAt.getTime())) return false;
+  return now.getTime() - originalSendAt.getTime() > NOT_READY_GIVE_UP_MS;
+}
+
+// Everything that happens AFTER sendCustomerMessage returns — split out of
+// dispatchClaimedCall purely to keep that function's own branching within
+// the repo's structural-lint threshold (CLAUDE.md rule 20: this moves
+// decisions out wholesale, it doesn't hide them behind a one-use wrapper —
+// every branch here is a DIFFERENT terminal outcome dispatchClaimedCall
+// would otherwise have to classify itself).
+async function recordSendOutcome(conn, call, entry, leadId, now, result) {
+  const skip = async (reason) => {
+    await recordDecision(conn, call, { status: 'skipped', reason, lead_id: leadId, send_at: entry.send_at });
+    return { sent: false, skipped: reason };
+  };
   if (result.sent && isRealProviderSend(result)) {
     await recordDecision(conn, call, {
-      status: 'sent', lead_id: lead.id, send_at: entry.send_at, sent_at: now.toISOString(), provider_message_id: result.providerMessageId,
+      status: 'sent', lead_id: leadId, send_at: entry.send_at, sent_at: now.toISOString(), provider_message_id: result.providerMessageId,
     });
     return { sent: true, providerMessageId: result.providerMessageId };
   }
@@ -640,6 +806,22 @@ async function dispatchClaimedCall(conn, call, now) {
     // human can always resolve it by hand if it never settles.
     logger.warn(`[call-booking-link-text] ambiguous provider outcome for call ${call.id} — leaving claimed`);
     return { sent: false, skipped: 'ambiguous_provider_outcome', ambiguous: true };
+  }
+  // A retryable/deferred outcome (send-customer-message.js's own
+  // { retryable, deferred, nextAllowedAt } — a quiet-hours hold crossed by
+  // this sweep, CONSENT_LOOKUP_FAILED, or a transient provider failure) is
+  // a reason to WAIT, not to give up (codex r1 P1) — the same principle as
+  // the send-window deferral in dispatchClaimedCall. Re-queue as 'pending'
+  // at nextAllowedAt, or a short backoff when the result named none,
+  // bounded by the SAME 24h give-up this lane already applies to a stalled
+  // reprocess: past that, from the ORIGINAL send_at, stop retrying and
+  // record a reason.
+  if (result.retryable || result.deferred) {
+    if (pastRetryDeadline(entry, now)) return skip(result.code || result.reason || 'send_retry_timeout');
+    const nextAllowedAt = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
+    const send_at = (nextAllowedAt && !Number.isNaN(nextAllowedAt.getTime()) ? nextAllowedAt : new Date(now.getTime() + RETRY_BACKOFF_MS)).toISOString();
+    await recordDecision(conn, call, { status: 'pending', lead_id: leadId, send_at }, { logActivity: false });
+    return { sent: false, skipped: result.code || result.reason || 'send_retryable', deferred: true };
   }
   const blockedReason = result.blocked ? (result.code || result.reason || 'policy_block') : (result.code || result.reason || 'provider_failed');
   return skip(blockedReason);
@@ -686,10 +868,16 @@ module.exports = {
   MIN_CONVERSATION_SECONDS,
   computeSendAt,
   callEndFor,
+  conversationSeconds,
+  managedLineForCall,
   stagingIneligibleReason,
   outboundPriorContactMissing,
   outboundStagingReason,
   resolveLeadId,
+  resolveLeadLinkage,
+  activationBoundary,
+  persistedActivationBoundary,
+  ACTIVATION_SETTINGS_KEY,
   stage,
   stageOne,
   claimForDispatch,

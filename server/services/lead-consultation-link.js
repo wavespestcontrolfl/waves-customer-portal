@@ -141,7 +141,14 @@ async function buildLeadConsultationLink(leadOrId, { channel } = {}) {
     // the server-side scheduled-link fence (composer-customer-links.js
     // immediateOnlyLinkSendCheck) refuses to schedule this kind past the
     // window a queued send could deliver an already-expired token in.
-    return { url: shortUrl, line: consultationSmsLineFor(shortUrl), expiresAt, immediateOnly: true };
+    // `phone` (additive — codex pre-push P1) is the EXACT destination this
+    // token was minted for (this function's own fresh DB read above, not
+    // whatever phone a caller's in-memory lead object carries): an
+    // automated sender that fetched the lead moments earlier must verify
+    // its own `to` still matches this before sending, since a phone change
+    // in that narrow window would otherwise deliver a token proving
+    // delivery to the OLD number while it actually reaches the new one.
+    return { url: shortUrl, line: consultationSmsLineFor(shortUrl), expiresAt, immediateOnly: true, phone: lead.phone };
   } catch (err) {
     logger.warn(`[lead-consultation-link] build failed: ${err.message}`);
     return { url: null, line: '', reason: 'Could not build a consultation link' };
@@ -291,6 +298,7 @@ async function buildLeadConsultationSmsLine(leadOrId, firstName) {
       standalone: true,
       expiresAt: built.expiresAt || null,
       immediateOnly: built.immediateOnly,
+      phone: built.phone,
     };
   } catch (err) {
     logger.warn(`[lead-consultation-link] template render failed: ${err.message}`);

@@ -11,7 +11,7 @@
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
 jest.mock('../services/lead-consultation-link', () => ({
   buildLeadConsultationSmsLine: jest.fn(async () => ({ url: 'https://wavespest.co/l/abcd', line: 'Pick a time...\n\n' })),
   isUsPhone: jest.fn((phone) => /^\+?1?\d{10}$/.test(String(phone || '').replace(/[^0-9+]/g, ''))),
@@ -32,10 +32,15 @@ const { isAmbiguousProviderOutcome } = require('../services/sms-auto-send');
 const {
   computeSendAt,
   callEndFor,
+  conversationSeconds,
+  managedLineForCall,
   stagingIneligibleReason,
   outboundPriorContactMissing,
   outboundStagingReason,
   resolveLeadId,
+  resolveLeadLinkage,
+  activationBoundary,
+  persistedActivationBoundary,
   dispatchClaimedCall,
   claimForDispatch,
   stage,
@@ -115,6 +120,72 @@ describe('callEndFor', () => {
 
   test('no created_at at all returns null (the no_call_end_time skip)', () => {
     expect(callEndFor({ direction: 'inbound' })).toBeNull();
+  });
+});
+
+// ── conversationSeconds — talk time for the call_too_short screen only ───
+describe('conversationSeconds', () => {
+  test('outbound: recording_duration_seconds is used directly, never maxed against the inflated duration_seconds', () => {
+    // duration_seconds includes staff ringing + the press-1 prompt (10 min);
+    // the recorded conversation itself was only 20s.
+    const call = { direction: 'outbound', duration_seconds: 600, recording_duration_seconds: 20 };
+    expect(conversationSeconds(call)).toBe(20);
+  });
+
+  test('outbound with no usable recording falls back to callDurationSeconds', () => {
+    const call = { direction: 'outbound', duration_seconds: 45, recording_duration_seconds: 0 };
+    expect(conversationSeconds(call)).toBe(45);
+  });
+
+  test('inbound stays on callDurationSeconds (its own "largest positive wins" rule), unaffected', () => {
+    const call = { direction: 'inbound', duration_seconds: 20, recording_duration_seconds: 600 };
+    expect(conversationSeconds(call)).toBe(600);
+  });
+});
+
+// ── managedLineForCall — reply from the line the caller actually reached ──
+describe('managedLineForCall', () => {
+  const PARRISH = '+19412972817'; // a real registered location line
+  const TECH_LINE = '+19413529161'; // a real registered field-tech line
+  const TOLL_FREE = '+18559260203'; // the AI toll-free / customer-chat line
+  const UNREGISTERED = '+19995551234';
+
+  test('inbound: to_phone, when it is a real registered location line', () => {
+    expect(managedLineForCall({ direction: 'inbound', to_phone: PARRISH })).toBe(PARRISH);
+  });
+
+  test('outbound: from_phone, when it is a real registered line', () => {
+    expect(managedLineForCall({ direction: 'outbound', from_phone: PARRISH })).toBe(PARRISH);
+  });
+
+  test('a lead-webhook auto-bridge uses metadata.bridgeCallerId — never the internal alert leg from_phone/to_phone', () => {
+    const call = { direction: 'outbound', from_phone: '+19415550100', to_phone: '+19415550200', metadata: { bridgeCallerId: PARRISH } };
+    expect(managedLineForCall(call)).toBe(PARRISH);
+  });
+
+  test('a tech line is never used, even though it is a registered number', () => {
+    expect(managedLineForCall({ direction: 'inbound', to_phone: TECH_LINE })).toBeNull();
+  });
+
+  test('the AI toll-free line is never used', () => {
+    expect(managedLineForCall({ direction: 'inbound', to_phone: TOLL_FREE })).toBeNull();
+  });
+
+  test('a registered line ALSO configured as a staff-forward number is never used', () => {
+    process.env.WAVES_FALLBACK_FORWARD_NUMBERS = PARRISH;
+    try {
+      expect(managedLineForCall({ direction: 'inbound', to_phone: PARRISH })).toBeNull();
+    } finally {
+      delete process.env.WAVES_FALLBACK_FORWARD_NUMBERS;
+    }
+  });
+
+  test('an unregistered number resolves to null — deriveOutboundNumber decides as today', () => {
+    expect(managedLineForCall({ direction: 'inbound', to_phone: UNREGISTERED })).toBeNull();
+  });
+
+  test('no candidate at all resolves to null', () => {
+    expect(managedLineForCall({ direction: 'inbound' })).toBeNull();
   });
 });
 
@@ -224,6 +295,15 @@ describe('stagingIneligibleReason', () => {
     expect(stagingIneligibleReason({ ...recovered, recording_duration_seconds: 5 }, baseExtraction(), leadId)).toBe('call_too_short');
   });
 
+  // codex r1 P1: an outbound bridge's duration_seconds includes staff
+  // ringing and the press-1 prompt — a real conversation this short must
+  // still be caught, which the OLD callDurationSeconds check (max of both
+  // fields) would have missed entirely.
+  test('an outbound bridge with a long ring but a genuinely short conversation is still call_too_short', () => {
+    const outboundBridge = { ...baseCall, direction: 'outbound', duration_seconds: 600, recording_duration_seconds: 20 };
+    expect(stagingIneligibleReason(outboundBridge, baseExtraction(), leadId)).toBe('call_too_short');
+  });
+
   test('an address that never validated in-area is skipped', () => {
     expect(stagingIneligibleReason({ ...baseCall, ai_address_validation: { inServiceArea: false } }, baseExtraction(), leadId)).toBe('not_in_service_area');
     expect(stagingIneligibleReason({ ...baseCall, ai_address_validation: null }, baseExtraction(), leadId)).toBe('not_in_service_area');
@@ -244,6 +324,54 @@ test('gate off: sweep never touches the database', async () => {
   isEnabled.mockReturnValue(true);
 });
 
+// ── activationBoundary / persistedActivationBoundary ──────────────────────
+// Mirrors reschedule-link-promises.js's own activationBoundary pattern:
+// flipping the gate on must never pick up days of pre-existing valid-but-
+// unstaged calls and text them all in one burst (codex r1 P1).
+describe('activationBoundary / persistedActivationBoundary', () => {
+  afterEach(() => { delete process.env.CALL_BOOKING_LINK_TEXT_ACTIVATED_AT; });
+
+  test('an explicit env override always wins, with no DB read at all', async () => {
+    process.env.CALL_BOOKING_LINK_TEXT_ACTIVATED_AT = '2026-01-01T00:00:00.000Z';
+    const conn = jest.fn();
+    const boundary = await activationBoundary(conn);
+    expect(boundary.getTime()).toBe(new Date('2026-01-01T00:00:00.000Z').getTime());
+    expect(conn).not.toHaveBeenCalled();
+  });
+
+  test('an unparseable env override falls back to the persisted boundary instead of throwing', async () => {
+    process.env.CALL_BOOKING_LINK_TEXT_ACTIVATED_AT = 'not-a-date';
+    const chain = { where: jest.fn(() => chain), first: jest.fn(async () => ({ value: '2026-02-01T00:00:00.000Z' })) };
+    const conn = jest.fn(() => chain);
+    const boundary = await activationBoundary(conn);
+    expect(boundary.getTime()).toBe(new Date('2026-02-01T00:00:00.000Z').getTime());
+  });
+
+  test('reads an already-persisted boundary without ever writing', async () => {
+    const insert = jest.fn();
+    const chain = { where: jest.fn(() => chain), first: jest.fn(async () => ({ value: '2026-02-01T00:00:00.000Z' })), insert };
+    const conn = jest.fn(() => chain);
+    const boundary = await persistedActivationBoundary(conn);
+    expect(boundary.getTime()).toBe(new Date('2026-02-01T00:00:00.000Z').getTime());
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  test('the first live sweep anywhere to find nothing stored writes now() (onConflict-ignore), then reads it back', async () => {
+    let stored = null;
+    const chain = {
+      where: jest.fn(() => chain),
+      first: jest.fn(async () => (stored ? { value: stored } : undefined)),
+      insert: jest.fn((row) => { stored = row.value; return { onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) }; }),
+    };
+    const conn = jest.fn(() => chain);
+    conn.raw = jest.fn(async () => ({ rows: [{ now: new Date('2026-03-01T00:00:00.000Z') }] }));
+    const boundary = await persistedActivationBoundary(conn);
+    expect(boundary.getTime()).toBe(new Date('2026-03-01T00:00:00.000Z').getTime());
+    expect(stored).toBe('2026-03-01T00:00:00.000Z');
+    expect(chain.insert).toHaveBeenCalledWith(expect.objectContaining({ key: 'call_booking_link_text_activated_at' }));
+  });
+});
+
 // ── stage — a grace period before ever judging a fresh call ──────────────
 describe('stage', () => {
   function spyingConn() {
@@ -255,6 +383,10 @@ describe('stage', () => {
         chain[m] = jest.fn((...args) => { if (m === 'where') wheres.push(args); return chain; });
       });
       chain.whereNull = jest.fn((col) => { whereNulls.push(col); return chain; });
+      // activationBoundary's own system_settings read — pinned to the
+      // epoch so every test call is well after it and the pre_activation
+      // check never trips for these call_log-query-shape assertions.
+      chain.first = jest.fn(async () => ({ value: '1970-01-01T00:00:00.000Z' }));
       chain.then = (resolve) => resolve([]);
       return chain;
     });
@@ -354,10 +486,7 @@ describe('stage', () => {
     const now = new Date('2026-09-26T15:00:00Z');
     const rawBindings = [];
     const conn = jest.fn((table) => {
-      if (table === 'leads') {
-        const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), first: jest.fn(async () => ({ id: 'lead-fresh' })) };
-        return chain;
-      }
+      if (table === 'leads') return leadsSidChain([{ id: 'lead-fresh' }]);
       const chain = {};
       ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
       chain.update = jest.fn(async () => 1);
@@ -381,6 +510,56 @@ describe('stage', () => {
     expect(decided).toBe('pending');
     const parsed = rawBindings.map(([json]) => JSON.parse(json)).find((v) => v.call_booking_link_text?.status === 'pending');
     expect(parsed.call_booking_link_text.lead_id).toBe('lead-fresh');
+  });
+
+  // codex r1 P1: flipping the gate on must never pick up a call that
+  // started before the lane's own first live activation.
+  test('a call that started before the activation boundary is skipped as pre_activation, never judged further', async () => {
+    const boundary = new Date('2026-09-26T12:00:00Z');
+    const now = new Date('2026-09-26T13:00:00Z');
+    const rawBindings = [];
+    const conn = jest.fn(() => {
+      const chain = {};
+      ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.update = jest.fn(async () => 1);
+      return chain;
+    });
+    conn.raw = jest.fn((sql, bindings) => { rawBindings.push(bindings); return 'RAW'; });
+    const call = { id: 'call-old', direction: 'inbound', created_at: new Date('2026-09-26T11:00:00Z'), duration_seconds: 90, metadata: {} };
+    const decided = await stageOne(conn, call, now, boundary);
+    expect(decided).toBe('skipped');
+    const parsed = rawBindings.map(([json]) => JSON.parse(json)).find((v) => v.call_booking_link_text);
+    expect(parsed.call_booking_link_text.reason).toBe('pre_activation');
+    expect(conn).not.toHaveBeenCalledWith('leads'); // never even resolves lead linkage
+  });
+
+  test('a call that started at/after the boundary proceeds to ordinary eligibility, unaffected', async () => {
+    const boundary = new Date('2020-01-01T00:00:00Z'); // long past — never blocks a real call
+    const now = new Date('2026-09-26T15:00:00Z');
+    const rawBindings = [];
+    const conn = jest.fn((table) => {
+      if (table === 'leads') return leadsSidChain([{ id: 'lead-fresh' }]);
+      const chain = {};
+      ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.update = jest.fn(async () => 1);
+      return chain;
+    });
+    conn.raw = jest.fn((sql, bindings) => { rawBindings.push(bindings); return 'RAW'; });
+    const call = {
+      id: 'call-fresh-2', direction: 'inbound', created_at: new Date(now.getTime() - 60000), duration_seconds: 90,
+      metadata: {}, twilio_call_sid: 'CAyyy',
+      ai_extraction_enriched: {
+        meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
+        caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
+        property: { property_type: 'single_family' },
+        service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        sentiment_and_lead: { lead_quality: 'warm' },
+      },
+      ai_address_validation: { inServiceArea: true },
+    };
+    const decided = await stageOne(conn, call, now, boundary);
+    expect(decided).toBe('pending');
   });
 });
 
@@ -444,7 +623,12 @@ describe('outboundPriorContactMissing / outboundStagingReason', () => {
 // — a stamp-less, phone-bearing fresh insert self-links through its OWN
 // leads.twilio_call_sid instead. leadIdOf alone reads no_lead_linkage for
 // every such call.
-describe('resolveLeadId', () => {
+function leadsSidChain(rows) {
+  const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), limit: jest.fn(() => chain), select: jest.fn(async () => rows) };
+  return chain;
+}
+
+describe('resolveLeadId / resolveLeadLinkage', () => {
   test('a stamped call resolves without ever querying leads', async () => {
     const conn = jest.fn();
     const call = { metadata: { lead_id: 'lead-1' }, twilio_call_sid: 'CAxxx' };
@@ -459,18 +643,33 @@ describe('resolveLeadId', () => {
   });
 
   test('a stamp-less fresh lead resolves through its own twilio_call_sid', async () => {
-    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), first: jest.fn(async () => ({ id: 'lead-fresh' })) };
+    const chain = leadsSidChain([{ id: 'lead-fresh' }]);
     const conn = jest.fn(() => chain);
     const call = { metadata: {}, twilio_call_sid: 'CAxxx' };
     await expect(resolveLeadId(conn, call)).resolves.toBe('lead-fresh');
     expect(conn).toHaveBeenCalledWith('leads');
     expect(chain.where).toHaveBeenCalledWith({ twilio_call_sid: 'CAxxx' });
+    expect(chain.limit).toHaveBeenCalledWith(2);
   });
 
   test('a twilio_call_sid matching no lead resolves to null', async () => {
-    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), first: jest.fn(async () => undefined) };
-    const conn = jest.fn(() => chain);
+    const conn = jest.fn(() => leadsSidChain([]));
     await expect(resolveLeadId(conn, { metadata: {}, twilio_call_sid: 'CAxxx' })).resolves.toBeNull();
+  });
+
+  // codex r1 P1: leads.twilio_call_sid carries no unique index. Minting a
+  // fresh send to the WRONG lead is worse than not sending at all, so two
+  // or more live matches must fail CLOSED — never an arbitrary pick.
+  test('two or more live leads sharing a sid resolve to no lead — ambiguous, not an arbitrary pick', async () => {
+    const conn = jest.fn(() => leadsSidChain([{ id: 'lead-a' }, { id: 'lead-b' }]));
+    await expect(resolveLeadId(conn, { metadata: {}, twilio_call_sid: 'CAxxx' })).resolves.toBeNull();
+    await expect(resolveLeadLinkage(conn, { metadata: {}, twilio_call_sid: 'CAxxx' })).resolves.toEqual({ leadId: null, ambiguous: true });
+  });
+
+  test('a stamped call is never ambiguous, whatever else shares its sid', async () => {
+    const conn = jest.fn();
+    const linkage = await resolveLeadLinkage(conn, { metadata: { lead_id: 'lead-1' }, twilio_call_sid: 'CAxxx' });
+    expect(linkage).toEqual({ leadId: 'lead-1', ambiguous: false });
   });
 });
 
@@ -714,5 +913,77 @@ describe('dispatchClaimedCall', () => {
     const result = await dispatchClaimedCall(conn, CALL, NOW);
     expect(result.sent).toBe(false);
     expect(result.skipped).toBe('SUPPRESSED_OPT_OUT');
+  });
+
+  // codex r1 P1: the token is signed for the phone buildLeadConsultationSmsLine
+  // minted it for, not necessarily lead.phone from this function's own
+  // earlier read.
+  test('a token minted for a different phone than the row judged blocks the send', async () => {
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://wavespest.co/l/abcd', line: 'Pick a time...\n\n', phone: '+19415559999' });
+    const conn = makeDb();
+    const result = await dispatchClaimedCall(conn, CALL, NOW);
+    expect(result.skipped).toBe('phone_changed_before_send');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a token minted for the SAME phone sends normally, to that exact number', async () => {
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://wavespest.co/l/abcd', line: 'Pick a time...\n\n', phone: OPEN_LEAD.phone });
+    const conn = makeDb();
+    const result = await dispatchClaimedCall(conn, CALL, NOW);
+    expect(result.sent).toBe(true);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: OPEN_LEAD.phone }));
+  });
+
+  // codex r1 P2: reply from the line the caller actually reached, not
+  // deriveOutboundNumber's location-based fallback.
+  test('metadata.fromNumber rides the managed line this call actually used', async () => {
+    const PARRISH = '+19412972817'; // a real registered location line
+    const withLine = { ...CALL, to_phone: PARRISH };
+    const conn = makeDb();
+    await dispatchClaimedCall(conn, withLine, NOW);
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({ fromNumber: PARRISH }),
+    }));
+  });
+
+  test('no valid managed line omits fromNumber entirely — deriveOutboundNumber decides as before', async () => {
+    const conn = makeDb();
+    await dispatchClaimedCall(conn, CALL, NOW); // CALL carries no to_phone/from_phone at all
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.fromNumber).toBeUndefined();
+  });
+
+  // codex r1 P1: a retryable/deferred sendCustomerMessage outcome (a
+  // quiet-hours hold this sweep crossed into, CONSENT_LOOKUP_FAILED, a
+  // transient provider failure) is a reason to WAIT, never to give up.
+  test('a retryable send outcome re-queues as pending at nextAllowedAt, not a terminal skip', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, retryable: true, nextAllowedAt: '2026-09-26T20:30:00.000Z', code: 'CONSENT_LOOKUP_FAILED' });
+    const conn = makeDb();
+    const result = await dispatchClaimedCall(conn, CALL, NOW);
+    expect(result.skipped).toBe('CONSENT_LOOKUP_FAILED');
+    expect(result.deferred).toBe(true);
+    const rawCall = conn.raw.mock.calls.find(([, bindings]) => bindings?.[0]?.includes('"status":"pending"'));
+    expect(rawCall).toBeTruthy();
+    expect(JSON.parse(rawCall[1][0]).call_booking_link_text.send_at).toBe('2026-09-26T20:30:00.000Z');
+  });
+
+  test('a retryable outcome with no nextAllowedAt uses a short backoff instead', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, retryable: true, code: 'PROVIDER_FAILURE' });
+    const conn = makeDb();
+    const result = await dispatchClaimedCall(conn, CALL, NOW);
+    expect(result.deferred).toBe(true);
+    const rawCall = conn.raw.mock.calls.find(([, bindings]) => bindings?.[0]?.includes('"status":"pending"'));
+    const sendAt = new Date(JSON.parse(rawCall[1][0]).call_booking_link_text.send_at);
+    expect(sendAt.getTime()).toBeGreaterThan(NOW.getTime());
+    expect(sendAt.getTime()).toBeLessThan(NOW.getTime() + 60 * 60 * 1000); // well under an hour out
+  });
+
+  test('a retryable outcome past 24h from the ORIGINAL send_at gives up with a reason, not another requeue', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, retryable: true, code: 'CONSENT_LOOKUP_FAILED' });
+    const staleEntry = { status: 'claimed', lead_id: 'lead-1', send_at: new Date(NOW.getTime() - 25 * 60 * 60 * 1000).toISOString() };
+    const stale = { ...CALL, metadata: { ...CALL.metadata, call_booking_link_text: staleEntry } };
+    const conn = makeDb();
+    const result = await dispatchClaimedCall(conn, stale, NOW);
+    expect(result.skipped).toBe('CONSENT_LOOKUP_FAILED');
+    expect(result.deferred).toBeUndefined();
   });
 });
