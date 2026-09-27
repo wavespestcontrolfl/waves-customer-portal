@@ -29,6 +29,7 @@ const { billingChannelAllowed } = require('./billing-delivery-channels');
 const {
   loadBillingEmailContext, dispatchUnderBillingEmailAuthority,
 } = require('./billing-channel-email-authority');
+const { billingEmailRefusal } = require('./billing-email-sender');
 
 let cachedTransporter = null;
 function getTransporter() {
@@ -593,25 +594,23 @@ async function inspectionCreditMemoForInvoice(invoice) {
   }
 }
 
-// A routed receipt's refusal, in the vocabulary its callers (the receipt
-// delivery queue, the no-show fee receipt) already settle on: the switch, no
-// address and an unselected Email at the first read are their expected skips,
-// a suppression is a blocked send, and anything else (a choice or recipient
-// that moved at the handoff, an invoice no longer this customer's to be paid
-// for, a recheck that could not run) is an aborted handoff the durable owner
-// retries.
-const RECEIPT_SUPPRESSION_CODES = new Set(['EMAIL_SUPPRESSED', 'SUPPRESSED_MANUAL_DNC', 'SUPPRESSED_OTHER']);
+// A routed receipt's refusal, classified like every other billing sender's
+// (billing-email-sender.js) and reported in the vocabulary its callers (the
+// receipt delivery queue, the no-show fee receipt) already settle on: the
+// switch, no address and an unselected Email at the first read are their
+// expected skips, a suppression is a blocked send, and anything else (a
+// choice or recipient that moved at the handoff, an invoice no longer this
+// customer's to be paid for, a recheck that could not run) is an aborted
+// handoff the durable owner retries.
 function routedReceiptRefusal(block, { atHandoff = false } = {}) {
-  const reason = String(block.reason || block.code || 'Receipt email refused');
-  if (RECEIPT_SUPPRESSION_CODES.has(block.code)) {
-    return { ok: false, error: reason.startsWith('Suppressed: ') ? reason : `Suppressed: ${reason}`, blocked: true };
-  }
-  if (block.code === 'BILLING_EMAIL_DISABLED') return { ok: false, error: 'email_opted_out' };
-  if (block.code === 'NO_EMAIL_RECIPIENT') return { ok: false, error: 'No receipt recipient email' };
+  const refusal = billingEmailRefusal(block);
+  if (refusal.blocked) return { ok: false, error: refusal.reason, blocked: true };
+  if (refusal.reason === 'email_disabled') return { ok: false, error: 'email_opted_out' };
+  if (refusal.reason === 'missing_email') return { ok: false, error: 'No receipt recipient email' };
   if (block.code === 'BILLING_PREFERENCES_CHANGED' && !atHandoff) {
     return { ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected' };
   }
-  return { ok: false, error: reason, code: 'receipt_handoff_aborted' };
+  return { ok: false, error: String(block.reason || block.code || 'Receipt email refused'), code: 'receipt_handoff_aborted' };
 }
 
 async function sendReceiptEmail(invoiceId, options = {}) {
