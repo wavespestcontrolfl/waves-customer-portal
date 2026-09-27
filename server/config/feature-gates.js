@@ -44,6 +44,7 @@
  *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
  *   GATE_CUSTOMER_PHOTO_ID=true (authenticated customer Photo ID API — POST/GET /api/photo-id/*, comms-free; dark: every handler 404s while off)
  *   GATE_CUSTOMER_PHOTO_ID_ISSUES=true (customer pest Photo ID issue association + observation dates; strict opt-in in every environment; requires GATE_APP_PROPERTY_SCOPE)
+ *   GATE_PHOTO_ID_V2=true (customer Photo ID PEST path calls the v2 species-catalog engine, identifyPestV2 — server/services/photo-id-v2/pest-engine.js — instead of v1's identifyPest; layered on GATE_CUSTOMER_PHOTO_ID, which must also be on. Response keeps every v1 field and ADDS `v2`; the customer v2 object is persisted with no migration, embedded in the existing report_contract jsonb column under a `v2` key. A v2 engine failure (ok:false) answers the SAME 503 the v1 path already does — never a silent fallback to v1. Stored v2 answers are served back (history headline, next step, detail `v2`) only while the gate is on. Dark = today's v1-only pest path, byte-identical, for new AND already-stored rows; lawn/tree_shrub are unaffected at any setting.)
  *   GATE_PHOTO_TRIAGE=true      (inbound photo texts that read like a lawn/plant/pest "what is this" run the admin photo assessment and park ONE pending reply draft for owner approval — never sends; paid vision capped by PHOTO_TRIAGE_DAILY_CAP per ET day, default 20, and the paid caption classifier by PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP, default = the vision cap; a triage candidate skips the legacy AI draft; read at call time; dark in dev AND prod)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
@@ -599,6 +600,13 @@ const gates = {
   // load value, so a flip needs no redeploy.
   discountStacking: process.env.GATE_DISCOUNT_STACKING === 'true',
 
+  // Voice relay (Sandy) on an OpenAI model — benchmark/sandbox only. This map
+  // entry is for logGateStatus only; the canonical CALL-TIME reader is
+  // voiceRelayOpenaiLive() below (strict 'true', same convention as
+  // GATE_DISCOUNT_STACKING) — every caller (relay-conversation.js's session
+  // allowlist, the eval harness, the benchmark runner) must use that.
+  voiceRelayOpenai: process.env.GATE_VOICE_RELAY_OPENAI === 'true',
+
   // Collective series moves on every staff surface (owner rulings 2026-07-30
   // + 2026-08-28): with the gate on, ANY date move of a cadence visit that
   // reaches SmartRebooker.reschedule — dispatch drag, the Edit appointment
@@ -650,6 +658,14 @@ const gates = {
   // environment; requires appPropertyScope so every issue has a durable saved-
   // property identity. Gate off keeps existing payloads and writes unchanged.
   customerPhotoIdIssues: process.env.GATE_CUSTOMER_PHOTO_ID_ISSUES === 'true',
+  // v2 species-catalog pest engine (server/services/photo-id-v2/pest-engine.js)
+  // behind the customer Photo ID PEST path only — lawn/tree_shrub are
+  // unaffected at any setting. A SEPARATE, layered gate: customerPhotoId
+  // above must also be on, or every handler still 404s regardless of this
+  // one. Off = identifyPestV2 is never called, stored v2 answers are not
+  // served back, and the v1 identifyPest path stays byte-identical to
+  // today. Kill switch: unset or any non-'true' value.
+  photoIdV2: process.env.GATE_PHOTO_ID_V2 === 'true',
   // Public careers application funnel (POST /api/public/careers/apply).
   // Dark until the owner turns hiring on; the admin recruiting queue works
   // at any setting (it only reads/updates existing rows).
@@ -3020,6 +3036,19 @@ function discountStackingLive() {
   return process.env.GATE_DISCOUNT_STACKING === 'true';
 }
 
+// GATE_VOICE_RELAY_OPENAI read at CALL time — the one reader every entry
+// point into a non-Anthropic voice-relay session model must use: the session
+// allowlist (relay-conversation.js's resolveSessionModel/isAllowedOverride
+// Model), the eval harness (voice-relay-replay.js), and the benchmark runner
+// (run-voice-relay-benchmark.js), so a candidate OpenAI model is accepted
+// consistently across inbound, sandbox and eval alike. Unset (the production
+// default) or any spelling other than exactly 'true' keeps every non-
+// Anthropic override rejected — the existing reject → fallback → warn-once →
+// stamped model_fallback_reason path applies unchanged.
+function voiceRelayOpenaiLive() {
+  return process.env.GATE_VOICE_RELAY_OPENAI === 'true';
+}
+
 // GATE_CUSTOMER_INTEL_AI read at CALL time — the ONE reader for every entry
 // point into the customer-intelligence AI legs (nightly sentiment mining in
 // signal-detector, retention drafting in retention-engine, and the admin
@@ -3167,5 +3196,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, commercialSuiteSizingLive, autoDispatchSharedModelLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, commercialSuiteSizingLive, autoDispatchSharedModelLive };
 // gates 1775330914
