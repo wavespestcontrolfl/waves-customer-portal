@@ -39,7 +39,7 @@ const engine = require('../services/photo-id-v2/pest-engine');
 
 const {
   buildAnswer, mapToV1, resolveCandidate, dedupeCandidates, isConsequential, isApproved,
-  identifyPestV2, REFERRAL_TEMPLATES,
+  identifyPestV2, REFERRAL_TEMPLATES, UNNAMED_NEXT_PHOTO,
 } = engine;
 
 // ── ctx-builder helpers for buildAnswer unit tests ─────────────────────────
@@ -211,7 +211,7 @@ describe('buildAnswer — lineage climb', () => {
     expect(built.answer).toMatchObject({ level: 'unknown', wording: 'unknown', node_id: null, headline: "We couldn't tell from these photos" });
     expect(built.tier).toBe('needs_more_evidence');
     // Still gets retake guidance (pre-push audit on Codex #4916 r4).
-    expect(built.nextPhoto).toEqual({ ask: 'Other retake photo', why: 'Other retake why', photo_can_confirm: true });
+    expect(built.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
   });
 });
 
@@ -306,7 +306,7 @@ describe('buildAnswer — tier', () => {
     const likely = buildAnswer(baseCtx({
       candidates: [cand('no-photo-pair-a', 0.60)], evidenceKind: { shownKind: 'organism', hiddenKind: 'sign' }, currentMonth: CURRENT_MONTH,
     }));
-    expect(likely.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
+    expect(likely.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
   });
 
   test("a sign-only veto does not govern when shows='both'", () => {
@@ -356,7 +356,7 @@ describe('buildAnswer — next_photo', () => {
 
   test('falls back to the node next_photo when there is no curated pair', () => {
     const built = buildAnswer(baseCtx({ candidates: [cand('unreviewed-ant', 0.95)] }));
-    expect(built.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
+    expect(built.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
   });
 
   test('a single entry-level candidate (no second candidate) preserves its own first look-alike\'s photo_can_confirm:false — Codex round-0 P1', () => {
@@ -382,7 +382,7 @@ describe('buildAnswer — look-alike identities respect the review gate (Codex r
     const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.55)] })); // fire-ant's only look-alike is unapproved
     expect(built.answer.wording).toBe('likely');
     // The group's generic prompt stands in; nothing names the unapproved ant.
-    expect(built.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
+    expect(built.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
   });
 
   test('a stale look-alike approval hash blocks its name and pair prose on every pair path', () => {
@@ -392,7 +392,7 @@ describe('buildAnswer — look-alike identities respect the review gate (Codex r
     try {
       const built = buildAnswer(baseCtx({ candidates: [cand('ghost-ant', 0.65), cand('white-footed-ant', 0.3)] }));
       expect(built.entry.look_alikes).toEqual([]);
-      expect(built.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
+      expect(built.nextPhoto).toEqual(UNNAMED_NEXT_PHOTO);
       expect(JSON.stringify(built)).not.toMatch(/white-footed|black all over/i);
     } finally {
       staleTarget.copy.fact = originalFact;

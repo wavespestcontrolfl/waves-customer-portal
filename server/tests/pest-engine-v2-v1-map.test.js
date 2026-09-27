@@ -2,7 +2,9 @@
 // engine suite runs on a fixture). A named v2 species may only inherit a
 // v1 identity that is true of it (pre-push audit on Codex #4916 r3).
 const catalog = require('../services/species-catalog');
-const { buildAnswer, mapToV1, _test: { v1IdentityFor } } = require('../services/photo-id-v2/pest-engine');
+const {
+  buildAnswer, mapToV1, UNNAMED_SAFETY_LINE, UNNAMED_NEXT_PHOTO, _test: { v1IdentityFor },
+} = require('../services/photo-id-v2/pest-engine');
 
 function approvedClone(entry) {
   const clone = { ...entry, review: { status: 'owner_approved', notes: 'Synthetic test approval.' }, verification: [] };
@@ -65,48 +67,51 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
       });
     });
 
+  // Contract delta 2026-09-26 #1: an answer that names no approved entry
+  // shows ONLY the fixed UNNAMED_SAFETY_LINE (or null) — never a group's own
+  // authored wording. This is the safety property that survives: the line
+  // still tells the customer to keep their distance and call for medical
+  // help when the answered node has anything under it that keeps distance.
   test.each([
-    ['fire-ant', 'fire-ants', /call 911 if someone has trouble breathing/i],
-    ['black-widow', 'widow-spiders', /see a doctor for a suspected bite.+call 911/i],
-  ])('a draft medical-risk %s climb carries visible generic safety guidance', (slug, nodeId, safety) => {
+    ['fire-ant', 'fire-ants'],
+    ['black-widow', 'widow-spiders'],
+  ])('a draft medical-risk %s climb carries visible generic safety guidance', (slug, nodeId) => {
     const built = answerFor(slug, { approved: false });
     expect(built).toMatchObject({ answer: { node_id: nodeId }, entry: null });
-    expect(built.genericSafetyLine).toMatch(safety);
+    expect(built.genericSafetyLine).toBe(UNNAMED_SAFETY_LINE);
   });
 
-  test.each([
-    ['southern-toad', 'toads', 'No Treatment Needed'],
-    ['brown-anole', 'anoles', 'Wildlife Referral'],
-    ['gecko', 'geckos', 'Wildlife Referral'],
-  ])('a neutral %s subgroup inherits its ancestor service contract', (slug, nodeId, label) => {
-    const built = answerFor(slug, { approved: false });
-    expect(built).toMatchObject({ answer: { node_id: nodeId }, entry: null });
-    expect(mapToV1(built).report_contract.service).toMatchObject({ line: 'none', key: null, label });
-  });
-
+  // Contract delta 2026-09-26 #1: an unnamed answer's v1 compatibility is
+  // DERIVED from every catalog entry under the answered node — a singleton
+  // node's derived contract equals its one entry's own service fields, but
+  // inspection stays v1's own unmatched default (true) rather than the
+  // entry's own inspection_first flag.
   test.each([
     ['carpenter-ant', 'carpenter-ants', {
       line: 'pest', key: null, label: 'General Pest Control', inspection_required: true,
     }, 'moderate'],
     ['tussock-moth-caterpillar', 'stinging-caterpillars', {
-      line: 'tree_shrub', key: null, label: 'Tree & Shrub Care', inspection_required: false,
+      line: 'tree_shrub', key: null, label: 'Tree & Shrub Care', inspection_required: true,
     }, 'low'],
     ['regal-jumping-spider', 'jumping-spiders', {
-      line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false,
+      line: 'none', key: null, label: 'No Treatment Needed', inspection_required: true,
     }, 'low'],
     ['golden-silk-orbweaver', 'orb-weavers', {
-      line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false,
+      line: 'none', key: null, label: 'No Treatment Needed', inspection_required: true,
     }, 'low'],
     ['two-striped-walkingstick', 'irritant-walkingsticks', {
-      line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false,
+      line: 'none', key: null, label: 'No Treatment Needed', inspection_required: true,
     }, 'low'],
-    ['acrobat-ant', 'defensive-stinging-ants', {
-      line: 'pest', key: 'pest', label: 'General Pest Control', inspection_required: false,
-    }, 'low'],
-    ['trap-jaw-ant', 'defensive-stinging-ants', {
-      line: 'pest', key: 'pest', label: 'General Pest Control', inspection_required: false,
-    }, 'low'],
-    ['termite-swarmers', 'termite-swarm-activity', {
+    // A draft climbs to its group, whose contract is derived from every
+    // entry under it: the ants group carries its worst sting risk, and the
+    // termites group keeps high-urgency termite inspection (Codex #4974).
+    ['acrobat-ant', 'ants', {
+      line: 'pest', key: null, label: 'Pest Consultation', inspection_required: true,
+    }, 'high'],
+    ['trap-jaw-ant', 'ants', {
+      line: 'pest', key: null, label: 'Pest Consultation', inspection_required: true,
+    }, 'high'],
+    ['termite-swarmers', 'termites', {
       line: 'termite', key: null, label: 'Termite Protection', inspection_required: true,
     }, 'high'],
   ])('a singleton draft %s retains its source-backed service contract at %s', (
@@ -120,155 +125,10 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     });
   });
 
-  test.each([
-    ['acrobat-ant', 'bigheaded-ant', 'ants'],
-    ['termite-swarmers', 'dampwood-termite', 'termites'],
-  ])('mixed draft %s and %s results retain only the shared %s contract', (specific, other, nodeId) => {
-    const built = buildAnswer({
-      candidates: [
-        { ...candidate(specific, { approved: false }), confidence: 0.55 },
-        { ...candidate(other, { approved: false }), confidence: 0.3 },
-      ],
-      disagreed: false, disagreementNode: null, escalationTriggered: false,
-      openaiAnswered: false, openaiStoodInAlone: false, qualityUsable: true,
-      qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
-    });
-    expect(built.answer).toMatchObject({ level: 'group', node_id: nodeId });
-    expect(mapToV1(built).report_contract).toMatchObject({
-      urgency: expect.not.stringMatching(/^high$/),
-      safety: { stinging: false, structural_threat: false },
-    });
-  });
-
-  test.each([
-    ['tussock-moth-caterpillar', 'stinging-caterpillars', /itchy rash.+seek medical care/i],
-    ['southern-toad', 'toads', /irritate a pet's mouth.+contact a veterinarian/i],
-    ['cuban-treefrog', 'irritant-treefrogs', /irritate eyes, nose, and airways.+see a doctor/i],
-    ['bed-bug', 'bed-bugs', /bites can itch or welt.+see a doctor/i],
-    ['deer-fly', 'biting-flies', /bites can be painful, itchy, or swollen.+see a doctor/i],
-    ['chiggers', 'mites', /persistent, itchy welts.+see a doctor/i],
-    ['millipede', 'millipedes', /irritate skin or eyes.+avoid bare-hand contact/i],
-    ['carpenter-bee', 'carpenter-bees', /allergic reaction.+call 911/i],
-    ['wheel-bug', 'persistent-bite-assassin-bugs', /very painful.+numbness or pain lasts/i],
-    ['mud-dauber', 'medical-solitary-wasps', /allergic reaction.+call 911/i],
-    ['graceful-twig-ant', 'allergy-risk-ants', /sharply painful.+allergic reaction/i],
-    ['asian-lady-beetle', 'allergen-lady-beetles', /allergies or asthma/i],
-    ['monarch-caterpillar', 'pet-risk-garden-caterpillars', /upset a pet’s stomach/i],
-    ['house-centipede', 'bite-risk-centipedes', /centipede bite can hurt.+allergic reaction/i],
-    ['carpet-beetle', 'irritant-fabric-beetles', /mild skin irritation.+not a bite or sting/i],
-    ['hentz-striped-scorpion', 'allergy-risk-scorpions', /sting is painful.+allergic reaction/i],
-    ['hammerhead-flatworm', 'toxic-flatworms', /do not handle it bare-handed.+wash hands/i],
-    ['yellow-sac-spider', 'medical-sac-spiders', /mild pain and itching.+see a doctor/i],
-    ['velvet-ant', 'allergy-risk-velvet-ants', /sting can be extremely painful.+allergic reaction/i],
-    ['two-striped-walkingstick', 'irritant-walkingsticks', /eye burning.+reaches an eye.+rinse it.+right away/i],
-  ])('a draft %s retains source-backed exposure guidance at %s', (slug, nodeId, safety) => {
-    const built = answerFor(slug, { approved: false });
-    expect(built).toMatchObject({
-      answer: { node_id: nodeId }, entry: null, topEntrySlug: null,
-      genericSafetyLine: expect.stringMatching(safety),
-    });
-    expect(catalog.genericGuidance(nodeId).sources.length).toBeGreaterThan(0);
-  });
-
-  test('a mixed caterpillar result cannot borrow the singleton tree-and-shrub or rash contract', () => {
-    const built = buildAnswer({
-      candidates: [
-        { ...candidate('tussock-moth-caterpillar', { approved: false }), confidence: 0.55 },
-        { ...candidate('fall-armyworm', { approved: false }), confidence: 0.3 },
-      ],
-      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
-      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
-    });
-    expect(built).toMatchObject({
-      answer: { level: 'group', node_id: 'caterpillars-moths' }, entry: null,
-      genericSafetyLine: null,
-    });
-    expect(mapToV1(built)).toMatchObject({
-      service_line: 'pest', urgency: 'low',
-      report_contract: {
-        safety: { stinging: false },
-        service: { line: 'pest', key: null, label: 'Pest Consultation', inspection_required: true },
-      },
-    });
-  });
-
-  test('a broader mixed toad result does not borrow toxic-toad safety guidance', () => {
-    const built = buildAnswer({
-      candidates: [
-        { ...candidate('cane-toad', { approved: false }), confidence: 0.55 },
-        { ...candidate('southern-toad', { approved: false }), confidence: 0.35 },
-      ],
-      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
-      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
-    });
-    expect(built.answer).toMatchObject({ level: 'group', node_id: 'frogs-toads' });
-    expect(built.genericSafetyLine).toBeNull();
-    expect(mapToV1(built).report_contract).toMatchObject({
-      urgency: 'low', service: { line: 'none', key: null, label: 'No Treatment Needed' },
-    });
-  });
-
-  test('a mixed Cuban and native treefrog result stays at the neutral treefrog parent', () => {
-    const built = buildAnswer({
-      candidates: [
-        { ...candidate('cuban-treefrog', { approved: false }), confidence: 0.55 },
-        { ...candidate('green-treefrog', { approved: false }), confidence: 0.35 },
-      ],
-      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
-      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
-    });
-    expect(built).toMatchObject({
-      answer: { level: 'subgroup', node_id: 'treefrogs' }, entry: null,
-      genericSafetyLine: null,
-    });
-    const mapped = mapToV1(built).report_contract;
-    expect(mapped.safety).not.toHaveProperty('irritant');
-    expect(mapped.service).toMatchObject({
-      line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false,
-    });
-  });
-
-  test('a mixed iguana and anole result uses safe lizard guidance and a neutral wildlife contract', () => {
-    const built = buildAnswer({
-      candidates: [
-        { ...candidate('green-iguana', { approved: false }), confidence: 0.35 },
-        { ...candidate('brown-anole', { approved: false }), confidence: 0.30 },
-      ],
-      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
-      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
-    });
-    expect(built).toMatchObject({
-      answer: { level: 'group', node_id: 'lizards' }, entry: null,
-      nextPhoto: { ask: expect.stringMatching(/zoom from a safe distance/i) },
-    });
-    expect(built.nextPhoto.ask).toMatch(/do not approach, corner, touch, or handle/i);
-    expect(built.nextPhoto.ask).not.toMatch(/close-up|a few feet|several feet|next to a coin/i);
-    expect(mapToV1(built)).toMatchObject({
-      species_slug: null, service_line: 'none', urgency: 'low',
-      report_contract: {
-        service: { line: 'none', key: null, label: 'Wildlife Referral', inspection_required: false },
-        safety: { venomous: false },
-      },
-    });
-  });
-
-  test('mixed Centruroides species keep only their shared scorpion guidance', () => {
-    const built = buildAnswer({
-      candidates: [
-        { ...candidate('hentz-striped-scorpion', { approved: false }), confidence: 0.55 },
-        { ...candidate('florida-bark-scorpion', { approved: false }), confidence: 0.35 },
-      ],
-      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
-      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
-    });
-    expect(built).toMatchObject({
-      answer: { level: 'subgroup', node_id: 'centruroides-scorpions' }, entry: null,
-      genericSafetyLine: expect.stringMatching(/stings can be painful.+allergic reaction/i),
-    });
-    expect(mapToV1(built).report_contract).toMatchObject({
-      safety: { stinging: true, venomous: true }, urgency: 'low',
-      service: { line: 'pest', key: 'pest', label: 'General Pest Control', inspection_required: false },
-    });
+  test('a draft termite-swarmers answer keeps the structural-threat flag at its group', () => {
+    const built = answerFor('termite-swarmers', { approved: false });
+    expect(built).toMatchObject({ answer: { node_id: 'termites' }, entry: null });
+    expect(mapToV1(built).report_contract.safety).toMatchObject({ structural_threat: true });
   });
 
   test('a draft Hentz fallback shows only its shared genus metadata', () => {
@@ -278,25 +138,6 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
       entry: null,
     });
     expect(built.answer.subhead).not.toMatch(/hentzi/i);
-  });
-
-  test('a mixed walkingstick result cannot borrow the eye-spray fallback', () => {
-    const built = buildAnswer({
-      candidates: [
-        { ...candidate('two-striped-walkingstick', { approved: false }), confidence: 0.55 },
-        { ...candidate('carolina-mantis', { approved: false }), confidence: 0.35 },
-      ],
-      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
-      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
-    });
-    expect(built).toMatchObject({
-      answer: { level: 'group', node_id: 'other-insects' }, entry: null,
-      genericSafetyLine: null,
-    });
-    expect(mapToV1(built).report_contract).toMatchObject({
-      urgency: 'low',
-      service: { line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false },
-    });
   });
 
   test('every universally routed actual fallback preserves its catalog contract', () => {
@@ -318,42 +159,31 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
       // urgency, a referral-oriented label, or both.
       const mapped = mapToV1(built);
       const actual = { ...mapped.report_contract.service, urgency: mapped.urgency };
-      const sharedIdentity = ['line', 'key', 'label'].every((field) => (
-        new Set(contracts.map((contract) => JSON.stringify(contract[field]))).size === 1
-      ));
-      for (const field of ['line', 'key', 'label', 'inspection_required', 'urgency']) {
+      for (const field of ['line', 'key', 'label', 'urgency']) {
         if (new Set(contracts.map((contract) => JSON.stringify(contract[field]))).size !== 1) continue;
-        if (field === 'inspection_required' && !sharedIdentity) continue;
         if (field === 'urgency' && nodeId === 'aedes') continue;
         if (field === 'label' && ['anoles', 'bats', 'geckos'].includes(nodeId)) continue;
         expect({ nodeId, field, value: actual[field] }).toEqual({
           nodeId, field, value: contracts[0][field],
         });
       }
+      // Contract delta 2026-09-26 #1: inspection is v1's own unmatched
+      // default for every unnamed answer, never derived from whether the
+      // descendants themselves are inspection-first.
+      expect({ nodeId, value: actual.inspection_required }).toEqual({ nodeId, value: true });
     }
   });
 
-  test('swarm and wall-colony uncertainty stops at their neutral honey-bee parent', () => {
-    const built = buildAnswer({
-      candidates: [
-        { ...candidate('honey-bee-wall-colony', { approved: false }), confidence: 0.55 },
-        { ...candidate('honey-bee-swarm', { approved: false }), confidence: 0.35 },
-      ],
-      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
-      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
-    });
-    expect(built).toMatchObject({
-      answer: { level: 'subgroup', node_id: 'bees', headline: 'Looks like a honey bee' },
-      entry: null,
-      referral: { kind: 'bee_relocation' },
-      genericCompatibility: { serviceLabel: 'Bee Assessment & Referral', inspectionRequired: true, urgency: 'moderate' },
-    });
-    expect(built.genericSafetyLine).toMatch(/do not spray or seal active honey bees/i);
-  });
+  // "swarm and wall-colony uncertainty stops at their neutral honey-bee
+  // parent" (bee_relocation referral + node-authored safety line) is
+  // superseded: a referral is now only an approved, named entry's own
+  // routing (contract delta 2026-09-26 #1) — an unapproved bee climb gets
+  // referral: null and the fixed UNNAMED_SAFETY_LINE, covered by the
+  // medical-risk and singleton-contract cases above.
 
   test.each([
-    ['carpenter-bee', 'honey-bee', 'carpenter-bees', 'insect', { key: 'pest', label: 'General Pest Control', inspection_required: false }],
-    ['aphid', 'aphid-scale', 'plant-pests-small', 'insect', { key: null, label: 'Tree & Shrub Care', inspection_required: false }],
+    ['carpenter-bee', 'honey-bee', 'carpenter-bees', 'insect', { key: 'pest', label: 'General Pest Control', inspection_required: true }],
+    ['aphid', 'aphid-scale', 'plant-pests-small', 'insect', { key: null, label: 'Tree & Shrub Care', inspection_required: true }],
   ])('a draft %s climb preserves category but never borrows the narrower %s identity',
     (slug, forbiddenLegacySlug, nodeId, category, service) => {
       const built = answerFor(slug, { approved: false });
@@ -397,24 +227,15 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     });
   });
 
-  test('a mixed termite-family answer keeps only the broader shared termite contract', () => {
-    const built = buildAnswer({
-      candidates: [
-        { ...candidate('subterranean-termite', { approved: false }), confidence: 0.55 },
-        { ...candidate('drywood-termite', { approved: false }), confidence: 0.3 },
-      ],
-      disagreed: false, qualityUsable: true, qualityIssue: 'none', currentMonth: 6,
-    });
-    expect(built.answer).toMatchObject({ level: 'group', node_id: 'termites' });
-    expect(mapToV1(built)).toMatchObject({
-      species_slug: null, service_line: 'termite', urgency: 'moderate',
-      report_contract: { safety: { structural_threat: false }, service: { inspection_required: true } },
-    });
-  });
-
-  test.each(['low-confidence', 'mixed-insect'])('%s cannot borrow a termite contract', (kind) => {
-    const candidates = [{ ...candidate('subterranean-termite', { approved: false }), confidence: kind === 'low-confidence' ? 0.5 : 0.55 }];
-    if (kind === 'mixed-insect') candidates.push({ ...candidate('carpenter-ant', { approved: false }), confidence: 0.3 });
+  // "a mixed termite-family answer keeps only the broader shared termite
+  // contract" and the "mixed-insect" half of the test below are superseded:
+  // an unnamed answer's v1 columns are now derived from EVERY catalog entry
+  // under the climbed node (contract delta 2026-09-26 #1), so a mixed read
+  // that climbs to a broad node picks up that whole node's worst-case hazard
+  // union — a real safety-first change, not a bug. The low-confidence case
+  // (a single candidate too weak to climb at all) still stays unmatched.
+  test('a genuinely low-confidence single candidate cannot borrow a termite contract', () => {
+    const candidates = [{ ...candidate('subterranean-termite', { approved: false }), confidence: 0.5 }];
     const built = buildAnswer({ candidates, disagreed: false, qualityUsable: true, qualityIssue: 'none', currentMonth: 6 });
     expect(['unknown', 'category']).toContain(built.answer.level);
     expect(mapToV1(built)).toMatchObject({
@@ -444,78 +265,17 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     }
   });
 
-  test('a high-confidence draft bat climb keeps generic rabies and exclusion guidance', () => {
-    const built = answerFor('brazilian-free-tailed-bat', { approved: false });
-    expect(built).toMatchObject({
-      answer: { level: 'subgroup', node_id: 'bats', wording: 'group_only' },
-      entry: null,
-      topEntrySlug: null,
-      referral: { kind: 'bat_exclusion' },
-    });
-    expect(built.answer.headline).not.toMatch(/brazilian|free-tailed/i);
-    expect(built.referral.text).toMatch(/bitten or scratched|wake up with a bat/i);
-    expect(built.referral.text).toMatch(/exclusion is the only legal removal method/i);
-
-    const mapped = mapToV1(built);
-    expect(mapped).toMatchObject({ species_slug: null, category: 'wildlife', service_line: 'none', urgency: 'high' });
-    expect(mapped.report_contract).toMatchObject({
-      safety: { stinging: false, venomous: false, disease_vector: true, structural_threat: false },
-      service: { line: 'none', key: null, label: 'Wildlife Referral (exclusion only)', inspection_required: true },
-    });
-  });
-
-  test('a high-confidence draft gopher tortoise climb keeps protected no-treatment guidance', () => {
-    const built = answerFor('gopher-tortoise', { approved: false });
-    expect(built).toMatchObject({
-      answer: { level: 'group', node_id: 'turtles', wording: 'group_only' },
-      entry: null,
-      topEntrySlug: null,
-      referral: { kind: 'protected_leave_alone' },
-    });
-    expect(built.answer.headline).toBe('Looks like a turtle or tortoise');
-    expect(built.answer.headline).not.toMatch(/gopher/i);
-    expect(built.referral.text).toMatch(/protected by Florida law/i);
-    expect(built.referral.text).toMatch(/leave it undisturbed|no treatment is needed/i);
-
-    const mapped = mapToV1(built);
-    expect(mapped).toMatchObject({ species_slug: null, category: 'wildlife', service_line: 'none', urgency: 'low' });
-    expect(mapped.report_contract).toMatchObject({
-      identification: { slug: null, category: 'wildlife', contested: true },
-      safety: { stinging: false, venomous: false, disease_vector: false, structural_threat: false },
-      service: { line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false },
-    });
-  });
-
-  test.each([
-    ['giant-african-land-snail', 'regulated-land-snails', 'report_fdacs', 'none', 'high', { disease_vector: true }, /giant|african/i],
-    ['raccoon', 'rabies-risk-wild-mammals', 'wildlife_trapper', 'none', 'high', { disease_vector: true }, /raccoon/i],
-    ['burrowing-owl', 'protected-ground-birds', 'protected_leave_alone', 'none', 'moderate', {}, /burrowing|owl/i],
-  ])('a high-confidence draft %s keeps its special generic safety and routing contract',
-    (slug, nodeId, referral, serviceLine, urgency, safety, forbiddenIdentity) => {
-      const built = answerFor(slug, { approved: false });
-      expect(built).toMatchObject({
-        answer: { level: 'subgroup', node_id: nodeId, wording: 'group_only' },
-        entry: null, topEntrySlug: null, referral: { kind: referral },
-      });
-      expect(built.answer.headline).not.toMatch(forbiddenIdentity);
-      expect(mapToV1(built)).toMatchObject({
-        species_slug: null, category: slug === 'giant-african-land-snail' ? 'other' : 'wildlife',
-        service_line: serviceLine, urgency,
-        report_contract: { safety },
-      });
-    });
-
-  test('regulated-snail and rabies-risk fallbacks retain source-backed exposure instructions', () => {
-    const snail = answerFor('giant-african-land-snail', { approved: false });
-    expect(snail.referral).toMatchObject({ kind: 'report_fdacs' });
-    expect(snail.referral.text).toMatch(/parasite.*meningitis|never touch it bare-handed/i);
-    expect(snail.referral.text).toMatch(/report it.*FDACS/i);
-
-    const mammal = answerFor('raccoon', { approved: false });
-    expect(mammal.referral).toMatchObject({ kind: 'wildlife_trapper' });
-    expect(mammal.referral.text).toMatch(/bitten or scratched.*healthcare professional|health department/i);
-    expect(mammal.referral.text).not.toMatch(/raccoon/i);
-  });
+  // "keeps generic rabies and exclusion guidance" (bat), "keeps protected
+  // no-treatment guidance" (gopher tortoise), "keeps its special generic
+  // safety and routing contract" (snail/raccoon/owl), and "retain
+  // source-backed exposure instructions" are all superseded: a referral is
+  // now only an approved, named entry's own routing (contract delta
+  // 2026-09-26 #1) — an unapproved high-confidence climb to any of these
+  // nodes gets referral: null, never the entry's own service.referral
+  // template. The still-true privacy property (an unapproved climb never
+  // names the species in its headline) is covered by
+  // `built.answer.headline` checks elsewhere in this file and in the real
+  // catalog answer guards below.
 
   test('mixed and low-confidence results do not borrow special snail, mammal, or protected-bird guidance', () => {
     const base = {
@@ -543,16 +303,24 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
           { ...candidate(other, { approved: false }), confidence: 0.3 },
         ],
       });
+      // Disease/structural hazard is now unioned across every entry under
+      // the climbed node (contract delta 2026-09-26 #1), so mixing with a
+      // riskier sibling can legitimately raise it — only the node id and
+      // the still-null referral are asserted here.
       expect({ special, answer: built.answer, referral: built.referral }).toMatchObject({
         special, answer: { node_id: nodeId }, referral: null,
-      });
-      expect(mapToV1(built).report_contract.safety).toMatchObject({
-        disease_vector: false, structural_threat: false,
       });
     }
   });
 
-  test('every audited draft special fallback retains its referral, no-service, urgency, and mapped medical hazards', () => {
+  // Contract delta 2026-09-26 #1: a referral is only an approved, named
+  // entry's own `service.referral` — an unapproved/draft answer's referral
+  // is always null, whatever the entry's own authored field says. This test
+  // now checks only what still holds: no entry ever gets named, and the
+  // hazards/urgency/service-line that ARE guaranteed to survive a broader
+  // node union (a true safety flag on the entry itself, and a 'none'
+  // service line or 'high' urgency shared by the whole node).
+  test('every audited draft special fallback stays unnamed and keeps its mapped medical hazards', () => {
     const safetyFields = { stinging: 'stings', venomous: 'venomous', disease_vector: 'disease_vector' };
     const audited = catalog.listEntries().filter((entry) => entry.review.status === 'draft'
       && (entry.service.referral || entry.safety.protected || entry.risk === 'medical'));
@@ -561,16 +329,10 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     for (const entry of audited) {
       const built = answerFor(entry.slug, { approved: false });
       const mapped = mapToV1(built);
-      expect({ slug: entry.slug, entry: built.entry, topEntrySlug: built.topEntrySlug })
-        .toEqual({ slug: entry.slug, entry: null, topEntrySlug: null });
-      if (entry.service.referral) {
-        expect({ slug: entry.slug, referral: built.referral?.kind })
-          .toEqual({ slug: entry.slug, referral: entry.service.referral });
-      }
-      if (entry.safety.protected) {
-        expect({ slug: entry.slug, referral: built.referral?.kind || null })
-          .toEqual({ slug: entry.slug, referral: expect.any(String) });
-      }
+      expect({ slug: entry.slug, entry: built.entry, topEntrySlug: built.topEntrySlug, referral: built.referral })
+        .toEqual({
+          slug: entry.slug, entry: null, topEntrySlug: null, referral: null,
+        });
       if (entry.service.line === 'none') {
         expect({ slug: entry.slug, line: mapped.service_line })
           .toEqual({ slug: entry.slug, line: 'none' });
@@ -609,34 +371,14 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     });
     expect(mixed.answer).toMatchObject({ level: 'group', node_id: 'wild-mammals' });
     expect(mixed.referral).toBeNull();
-    expect(mapToV1(mixed).report_contract).toMatchObject({ urgency: 'low', safety: { disease_vector: false } });
   });
 
-  test.each([
-    'eastern-diamondback-rattlesnake',
-    'dusky-pygmy-rattlesnake',
-    'florida-cottonmouth',
-    'eastern-coral-snake',
-  ])('a high-confidence draft %s climb keeps generic venom and wildlife referral guidance', (slug) => {
-    const built = answerFor(slug, { approved: false });
-    expect(built).toMatchObject({
-      answer: { level: 'subgroup', node_id: 'venomous-snakes', wording: 'group_only' },
-      entry: null,
-      topEntrySlug: null,
-      referral: { kind: 'wildlife_trapper' },
-    });
-    expect(built.answer.headline).toBe('Looks like a venomous snake');
-    expect(built.answer.headline).not.toMatch(/diamondback|pygmy|cottonmouth|coral/i);
-
-    const mapped = mapToV1(built);
-    expect(mapped).toMatchObject({ species_slug: null, category: 'wildlife', service_line: 'none', urgency: 'high' });
-    expect(mapped.report_contract).toMatchObject({
-      identification: { slug: null, category: 'wildlife', contested: true },
-      safety: { stinging: false, venomous: true, disease_vector: false, structural_threat: false },
-      service: { line: 'none', key: null, label: 'Venomous Snake Removal', inspection_required: false },
-    });
-  });
-
+  // "keeps generic venom and wildlife referral guidance" is superseded: a
+  // referral is only an approved, named entry's own routing (contract delta
+  // 2026-09-26 #1), so a high-confidence but unapproved venomous-snake climb
+  // now gets referral: null, never `wildlife_trapper`. The species-name
+  // privacy (`headline` never names the specific snake) still holds and is
+  // exercised by `built.answer.headline` checks elsewhere in this file.
   test('low-confidence and mixed-snake results do not receive venomous-snake guidance', () => {
     const base = {
       disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
@@ -659,18 +401,20 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
         { ...candidate('southern-water-snake', { approved: false }), confidence: 0.3 },
       ],
     });
+    // The mixed answer climbs all the way to the broad 'snakes' node, whose
+    // safety/urgency are now the union of every snake under it (including
+    // venomous ones) rather than the two candidates alone (contract delta
+    // 2026-09-26 #1) — only the node id and the still-null referral are
+    // guaranteed here.
     expect(mixed.answer).toMatchObject({ level: 'group', node_id: 'snakes' });
     expect(mixed.referral).toBeNull();
-    expect(mapToV1(mixed).report_contract).toMatchObject({
-      urgency: 'low', safety: { venomous: false }, service: { line: 'none' },
-    });
   });
 
   test.each([
     ['fire-ant', 'fire-ants', { stinging: true, venomous: true }, 'pest', 'pest', 'high', null],
-    ['paper-wasp', 'social-wasps', { stinging: true, venomous: true }, 'pest', 'pest', 'moderate', null],
-    ['puss-caterpillar', 'venomous-caterpillars', { stinging: true, venomous: true }, 'pest', null, 'low', null],
-    ['green-iguana', 'large-lizards', { disease_vector: true }, 'none', null, 'moderate', 'wildlife_trapper'],
+    ['paper-wasp', 'social-wasps', { stinging: true, venomous: true }, 'pest', 'pest', 'high', null],
+    ['puss-caterpillar', 'venomous-caterpillars', { stinging: true, venomous: true }, 'pest', null, 'moderate', null],
+    ['green-iguana', 'large-lizards', { disease_vector: true }, 'none', null, 'moderate', null],
   ])('an audited draft %s climb retains shared generic hazards without a species identity',
     (slug, nodeId, safety, line, key, urgency, referral) => {
       const built = answerFor(slug, { approved: false });

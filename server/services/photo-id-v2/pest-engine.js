@@ -98,10 +98,7 @@ const REFERRAL_TEMPLATES = {
   wildlife_trapper: 'This is a wildlife visitor, not something pest control treats. We refer you to a licensed nuisance wildlife trapper for safe removal.',
   report_fwc: 'Please report this sighting to the Florida Fish and Wildlife Conservation Commission (FWC) rather than handling it yourself.',
   report_fdacs: 'This may be a regulated pest of concern. Please report it to the Florida Department of Agriculture and Consumer Services (FDACS).',
-  report_fdacs_snail_exposure: 'This snail can carry a parasite that causes a rare form of meningitis in people; never touch it bare-handed, wash hands well if you do, and keep kids and pets away. This may be a regulated pest of concern. Please report it to the Florida Department of Agriculture and Consumer Services (FDACS).',
   protected_leave_alone: 'This animal and its burrow are protected by Florida law. Please leave it undisturbed — no treatment is needed here.',
-  protected_bird_deterrence: 'This bird is protected by federal law and cannot be trapped or killed. Use repair and deterrence rather than removing the bird.',
-  rabies_exposure_wildlife_trapper: 'Wild mammals can carry rabies. If you are bitten or scratched, contact a healthcare professional or local health department right away. Do not try to touch, trap, or handle the animal yourself. We refer you to a licensed nuisance wildlife trapper for safe removal.',
   // CDC: bites, scratches, or waking with a bat in the room need prompt
   // medical/public-health assessment. FWC: exclusion is Florida's only legal
   // removal method and is restricted during maternity season.
@@ -116,6 +113,71 @@ const DEFAULT_GENERIC_COMPATIBILITY = Object.freeze({
   inspectionRequired: true,
   urgency: 'low',
 });
+
+// An answer that names no approved entry (an unreviewed species, a spread of
+// candidates, or an unknown) shows ONLY these fixed templates: customer text
+// comes from owner-approved entries or from here, never from group prose. A
+// group's prose would have to stay right for every species under it,
+// reviewed or not, and each new species broke a different group's text.
+const UNNAMED_SAFETY_LINE = "Until we know exactly what this is, keep your distance, don't touch it, and keep kids and pets away. If anyone is bitten, stung or scratched, wash the area and call a doctor; call 911 for trouble breathing or a severe reaction.";
+const UNNAMED_NEXT_PHOTO = Object.freeze({
+  ask: "From a safe distance, zoom in so it fills the frame and take one more photo in good light. Don't move closer or touch it.",
+  why: 'A sharper photo helps us narrow it down.',
+  photo_can_confirm: true,
+});
+
+// Every catalog entry under each node (entries, subgroups, groups and
+// categories), reviewed or not: an unnamed answer's safety line and v1
+// columns are derived from all of them, never from one group's own text.
+const NODE_MEMBERS = (() => {
+  const members = new Map();
+  for (const entry of catalog.listEntries()) {
+    for (const { id } of catalog.lineage(entry.slug)) {
+      if (!members.has(id)) members.set(id, []);
+      members.get(id).push(entry);
+    }
+  }
+  return members;
+})();
+
+function keepsDistance(entry) {
+  return (!!entry.risk && entry.risk !== 'low') || !!entry.safety?.protected
+    || entry.role === 'wildlife' || entry.role === 'protected_wildlife';
+}
+
+// An unknown answer (no node) could be anything, so it always gets the line.
+function unnamedSafetyLineFor(nodeId) {
+  const members = nodeId ? (NODE_MEMBERS.get(nodeId) || []) : [];
+  return !nodeId || members.some(keepsDistance) ? UNNAMED_SAFETY_LINE : null;
+}
+
+const URGENCY_ORDER = ['low', 'moderate', 'high'];
+
+/** The v1 columns for an unnamed answer, derived from every entry under the
+ * answered node: any hazard one of them carries, the most urgent urgency,
+ * and a service line/key/label only when they all share it. Inspection stays
+ * v1's own unmatched default (confirm in person first). No node (unknown) is
+ * that default throughout. */
+function derivedNodeCompatibility(nodeId) {
+  const members = nodeId ? (NODE_MEMBERS.get(nodeId) || []) : [];
+  if (!members.length) return { ...DEFAULT_GENERIC_COMPATIBILITY, safety: { ...DEFAULT_GENERIC_COMPATIBILITY.safety } };
+  const shared = (pick, fallback) => {
+    const values = new Set(members.map(pick));
+    return values.size === 1 ? [...values][0] : fallback;
+  };
+  const safety = {};
+  for (const key of Object.keys(DEFAULT_GENERIC_COMPATIBILITY.safety)) {
+    safety[key] = members.some((entry) => v1SafetyFallback(entry)[key]);
+  }
+  return {
+    ...DEFAULT_GENERIC_COMPATIBILITY,
+    safety,
+    serviceLine: shared((e) => e.service?.line || null, null) || DEFAULT_GENERIC_COMPATIBILITY.serviceLine,
+    serviceKey: shared((e) => e.service?.key || null, null),
+    serviceLabel: shared((e) => e.service?.label || null, null) || DEFAULT_GENERIC_COMPATIBILITY.serviceLabel,
+    urgency: URGENCY_ORDER[Math.max(...members.map((e) => URGENCY_ORDER.indexOf(e.urgency)), 0)],
+  };
+}
 
 function escalateBelow() {
   const raw = Number(process.env.PHOTO_ID_ESCALATE_BELOW);
@@ -807,45 +869,35 @@ function nextPhotoFor(wording, candidates, level, nodeId, shownKind = null) {
     const pair = pairIfBothApproved(top.entry, second.entry, shownKind);
     if (pair) return { ask: pair.next_photo || null, why: pair.difference || null, photo_can_confirm: pair.photo_can_confirm !== false };
   }
-  // Entry level with no usable second-candidate pair: the SAME fallback
-  // `catalog.nextPhoto` uses internally for a bare entry (its own first
-  // look-alike WHOSE OWN TARGET IS APPROVED) — read directly so
-  // `photo_can_confirm` survives (`catalog.nextPhoto`'s wrapper drops it).
+  // Entry level with no usable second-candidate pair: the entry's own first
+  // look-alike WHOSE OWN TARGET IS APPROVED, read directly so
+  // `photo_can_confirm` survives.
   if (level === 'entry' && top?.entry) {
     if (governing && !isApproved(catalog.getEntry(governing.slug))) {
       // Its prose names the unapproved look-alike, so it can't be shown.
-      // A pair no photo can settle gets fixed technician guidance (the
-      // group's photo prompt would contradict it); otherwise the group's
-      // generic prompt stands in.
+      // A pair no photo can settle gets fixed technician guidance (a retake
+      // prompt would contradict it); otherwise the fixed safe retake does.
       if (governing.photo_can_confirm === false) return { ...NO_PHOTO_CONFIRMS };
-      const np = catalog.nextPhoto(top.entry.group);
-      return { ask: np?.ask || null, why: np?.why || null, photo_can_confirm: true };
+      return { ...UNNAMED_NEXT_PHOTO };
     }
     const fallbackPair = firstApprovedLookAlike(top.entry, shownKind);
     if (fallbackPair) {
       return { ask: fallbackPair.next_photo || null, why: fallbackPair.difference || null, photo_can_confirm: fallbackPair.photo_can_confirm !== false };
     }
-    // No usable pair: the entry's group prompt, then the general retake
-    // prompt, so an uncertain entry answer always carries guidance
-    // (pre-push audit on Codex #4916 r5).
-    const groupPrompt = catalog.nextPhoto(top.entry.group) || catalog.nextPhoto('other');
-    return groupPrompt ? { ask: groupPrompt.ask || null, why: groupPrompt.why || null, photo_can_confirm: true } : null;
+    // No usable approved pair: the fixed safe retake prompt, so an
+    // uncertain entry answer always carries guidance (pre-push audit on
+    // Codex #4916 r5).
+    return { ...UNNAMED_NEXT_PHOTO };
   }
-  // Node level (group/subgroup/category): the catalog's own authored
-  // prompt has no per-pair confirmability of its own — always
-  // photo_can_confirm: true (contract delta #3).
-  // An unknown answer (no node) falls back to the catalog's general
-  // "other" prompt, so the least identifiable photos still get retake
-  // guidance (pre-push audit on Codex #4916 r4).
-  const np = catalog.nextPhoto(nodeId || 'other');
-  return np ? { ask: np.ask || null, why: np.why || null, photo_can_confirm: true } : null;
+  // Node level (group/subgroup/category) or unknown: the fixed safe retake
+  // prompt, never a group's own prose (see UNNAMED_NEXT_PHOTO).
+  return { ...UNNAMED_NEXT_PHOTO };
 }
 
-function referralFor(entry, fallbackKind = null, fallbackTemplate = null) {
-  const kind = entry?.service?.referral || fallbackKind;
-  const template = entry?.service?.referral || fallbackTemplate || fallbackKind;
-  if (!kind || !REFERRAL_TEMPLATES[template]) return null;
-  return { kind, text: REFERRAL_TEMPLATES[template] };
+function referralFor(entry) {
+  const kind = entry?.service?.referral;
+  if (!kind || !REFERRAL_TEMPLATES[kind]) return null;
+  return { kind, text: REFERRAL_TEMPLATES[kind] };
 }
 
 // One of the three entry-level naming rules (pretty_sure/pretty_sure via the
@@ -973,7 +1025,6 @@ function buildAnswer(ctx) {
       || climbedOrDisagreedAnswer(answerCandidates, false, null);
   }
   const { level, wording, nodeId, subhead, headline, entry } = picked;
-  const genericGuidance = entry ? null : catalog.genericGuidance(nodeId);
 
   const group = groupBlockFor(level, nodeId, entry);
   // Evidence and other possibilities come from the same filtered list
@@ -998,9 +1049,11 @@ function buildAnswer(ctx) {
     evidence,
     candidatesBlock,
     nextPhoto,
-    referral: referralFor(entry, genericGuidance?.referral, genericGuidance?.referral_template),
-    genericCompatibility: Object.assign({ safety: {} }, genericGuidance?.compatibility),
-    genericSafetyLine: entry ? null : genericGuidance?.safety_line || null,
+    // A referral is an approved entry's own routing; an unnamed answer goes
+    // to the team (or an inspection) instead of borrowing a group's.
+    referral: referralFor(entry),
+    genericCompatibility: entry ? { safety: {} } : derivedNodeCompatibility(nodeId),
+    genericSafetyLine: entry ? null : unnamedSafetyLineFor(nodeId),
     tier,
     topEntrySlug: entry?.slug || null,
   };
@@ -1515,6 +1568,8 @@ module.exports = {
   RISK_LABELS,
   ACTION_LABELS,
   REFERRAL_TEMPLATES,
+  UNNAMED_SAFETY_LINE,
+  UNNAMED_NEXT_PHOTO,
   escalateBelow,
   toImages,
   _test: {

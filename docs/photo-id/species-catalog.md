@@ -22,12 +22,11 @@ ant; we can't yet tell you which kind"):
 - **Category** (`insect`, `arachnid`, `rodent`, `wildlife`, `other`) — the
   broadest bucket, with a generic label like "an insect".
 - **Group** (`ants`, `termites`, `spiders`, `snakes`, 29 total) — "we're sure
-  it's an ant". Every group has a `generic` label and a `next_photo`: the one
-  photo that would narrow it further.
+  it's an ant". Every group has a `generic` label.
 - **Subgroup** (`fire-ants`, `widow-spiders`, `venomous-snakes`, 74 total,
   optional) — a narrower "we're sure it's a fire ant" stop between group and
   entry, for groups where that middle rung matters. Also has its own
-  `generic` label and `next_photo`.
+  `generic` label.
 - **Entry** — a specific species (or a `sign`, like mud tubes or droppings,
   which points back at the organism entries it's a sign of via `sign_of`;
   a sign made by an animal with no catalog entry, such as woodpecker damage
@@ -36,49 +35,23 @@ ant; we can't yet tell you which kind"):
 Subgroups may name a same-group `parent` when a neutral shared taxon has
 more specific situation nodes beneath it. `lineage(id)` includes every such
 parent in order. `server/services/species-catalog.js` exposes it to walk this
-ladder for any id, and `nextPhoto(id)` to get the one photo that would narrow
-a category/group/subgroup/entry further.
+ladder for any id.
 
-When an unapproved entry climbs to a generic node, that node may carry
-`generic_guidance`. It records safety and routing facts shared by every
-descendant represented by that node; omitted compatibility fields keep the
-neutral generic defaults. Ancestor guidance is merged with the selected
-subgroup's overlay, including nested safety flags, without consulting any
-descendant. An optional source-backed `safety_line` is customer-visible when
-an unapproved medical-risk entry cannot be named. This keeps a generic result such as “a venomous
-snake” on the high-urgency wildlife referral path without naming an
-unapproved species. Mixed or lower-confidence results that stop above that
-node do not inherit its guidance.
-The subterranean and drywood termite subgroups retain structural-risk,
-high-urgency termite inspection contracts; an answer at the broader termite
-group keeps the shared termite service and moderate urgency without borrowing
-a narrower structural-risk claim. Wasp and bee fallbacks keep their shared
-stinging hazard without borrowing a species-specific treatment or referral.
-Dedicated neutral subgroups retain special draft-only contracts when a
-broader node has incompatible descendants. They cover regulated reporting,
-protected-wildlife handling, exposure guidance, medically significant safety
-flags, and no-service routing. Mixed or lower-confidence results stop above
-those nodes and do not inherit the narrower referral, urgency, or hazard.
-Singleton and uniformly benign generic nodes also retain source-backed
-contracts that are true of all their descendants: carpenter ants keep
-inspection-first moderate service, jumping spiders and orb-weavers keep
-no-treatment routing, and stinging caterpillars keep Tree & Shrub Care plus
-neutral rash guidance. The native-toad singleton keeps neutral pet-exposure
-guidance. Cuban treefrog uncertainty stops at a dedicated child node that
-keeps its neutral skin, airway, and pet-exposure guidance; a mixed result with
-a native treefrog stops at the parent and cannot borrow those narrower facts.
-Two-striped walkingstick uncertainty likewise keeps immediate eye-rinse advice
-at a narrow defensive-spray child; a mixed insect result stays at the neutral
-parent and does not inherit that exposure warning.
-The same rule applies to the catalog-wide generic audit: shared plant-care,
-general-pest, bed-bug, no-treatment, and wildlife routing lives only on nodes
-whose represented entries all support it. Source-backed bite, sting, skin,
-airway, and pet-exposure advice uses draft-only child nodes when the broader
-group contains entries with different risks. This lets an unnamed result keep
-useful neutral guidance without attaching it to a mixed result.
-Benign draft entries that share a broader node with treatable descendants
-keep the conservative Pest Consultation fallback until the photo supports an
-entry-level name; a no-treatment contract is not inferred from one candidate.
+**What an unnamed answer shows.** The engine names an entry only when it is
+owner-approved and fact-check-clean. Any other answer (an unapproved
+species, a spread of candidates, a disagreement, or an unknown) shows only
+the engine's fixed templates in `server/services/photo-id-v2/pest-engine.js`:
+one safe-distance retake prompt (`UNNAMED_NEXT_PHOTO`) and, when any entry
+under the answered node can bite, sting or irritate, is wildlife, or is
+protected (or when nothing was identified at all), one safety line
+(`UNNAMED_SAFETY_LINE`). It carries no referral: the next step is the team,
+or an inspection for a node whose every entry is inspection-first (termites,
+rodents, bed bugs, carpenter ants). Its v1 columns are derived from every
+entry under the node: any hazard flag one of them has, the highest urgency,
+and a service line/key/label only when they all share it; inspection stays
+v1's unmatched default. Nodes carry no prose of their own, so adding or
+re-drafting a species can never make a group's text wrong for it.
+`server/tests/species-catalog.test.js` checks this for every unapproved entry.
 
 ## Files
 
@@ -117,7 +90,7 @@ brief; the jest suite enforces them)
 | field | notes |
 |---|---|
 | `slug`, `kind` | `kind` is `organism` or `sign`; a `sign` needs `sign_of` |
-| `common_name`, `aka`, `aliases`, `scientific_name`, `rank` | `aliases` are lowercase, whole-word matchable; avoid short generic words |
+| `common_name`, `aka`, `aliases`, `scientific_name`, `rank` | `aliases` are lowercase, whole-word matchable; avoid short generic words. A nickname (`aliases`, `aka`) resolves to its entry only when it spells one of the entry's own names (the common name, a name in its parenthetical, a scientific name) or qualifies the common name keeping every word ("tomato hornworm" for Hornworm); any other nickname resolves to the entry's group. A bare genus resolves to the deepest node holding every catalog entry of that genus (never a single species; an entry that is itself the genus, "Phyllophaga spp.", keeps it) |
 | `group`, `subgroup`, `site_category` | must resolve against `index.json` |
 | `traits` (3–5) | visible features only, most decisive first, ≤140 chars each |
 | `look_alikes` (1–3) | `difference` ≤160 chars, `next_photo` ≤180 chars, one visible tell; `photo_veto_applies_to` may scope a false confirmation veto to `sign` or `organism` photos |
