@@ -373,7 +373,7 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
 
   test('route tiers on: a sibling inside its 72h reminder band, or an unreadable check, refuses (fail closed); tiers off never queries it', async () => {
     const members = [primary, { id: 's2', status: 'pending' }, { id: 's3', status: 'confirmed' }];
-    const on = makeMemberGuard({ service: SERVICE, best: BEST, config: { routeTiersEnabled: true }, techChanged: false });
+    const on = makeMemberGuard({ service: SERVICE, best: BEST, config: { guardMode: 'tiers' }, techChanged: false });
     routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set(['s3']) });
     const trx = fakeTrx();
     await expect(on({ trx, members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's3' });
@@ -420,7 +420,7 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     const sib = eligible({ scheduled_date: sibDate, auto_dispatch_change_count: 0 });
     const win = routeTiers.tierMoveWindow({ origDate: sibDate, anchorDate: sibDate, today, radius: routeTiers.tierRadiusForDaysOut(30) });
     expect(win).toBeTruthy();
-    const on = (date) => makeMemberGuard({ service: SERVICE, best: { ...BEST, date }, config: { routeTiersEnabled: true }, techChanged: false });
+    const on = (date) => makeMemberGuard({ service: SERVICE, best: { ...BEST, date }, config: { guardMode: 'tiers' }, techChanged: false });
     // inside the sibling's window ⇒ passes (anchor = its own date, never moved)
     await expect(on(win.dateTo)({ trx: fakeTrx({ siblings: [sib] }), members })).resolves.toBeUndefined();
     // one day past the sibling's drift budget ⇒ refused, even though the PRIMARY may have budget left

@@ -380,10 +380,11 @@ function buildEligCtx(guardMode, today, lockBoundary, lockWindowDays) {
   return base;
 }
 
-// Bulk per-run guard context for the active mode — one query pair at most.
-// ROUTE-TIERS needs the reminder freeze (its 72.25h band) + drift-anchor
-// evidence; FLEX-TIER needs the reminder freeze (its own, tighter 73h band)
-// + each visit's series neighbors. Both FAIL CLOSED: a failed read must
+// Bulk per-run guard context for the active mode. ROUTE-TIERS needs the
+// reminder freeze (its 72.25h band) + drift-anchor evidence; FLEX-TIER needs
+// the reminder freeze (its own, tighter 73h band) + the SAME drift-anchor
+// evidence (its ±5 days are measured from the durable original date too) +
+// each visit's series neighbors. Both FAIL CLOSED: a failed read must
 // freeze/guard-unknown every visit rather than move without the check.
 // Pulled out of runAutoDispatch to keep its complexity budget (see
 // buildPlacementAudit above). Returns { reminderFreeze, anchorMap, neighborMap, degraded }.
@@ -398,19 +399,53 @@ async function loadGuardContext(guardMode, services, nowDate) {
   const reminderFreeze = await routeTiers.loadReminderFreeze(db, ids, nowDate, freezeHours);
   // ALL ids, not just change_count>0 — the durable move records (not the
   // best-effort stamp) decide whether a visit has spent drift budget.
-  const anchorMap = guardMode === 'tiers' ? await routeTiers.loadAnchorMap(db, ids) : null;
+  const anchorMap = await routeTiers.loadAnchorMap(db, ids);
   const neighborMap = guardMode === 'flex' ? await flexTier.loadSeriesNeighbors(db, services) : null;
   const degraded = (reminderFreeze && reminderFreeze.failed)
-    || (guardMode === 'tiers' && anchorMap === null)
+    || anchorMap === null
     || (guardMode === 'flex' && neighborMap === null);
   if (degraded) {
     // Fail closed AND fail loud: the per-visit skips keep every visit safe,
     // but an outage that silently disables all day-moves must not leave cron
     // health green (the run completes as completed_with_errors).
-    logger.error(`[auto-dispatch] ${guardMode} guard read failed (reminder freeze or ${guardMode === 'flex' ? 'series-neighbor' : 'anchor'} evidence) — all day-moves frozen this run`);
+    logger.error(`[auto-dispatch] ${guardMode} guard read failed (reminder freeze, anchor${guardMode === 'flex' ? ' or series-neighbor' : ''} evidence) — all day-moves frozen this run`);
   }
   return {
     reminderFreeze, anchorMap, neighborMap, degraded,
+  };
+}
+
+// FLEX-TIER branch of resolveDayMoveWindow (past the shared reminder freeze).
+// Reminder evidence only ever ADDS a freeze (a sent flag, or the sender's
+// own claimable band read off appointment_reminders ROWS) — a visit with NO
+// reminder row at all is invisible to that check, and the flex ctx skips
+// eligibility.js's days-out lock entirely, so the 73h cutoff is ALSO
+// enforced directly from the visit's own canonical arrival (Codex pre-push
+// P1). The ±5-day window is anchored to the durable original date
+// (route-tiers' resolveAnchor), so it is never reset by an earlier move.
+async function resolveFlexWindow(service, anchorMap, neighborMap, today, nowDate) {
+  if (await flexTier.ownScheduleFrozen(db, service, nowDate)) {
+    return { window: null, meta: null, skip: { code: 'WITHIN_73H', description: '73-hour cutoff reached on the visit\'s own schedule — frozen (independent of reminder evidence)' } };
+  }
+  if (!neighborMap) {
+    return { window: null, meta: null, skip: { code: 'SERIES_NEIGHBORS_UNKNOWN', description: 'Series occurrence order could not be derived — no move (fail closed)' } };
+  }
+  const anchor = routeTiers.resolveAnchor(service, anchorMap);
+  if (!anchor) {
+    return { window: null, meta: null, skip: { code: 'DRIFT_ANCHOR_UNKNOWN', description: 'Recurrence anchor could not be derived — no move (fail closed)' } };
+  }
+  const neighbors = neighborMap.get(service.id);
+  if (!neighbors) {
+    return { window: null, meta: null, skip: { code: 'SERIES_NEIGHBORS_UNKNOWN', description: 'Visit missing from its own series read — no move (fail closed)' } };
+  }
+  const window = flexTier.flexTierMoveWindow({ origDate: service.scheduled_date, anchorDate: anchor, today, neighbors });
+  if (!window) {
+    return { window: null, meta: null, skip: { code: 'FLEX_WINDOW_EXHAUSTED', description: `No legal candidate dates left within ±${flexTier.FLEX_TIER_RADIUS_DAYS} days of the visit's date and its original date ${anchor}, clamped by the series' adjacent occurrence` } };
+  }
+  return {
+    window, meta: {
+      mode: 'flex', radius_days: flexTier.FLEX_TIER_RADIUS_DAYS, anchor, neighbors, window,
+    }, skip: null,
   };
 }
 
@@ -422,7 +457,7 @@ async function loadGuardContext(guardMode, services, nowDate) {
 // (flex mode's own-schedule freeze needs hours, not whole days). Returns
 // { window, meta, skip }; `skip` is {code, description} when the visit
 // cannot move this run/window.
-function resolveDayMoveWindow(guardMode, service, guardCtx, today, nowDate) {
+async function resolveDayMoveWindow(guardMode, service, guardCtx, today, nowDate) {
   if (guardMode === 'legacy') return { window: null, meta: null, skip: null };
   const { reminderFreeze, anchorMap, neighborMap } = guardCtx;
   if (!reminderFreeze || reminderFreeze.failed) {
@@ -431,31 +466,8 @@ function resolveDayMoveWindow(guardMode, service, guardCtx, today, nowDate) {
   if (reminderFreeze.frozen.has(service.id)) {
     return { window: null, meta: null, skip: { code: 'REMINDER_SENT_FROZEN', description: `${guardMode === 'flex' ? '73-hour' : '72-hour'} reminder already sent — visit is frozen` } };
   }
+  if (guardMode === 'flex') return resolveFlexWindow(service, anchorMap, neighborMap, today, nowDate);
   const dateStr = toDateStr(service.scheduled_date);
-  if (guardMode === 'flex') {
-    // Reminder evidence only ever ADDS a freeze (a sent flag, or the
-    // sender's own claimable band read off appointment_reminders ROWS) — a
-    // visit with NO reminder row at all is invisible to the check above, and
-    // the flex ctx skips eligibility.js's days-out lock entirely, so the 73h
-    // cutoff is ALSO enforced directly from the visit's own schedule
-    // (Codex pre-push P1).
-    if (flexTier.ownScheduleFrozen(service, nowDate)) {
-      return { window: null, meta: null, skip: { code: 'WITHIN_73H', description: '73-hour cutoff reached on the visit\'s own schedule — frozen (independent of reminder evidence)' } };
-    }
-    if (!neighborMap) {
-      return { window: null, meta: null, skip: { code: 'SERIES_NEIGHBORS_UNKNOWN', description: 'Series occurrence order could not be derived — no move (fail closed)' } };
-    }
-    const neighbors = neighborMap.get(service.id) || {};
-    const window = flexTier.flexTierMoveWindow({ origDate: service.scheduled_date, today, neighbors });
-    if (!window) {
-      return { window: null, meta: null, skip: { code: 'FLEX_WINDOW_EXHAUSTED', description: `No legal candidate dates left within ±${flexTier.FLEX_TIER_RADIUS_DAYS} days of the series' adjacent occurrence` } };
-    }
-    return {
-      window, meta: {
-        mode: 'flex', radius_days: flexTier.FLEX_TIER_RADIUS_DAYS, neighbors, window,
-      }, skip: null,
-    };
-  }
   const anchor = routeTiers.resolveAnchor(service, anchorMap);
   if (!anchor) {
     return { window: null, meta: null, skip: { code: 'DRIFT_ANCHOR_UNKNOWN', description: 'Recurrence anchor could not be derived — no move (fail closed)' } };
@@ -504,17 +516,21 @@ async function recheckDayMoveWindow(guardMode, service, meta, nowDate) {
   }
   const todayNow = etDateString(nowDate);
   if (guardMode === 'flex') {
-    if (flexTier.ownScheduleFrozen(service, nowDate)) {
+    if (await flexTier.ownScheduleFrozen(db, service, nowDate)) {
       return { window: null, meta: null, skip: { code: 'WITHIN_73H', description: 'No longer legally movable at apply time — 73-hour cutoff reached on the visit\'s own schedule' } };
     }
     const neighborMap = await flexTier.loadSeriesNeighbors(db, [service]);
-    if (neighborMap === null) {
+    const neighbors = neighborMap && neighborMap.get(service.id);
+    if (!neighbors) {
       return { window: null, meta: null, skip: { code: 'SERIES_NEIGHBORS_UNKNOWN', description: 'Series occurrence order unreadable at apply time — frozen (fail closed)' } };
     }
-    const neighbors = neighborMap.get(service.id) || {};
-    const window = flexTier.flexTierMoveWindow({ origDate: service.scheduled_date, today: todayNow, neighbors });
+    // The anchor is durable evidence (only ever grows) — reused from pass 1,
+    // the same as the tiers branch below.
+    const window = flexTier.flexTierMoveWindow({
+      origDate: service.scheduled_date, anchorDate: meta && meta.anchor, today: todayNow, neighbors,
+    });
     if (!window) {
-      return { window: null, meta: null, skip: { code: 'FLEX_WINDOW_EXHAUSTED', description: 'No longer legally movable at apply time, clamped by the series\' adjacent occurrence' } };
+      return { window: null, meta: null, skip: { code: 'FLEX_WINDOW_EXHAUSTED', description: 'No longer legally movable at apply time, clamped by its original date or the series\' adjacent occurrence' } };
     }
     return { window, meta: { ...meta, neighbors, window }, skip: null };
   }
@@ -620,7 +636,7 @@ async function runAutoDispatch(opts = {}) {
         let tierWindow = null;
         let tierMeta = null;
         if (guardMode !== 'legacy' && !(service.recurring_dispatch_due_date && !service.window_start)) {
-          const guardResult = resolveDayMoveWindow(guardMode, service, guardCtx, today, nowDate);
+          const guardResult = await resolveDayMoveWindow(guardMode, service, guardCtx, today, nowDate);
           if (guardResult.skip) {
             totals.skipped++;
             await audit.logDecision(runId, { action: 'skipped', service, reason_code: guardResult.skip.code, reason_description: guardResult.skip.description });
@@ -745,7 +761,8 @@ async function runAutoDispatch(opts = {}) {
           // enough for its reminder to fire has necessarily changed date and
           // 409s).
           if (guardMode !== 'legacy' && !(pm.service.recurring_dispatch_due_date && !pm.service.window_start)) {
-            const recheck = await recheckDayMoveWindow(guardMode, pm.service, pm.ctx.tierMeta, new Date());
+            const recheckNow = new Date();
+            const recheck = await recheckDayMoveWindow(guardMode, pm.service, pm.ctx.tierMeta, recheckNow);
             if (recheck.skip) {
               if (recheck.skip.degraded) guardReadDegraded = true;
               await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: recheck.skip.code, reason_description: recheck.skip.description, ...pm.result.audit });
@@ -753,6 +770,9 @@ async function runAutoDispatch(opts = {}) {
             }
             pm.ctx.tierWindow = recheck.window;
             pm.ctx.tierMeta = recheck.meta;
+            // The re-evaluation below filters destinations against the flex
+            // freeze (candidate-slots) — measured from now, not pass 1.
+            pm.ctx.nowDate = recheckNow;
           }
 
           fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);

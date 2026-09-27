@@ -41,6 +41,7 @@ const { findAvailableSlots } = require('../scheduling/find-time');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { resolveGeo, driveMin, HQ } = require('./geo');
 const { toDateStr, shiftDateStr } = require('./dates');
+const { destinationFrozen } = require('./flex-tier');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { isActiveRouteStop } = require('./overlap-predicate');
 const { routeCost, clusterShare } = require('./route-model');
@@ -753,7 +754,15 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // better available" rather than an opaque NO_VALID_SLOT.
   // slot_taken only increments with GATE_AUTO_DISPATCH_SHARED_MODEL on — the
   // writer-agreement overlap pre-filter (rankSurvivorsForSharedModel below).
-  const drops = { blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0 };
+  const drops = { blackout: 0, sibling: 0, weekend: 0, preferred_day: 0, preferred_time: 0, deactivated: 0, after_hours: 0, slot_taken: 0, flex_frozen: 0 };
+  // FLEX-TIER (Codex #4995 P1): the date window keeps the visit's own date
+  // open for a same-day re-time, so a slot EARLIER that day can still fall
+  // inside the 73h freeze — each destination's own instant must clear it
+  // (flexTier.destinationFrozen; apply.js re-checks it authoritatively,
+  // grouped members' derived starts included).
+  const flexFrozen = ctx.tierMeta && ctx.tierMeta.mode === 'flex'
+    ? (slot) => destinationFrozen(service, slot.date, slot.start_time, ctx.nowDate)
+    : null;
   const candidates = [];
   for (const slot of slots) {
     // HARD: find-time (findAvailableSlots) shares ONE admission bound across
@@ -770,6 +779,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     // reschedule, re-service, the estimate picker, slot-reservation) also
     // relies on for offer/commit parity at the real 18:00 close.
     if (hhmmToMin(slot.end_time) > DAY_CLOSE) { drops.after_hours++; continue; }
+    if (flexFrozen && flexFrozen(slot)) { drops.flex_frozen++; continue; }            // HARD: inside the flex 73h freeze
     if (inBlackout(slot.date, prefs.blackout)) { drops.blackout++; continue; }       // HARD: blackout
     if (siblingDates.has(slot.date)) { drops.sibling++; continue; }                  // HARD: same-series occurrence that day
     if (service.skip_weekends === true && isSaturday(slot.date)) { drops.weekend++; continue; } // HARD: skip_weekends series

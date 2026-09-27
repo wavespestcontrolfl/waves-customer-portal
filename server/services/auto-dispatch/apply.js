@@ -167,20 +167,6 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
 // placement's technician (the unit mover strips technicianId from member
 // moves, so the rebooker's "kept" tech is the OLD one there and would both
 // block a valid move away from an Off category and miss the destination).
-// The resolved day-move guard mode for a config object: production always
-// sets config.guardMode via getAutoDispatchConfig (the single source of
-// truth for BOTH index.js and this module), but this guard is also
-// constructed directly by callers (and tests) that pass only the legacy
-// {routeTiersEnabled} / {flexTierEnabled} booleans — an explicit guardMode
-// wins when present; otherwise fall back to the same flex-over-tiers
-// precedence config.js uses, so those callers are unaffected.
-function resolveGuardModeCompat(config) {
-  if (config.guardMode) return config.guardMode;
-  if (config.flexTierEnabled === true) return 'flex';
-  if (config.routeTiersEnabled === true) return 'tiers';
-  return 'legacy';
-}
-
 // FLEX-TIER series fence: a plain re-read on `trx` does NOT serialize against
 // a concurrent series writer — READ COMMITTED never shows its uncommitted
 // insert/edit, and nothing here blocks it from committing right after this
@@ -209,18 +195,34 @@ async function fenceFlexSeries(trx, rows, refuse) {
   }
 }
 
-// FLEX-TIER (Codex pre-push P1): the series' adjacent-occurrence bounds are
-// NOT durable evidence like the tier anchor — a sibling occurrence can be
-// inserted or edited any time before THIS row's own commit, and that write
-// touches a DIFFERENT row, so the rebooker's `expect` CAS on this row (which
-// pins only this row's own columns) can never catch it. Re-read the series
-// fresh, on `trx` — the SAME transaction this row's own write commits in,
-// under the series fence (fenceFlexSeries) — right before that commit
-// (mirrors checkFlexSiblingBounds' established pattern for grouped siblings
-// below; one scheme, reused, not invented twice). Extracted (Codex pre-push P1) so makeMoveGuard's closure — already
-// near its complexity budget — never grows from this. No-ops outside flex
-// mode, a non-recurring-child row, or the unplaced due-date shape (no
-// window_start yet — not a day-move in the first place).
+// The flex window for each of `rows`, read fresh on `trx` under the series
+// fence: series neighbors (loadSeriesNeighbors, row-locked — see its `lock`
+// note: the fence alone never stops an ordinary single-occurrence
+// reschedule of a neighbor) and the durable drift anchor (route-tiers'
+// loadAnchorMap/resolveAnchor — the earliest pre-auto-dispatch date on
+// record), so the ±5 days are measured from the visit's original date and an
+// earlier night's move never resets them. Refuses (fail closed) on an
+// unreadable or busy read, an unknown anchor or neighbor set, or best.date
+// outside a window.
+async function assertFlexWindows(trx, rows, best, today, refuse) {
+  const neighborMap = await flexTier.loadSeriesNeighbors(trx, rows, { lock: true });
+  if (neighborMap === null) throw refuse(rows[0].id, 'series occurrence order is unreadable or being edited (no move, fail closed)');
+  const anchorMap = await routeTiers.loadAnchorMap(trx, rows.map((r) => r.id));
+  if (anchorMap === null) throw refuse(rows[0].id, 'drift-anchor evidence is unreadable (no move, fail closed)');
+  for (const r of rows) {
+    const anchor = routeTiers.resolveAnchor(r, anchorMap);
+    if (!anchor) throw refuse(r.id, 'has no derivable drift anchor (no move, fail closed)');
+    const neighbors = neighborMap.get(r.id);
+    if (!neighbors) throw refuse(r.id, 'is missing from its own series read (no move, fail closed)');
+    const window = flexTier.flexTierMoveWindow({
+      origDate: r.scheduled_date, anchorDate: anchor, today, neighbors,
+    });
+    if (!window || best.date < window.dateFrom || best.date > window.dateTo) {
+      throw refuse(r.id, `cannot legally move to ${best.date} (outside its ±${flexTier.FLEX_TIER_RADIUS_DAYS}-day flex window of its current and original date ${anchor}, clamped by its series' adjacent occurrence)`);
+    }
+  }
+}
+
 // The unplaced due-date shape (a recurring_dispatch_due_date visit with no
 // window_start yet) is a first placement, not a day-move: it has no
 // appointment time to freeze on and no scheduled slot to bound. Its own
@@ -229,20 +231,33 @@ function isUnplacedDueDate(row) {
   return Boolean(row.recurring_dispatch_due_date && !row.window_start);
 }
 
-async function checkFlexOwnBounds(trx, row, best, guardMode, refuse) {
+// FLEX-TIER (Codex pre-push P1): the series' adjacent-occurrence bounds are
+// not pinned by the rebooker's `expect` CAS on this row (which covers only
+// this row's own columns) — a sibling occurrence can be inserted or edited
+// any time before THIS row's own commit. So the freeze (from the canonical
+// arrival), the series neighbors and the drift anchor are all re-read fresh,
+// on `trx` — the SAME transaction this row's own write commits in, under the
+// series fence (fenceFlexSeries) — right before that commit, through the
+// same assertFlexWindows the grouped-sibling check uses. Extracted so
+// makeMoveGuard's closure never grows from this. No-ops outside flex mode,
+// for a non-recurring-child row, or the unplaced due-date shape.
+// The tapped row (`tappedId`) must also clear the freeze at its DESTINATION,
+// best.date + best.start_time (flexTier.destinationFrozen — a same-day
+// re-time to an earlier hour can land inside it). A grouped member the unit
+// mover forwards here lands on its own derived start, which only the member
+// guard's targets carry, so checkFlexSiblingBounds checks those.
+async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, tappedId) {
   if (guardMode !== 'flex' || row.is_recurring !== true || !row.recurring_parent_id
     || isUnplacedDueDate(row)) return;
-  if (flexTier.ownScheduleFrozen(row, new Date())) {
+  const now = new Date();
+  if (await flexTier.ownScheduleFrozen(trx, row, now)) {
     throw refuse(row.id, 'is within 73 hours of its own scheduled time (frozen, independent of reminder evidence)');
   }
-  await fenceFlexSeries(trx, [row], refuse);
-  const neighborMap = await flexTier.loadSeriesNeighbors(trx, [row]);
-  if (neighborMap === null) throw refuse(row.id, 'series occurrence order is unreadable (no move, fail closed)');
-  const neighbors = neighborMap.get(row.id) || {};
-  const window = flexTier.flexTierMoveWindow({ origDate: row.scheduled_date, today: etDateString(new Date()), neighbors });
-  if (!window || best.date < window.dateFrom || best.date > window.dateTo) {
-    throw refuse(row.id, `cannot legally move to ${best.date} (outside its ±${flexTier.FLEX_TIER_RADIUS_DAYS}-day flex window, clamped by its series' adjacent occurrence)`);
+  if (String(row.id) === String(tappedId) && flexTier.destinationFrozen(row, best.date, best.start_time, now)) {
+    throw refuse(row.id, `would start within 73 hours at its destination (${best.date} ${best.start_time || 'no start'}) — frozen`);
   }
+  await fenceFlexSeries(trx, [row], refuse);
+  await assertFlexWindows(trx, [row], best, etDateString(new Date()), refuse);
 }
 
 function makeMoveGuard({ service, best, config = {} }) {
@@ -255,7 +270,7 @@ function makeMoveGuard({ service, best, config = {} }) {
     if (row.recurring_dispatch_due_date && row.customer_confirmed === true) {
       throw refuse(row.id, 'was confirmed by the customer');
     }
-    await checkFlexOwnBounds(trx, row, best, resolveGuardModeCompat(config), refuse);
+    await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, service.id);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
   };
@@ -331,13 +346,15 @@ async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse)
 
 // FLEX-TIER sibling legality (Codex pre-push P1): the SAME rules as the
 // tapped row (makeMoveGuard) — the 73h freeze (reminder evidence, fail
-// closed on an unreadable read, OR-ed with each sibling's OWN schedule
-// since a sibling can equally lack a reminder row) and its own
-// series-neighbor window, re-read fresh here under the series fence
-// (fenceFlexSeries) — never reused from any earlier snapshot, so a sibling
-// occurrence inserted or edited since is still caught, and none can land
-// before this move commits.
-async function checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse) {
+// closed on an unreadable read, OR-ed with each sibling's OWN canonical
+// arrival since a sibling can equally lack a reminder row) and its own
+// anchored series-neighbor window, re-read fresh here under the series
+// fence (fenceFlexSeries) — never reused from any earlier snapshot, so a
+// sibling occurrence inserted or edited since is still caught, and none can
+// land before this move commits. Each sibling's DESTINATION must clear the
+// freeze too: best.date + that member's own derived start from the unit
+// mover's `targets` (a member with no target fails closed).
+async function checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets) {
   const now = new Date();
   const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), now, flexTier.FLEX_TIER_FREEZE_HOURS);
   if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
@@ -347,18 +364,18 @@ async function checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse) 
   // no time to freeze on or slot to bound (Codex pre-push P1).
   const placed = rows.filter((r) => !isUnplacedDueDate(r));
   if (!placed.length) return;
-  const ownFrozen = placed.find((r) => flexTier.ownScheduleFrozen(r, now));
-  if (ownFrozen) throw refuse(ownFrozen.id, 'is within 73 hours of its own scheduled time (frozen, independent of reminder evidence)');
-  await fenceFlexSeries(trx, placed, refuse);
-  const neighborMap = await flexTier.loadSeriesNeighbors(trx, placed);
-  if (neighborMap === null) throw refuse(placed[0].id, 'series occurrence order is unreadable (no move, fail closed)');
   for (const r of placed) {
-    const neighbors = neighborMap.get(r.id) || {};
-    const window = flexTier.flexTierMoveWindow({ origDate: r.scheduled_date, today, neighbors });
-    if (!window || best.date < window.dateFrom || best.date > window.dateTo) {
-      throw refuse(r.id, `cannot legally move to ${best.date} (outside its ±${flexTier.FLEX_TIER_RADIUS_DAYS}-day flex window, clamped by its series' adjacent occurrence)`);
+    if (await flexTier.ownScheduleFrozen(trx, r, now)) {
+      throw refuse(r.id, 'is within 73 hours of its own scheduled time (frozen, independent of reminder evidence)');
+    }
+    const target = (targets || []).find((t) => String(t.id) === String(r.id));
+    const start = target ? target.startHHMM : null;
+    if (flexTier.destinationFrozen(r, best.date, start, now)) {
+      throw refuse(r.id, `would start within 73 hours at its destination (${best.date} ${start || 'no start'}) — frozen`);
     }
   }
+  await fenceFlexSeries(trx, placed, refuse);
+  await assertFlexWindows(trx, placed, best, today, refuse);
 }
 
 // The target date must not already hold another occurrence of a sibling's
@@ -397,7 +414,7 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
         'c.latitude as customer_latitude', 'c.longitude as customer_longitude');
     const memberIds = (members || []).map((m) => m.id);
     const today = etDateString(new Date());
-    const guardMode = resolveGuardModeCompat(config);
+    const { guardMode } = config;
     const eligCtx = buildMemberEligCtx(guardMode, config, today);
     await checkMemberEligibility(rows, best, eligCtx, trx, refuse);
     if (isSaturday(best.date)) {
@@ -407,7 +424,7 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
     if (guardMode === 'tiers') {
       await checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse);
     } else if (guardMode === 'flex') {
-      await checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse);
+      await checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets);
     }
     await checkSameSeriesClash(trx, rows, best, memberIds, refuse);
     // Every sibling against the receiving tech, committed rows, tech changed
@@ -778,5 +795,5 @@ module.exports = {
   // Exported for direct unit tests of the flex-tier apply-time guards (Codex
   // pre-push P1) — otherwise only reachable through the full member/move
   // guard closures.
-  checkFlexOwnBounds, checkFlexSiblingBounds, checkTiersSiblingBounds, resolveGuardModeCompat,
+  checkFlexOwnBounds, checkFlexSiblingBounds, checkTiersSiblingBounds,
 };

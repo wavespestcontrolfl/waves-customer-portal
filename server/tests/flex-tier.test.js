@@ -1,13 +1,29 @@
 // FLEX-TIER core rules (GATE_AUTO_DISPATCH_FLEX_TIER): the fixed ±5-day
 // radius, the destination floor with the same-day-always-reachable carve-out,
 // the series adjacent-occurrence guard (incl. date_exception_cadence_date
-// ordering), and loadSeriesNeighbors' fail-closed evidence read.
+// ordering), loadSeriesNeighbors' bulk fail-closed evidence read, the
+// durable-anchor bound on cumulative drift, and ownScheduleFrozen's
+// canonical (grouped) arrival.
+jest.mock('../services/appointment-reminders', () => ({
+  // A realistic composer (mirrors the real module's own logic), without
+  // pulling in the full appointment-reminders module and its dependencies.
+  composeScheduledApptTime: jest.fn((svc) => {
+    if (!svc) return null;
+    const datePart = String(svc.scheduled_date || '').slice(0, 10);
+    const timePart = svc.window_start ? String(svc.window_start).slice(0, 8) : null;
+    if (!datePart || !timePart) return null;
+    return require('../utils/datetime-et').parseETDateTime(`${datePart}T${timePart}`);
+  }),
+}));
+
 const {
   FLEX_TIER_RADIUS_DAYS,
   FLEX_TIER_FREEZE_HOURS,
   seriesPosition,
   loadSeriesNeighbors,
   flexTierMoveWindow,
+  ownScheduleFrozen,
+  destinationFrozen,
 } = require('../services/auto-dispatch/flex-tier');
 const { MIN_DESTINATION_DAYS_OUT } = require('../services/auto-dispatch/route-tiers');
 
@@ -39,7 +55,7 @@ describe('flexTierMoveWindow — ±5 days ∩ destination floor ∩ occurrence g
 
   test('unconstrained visit: full ±5 window around its date', () => {
     // 20 days out — well past the floor, no neighbors.
-    const w = flexTierMoveWindow({ origDate: '2026-09-21', today, neighbors: {} });
+    const w = flexTierMoveWindow({ origDate: '2026-09-21', anchorDate: '2026-09-21', today, neighbors: {} });
     expect(w).toEqual({ dateFrom: '2026-09-16', dateTo: '2026-09-26' });
   });
 
@@ -47,14 +63,14 @@ describe('flexTierMoveWindow — ±5 days ∩ destination floor ∩ occurrence g
     // 4 days out: just past a 73h freeze in practice, but well inside the
     // 5-day destination floor (today+5). Without the same-day carve-out the
     // floor would push dateFrom PAST the visit's own current date.
-    const w = flexTierMoveWindow({ origDate: '2026-09-05', today, neighbors: {} });
+    const w = flexTierMoveWindow({ origDate: '2026-09-05', anchorDate: '2026-09-05', today, neighbors: {} });
     expect(w.dateFrom).toBe('2026-09-05'); // clamped down to orig, not the floor (09-06)
     expect(w.dateTo).toBe('2026-09-10'); // orig+5, unaffected
   });
 
   test('destination floor still applies on the forward side when it does not conflict with orig', () => {
     // 6 days out: orig-5 = today+1, below the floor (today+MIN_DESTINATION_DAYS_OUT) — floored.
-    const w = flexTierMoveWindow({ origDate: '2026-09-07', today, neighbors: {} });
+    const w = flexTierMoveWindow({ origDate: '2026-09-07', anchorDate: '2026-09-07', today, neighbors: {} });
     expect(w.dateFrom).toBe('2026-09-06'); // today + MIN_DESTINATION_DAYS_OUT (5)
     expect(w.dateTo).toBe('2026-09-12'); // orig+5, unaffected
   });
@@ -62,25 +78,25 @@ describe('flexTierMoveWindow — ±5 days ∩ destination floor ∩ occurrence g
   test('guard: never reaches or crosses the NEXT occurrence', () => {
     // Next occurrence 3 days after orig — inside the ±5 radius, so it clamps
     // dateTo to next-1 instead of orig+5.
-    const w = flexTierMoveWindow({ origDate: '2026-09-21', today, neighbors: { next: '2026-09-24' } });
+    const w = flexTierMoveWindow({ origDate: '2026-09-21', anchorDate: '2026-09-21', today, neighbors: { next: '2026-09-24' } });
     expect(w.dateTo).toBe('2026-09-23'); // next - 1, not orig+5 = 09-26
   });
 
   test('guard: never reaches or crosses the PREVIOUS occurrence', () => {
-    const w = flexTierMoveWindow({ origDate: '2026-09-21', today, neighbors: { prev: '2026-09-18' } });
+    const w = flexTierMoveWindow({ origDate: '2026-09-21', anchorDate: '2026-09-21', today, neighbors: { prev: '2026-09-18' } });
     expect(w.dateFrom).toBe('2026-09-19'); // prev + 1, not orig-5 = 09-16
   });
 
   test('both neighbors inside the radius clamp both sides at once', () => {
     const w = flexTierMoveWindow({
-      origDate: '2026-09-21', today, neighbors: { prev: '2026-09-19', next: '2026-09-23' },
+      origDate: '2026-09-21', anchorDate: '2026-09-21', today, neighbors: { prev: '2026-09-19', next: '2026-09-23' },
     });
     expect(w).toEqual({ dateFrom: '2026-09-20', dateTo: '2026-09-22' });
   });
 
   test('a neighbor exactly one day off degenerates the window to same-day-only, never empty', () => {
     const w = flexTierMoveWindow({
-      origDate: '2026-09-21', today, neighbors: { prev: '2026-09-20', next: '2026-09-22' },
+      origDate: '2026-09-21', anchorDate: '2026-09-21', today, neighbors: { prev: '2026-09-20', next: '2026-09-22' },
     });
     expect(w).toEqual({ dateFrom: '2026-09-21', dateTo: '2026-09-21' });
   });
@@ -88,7 +104,7 @@ describe('flexTierMoveWindow — ±5 days ∩ destination floor ∩ occurrence g
   test('malformed data (prev floor past dateTo) empties the window — fails closed, not silently ignored', () => {
     // A "previous" occurrence recorded 6 days after orig (a data anomaly —
     // series positions should never invert) pushes the floor past orig+5.
-    const w = flexTierMoveWindow({ origDate: '2026-09-21', today, neighbors: { prev: '2026-09-27' } });
+    const w = flexTierMoveWindow({ origDate: '2026-09-21', anchorDate: '2026-09-21', today, neighbors: { prev: '2026-09-27' } });
     expect(w).toBeNull();
   });
 
@@ -96,36 +112,76 @@ describe('flexTierMoveWindow — ±5 days ∩ destination floor ∩ occurrence g
     // prev one day after orig is invalid data, but the pure clamp still runs:
     // dateFrom lands past orig, which the caller (index.js) never applies to
     // a real move because the visit's OWN date is now outside its window.
-    const w = flexTierMoveWindow({ origDate: '2026-09-21', today, neighbors: { prev: '2026-09-22' } });
+    const w = flexTierMoveWindow({ origDate: '2026-09-21', anchorDate: '2026-09-21', today, neighbors: { prev: '2026-09-22' } });
     expect(w).toEqual({ dateFrom: '2026-09-23', dateTo: '2026-09-26' });
   });
 
   test('missing inputs return null (fail closed)', () => {
-    expect(flexTierMoveWindow({ origDate: null, today, neighbors: {} })).toBeNull();
-    expect(flexTierMoveWindow({ origDate: '2026-09-21', today: null, neighbors: {} })).toBeNull();
+    expect(flexTierMoveWindow({ origDate: null, anchorDate: null, today, neighbors: {} })).toBeNull();
+    expect(flexTierMoveWindow({ origDate: '2026-09-21', anchorDate: '2026-09-21', today: null, neighbors: {} })).toBeNull();
+    // An unknown anchor (resolveAnchor → null) never guesses a budget.
+    expect(flexTierMoveWindow({ origDate: '2026-09-21', anchorDate: null, today, neighbors: {} })).toBeNull();
+  });
+});
+
+describe('flexTierMoveWindow — the ±5 days are measured from the durable original date too (Codex #4995 r1 P1)', () => {
+  const today = '2026-09-01';
+
+  test('a visit already moved +5 from its original date can never be pushed further out on a later night', () => {
+    // Originally 09-16; last night's move put it on 09-21. Without the
+    // anchor the window would reset to 09-16..09-26 and allow another +5.
+    const w = flexTierMoveWindow({ origDate: '2026-09-21', anchorDate: '2026-09-16', today, neighbors: {} });
+    expect(w).toEqual({ dateFrom: '2026-09-16', dateTo: '2026-09-21' });
+  });
+
+  test('a partly-spent allowance leaves only what is left on each side of the original date', () => {
+    const w = flexTierMoveWindow({ origDate: '2026-09-18', anchorDate: '2026-09-16', today, neighbors: {} });
+    expect(w).toEqual({ dateFrom: '2026-09-13', dateTo: '2026-09-21' });
+  });
+
+  test('a visit already outside its original band (an older move) keeps only same-day and moves back toward it', () => {
+    // 7 days past its original date — nothing further out, but its own date
+    // (same-day re-time) and anything closer to the original stay legal.
+    const w = flexTierMoveWindow({ origDate: '2026-09-23', anchorDate: '2026-09-16', today, neighbors: {} });
+    expect(w).toEqual({ dateFrom: '2026-09-18', dateTo: '2026-09-23' });
+  });
+
+  test('the series guard still clamps inside the anchored window', () => {
+    const w = flexTierMoveWindow({
+      origDate: '2026-09-18', anchorDate: '2026-09-16', today, neighbors: { prev: '2026-09-15' },
+    });
+    expect(w).toEqual({ dateFrom: '2026-09-16', dateTo: '2026-09-21' });
   });
 });
 
 // ── Series-neighbor evidence (COALESCE(date_exception_cadence_date, scheduled_date)) ──
-function seriesDbStub(rowsByParent) {
+// Models the bulk read: `.where(fn)` whose builder callback runs
+// `.whereIn('id', parentIds).orWhereIn('recurring_parent_id', parentIds)`;
+// returns every requested series' rows, children tagged with their parent.
+// `locks` records any row-lock clauses (forShare / noWait) the read adds.
+function seriesDbStub(rowsByParent, calls = [], locks = []) {
   return (table) => {
     expect(table).toBe('scheduled_services');
     const c = {};
-    let parentId;
+    c.forShare = () => { locks.push('forShare'); return c; };
+    c.noWait = () => { locks.push('noWait'); return c; };
+    let parentIds = [];
     c.where = (arg) => {
       if (typeof arg === 'function') {
-        // Capture the parentId out of the `.where('id', parentId).orWhere(...)`
-        // builder callback the module uses.
         const probe = {
-          where: (col, val) => { if (col === 'id') parentId = val; return probe; },
-          orWhere: () => probe,
+          whereIn: (col, vals) => { if (col === 'id') parentIds = vals; return probe; },
+          orWhereIn: () => probe,
         };
         arg.call(probe);
       }
       return c;
     };
     c.whereNotIn = () => c;
-    c.select = async () => rowsByParent[parentId] || [];
+    c.select = async () => {
+      calls.push(parentIds);
+      return parentIds.flatMap((pid) => (rowsByParent[pid] || [])
+        .map((r) => ({ recurring_parent_id: r.id === pid ? null : pid, ...r })));
+    };
     return c;
   };
 }
@@ -190,6 +246,81 @@ describe('loadSeriesNeighbors', () => {
     // s3's previous occurrence is s2's CADENCE position (09-15), not its
     // actual (later) physical date (09-30).
     expect(map.get('s3').prev).toBe('2026-09-15');
+    // ...and s2 physically sits AFTER s3 now, so its actual date bounds s3
+    // from above as well (Codex #4995 P1).
+    expect(map.get('s3').next).toBe('2026-09-30');
+  });
+
+  test('a neighbor rescheduled INSIDE its cadence slot bounds the move by its actual date (Codex #4995 P1)', async () => {
+    // A is 11-10; its next occurrence B has cadence 11-17 but was moved to
+    // 11-13. A -> 11-14 would cross B, so the bound is B's actual 11-13.
+    const db = seriesDbStub({
+      p1: [
+        { id: 'p1', scheduled_date: '2026-11-03' },
+        { id: 'a', scheduled_date: '2026-11-10' },
+        {
+          id: 'b', scheduled_date: '2026-11-13', date_exception: true, date_exception_cadence_date: '2026-11-17',
+        },
+      ],
+    });
+    const map = await loadSeriesNeighbors(db, [{ id: 'a', recurring_parent_id: 'p1' }]);
+    expect(map.get('a')).toEqual({ prev: '2026-11-03', next: '2026-11-13' });
+    const w = flexTierMoveWindow({ origDate: '2026-11-10', anchorDate: '2026-11-10', today: '2026-10-01', neighbors: map.get('a') });
+    expect(w).toEqual({ dateFrom: '2026-11-05', dateTo: '2026-11-12' });
+  });
+
+  test('a NON-adjacent occurrence rescheduled closer than the cadence neighbor bounds it too', async () => {
+    // C's cadence slot (11-24) is two occurrences away, but it was moved to
+    // 11-12 — nearer to A than A's cadence neighbor B (11-17).
+    const db = seriesDbStub({
+      p1: [
+        { id: 'p1', scheduled_date: '2026-11-03' },
+        { id: 'a', scheduled_date: '2026-11-10' },
+        { id: 'b', scheduled_date: '2026-11-17' },
+        {
+          id: 'c', scheduled_date: '2026-11-12', date_exception: true, date_exception_cadence_date: '2026-11-24',
+        },
+      ],
+    });
+    const map = await loadSeriesNeighbors(db, [{ id: 'a', recurring_parent_id: 'p1' }]);
+    expect(map.get('a')).toEqual({ prev: '2026-11-03', next: '2026-11-12' });
+  });
+
+  test('a service missing from its own series read gets no entry (callers fail closed)', async () => {
+    const db = seriesDbStub({ p1: [{ id: 'p1', scheduled_date: '2026-09-01' }] });
+    const map = await loadSeriesNeighbors(db, [{ id: 's9', recurring_parent_id: 'p1' }]);
+    expect(map.has('s9')).toBe(false);
+  });
+
+  test('only the authoritative (lock) read row-locks — FOR SHARE NOWAIT; the planning read never locks', async () => {
+    const rows = { p1: [{ id: 'p1', scheduled_date: '2026-09-01' }, { id: 's1', scheduled_date: '2026-09-08' }] };
+    const planningLocks = [];
+    await loadSeriesNeighbors(seriesDbStub(rows, [], planningLocks), [{ id: 's1', recurring_parent_id: 'p1' }]);
+    expect(planningLocks).toEqual([]);
+    const applyLocks = [];
+    const map = await loadSeriesNeighbors(seriesDbStub(rows, [], applyLocks), [{ id: 's1', recurring_parent_id: 'p1' }], { lock: true });
+    expect(applyLocks).toEqual(['forShare', 'noWait']);
+    expect(map.get('s1')).toEqual({ prev: '2026-09-01', next: null });
+  });
+
+  test('many series load in ONE query (never one round trip per series), partitioned correctly', async () => {
+    const calls = [];
+    const rowsByParent = {};
+    const services = [];
+    for (let i = 0; i < 300; i++) {
+      const pid = `p${i}`;
+      rowsByParent[pid] = [
+        { id: pid, scheduled_date: '2026-09-01' },
+        { id: `s${i}`, scheduled_date: '2026-09-08' },
+        { id: `n${i}`, scheduled_date: '2026-09-15' },
+      ];
+      services.push({ id: `s${i}`, recurring_parent_id: pid });
+    }
+    const map = await loadSeriesNeighbors(seriesDbStub(rowsByParent, calls), services);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toHaveLength(300);
+    expect(map.get('s0')).toEqual({ prev: '2026-09-01', next: '2026-09-15' });
+    expect(map.get('s299')).toEqual({ prev: '2026-09-01', next: '2026-09-15' });
   });
 
   test('query failure fails closed: returns null (guard-unknown for every visit)', async () => {
@@ -197,5 +328,68 @@ describe('loadSeriesNeighbors', () => {
     const db = () => ({ where: () => throwingChain });
     const map = await loadSeriesNeighbors(db, [{ id: 's1', recurring_parent_id: 'p1' }]);
     expect(map).toBeNull();
+  });
+});
+
+describe('ownScheduleFrozen — 73h from the canonical arrival (Codex #4995 r1 P1)', () => {
+  // 2026-09-10 08:00 ET = 12:00Z; 15:00 ET = 19:00Z. At 2026-09-07 12:00Z the
+  // 08:00 arrival is 72h away (frozen) while the 15:00 work slot is 79h away.
+  const NOW = new Date('2026-09-07T12:00:00Z');
+
+  test('a member of a combined allocation freezes on the group\'s earlier shared arrival, not its later work slot', async () => {
+    const conn = { raw: jest.fn(async () => ({ rows: [{ window_start: '08:00:00' }] })) };
+    const service = {
+      id: 's1', scheduled_date: '2026-09-10', window_start: '15:00', reservation_service_mix: { allocatedServiceIds: ['s0', 's1'] },
+    };
+    await expect(ownScheduleFrozen(conn, service, NOW)).resolves.toBe(true);
+    expect(conn.raw).toHaveBeenCalledWith('SELECT reservation_arrival_start(?) AS window_start', ['s1']);
+  });
+
+  test('a plain visit uses its own window_start with no query', async () => {
+    const conn = { raw: jest.fn() };
+    await expect(ownScheduleFrozen(conn, { id: 's1', scheduled_date: '2026-09-10', window_start: '15:00' }, NOW)).resolves.toBe(false);
+    await expect(ownScheduleFrozen(conn, { id: 's1', scheduled_date: '2026-09-10', window_start: '08:00' }, NOW)).resolves.toBe(true);
+    expect(conn.raw).not.toHaveBeenCalled();
+  });
+
+  test('an unreadable arrival or an uncomposable time fails closed (frozen)', async () => {
+    const conn = { raw: jest.fn(async () => { throw new Error('db down'); }) };
+    const grouped = {
+      id: 's1', scheduled_date: '2026-09-20', window_start: '15:00', reservation_service_mix: { allocatedServiceIds: ['s0', 's1'] },
+    };
+    await expect(ownScheduleFrozen(conn, grouped, NOW)).resolves.toBe(true);
+    await expect(ownScheduleFrozen({ raw: jest.fn() }, { id: 's1', scheduled_date: '2026-09-20', window_start: null }, NOW)).resolves.toBe(true);
+  });
+});
+
+describe('destinationFrozen — the DESTINATION instant must clear 73h too (Codex #4995 P1)', () => {
+  // Mon 2026-10-05 15:00 ET (EDT) = 19:00Z. Thu 10-08 17:00 ET is 74h away;
+  // Thu 10-08 09:00 ET is 66h away.
+  const NOW = new Date('2026-10-05T19:00:00Z');
+
+  test('Thu 17:00 -> Thu 09:00 same-day re-time is frozen; keeping 17:00 or a later day is not', () => {
+    const svc = { id: 's1', scheduled_date: '2026-10-08', window_start: '17:00' };
+    expect(destinationFrozen(svc, '2026-10-08', '09:00', NOW)).toBe(true);
+    expect(destinationFrozen(svc, '2026-10-08', '17:00', NOW)).toBe(false);
+    expect(destinationFrozen(svc, '2026-10-12', '08:00', NOW)).toBe(false);
+  });
+
+  test('no destination start fails closed', () => {
+    expect(destinationFrozen({ id: 's1' }, '2026-10-20', null, NOW)).toBe(true);
+  });
+
+  test('a combined-allocation stamp for the destination date freezes on its earlier shared arrival', () => {
+    const stamped = {
+      id: 's1',
+      reservation_service_mix: { allocatedServiceIds: ['s0', 's1'], scheduledDate: '2026-10-08', arrivalWindowStart: '15:00' },
+    };
+    // 17:00 alone is 74h out, but the stamp's 15:00 arrival (72h) is what
+    // reservation_arrival_start would hand back for that date.
+    expect(destinationFrozen(stamped, '2026-10-08', '17:00', NOW)).toBe(true);
+    // Another date: the stamp does not apply.
+    expect(destinationFrozen(stamped, '2026-10-12', '08:00', NOW)).toBe(false);
+    // A malformed stamp arrival is ignored, as reservation_arrival_start ignores it.
+    const malformed = { ...stamped, reservation_service_mix: { ...stamped.reservation_service_mix, arrivalWindowStart: '3pm' } };
+    expect(destinationFrozen(malformed, '2026-10-08', '17:00', NOW)).toBe(false);
   });
 });

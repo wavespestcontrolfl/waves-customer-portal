@@ -32,7 +32,7 @@ jest.mock('../services/appointment-reminders', () => ({
 
 const routeTiers = require('../services/auto-dispatch/route-tiers');
 const {
-  makeMoveGuard, makeMemberGuard, checkFlexOwnBounds, checkFlexSiblingBounds, resolveGuardModeCompat,
+  makeMoveGuard, makeMemberGuard, checkFlexOwnBounds, checkFlexSiblingBounds,
 } = require('../services/auto-dispatch/apply');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 
@@ -43,9 +43,6 @@ function refuseFactory() {
   return (id, why) => Object.assign(new Error(`refused ${id}: ${why}`), { code: 'TEST_REFUSE', id, why });
 }
 
-// A trx stub for loadSeriesNeighbors' `db('scheduled_services')
-// .where(fn).whereNotIn(status).select(...)` query — the only query these
-// unit-level guard functions issue once loadReminderFreeze is mocked.
 // `raw` answers fenceFlexSeries' pg_try_advisory_xact_lock — granted
 // unless the parent is listed in `busyParents`.
 function withSeriesFence(trx, busyParents = []) {
@@ -53,19 +50,50 @@ function withSeriesFence(trx, busyParents = []) {
   return trx;
 }
 
-function seriesTrx(rowsByParent, busyParents) {
-  return withSeriesFence(jest.fn((table) => {
+// A trx stub for the reads these unit-level guard functions issue once
+// loadReminderFreeze is mocked: loadSeriesNeighbors' bulk
+// `db('scheduled_services').where(fn).whereNotIn(status)[.forShare().noWait()].select(...)`
+// and route-tiers' loadAnchorMap evidence reads (reschedule_log /
+// auto_dispatch_audit_logs — `moves` are reschedule_log rows, none by
+// default, so every visit anchors on its own date). `trx.locks` records the
+// row-lock clauses; `rowLockBusy` makes a NOWAIT read fail the way
+// PostgreSQL does when another transaction holds a series row (55P03).
+function seriesTrx(rowsByParent, busyParents, moves = [], { rowLockBusy = false } = {}) {
+  const locks = [];
+  const trx = withSeriesFence(jest.fn((table) => {
+    if (table === 'reschedule_log' || table === 'auto_dispatch_audit_logs') {
+      const rows = table === 'reschedule_log' ? moves : [];
+      const chain = {
+        whereIn: () => chain, where: () => chain, orderBy: () => chain, select: async () => rows,
+      };
+      return chain;
+    }
     if (table !== 'scheduled_services') throw new Error(`unexpected table ${table}`);
-    let parentId;
-    const capture = { where: (col, val) => { if (col === 'id') parentId = val; return capture; }, orWhere: () => capture };
+    let parentIds = [];
+    let noWait = false;
+    const capture = { whereIn: (col, vals) => { if (col === 'id') parentIds = vals; return capture; }, orWhereIn: () => capture };
     const api = {
       where: (fn) => { fn.call(capture); return api; },
       whereNotIn: () => api,
-      select: async () => rowsByParent[parentId] || [],
+      forShare: () => { locks.push('forShare'); return api; },
+      noWait: () => { locks.push('noWait'); noWait = true; return api; },
+      select: async () => {
+        if (noWait && rowLockBusy) {
+          throw Object.assign(new Error('could not obtain lock on row in relation "scheduled_services"'), { code: '55P03' });
+        }
+        return parentIds.flatMap((pid) => (rowsByParent[pid] || [])
+          .map((r) => ({ recurring_parent_id: r.id === pid ? null : pid, ...r })));
+      },
     };
     return api;
   }), busyParents);
+  trx.locks = locks;
+  return trx;
 }
+
+// The unit mover's per-member targets for `rows`, each landing on its own
+// current start (the member guard reads a sibling's destination start here).
+const targetsOf = (rows) => rows.map((r) => ({ id: r.id, startHHMM: r.window_start }));
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -169,7 +197,7 @@ describe('fenceFlexSeries — series writers are serialized, not just re-read', 
       { id: 's2', scheduled_date: dayOffset(9), window_start: '09:00', recurring_parent_id: 'p1' },
     ];
     const trx = seriesTrx({ p1: [rows[1]], p2: [rows[0]] }, ['p2']);
-    await expect(checkFlexSiblingBounds(trx, rows, rows, { date: dayOffset(11) }, TODAY, refuseFactory()))
+    await expect(checkFlexSiblingBounds(trx, rows, rows, { date: dayOffset(11) }, TODAY, refuseFactory(), targetsOf(rows)))
       .rejects.toMatchObject({ id: 's3' });
     expect(trx.raw.mock.calls.map((c) => c[1][1])).toEqual(['p1', 'p2']);
   });
@@ -209,7 +237,7 @@ describe('checkFlexSiblingBounds (grouped siblings) — Finding 2', () => {
     const trx = seriesTrx({ p1: rows });
     const refuse = refuseFactory();
     routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
-    await expect(checkFlexSiblingBounds(trx, rows, rows, BEST, TODAY, refuse)).resolves.toBeUndefined();
+    await expect(checkFlexSiblingBounds(trx, rows, rows, BEST, TODAY, refuse, targetsOf(rows))).resolves.toBeUndefined();
   });
 
   test('Finding 3: a sibling series-neighbor bound is re-read fresh — a newly inserted occurrence between the members blocks the move', async () => {
@@ -229,8 +257,8 @@ describe('checkFlexSiblingBounds (grouped siblings) — Finding 2', () => {
     const refuse = refuseFactory();
     routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
     // best.date = dayOffset(11) crosses s2's newly-adjacent next occurrence (day 12 - 1 = day 11 is the last legal day; day 12+ crosses it)
-    await expect(checkFlexSiblingBounds(trx, rows, rows, { date: dayOffset(12) }, TODAY, refuse))
-      .rejects.toMatchObject({ id: 's2' });
+    await expect(checkFlexSiblingBounds(trx, rows, rows, { date: dayOffset(12) }, TODAY, refuse, targetsOf(rows)))
+      .rejects.toMatchObject({ id: 's2', why: expect.stringContaining('cannot legally move') });
   });
 });
 
@@ -252,19 +280,8 @@ describe('checkFlexSiblingBounds — unplaced due-date sibling', () => {
       { id: 's3', scheduled_date: dayOffset(2), window_start: '09:00', recurring_parent_id: 'p1' },
     ];
     const trx = seriesTrx({ p1: rows });
-    await expect(checkFlexSiblingBounds(trx, rows, rows, { date: dayOffset(10) }, TODAY, refuseFactory()))
+    await expect(checkFlexSiblingBounds(trx, rows, rows, { date: dayOffset(10) }, TODAY, refuseFactory(), targetsOf(rows)))
       .rejects.toMatchObject({ id: 's3' });
-  });
-});
-
-describe('resolveGuardModeCompat', () => {
-  test('an explicit guardMode wins', () => {
-    expect(resolveGuardModeCompat({ guardMode: 'flex', routeTiersEnabled: true })).toBe('flex');
-  });
-  test('falls back to flexTierEnabled, then routeTiersEnabled, then legacy', () => {
-    expect(resolveGuardModeCompat({ flexTierEnabled: true })).toBe('flex');
-    expect(resolveGuardModeCompat({ routeTiersEnabled: true })).toBe('tiers');
-    expect(resolveGuardModeCompat({})).toBe('legacy');
   });
 });
 
@@ -281,7 +298,7 @@ describe('makeMoveGuard / makeMemberGuard thread the resolved guard mode (Findin
     await expect(guardOff({ trx: jest.fn(), technicianId: null })).resolves.toBeUndefined();
   });
 
-  test('makeMemberGuard dispatches to the flex sibling check when config.flexTierEnabled is set (no explicit guardMode)', async () => {
+  test('makeMemberGuard dispatches to the flex sibling check when config.guardMode is flex', async () => {
     const service = { id: 's1', status: 'confirmed' };
     const sibling = {
       id: 's2', status: 'confirmed', scheduled_date: dayOffset(2), window_start: '09:00',
@@ -303,8 +320,109 @@ describe('makeMoveGuard / makeMemberGuard thread the resolved guard mode (Findin
       return { where: () => ({ orWhereNull: () => ({ first: async () => null }) }) };
     });
     routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
-    const guard = makeMemberGuard({ service, best: { date: dayOffset(9) }, config: { flexTierEnabled: true }, techChanged: false });
+    const guard = makeMemberGuard({ service, best: { date: dayOffset(9) }, config: { guardMode: 'flex' }, techChanged: false });
     await expect(guard({ trx, members: [service, { id: 's2', status: 'confirmed' }] }))
       .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2', message: expect.stringContaining('73 hours') });
+  });
+});
+
+describe('apply-time drift bound — ±5 days from the durable original date (Codex #4995 P1)', () => {
+  test('a visit an earlier night already moved +5 cannot be pushed further out at apply time', async () => {
+    const row = {
+      id: 's1', scheduled_date: dayOffset(14), window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1', auto_dispatch_change_count: 1,
+    };
+    const moves = [{ scheduled_service_id: 's1', original_date: dayOffset(9), created_at: new Date() }];
+    const trx = seriesTrx({ p1: [{ id: 's1', scheduled_date: dayOffset(14) }] }, [], moves);
+    await expect(checkFlexOwnBounds(trx, row, { date: dayOffset(15) }, 'flex', refuseFactory()))
+      .rejects.toMatchObject({ id: 's1', why: expect.stringContaining(`original date ${dayOffset(9)}`) });
+    // Back toward the original date stays legal.
+    await expect(checkFlexOwnBounds(trx, row, { date: dayOffset(12) }, 'flex', refuseFactory())).resolves.toBeUndefined();
+  });
+
+  test('moved per change_count but no durable record of the original date refuses (never guesses a budget)', async () => {
+    const row = {
+      id: 's1', scheduled_date: dayOffset(14), window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1', auto_dispatch_change_count: 1,
+    };
+    const trx = seriesTrx({ p1: [{ id: 's1', scheduled_date: dayOffset(14) }] });
+    await expect(checkFlexOwnBounds(trx, row, { date: dayOffset(13) }, 'flex', refuseFactory()))
+      .rejects.toMatchObject({ id: 's1', why: expect.stringContaining('drift anchor') });
+  });
+});
+
+describe('the authoritative neighbor read row-locks the series (Codex #4995 P1)', () => {
+  const row = {
+    id: 's1', scheduled_date: dayOffset(9), window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1',
+  };
+
+  test('the tapped row reads its neighbors FOR SHARE NOWAIT, after the series fence', async () => {
+    const trx = seriesTrx({ p1: [{ id: 's1', scheduled_date: dayOffset(9) }] });
+    await expect(checkFlexOwnBounds(trx, row, { date: dayOffset(11) }, 'flex', refuseFactory())).resolves.toBeUndefined();
+    expect(trx.locks).toEqual(['forShare', 'noWait']);
+    expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(trx.mock.invocationCallOrder[0]);
+  });
+
+  test('a neighbor row already being rescheduled (lock not available) refuses at once — fail closed, no wait', async () => {
+    const trx = seriesTrx({ p1: [{ id: 's1', scheduled_date: dayOffset(9) }] }, [], [], { rowLockBusy: true });
+    await expect(checkFlexOwnBounds(trx, row, { date: dayOffset(11) }, 'flex', refuseFactory()))
+      .rejects.toMatchObject({ id: 's1', why: expect.stringContaining('being edited') });
+  });
+
+  test('grouped siblings are read under the same row lock', async () => {
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
+    const rows = [{ id: 's2', scheduled_date: dayOffset(9), window_start: '09:00', recurring_parent_id: 'p1' }];
+    const trx = seriesTrx({ p1: rows });
+    await expect(checkFlexSiblingBounds(trx, rows, rows, { date: dayOffset(11) }, TODAY, refuseFactory(), targetsOf(rows))).resolves.toBeUndefined();
+    expect(trx.locks).toEqual(['forShare', 'noWait']);
+  });
+
+  test('a visit missing from its own series read refuses (fail closed)', async () => {
+    const trx = seriesTrx({ p1: [{ id: 'p1', scheduled_date: dayOffset(1) }] });
+    await expect(checkFlexOwnBounds(trx, row, { date: dayOffset(11) }, 'flex', refuseFactory()))
+      .rejects.toMatchObject({ id: 's1', why: expect.stringContaining('missing from its own series read') });
+  });
+});
+
+describe('destination freeze — the DESTINATION instant must clear 73h, not just the source (Codex #4995 P1)', () => {
+  // Mon 2026-10-05 15:00 ET (19:00Z): Thu 10-08 17:00 ET is 74h away (movable),
+  // but a same-day re-time to 09:00 would be only 66h away.
+  beforeEach(() => {
+    jest.useFakeTimers({ now: new Date('2026-10-05T19:00:00Z'), doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+  const row = {
+    id: 's1', scheduled_date: '2026-10-08', window_start: '17:00', is_recurring: true, recurring_parent_id: 'p1', technician_id: null,
+  };
+
+  test('the tapped row: 17:00 -> 09:00 the same day is refused; keeping 17:00 or a later day passes', async () => {
+    const trx = seriesTrx({ p1: [{ id: 's1', scheduled_date: '2026-10-08' }] });
+    await expect(checkFlexOwnBounds(trx, row, { date: '2026-10-08', start_time: '09:00' }, 'flex', refuseFactory(), 's1'))
+      .rejects.toMatchObject({ id: 's1', why: expect.stringContaining('at its destination') });
+    await expect(checkFlexOwnBounds(trx, row, { date: '2026-10-08', start_time: '17:00' }, 'flex', refuseFactory(), 's1')).resolves.toBeUndefined();
+    await expect(checkFlexOwnBounds(trx, row, { date: '2026-10-10', start_time: '08:00' }, 'flex', refuseFactory(), 's1')).resolves.toBeUndefined();
+  });
+
+  test('makeMoveGuard applies it to the tapped row only — a forwarded member lands on its own start, checked by the member guard', async () => {
+    const best = { date: '2026-10-08', start_time: '09:00', technician_id: null };
+    const guard = makeMoveGuard({ service: row, best, config: { guardMode: 'flex' } });
+    await expect(guard({ trx: seriesTrx({ p1: [{ id: 's1', scheduled_date: '2026-10-08' }] }), technicianId: null }))
+      .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', message: expect.stringContaining('at its destination') });
+    const member = { ...row, id: 's2' };
+    await expect(guard({ trx: seriesTrx({ p1: [{ id: 's2', scheduled_date: '2026-10-08' }] }), technicianId: null, service: member }))
+      .resolves.toBeUndefined();
+  });
+
+  test('a grouped member: its own derived start is checked — 09:00 refused, 17:00 passes, no target fails closed', async () => {
+    const sibRow = { id: 's2', scheduled_date: '2026-10-08', window_start: '17:00', recurring_parent_id: 'p1' };
+    const trx = seriesTrx({ p1: [sibRow] });
+    const best = { date: '2026-10-08' };
+    for (let i = 0; i < 3; i++) routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
+    await expect(checkFlexSiblingBounds(trx, [sibRow], [sibRow], best, '2026-10-05', refuseFactory(), [{ id: 's2', startHHMM: '09:00' }]))
+      .rejects.toMatchObject({ id: 's2', why: expect.stringContaining('at its destination') });
+    await expect(checkFlexSiblingBounds(trx, [sibRow], [sibRow], best, '2026-10-05', refuseFactory(), [{ id: 's2', startHHMM: '17:00' }]))
+      .resolves.toBeUndefined();
+    await expect(checkFlexSiblingBounds(trx, [sibRow], [sibRow], best, '2026-10-05', refuseFactory(), []))
+      .rejects.toMatchObject({ id: 's2', why: expect.stringContaining('at its destination') });
   });
 });
