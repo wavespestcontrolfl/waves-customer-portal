@@ -34,6 +34,7 @@ const inventoryOperations = require('../inventory-operations');
 const {
   classifyItem, findPossibleDuplicateMovement, lockShipment, SOURCES,
   TITLE_SIZE_RE, sizeUnit, parseSizeNumber, sizesAgree, round4,
+  parseMultipack, PACK_CLAIM_RE,
 } = require('./receipt-processor');
 
 const GATE = 'GATE_INVENTORY_AGENT';
@@ -62,17 +63,6 @@ function displayUnit(unit) {
   return String(unit || '').replace(/_/g, ' ');
 }
 
-function normalizeWhitespace(value) {
-  return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
-}
-
-// Case/whitespace-insensitive substring check — the same tolerance every
-// "must be a substring of the title" rule in the design uses.
-function containsCI(haystack, needle) {
-  const n = normalizeWhitespace(needle);
-  return Boolean(n) && normalizeWhitespace(haystack).includes(n);
-}
-
 // A number that literally appears in `title`, deterministically — never
 // trusting the model's own transcription of it.
 function extractEpaRegNumber(title) {
@@ -88,18 +78,32 @@ function canonicalUnit(first, second) {
   return COUNT_UNIT_WORD_RE.test(String(first || '').trim()) ? 'each' : null;
 }
 
-// Every "<number> <unit>" claim inside `text` that resolves to a known unit
-// (measured or count), reusing the exact TITLE_SIZE_RE/parseSizeNumber
-// primitives receipt-processor.js parses full titles with.
+// Every COMPLETE "<number> <unit>" claim inside `text` that resolves to a
+// known unit (measured or count), reusing the exact TITLE_SIZE_RE/
+// parseSizeNumber primitives receipt-processor.js parses full titles with —
+// its lookbehind (`(?<![a-z\d./])`) is what keeps this to whole tokens: a
+// match can never start mid-number, so "12 Count" is one claim {12, each}
+// and never also yields a spurious {2, each} from inside it. `matchText` is
+// the exact matched substring (used to excise a claim from the text once
+// it's been consumed — see validateReading).
 function parsedSizeClaims(text) {
   const claims = [];
-  for (const [, number, first, second] of String(text || '').matchAll(TITLE_SIZE_RE)) {
+  for (const match of String(text || '').matchAll(TITLE_SIZE_RE)) {
+    const [matchText, number, first, second] = match;
     const unit = canonicalUnit(first, second);
     if (!unit) continue;
     const value = parseSizeNumber(number);
-    if (Number.isFinite(value) && value > 0) claims.push({ value, unit });
+    if (Number.isFinite(value) && value > 0) claims.push({ value, unit, matchText });
   }
   return claims;
+}
+
+// Removes the FIRST literal occurrence of `substring` from `text` (used to
+// excise a matched pack marker or size claim before checking what's left).
+function stripFirstOccurrence(text, substring) {
+  const index = text.indexOf(substring);
+  if (index === -1) return text;
+  return `${text.slice(0, index)} ${text.slice(index + substring.length)}`;
 }
 
 function formatSizeNumber(n) {
@@ -114,44 +118,71 @@ function canonicalSizeText(number, unit) {
 }
 
 /**
- * Deterministically checks one proposed `reading` against the purchased
- * title and the purchase line's own ordered quantity. Returns
+ * Deterministically checks one proposed `reading` against the FULL
+ * purchased title and the purchase line's own ordered quantity. Returns
  * { ok: true, sizeNumber, unit, packCount, amount } (amount = lineQuantity
  * x packCount x sizeNumber, in `unit`) or { ok: false, reason }. Never
- * trusts size_number/size_unit/pack_count directly — every one is
- * re-derived from a substring of the title.
+ * trusts size_number/size_unit/pack_count directly, and never accepts
+ * size_text as a bare substring (that let "2 Count" pass against a title
+ * that actually reads "12 Count" — see the 2026-09-27 review): every number
+ * is re-derived from a COMPLETE token of the title itself.
+ *
+ *   - The reading's (size_number, size_unit) must equal one of the
+ *     complete size claims parsedSizeClaims finds in the title (after the
+ *     pack marker, if any, is removed — see below); size_text is kept only
+ *     as an optional hint and never checked.
+ *   - pack_count must equal EXACTLY the count receipt-processor's own
+ *     MULTIPACK_PATTERNS recognizes in the title (parseMultipack, the SAME
+ *     function amountPerItem uses — never a bare digit inside pack_text),
+ *     or 1 when the title carries no such marker. pack_text is likewise
+ *     kept only as a hint.
+ *   - Once the pack marker and the matched size claim are both removed,
+ *     whatever's left must not match PACK_CLAIM_RE — a second marker, or
+ *     pack/count wording this lane can't resolve ("Twin Pack", a stray
+ *     "2ct", …), holds the line the same way it holds the deterministic
+ *     lane.
  */
 function validateReading(reading, { rawTitle, lineQuantity }) {
   if (!reading || typeof reading !== 'object') return { ok: false, reason: 'no_reading' };
-  const sizeText = String(reading.size_text || '');
-  if (!sizeText || !containsCI(rawTitle, sizeText)) return { ok: false, reason: 'size_text_not_in_title' };
-
-  const claims = parsedSizeClaims(sizeText);
-  if (claims.length !== 1) return { ok: false, reason: 'size_text_unparseable' };
-  const [claim] = claims;
+  const title = String(rawTitle || '');
 
   const claimedUnit = normalizeInventoryUnit(reading.size_unit);
-  if (!claimedUnit || !unitDefinition(claimedUnit) || claimedUnit !== claim.unit) {
-    return { ok: false, reason: 'size_unit_mismatch' };
-  }
   const claimedNumber = Number(reading.size_number);
-  if (!Number.isFinite(claimedNumber) || claimedNumber <= 0 || !sizesAgree(claim.value, claimedNumber)) {
-    return { ok: false, reason: 'size_number_mismatch' };
+  if (!claimedUnit || !unitDefinition(claimedUnit) || !Number.isFinite(claimedNumber) || claimedNumber <= 0) {
+    return { ok: false, reason: 'size_fields_invalid' };
   }
 
   const packCount = Number(reading.pack_count);
   if (!Number.isInteger(packCount) || packCount < 1 || packCount > 100) return { ok: false, reason: 'pack_count_range' };
-  if (packCount > 1) {
-    const packText = String(reading.pack_text || '');
-    if (!packText || !containsCI(rawTitle, packText) || !packText.includes(String(packCount))) {
-      return { ok: false, reason: 'pack_text_invalid' };
-    }
+
+  // parseMultipack is the SAME function (not a re-implementation) that
+  // decides a pack multiplier for the deterministic lane — "12 Count" never
+  // matches it (no MULTIPACK_PATTERNS entry looks for a bare count noun),
+  // so a genuine count SIZE is never mistaken for a pack marker here.
+  const multipack = parseMultipack(title);
+  if (multipack) {
+    if (packCount !== multipack.count) return { ok: false, reason: 'pack_count_mismatch' };
+  } else if (packCount !== 1) {
+    return { ok: false, reason: 'pack_count_without_marker' };
   }
+  const afterMultipack = multipack ? multipack.rest : title;
+
+  const claims = parsedSizeClaims(afterMultipack);
+  const matchedClaim = claims.find((c) => c.unit === claimedUnit && sizesAgree(c.value, claimedNumber));
+  if (!matchedClaim) return { ok: false, reason: 'size_not_a_full_title_claim' };
+
+  // Whatever remains once the pack marker AND the matched size claim's own
+  // text are both gone must carry no OTHER pack/count wording — a second
+  // marker (e.g. "2 x 78 oz (Pack of 2)"), an unreadable count ("Twin
+  // Pack"), or a UOM other than each all land here, exactly mirroring
+  // amountPerItem's own ambiguity guard.
+  const leftover = stripFirstOccurrence(afterMultipack, matchedClaim.matchText);
+  if (PACK_CLAIM_RE.test(leftover)) return { ok: false, reason: 'leftover_pack_wording' };
 
   const lineQty = Number(lineQuantity);
   if (!Number.isFinite(lineQty) || lineQty <= 0) return { ok: false, reason: 'bad_line_quantity' };
 
-  return { ok: true, sizeNumber: claim.value, unit: claim.unit, packCount, amount: round4(lineQty * packCount * claim.value) };
+  return { ok: true, sizeNumber: matchedClaim.value, unit: matchedClaim.unit, packCount, amount: round4(lineQty * packCount * matchedClaim.value) };
 }
 
 // The same two-branch agreement receipt-processor's amountPerItem() checks
@@ -438,13 +469,13 @@ Decide what this purchase is:
 - "new_product": stock (a chemical, bait, tool consumable, trap, etc.) not yet in the catalog — propose adding it.
 - "unsure": you cannot confidently resolve this from the title alone.
 
-CRITICAL — never invent a number. Every number you report must be copied from a number that literally appears in the title above:
-- reading.size_text is the EXACT substring of the title naming the size ("78 oz", "12 Count", "500 g", "1 Station").
-- reading.size_number / reading.size_unit are that same size, split into a number and a unit. size_unit is one of: fl_oz, oz, gal, qt, pt, lb, g, kg, ml, l (measured), or "each" (a count item — traps, stations, cartridges, tablets, dunks, briquets, or a bare "N Count"/"N ct").
-- reading.pack_count is 1 unless the title carries multi-pack wording ("Pack of 2", "2 x", "Case of 12"), in which case reading.pack_text is the exact substring naming that count.
+CRITICAL — never invent a number. Every number you report must be a COMPLETE number that literally appears in the title above — never a digit read out of the middle of a bigger number ("12 Count" is the number 12, never 2):
+- reading.size_number / reading.size_unit is the title's own size, as a whole number/unit pair. size_unit is one of: fl_oz, oz, gal, qt, pt, lb, g, kg, ml, l (measured), or "each" (a count item — traps, stations, cartridges, tablets, dunks, briquets, or a bare "N Count"/"N ct" — this is a SIZE, never a pack).
+- reading.pack_count is 1 UNLESS the title carries one of these EXACT multi-pack forms: "N x" (e.g. "2 x 78 oz"), "pack of N", "N-pack"/"N pack", "case of N", "set of N" — then pack_count is that N, exactly. A count size like "12 Count" is NEVER a pack marker. Any other pack/count wording you can't map to one of those forms ("Twin Pack", a bare "2ct", two different pack markers in the same title) means you should answer "unsure" instead of guessing a pack_count.
+- reading.size_text / reading.pack_text are optional short hints (a copy of what you read) — they are not checked directly, so get size_number/size_unit/pack_count right rather than relying on them.
 - Fill in "reading" for "existing" and "new_product" only; leave it null otherwise. Fill in "new_product" only for kind "new_product" (name, category from the allowed list, active_ingredient if the title states one, epa_reg_no ONLY if an EPA registration number literally appears in the title — leave it null otherwise). Leave "product_id" null except for "existing".
 
-Your reading is re-checked against the title in code; a mismatch discards the whole answer and holds the line for a person, so copy exactly what the title says.`;
+Your reading is re-checked against the FULL title in code — every field must match a complete token of it, not a fragment — and a mismatch discards the whole answer and holds the line for a person, so read carefully rather than approximate.`;
 }
 
 async function callDecision(dispatch, prompt) {

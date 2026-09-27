@@ -349,9 +349,10 @@ async function performLoggedMovement(trx, { vendor, claim, classified, orderNumb
 module.exports = {
   classifyItem, processReceiptLine, lockShipment, SOURCES, UNKNOWN_ORDER,
   findPossibleDuplicateMovement,
-  // Title-size-claim parsing primitives, reused (not duplicated) by
-  // inventory-agent.js's deterministic reading validation — see this
-  // module's header for what each one does.
+  // Title-size-claim and pack-marker parsing primitives, reused (not
+  // duplicated) by inventory-agent.js's deterministic reading validation —
+  // see this module's header for what each one does.
   TITLE_SIZE_RE, SIZE_UNITS, sizeUnit, parseSizeNumber, sizesAgree, round4,
+  MULTIPACK_PATTERNS, parseMultipack, PACK_CLAIM_RE,
   AGENT_HANDOFF_STATUSES,
 };

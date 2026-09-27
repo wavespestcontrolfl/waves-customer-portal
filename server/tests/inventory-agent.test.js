@@ -20,7 +20,7 @@ const ctx = (overrides = {}) => ({
   rawTitle: '', lineQuantity: 1, candidates: [], allActiveProducts: [], allowedCategories: new Set(), matchedProductId: null, ...overrides,
 });
 
-describe('validateReading — grounded vs invented numbers', () => {
+describe('validateReading — grounded vs invented numbers (complete title tokens only)', () => {
   const title = 'Control Solutions Taurus SC Termiticide 78 oz';
 
   test('a reading that reproduces the title\'s own size validates', () => {
@@ -28,56 +28,100 @@ describe('validateReading — grounded vs invented numbers', () => {
     expect(result).toMatchObject({ ok: true, sizeNumber: 78, unit: 'oz', packCount: 1, amount: 156 });
   });
 
-  test('a size_text not present in the title at all is rejected', () => {
+  test('a size not present in the title at all is rejected, even with a size_text hint that IS a substring', () => {
+    // size_text "96 oz" is nowhere in the title — but even a hint that WAS a
+    // real substring would no longer matter: size_text is never checked.
     expect(validateReading({ size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_count: 1 }, { rawTitle: title, lineQuantity: 1 }))
-      .toMatchObject({ ok: false, reason: 'size_text_not_in_title' });
+      .toMatchObject({ ok: false, reason: 'size_not_a_full_title_claim' });
   });
 
-  test('an invented size_number that disagrees with what size_text itself parses to is rejected', () => {
-    // size_text IS in the title, but the model claimed a different number for it.
+  test('an invented size_number is rejected even though the substring-only size_text hint would have passed the old check', () => {
     expect(validateReading({ size_text: '78 oz', size_number: 96, size_unit: 'oz', pack_count: 1 }, { rawTitle: title, lineQuantity: 1 }))
-      .toMatchObject({ ok: false, reason: 'size_number_mismatch' });
+      .toMatchObject({ ok: false, reason: 'size_not_a_full_title_claim' });
   });
 
-  test('an invented size_unit that disagrees with size_text\'s own unit is rejected', () => {
+  test('an invented size_unit is rejected the same way', () => {
     expect(validateReading({ size_text: '78 oz', size_number: 78, size_unit: 'gal', pack_count: 1 }, { rawTitle: title, lineQuantity: 1 }))
-      .toMatchObject({ ok: false, reason: 'size_unit_mismatch' });
+      .toMatchObject({ ok: false, reason: 'size_not_a_full_title_claim' });
   });
 
-  test('no reading at all, or one missing size_text, never validates (so it can never become an alias — see the header)', () => {
+  test('no reading at all never validates (so it can never become an alias — see the header)', () => {
     expect(validateReading(null, { rawTitle: title, lineQuantity: 1 })).toMatchObject({ ok: false, reason: 'no_reading' });
+  });
+
+  test('size_text is a HINT only — a blank or wrong size_text no longer matters when size_number/size_unit are correct', () => {
     expect(validateReading({ size_text: '', size_number: 78, size_unit: 'oz', pack_count: 1 }, { rawTitle: title, lineQuantity: 1 }))
-      .toMatchObject({ ok: false, reason: 'size_text_not_in_title' });
+      .toMatchObject({ ok: true, sizeNumber: 78 });
+  });
+
+  test('"2 Count" against a title that actually reads "12 Count" is rejected — a claim can never start mid-number', () => {
+    const trapTitle = 'Victor M326 Rat Trap 12 Count';
+    expect(validateReading({ size_text: '2 Count', size_number: 2, size_unit: 'each', pack_count: 1 }, { rawTitle: trapTitle, lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'size_not_a_full_title_claim' });
   });
 });
 
-describe('validateReading — pack text', () => {
-  test('"Pack of 2" multiplies the per-unit size', () => {
-    const title = 'Taurus SC Termiticide 78 oz (Pack of 2)';
-    const result = validateReading({ size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: 'Pack of 2', pack_count: 2 }, { rawTitle: title, lineQuantity: 1 });
-    expect(result).toMatchObject({ ok: true, amount: 156 });
+describe('validateReading — pack_count must come from recognized pack syntax, not digit presence', () => {
+  test('"2 x 78 oz" with pack_count 2 validates (the recognized "N x" marker)', () => {
+    const title = 'Taurus SC 2 x 78 oz';
+    const result = validateReading({ size_number: 78, size_unit: 'oz', pack_count: 2 }, { rawTitle: title, lineQuantity: 1 });
+    expect(result).toMatchObject({ ok: true, sizeNumber: 78, packCount: 2, amount: 156 });
   });
 
   test('"4 x 500 g Case" reads the per-unit size and the leading multiplier separately', () => {
     const title = 'Advion Cockroach Gel Bait 4 x 500 g Case';
-    const result = validateReading({ size_text: '500 g', size_number: 500, size_unit: 'g', pack_text: '4 x', pack_count: 4 }, { rawTitle: title, lineQuantity: 1 });
+    const result = validateReading({ size_number: 500, size_unit: 'g', pack_count: 4 }, { rawTitle: title, lineQuantity: 1 });
     expect(result).toMatchObject({ ok: true, sizeNumber: 500, unit: 'g', packCount: 4, amount: 2000 });
   });
 
-  test('pack_count > 1 requires pack_text to be a real substring naming that count', () => {
+  test('"Pack of 12" with pack_count claimed as 2 (a digit inside the title, not the marker\'s own count) -> unsure', () => {
+    const title = 'Taurus SC Termiticide 78 oz (Pack of 12)';
+    expect(validateReading({ size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: '2', pack_count: 2 }, { rawTitle: title, lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'pack_count_mismatch' });
+  });
+
+  test('"(Pack of 2)" with pack_count claimed as 1 (ignoring the real marker) -> unsure', () => {
     const title = 'Taurus SC Termiticide 78 oz (Pack of 2)';
-    expect(validateReading({ size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 2 }, { rawTitle: title, lineQuantity: 1 }))
-      .toMatchObject({ ok: false, reason: 'pack_text_invalid' });
-    expect(validateReading({ size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: 'Termiticide', pack_count: 2 }, { rawTitle: title, lineQuantity: 1 }))
-      .toMatchObject({ ok: false, reason: 'pack_text_invalid' }); // in the title, but doesn't name "2"
+    expect(validateReading({ size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_count: 1 }, { rawTitle: title, lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'pack_count_mismatch' });
+  });
+
+  test('"12 Count" is a SIZE, never a pack marker: claiming pack_count 2 against it -> unsure (no marker at all in the title)', () => {
+    const title = 'Victor M326 Rat Trap 12 Count';
+    expect(validateReading({ size_number: 12, size_unit: 'each', pack_count: 2 }, { rawTitle: title, lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'pack_count_without_marker' });
+  });
+
+  test('a digit inside an unrelated word (a model number) is never read as a pack: "Model 2000 Sprayer 1 gal" claimed as pack 2 -> unsure', () => {
+    const title = 'Acme Model 2000 Sprayer 1 gal';
+    expect(validateReading({ size_number: 1, size_unit: 'gal', pack_count: 2 }, { rawTitle: title, lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'pack_count_without_marker' });
+  });
+
+  test('pack_count without ANY recognized marker in the title must be 1', () => {
+    const title = 'Taurus SC Termiticide 78 oz';
+    expect(validateReading({ size_number: 78, size_unit: 'oz', pack_count: 3 }, { rawTitle: title, lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'pack_count_without_marker' });
   });
 
   test('pack_count out of 1..100 is rejected', () => {
     const title = 'Taurus SC Termiticide 78 oz (Pack of 200)';
-    expect(validateReading({ size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: 'Pack of 200', pack_count: 200 }, { rawTitle: title, lineQuantity: 1 }))
+    expect(validateReading({ size_number: 78, size_unit: 'oz', pack_count: 200 }, { rawTitle: title, lineQuantity: 1 }))
       .toMatchObject({ ok: false, reason: 'pack_count_range' });
-    expect(validateReading({ size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_count: 0 }, { rawTitle: title, lineQuantity: 1 }))
+    expect(validateReading({ size_number: 78, size_unit: 'oz', pack_count: 0 }, { rawTitle: title, lineQuantity: 1 }))
       .toMatchObject({ ok: false, reason: 'pack_count_range' });
+  });
+
+  test('a SECOND, unrecognized pack marker left over after the first is stripped -> unsure (never picks one)', () => {
+    const title = 'Taurus SC 2 x 78 oz (Pack of 2)';
+    expect(validateReading({ size_number: 78, size_unit: 'oz', pack_count: 2 }, { rawTitle: title, lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'leftover_pack_wording' });
+  });
+
+  test('leftover unreadable pack wording ("Twin Pack") after the size is stripped -> unsure', () => {
+    const title = 'Taurus SC Termiticide 78 oz, Twin Pack';
+    expect(validateReading({ size_number: 78, size_unit: 'oz', pack_count: 1 }, { rawTitle: title, lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'leftover_pack_wording' });
   });
 });
 
@@ -92,7 +136,7 @@ describe('validateReading — count items', () => {
     const cases = ['1 Station', '25 Cartridges', '6 Tablets', '2 Dunks', '10 Briquettes'];
     for (const text of cases) {
       const [, numberText] = text.match(/^(\d+)\s+/);
-      const result = validateReading({ size_text: text, size_number: Number(numberText), size_unit: 'each', pack_count: 1 }, { rawTitle: `Some Product ${text}`, lineQuantity: 1 });
+      const result = validateReading({ size_number: Number(numberText), size_unit: 'each', pack_count: 1 }, { rawTitle: `Some Product ${text}`, lineQuantity: 1 });
       expect(result).toMatchObject({ ok: true, unit: 'each' });
     }
   });
