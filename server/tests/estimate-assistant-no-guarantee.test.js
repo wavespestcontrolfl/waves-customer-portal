@@ -279,6 +279,30 @@ describe('estimate assistant no-guarantee context', () => {
     expect(context.oneTime.items[0].purchasedTerms).toEqual([]);
   });
 
+  test.each([
+    ['key alias removal', { key: 'trenching', label: 'Termite Trenching', price: 1200,
+      warrantyTier: 'none', warrantyAdder: 0 }],
+    ['tier conflict', { service: 'trenching', label: 'Termite Trenching', price: 1200,
+      warrantyTier: 'three_year_repair_retreat' }],
+    ['renamed removal', { service: 'trenching', label: 'Updated Trenching Scope', price: 1200,
+      warrantyTier: 'none', warrantyAdder: 0 }],
+    ['zero-price removal', { service: 'trenching', label: 'Updated Trenching Scope', price: 0,
+      warrantyTier: 'none', warrantyAdder: 0 }],
+  ])('current %s cannot resurrect older raw warranty proof', (_name, current) => {
+    const raw = { service: 'trenching', label: 'Termite Trenching', price: 1200,
+      warrantyTier: 'one_year_retreat', warrantyAdder: 0 };
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 1200 },
+      estData: {
+        result: { oneTime: { items: [current] } },
+        engineResult: { oneTime: { items: [raw] } },
+      },
+      serviceMode: 'one_time',
+      noGuaranteeClaims: true,
+    });
+    expect(context.oneTime.items.flatMap((row) => row.purchasedTerms || [])).toEqual([]);
+  });
+
   test('ambiguous duplicate raw trenching rows cannot prove purchased terms', () => {
     const mapped = { service: 'trenching', label: 'Termite Trenching', amount: 1200, price: 1200,
       warrantyTier: 'one_year_retreat' };
@@ -344,6 +368,7 @@ describe('estimate assistant no-guarantee context', () => {
     ['name-derived', { service: 'termite_bond', name: 'Termite Bond (5-Year Term)', annual: 216 }, true],
     ['bondYears-derived', { service: 'termite_bond', name: 'Termite Bond', bondYears: 10, annual: 180 }, true],
     ['serviceKey alias', { serviceKey: 'termite_bond', name: 'Termite Bond (1-Year Term)', annual: 240 }, true],
+    ['name-only', { name: 'Termite Bond (5-Year Term)', annual: 216 }, true],
     ['wrong service', { service: 'termite_bait', name: 'Termite Bond (5-Year Term)', annual: 216 }, false],
     ['unsupported name', { service: 'termite_bond', name: 'Termite Bond (7-Year Term)', annual: 216 }, false],
     ['unpaid', { service: 'termite_bond', name: 'Termite Bond (5-Year Term)', annual: 0 }, false],
@@ -356,6 +381,18 @@ describe('estimate assistant no-guarantee context', () => {
     const terms = context.recurringServices.flatMap((item) => item.purchasedTerms || []);
     expect(terms.length > 0).toBe(purchased);
     if (purchased) expect(terms[0]).toMatch(/Purchased termite bond: (1|5|10)-year term/);
+  });
+
+  test('a name-only legacy bond in raw lineItems clears every identity gate', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 18 },
+      estData: { engineResult: { lineItems: [
+        { name: 'Termite Bond (5-Year Term)', annual: 216 },
+      ] } },
+      noGuaranteeClaims: true,
+    });
+    expect(context.recurringServices.flatMap((row) => row.purchasedTerms || []))
+      .toEqual(['Purchased termite bond: 5-year term with re-treatment coverage.']);
   });
 
   test('mixed purchased warranty answers stay scoped to the named service', () => {
@@ -381,6 +418,13 @@ describe('estimate assistant no-guarantee context', () => {
     expect(bondAnswer).toContain('For Termite Bond');
     expect(bondAnswer).toContain('5-year term with re-treatment coverage');
     expect(bondAnswer).not.toContain('Annual inspection during the warranty period');
+
+    const bondInspectionAnswer = answerEstimateQuestionFallback(
+      'Is annual inspection included with my termite bond?', context,
+    );
+    expect(bondInspectionAnswer).toContain('For Termite Bond');
+    expect(bondInspectionAnswer).toContain('5-year term with re-treatment coverage');
+    expect(bondInspectionAnswer).not.toContain('Annual inspection during the warranty period');
 
     const genericAnswer = answerEstimateQuestionFallback('What warranty did I buy?', context);
     expect(genericAnswer).toMatch(/Termite Bond:.*5-year term/s);

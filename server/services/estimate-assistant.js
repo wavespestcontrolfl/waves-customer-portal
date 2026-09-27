@@ -10,7 +10,9 @@ const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const { GUARANTEE_COPY, resolveOneTimeServiceCopy } = require('./estimate-one-time-copy');
 const {
   hasPurchasedTrenchingWarranty,
-  trenchingWarrantyDecision,
+  rawOneTimeWarrantyEvidenceItems,
+  reconcileTrenchingWarrantyEvidence,
+  trenchingServiceIdentity,
 } = require('../../shared/estimate-purchased-warranty.cjs');
 const { serviceKeysFromText } = require('./estimate-service-lines');
 const { RECURRING_TERMS_LANES } = require('./estimate-followup-copy');
@@ -177,10 +179,13 @@ function termiteBondPurchasedTerms(row = {}, selectedTerms = []) {
 }
 
 function withTermiteBondPurchasedTerms(row, proofRow = row, selectedTerms = []) {
-  const service = cleanText(proofRow.service || proofRow.serviceKey || proofRow.service_key || proofRow.key).toLowerCase();
+  const normalizedProof = normalizeBondTermService(proofRow);
+  const service = cleanText([
+    normalizedProof.service, normalizedProof.serviceKey, normalizedProof.service_key, normalizedProof.key,
+  ].find(Boolean)).toLowerCase();
   if (!service.startsWith('termite_bond')) return row;
-  const purchasedTerms = termiteBondPurchasedTerms(proofRow, selectedTerms);
-  return { ...row, purchasedTerms };
+  const purchasedTerms = termiteBondPurchasedTerms(normalizedProof, selectedTerms);
+  return { ...row, service: row.service || service, purchasedTerms };
 }
 
 function serviceRowsFromEstimateData(estData = {}, selectedBondTerms = []) {
@@ -194,8 +199,11 @@ function serviceRowsFromEstimateData(estData = {}, selectedBondTerms = []) {
       ...(Array.isArray(nestedRecurring.services) ? nestedRecurring.services : []),
       ...(Array.isArray(result.lineItems)
         ? result.lineItems.filter((row) => {
+          const normalized = normalizeBondTermService(row);
           const lanes = guaranteeLanesForRow(row);
-          const service = cleanText(row.service || row.serviceKey || row.service_key || row.key).toLowerCase();
+          const service = cleanText([
+            normalized.service, normalized.serviceKey, normalized.service_key, normalized.key,
+          ].find(Boolean)).toLowerCase();
           const recurringValue = [row.monthly, row.mo, row.annual, row.perTreatment, row.perApp, row.perVisit]
             .some((value) => Number.isFinite(Number(value)) && Number(value) > 0);
           const commercial = lanes.some((lane) => lane.startsWith('commercial_'));
@@ -372,7 +380,7 @@ function purchasedTermsForRow(item) {
   return (copy?.includes || []).filter((line) => GUARANTEE_COPY.test(line));
 }
 
-function oneTimeRowsFromPricing(pricingBundle = {}) {
+function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {
   const items = Array.isArray(pricingBundle.oneTimeBreakdown?.items)
     ? pricingBundle.oneTimeBreakdown.items
     : [];
@@ -385,15 +393,15 @@ function oneTimeRowsFromPricing(pricingBundle = {}) {
         item.quoteRequired === true ? 'Quote required' : null,
         Number.isFinite(amount) && amount > 0 ? fmtMoney(amount) : null,
       ].filter(Boolean);
-      const explicitWarrantyDecision = Object.prototype.hasOwnProperty.call(item, 'warrantyAdder')
-        || (Object.prototype.hasOwnProperty.call(item, 'warrantyTier')
-          && ['', 'none'].includes(cleanText(item.warrantyTier).toLowerCase()));
+      const evidence = reconcileTrenchingWarrantyEvidence(item, [[item], ...evidenceGroups]);
       return {
-        service: cleanText(item.service || item.key) || null,
+        service: cleanText(item.service || item.serviceKey || item.service_key || item.key) || null,
         label: cleanText(item.label || item.name || item.service || 'One-time service'),
         detail: detailParts.join(' - '),
         amount: Number.isFinite(amount) && amount > 0 ? amount : null,
-        ...(explicitWarrantyDecision ? { purchasedTerms: purchasedTermsForRow(item) } : {}),
+        ...(trenchingServiceIdentity(item) === 'termite_trenching'
+          ? { purchasedTerms: purchasedTermsForRow(evidence) }
+          : {}),
         oneTime: true,
       };
     });
@@ -434,38 +442,35 @@ function oneTimeRowsFromResult(result = {}) {
         item.quoteRequired === true ? 'Quote required' : null,
         Number.isFinite(amount) && amount > 0 ? fmtMoney(amount) : null,
       ].filter(Boolean);
-      const warrantyDecision = trenchingWarrantyDecision(item);
       return {
-        service: cleanText(item.service || item.key) || null,
+        service: cleanText(item.service || item.serviceKey || item.service_key || item.key) || null,
         label: cleanText(item.label || item.displayName || item.name || item.service || 'One-time service'),
         detail: detailParts.join(' - '),
         amount: Number.isFinite(amount) && amount > 0 ? amount : null,
-        ...(warrantyDecision !== 'unset' ? { purchasedTerms: purchasedTermsForRow(item) } : {}),
         oneTime: true,
       };
     });
 }
 
-function failClosedAmbiguousOneTimeWarranties(rows = []) {
-  const counts = new Map();
-  for (const row of rows) {
-    if (!['trenching', 'termite_trenching'].includes(cleanText(row.service).toLowerCase())) continue;
-    const key = `${cleanText(row.service).toLowerCase()}|${cleanText(row.label).toLowerCase()}`;
-    counts.set(key, (counts.get(key) || 0) + 1);
-  }
-  return rows.map((row) => {
-    const key = `${cleanText(row.service).toLowerCase()}|${cleanText(row.label).toLowerCase()}`;
-    return (counts.get(key) || 0) > 1 ? { ...row, purchasedTerms: [] } : row;
-  });
+function oneTimeEvidenceGroupsFromEstimateData(estData = {}) {
+  const roots = [...new Set([estData.result, estData.engineResult]
+    .filter((value) => value && typeof value === 'object'))];
+  if (!roots.length) roots.push(estData);
+  return roots.map(rawOneTimeWarrantyEvidenceItems);
 }
 
 function oneTimeRowsFromEstimateData(estData = {}) {
   const roots = [...new Set([estData.result, estData.engineResult]
     .filter((value) => value && typeof value === 'object'))];
   if (!roots.length) roots.push(estData);
-  const currentRows = failClosedAmbiguousOneTimeWarranties(oneTimeRowsFromResult(roots[0]));
-  const fallbackRows = failClosedAmbiguousOneTimeWarranties(roots.slice(1).flatMap(oneTimeRowsFromResult));
-  return mergeServiceRows(currentRows, fallbackRows);
+  const evidenceGroups = oneTimeEvidenceGroupsFromEstimateData(estData);
+  const currentRows = oneTimeRowsFromResult(roots[0]);
+  const fallbackRows = roots.slice(1).flatMap(oneTimeRowsFromResult);
+  return mergeServiceRows(currentRows, fallbackRows).map((row) => {
+    if (trenchingServiceIdentity(row) !== 'termite_trenching') return row;
+    const evidence = reconcileTrenchingWarrantyEvidence(row, evidenceGroups);
+    return { ...row, purchasedTerms: purchasedTermsForRow(evidence) };
+  });
 }
 
 function frequencyHasRecurringValue(frequency = {}) {
@@ -693,8 +698,9 @@ function buildEstimateAssistantContext({
     estimateRecurringRows,
     { allowFallbackOnly: pricingRecurringRows.length === 0 },
   );
+  const oneTimeEvidenceGroups = oneTimeEvidenceGroupsFromEstimateData(parsedData);
   const oneTimeServices = mergeServiceRows(
-    oneTimeRowsFromPricing(pricingBundle),
+    oneTimeRowsFromPricing(pricingBundle, oneTimeEvidenceGroups),
     oneTimeRowsFromEstimateData(parsedData),
   );
   const oneTimeTotal = Number(pricingBundle.anchorOneTimePrice || estimate.onetime_total || estimate.onetimeTotal);
@@ -1446,21 +1452,28 @@ function isBoraCareIntent(question = '') {
     || (/\bwood/.test(text) && /(treat|destroy|beetle|fungi|boring|decay)/.test(text));
 }
 
-function questionNamesPurchasedService(question, row = {}) {
+function purchasedServiceSubtype(row = {}) {
   const serviceText = cleanText([row.service, row.label].filter(Boolean).join(' ')).toLowerCase();
-  if (/\bbond\b/.test(serviceText)) return /\bbond\b/.test(question);
-  if (/\btrench(?:ing|ed)?\b/.test(serviceText)) {
-    return /\btrench(?:ing|ed)?\b/.test(question)
-      || (/\bannual inspection\b/.test(question)
-        && (row.purchasedTerms || []).some((term) => /\bannual inspection\b/i.test(term)));
-  }
-  return false;
+  if (/\bbond\b/.test(serviceText)) return 'bond';
+  if (/\btrench(?:ing|ed)?\b/.test(serviceText)) return 'trenching';
+  return null;
 }
 
 function purchasedServiceScopeForQuestion(question, rows = []) {
-  const subtypeNamed = /\b(?:bond|trench(?:ing|ed)?|annual inspection)\b/.test(question);
-  const subtypeRows = rows.filter((row) => questionNamesPurchasedService(question, row));
-  if (subtypeNamed) return { named: true, rows: subtypeRows };
+  const namedSubtypes = [
+    /\bbond\b/.test(question) ? 'bond' : null,
+    /\btrench(?:ing|ed)?\b/.test(question) ? 'trenching' : null,
+  ].filter(Boolean);
+  if (namedSubtypes.length) {
+    return { named: true, rows: rows.filter((row) => namedSubtypes.includes(purchasedServiceSubtype(row))) };
+  }
+  if (/\bannual inspection\b/.test(question)) {
+    return {
+      named: true,
+      rows: rows.filter((row) => (row.purchasedTerms || [])
+        .some((term) => /\bannual inspection\b/i.test(term))),
+    };
+  }
 
   const namedKeys = new Set(serviceFamiliesFromText(question));
   if (!namedKeys.size) return { named: false, rows: [] };

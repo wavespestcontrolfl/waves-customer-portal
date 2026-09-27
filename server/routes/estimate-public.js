@@ -41,6 +41,9 @@ const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { GUARANTEE_COPY, resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
 const {
   hasPurchasedTrenchingWarranty,
+  rawOneTimeWarrantyEvidenceItems,
+  reconcileTrenchingWarrantyEvidence,
+  trenchingServiceIdentity,
   trenchingWarrantyDecision,
 } = require('../../shared/estimate-purchased-warranty.cjs');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -23578,24 +23581,23 @@ function normalizedOneTimeRowGroups(estData = {}) {
     .filter((root) => root && typeof root === 'object'))];
   if (!roots.length) roots.push(estData);
   return roots.map((result) => {
-    const oneTime = result.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
-    const nested = result.results?.oneTime && typeof result.results.oneTime === 'object'
-      ? result.results.oneTime
-      : {};
     return {
       rows: normalizeOneTimeBreakdown({ ...estData, result, engineResult: null }).items || [],
-      sourceItems: [
-        ...(Array.isArray(oneTime.items) ? oneTime.items : []),
-        ...(Array.isArray(nested.items) ? nested.items : []),
-      ],
+      sourceItems: rawOneTimeWarrantyEvidenceItems(result),
     };
   });
 }
 
+function oneTimeServiceIdentity(item = {}) {
+  const trenchingIdentity = trenchingServiceIdentity(item);
+  if (trenchingIdentity === 'termite_trenching') return trenchingIdentity;
+  return String(item?.service || item?.serviceKey || item?.service_key || item?.key || '').toLowerCase();
+}
+
 function matchingRawOneTimeRow(row, rawRows = []) {
-  const service = String(row?.service || '').toLowerCase();
+  const service = oneTimeServiceIdentity(row);
   if (!service) return { row: null, ambiguous: false };
-  const candidates = rawRows.filter((raw) => String(raw?.service || raw?.key || '').toLowerCase() === service);
+  const candidates = rawRows.filter((raw) => oneTimeServiceIdentity(raw) === service);
   if (candidates.length < 2) return { row: candidates[0] || null, ambiguous: false };
   const sameLabel = candidates.filter((raw) => (
     String(raw.label || raw.displayName || raw.name || raw.service || '') === String(row.label || '')
@@ -23604,6 +23606,24 @@ function matchingRawOneTimeRow(row, rawRows = []) {
   const sameAmount = sameLabel.filter((raw) => Number(raw.amount ?? raw.price ?? raw.total) === Number(row.amount));
   if (sameAmount.length === 1) return { row: sameAmount[0], ambiguous: false };
   return { row: null, ambiguous: true };
+}
+
+function withReconciledContractWarranty(row, rawRowGroups = [], target = row) {
+  if (trenchingServiceIdentity(row) !== 'termite_trenching') return row;
+  const evidence = reconcileTrenchingWarrantyEvidence(
+    target,
+    [[target], ...rawRowGroups.map((group) => group.sourceItems)],
+  );
+  const reconciled = { ...row };
+  delete reconciled.warrantyTier;
+  delete reconciled.warrantyAdder;
+  if (evidence && Object.prototype.hasOwnProperty.call(evidence, 'warrantyTier')) {
+    reconciled.warrantyTier = evidence.warrantyTier;
+  }
+  if (evidence && Object.prototype.hasOwnProperty.call(evidence, 'warrantyAdder')) {
+    reconciled.warrantyAdder = evidence.warrantyAdder;
+  }
+  return reconciled;
 }
 
 function rawContractRowFor(row, rawRowGroups = []) {
@@ -23672,7 +23692,8 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
           if (!rowCopyAllowed) return labeled;
           const copyInputs = labeled.map((row) => {
             const raw = rawContractRowFor(row, rawContractRowGroups);
-            return raw ? { ...raw, ...row } : row;
+            const input = raw ? { ...raw, ...row } : row;
+            return withReconciledContractWarranty(input, rawContractRowGroups, row);
           });
           const copies = resolveOneTimeRowCopies(copyInputs, { noGuaranteeClaims });
           return labeled.map((row, i) => (copies[i] ? {
