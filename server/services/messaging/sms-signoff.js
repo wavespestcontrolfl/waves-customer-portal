@@ -12,8 +12,9 @@
 //   - a signer set off by a dash: "— Adam" (not after "is"/"as" and the like:
 //     "Your technician is - Adam" is an answer)
 //   - a signer on its own line under a FINISHED sentence (ends in . or ! or an
-//     emoji): "Talk soon!\nAdam". After a question, a colon or an unfinished
-//     sentence the name is the answer ("Who will be coming?\nAdam",
+//     emoji) or under a question that does not ask who: "Talk soon!\nAdam",
+//     "When works best for you?\nAdam". After a who-question, a colon or an
+//     unfinished sentence the name is the answer ("Who will be coming?\nAdam",
 //     "Your technician will be\nAdam", "Your technician is:\nAdam").
 //   - a full name-and-company block that is its own final sentence:
 //     "Talk soon. Adam, Waves Pest Control", or the whole text (a lone name or company there may
@@ -47,9 +48,12 @@ const EMOJI_PART = '\\p{Extended_Pictographic}|\\p{Emoji_Modifier}|\\p{Regional_
 const EMOTICON = "[:;=8]['\\-^]?[)(\\]\\[DPp3*|/]+|<3+|\\^_?\\^";
 const TAIL = `\\s*[.!]?(?:[\\s"'\\u201C\\u201D\\u2018\\u2019]|${EMOJI_PART}|${EMOTICON})*$`;
 // A line break under a finished sentence: the line above ends in . or ! (a
-// quote mark may close it) or an emoji. A bare name after anything else
-// answers that line instead of signing it.
-const AFTER_SENTENCE_LINE = `(?<=(?:[.!]["'\\u201D\\u2019]?|${EMOJI_PART}))[ \\t]*\\n\\s*`;
+// quote mark may close it) or an emoji, or in a question that does not ask
+// who. A name cannot answer "When works best for you?" or "Would you like to
+// schedule?", so under one it signs the text. A bare name after anything else
+// (a who-question, a colon, an unfinished sentence) answers that line instead.
+const NON_WHO_QUESTION = '(?:^|[.!?\\n])(?![^.!?\\n]*\\b(?:who|whom|whose)\\b)[^.!?\\n]*\\?';
+const AFTER_SENTENCE_LINE = `(?<=(?:(?:[.!]|${NON_WHO_QUESTION})["'\\u201D\\u2019]?|${EMOJI_PART}))[ \\t]*\\n\\s*`;
 
 // A dash right after a word that introduces a value ("Your technician is -
 // Adam", "The charge appears as - Waves Pest Control") sets off the answer.
@@ -86,8 +90,9 @@ for (const key of Object.keys(PEOPLE)) SIGNATURE_TAIL_RES[key] = buildSignatureT
 //  - a dash-set name: the dash starts its own line (not under a value word,
 //    trailing spaces included: "Your technician is \n— Sarah" is an answer),
 //    follows a sentence ending in . or ! on the same line, or is the whole
-//    text. The name is one word in any case or script, or two capitalized
-//    words, optionally ", <Company>" in capitalized words or "from Waves";
+//    text. The name is one word in any case or script, or two or three
+//    capitalized words ("Mary Ann Smith"), optionally ", <Company>" in
+//    capitalized words or "from Waves";
 //  - a known closer on its own line with the name under it ("Thanks,\nSarah")
 //    — a closer from CLOSER, never any comma-ended line ("Here are the
 //    options,\nLawn Care" is a list);
@@ -115,8 +120,9 @@ const CAP_TOKEN = "\\p{Lu}[\\p{L}'\\u2019-]*";
 // After the name: ", Waves Team" in capitalized words, or the company joined
 // by from/at/with ("— Sarah from Waves") as SIGNATURE_BLOCK joins it.
 const CAP_COMPANY = `(?:\\s*,\\s*${CAP_TOKEN}(?:\\s+${CAP_TOKEN}){0,3}|\\s+${anyCase(`(?:from|at|with)\\s+${COMPANY}`)})?`;
-const CAP_NAME = `(?<name>${CAP_TOKEN}(?:\\s+${CAP_TOKEN})?)${CAP_COMPANY}`;
-const DASH_NAME = `(?<name>${CAP_TOKEN}\\s+${CAP_TOKEN}|${ANY_TOKEN})${CAP_COMPANY}`;
+// Up to three capitalized words: "Sarah", "Sarah Jones", "Mary Ann Smith".
+const CAP_NAME = `(?<name>${CAP_TOKEN}(?:\\s+${CAP_TOKEN}){0,2})${CAP_COMPANY}`;
+const DASH_NAME = `(?<name>${CAP_TOKEN}(?:\\s+${CAP_TOKEN}){1,2}|${ANY_TOKEN})${CAP_COMPANY}`;
 const VALUE_WORD = anyCase('(?:is|are|was|were|be|as|named|called|by)');
 const ANY_CLOSER = anyCase(CLOSER);
 // mode: 'always' strips regardless of the customer; 'keepAddressee' keeps the
@@ -131,15 +137,18 @@ const ANY_SIGNER_RES = [
   { re: new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})${ANY_CLOSER},?[ \\t]+${CAP_NAME}${TAIL}`, 'u'), mode: 'otherThanAddressee' },
 ];
 // A dash can also set a value on its own line: under a label ("Your
-// technician:\n— Sarah", "Which service:\n— Lawn Care"), under an information
-// question ("Who will be coming?\n— Sarah") or as the next item of a dashed
-// or bulleted list. Such a text keeps its tail through both passes, known
-// signers included. A broad closing question ("Would you like to
-// schedule?\n— Sarah") is still a sign-off, and so is a dashed line set off
-// by a blank line or carrying a company ("— Adam, Waves Pest Control").
-const VALUE_QUESTION = anyCase('(?:who|what|which|where|when|why|how)');
+// technician:\n— Sarah", "Which service:\n— Lawn Care"), under a who-question
+// ("Who will be coming?\n— Sarah") or as the next item of a dashed or bulleted
+// list. Such a text keeps its tail through both passes, known signers
+// included. Any other question is one a name cannot answer ("When works best
+// for you?\n— Adam", "Would you like to schedule?\n— Sarah"), so the dash
+// there is a sign-off, and so is a dashed line set off by a blank line or
+// carrying a company ("— Adam, Waves Pest Control"). The value takes the
+// signer patterns' one-to-three-word shape, so whatever they would strip
+// under a label, this keeps.
+const VALUE_QUESTION = anyCase('(?:who|whom|whose)');
 const DASH_VALUE_TAIL_RE = new RegExp(
-  `(?:^|\\n)(?:[^\\n]*:[ \\t]*|[^\\n]*\\b${VALUE_QUESTION}\\b[^.!?\\n]*\\?[ \\t]*|[ \\t]*(?:${DASH}|[\\u2022*])[^\\n]*)\\n[ \\t]*${DASH}[ \\t]*(?:${CAP_TOKEN}[ \\t]+${CAP_TOKEN}|${ANY_TOKEN})${TAIL}`,
+  `(?:^|\\n)(?:[^\\n]*:[ \\t]*|[^\\n]*\\b${VALUE_QUESTION}\\b[^.!?\\n]*\\?[ \\t]*|[ \\t]*(?:${DASH}|[\\u2022*])[^\\n]*)\\n[ \\t]*${DASH}[ \\t]*(?:${CAP_TOKEN}(?:[ \\t]+${CAP_TOKEN}){1,2}|${ANY_TOKEN})${TAIL}`,
   'u',
 );
 

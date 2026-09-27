@@ -67,6 +67,12 @@ describe('stripTrailingSignature', () => {
     // A bare full signature block is a sign-off even as the whole text.
     ['Adam, Waves Pest Control', ''],
     ['Adam from Waves', ''],
+    // A name cannot answer a question that does not ask who, so a signer on
+    // its own line under one signs the text (most suggested replies end on a
+    // question like these).
+    ['Would you like to schedule?\nAdam', 'Would you like to schedule?'],
+    ['Happy to help. When works best for you?\nWaves Pest Control', 'Happy to help. When works best for you?'],
+    ['What day works best for you?\nAdam B.', 'What day works best for you?'],
   ])('strips the trailing sign-off from %j', (input, expected) => {
     expect(stripTrailingSignature(input)).toBe(expected);
   });
@@ -100,6 +106,7 @@ describe('stripTrailingSignature', () => {
     // answers it.
     'Who will be coming?\nAdam',
     'Who is your technician?\nAdam',
+    "Who's coming Tuesday?\nAdam",
     'Your technician will be\nAdam',
     'The charge will appear as\nWaves Pest Control',
     // A smiley in content is content.
@@ -171,6 +178,17 @@ describe('stripTrailingSignature — anySigner', () => {
     ['Options:\n- Lawn Care\n\n— Adam, Waves Pest Control', 'Options:\n- Lawn Care'],
     ['Options:\n- Lawn Care\n\n— Sarah', 'Options:\n- Lawn Care'],
     ['Options:\n- Lawn Care\n— Adam, Waves Pest Control', 'Options:\n- Lawn Care'],
+    // #4975 follow-ups: only a who-question takes a dashed name as its answer
+    // (the known signers included), and names run to three words.
+    ['When works best for you?\n— Adam', 'When works best for you?'],
+    ['What day works best for you?\n- Adam', 'What day works best for you?'],
+    ['When works for you?\n— Sarah', 'When works for you?'],
+    ['We can help. — Mary Ann Smith', 'We can help.'],
+    ['We can help.\nThanks,\nMary Ann Smith', 'We can help.'],
+    ['We can help. — Mary Ann Smith, Waves Team', 'We can help.'],
+    // Owner ruling 2026-09-26 on #4975: lean toward stripping, so a one-word
+    // value under a closing question goes as well.
+    ['When is your visit?\n— Tuesday', 'When is your visit?'],
   ])('%j → %j', (text, expected) => {
     expect(any(text)).toBe(expected);
   });
@@ -202,6 +220,12 @@ describe('stripTrailingSignature — anySigner', () => {
     'Who will be coming?\n— Sarah',
     'Your technician is:\n— Adam',
     'Options:\n- Lawn Care\n- Pest Control',
+    // #4975 follow-ups: a who-question's dashed answer, a known signer
+    // included, and a three-word value under a label.
+    'Who will be coming?\n— Adam',
+    'Who will be coming?\n— Mary Ann Smith',
+    'Your technician:\n— Mary Ann Smith',
+    'Make checks payable to:\n— Waves Pest Control',
   ])('%j is not a sign-off and is kept', (text) => {
     expect(any(text)).toBe(text);
   });
@@ -226,4 +250,5 @@ describe('stripTrailingSignature — anySigner', () => {
 test('anySigner keeps a closer block that names the customer by full name', () => {
   expect(stripTrailingSignature('Thanks,\nSarah Jones!', { anySigner: true, addresseeFirstName: 'Sarah' })).toBe('Thanks,\nSarah Jones!');
   expect(stripTrailingSignature('We can help.\nSarah Jones', { anySigner: true, addresseeFirstName: 'Sarah' })).toBe('We can help.\nSarah Jones');
+  expect(stripTrailingSignature('Thanks,\nMary Ann Smith!', { anySigner: true, addresseeFirstName: 'Mary' })).toBe('Thanks,\nMary Ann Smith!');
 });
