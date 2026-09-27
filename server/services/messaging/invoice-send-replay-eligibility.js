@@ -21,7 +21,8 @@ async function linkedVisitId(invoice, database) {
 // holds the invoice row lock): same customer, still collectible (not paid,
 // void or processing; no payer; not withdrawn), a status a send may deliver
 // from, something still due, and a linked visit that still ran. The caller's
-// ownership check follows. No amount pin: the notice body is the invoice
+// ownership check follows. The invoice must also have been finalized as
+// sent (see the resendable refusal below). No amount pin: the notice body is the invoice
 // text, which names no dollar amount (the pay page shows the live balance),
 // so a partial payment or credit leaves it accurate.
 async function invoiceSendRefusal(meta, database) {
@@ -34,6 +35,17 @@ async function invoiceSendRefusal(meta, database) {
   if (collectible.eligible !== true) return refused(collectible.reason, collectible.retryable === true);
   const { SEND_FINALIZABLE_STATUSES, invoiceAmountDue, visitRefusesSettlement } = require('../invoice-helpers');
   if (!SEND_FINALIZABLE_STATUSES.includes(invoice.status)) return refused(`invoice-status:${invoice.status}`);
+  // A live send claim: the send that queued this Email, or a newer one, still
+  // owns the invoice. Wait for it to finalize or restore.
+  if (invoice.status === 'sending') return refused('invoice-send-in-flight', true);
+  // Never finalized as sent: the send that queued this Email accepted no leg
+  // and restored the invoice (possibly reversing credit it applied). A
+  // pay-link email must not reach the customer while the invoice still reads
+  // unsent, since nothing would finalize it (Codex #4963 P1). Refused as
+  // RESENDABLE, not blocked: the row settles as a definitely-unsent failure,
+  // so the invoice's next send re-delivers through the same notice key
+  // instead of deduping against a block.
+  if (!invoice.sent_at) return { eligible: false, reason: 'invoice-send-not-finalized', retryable: false, resendable: true };
   if (!(invoiceAmountDue(invoice) > 0)) return refused('invoice-nothing-due');
   const visitStatus = await visitRefusesSettlement(database, await linkedVisitId(invoice, database));
   return visitStatus ? refused(`invoice-visit-${visitStatus}`) : null;

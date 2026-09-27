@@ -575,7 +575,11 @@ async function retryOne(message) {
           await markRetryFailure(message, err);
           return { sent: false, error: err };
         }
-        return await stopRetry(message, { status: 'blocked', reason: handoff.reason });
+        // A resendable refusal (billing-email-provider-replay.js) settles as
+        // a definitely-unsent failure, never 'blocked', which would dedupe the
+        // notice's next send for good.
+        const status = handoff.code === billingReplay.BILLING_REPLAY_RESENDABLE ? 'failed' : 'blocked';
+        return await stopRetry(message, { status, reason: handoff.reason });
       }
     } else {
       await dispatchToProvider();

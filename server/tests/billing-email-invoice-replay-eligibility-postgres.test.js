@@ -29,6 +29,7 @@ postgres('direct invoice Email replay eligibility (PostgreSQL)', () => {
       table.uuid('payer_id'); table.text('scheduled_send_error');
       table.decimal('total', 10, 2); table.decimal('credit_applied', 10, 2);
       table.uuid('scheduled_service_id'); table.uuid('service_record_id');
+      table.timestamp('sent_at', { useTz: true });
     });
     await mockPg.schema.createTable('scheduled_services', (table) => {
       table.uuid('id').primary(); table.text('status');
@@ -52,7 +53,9 @@ postgres('direct invoice Email replay eligibility (PostgreSQL)', () => {
   async function invoiceWith(overrides = {}) {
     const visitId = randomUUID();
     await mockPg('scheduled_services').insert({ id: visitId, status: 'completed' });
-    const invoice = { id: randomUUID(), customer_id: customerId, status: 'sent', payer_id: null,
+    // A finalized send by default: a provider retry only runs after the send
+    // that queued it stamped the invoice sent (sent_at).
+    const invoice = { id: randomUUID(), customer_id: customerId, status: 'sent', sent_at: new Date(), payer_id: null,
       scheduled_send_error: null, total: '120.00', credit_applied: '0.00', scheduled_service_id: visitId,
       service_record_id: null, ...overrides };
     await mockPg('invoices').insert(invoice);
@@ -82,6 +85,22 @@ postgres('direct invoice Email replay eligibility (PostgreSQL)', () => {
     const invoice = await invoiceWith(overrides);
     await expect(billingEmailReplayEligible(context(invoice.id), mockPg))
       .resolves.toEqual({ eligible: false, reason, retryable: false });
+  });
+
+  // Codex #4963 P1: an Email-only send whose SendGrid attempt failed
+  // retryably restored the invoice; its provider retry must not deliver a pay
+  // link while the invoice reads unsent, and must stay re-sendable.
+  test('a send that never finalized is refused as resendable, never blocked', async () => {
+    const invoice = await invoiceWith({ status: 'draft', sent_at: null });
+    await expect(billingEmailReplayEligible(context(invoice.id), mockPg)).resolves.toEqual({
+      eligible: false, reason: 'invoice-send-not-finalized', retryable: false, resendable: true,
+    });
+  });
+
+  test('a live send claim holds the retry until that send settles', async () => {
+    const invoice = await invoiceWith({ status: 'sending', sent_at: null });
+    await expect(billingEmailReplayEligible(context(invoice.id), mockPg))
+      .resolves.toEqual({ eligible: false, reason: 'invoice-send-in-flight', retryable: true });
   });
 
   test('refuses a missing invoice', async () => {
