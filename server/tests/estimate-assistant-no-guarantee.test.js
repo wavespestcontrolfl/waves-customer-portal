@@ -400,8 +400,39 @@ describe('estimate assistant no-guarantee context', () => {
       expect(context.oneTime.items.filter((row) => row.purchasedTerms
         .includes('Annual inspection during the warranty period'))).toHaveLength(1);
       expect(answerEstimateQuestionFallback('What guarantee does the trenching include?', context)).toBe(
-        'For Termite Trenching, this estimate includes this purchased service-specific term: Annual inspection during the warranty period. It applies only to that service and does not create an estimate-wide callback or money-back guarantee.',
+        'For one of the 2 Termite Trenching jobs at $900, this estimate includes this purchased service-specific term: Annual inspection during the warranty period. It applies only to that service and does not create an estimate-wide callback or money-back guarantee.',
       );
+    }
+  });
+
+  test.each([
+    ['paid-first', false],
+    ['removed-first', true],
+  ])('price and label scope do not borrow a sibling trenching purchase: %s', (_name, reverse) => {
+    const paid = { service: 'trenching', label: 'Rear Trenching', amount: 900,
+      warrantyTier: 'one_year_retreat', warrantyAdder: 0 };
+    const removed = { service: 'trenching', label: 'Front Trenching', amount: 700,
+      warrantyTier: 'none', warrantyAdder: 0 };
+    const rows = reverse ? [removed, paid] : [paid, removed];
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 1600 }, serviceMode: 'one_time', noGuaranteeClaims: true,
+      estData: {},
+      pricingBundle: { source: 'engine_invocation', snapshotHit: false,
+        anchorOneTimePrice: 1600, oneTimeBreakdown: { total: 1600, items: rows } },
+    });
+    for (const question of [
+      'Does the $700 trenching include a guarantee?',
+      'Does the Front Trenching include a guarantee?',
+    ]) {
+      expect(answerEstimateQuestionFallback(question, context))
+        .toMatch(/do not see an estimate-wide callback or money-back guarantee/i);
+    }
+    for (const question of [
+      'Does the $900 trenching include a guarantee?',
+      'Does the Rear Trenching include a guarantee?',
+    ]) {
+      expect(answerEstimateQuestionFallback(question, context))
+        .toContain('Annual inspection during the warranty period');
     }
   });
 

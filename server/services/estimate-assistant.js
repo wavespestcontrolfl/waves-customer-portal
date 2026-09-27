@@ -1549,6 +1549,21 @@ function purchasedServiceSubtype(row = {}) {
 }
 
 function purchasedServiceScopeForQuestion(question, rows = []) {
+  const exactLabelRows = rows.filter((row) => {
+    const label = cleanText(row.label).toLowerCase();
+    return label.length >= 4 && question.includes(label);
+  });
+  const amounts = [...question.matchAll(/\$\s*([\d,]+(?:\.\d{1,2})?)/g)]
+    .map((match) => Number(match[1].replace(/,/g, ''))).filter(Number.isFinite);
+  if (exactLabelRows.length || amounts.length) {
+    const labelScoped = exactLabelRows.length ? exactLabelRows : rows;
+    return {
+      named: true,
+      rows: amounts.length
+        ? labelScoped.filter((row) => amounts.includes(Number(row.amount)))
+        : labelScoped,
+    };
+  }
   const namedSubtypes = [
     /\bbond\b/.test(question) ? 'bond' : null,
     /\btrench(?:ing|ed)?\b/.test(question) ? 'trenching' : null,
@@ -1573,10 +1588,18 @@ function purchasedServiceScopeForQuestion(question, rows = []) {
   };
 }
 
-function purchasedServiceTermsAnswer(rows, namedService) {
+function purchasedServiceTermsAnswer(rows, namedService, scopeRows = rows) {
   if (rows.length === 1) {
     const row = rows[0];
-    const scope = row.label || 'that service';
+    const label = row.label || 'that service';
+    const sameLabelScope = scopeRows.filter((candidate) => cleanText(candidate.label) === cleanText(label));
+    const amount = Number(row.amount);
+    const sameAmountCount = Number.isFinite(amount)
+      ? sameLabelScope.filter((candidate) => Number(candidate.amount) === amount).length
+      : 0;
+    const scope = sameAmountCount > 1
+      ? `one of the ${sameAmountCount} ${label} jobs at ${fmtMoney(amount)}`
+      : (sameLabelScope.length > 1 && Number.isFinite(amount) ? `the ${label} job at ${fmtMoney(amount)}` : label);
     const prefix = namedService
       ? `For ${scope}, this estimate includes this purchased service-specific term:`
       : `This estimate includes this purchased service-specific term for ${scope}:`;
@@ -1612,7 +1635,8 @@ function writtenServiceClaimAnswer(question, context = {}, fallback = null) {
       ? namedScope.rows.filter((row) => Array.isArray(row.purchasedTerms) && row.purchasedTerms.length)
       : purchasedRows;
     if (relevantRows.length) {
-      return purchasedServiceTermsAnswer(relevantRows, namedScope.named);
+      return purchasedServiceTermsAnswer(relevantRows, namedScope.named,
+        namedScope.named ? namedScope.rows : rows);
     }
   }
   if (/\bsatisfaction\b/.test(question) && !/\b(callbacks?|money[- ]?back|re-?treat\w*|risk[- ]?free)\b/.test(question)) {
