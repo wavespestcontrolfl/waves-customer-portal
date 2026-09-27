@@ -230,7 +230,7 @@ function HelpCard({ children }) {
   );
 }
 
-function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, onRetry }) {
+function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, locationReviewRequired, onRetry }) {
   // Inspection GET can answer state:'ok' with availability:null and
   // service_area_unavailable:true (the county lookup itself failed, not a
   // verdict either way — Codex pre-push P1, 2026-09-24). Same recoverable
@@ -251,6 +251,16 @@ function EmptyTimesCard({ aiFiltered, serviceAreaUnavailable, onRetry }) {
           >
             Try again
           </button>
+        </div>
+        <ContactRow />
+      </Card>
+    );
+  }
+  if (locationReviewRequired) {
+    return (
+      <Card>
+        <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
+          We need to confirm your service address before we can schedule this re-service online. Text or call us and we&apos;ll take care of it.
         </div>
         <ContactRow />
       </Card>
@@ -817,8 +827,11 @@ function ReserviceHero({
           {data?.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}pests back between visits?
         </h1>
         <div style={{ marginTop: 12, color: S.body, fontSize: 16, lineHeight: 1.55 }}>
-          Breakthrough activity between regular visits is covered — pick a time
-          below and we&apos;ll send a tech back out at <strong style={{ color: S.text }}>no charge</strong>.
+          {data?.location_review_required ? (
+            <>Your re-service is covered at <strong style={{ color: S.text }}>no charge</strong>. We need to confirm the service address before we can schedule it.</>
+          ) : (
+            <>Breakthrough activity between regular visits is covered — pick a time below and we&apos;ll send a tech back out at <strong style={{ color: S.text }}>no charge</strong>.</>
+          )}
         </div>
       </div>
       <Card>
@@ -1512,6 +1525,14 @@ export default function ScheduleFlowPage({ flow }) {
     setData((prev) => (prev ? { ...prev, ...patch } : prev));
   }, []);
 
+  const showReserviceLocationReview = useCallback(() => {
+    setSelectedSlot(null);
+    setAiFiltered(false);
+    setAiSession((n) => n + 1);
+    mergeData({ availability: null, location_review_required: true });
+    setSubmitError(null);
+  }, [mergeData]);
+
   // Inspection only — the ONE client helper that refreshes availability on
   // any post-load path (Codex pre-push P1, 2026-09-24): "Show all open
   // times" after an AI search, and the SLOT_TAKEN recovery fallback, both
@@ -1570,6 +1591,10 @@ export default function ScheduleFlowPage({ flow }) {
     });
     const body = await res.json().catch(() => ({}));
     if (signal?.aborted) throw new Error('search superseded');
+    if (flow === 'reservice' && body.code === 'LOCATION_REVIEW_REQUIRED') {
+      showReserviceLocationReview();
+      return { summary: null };
+    }
     if (!res.ok) throw new Error(body.error || 'search failed');
     // Inspection: a terminal state (already_booked / converted / gone) from
     // the server's eligibility re-check replaces the page, exactly as the
@@ -1651,6 +1676,10 @@ export default function ScheduleFlowPage({ flow }) {
       if (flow === 'inspection' && res.ok && body.state && body.state !== 'ok') {
         setSelectedSlot(null);
         setData(body);
+        return;
+      }
+      if (flow === 'reservice' && body.code === 'LOCATION_REVIEW_REQUIRED') {
+        showReserviceLocationReview();
         return;
       }
       if (body.code === 'SLOT_TAKEN') {
@@ -1771,7 +1800,9 @@ export default function ScheduleFlowPage({ flow }) {
       {flow === 'reservice' && !selectedLane ? (
         <Card><p style={{ margin: 0, fontSize: 14, color: S.body }}>Choose a service above to see available times.</p></Card>
       ) : (<>
-        <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />
+        {flow === 'reservice' && data?.location_review_required
+          ? null
+          : <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />}
         <SchedulePicker
           availability={data?.availability}
           // Every other flow hides "Our best times for you" once an AI
@@ -1816,12 +1847,15 @@ export default function ScheduleFlowPage({ flow }) {
             <EmptyTimesCard
               aiFiltered={aiFiltered}
               serviceAreaUnavailable={flow === 'inspection' && !!data?.service_area_unavailable}
+              locationReviewRequired={flow === 'reservice' && !!data?.location_review_required}
               onRetry={load}
             />
           )}
         />
       </>)}
-      <HelpCard>Don&apos;t see a time that works? Text or call {WAVES_SUPPORT_PHONE_DISPLAY} and our team will fit you in.</HelpCard>
+      {flow === 'reservice' && data?.location_review_required
+        ? null
+        : <HelpCard>Don&apos;t see a time that works? Text or call {WAVES_SUPPORT_PHONE_DISPLAY} and our team will fit you in.</HelpCard>}
     </Page>
   );
 }

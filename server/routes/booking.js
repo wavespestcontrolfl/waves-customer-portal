@@ -7,6 +7,14 @@ const db = require('../models/db');
 const { isAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const {
+  estimateBelongsToCustomerAccount,
+  loadEstimateOwnershipSnapshots,
+  estimateOwnershipCustomerIds,
+  lockCustomerAccountRows,
+  estimateOwnershipMatchesLockedRows,
+  validateEstimateOwnershipUnderLock,
+} = require('../services/customer-account-ownership');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
@@ -147,7 +155,7 @@ const {
   CUSTOMER_HOUR_GRID, lunchBlockEnabled, customerWindowAdmits, refreshCustomerBookingWindowConfig,
 } = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
-const { selfBookDayCapEnabled, reserviceRankAfterNewLive } = require('../config/feature-gates');
+const { selfBookDayCapEnabled, reserviceRankAfterNewLive, bookCapacityCommitLive } = require('../config/feature-gates');
 const { etDateString, addETDays, addETBusinessDays } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -791,6 +799,26 @@ async function findUniqueCustomerByAddress(address, city, zip, unit) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+// A token-proven customer identifies an account, while the submitted address
+// identifies the property row that availability and confirmation must share.
+// This is the one account-property binding contract for both paths.
+async function findAccountPropertyByAddress(customer, { address, zip, unit }, conn = db) {
+  if (!customer || !address) return customer || null;
+  if (addressMatchesCustomer(customer, address, zip, unit)) return customer;
+  const accountId = customer.account_id || customer.id;
+  const accountRows = await conn('customers')
+    .where(function () {
+      this.where('account_id', accountId).orWhere('id', accountId);
+    })
+    .whereNot('id', customer.id)
+    .whereNull('deleted_at')
+    .andWhere(function () {
+      this.whereNull('active').orWhere('active', true);
+    })
+    .limit(25);
+  return (accountRows || []).find(row => addressMatchesCustomer(row, address, zip, unit)) || null;
+}
+
 // GET /api/booking/customer-lookup?phone=9415551234 OR ?address=...&city=...&zip=...
 router.get('/customer-lookup', async (req, res, next) => {
   try {
@@ -967,6 +995,10 @@ function inTimeOfDay(startTimeHHMM, timeOfDay) {
 // check here) would hand out someone else's rooftop-accurate location, so the
 // public routes round those (roundPublicCoord). Slot computation always uses
 // the exact values either way.
+function firstNonblankAddressValue(...values) {
+  return values.map(value => String(value ?? '').trim()).find(Boolean) || '';
+}
+
 async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
   let resolvedLat = lat ? parseFloat(lat) : null;
   let resolvedLng = lng ? parseFloat(lng) : null;
@@ -1002,6 +1034,76 @@ async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
   }
 
   return { lat: resolvedLat, lng: resolvedLng, disclosable };
+}
+
+// /book's offer location (/availability and /find-slots). When the request is
+// for an existing customer — the estimate's account property selected by the
+// typed address/unit, else the unique customer at that address (the step-1
+// lookup's own match) — confirmation books at
+// customerBookingLocation and refuses an offer signed on any other grid cell,
+// so the offer is built there too (Codex #4992 P1: a staff-verified pin the
+// address geocoder never returns would refuse every retry), and never
+// echoed exactly — it is a customer record's pin. A validated optional
+// bearer supplies the same account identity for bare signed-in entries;
+// estimate identity takes precedence for estimate links. Both offer routes
+// and /confirm ignore ambient bearer identity while customers-only is off.
+// Everyone else keeps resolveBookingCoords. estimate_id is a raw public
+// value: only a UUID (LEAD_ID_RE's shape) is looked up.
+async function resolveOfferCoords({
+  lat, lng, address, city, state, zip, unit, estimate_id,
+  authedCustomer,
+}) {
+  let customer = null;
+  let estimateBound = false;
+  const parsed = parseRawAddress(address || '');
+  const line1 = firstNonblankAddressValue(parsed.line1, address);
+  const locality = {
+    city: firstNonblankAddressValue(city, parsed.city),
+    state: firstNonblankAddressValue(state, parsed.state),
+    zip: firstNonblankAddressValue(zip, parsed.zip),
+  };
+  const submittedUnit = firstNonblankAddressValue(unit, submittedInlineUnit(line1));
+  if (LEAD_ID_RE.test(String(estimate_id || ''))) {
+    const customerId = (await db('estimates').where('id', estimate_id).first('customer_id'))?.customer_id;
+    estimateBound = !!customerId;
+    if (customerId) {
+      const primary = await db('customers').where({ id: customerId }).whereNull('deleted_at')
+        .first('id', 'account_id', 'active', 'deleted_at', 'latitude', 'longitude',
+          'address_line1', 'address_line2', 'city', 'state', 'zip');
+      customer = await findAccountPropertyByAddress(primary, {
+        address: line1, zip: locality.zip, unit: submittedUnit,
+      });
+    }
+  }
+  if (!estimateBound && authedCustomer) {
+    customer = await findAccountPropertyByAddress(authedCustomer, {
+      address: line1, zip: locality.zip, unit: submittedUnit,
+    });
+    // Callers supply a bearer row only under customers-only, matching
+    // confirmation's account boundary and its location binding.
+    if (!customer) return { lat: null, lng: null, disclosable: false };
+  }
+  // A bound estimate proves one account. If its submitted property matches
+  // none of that account's rows, confirmation refuses it; do not fall through
+  // to another household's globally unique address or the estimate's old pin.
+  if (estimateBound && !customer) return { lat: null, lng: null, disclosable: false };
+  if (!customer && address) {
+    const customerId = (await findUniqueCustomerByAddress(
+      line1,
+      locality.city,
+      locality.zip,
+      submittedUnit,
+    ))?.id;
+    customer = customerId
+      ? await db('customers').where({ id: customerId })
+        .first('id', 'account_id', 'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+      : null;
+  }
+  const pin = customer ? await customerBookingLocation(customer) : null;
+  if (customer) return pin ? { ...pin, disclosable: false } : { lat: null, lng: null, disclosable: false };
+  const stateZip = [locality.state, locality.zip].filter(Boolean).join(' ');
+  const geocodeAddressLine = [line1, locality.city, stateZip].filter(Boolean).join(', ');
+  return resolveBookingCoords({ lat, lng, address: geocodeAddressLine, city: locality.city, estimate_id: null });
 }
 
 // Load the singleton booking_config row, falling back to the same defaults the
@@ -1773,7 +1875,8 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
 }
 
 // GET /api/booking/availability
-//   query: lat, lng, address, city, service_type, duration_minutes, date_from, date_to
+//   query: lat, lng, address, city, state, zip, unit, estimate_id,
+//          service_type, duration_minutes, date_from, date_to
 router.get('/availability', async (req, res, next) => {
   try {
     const { isEnabled } = require('../config/feature-gates');
@@ -1782,7 +1885,7 @@ router.get('/availability', async (req, res, next) => {
     }
 
     const {
-      lat, lng, address, city, estimate_id,
+      lat, lng, address, city, state, zip, unit, estimate_id,
       service_type, duration_minutes,
       date_from, date_to,
     } = req.query;
@@ -1794,7 +1897,16 @@ router.get('/availability', async (req, res, next) => {
       max_self_books_per_day: 3,
     };
 
-    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveBookingCoords({ lat, lng, address, city, estimate_id });
+    const customersOnly = isEnabled('bookingCustomersOnly');
+    const { resolveBearerCustomer } = require('../middleware/auth');
+    const authedCustomer = customersOnly ? await resolveBearerCustomer(req) : null;
+    if (customersOnly && !authedCustomer && req.bearerTokenExpired) {
+      return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+    }
+    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({
+      lat, lng, address, city, state, zip, unit, estimate_id,
+      authedCustomer,
+    });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
@@ -1875,7 +1987,8 @@ const findSlotsHourlyLimiter = rateLimit({
 });
 
 // POST /api/booking/find-slots — Waves AI date/time search.
-//   body: { query, lat, lng, address, city, estimate_id, service_type, duration_minutes }
+//   body: { query, lat, lng, address, city, state, zip, unit, estimate_id,
+//           service_type, duration_minutes }
 //   Parses the natural-language "when" into a date window + time-of-day, then
 //   returns the matching open slots (same shape as /availability) plus a short
 //   summary line and a `nearby` flag for the soft route-density message.
@@ -1887,7 +2000,7 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
     }
 
     const {
-      query, lat, lng, address, city, estimate_id,
+      query, lat, lng, address, city, state, zip, unit, estimate_id,
       service_type, duration_minutes,
     } = req.body || {};
     const cleanQuery = String(query || '').trim();
@@ -1901,7 +2014,16 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
       max_self_books_per_day: 3,
     };
 
-    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveBookingCoords({ lat, lng, address, city, estimate_id });
+    const customersOnly = isEnabled('bookingCustomersOnly');
+    const { resolveBearerCustomer } = require('../middleware/auth');
+    const authedCustomer = customersOnly ? await resolveBearerCustomer(req) : null;
+    if (customersOnly && !authedCustomer && req.bearerTokenExpired) {
+      return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+    }
+    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({
+      lat, lng, address, city, state, zip, unit, estimate_id,
+      authedCustomer,
+    });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
@@ -1965,6 +2087,44 @@ function seededRowPin(row, offerLat, offerLng) {
     lat: own(row?.lat) ?? fallback(offerLat),
     lng: own(row?.lng) ?? fallback(offerLng),
   };
+}
+
+function storedBookingPin(customer) {
+  const pair = [customer?.latitude, customer?.longitude];
+  if (pair.some(value => value == null || String(value).trim() === '' || !Number.isFinite(Number(value)) || Number(value) === 0)) return null;
+  return { lat: Number(pair[0]), lng: Number(pair[1]) };
+}
+
+function bookingAddressStamp(customer) {
+  return Object.fromEntries(['line1', 'line2', 'city', 'state', 'zip'].map(part => [
+    `service_address_${part}`,
+    customer?.[part.startsWith('line') ? `address_${part}` : part] || null,
+  ]));
+}
+
+// Load a missing primary pin from the server-owned address before taking
+// scheduling locks. The public echo proves the signed grid, not an exact
+// customer pin, so it must never be persisted as our geocoding authority.
+async function preloadBookingLocation(customer) {
+  if (!customer || storedBookingPin(customer)) return null;
+  const review = await require('../services/customer-geocode-review').reviewedServiceLocation({
+    customer_id: customer.id, ...bookingAddressStamp(customer),
+  });
+  if (review) return review.location;
+  return require('../services/scheduling/day-stops').resolveServiceLocation({
+    ...customer, lat: null, lng: null,
+  });
+}
+
+// The pin a booking for this existing customer commits at: its stored pin,
+// else preloadBookingLocation's staff-verified pin or canonical geocode of
+// the server-owned address — null while a staff review holds it, or when
+// nothing resolves. The offer paths build on it too (resolveOfferCoords,
+// reservice-public's buildAvailabilityForCustomer), so an offer is made at
+// the location its confirmation re-derives (Codex #4992 P1).
+async function customerBookingLocation(customer) {
+  const location = storedBookingPin(customer) || await preloadBookingLocation(customer);
+  return storedBookingPin({ latitude: location?.lat, longitude: location?.lng });
 }
 
 // createSelfBooking — the booking-commit operation behind POST /api/booking/confirm,
@@ -2103,26 +2263,11 @@ async function createSelfBooking(payload = {}) {
     // the wrong door. No submitted address → the row's own address is the
     // booking address, bind directly.
     const bindCustomerRowByAddress = async (row) => {
-      const submittedLine1 = new_customer?.address_line1;
-      if (!submittedLine1) return { custId: row.id };
-      let matched = addressMatchesCustomer(row, submittedLine1, new_customer?.zip, new_customer?.address_line2)
-        ? row : null;
-      if (!matched) {
-        const accountId = row.account_id || row.id;
-        const accountRows = await db('customers')
-          .where(function () {
-            this.where('account_id', accountId).orWhere('id', accountId);
-          })
-          .whereNot('id', row.id)
-          .whereNull('deleted_at')
-          .andWhere(function () {
-            this.whereNull('active').orWhere('active', true);
-          })
-          .limit(25);
-        matched = (accountRows || []).find(
-          (r) => addressMatchesCustomer(r, submittedLine1, new_customer?.zip, new_customer?.address_line2),
-        ) || null;
-      }
+      const matched = await findAccountPropertyByAddress(row, {
+        address: new_customer?.address_line1,
+        zip: new_customer?.zip,
+        unit: new_customer?.address_line2,
+      });
       if (!matched) {
         return {
           error: {
@@ -2540,6 +2685,14 @@ async function createSelfBooking(payload = {}) {
       Number.isFinite(offerLat) ? offerLat : null,
       Number.isFinite(offerLng) ? offerLng : null,
     );
+    // The signed coordinates above prove what the availability builder
+    // offered. Dispatch normally inherits the customer's live pin; a missing
+    // pin needs a server-resolved visit stamp instead. Reload and fence that
+    // effective location before any conflict/capacity simulation so those
+    // checks model the same exact point as the inserted visit.
+    let bookingLat = Number.isFinite(offerLat) ? offerLat : null;
+    let bookingLng = Number.isFinite(offerLng) ? offerLng : null;
+    let bookingLocationStamp = null;
     // An empty serviceKey can never have been offered by the funnel (both
     // public offer routes derive a key the same way) — refuse outright so a
     // sig harvested from a non-redeeming builder call (reschedule/voice
@@ -2688,7 +2841,7 @@ async function createSelfBooking(payload = {}) {
       const srcEstIdStr = String(sourceEstimateRow.id);
       let owned = false;
       if (sourceEstimateRow.customer_id) {
-        owned = String(sourceEstimateRow.customer_id) === String(custId);
+        owned = await estimateBelongsToCustomerAccount(db, sourceEstimateRow, customer);
       } else {
         const last10 = (v) => {
           const digits = String(v || '').replace(/\D/g, '');
@@ -2882,7 +3035,7 @@ async function createSelfBooking(payload = {}) {
         const pricingEstimateEligible = pricingShapeEligible(pricingEstimate);
         const pricingTrusted = handoffTokenValid
           && pricingEstimateEligible
-          && String(pricingEstimate.customer_id) === String(custId);
+          && await estimateBelongsToCustomerAccount(db, pricingEstimate, customer);
         // The verified LINKED-estimate path (/book/:estimateToken posts
         // estimate_id) still prices as it did before the handoff landed: that
         // estimate resolved identity above (non-quote_wizard only), so pricing
@@ -2890,7 +3043,7 @@ async function createSelfBooking(payload = {}) {
         // customer_id pair can't stamp another customer's price.
         const linkedEstimatePriceable = !!estimate
           && estimate.source !== 'quote_wizard'
-          && String(estimate.customer_id) === String(custId);
+          && await estimateBelongsToCustomerAccount(db, estimate, customer);
         // NON-pest wizard series: the quote's own cadence supplies the
         // divisor, under the same trust (token + shape + customer match)
         // and the same signed-service bind the pest rule uses — and ONLY
@@ -3023,16 +3176,61 @@ async function createSelfBooking(payload = {}) {
       // the fence and clears an inherited address/contact, the booking
       // must retry against live state, not commit on stale assumptions.
       const COMMS_FINGERPRINT_COLS = [
-        'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone',
+        'account_id', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone',
         ...[1, 2, 3].flatMap((n) => {
           const pfx = n === 1 ? 'service_contact' : `service_contact${n}`;
           return [`${pfx}_name`, `${pfx}_phone`, `${pfx}_email`, `${pfx}_role`];
         }),
       ];
       const commsFingerprint = (r) => COMMS_FINGERPRINT_COLS.map((c) => r?.[c] || '').join('|');
+      // Snapshot every estimate the visit will stamp before entering the
+      // scheduling transaction. Its current owner contributes a comms fence
+      // below; after that fence the estimate row and owner account are held
+      // FOR SHARE through the visit insert. A merge undo therefore either
+      // finishes its repoint before this snapshot is revalidated or waits for
+      // the booking to commit — it cannot change the owner after our check.
+      const stampedEstimateRefs = [...new Set([estimate?.id, sourceEstimateId].filter(Boolean).map(String))];
+      const estimateOwnershipSnapshots = await loadEstimateOwnershipSnapshots(db, stampedEstimateRefs);
+      const estimateOwnershipById = new Map(estimateOwnershipSnapshots.map(snapshot => [snapshot.id, snapshot]));
       const preFenceCustomer = custId
-        ? await db('customers').where({ id: custId }).first(...COMMS_FINGERPRINT_COLS)
+        ? await db('customers').where({ id: custId }).first('id', ...COMMS_FINGERPRINT_COLS, 'latitude', 'longitude')
         : null;
+      // A genuine re-service rebuilds availability from the customer's
+      // server-owned address just before calling this commit path. Preserve
+      // that same fallback when the legacy profile has no saved pin. The
+      // assessment caller already supplies expectedLocation from its own
+      // resolved/fenced property flow, so it must not trigger a second,
+      // potentially divergent geocode here.
+      const shouldResolveMissingBookingLocation = !callbackVisit || callbackVisit.isCallback !== false;
+      const preloadedBookingLocation = shouldResolveMissingBookingLocation
+        ? await preloadBookingLocation(preFenceCustomer)
+        : null;
+      // Spend the traffic budget before scheduling locks. The verifier below
+      // reuses this request-local travel object only when the locked route's
+      // fingerprint still matches, and never makes a provider request.
+      let preparedCapacity = null;
+      if (technician_id && bookCapacityCommitLive() && capacityEnabled()) {
+        const preparedPin = storedBookingPin(preFenceCustomer)
+          || storedBookingPin({
+            latitude: preloadedBookingLocation?.lat,
+            longitude: preloadedBookingLocation?.lng,
+          })
+          || storedBookingPin({ latitude: bookingLat, longitude: bookingLng });
+        const { prepareArrivalCapacity } = require('../services/scheduling/arrival-route');
+        preparedCapacity = await prepareArrivalCapacity({
+          date: slotDateStr,
+          technicianId: technician_id,
+          prospective: {
+            lat: preparedPin?.lat ?? null,
+            lng: preparedPin?.lng ?? null,
+            estimated_duration_minutes: duration,
+            service_type: resolvedServiceType,
+          },
+          windowStart: slot_start,
+          windowEnd: endTime,
+          durationMinutes: duration,
+        });
+      }
       txResult = await db.transaction(async (trx) => {
       // RUNG 1 — date-wide occupancy lock, FIRST (see the ORDERING CONTRACT
       // in services/scheduling/occupancy.js). This path's own conflict gate
@@ -3058,10 +3256,22 @@ async function createSelfBooking(payload = {}) {
       // global order) so concurrent confirms can't deadlock.
       const zoneSlug = zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null;
       if (technician_id) {
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['slot-reserve', `${technician_id}:${slotDateStr}`],
-        );
+        if (preparedCapacity) {
+          // verifyArrivalCapacity fingerprints selected AND unassigned stops.
+          // Dispatch moves a stop to unassigned while holding its source-day
+          // and unassigned-day fences, so hold both in the shared canonical
+          // order before any row lock and through verification + insertion.
+          const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+          await lockTechDays(trx, [
+            { techId: technician_id, date: slotDateStr },
+            { techId: null, date: slotDateStr },
+          ]);
+        } else {
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['slot-reserve', `${technician_id}:${slotDateStr}`],
+          );
+        }
       }
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -3144,16 +3354,27 @@ async function createSelfBooking(payload = {}) {
       // below resolves its comms recipients LIVE from the customer row, so
       // it must serialize against a concurrent customer-merge undo's
       // absence probes — after the scheduling rungs, BEFORE every row lock.
-      // The consultation page fences EVERY profile its lead touches first,
-      // in sorted order (Codex #4737 r22 P0 — the same order the waitlist
-      // uses); re-taking this customer's own fence below is a no-op.
+      // The consultation page fences EVERY profile its lead touches. Estimate
+      // ownership adds the current owner of every estimate this visit will
+      // stamp. Take the whole set in canonical id order before any customer
+      // or estimate row lock: merge undo takes the estimate owner's same
+      // customer-comms fence before it can repoint that estimate, so the
+      // ownership check below stays true through the final insert.
+      const commsFenceIds = new Set(
+        [custId, ...estimateOwnershipSnapshots.map(snapshot => snapshot.customerId)]
+          .filter(Boolean)
+          .map(String),
+      );
       if (typeof callbackVisit?.leadDedupe?.fenceIds === 'function') {
-        for (const id of await callbackVisit.leadDedupe.fenceIds(trx)) await lockCustomerComms(trx, id);
+        for (const id of await callbackVisit.leadDedupe.fenceIds(trx)) {
+          if (id) commsFenceIds.add(String(id));
+        }
       }
-      await lockCustomerComms(trx, custId);
+      for (const id of [...commsFenceIds].sort()) await lockCustomerComms(trx, id);
       if (custId) {
         const freshBookingCustomer = await trx('customers')
-          .where({ id: custId }).first(...COMMS_FINGERPRINT_COLS);
+          .where({ id: custId }).forShare()
+          .first('id', ...COMMS_FINGERPRINT_COLS, 'latitude', 'longitude');
         if (!freshBookingCustomer || commsFingerprint(freshBookingCustomer) !== commsFingerprint(preFenceCustomer)) {
           throw Object.assign(new Error('Your account details just changed — please refresh and book again.'), {
             statusCode: 409,
@@ -3161,14 +3382,62 @@ async function createSelfBooking(payload = {}) {
             code: 'CUSTOMER_CHANGED_RETRY',
           });
         }
+        let freshPin = storedBookingPin(freshBookingCustomer);
+        const missingPinUnchanged = ['latitude', 'longitude'].every(
+          column => (freshBookingCustomer[column] ?? null) === (preFenceCustomer[column] ?? null),
+        );
+        if (shouldResolveMissingBookingLocation && !freshPin && missingPinUnchanged && !storedBookingPin(preFenceCustomer)) {
+          // A customer can have server-built availability without a saved
+          // pin. Preserve that resolved location, but only while the same
+          // address/missing pair still holds. Never resurrect a cleared pin
+          // or bypass a staff review recorded while the lookup was running.
+          const reviewed = await require('../services/customer-geocode-review').reviewedServiceLocation({
+            customer_id: custId, ...bookingAddressStamp(freshBookingCustomer),
+          }, trx);
+          const resolved = reviewed ? reviewed.location : preloadedBookingLocation;
+          freshPin = storedBookingPin({ latitude: resolved?.lat, longitude: resolved?.lng });
+          if (freshPin) {
+            bookingLocationStamp = { ...freshPin, ...bookingAddressStamp(freshBookingCustomer) };
+          }
+        }
+        bookingLat = freshPin?.lat ?? null;
+        bookingLng = freshPin?.lng ?? null;
+        // Public offers bind the pin on the same rounded grid used by the
+        // availability response. A move to another grid cell invalidates the
+        // offer. An exact correction inside the same cell can still drive the
+        // overlap check; when a traffic proof was prepared, the exact-point
+        // comparison below requires a fresh offer instead.
+        // Re-service callbacks have no signed location key. They still must
+        // refuse an invalidated/held fallback, including when capacity is off
+        // or no technician is bound; a null pin cannot reach the visit insert.
+        if ((shouldResolveMissingBookingLocation && !freshPin)
+          || (!callbackVisit && bookingOfferLocationKey(bookingLat, bookingLng) !== offerLocationKey)) {
+          throw Object.assign(new Error('Your address just changed — please pick a time again.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'LOCATION_CHANGED_RETRY',
+          });
+        }
+        // The prepared traffic legs are exact-coordinate inputs. A profile
+        // correction inside the public signature's rounded grid is safe for
+        // overlap-only commits, but cannot reuse traffic prepared for the old
+        // point. Retry before verify instead of certifying a different door.
+        const preparedPoint = preparedCapacity?.options?.prospective;
+        if (preparedPoint
+          && (Number(preparedPoint.lat) !== bookingLat || Number(preparedPoint.lng) !== bookingLng)) {
+          throw Object.assign(new Error('Your address just changed — please pick a time again.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'LOCATION_CHANGED_RETRY',
+          });
+        }
         // callbackVisit.expectedLocation (consultation page only, Codex #4737
         // r5 P1): the location the caller validated the slot for must still be
         // the customer's, checked under this fence — another commit can have
         // replaced the address after the caller's own lock released.
         if (callbackVisit?.expectedLocation) {
-          const pin = await trx('customers').where({ id: custId }).first('latitude', 'longitude');
           const same = (a, b) => a != null && Math.abs(parseFloat(a) - Number(b)) < 1e-6;
-          if (!pin || !same(pin.latitude, callbackVisit.expectedLocation.lat) || !same(pin.longitude, callbackVisit.expectedLocation.lng)) {
+          if (!same(bookingLat, callbackVisit.expectedLocation.lat) || !same(bookingLng, callbackVisit.expectedLocation.lng)) {
             throw Object.assign(new Error('Your address just changed — please pick a time again.'), {
               statusCode: 409,
               isOperational: true,
@@ -3185,10 +3454,12 @@ async function createSelfBooking(payload = {}) {
         // source estimate already books UNLINKED (fail-open ownership
         // gate above), and revalidating its row here would 409 a booking
         // that stamps nothing from it.
-        for (const estRef of [estimate?.id, sourceEstimateId]) {
-          if (!estRef) continue;
-          const freshEst = await trx('estimates').where({ id: estRef }).first('id', 'customer_id');
-          if (!freshEst || (freshEst.customer_id && String(freshEst.customer_id) !== String(custId))) {
+        for (const estRef of stampedEstimateRefs) {
+          if (!await validateEstimateOwnershipUnderLock(
+            trx,
+            estimateOwnershipById.get(estRef),
+            freshBookingCustomer,
+          )) {
             throw Object.assign(new Error('Your quote was just updated — please refresh and book again.'), {
               statusCode: 409,
               isOperational: true,
@@ -3565,8 +3836,8 @@ async function createSelfBooking(payload = {}) {
         // Travel gap (GATE_SLOT_TRAVEL_GAP): the booking's own pin, resolved
         // for the offer location key above; NaN → null → buffer-only.
         travel: {
-          lat: Number.isFinite(offerLat) ? offerLat : null,
-          lng: Number.isFinite(offerLng) ? offerLng : null,
+          lat: bookingLat,
+          lng: bookingLng,
           // Same credit buildBookingAvailability offered this window under.
           // expectedIdentity: consultation page only (#4737 r1 P2).
           expectedMinutes: await bookingExpectedMinutes(trx, serviceKey, duration, callbackVisit?.expectedIdentity || null),
@@ -3579,6 +3850,22 @@ async function createSelfBooking(payload = {}) {
           code: 'SLOT_TAKEN',
         });
       }
+
+      // Verify the traffic-aware prepared proof under the existing tech-day
+      // lock. A changed route fingerprint or infeasible live fit refuses the
+      // slot; a verified corrected order is persisted after insertion.
+      const capacityServiceTypes = callbackVisit
+        ? [resolvedServiceType]
+        : normalizeBookingServiceKeys(serviceKey).map(key => BOOKING_FUNNEL_SERVICE_LABELS[key]);
+      const capacityCommitFit = preparedCapacity
+        ? await require('../services/scheduling/arrival-route').verifyArrivalCapacity(preparedCapacity, {
+          conn: trx,
+          windowStart: slot_start,
+          windowEnd: endTime,
+          durationMinutes: duration,
+          serviceTypes: capacityServiceTypes,
+        })
+        : null;
 
       const [bookingRow] = await trx('self_booked_appointments').insert({
         customer_id: custId,
@@ -3640,6 +3927,9 @@ async function createSelfBooking(payload = {}) {
         throw err;
       }
       const [scheduledRow] = await trx('scheduled_services').insert({
+        // A geocoded fallback has no customer pin to inherit. Persist the
+        // exact checked pair and its address on THIS visit, not the profile.
+        ...(bookingLocationStamp || {}),
         ...(pestDuplicateKeptAtBooking ? { wizard_recovery_reconciled_at: trx.fn.now() } : {}),
         ...(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration
           ? { source_estimate_generation: sourceEstimateGeneration }
@@ -3713,6 +4003,11 @@ async function createSelfBooking(payload = {}) {
         await trx('scheduled_services')
           .where({ id: scheduledRow.id })
           .update({ notes: trx.raw("COALESCE(notes, '') || ' — booked beside an existing pest plan; kept as a one-off visit (no second series seeded)'") });
+      }
+      // Apply the certified order only after the candidate has a stored id.
+      if (capacityCommitFit) {
+        const { persistArrivalOrder } = require('../services/scheduling/arrival-route');
+        await persistArrivalOrder(trx, capacityCommitFit, scheduledRow.id);
       }
       // Visit groups (visit-group-scope.md §2): the primary self-booked row
       // stamps at scheduling, same as the seeded series rows below.
@@ -3829,7 +4124,7 @@ async function createSelfBooking(payload = {}) {
       // customer's CURRENT address" outcome the consultation page's
       // sendBookingFailure answers the same way it answers a slot race
       // (409, refreshed availability), never the global error handler.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED') {
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED' || txErr.code === 'SLOT_UNAVAILABLE' || txErr.code === 'SELF_SERVE_NOTICE' || txErr.code === 'LOCATION_CHANGED_RETRY' || txErr.code === 'CUSTOMER_CHANGED_RETRY' || txErr.code === 'ADDRESS_UNVERIFIED') {
         // Undo a profile this request just created: leaving it would make
         // the customer's retry with a different slot hit the
         // phone-already-on-file 409 and strand them entirely. The row is
@@ -3857,7 +4152,8 @@ async function createSelfBooking(payload = {}) {
         // code rides along so the reservice route can distinguish the lane
         // dedupe from a slot race; /confirm's response shape is unchanged
         // (it reads only error + customersOnly fields).
-        return { ok: false, status: 409, error: txErr.message, code: txErr.code || null };
+        return { ok: false, status: 409, error: txErr.message,
+          code: txErr.code === 'SLOT_UNAVAILABLE' ? 'SLOT_TAKEN' : (txErr.code || null) };
       }
       throw txErr;
     }
@@ -3906,12 +4202,31 @@ async function createSelfBooking(payload = {}) {
     const { verifyEstimateHandoffToken: verifyFeeHandoffToken } = require('../utils/estimate-handoff-token');
     const setupFeeHandoffEligible = !!pricing_estimate_id
       && verifyFeeHandoffToken(pricing_estimate_id, estimate_token);
-    const stampDisclosedSetupFee = async (outerTrx, { allowStamp = true, stampServiceRow = null } = {}) => {
+    const stampDisclosedSetupFee = async (outerTrx, {
+      allowStamp = true,
+      stampServiceRow = null,
+      ownershipSnapshot = null,
+    } = {}) => {
             await outerTrx.transaction(async (sp) => {
-                const freshPricingEst = await sp('estimates')
-                  .where({ id: pricing_estimate_id })
-                  .forUpdate()
-                  .first('*');
+                const snapshot = ownershipSnapshot
+                  || (await loadEstimateOwnershipSnapshots(sp, [pricing_estimate_id]))[0];
+                const ownershipCustomerIds = estimateOwnershipCustomerIds(snapshot, custId);
+                for (const id of ownershipCustomerIds) await lockCustomerComms(sp, id);
+                // Lock account membership before the draft. A merge changes
+                // these rows before it repoints estimates; waiting here and
+                // then comparing the locked current rows prevents a stale
+                // sibling relationship from stamping or archiving a draft.
+                const lockedOwnershipCustomers = await lockCustomerAccountRows(
+                  sp,
+                  ownershipCustomerIds,
+                  { forUpdate: true, columns: ['*'] },
+                );
+                const freshPricingEst = await validateEstimateOwnershipUnderLock(
+                  sp,
+                  snapshot,
+                  custId,
+                  { forUpdate: true, columns: ['*'], lockedCustomers: lockedOwnershipCustomers },
+                );
                 const { wizardDraftSelfServeBookable } = require('../services/booking-pay-at-visit');
                 if (!freshPricingEst || !wizardDraftSelfServeBookable(freshPricingEst)) return;
                 // Ownership: a mirrored draft carries this customer's id; a
@@ -3923,14 +4238,13 @@ async function createSelfBooking(payload = {}) {
                 // (Codex #3489: null !== custId silently dropped the
                 // stamp). A draft linked to a DIFFERENT customer never
                 // stamps.
-                if (freshPricingEst.customer_id) {
-                  if (String(freshPricingEst.customer_id) !== String(custId)) return;
-                } else {
+                if (!freshPricingEst.customer_id) {
                   const last10 = (v) => {
                     const digits = String(v || '').replace(/\D/g, '');
                     return digits.length >= 10 ? digits.slice(-10) : '';
                   };
-                  const bookerRow = await sp('customers').where({ id: custId }).first('phone', 'email');
+                  const bookerRow = lockedOwnershipCustomers
+                    .find(row => String(row.id) === String(custId));
                   const estPhone10 = last10(freshPricingEst.customer_phone);
                   const estEmail = String(freshPricingEst.customer_email || '').trim().toLowerCase();
                   const contactMatches = estPhone10
@@ -3985,7 +4299,6 @@ async function createSelfBooking(payload = {}) {
                   const configuredSetupFee = `$${(Math.round(Number(RODENT.baitSetupFee) * 100) / 100).toFixed(2).replace(/\.00$/, '')}`;
                   const DRAFT_WAIVING_FAMILIES = ['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait'];
                   if (draftLineServices.some((svc) => DRAFT_WAIVING_FAMILIES.includes(svc))) return;
-                  await sp('customers').where({ id: custId }).forUpdate().first('id');
                   const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
                   const liveFamilies = (await loadExistingQualifyingServiceKeys(sp, custId, { strict: true, planGate: false }) || [])
                     .filter((key) => key !== 'rodent_bait');
@@ -4046,10 +4359,8 @@ async function createSelfBooking(payload = {}) {
                   && (signedFeeComponents.length === 0
                     || !signedFeeComponents.every(draftHasComponent))) return;
                 const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
-                const freshCustomer = await sp('customers')
-                  .where({ id: custId })
-                  .forUpdate()
-                  .first();
+                const freshCustomer = lockedOwnershipCustomers
+                  .find(row => String(row.id) === String(custId));
                 const activeMember = !!freshCustomer
                   && freshCustomer.active !== false
                   && isMembershipCustomerRow(freshCustomer);
@@ -4272,6 +4583,9 @@ async function createSelfBooking(payload = {}) {
       let parentExtension = null;
       try {
         const outcome = await runSeriesTxWithOwnerRetry(db, async (trx) => {
+          const activationOwnershipSnapshot = (
+            await loadEstimateOwnershipSnapshots(trx, [pricing_estimate_id])
+          )[0];
           // Rung 1 FIRST (scheduling/occupancy.js ORDERING CONTRACT — the
           // per-date occupancy locks precede every other lock, and taking
           // them after the comms/row locks below can deadlock with normal
@@ -4291,7 +4605,11 @@ async function createSelfBooking(payload = {}) {
           const lockedSeedDates = [...new Set([slotDateStr, ...plannedSeedDates])].filter(Boolean).sort();
           await acquireOccupancyLocks(trx, lockedSeedDates);
           const lockedSeedDateSet = new Set(lockedSeedDates);
-          await lockCustomerComms(trx, custId);
+          const activationOwnershipCustomerIds = estimateOwnershipCustomerIds(
+            activationOwnershipSnapshot,
+            custId,
+          );
+          for (const id of activationOwnershipCustomerIds) await lockCustomerComms(trx, id);
           // Customer row lock BEFORE any scheduled_services row lock/write in
           // this transaction (Codex #4716 r2 P1): the parent-row FOR UPDATE
           // just below (lockedParent) used to run first, with the customer
@@ -4305,7 +4623,11 @@ async function createSelfBooking(payload = {}) {
           // here, before lockedParent, puts this transaction on the same
           // customer -> row order as the merge and every other creator in
           // this file.
-          await trx('customers').where({ id: custId }).forUpdate().first('id');
+          const activationOwnershipCustomers = await lockCustomerAccountRows(
+            trx,
+            activationOwnershipCustomerIds,
+            { forUpdate: true, columns: ['*'] },
+          );
           // Duplicate-confirmation idempotency (codex #3504 r2 P1): a replay
           // can observe the pricing draft still live BEFORE the winner's
           // activation commits, pass the replay pre-checks, and wait here on
@@ -4461,9 +4783,13 @@ async function createSelfBooking(payload = {}) {
           // #3504): a concurrent refresh/promotion can leave the same
           // recurring line on an archived/promoted/commercial/mixed draft.
           const { wizardDraftSelfServeBookable: lockedShapeOk } = require('../services/booking-pay-at-visit');
-          const freshPlan = (lockedDraft
-            && String(lockedDraft.customer_id) === String(custId)
-            && lockedShapeOk(lockedDraft))
+          const lockedDraftOwned = estimateOwnershipMatchesLockedRows(
+            activationOwnershipSnapshot,
+            lockedDraft,
+            custId,
+            activationOwnershipCustomers,
+          );
+          const freshPlan = (lockedDraftOwned && lockedShapeOk(lockedDraft))
             ? freshPlanFor(lockedDraft, RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }))
             : null;
           const freshPriced = freshPlan
@@ -4582,7 +4908,11 @@ async function createSelfBooking(payload = {}) {
             // alone is passive — the office must decide whether this extra
             // visit rides the existing series or gets billed another way.
             await notifySeriesStripInTx(trx, seriesParentRow.id, 'the customer already has an active series for this service');
-            await stampDisclosedSetupFee(trx, { allowStamp: false, stampServiceRow: seriesParentRow });
+            await stampDisclosedSetupFee(trx, {
+              allowStamp: false,
+              stampServiceRow: seriesParentRow,
+              ownershipSnapshot: activationOwnershipSnapshot,
+            });
             return { kept: matches[0] };
           }
           const activationFamilyKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
@@ -4737,8 +5067,8 @@ async function createSelfBooking(payload = {}) {
               // extension can eat the gap without overlapping the next stop
               // (GH codex #3803 r3 P1). Same booking pin as the commit probe.
               travel: {
-                lat: Number.isFinite(offerLat) ? offerLat : null,
-                lng: Number.isFinite(offerLng) ? offerLng : null,
+                lat: bookingLat,
+                lng: bookingLng,
               },
             });
             if (extensionClashes.length === 0) {
@@ -4865,7 +5195,7 @@ async function createSelfBooking(payload = {}) {
               // stamped pin (the seeder copies the parent's lat/lng), else
               // the booking pin the parent commit measured with — the
               // mirrored guard every commit surface carries (pre-push P1).
-              travel: seededRowPin(row, offerLat, offerLng),
+              travel: seededRowPin(row, bookingLat, bookingLng),
             });
             if (clashes.length > 0) {
               // Demote the colliding occurrence to the documented
@@ -4895,7 +5225,10 @@ async function createSelfBooking(payload = {}) {
           }
 
           if (setupFeeHandoffEligible) {
-            await stampDisclosedSetupFee(trx, { stampServiceRow: seriesParentRow });
+            await stampDisclosedSetupFee(trx, {
+              stampServiceRow: seriesParentRow,
+              ownershipSnapshot: activationOwnershipSnapshot,
+            });
           }
           // Fee-exempt families (lawn/tree quotes freeze no setup fee):
           // the stamp helper returns without consuming the draft, but the
@@ -5323,12 +5656,19 @@ async function createSelfBooking(payload = {}) {
     if (shouldSeedQuarterlyPestFollowUps && !pestDuplicateKeptAtBooking) {
       try {
         const outcome = await runSeriesTxWithOwnerRetry(db, async (trx) => {
+          const seedingOwnershipSnapshot = (
+            await loadEstimateOwnershipSnapshots(trx, [pricing_estimate_id])
+          )[0];
           // Rung 6 FIRST (Codex #3109 r37): admin/manual series creators
           // take customer-comms and THEN the series guard — this fresh
           // post-commit seeding transaction must acquire in the same
           // order, or concurrent creation for the same customer/service
           // deadlocks (the in-seeder acquire is then reentrant).
-          await lockCustomerComms(trx, custId);
+          const seedingOwnershipCustomerIds = estimateOwnershipCustomerIds(
+            seedingOwnershipSnapshot,
+            custId,
+          );
+          for (const id of seedingOwnershipCustomerIds) await lockCustomerComms(trx, id);
           // Customer row lock BEFORE the series-advisory lock (Codex #4716
           // r1 P1) — the same customer → series-advisory order admin-
           // schedule.js (~7186) and this file's own in-booking guard
@@ -5342,7 +5682,7 @@ async function createSelfBooking(payload = {}) {
           // waiting on the customer row the merge already holds, and the
           // merge waits on the advisory lock this transaction holds — a
           // deadlock Postgres resolves by aborting one side.
-          await trx('customers').where({ id: custId }).forUpdate().first('id');
+          await lockCustomerAccountRows(trx, seedingOwnershipCustomerIds, { forUpdate: true });
           // Re-read the parent under lock and confirm it is STILL this
           // customer's (Codex #4716 r3 P1): a merge can commit between the
           // booking's own transaction and this post-commit one, repointing
@@ -5435,7 +5775,10 @@ async function createSelfBooking(payload = {}) {
           // pricing path checks (draft shape, customer ownership) is
           // re-read fresh under the savepoint below.
           if (setupFeeHandoffEligible) {
-            await stampDisclosedSetupFee(trx, { stampServiceRow: effectiveParent });
+            await stampDisclosedSetupFee(trx, {
+              stampServiceRow: effectiveParent,
+              ownershipSnapshot: seedingOwnershipSnapshot,
+            });
             // NO catch here: an ERROR while deciding/stamping must abort
             // this whole seeding transaction - series and fee obligation
             // commit together or not at all, never a series with a
@@ -6209,6 +6552,8 @@ module.exports._internals = {
   // phoned-in availability check runs the exact same route-aware slot finder as
   // the web /book funnel (no duplicated scheduling logic).
   resolveBookingCoords,
+  resolveOfferCoords,
+  customerBookingLocation,
   buildBookingAvailability,
   bookingExpectedMinutes,
   loadBookingConfig,
