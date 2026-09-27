@@ -319,4 +319,26 @@ describe('no request data is logged', () => {
     expect(line).not.toContain('parrishpestcontrol.com');
     expect(line).toContain('23505');
   });
+
+  test('a code-less failure never logs its message (knex embeds the SQL and bound values)', async () => {
+    const leaky = `insert into "blog_read_depth_daily" ("day", "site", "path", "milestone") values (..., 'parrishpestcontrol.com', '${GOOD_BODY.p}', '50') - Connection terminated unexpectedly`;
+    mockInsert.mockImplementationOnce(() => { throw new Error(leaky); });
+    const res = await post(GOOD_BODY, { origin: SPOKE_ORIGIN });
+    expect(res.status).toBe(204);
+    await new Promise((r) => setImmediate(r));
+    expect(mockLoggerWarn).toHaveBeenCalledTimes(1);
+    const [line] = mockLoggerWarn.mock.calls[0];
+    expect(line).toBe('[blog-read-depth] write failed: Error');
+  });
+
+  test('errorKind keeps only a plain code or class name', () => {
+    const { errorKind } = require('../routes/public-blog-read-depth')._private;
+    expect(errorKind(Object.assign(new Error('x'), { code: 'ECONNRESET' }))).toBe('ECONNRESET');
+    expect(errorKind(Object.assign(new Error('x'), { code: 'bad code /pest-control/a/' }))).toBe('Error');
+    const timeout = new Error('Knex: Timeout acquiring a connection');
+    timeout.name = 'KnexTimeoutError';
+    expect(errorKind(timeout)).toBe('KnexTimeoutError');
+    expect(errorKind({ name: 'not an error class /x/' })).toBe('error');
+    expect(errorKind(undefined)).toBe('error');
+  });
 });

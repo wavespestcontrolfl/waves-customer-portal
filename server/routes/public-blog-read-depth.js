@@ -99,6 +99,18 @@ function resolveSite(req) {
   return site || null;
 }
 
+// Only a fixed error KIND ever reaches the log: a pg SQLSTATE / Node errno
+// code, else the error's class name, else 'error'. Never err.message — knex
+// prefixes it with the SQL and its bound values (site/path/milestone), e.g.
+// on a code-less "Connection terminated unexpectedly".
+function errorKind(err) {
+  const code = err && err.code;
+  if (typeof code === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(code)) return code;
+  const name = err && err.name;
+  if (typeof name === 'string' && /^[A-Za-z]{0,60}Error$/.test(name)) return name;
+  return 'error';
+}
+
 async function writeCount(site, path, milestone) {
   await db('blog_read_depth_daily')
     .insert({
@@ -167,10 +179,10 @@ router.post('/', (req, res) => {
     // Never log the path/milestone/site here beyond the fixed error kind —
     // this is the ONE catch on the fire-and-forget write and must not leak
     // any request data (AGENTS.md non-card PII rule covers shape too).
-    logger.warn(`[blog-read-depth] write failed: ${(err && err.code) || (err && err.message) || 'error'}`);
+    logger.warn(`[blog-read-depth] write failed: ${errorKind(err)}`);
   });
   return undefined;
 });
 
 module.exports = router;
-module.exports._private = { validateBody, resolveSite, PATH_RE, MILESTONES, MAX_PATH_CHARS };
+module.exports._private = { validateBody, resolveSite, errorKind, PATH_RE, MILESTONES, MAX_PATH_CHARS };
