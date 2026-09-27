@@ -2,7 +2,7 @@
 // this lane describes the authoritative next visit.
 
 const MERIDIEM_TEXT = String.raw`[ap]\.?m\.?`;
-const EXACT_TIME_TEXT = String.raw`(?:\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}|(?:[01]?\d|2[0-3]):[0-5]\d|noon|midnight)`;
+const EXACT_TIME_TEXT = String.raw`(?:\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}|(?:[01]?\d|2[0-3]):[0-5]\d|\b(?:noon|midnight)\b)`;
 const WINDOW_TEXT_RE = new RegExp(String.raw`(?<!\d)\d{1,2}(?::\d{2})?\s*(?:${MERIDIEM_TEXT})?\s*[–—-]\s*\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z])`, 'gi');
 const MONTH_NAMES = 'January|February|March|April|May|June|July|August|September|October|November|December';
 const WEEKDAY_NAMES = 'Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday';

@@ -235,6 +235,7 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
     .toContain('ungrounded_relative_date:tomorrow');
   expect(ungroundedClaims('Today we completed service. Your next visit is Monday, August 3, arriving 8–10 AM.', facts))
     .toEqual([]);
+  expect(ungroundedClaims('Service was completed this afternoon.', facts)).toEqual([]);
   expect(ungroundedClaims('Your next visit is Monday, August 3 in 2027, arriving 8–10 AM.', facts)
     .some((problem) => problem.includes('ungrounded_date:') && problem.includes('in 2027'))).toBe(true);
 
