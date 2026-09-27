@@ -14336,6 +14336,8 @@ const CallRecordingProcessor = {
               extracted,
               call,
               phone,
+              // The voicemail itself asked not to be contacted (V2 consent).
+              doNotContactRequested: v2Result?.extraction?.consent?.do_not_contact_request === true,
             });
           } catch (smsErr) {
             logger.warn(`[call-proc] voicemail text-back failed (non-blocking): ${smsErr.message}`);

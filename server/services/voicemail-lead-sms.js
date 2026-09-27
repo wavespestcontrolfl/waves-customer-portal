@@ -48,6 +48,7 @@ const { mintLeadPrefillToken } = require('../utils/lead-prefill-token');
 // bearer token, so a shorten failure must fail closed — never fall back to
 // putting the long tokenized URL in an SMS body. See the call site.
 const { createShortCode } = require('./short-url');
+const { autoTextHoldReason } = require('./messaging/auto-text-holds');
 
 const MESSAGE_TYPE = 'voicemail_quote_link';
 const PORTAL_BASE_URL = 'https://portal.wavespestcontrol.com';
@@ -161,7 +162,7 @@ async function clearLeadClaim(leadId) {
   }
 }
 
-async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone: rawPhone } = {}) {
+async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone: rawPhone, doNotContactRequested = false } = {}) {
   if (!isEnabled('voicemailLeadSms')) {
     logger.info(`[voicemail-sms] Gate off — text-back skipped for lead ${leadId || 'unknown'}`);
     return { sent: false, skipped: 'gate_off' };
@@ -183,6 +184,30 @@ async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone
     // A failed dedupe read must not fire a possibly-duplicate automated text.
     logger.warn(`[voicemail-sms] sms_log dedupe read failed — skipping (fail closed): ${e.message}`);
     return { sent: false, skipped: 'dedupe_read_failed' };
+  }
+
+  // Who never gets this automated text (owner rulings 2026-09-27): someone
+  // who asked in this voicemail not to be contacted, or — per the shared
+  // messaging/auto-text-holds.js — who already has a quote or estimate, has
+  // an open lead a staff member is working, asked on an earlier call not to
+  // be contacted, showed on an earlier call to be a salesperson / vendor /
+  // robocall / wrong number / job applicant, or texted with us in the last 7
+  // days. Checked BEFORE the claim, so a hold never consumes the one-shot;
+  // an unreadable check fails closed.
+  if (doNotContactRequested) return { sent: false, skipped: 'asked_not_to_be_contacted' };
+  try {
+    const hold = await autoTextHoldReason(phone, {
+      before: call.created_at ? new Date(call.created_at) : new Date(),
+      excludeCallLogId: call.id || null,
+      excludeMessageTypes: [MESSAGE_TYPE],
+    });
+    if (hold) {
+      logger.info(`[voicemail-sms] Text-back held for lead ${leadId}: ${hold}`);
+      return { sent: false, skipped: hold };
+    }
+  } catch (e) {
+    logger.warn(`[voicemail-sms] hold check failed — skipping (fail closed): ${e.message}`);
+    return { sent: false, skipped: 'hold_check_failed' };
   }
 
   // One text per phone number, EVER — DB-atomic: phone is the PRIMARY KEY of

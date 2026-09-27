@@ -40,6 +40,11 @@ jest.mock('../services/short-url', () => ({
   createShortCode: jest.fn(async () => ({ code: 'k3j9x', shortUrl: 'https://portal.wavespestcontrol.com/l/k3j9x' })),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The shared "never auto-text this number" holds are pinned against a real
+// schema in auto-text-holds-postgres.test.js; here only their wiring.
+jest.mock('../services/messaging/auto-text-holds', () => ({
+  autoTextHoldReason: jest.fn(async () => null),
+}));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
@@ -48,6 +53,7 @@ const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const lineType = require('../services/messaging/validators/line-type');
 const { mintLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { createShortCode } = require('../services/short-url');
+const { autoTextHoldReason } = require('../services/messaging/auto-text-holds');
 const { sendVoicemailQuoteLink, MESSAGE_TYPE } = require('../services/voicemail-lead-sms');
 
 const LEAD_ID = '3f2f7b9c-1111-4222-8333-abcdefabcdef';
@@ -108,6 +114,7 @@ beforeEach(() => {
   renderSmsTemplate.mockImplementation(async (key, vars) => `Hi ${vars.first_name} — ${vars.service_label}: ${vars.quote_url}`);
   // A REAL provider id — sent:true alone is a suppression sentinel (isRealProviderSend).
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM0123456789abcdef0123456789abcdef' });
+  autoTextHoldReason.mockResolvedValue(null);
 });
 
 function args(overrides = {}) {
@@ -171,6 +178,44 @@ describe('voicemail lead text-back gates', () => {
     const result = await sendVoicemailQuoteLink(args());
     expect(result).toEqual({ sent: false, skipped: 'dedupe_read_failed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  describe('who never gets the quote-link text (owner rulings 2026-09-27)', () => {
+    const claimTaken = () => state.inserts.some((i) => i.table === 'voicemail_sms_claims');
+
+    test('a voicemail that itself asks not to be contacted is held before any claim', async () => {
+      const result = await sendVoicemailQuoteLink(args({ doNotContactRequested: true }));
+      expect(result).toEqual({ sent: false, skipped: 'asked_not_to_be_contacted' });
+      expect(claimTaken()).toBe(false);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test.each(['quote_on_file', 'lead_assigned', 'asked_not_to_be_contacted', 'not_a_prospect', 'recent_conversation'])(
+      'a %s hold skips the text without consuming the one-shot',
+      async (hold) => {
+        autoTextHoldReason.mockResolvedValueOnce(hold);
+        const result = await sendVoicemailQuoteLink(args());
+        expect(result).toEqual({ sent: false, skipped: hold });
+        expect(claimTaken()).toBe(false);
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+      },
+    );
+
+    test('the hold check runs for this number, against calls before this voicemail, ignoring the lane\'s own texts', async () => {
+      const at = new Date('2026-09-26T15:00:00Z');
+      await sendVoicemailQuoteLink(args({ call: { id: 'call-9', twilio_call_sid: 'CA-test-1', created_at: at } }));
+      expect(autoTextHoldReason).toHaveBeenCalledWith(PHONE, expect.objectContaining({
+        before: at, excludeCallLogId: 'call-9', excludeMessageTypes: [MESSAGE_TYPE],
+      }));
+    });
+
+    test('an unreadable hold check fails CLOSED', async () => {
+      autoTextHoldReason.mockRejectedValueOnce(new Error('db down'));
+      const result = await sendVoicemailQuoteLink(args());
+      expect(result).toEqual({ sent: false, skipped: 'hold_check_failed' });
+      expect(claimTaken()).toBe(false);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
   });
 
   test('phone claim conflict — of two concurrent voicemails from one phone, the loser skips atomically', async () => {
