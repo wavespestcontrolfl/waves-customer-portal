@@ -567,7 +567,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "562d2bce06b0bb3fdd2343723d5e175d635dd7af719e4ab4679f2be7261c6831"
     },
     "role": "beneficial",
     "risk": "low",

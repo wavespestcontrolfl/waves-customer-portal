@@ -231,7 +231,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "cf2e5b0309b13835e7b4101ec88c86ac1f843214cfac13cc41815b6dcd995da8"
     },
     "slug": "pillbug",
     "common_name": "Pillbug",
@@ -651,7 +652,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "9abe3bd39aebeb1c7df44ed49b40d59c007083c160f73c216999770f9dbd256e"
     },
     "role": "harmless_visitor",
     "risk": "low",

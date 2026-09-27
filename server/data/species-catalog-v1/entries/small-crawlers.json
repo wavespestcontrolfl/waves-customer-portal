@@ -11,7 +11,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "dd8cac539f9a16d2635d6c13d5eb6279587a1fa92c40ac71ff42075c648013f5"
     },
     "slug": "silverfish",
     "common_name": "Silverfish",
@@ -317,7 +318,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Found a dedicated UF/IFAS Featured Creatures page this session covering firebrats directly: ENY-225/IG094, \"Booklice and Silverfish\" (Koehler, Branscome & Oi). It confirms size (1/3 to 1/2 inch), mottled gray/brown scaly body, long antennae plus three tail filaments, and habitat in hot, dark spots like furnaces/fireplaces/heated pipes, feeding on starch/protein/sugar materials including paper — matching this entry's traits (size corrected from 1/2-3/4in to the source's 1/3-1/2in). The page does not give a Florida-specific seasonal curve, so peak_months stays a reasonable estimate rather than a cited figure — general traits are the resolved part of this claim."
+      "notes": "Found a dedicated UF/IFAS Featured Creatures page this session covering firebrats directly: ENY-225/IG094, \"Booklice and Silverfish\" (Koehler, Branscome & Oi). It confirms size (1/3 to 1/2 inch), mottled gray/brown scaly body, long antennae plus three tail filaments, and habitat in hot, dark spots like furnaces/fireplaces/heated pipes, feeding on starch/protein/sugar materials including paper — matching this entry's traits (size corrected from 1/2-3/4in to the source's 1/3-1/2in). The page does not give a Florida-specific seasonal curve, so peak_months stays a reasonable estimate rather than a cited figure — general traits are the resolved part of this claim.",
+      "approval_hash": "6b5b912ec9f2a4242be8109f4bcac24fa2dc420693dd50d12659b09af629b1c6"
     },
     "role": "nuisance",
     "risk": "low",
@@ -428,7 +430,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Found and confirmed a dedicated UF/IFAS Featured Creatures page this session: ENY-228/IG124, \"Springtails\" (Koehler, Aparicio & Pfiester, rev. 2022). It confirms wingless, tiny (0.25-6mm, normally ~1mm) insects in white/yellow/gray/blue-gray, the furcula-and-tenaculum spring mechanism (jump up to 4 inches), moist-soil/high-humidity/mold habitat, appearance in swimming pools, mulch and potted plants, and that they don't bite or transmit disease — all matching this entry's traits. It states breeding \"can be year-round\" in general (supporting active_months as year-round) but gives no Florida-specific peak-month curve, so peak_months remains a reasonable estimate rather than a cited figure; the core traits claim is resolved."
+      "notes": "Found and confirmed a dedicated UF/IFAS Featured Creatures page this session: ENY-228/IG124, \"Springtails\" (Koehler, Aparicio & Pfiester, rev. 2022). It confirms wingless, tiny (0.25-6mm, normally ~1mm) insects in white/yellow/gray/blue-gray, the furcula-and-tenaculum spring mechanism (jump up to 4 inches), moist-soil/high-humidity/mold habitat, appearance in swimming pools, mulch and potted plants, and that they don't bite or transmit disease — all matching this entry's traits. It states breeding \"can be year-round\" in general (supporting active_months as year-round) but gives no Florida-specific peak-month curve, so peak_months remains a reasonable estimate rather than a cited figure; the core traits claim is resolved.",
+      "approval_hash": "4bd3f76253b54e0d6dbc553278af7cb13e2e99e53ed4197fd40f242642b801d8"
     },
     "role": "harmless_visitor",
     "risk": "low",
@@ -543,7 +546,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Found and confirmed a dedicated UF/IFAS Featured Creatures page this session: ENY-225/IG094, \"Booklice and Silverfish\" (Koehler, Branscome & Oi). It confirms small, soft-bodied insects under 1/16 inch, translucent white to gray to light brown, long filamentous antennae, indoor habitat in warm/high-humidity areas feeding on fungi/starch/paper (matching the 'damp, undisturbed spots' and paper-paste feeding in traits), and the 'booklice' vs. 'barklice' indoor/outdoor naming split used in this entry's aka. The page does not give a Florida-specific seasonal curve, so peak_months stays a reasonable estimate; the core traits claim is resolved."
+      "notes": "Found and confirmed a dedicated UF/IFAS Featured Creatures page this session: ENY-225/IG094, \"Booklice and Silverfish\" (Koehler, Branscome & Oi). It confirms small, soft-bodied insects under 1/16 inch, translucent white to gray to light brown, long filamentous antennae, indoor habitat in warm/high-humidity areas feeding on fungi/starch/paper (matching the 'damp, undisturbed spots' and paper-paste feeding in traits), and the 'booklice' vs. 'barklice' indoor/outdoor naming split used in this entry's aka. The page does not give a Florida-specific seasonal curve, so peak_months stays a reasonable estimate; the core traits claim is resolved.",
+      "approval_hash": "1dd4be82a2a7638aceec92aad840cf6393b0d5a320f533d142f8e70269073738"
     },
     "role": "harmless_visitor",
     "risk": "low",

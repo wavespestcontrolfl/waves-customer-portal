@@ -119,7 +119,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "08fcabcc6f9c4ff51bc0c451e5c29913dbf8ae4caee7b21240c9cdd00c07ae95"
     },
     "slug": "drain-fly",
     "common_name": "Drain Fly",
@@ -224,7 +225,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "be8f43e750e17c9fcce47388c4d4a0098d37d13d5144a48a8e67f805981061cf"
     },
     "slug": "fungus-gnat",
     "common_name": "Fungus Gnat",
@@ -644,7 +646,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "f4fc414cfdd1969d560deca6ecb42e86b186cbb07f0191d2a7dc5e9e05404fb2"
     }
   },
   {
@@ -764,7 +767,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Could not load a UF/IFAS EENY page dedicated to this exact species (Megaselia scalaris); IFAS source found (IN1144) covers a related agricultural Megaselia use case rather than the household nuisance angle."
+      "notes": "Could not load a UF/IFAS EENY page dedicated to this exact species (Megaselia scalaris); IFAS source found (IN1144) covers a related agricultural Megaselia use case rather than the household nuisance angle.",
+      "approval_hash": "d55dee180f6cde6488a19160570243aeb3cae09192242177ba3b532c1b1912e1"
     }
   },
   {

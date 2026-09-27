@@ -336,7 +336,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "1851d6db2090d370b2b509dc07e296af8f4dc29a8aaa9b3d4dba357aa352dde7"
     },
     "slug": "honey-bee-swarm",
     "common_name": "Honey Bee (swarm)",
@@ -746,7 +747,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "3ef7b6d2573c6dfabb9da5e72eca46a36aa9741318b6912e22cb310103537054"
     }
   },
   {
@@ -1165,7 +1167,6 @@
     "aka": [],
     "aliases": [
       "great golden digger wasp",
-      "digger wasp",
       "sphex ichneumoneus"
     ],
     "scientific_name": "Sphex ichneumoneus",

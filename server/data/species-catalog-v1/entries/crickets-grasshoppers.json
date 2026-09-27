@@ -112,7 +112,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "aba825f8548064add950162d42990af15403cc44e9aacb7f64c0cfd000148b24"
     },
     "slug": "mole-cricket",
     "common_name": "Mole Cricket",
@@ -319,7 +320,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "15a9a03a5ca452b1c29b1db6f1e6248a86845d433ac4e7e009e5a220349c2694"
     },
     "role": "nuisance",
     "risk": "low",

@@ -549,6 +549,10 @@
       "group": "wasps-bees",
       "label": "Solitary Wasps",
       "generic": "a solitary wasp",
+      "aliases": [
+        "digger wasp",
+        "digger wasps"
+      ],
       "scientific": "several families",
       "rank": "group",
       "next_photo": {
@@ -816,6 +820,43 @@
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the toe pads and side markings only if already visible. Do not approach, touch, or handle the frog.",
         "why": "Toe-pad size and the side stripe separate the oversized Cuban treefrog from native treefrogs."
+      }
+    },
+    {
+      "id": "bats",
+      "group": "wild-mammals",
+      "label": "Bats",
+      "generic": "a bat",
+      "aliases": [
+        "bat",
+        "bats"
+      ],
+      "scientific": "Chiroptera",
+      "rank": "order",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the bat, flight shape, or roost opening already visible. Never approach, disturb, touch, trap, or handle it.",
+        "why": "Wing shape, flight pattern, and roost location help distinguish a bat while keeping a safe distance."
+      },
+      "generic_guidance": {
+        "referral": "bat_exclusion",
+        "compatibility": {
+          "safety": {
+            "stinging": false,
+            "venomous": false,
+            "disease_vector": true,
+            "structural_threat": false
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Referral (exclusion only)",
+          "inspectionRequired": true,
+          "urgency": "high"
+        },
+        "sources": [
+          "https://www.cdc.gov/rabies/prevention/bats.html",
+          "https://www.cdc.gov/coca/media/pdfs/2026/CDC-COCA-Call-Rabies-still-here.pdf",
+          "https://myfwc.com/conservation/you-conserve/wildlife/bats/bats-in-buildings/"
+        ]
       }
     },
     {

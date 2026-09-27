@@ -551,7 +551,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Per audit item 41: role changed from beneficial to harmless_visitor and verdict from ally to harmless. This is a nonnative, parthenogenetic species; 'genuinely good news'/'genuinely beneficial' framing overstated it as an ecological ally rather than simply a harmless nonnative burrower. Also reconciled traits[2] with the earthworm look-alike difference, which had implied contradictory things about whether it has a distinct head."
+      "notes": "Per audit item 41: role changed from beneficial to harmless_visitor and verdict from ally to harmless. This is a nonnative, parthenogenetic species; 'genuinely good news'/'genuinely beneficial' framing overstated it as an ecological ally rather than simply a harmless nonnative burrower. Also reconciled traits[2] with the earthworm look-alike difference, which had implied contradictory things about whether it has a distinct head.",
+      "approval_hash": "20cfd9bf15f7d814642988751be5aaa09e4b904ef21298f62e230b4b3e7b0298"
     },
     "role": "harmless_visitor",
     "risk": "low",

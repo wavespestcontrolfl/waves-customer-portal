@@ -15,7 +15,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "1d133c1db156629d1c62e9462e1c0200b0b6d42db8e395a7fd30f27eb03aee7c"
     },
     "slug": "ghost-ant",
     "common_name": "Ghost Ant",
@@ -584,7 +585,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "cd0d4452a90f1c3bffd8552751d015236bf45664c624f461e7e5ad442844b54a"
     },
     "slug": "white-footed-ant",
     "common_name": "White-footed Ant",
@@ -1031,7 +1033,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "80ab4bf81c9fdbffc50719e118c3f1fda24df6b430dcea2a27d5006cf9d12217"
     }
   },
   {
@@ -1366,7 +1369,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Per audit item 46: traits[2] previously stated a non-visible safety claim (no sting/bite); replaced with a visible worker-size trait."
+      "notes": "Per audit item 46: traits[2] previously stated a non-visible safety claim (no sting/bite); replaced with a visible worker-size trait.",
+      "approval_hash": "16b4eb0aa8a164d0b1e503b9cd8409832a808536233d256a6b720b7e65a5bdaf"
     }
   },
   {
@@ -1813,7 +1817,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Primary source used is FWS species page rather than a UF/IFAS EENY (none found dedicated to this species); cross-checked against IFAS pharaoh ant page comparison images."
+      "notes": "Primary source used is FWS species page rather than a UF/IFAS EENY (none found dedicated to this species); cross-checked against IFAS pharaoh ant page comparison images.",
+      "approval_hash": "feccc9b10a523d2264454de8ad4aa78f71b7b1554f8d6096281247703fa313e8"
     }
   },
   {
@@ -2032,7 +2037,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Confirmed the old entnemdept.ufl.edu/creatures/urban/ants/ URL now 301-redirects to the general EDIS Featured Creatures collection page rather than ant-swarmer-specific content; source updated to that collection page. Species identity of any given swarm varies with which ant is nesting nearby, so the peak months given are a general seasonal estimate, not one species' calendar."
+      "notes": "Confirmed the old entnemdept.ufl.edu/creatures/urban/ants/ URL now 301-redirects to the general EDIS Featured Creatures collection page rather than ant-swarmer-specific content; source updated to that collection page. Species identity of any given swarm varies with which ant is nesting nearby, so the peak months given are a general seasonal estimate, not one species' calendar.",
+      "approval_hash": "47142798be70cb6e344c156677a2380c5c8eca805f3dce714137924d820e00cd"
     }
   },
   {

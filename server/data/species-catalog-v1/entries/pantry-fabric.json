@@ -103,7 +103,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Confirmed against UF/IFAS EDIS IN153 (Featured Creatures: Indianmeal Moth), which is common in Florida and lives outdoors here too; wingspan corrected to the source's 16-20mm (about 5/8-3/4 inch), not the 3/8 inch a general reference had given."
+      "notes": "Confirmed against UF/IFAS EDIS IN153 (Featured Creatures: Indianmeal Moth), which is common in Florida and lives outdoors here too; wingspan corrected to the source's 16-20mm (about 5/8-3/4 inch), not the 3/8 inch a general reference had given.",
+      "approval_hash": "754b2befeaab1e5de46eec7bc24d2bd8f4735f35c6aaa3506337f0f7a775066b"
     },
     "role": "nuisance",
     "risk": "low",
@@ -213,7 +214,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Found and confirmed a dedicated UF/IFAS EDIS page this session: ENY-261/IG120, \"Rice Weevil, Sitophilus oryzae\" (P. G. Koehler). It confirms size (1/10 inch, 2-3mm), reddish-brown to black color with four light yellow/reddish spots on the elytra, long snout, ability to fly and attraction to lights, and larvae developing hidden inside individual grain kernels — matching this entry's traits (size corrected from 1/8in to the source's 1/10in). It also confirms a serious-pest status in the southern US specifically. No Florida-specific peak-month curve is given, so peak_months stays an estimate; the traits claim itself is resolved."
+      "notes": "Found and confirmed a dedicated UF/IFAS EDIS page this session: ENY-261/IG120, \"Rice Weevil, Sitophilus oryzae\" (P. G. Koehler). It confirms size (1/10 inch, 2-3mm), reddish-brown to black color with four light yellow/reddish spots on the elytra, long snout, ability to fly and attraction to lights, and larvae developing hidden inside individual grain kernels — matching this entry's traits (size corrected from 1/8in to the source's 1/10in). It also confirms a serious-pest status in the southern US specifically. No Florida-specific peak-month curve is given, so peak_months stays an estimate; the traits claim itself is resolved.",
+      "approval_hash": "396ccc76b4f939f3f9a998f62829c6f7c0acf5f166220ddda527535c3796a28e"
     },
     "role": "nuisance",
     "risk": "low",
@@ -326,7 +328,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Confirmed against UF/IFAS EDIS IN385 (Featured Creatures: Drugstore Beetle): cylindrical body about 2.25-3.5mm, clubbed antennae (vs. cigarette beetle's saw-like antennae), and striated wing covers, matching this entry's traits."
+      "notes": "Confirmed against UF/IFAS EDIS IN385 (Featured Creatures: Drugstore Beetle): cylindrical body about 2.25-3.5mm, clubbed antennae (vs. cigarette beetle's saw-like antennae), and striated wing covers, matching this entry's traits.",
+      "approval_hash": "b70ea4f9258bda4c7975e70f9897ca1889ba70454b3be0046b8e60fb0897671f"
     },
     "role": "nuisance",
     "risk": "low",
@@ -439,7 +442,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Confirmed against UF/IFAS EDIS IN384 (Featured Creatures: Cigarette Beetle): serrated (saw-like) antennae, smooth wing covers with fine hairs, reddish-brown, and a broad diet, matching this entry's traits."
+      "notes": "Confirmed against UF/IFAS EDIS IN384 (Featured Creatures: Cigarette Beetle): serrated (saw-like) antennae, smooth wing covers with fine hairs, reddish-brown, and a broad diet, matching this entry's traits.",
+      "approval_hash": "6c6effb3e938778aa499db2be7e69dfe8b720a61aeec3e5de8dff8f9a145ffd2"
     },
     "role": "nuisance",
     "risk": "low",
@@ -548,7 +552,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "UF/IFAS EDIS IN345 (a related stored-products pest, Oryzaephilus acuminatus) compares that species against the sawtoothed grain beetle (Oryzaephilus surinamensis) directly: smaller eyes, longer temples, a less-elongate body, and a cereal-based life cycle for O. surinamensis, consistent with this entry's traits. It doesn't give this species its own dedicated page, but nothing in it contradicts the traits here."
+      "notes": "UF/IFAS EDIS IN345 (a related stored-products pest, Oryzaephilus acuminatus) compares that species against the sawtoothed grain beetle (Oryzaephilus surinamensis) directly: smaller eyes, longer temples, a less-elongate body, and a cereal-based life cycle for O. surinamensis, consistent with this entry's traits. It doesn't give this species its own dedicated page, but nothing in it contradicts the traits here.",
+      "approval_hash": "adacc63f1b4b6ba79cb23c257c05c77979dacac7af7334f9ed365bb95ea076d1"
     },
     "role": "nuisance",
     "risk": "low",
@@ -657,7 +662,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Confirmed against UF/IFAS EDIS IN566 (Confused Flour Beetle and Red Flour Beetle): red flour beetle has a smooth, slightly curved thorax with no teeth and can fly, matching this entry's traits."
+      "notes": "Confirmed against UF/IFAS EDIS IN566 (Confused Flour Beetle and Red Flour Beetle): red flour beetle has a smooth, slightly curved thorax with no teeth and can fly, matching this entry's traits.",
+      "approval_hash": "2ada9372cac157e1e24e061230f0b3e2545bf0fbfa31bec62056deb1c314078a"
     },
     "role": "nuisance",
     "risk": "low",

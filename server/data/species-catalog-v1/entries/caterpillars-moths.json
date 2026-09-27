@@ -11,7 +11,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "04e944e4f29ea176b2f75963cd844aea9305a828b912a531d229da0418b8e578"
     },
     "slug": "fall-armyworm",
     "common_name": "Fall Armyworm",
@@ -121,7 +122,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "edd6c3905bf95cf57bc98c3b923e1eac9d87e4eff897b37496062010eed7c2c4"
     },
     "slug": "sod-webworm",
     "common_name": "Tropical Sod Webworm",
@@ -1032,7 +1034,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Verdict is a judgment call: set to watch for citrus-damage reasons, but many homeowners prefer to leave it alone since it becomes a giant swallowtail butterfly; owner may prefer ally instead."
+      "notes": "Verdict is a judgment call: set to watch for citrus-damage reasons, but many homeowners prefer to leave it alone since it becomes a giant swallowtail butterfly; owner may prefer ally instead.",
+      "approval_hash": "9dd12dddde453f069af9ab4de5f7054176cf7d55ec4fb21ae485bc24ba238be1"
     },
     "role": "plant_pest",
     "risk": "low",
@@ -1140,7 +1143,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "60e226535a73304d6f3e425104e31ea0ba0b61e6954941b25437fb6fa2e52cee"
     },
     "role": "plant_pest",
     "risk": "low",
@@ -1352,8 +1356,8 @@
       "https://en.wikipedia.org/wiki/Psychidae"
     ],
     "review": {
-      "status": "owner_approved",
-      "notes": "Per audit item 54: the citrus-leafminer pairing here is a low-value, same-category match rather than a real visual confusion. The genuine, well-documented bagworm mix-up is with the 'household casebearer' / 'plaster bagworm' (Phereoeca uterella) -- a small case-building moth larva homeowners commonly call a bagworm indoors (Waves' own site already has a blog post on plaster bagworms). That species has no slug anywhere in the 239-entry master list, so it can't be added as a look_alikes target without creating a new entry, which is outside this pass's scope; flagging for the owner as a catalog gap worth adding in a future slug batch."
+      "status": "draft",
+      "notes": "Approval is pending after the resolver added not_matches for plaster bagworm / household casebearer. Per audit item 54: the citrus-leafminer pairing here is a low-value, same-category match rather than a real visual confusion. The genuine, well-documented bagworm mix-up is with the 'household casebearer' / 'plaster bagworm' (Phereoeca uterella) -- a small case-building moth larva homeowners commonly call a bagworm indoors (Waves' own site already has a blog post on plaster bagworms). That species has no slug anywhere in the 239-entry master list, so it can't be added as a look_alikes target without creating a new entry, which is outside this pass's scope; flagging for the owner as a catalog gap worth adding in a future slug batch."
     },
     "role": "plant_pest",
     "risk": "low",
@@ -1574,7 +1578,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "618dd625684893a74183e8db68469984a7df5d61aff15adb69264118ad4ebf2b"
     },
     "role": "plant_pest",
     "risk": "low",

@@ -130,7 +130,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "e394ceff7c81e8dcd55b6c2fbad5633d2cdc7b46b324935e9f510645b78c54c4"
     },
     "slug": "formosan-termite",
     "common_name": "Formosan Termite",
@@ -424,7 +425,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Species-level soldier ID is a magnification-level distinction from Formosan termite; app photo ID should stay suggestive only and route to inspection, per brief hard rule. Per audit item 53: traits[0] reworded from 'oozes ... when squeezed' to avoid inviting a customer to squeeze/handle a termite soldier."
+      "notes": "Species-level soldier ID is a magnification-level distinction from Formosan termite; app photo ID should stay suggestive only and route to inspection, per brief hard rule. Per audit item 53: traits[0] reworded from 'oozes ... when squeezed' to avoid inviting a customer to squeeze/handle a termite soldier.",
+      "approval_hash": "70fcdb242ee480f00fbcea2910ba9e631dc15df8b646ff4f70e0cead776ef079"
     }
   },
   {
@@ -535,7 +537,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Verdict judgment call: IFAS describes this species as not economically important in the southeastern US, so set to watch rather than call; owner may prefer call to stay consistent with other termite entries. Per audit item 37: safety.structural changed from true to false to match this entry's own copy ('rarely a threat to sound structural wood on its own') and rule 6 (structural only when the organism damages sound structural material; this species needs already-damp/decaying wood, not sound wood)."
+      "notes": "Verdict judgment call: IFAS describes this species as not economically important in the southeastern US, so set to watch rather than call; owner may prefer call to stay consistent with other termite entries. Per audit item 37: safety.structural changed from true to false to match this entry's own copy ('rarely a threat to sound structural wood on its own') and rule 6 (structural only when the organism damages sound structural material; this species needs already-damp/decaying wood, not sound wood).",
+      "approval_hash": "5639d8ee84806f631b27e16c46342f23ea842bd2dd1154c3313bfb72b5fdc837"
     }
   },
   {
@@ -771,7 +774,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "b8c9600de0bd6b5ed464bea84addb967fb9cd198ab91310b6abb8659dcc71a78"
     }
   },
   {
@@ -1018,7 +1022,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "This entry's own design already avoids the overclaim in the verification note: it never asserts a wing pile is always termites (sign_of lists both termite-swarmers and winged-ants, copy says wing shape is what 'suggests' termite vs ant, and tech_notes call for a full inspection either way). Ants also shed their wings after a mating flight (see the winged-ants entry's own traits), so a bodies-free wing pile can genuinely come from either group; role/risk default to the more consequential possibility (termites) as a cautious default pending the wing-length check, which matches how this entry is actually written."
+      "notes": "This entry's own design already avoids the overclaim in the verification note: it never asserts a wing pile is always termites (sign_of lists both termite-swarmers and winged-ants, copy says wing shape is what 'suggests' termite vs ant, and tech_notes call for a full inspection either way). Ants also shed their wings after a mating flight (see the winged-ants entry's own traits), so a bodies-free wing pile can genuinely come from either group; role/risk default to the more consequential possibility (termites) as a cautious default pending the wing-length check, which matches how this entry is actually written.",
+      "approval_hash": "83e8ca1415625e8243b19e7d099406ee2c3adf74dbfbf32a69ee241460fa6cd4"
     }
   }
 ]

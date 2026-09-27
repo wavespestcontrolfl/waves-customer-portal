@@ -24,7 +24,7 @@ ant; we can't yet tell you which kind"):
 - **Group** (`ants`, `termites`, `spiders`, `snakes`, 29 total) — "we're sure
   it's an ant". Every group has a `generic` label and a `next_photo`: the one
   photo that would narrow it further.
-- **Subgroup** (`fire-ants`, `widow-spiders`, `venomous-snakes`, 36 total,
+- **Subgroup** (`fire-ants`, `widow-spiders`, `venomous-snakes`, 38 total,
   optional) — a narrower "we're sure it's a fire ant" stop between group and
   entry, for groups where that middle rung matters. Also has its own
   `generic` label and `next_photo`.
@@ -41,7 +41,7 @@ a category/group/subgroup/entry further.
 
 - `index.json` — `catalog_version`, `section` ("pest" — this catalog does not
   yet cover the lawn or tree & shrub photo ID sections), the five
-  `categories`, the 29 `groups` and 36 `subgroups` (ids are fixed by the
+  `categories`, the 29 `groups` and 38 `subgroups` (ids are fixed by the
   shared build brief), `look_alike_groups` (group-level look-alike notes,
   e.g. ants vs. termites), `legacy_slug_map` (every v1 `PEST_LIBRARY` slug →
   a v2 catalog node — see below), and `planned_slugs` (see "Cross-worker
@@ -86,7 +86,25 @@ brief; the jest suite enforces them)
 | `copy.what_it_means` (≤320), `copy.fact` (≤240), optional `copy.blurb` | **customer-facing strings must come from here, never hardcoded in a route or component** — no prices, no guarantees, no response-time promises |
 | `tech_notes` | internal only, no product names/rates |
 | `links.site_page`, `links.guides` | `site_page` only for the 60 entries with a live website page |
-| `legacy_slugs`, `sources`, `review` | see below |
+| `legacy_slugs`, `sources`, `review` | `owner_approved` reviews carry a SHA-256 `approval_hash`; see below |
+
+The catalog currently has 73 owner-approved entries and 166 drafts. Runtime
+naming requires all three conditions: `review.status` is `owner_approved`, the
+`verification` list is empty, and `review.approval_hash` matches the stable
+hash of every authored entry field. `review` metadata and the loader-injected
+`level` are the only excluded fields. Editing identity, aliases, traits,
+look-alikes, safety, copy, service, sources, or any other authored field makes
+the stored approval stale and the engine climbs to a generic catalog node.
+
+The approval-hash migration compared approval-bound content against the
+three commits that recorded the real owner decisions: `f05b815b4c` (52
+website entries), `c5e8e2f86f` (7 more website entries), and `bbe617e26a`
+(the review-backup decisions for the 179-entry expansion). Of the 74 entries
+still marked approved before migration, 73 matched their first trusted
+approved snapshot exactly. `bagworm` had since gained `not_matches`, so it
+was downgraded to draft rather than receiving a hash for changed content.
+The machine-readable comparison record is
+[`species-catalog-approval-migration.json`](./species-catalog-approval-migration.json).
 
 ## The v1 → v2 legacy slug map
 
@@ -121,11 +139,10 @@ it reaches a customer — the app's result card, the website's
 1. Wire an actual caller (the app result card, the engine's alias resolution,
    or both) and add `GATE_PHOTO_ID_V2` (or similar) so the wiring itself ships
    dark first.
-2. Have the owner review every entry's `verdict` and `safety_line` — this PR
-   authored them carefully from UF/IFAS, FWC, and FDACS sources, but they are
-   still `review.status: "draft"` and have not had an owner pass. Flip
-   `review.status` to `"reviewed"` (or similar) as part of that pass, not as
-   part of adding new species.
+2. Have the owner review each remaining draft's complete authored content.
+   Record `review.status: "owner_approved"` and the matching `approval_hash`
+   only from that real decision; never copy a hash from another revision or
+   mint approval as part of an unrelated species edit.
 3. Confirm the hard service rules (termite suggestive-only, honey bee
    referral, rodent/bed bug inspection-first, wildlife never auto-priced,
    venomous-snake handling) still read correctly once real customers can see

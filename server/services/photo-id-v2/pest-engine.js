@@ -30,6 +30,7 @@
 
 const MODELS = require('../../config/models');
 const catalog = require('../species-catalog');
+const { isApproved } = require('../species-catalog-approval');
 const { dispatch } = require('../llm/call');
 const { etParts } = require('../../utils/datetime-et');
 const { PEST_LIBRARY } = require('../pest-identification');
@@ -98,10 +99,20 @@ const REFERRAL_TEMPLATES = {
   report_fwc: 'Please report this sighting to the Florida Fish and Wildlife Conservation Commission (FWC) rather than handling it yourself.',
   report_fdacs: 'This may be a regulated pest of concern. Please report it to the Florida Department of Agriculture and Consumer Services (FDACS).',
   protected_leave_alone: 'This animal and its burrow are protected by Florida law. Please leave it undisturbed — no treatment is needed here.',
-  // Bats are never trapped or handled; only exclusion is lawful, and not in
-  // the FWC maternity season (Codex #4974 r2).
-  bat_exclusion: 'Bats are protected in Florida and are never trapped or handled. We refer you to a licensed wildlife professional who can exclude them legally, outside the spring and summer maternity season when exclusion is not allowed.',
+  // CDC: bites, scratches, or waking with a bat in the room need prompt
+  // medical/public-health assessment. FWC: exclusion is Florida's only legal
+  // removal method and is restricted during maternity season.
+  bat_exclusion: 'Bats can carry rabies. If you are bitten or scratched, or wake up with a bat in the room, contact a healthcare professional or local health department right away. Do not try to touch, trap, or handle it yourself. In Florida, exclusion is the only legal removal method and is restricted during maternity season; we refer you to a licensed wildlife professional.',
 };
+
+const DEFAULT_GENERIC_COMPATIBILITY = Object.freeze({
+  safety: Object.freeze({ stinging: false, venomous: false, disease_vector: false, structural_threat: false }),
+  serviceLine: 'pest',
+  serviceKey: null,
+  serviceLabel: 'Pest Consultation',
+  inspectionRequired: true,
+  urgency: 'low',
+});
 
 function escalateBelow() {
   const raw = Number(process.env.PHOTO_ID_ESCALATE_BELOW);
@@ -274,14 +285,11 @@ function isConsequential(entry) {
 }
 
 // Contract delta 2026-09-26 #1: the engine names an entry only when its
-// catalog review is owner-approved AND fact-check-clean — an unreviewed or
-// fact-check-pending entry can never be shown by name, whatever the models
-// say. Confidence math and escalation triggers are unaffected; only naming
-// (the `entry` level/block) is gated.
-function isApproved(entry) {
-  return !!entry && entry.review?.status === 'owner_approved' && Array.isArray(entry.verification) && entry.verification.length === 0;
-}
-
+// catalog review is owner-approved, fact-check-clean, AND its stored approval
+// hash still matches every authored field. Unreviewed, changed-after-approval,
+// or fact-check-pending entries can never be shown by name, whatever the
+// models say. Confidence math and escalation triggers are unaffected; only
+// naming (the `entry` level/block) is gated.
 function candidateContextFor(candidates) {
   return candidates.filter((c) => c.entry).map((c) => ({
     slug: c.slug,
@@ -812,8 +820,8 @@ function nextPhotoFor(wording, candidates, level, nodeId, shownKind = null) {
   return np ? { ask: np.ask || null, why: np.why || null, photo_can_confirm: true } : null;
 }
 
-function referralFor(entry) {
-  const kind = entry?.service?.referral;
+function referralFor(entry, fallbackKind = null) {
+  const kind = entry?.service?.referral || fallbackKind;
   if (!kind || !REFERRAL_TEMPLATES[kind]) return null;
   return { kind, text: REFERRAL_TEMPLATES[kind] };
 }
@@ -943,6 +951,7 @@ function buildAnswer(ctx) {
       || climbedOrDisagreedAnswer(answerCandidates, false, null);
   }
   const { level, wording, nodeId, subhead, headline, entry } = picked;
+  const genericGuidance = catalog.getNode(nodeId)?.generic_guidance;
 
   const group = groupBlockFor(level, nodeId, entry);
   // Evidence and other possibilities come from the same filtered list
@@ -967,7 +976,8 @@ function buildAnswer(ctx) {
     evidence,
     candidatesBlock,
     nextPhoto,
-    referral: referralFor(entry),
+    referral: referralFor(entry, genericGuidance?.referral),
+    genericCompatibility: genericGuidance?.compatibility,
     tier,
     topEntrySlug: entry?.slug || null,
   };
@@ -1030,8 +1040,6 @@ function v1SafetyFallback(entry) {
   };
 }
 
-const DEFAULT_SAFETY = { stinging: false, venomous: false, disease_vector: false, structural_threat: false };
-
 /**
  * Map the built v2 answer to the v1 columns the route still writes
  * (`species_slug`, `category`, `service_line`, `urgency`, a v1-shaped
@@ -1089,14 +1097,7 @@ function mapToV1(built) {
       inspectionRequired: inheritIdentityOnly ? !!namedService.inspection_first : true,
       urgency: namedEntry.urgency,
     },
-    generic: {
-      safety: DEFAULT_SAFETY,
-      serviceLine: 'pest',
-      serviceKey: null,
-      serviceLabel: 'Pest Consultation',
-      inspectionRequired: true,
-      urgency: 'low',
-    },
+    generic: { ...DEFAULT_GENERIC_COMPATIBILITY, ...built.genericCompatibility },
   }[compatibilityKind];
   const {
     safety, serviceLine, serviceKey, serviceLabel, inspectionRequired, urgency,

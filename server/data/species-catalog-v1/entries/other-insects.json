@@ -434,7 +434,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Per audit item 54: added a reciprocal look-alike to azalea-lace-bug (B/true-bugs, also this session's own work) — a name-based mix-up ('lace bug' vs 'lacewing') between a plant pest and a beneficial predator, worth distinguishing before any treatment recommendation."
+      "notes": "Per audit item 54: added a reciprocal look-alike to azalea-lace-bug (B/true-bugs, also this session's own work) — a name-based mix-up ('lace bug' vs 'lacewing') between a plant pest and a beneficial predator, worth distinguishing before any treatment recommendation.",
+      "approval_hash": "244974d94ff17bfd05fe6e6b7676780471277e551bfe886f7af1d99594fd9d22"
     },
     "role": "beneficial",
     "risk": "low",

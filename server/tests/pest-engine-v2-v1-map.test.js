@@ -4,6 +4,12 @@
 const catalog = require('../services/species-catalog');
 const { buildAnswer, mapToV1, _test: { v1IdentityFor } } = require('../services/photo-id-v2/pest-engine');
 
+function approvedClone(entry) {
+  const clone = { ...entry, review: { status: 'owner_approved', notes: 'Synthetic test approval.' }, verification: [] };
+  clone.review.approval_hash = catalog.approvalContentHash(clone);
+  return clone;
+}
+
 describe('v1IdentityFor on the real catalog', () => {
   test('exact legacy mappings resolve to themselves', () => {
     expect(v1IdentityFor('fire-ant')).toEqual({ slug: 'fire-ant', inherited: false });
@@ -29,11 +35,8 @@ describe('v1IdentityFor on the real catalog', () => {
 
 describe('inherited v1 identity keeps the named v2 entry service contract', () => {
   const candidate = (slug, { approved = true } = {}) => {
-    const entry = {
-      ...catalog.getEntry(slug),
-      review: { status: approved ? 'owner_approved' : 'draft', notes: '' },
-      verification: [],
-    };
+    const base = { ...catalog.getEntry(slug), review: { status: 'draft', notes: '' }, verification: [] };
+    const entry = approved ? approvedClone(base) : base;
     return {
       slug, offCatalogName: null, groupId: entry.group, confidence: 0.85, entry,
       traitsVisible: [1], traitsNotVisible: [], checked: true, verified: true,
@@ -88,6 +91,50 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     expect(mapped.report_contract.identification).toMatchObject({ slug: null, category: 'arachnid' });
   });
 
+  test('a high-confidence draft bat climb keeps generic rabies and exclusion guidance', () => {
+    const built = answerFor('brazilian-free-tailed-bat', { approved: false });
+    expect(built).toMatchObject({
+      answer: { level: 'subgroup', node_id: 'bats', wording: 'group_only' },
+      entry: null,
+      topEntrySlug: null,
+      referral: { kind: 'bat_exclusion' },
+    });
+    expect(built.answer.headline).not.toMatch(/brazilian|free-tailed/i);
+    expect(built.referral.text).toMatch(/bitten or scratched|wake up with a bat/i);
+    expect(built.referral.text).toMatch(/exclusion is the only legal removal method/i);
+
+    const mapped = mapToV1(built);
+    expect(mapped).toMatchObject({ species_slug: null, category: 'wildlife', service_line: 'none', urgency: 'high' });
+    expect(mapped.report_contract).toMatchObject({
+      safety: { stinging: false, venomous: false, disease_vector: true, structural_threat: false },
+      service: { line: 'none', key: null, label: 'Wildlife Referral (exclusion only)', inspection_required: true },
+    });
+  });
+
+  test('low-confidence and mixed-wildlife results do not receive bat-specific guidance', () => {
+    const base = {
+      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
+      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+    };
+    const genuinelyLow = buildAnswer({
+      ...base,
+      candidates: [{ ...candidate('brazilian-free-tailed-bat', { approved: false }), confidence: 0.5 }],
+    });
+    expect(genuinelyLow.answer.level).toBe('unknown');
+    expect(genuinelyLow.referral).toBeNull();
+
+    const mixed = buildAnswer({
+      ...base,
+      candidates: [
+        { ...candidate('brazilian-free-tailed-bat', { approved: false }), confidence: 0.55 },
+        { ...candidate('southern-flying-squirrel', { approved: false }), confidence: 0.3 },
+      ],
+    });
+    expect(mixed.answer).toMatchObject({ level: 'group', node_id: 'wild-mammals' });
+    expect(mixed.referral).toBeNull();
+    expect(mapToV1(mixed).report_contract).toMatchObject({ urgency: 'low', safety: { disease_vector: false } });
+  });
+
   test.each([
     ['american-dog-tick', 'pest', 'General Pest Control', 'high'],
     ['lone-star-tick', 'pest', 'General Pest Control', 'high'],
@@ -140,7 +187,7 @@ describe('real-catalog answer guards (Codex #4974 r2)', () => {
   // The guards under test are about photo-confirmability, not the owner's
   // review state, so the top entry is treated as approved here.
   const cand = (slug, confidence) => {
-    const entry = { ...catalog.getEntry(slug), review: { status: 'owner_approved', notes: '' }, verification: [] };
+    const entry = approvedClone(catalog.getEntry(slug));
     return { slug, offCatalogName: null, groupId: entry.group, confidence, entry, traitsVisible: [1], traitsNotVisible: [], checked: true, verified: true };
   };
   const ctx = (candidates) => ({
@@ -167,7 +214,7 @@ describe('real-catalog answer guards (Codex #4974 r2)', () => {
 
   test('a bare "bat" does not name one bat species', () => {
     const r = catalog.resolveName('bats');
-    expect(r?.node?.slug).not.toBe('brazilian-free-tailed-bat');
+    expect(r).toMatchObject({ node: { level: 'subgroup', id: 'bats' } });
   });
 
   test.each([
@@ -221,6 +268,7 @@ describe('real-catalog answer guards (Codex #4974 r2)', () => {
 
   test('bats get the exclusion-only referral, never a trapper', () => {
     expect(catalog.getEntry('brazilian-free-tailed-bat').service.referral).toBe('bat_exclusion');
-    expect(REFERRAL_TEMPLATES.bat_exclusion).toMatch(/never trapped or handled/);
+    expect(REFERRAL_TEMPLATES.bat_exclusion).toMatch(/do not try to touch, trap, or handle/i);
+    expect(REFERRAL_TEMPLATES.bat_exclusion).toMatch(/healthcare professional or local health department/i);
   });
 });

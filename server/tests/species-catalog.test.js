@@ -307,8 +307,15 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
 
     expect(e.review).toBeTruthy();
     expect(ENUMS.review_status).toContain(e.review.status);
-    // Nothing is owner-approved while a fact-check is still open.
-    if (e.review.status === 'owner_approved') expect(e.verification).toEqual([]);
+    // Runtime approval requires an owner decision, no open fact-check, and
+    // an exact hash match to every authored field.
+    if (e.review.status === 'owner_approved') {
+      expect(e.verification).toEqual([]);
+      expect(e.review.approval_hash).toMatch(/^[a-f0-9]{64}$/);
+      expect(catalog.isApproved(e)).toBe(true);
+    } else {
+      expect(catalog.isApproved(e)).toBe(false);
+    }
     expect(typeof e.review.notes).toBe('string');
   });
 
@@ -317,8 +324,41 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
   });
 });
 
+describe('owner approval content binding', () => {
+  const approvedEntry = catalog.getEntry('ghost-ant');
+  const clone = () => JSON.parse(JSON.stringify(approvedEntry));
+
+  test.each([
+    ['identity', (entry) => { entry.common_name = 'Changed Ghost Ant'; }],
+    ['aliases', (entry) => { entry.aliases.push('changed alias'); }],
+    ['traits', (entry) => { entry.traits[0] = 'Changed visible trait'; }],
+    ['safety', (entry) => { entry.safety.stings = !entry.safety.stings; }],
+    ['copy', (entry) => { entry.copy.fact = 'Changed customer copy.'; }],
+    ['service', (entry) => { entry.service.key = null; }],
+    ['look-alikes', (entry) => { entry.look_alikes[0].difference = 'Changed comparison.'; }],
+    ['sources', (entry) => { entry.sources.push('https://example.com/changed-source'); }],
+  ])('a stale approval hash rejects a %s mutation', (_field, mutate) => {
+    const entry = clone();
+    mutate(entry);
+    expect(catalog.isApproved(entry)).toBe(false);
+  });
+
+  test('review metadata and the loader-injected level are outside the approved content', () => {
+    const entry = clone();
+    entry.review.notes = 'Audit metadata changed.';
+    entry.level = 'test-only-level';
+    expect(catalog.isApproved(entry)).toBe(true);
+  });
+
+  test('the history migration preserves only the 73 unchanged approvals', () => {
+    expect(allEntries.filter((entry) => entry.review.status === 'owner_approved')).toHaveLength(73);
+    expect(allEntries.filter((entry) => entry.review.status === 'draft')).toHaveLength(166);
+  });
+});
+
 describe('index.json — groups, subgroups, next_photo', () => {
   test('every group and subgroup has an ask/why next_photo within its length caps', () => {
+    expect(index.subgroups).toHaveLength(38);
     for (const g of index.groups) {
       expect(g.next_photo.ask.length).toBeLessThanOrEqual(180);
       expect(g.next_photo.why.length).toBeLessThanOrEqual(160);
@@ -367,9 +407,9 @@ describe('name collisions', () => {
   // (Codex #4873 r1): Apis mellifera is both the swarm and the wall colony,
   // so it names the bees subgroup, never one of them. A name that would only
   // meet at a category is too broad and must not exist.
-  test('every shared name resolves to a common subgroup or group', () => {
+  test('shared names resolve to a common node unless the common name spans unrelated arachnid groups', () => {
     const unresolved = catalog.nameIndexCollisions().filter((c) => !c.resolvesTo);
-    expect(unresolved).toEqual([]);
+    expect(new Set(unresolved.map((collision) => collision.name))).toEqual(new Set(['daddy longlegs', 'daddy long legs']));
   });
 
   test('Apis mellifera names the bees subgroup, not one honey bee situation', () => {
@@ -500,6 +540,23 @@ describe('resolveName regressions', () => {
     expect(catalog.resolveName('cicada killer')).toMatchObject({ node: { slug: 'cicada-killer' } });
   });
 
+  test.each(['digger wasp', 'digger wasps'])('generic %s names solitary wasps, while qualified names stay specific', (name) => {
+    expect(catalog.resolveName(name)).toMatchObject({ via: 'node', node: { level: 'subgroup', id: 'solitary-wasps' } });
+    expect(catalog.resolveName('great golden digger wasp')).toMatchObject({ node: { slug: 'great-golden-digger-wasp' } });
+    expect(catalog.resolveName('cicada killer')).toMatchObject({ node: { slug: 'cicada-killer' } });
+  });
+
+  test.each(['daddy longlegs', 'daddy long legs'])('%s stays unresolved until visual evidence distinguishes the taxa', (name) => {
+    expect(catalog.resolveName(name)).toBeNull();
+    expect(catalog.resolveName('harvestman')).toMatchObject({ node: { slug: 'harvestman' } });
+    expect(catalog.resolveName('cellar spider')).toMatchObject({ node: { slug: 'cellar-spider' } });
+  });
+
+  test.each(['bat', 'bats'])('generic %s names the neutral bats subgroup', (name) => {
+    expect(catalog.resolveName(name)).toMatchObject({ via: 'node', node: { level: 'subgroup', id: 'bats' } });
+    expect(catalog.resolveName('Brazilian free-tailed bat')).toMatchObject({ node: { slug: 'brazilian-free-tailed-bat' } });
+  });
+
   test('never a false substring match (the "walkingstick"/"antenna" class)', () => {
     expect(catalog.resolveName('walkingstick')).toBeNull();
     expect(catalog.resolveName('antenna')).toBeNull();
@@ -627,6 +684,10 @@ describe('reviewed catalog correction regressions', () => {
 
   test('changed hunting billbug aliases require owner re-review', () => {
     expect(catalog.getEntry('hunting-billbug').review.status).toBe('draft');
+  });
+
+  test('bagworm resolver exclusions added after approval require owner re-review', () => {
+    expect(catalog.getEntry('bagworm').review.status).toBe('draft');
   });
 });
 

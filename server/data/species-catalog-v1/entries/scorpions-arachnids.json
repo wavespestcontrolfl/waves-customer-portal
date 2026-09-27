@@ -235,12 +235,14 @@
     "season_basis": "year_round",
     "verification": [],
     "aka": [
-      "daddy longlegs"
+      "daddy longlegs",
+      "daddy long legs"
     ],
     "aliases": [
       "harvestman",
       "harvestmen",
       "daddy longlegs",
+      "daddy long legs",
       "opiliones"
     ],
     "scientific_name": "Opiliones",
@@ -447,7 +449,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "296082eef73f94f09479bdff18def71e401f3a47143ff8b0da3fd534ba1553e9"
     }
   }
 ]

@@ -34,6 +34,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { approvalContentHash, isApproved } = require('./species-catalog-approval');
 
 const DATA_DIR = path.join(__dirname, '..', 'data', 'species-catalog-v1');
 
@@ -517,6 +518,8 @@ module.exports = {
   resolveName,
   resolveLegacySlug,
   nameIndexCollisions,
+  approvalContentHash,
+  isApproved,
   // Test-only escape hatch: the full merged index data, for cross-checks
   // (planned_slugs, look_alike_groups) that don't warrant their own getter.
   _index: () => readJson('index.json'),

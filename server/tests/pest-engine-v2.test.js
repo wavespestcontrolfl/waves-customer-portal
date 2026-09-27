@@ -133,6 +133,17 @@ describe('buildAnswer — entry-level naming', () => {
     expect(built.answer.level).toBe('group');
   });
 
+  test('owner_approved content with a stale hash cannot be named', () => {
+    const candidate = cand('ghost-ant', 0.95);
+    candidate.entry = JSON.parse(JSON.stringify(candidate.entry));
+    candidate.entry.copy.fact = 'Changed after approval.';
+    expect(isApproved(candidate.entry)).toBe(false);
+
+    const built = buildAnswer(baseCtx({ candidates: [candidate] }));
+    expect(built.answer).toMatchObject({ level: 'group', node_id: 'ants' });
+    expect(built.entry).toBeNull();
+  });
+
   test('an escalation trigger with no OpenAI answer can never read pretty_sure, even at 0.90', () => {
     const built = buildAnswer(baseCtx({
       candidates: [cand('fire-ant', 0.90)], escalationTriggered: true, openaiAnswered: false,
@@ -372,6 +383,20 @@ describe('buildAnswer — look-alike identities respect the review gate (Codex r
     expect(built.answer.wording).toBe('likely');
     // The group's generic prompt stands in; nothing names the unapproved ant.
     expect(built.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
+  });
+
+  test('a stale look-alike approval hash blocks its name and pair prose on every pair path', () => {
+    const staleTarget = catalog.getEntry('white-footed-ant');
+    const originalFact = staleTarget.copy.fact;
+    staleTarget.copy.fact = 'Changed after approval.';
+    try {
+      const built = buildAnswer(baseCtx({ candidates: [cand('ghost-ant', 0.65), cand('white-footed-ant', 0.3)] }));
+      expect(built.entry.look_alikes).toEqual([]);
+      expect(built.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
+      expect(JSON.stringify(built)).not.toMatch(/white-footed|black all over/i);
+    } finally {
+      staleTarget.copy.fact = originalFact;
+    }
   });
 
   test('a reverse-edge veto brings its own safe wording, not the forward tip (Codex #4974 r6)', () => {

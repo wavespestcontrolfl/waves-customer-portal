@@ -11,7 +11,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "e8c3cc70d2fe1ea7e4959b8a2dad912169662d24dd22a01e1ac5f394a89df894"
     },
     "slug": "chinch-bug",
     "common_name": "Southern Chinch Bug",
@@ -122,7 +123,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "844164ac216a167bfe70fb918c71caaa9d76a6457db96296a57e6e669a6b4b6a"
     },
     "slug": "spittlebug",
     "common_name": "Twolined Spittlebug",
@@ -223,7 +225,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "67efa3a2c3c03971b58ae929d1a8474cf473ab1be343a001fc413cf7f8627d2f"
     },
     "slug": "stink-bug",
     "common_name": "Stink Bug",
@@ -863,7 +866,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Confirmed against UF/IFAS EDIS IN383 (Southern Chinch Bug): \"a bigeyed bug, Geocoris uliginosus, is the most numerous predator of the southern chinch bug in St. Augustinegrass.\" IN517 (Featured Creatures: Bigeyed Bugs) doesn't list chinch bugs among the prey items it names, but does warn against misidentifying bigeyed bugs as chinch bugs when spraying -- consistent with them being found together in the same turf."
+      "notes": "Confirmed against UF/IFAS EDIS IN383 (Southern Chinch Bug): \"a bigeyed bug, Geocoris uliginosus, is the most numerous predator of the southern chinch bug in St. Augustinegrass.\" IN517 (Featured Creatures: Bigeyed Bugs) doesn't list chinch bugs among the prey items it names, but does warn against misidentifying bigeyed bugs as chinch bugs when spraying -- consistent with them being found together in the same turf.",
+      "approval_hash": "9dd96e54fb3e60410c1288657642bee0f29b23c44d568b2029ba142c4abe1c53"
     },
     "role": "beneficial",
     "risk": "low",
@@ -971,7 +975,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Per audit item 54: replaced the low-value azalea-lace-bug pairing (different host plant, not a realistic visual confusion) with palmetto-weevil (C/beetles, also this session's own work), since UF/IFAS EDIS IN139 documents royal palm (Roystonea sp.) as a host with larval infestations, and the cosmetic-vs-potentially-fatal distinction is genuinely useful triage information. Reciprocal look-alike added on the palmetto-weevil entry."
+      "notes": "Per audit item 54: replaced the low-value azalea-lace-bug pairing (different host plant, not a realistic visual confusion) with palmetto-weevil (C/beetles, also this session's own work), since UF/IFAS EDIS IN139 documents royal palm (Roystonea sp.) as a host with larval infestations, and the cosmetic-vs-potentially-fatal distinction is genuinely useful triage information. Reciprocal look-alike added on the palmetto-weevil entry.",
+      "approval_hash": "e6435c31532b2da715feaa113ddd4617340d80f2d4ae41915f70b410cf073085"
     },
     "role": "plant_pest",
     "risk": "low",
@@ -1075,7 +1080,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Per audit item 54: replaced the low-value royal-palm-bug pairing (different host plant, not a realistic confusion) with green-lacewing (C/other-insects, also this session's own work) — the two are commonly confused by name ('lace bug' vs 'lacewing') even though one is a pest and the other a beneficial predator, so telling them apart matters for whether to treat. Reciprocal look-alike added on the green-lacewing entry."
+      "notes": "Per audit item 54: replaced the low-value royal-palm-bug pairing (different host plant, not a realistic confusion) with green-lacewing (C/other-insects, also this session's own work) — the two are commonly confused by name ('lace bug' vs 'lacewing') even though one is a pest and the other a beneficial predator, so telling them apart matters for whether to treat. Reciprocal look-alike added on the green-lacewing entry.",
+      "approval_hash": "dad14dddde5a1688c133dc9ed6347dc9fbbf4e911498720e00be24d30438b621"
     },
     "role": "plant_pest",
     "risk": "low",

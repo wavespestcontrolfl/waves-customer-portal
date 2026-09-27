@@ -18,7 +18,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "f590a6812c6d77acb0ec994fffefe9c516145b4ad266d3c315b8e232eb5fd086"
     },
     "slug": "american-cockroach",
     "common_name": "American Cockroach",
@@ -132,7 +133,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "Sourced from a UF entomology project gallery page rather than a Featured Creatures EDIS number; the dedicated EDIS page for this species could not be located during this pass."
+      "notes": "Sourced from a UF entomology project gallery page rather than a Featured Creatures EDIS number; the dedicated EDIS page for this species could not be located during this pass.",
+      "approval_hash": "fb5ad86d489a47fd2d6e071d2090023605dcf7c7a49f943f0c5c82195e786d6d"
     },
     "slug": "smokybrown-cockroach",
     "common_name": "Smokybrown Cockroach",
@@ -566,7 +568,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Primary distinguishing traits (yellow wing stripe, pronotum band) cross-checked across several pest-control and reference sources; could not load a UF/IFAS EENY page dedicated specifically to this species. Per audit item 52: aligned verdict/role/risk/action/safety.allergen with american-cockroach (A entry, read for reference) -- this is a closely related Periplaneta species that this entry's own copy says 'behaves a lot like the American cockroach,' so there was no documented basis for the earlier call/specialist/allergen-true posture being more severe than its American counterpart's watch/monitor/allergen-false. A-side (american-cockroach) should be checked to confirm it stays at this same posture once its own audit fixes (item 9) land."
+      "notes": "Primary distinguishing traits (yellow wing stripe, pronotum band) cross-checked across several pest-control and reference sources; could not load a UF/IFAS EENY page dedicated specifically to this species. Per audit item 52: aligned verdict/role/risk/action/safety.allergen with american-cockroach (A entry, read for reference) -- this is a closely related Periplaneta species that this entry's own copy says 'behaves a lot like the American cockroach,' so there was no documented basis for the earlier call/specialist/allergen-true posture being more severe than its American counterpart's watch/monitor/allergen-false. A-side (american-cockroach) should be checked to confirm it stays at this same posture once its own audit fixes (item 9) land.",
+      "approval_hash": "484c92982acfa84ba154b049d68f85dad4e243129d42f3d831f52e7825d01f12"
     }
   },
   {
@@ -676,7 +679,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "bc42b2d9459f008ba41bc46784ceeb41ffe362ed8a1f6cbd2f12b58c69a85436"
     }
   },
   {
@@ -1013,7 +1017,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Primary source is Wikipedia cross-checked against pest-industry summaries; could not load a dedicated UF/IFAS EENY page for this species in this session."
+      "notes": "Primary source is Wikipedia cross-checked against pest-industry summaries; could not load a dedicated UF/IFAS EENY page for this species in this session.",
+      "approval_hash": "155493294a39319585a871d3ea45a6551efaa8daad291b3b6cec490c478890dc"
     }
   },
   {
@@ -1124,7 +1129,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Could not load a dedicated UF/IFAS EENY page for this species in this session; facts cross-checked across multiple general reference/pest-industry sources."
+      "notes": "Could not load a dedicated UF/IFAS EENY page for this species in this session; facts cross-checked across multiple general reference/pest-industry sources.",
+      "approval_hash": "f7dd35d0b757ddb80c4185d981c7169b74f7c02543dbccd7ef9ea2b2bfb02c2a"
     }
   },
   {

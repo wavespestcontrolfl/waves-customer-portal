@@ -11,7 +11,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "8a14921d026b8d29b20385fe9067f6ce241f76325bd5ddbaa78d5c6bf84d3e97"
     },
     "slug": "brown-anole",
     "common_name": "Brown Anole",
@@ -121,7 +122,8 @@
     "legacy_slugs": [],
     "review": {
       "status": "owner_approved",
-      "notes": "Resolved 2026-09-26: the old source (ask.ifas.ufl.edu/publication/UW486) was misidentified -- that publication is actually about the brown anole (Anolis sagrei), not Hemidactylus house geckos, so it was removed. No dedicated UF/IFAS Featured Creatures page for Hemidactylus exists. Confirmed traits instead against two directly-loaded sources: Powell 2004, \"Asian House Gecko (Hemidactylus frenatus),\" IGUANA 11(1):20 (nocturnal, gathers at lights to feed on insects, forages on walls/ceilings), and Hoskin 2020, \"Calling behaviour in the invasive Asian house gecko (Hemidactylus frenatus)...,\" Wildlife Research, BioOne/CSIRO (multiple-chirp \"chik, chik, chik\" call, territorial/sexual function, peaks at dusk and pre-dawn). Toe-pad wall-climbing is a defining, undisputed Gekkonidae trait and wasn't separately sourced."
+      "notes": "Resolved 2026-09-26: the old source (ask.ifas.ufl.edu/publication/UW486) was misidentified -- that publication is actually about the brown anole (Anolis sagrei), not Hemidactylus house geckos, so it was removed. No dedicated UF/IFAS Featured Creatures page for Hemidactylus exists. Confirmed traits instead against two directly-loaded sources: Powell 2004, \"Asian House Gecko (Hemidactylus frenatus),\" IGUANA 11(1):20 (nocturnal, gathers at lights to feed on insects, forages on walls/ceilings), and Hoskin 2020, \"Calling behaviour in the invasive Asian house gecko (Hemidactylus frenatus)...,\" Wildlife Research, BioOne/CSIRO (multiple-chirp \"chik, chik, chik\" call, territorial/sexual function, peaks at dusk and pre-dawn). Toe-pad wall-climbing is a defining, undisputed Gekkonidae trait and wasn't separately sourced.",
+      "approval_hash": "1596c87b9d0aadd7fa0617d5cc9bc1141dca75c90272f07417bc333b1f6c218e"
     },
     "slug": "gecko",
     "common_name": "House Gecko",
@@ -320,7 +322,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": ""
+      "notes": "",
+      "approval_hash": "70a532b4a79a28643f20ac9100c1c8cc7011f3bde4dd84c38c6ab92e150a8def"
     },
     "role": "beneficial",
     "risk": "low",
