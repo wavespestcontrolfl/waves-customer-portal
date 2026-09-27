@@ -178,17 +178,11 @@ describe('stripTrailingSignature — anySigner', () => {
     ['Options:\n- Lawn Care\n\n— Adam, Waves Pest Control', 'Options:\n- Lawn Care'],
     ['Options:\n- Lawn Care\n\n— Sarah', 'Options:\n- Lawn Care'],
     ['Options:\n- Lawn Care\n— Adam, Waves Pest Control', 'Options:\n- Lawn Care'],
-    // #4975 follow-ups: only a who-question takes a dashed name as its answer
-    // (the known signers included), and names run to three words.
+    // #4975 follow-up: a Waves signer answers only a who-question, so under
+    // any other question the dashed name signs the text.
     ['When works best for you?\n— Adam', 'When works best for you?'],
     ['What day works best for you?\n- Adam', 'What day works best for you?'],
-    ['When works for you?\n— Sarah', 'When works for you?'],
-    ['We can help. — Mary Ann Smith', 'We can help.'],
-    ['We can help.\nThanks,\nMary Ann Smith', 'We can help.'],
-    ['We can help. — Mary Ann Smith, Waves Team', 'We can help.'],
-    // Owner ruling 2026-09-26 on #4975: lean toward stripping, so a one-word
-    // value under a closing question goes as well.
-    ['When is your visit?\n— Tuesday', 'When is your visit?'],
+    ['Which works better, Tuesday or Wednesday?\n— Waves Pest Control', 'Which works better, Tuesday or Wednesday?'],
   ])('%j → %j', (text, expected) => {
     expect(any(text)).toBe(expected);
   });
@@ -220,12 +214,18 @@ describe('stripTrailingSignature — anySigner', () => {
     'Who will be coming?\n— Sarah',
     'Your technician is:\n— Adam',
     'Options:\n- Lawn Care\n- Pest Control',
-    // #4975 follow-ups: a who-question's dashed answer, a known signer
-    // included, and a three-word value under a label.
+    // #4975 follow-up: a who-question's dashed answer, a Waves signer
+    // included; a dashed answer to an information question. An unknown name
+    // there has an answer's shape too, so it stays.
     'Who will be coming?\n— Adam',
-    'Who will be coming?\n— Mary Ann Smith',
-    'Your technician:\n— Mary Ann Smith',
-    'Make checks payable to:\n— Waves Pest Control',
+    'Which service?\n— Lawn Care',
+    'Where are you located?\n— Lakewood Ranch',
+    'When works for you?\n— Sarah',
+    // Codex r1 on #5083: a three-word call to action is not a name, and a
+    // name never runs onto the next line.
+    'Thanks!\nCall Us Today',
+    'Talk soon!\nSchedule Online Today',
+    'Options:\n- Lawn Care\nTuesday',
   ])('%j is not a sign-off and is kept', (text) => {
     expect(any(text)).toBe(text);
   });
@@ -250,5 +250,4 @@ describe('stripTrailingSignature — anySigner', () => {
 test('anySigner keeps a closer block that names the customer by full name', () => {
   expect(stripTrailingSignature('Thanks,\nSarah Jones!', { anySigner: true, addresseeFirstName: 'Sarah' })).toBe('Thanks,\nSarah Jones!');
   expect(stripTrailingSignature('We can help.\nSarah Jones', { anySigner: true, addresseeFirstName: 'Sarah' })).toBe('We can help.\nSarah Jones');
-  expect(stripTrailingSignature('Thanks,\nMary Ann Smith!', { anySigner: true, addresseeFirstName: 'Mary' })).toBe('Thanks,\nMary Ann Smith!');
 });

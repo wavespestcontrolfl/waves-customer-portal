@@ -90,9 +90,9 @@ for (const key of Object.keys(PEOPLE)) SIGNATURE_TAIL_RES[key] = buildSignatureT
 //  - a dash-set name: the dash starts its own line (not under a value word,
 //    trailing spaces included: "Your technician is \n— Sarah" is an answer),
 //    follows a sentence ending in . or ! on the same line, or is the whole
-//    text. The name is one word in any case or script, or two or three
-//    capitalized words ("Mary Ann Smith"), optionally ", <Company>" in
-//    capitalized words or "from Waves";
+//    text. The name is one word in any case or script, or two capitalized
+//    words on one line, optionally ", <Company>" in capitalized words or
+//    "from Waves";
 //  - a known closer on its own line with the name under it ("Thanks,\nSarah")
 //    — a closer from CLOSER, never any comma-ended line ("Here are the
 //    options,\nLawn Care" is a list);
@@ -120,9 +120,11 @@ const CAP_TOKEN = "\\p{Lu}[\\p{L}'\\u2019-]*";
 // After the name: ", Waves Team" in capitalized words, or the company joined
 // by from/at/with ("— Sarah from Waves") as SIGNATURE_BLOCK joins it.
 const CAP_COMPANY = `(?:\\s*,\\s*${CAP_TOKEN}(?:\\s+${CAP_TOKEN}){0,3}|\\s+${anyCase(`(?:from|at|with)\\s+${COMPANY}`)})?`;
-// Up to three capitalized words: "Sarah", "Sarah Jones", "Mary Ann Smith".
-const CAP_NAME = `(?<name>${CAP_TOKEN}(?:\\s+${CAP_TOKEN}){0,2})${CAP_COMPANY}`;
-const DASH_NAME = `(?<name>${CAP_TOKEN}(?:\\s+${CAP_TOKEN}){1,2}|${ANY_TOKEN})${CAP_COMPANY}`;
+// A name is on one line, so its words are joined by spaces only: a line
+// break never makes "- Lawn Care\nTuesday" one name. Two words at most —
+// "Call Us Today" and "Schedule Online Today" have a three-word name's shape.
+const CAP_NAME = `(?<name>${CAP_TOKEN}(?:[ \\t]+${CAP_TOKEN})?)${CAP_COMPANY}`;
+const DASH_NAME = `(?<name>${CAP_TOKEN}[ \\t]+${CAP_TOKEN}|${ANY_TOKEN})${CAP_COMPANY}`;
 const VALUE_WORD = anyCase('(?:is|are|was|were|be|as|named|called|by)');
 const ANY_CLOSER = anyCase(CLOSER);
 // mode: 'always' strips regardless of the customer; 'keepAddressee' keeps the
@@ -137,18 +139,24 @@ const ANY_SIGNER_RES = [
   { re: new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})${ANY_CLOSER},?[ \\t]+${CAP_NAME}${TAIL}`, 'u'), mode: 'otherThanAddressee' },
 ];
 // A dash can also set a value on its own line: under a label ("Your
-// technician:\n— Sarah", "Which service:\n— Lawn Care"), under a who-question
-// ("Who will be coming?\n— Sarah") or as the next item of a dashed or bulleted
-// list. Such a text keeps its tail through both passes, known signers
-// included. Any other question is one a name cannot answer ("When works best
-// for you?\n— Adam", "Would you like to schedule?\n— Sarah"), so the dash
-// there is a sign-off, and so is a dashed line set off by a blank line or
-// carrying a company ("— Adam, Waves Pest Control"). The value takes the
-// signer patterns' one-to-three-word shape, so whatever they would strip
-// under a label, this keeps.
-const VALUE_QUESTION = anyCase('(?:who|whom|whose)');
+// technician:\n— Sarah", "Which service:\n— Lawn Care"), under an information
+// question ("Who will be coming?\n— Sarah", "Where are you located?\n—
+// Lakewood Ranch") or as the next item of a dashed or bulleted list. Such a
+// text keeps its tail through both passes. A Waves signer (Adam, Virginia,
+// the company) answers only a who-question: under any other question it signs
+// the text ("When works best for you?\n— Adam"), as a bare signer line does
+// (AFTER_SENTENCE_LINE). A yes/no closing question ("Would you like to
+// schedule?\n— Sarah") takes no dashed answer, and a dashed line set off by a
+// blank line or carrying a company ("— Adam, Waves Pest Control") is never
+// one.
+const WHO_QUESTION = anyCase('(?:who|whom|whose)');
+const INFO_QUESTION = anyCase('(?:what|which|where|when|why|how)');
+const WAVES_SIGNER = anyCase(SIGNER);
+const DASHED_LINE = `\\n[ \\t]*${DASH}[ \\t]*`;
 const DASH_VALUE_TAIL_RE = new RegExp(
-  `(?:^|\\n)(?:[^\\n]*:[ \\t]*|[^\\n]*\\b${VALUE_QUESTION}\\b[^.!?\\n]*\\?[ \\t]*|[ \\t]*(?:${DASH}|[\\u2022*])[^\\n]*)\\n[ \\t]*${DASH}[ \\t]*(?:${CAP_TOKEN}(?:[ \\t]+${CAP_TOKEN}){1,2}|${ANY_TOKEN})${TAIL}`,
+  `(?:^|\\n)(?:(?:[^\\n]*:[ \\t]*|[^\\n]*\\b${WHO_QUESTION}\\b[^.!?\\n]*\\?[ \\t]*|[ \\t]*(?:${DASH}|[\\u2022*])[^\\n]*)${DASHED_LINE}`
+  + `|[^\\n]*\\b${INFO_QUESTION}\\b[^.!?\\n]*\\?[ \\t]*${DASHED_LINE}(?!${WAVES_SIGNER}${TAIL}))`
+  + `(?:${CAP_TOKEN}[ \\t]+${CAP_TOKEN}|${ANY_TOKEN})${TAIL}`,
   'u',
 );
 
