@@ -7735,7 +7735,7 @@ async function paymentReminderCopy({ term, invoice, customer, amountDue }) {
   const firstVisitDate = effectiveFirstVisitDate(term);
   const body = await renderSmsTemplate('annual_prepay_payment_reminder', {
     first_name: customer.first_name || 'there',
-    amount_text: ` for $${amountDue.toFixed(2)}`,
+    amount_text: Number.isFinite(amountDue) ? ` for $${amountDue.toFixed(2)}` : '',
     first_visit_date: formatDateLabel(firstVisitDate),
     pay_link: payUrl,
   }, { workflow: 'annual_prepay_payment_reminder', entity_type: 'annual_prepay_term', entity_id: term.id });
@@ -7886,11 +7886,16 @@ async function sendExplicitPaymentReminderChannels({
   return { sent: hadPriorDelivery || reachedNow, termId: claimedTerm.id, complete: result.complete };
 }
 
+async function readPaymentReminderChoice(customerId) {
+  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+  const channels = require('./billing-delivery-channels').explicitBillingChannels(prefs || {}, 'billing');
+  return { channels, explicit: channels?.length > 0 };
+}
+
 async function routeExplicitPaymentReminder(context) {
   let channels;
   try {
-    const prefs = await db('notification_prefs').where({ customer_id: context.customer.id }).first();
-    channels = require('./billing-delivery-channels').explicitBillingChannels(prefs || {}, 'billing');
+    ({ channels } = await readPaymentReminderChoice(context.customer.id));
   } catch (err) {
     logger.warn(`[annual-prepay] notification_prefs lookup failed for customer ${context.customer.id}: ${err.message}`);
     await context.reverseReminderCredit();
@@ -7921,23 +7926,25 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
     ? termOrId
     : await db('annual_prepay_terms').where({ id: termOrId }).first();
   if (!term) return { sent: false, reason: 'term_not_found' };
-  if (term.status !== PAYMENT_PENDING_STATUS) return { sent: false, reason: 'not_payment_pending' };
-  if (term[sentCol]) return { sent: false, reason: 'already_sent' };
-  if (!term.prepay_invoice_id) return { sent: false, reason: 'no_invoice' };
+  const termRefusal = [
+    ['not_payment_pending', term.status !== PAYMENT_PENDING_STATUS],
+    ['already_sent', Boolean(term[sentCol])],
+    ['no_invoice', !term.prepay_invoice_id],
+  ].find(([, refused]) => refused);
+  if (termRefusal) return { sent: false, reason: termRefusal[0] };
 
   const attemptColumn = 'payment_reminder_3d_attempted_for';
   const trackAttempt = Number(daysOut) === 3 && Boolean(cols[attemptColumn]);
   let explicitAttempt = false;
   if (trackAttempt) {
     try {
-      const prefs = await db('notification_prefs').where({ customer_id: term.customer_id }).first();
-      explicitAttempt = require('./billing-delivery-channels').explicitBillingChannels(prefs || {}, 'billing')?.length > 0;
+      explicitAttempt = (await readPaymentReminderChoice(term.customer_id)).explicit;
     } catch (err) {
       logger.warn(`[annual-prepay] attempt choice unreadable for term ${term.id}: ${err.message}`);
       return { sent: false, reason: 'notification_prefs_unavailable' };
     }
   }
-  if (opts.resume && (!trackAttempt || !explicitAttempt)) return { sent: false, reason: 'resume_not_explicit' };
+  if (opts.resume && !explicitAttempt) return { sent: false, reason: 'resume_not_explicit' };
   let invoice;
   const { isInvoiceCollectibleStatus, invoiceAmountDue } = require('./invoice-helpers');
 
@@ -7991,15 +7998,17 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
   try {
     // Persist explicit attempt evidence before any fallible invoice preparation.
     invoice = await db('invoices').where({ id: claimedTerm.prepay_invoice_id }).first();
-    let refusal;
-    if (!invoice) refusal = 'invoice_missing';
-    else if (!isInvoiceCollectibleStatus(invoice.status)) refusal = 'invoice_not_collectible';
-    else if (invoice.payer_id) refusal = 'payer_billed';
-    else if (await invoiceDunningActiveToday(invoice.id)) refusal = 'dunning_active_today';
-    else if (!(invoiceAmountDue(invoice) > 0)) refusal = 'fully_credited';
-    if (refusal) {
-      await releaseClaim();
-      return { sent: false, reason: refusal };
+    for (const [reason, refused] of [
+      ['invoice_missing', () => !invoice],
+      ['invoice_not_collectible', () => !isInvoiceCollectibleStatus(invoice.status)],
+      ['payer_billed', () => invoice.payer_id],
+      ['dunning_active_today', () => invoiceDunningActiveToday(invoice.id)],
+      ['fully_credited', () => !(invoiceAmountDue(invoice) > 0)],
+    ]) {
+      if (await refused()) {
+        await releaseClaim();
+        return { sent: false, reason };
+      }
     }
     // Run the same account-credit seam the regular invoice send paths run
     // before asking for money (feature-gated + fail-soft inside), then
@@ -8057,29 +8066,7 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       return { sent: false, reason: 'no_phone' };
     }
 
-    const { publicPortalUrl } = require('../utils/portal-url');
-    const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
-    const payUrl = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
-      kind: 'invoice',
-      entityType: 'invoices',
-      entityId: invoice.id,
-      customerId: customer.id,
-      codePrefix: invoiceShortCodePrefix(invoice),
-    });
-    const amountText = Number.isFinite(amountDue)
-      ? ` for $${amountDue.toFixed(2)}`
-      : '';
-
-    const body = await renderSmsTemplate(
-      'annual_prepay_payment_reminder',
-      {
-        first_name: customer.first_name || 'there',
-        amount_text: amountText,
-        first_visit_date: formatDateLabel(effectiveFirstVisitDate(claimedTerm)),
-        pay_link: payUrl,
-      },
-      { workflow: 'annual_prepay_payment_reminder', entity_type: 'annual_prepay_term', entity_id: claimedTerm.id },
-    );
+    const { body } = await paymentReminderCopy({ term: claimedTerm, invoice, customer, amountDue });
     if (!body) {
       logger.warn(`[annual-prepay] annual_prepay_payment_reminder template missing/disabled for customer ${customer.id}`);
       await reverseReminderCredit();
@@ -8202,8 +8189,7 @@ async function pendingExplicitEpisodeTerms(stageTerms, date) {
     const terms = [];
     for (const term of candidates) {
       try {
-        const prefs = await db('notification_prefs').where({ customer_id: term.customer_id }).first();
-        if (require('./billing-delivery-channels').explicitBillingChannels(prefs || {}, 'billing')?.length) terms.push(term);
+        if ((await readPaymentReminderChoice(term.customer_id)).explicit) terms.push(term);
       } catch (err) {
         logger.warn(`[annual-prepay] resume choice unreadable for term ${term.id}: ${err.message}`);
       }
