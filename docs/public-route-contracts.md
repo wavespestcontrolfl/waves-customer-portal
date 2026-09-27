@@ -201,8 +201,21 @@ the confirmed window — that booking now refuses with the existing `SLOT_TAKEN`
 409 (the same shape and client recovery as every other slot race on this
 route) instead of committing a route the offer engine would no longer certify.
 A zone/no-tech confirm (no technician bound) has no single route to re-check
-and keeps only the overlap gate, unchanged. Either gate off is byte-identical
-to today.
+and keeps only the overlap gate, unchanged. Either gate off skips this
+whole-route capacity re-check.
+
+Public-confirm location freshness applies with either capacity gate on or
+off. After the scheduling and customer-communications fences, the customer
+row is held `FOR SHARE` through the insert. A complete live pin in another
+signed-offer grid cell returns `LOCATION_CHANGED_RETRY` (409); a same-cell
+exact correction drives the final travel/capacity probes. Customers without
+a complete stored pair are geocoded from their server-owned address before
+locks. The address and missing pair must still be unchanged under the fence,
+and a matching staff geocode-review hold refuses the fallback. A valid
+server-resolved pair must match the signed grid and is stamped with its
+address on the new visit so dispatch uses the same location the commit
+certified. The customer profile is not rewritten, cleared pins are not
+restored, and no geocoder request runs while scheduling locks are held.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`

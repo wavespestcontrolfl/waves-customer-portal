@@ -1967,6 +1967,33 @@ function seededRowPin(row, offerLat, offerLng) {
   };
 }
 
+function storedBookingPin(customer) {
+  const pair = [customer?.latitude, customer?.longitude];
+  if (pair.some(value => value == null || String(value).trim() === '' || !Number.isFinite(Number(value)) || Number(value) === 0)) return null;
+  return { lat: Number(pair[0]), lng: Number(pair[1]) };
+}
+
+function bookingAddressStamp(customer) {
+  return Object.fromEntries(['line1', 'line2', 'city', 'state', 'zip'].map(part => [
+    `service_address_${part}`,
+    customer?.[part.startsWith('line') ? `address_${part}` : part] || null,
+  ]));
+}
+
+// Load a missing primary pin from the server-owned address before taking
+// scheduling locks. The public echo proves the signed grid, not an exact
+// customer pin, so it must never be persisted as our geocoding authority.
+async function preloadBookingLocation(customer) {
+  if (!customer || storedBookingPin(customer)) return null;
+  const review = await require('../services/customer-geocode-review').reviewedServiceLocation({
+    customer_id: customer.id, ...bookingAddressStamp(customer),
+  });
+  if (review) return review.location;
+  return require('../services/scheduling/day-stops').resolveServiceLocation({
+    ...customer, lat: null, lng: null,
+  });
+}
+
 // createSelfBooking — the booking-commit operation behind POST /api/booking/confirm,
 // extracted so non-HTTP callers (e.g. the voice agent's confirm_booking tool) run the
 // EXACT same path: customer resolution, advisory-locked conflict re-check, the two-row
@@ -2541,13 +2568,13 @@ async function createSelfBooking(payload = {}) {
       Number.isFinite(offerLng) ? offerLng : null,
     );
     // The signed coordinates above prove what the availability builder
-    // offered. The visit itself is unstamped, though, so dispatch inherits
-    // the customer row's LIVE pin. Reload and fence that effective pin inside
-    // the booking transaction before any conflict/capacity simulation; a pin
-    // corrected after the offer must never leave those checks modeling the
-    // stale echo while the inserted visit routes to the corrected location.
+    // offered. Dispatch normally inherits the customer's live pin; a missing
+    // pin needs a server-resolved visit stamp instead. Reload and fence that
+    // effective location before any conflict/capacity simulation so those
+    // checks model the same exact point as the inserted visit.
     let bookingLat = Number.isFinite(offerLat) ? offerLat : null;
     let bookingLng = Number.isFinite(offerLng) ? offerLng : null;
+    let bookingLocationStamp = null;
     // An empty serviceKey can never have been offered by the funnel (both
     // public offer routes derive a key the same way) — refuse outright so a
     // sig harvested from a non-redeeming builder call (reschedule/voice
@@ -3039,8 +3066,9 @@ async function createSelfBooking(payload = {}) {
       ];
       const commsFingerprint = (r) => COMMS_FINGERPRINT_COLS.map((c) => r?.[c] || '').join('|');
       const preFenceCustomer = custId
-        ? await db('customers').where({ id: custId }).first(...COMMS_FINGERPRINT_COLS)
+        ? await db('customers').where({ id: custId }).first('id', ...COMMS_FINGERPRINT_COLS, 'latitude', 'longitude')
         : null;
+      const preloadedBookingLocation = !callbackVisit ? await preloadBookingLocation(preFenceCustomer) : null;
       txResult = await db.transaction(async (trx) => {
       // RUNG 1 — date-wide occupancy lock, FIRST (see the ORDERING CONTRACT
       // in services/scheduling/occupancy.js). This path's own conflict gate
@@ -3170,15 +3198,31 @@ async function createSelfBooking(payload = {}) {
             code: 'CUSTOMER_CHANGED_RETRY',
           });
         }
-        const freshLat = freshBookingCustomer.latitude != null ? Number(freshBookingCustomer.latitude) : NaN;
-        const freshLng = freshBookingCustomer.longitude != null ? Number(freshBookingCustomer.longitude) : NaN;
-        bookingLat = Number.isFinite(freshLat) ? freshLat : null;
-        bookingLng = Number.isFinite(freshLng) ? freshLng : null;
+        let freshPin = storedBookingPin(freshBookingCustomer);
+        const missingPinUnchanged = ['latitude', 'longitude'].every(
+          column => (freshBookingCustomer[column] ?? null) === (preFenceCustomer[column] ?? null),
+        );
+        if (!callbackVisit && !freshPin && missingPinUnchanged && !storedBookingPin(preFenceCustomer)) {
+          // A customer can have a valid geocoded offer without a saved pin.
+          // Preserve that server-resolved location, but only while the same
+          // address/missing pair still holds. Never resurrect a cleared pin
+          // or bypass a staff review recorded while the lookup was running.
+          const reviewed = await require('../services/customer-geocode-review').reviewedServiceLocation({
+            customer_id: custId, ...bookingAddressStamp(freshBookingCustomer),
+          }, trx);
+          const resolved = reviewed ? reviewed.location : preloadedBookingLocation;
+          freshPin = storedBookingPin({ latitude: resolved?.lat, longitude: resolved?.lng });
+          if (freshPin) {
+            bookingLocationStamp = { ...freshPin, ...bookingAddressStamp(freshBookingCustomer) };
+          }
+        }
+        bookingLat = freshPin?.lat ?? null;
+        bookingLng = freshPin?.lng ?? null;
         // Public offers bind the pin on the same rounded grid used by the
         // availability response. A move to another grid cell invalidates the
         // offer; an exact correction inside the same cell is safe because the
-        // live exact pin below drives every commit-time route check and the
-        // customer row is FOR SHARE-fenced through the unstamped insert.
+        // resolved exact pin below drives every commit-time route check and
+        // the customer row is FOR SHARE-fenced through the visit insert.
         if (!callbackVisit && bookingOfferLocationKey(bookingLat, bookingLng) !== offerLocationKey) {
           throw Object.assign(new Error('Your address just changed — please pick a time again.'), {
             statusCode: 409,
@@ -3671,6 +3715,9 @@ async function createSelfBooking(payload = {}) {
         throw err;
       }
       const [scheduledRow] = await trx('scheduled_services').insert({
+        // A geocoded fallback has no customer pin to inherit. Persist the
+        // exact checked pair and its address on THIS visit, not the profile.
+        ...(bookingLocationStamp || {}),
         ...(pestDuplicateKeptAtBooking ? { wizard_recovery_reconciled_at: trx.fn.now() } : {}),
         ...(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration
           ? { source_estimate_generation: sourceEstimateGeneration }

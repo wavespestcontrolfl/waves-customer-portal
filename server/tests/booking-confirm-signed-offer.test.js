@@ -305,6 +305,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   const MISMATCH_EST = 'dddd4444-ee55-4f66-8a77-bbbb8888cccc';
   const CUST = {
     id: 'cust-1', phone: '(941) 555-0100', email: 'ada@example.com', city: 'Sarasota',
+    address_line1: '123 Fixture Lane', address_line2: 'Unit 2', state: 'FL', zip: '34236',
     latitude: LAT, longitude: LNG,
   };
   const ESTIMATES = {
@@ -319,6 +320,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   const SENTINEL = 'stop-after-scheduled-services-insert';
   let capturedScheduledInsert;
   let fencedCustomer;
+  let loadedCustomer;
 
   function trxTable(table) {
     if (table === 'self_booked_appointments') {
@@ -333,6 +335,21 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
         // replay lookup → none; global day-cap count → 0 (under cap)
         first: () => Promise.resolve(counting ? { count: 0 } : null),
         insert: () => ({ returning: () => Promise.resolve([{ id: 'sb-1' }]) }),
+      };
+      return b;
+    }
+    if (table === 'leads') {
+      // Exercise the real address-verdict lookup shape while returning no
+      // matching lead. Invoke nested predicates so this fixture does not
+      // silently bypass the guard's contact-pair query construction.
+      const b = {
+        where(arg) { if (typeof arg === 'function') arg(b); return b; },
+        orWhere(arg) { if (typeof arg === 'function') arg(b); return b; },
+        whereNull: () => b,
+        whereRaw: () => b,
+        forUpdate: () => b,
+        first: async () => null,
+        select: async () => [],
       };
       return b;
     }
@@ -436,7 +453,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
           whereRaw: jest.fn().mockReturnThis(),
           where: jest.fn().mockReturnThis(),
           andWhere: jest.fn().mockReturnThis(),
-          first: jest.fn().mockResolvedValue(CUST),
+          first: jest.fn().mockImplementation(async () => loadedCustomer),
         };
       }
       if (table === 'notification_prefs' || table === 'property_preferences') {
@@ -465,6 +482,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     jest.clearAllMocks();
     capturedScheduledInsert = undefined;
     fencedCustomer = { ...CUST };
+    loadedCustomer = { ...CUST };
     mockOwnershipTables();
   });
 
@@ -516,6 +534,133 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       code: 'LOCATION_CHANGED_RETRY',
     });
     expect(capturedScheduledInsert).toBeUndefined();
+  });
+
+  test.each([
+    ['true', 'true'], ['true', 'false'], ['false', 'true'], ['false', 'false'],
+  ])('a geocoded offer with no stored customer pin survives confirm (capacity=%s, commit=%s)', async (capacity, commit) => {
+    const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+    const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
+    process.env.GATE_SCHEDULING_CAPACITY = capacity;
+    process.env.GATE_BOOK_CAPACITY_COMMIT = commit;
+    loadedCustomer = { ...CUST, latitude: null, longitude: null };
+    fencedCustomer = { ...loadedCustomer };
+    const exactPin = { lat: 27.339, lng: -82.531 };
+    let transactionStarted = false;
+    const runTransaction = db.transaction.getMockImplementation();
+    db.transaction.mockImplementation((...args) => { transactionStarted = true; return runTransaction(...args); });
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockImplementation(async (address) => {
+      expect(address).toBe('123 Fixture Lane, Sarasota, FL, 34236');
+      expect(transactionStarted).toBe(false);
+      return exactPin;
+    });
+    const capacitySpy = jest.spyOn(require('../services/scheduling/arrival-route'), 'checkArrivalPlacement')
+      .mockResolvedValue({ feasible: true, routeOrder: ['__candidate__'] });
+    const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+    try {
+      const row = await runToScheduledInsert();
+      expect(row).toMatchObject({
+        ...exactPin,
+        service_address_line1: CUST.address_line1, service_address_line2: CUST.address_line2,
+        service_address_city: CUST.city, service_address_state: CUST.state, service_address_zip: CUST.zip,
+      });
+      expect(loadedCustomer.latitude).toBeNull();
+      expect(fencedCustomer.latitude).toBeNull();
+      expect(conflictSpy).toHaveBeenCalledWith(expect.objectContaining({ travel: expect.objectContaining(exactPin) }));
+      if (capacity === 'true' && commit === 'true') {
+        expect(capacitySpy).toHaveBeenCalledWith(expect.objectContaining({ prospective: expect.objectContaining(exactPin) }));
+      } else expect(capacitySpy).not.toHaveBeenCalled();
+      expect(geocodeSpy).toHaveBeenCalledTimes(1);
+      const { recurringServiceAddress } = require('../services/booking/visit-financial-stamps');
+      expect(recurringServiceAddress(row)).toMatchObject({ lat: exactPin.lat, lng: exactPin.lng, service_address_line1: CUST.address_line1 });
+    } finally {
+      geocodeSpy.mockRestore(); capacitySpy.mockRestore(); conflictSpy.mockRestore();
+      if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+      if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+      else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
+    }
+  });
+
+  test('a complete customer pin cleared while confirm waits is not resurrected from the signed echo', async () => {
+    fencedCustomer = { ...CUST, latitude: null, longitude: null };
+    const sig = mintSlotOfferField(offerPayload());
+    await expect(createSelfBooking(confirmPayload(sig))).resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+    expect(capturedScheduledInsert).toBeUndefined();
+  });
+
+  test.each([
+    { latitude: null, longitude: LNG }, { latitude: LAT, longitude: null },
+  ])('a stable incomplete legacy pair is replaced as a whole on the visit: %p', async (pair) => {
+    loadedCustomer = { ...CUST, ...pair };
+    fencedCustomer = { ...loadedCustomer };
+    const pin = { lat: 27.339, lng: -82.531 };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue(pin);
+    try {
+      const row = await runToScheduledInsert();
+      expect(row).toMatchObject(pin);
+    } finally { geocodeSpy.mockRestore(); }
+  });
+
+  test.each([
+    [{ latitude: null, longitude: LNG }, { latitude: null, longitude: LNG - 0.02 }],
+    [{ latitude: LAT, longitude: null }, { latitude: LAT + 0.02, longitude: null }],
+  ])('an incomplete legacy pair changed during geocoding requires a fresh slot: %p', async (before, after) => {
+    loadedCustomer = { ...CUST, ...before };
+    fencedCustomer = { ...loadedCustomer };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockImplementation(async () => {
+      fencedCustomer = { ...fencedCustomer, ...after };
+      return { lat: LAT, lng: LNG };
+    });
+    try {
+      const sig = mintSlotOfferField(offerPayload());
+      await expect(createSelfBooking(confirmPayload(sig))).resolves.toMatchObject({
+        ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY',
+      });
+      expect(geocodeSpy).toHaveBeenCalledTimes(1);
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally { geocodeSpy.mockRestore(); }
+  });
+
+  test('a canonical address changed during geocoding requires a fresh booking attempt', async () => {
+    loadedCustomer = { ...CUST, latitude: null, longitude: null };
+    fencedCustomer = { ...loadedCustomer };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockImplementation(async () => {
+      fencedCustomer = { ...fencedCustomer, address_line1: '456 Changed Avenue' };
+      return { lat: LAT, lng: LNG };
+    });
+    try {
+      const sig = mintSlotOfferField(offerPayload());
+      await expect(createSelfBooking(confirmPayload(sig))).resolves.toMatchObject({
+        ok: false, status: 409, code: 'CUSTOMER_CHANGED_RETRY',
+      });
+      expect(geocodeSpy).toHaveBeenCalledTimes(1);
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally { geocodeSpy.mockRestore(); }
+  });
+
+  test('a canonical geocode outside the signed grid cannot certify the client echo', async () => {
+    loadedCustomer = { ...CUST, latitude: null, longitude: null };
+    fencedCustomer = { ...loadedCustomer };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: 27.5, lng: -82.4 });
+    try {
+      const sig = mintSlotOfferField(offerPayload());
+      await expect(createSelfBooking(confirmPayload(sig))).resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally { geocodeSpy.mockRestore(); }
+  });
+
+  test('a staff review hold recorded during geocoding prevents a new visit pin', async () => {
+    loadedCustomer = { ...CUST, latitude: null, longitude: null };
+    fencedCustomer = { ...loadedCustomer };
+    const geocodeSpy = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: LAT, lng: LNG });
+    const reviewSpy = jest.spyOn(require('../services/customer-geocode-review'), 'reviewedServiceLocation')
+      .mockResolvedValueOnce(null).mockResolvedValue({ location: null, reason: 'address_review_required' });
+    try {
+      const sig = mintSlotOfferField(offerPayload());
+      await expect(createSelfBooking(confirmPayload(sig))).resolves.toMatchObject({ ok: false, status: 409, code: 'LOCATION_CHANGED_RETRY' });
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally { geocodeSpy.mockRestore(); reviewSpy.mockRestore(); }
   });
 
   test('an exact pin correction inside the signed grid drives both commit-time route checks for the unstamped visit', async () => {
