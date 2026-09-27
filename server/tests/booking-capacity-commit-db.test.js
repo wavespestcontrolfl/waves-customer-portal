@@ -2,12 +2,11 @@
 // All fixture tables are connection-local copies of the deployed schema,
 // contain synthetic rows, and disappear when each transaction rolls back.
 // Same convention as arrival-window-placement-db.test.js — this file proves
-// createSelfBooking's assertBookCapacityCommit (GATE_BOOK_CAPACITY_COMMIT)
-// against the REAL arrival-route whole-route simulation instead of a mock:
-// a feasible slot still books, a later same-tech stop outside the candidate's
-// window passes the legacy overlap predicate but is refused with the
-// SLOT_TAKEN shape once checkArrivalPlacement finds the route cannot finish
-// its shift, and — Codex #4992 r1 P1 — when evaluateArrivalPlacement
+// the REAL arrival-route whole-route simulation used inline by
+// createSelfBooking: a feasible slot remains feasible, a later same-tech stop
+// outside the candidate's window passes the legacy overlap predicate but is
+// rejected by checkArrivalPlacement, and — Codex #4992 r1 P1 — when
+// evaluateArrivalPlacement
 // certifies feasibility through its clockOrder/storedOrderStale fallback
 // (a corrected order, not the day's STALE stored route_order values),
 // the shared persistArrivalOrder applies that corrected order onto the
@@ -26,8 +25,7 @@ jest.mock('../services/geocoder', () => ({
 }));
 
 const knex = require('knex');
-const { assertBookCapacityCommit } = require('../routes/booking')._internals;
-const { persistArrivalOrder } = require('../services/scheduling/arrival-route');
+const { checkArrivalPlacement, persistArrivalOrder } = require('../services/scheduling/arrival-route');
 const { findConflictingVisits } = require('../services/scheduling/occupancy');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { geocodeAddress } = require('../services/geocoder');
@@ -42,8 +40,8 @@ const SOUTH = '20000000-0000-4000-8000-000000000012';
 const BLOCKER = '20000000-0000-4000-8000-000000000013';
 const CUSTOMER = '30000000-0000-4000-8000-000000000011';
 
-// The candidate self-booking commit under test — never a stored row (the
-// booking hasn't inserted yet at the point assertBookCapacityCommit runs).
+// The candidate self-booking commit under test — never a stored row when the
+// inline createSelfBooking gate runs.
 const CANDIDATE = {
   technicianId: TECH, date: DAY, windowStart: '09:00', windowEnd: '10:00',
   durationMinutes: 60, lat: 27.545, lng: -82.4, serviceType: 'Pest Control',
@@ -62,7 +60,22 @@ async function insertNonOverlappingRouteOverload(conn) {
   });
 }
 
-describeDb('createSelfBooking commit-time capacity re-check on real PostgreSQL', () => {
+const probe = (trx) => checkArrivalPlacement({
+  conn: trx,
+  date: CANDIDATE.date,
+  technicianId: CANDIDATE.technicianId,
+  prospective: {
+    lat: CANDIDATE.lat,
+    lng: CANDIDATE.lng,
+    estimated_duration_minutes: CANDIDATE.durationMinutes,
+    service_type: CANDIDATE.serviceType,
+  },
+  windowStart: CANDIDATE.windowStart,
+  windowEnd: CANDIDATE.windowEnd,
+  durationMinutes: CANDIDATE.durationMinutes,
+});
+
+describeDb('booking commit whole-route dependency on real PostgreSQL', () => {
   let database;
   const gates = ['GATE_SCHEDULING_CAPACITY', 'GATE_BOOK_CAPACITY_COMMIT'];
   const saved = Object.fromEntries(gates.map((k) => [k, process.env[k]]));
@@ -95,12 +108,12 @@ describeDb('createSelfBooking commit-time capacity re-check on real PostgreSQL',
   afterEach(async () => { await mockConn.rollback(); });
 
   test('feasible slot still books: resolves with the certified fit', async () => {
-    await expect(assertBookCapacityCommit({ ...CANDIDATE, trx: mockConn }))
+    await expect(probe(mockConn))
       .resolves.toEqual(expect.objectContaining({ feasible: true }));
   });
 
-  test('a non-overlapping later stop that overloads the route is refused with the SLOT_TAKEN shape', async () => {
-    await expect(assertBookCapacityCommit({ ...CANDIDATE, trx: mockConn }))
+  test('a non-overlapping later stop that overloads the route makes the slot infeasible (createSelfBooking refuses it as SLOT_TAKEN)', async () => {
+    await expect(probe(mockConn))
       .resolves.toEqual(expect.objectContaining({ feasible: true }));
     await insertNonOverlappingRouteOverload(mockConn);
 
@@ -114,9 +127,7 @@ describeDb('createSelfBooking commit-time capacity re-check on real PostgreSQL',
       windowEnd: CANDIDATE.windowEnd,
     })).resolves.toEqual([]);
 
-    await expect(assertBookCapacityCommit({ ...CANDIDATE, trx: mockConn })).rejects.toMatchObject({
-      code: 'SLOT_TAKEN', statusCode: 409, isOperational: true,
-    });
+    await expect(probe(mockConn)).resolves.toEqual(expect.objectContaining({ feasible: false }));
   });
 
   test('Codex #4992 r1: a stale stored order certified through the clockOrder fallback is PERSISTED, not left stale', async () => {
@@ -131,7 +142,7 @@ describeDb('createSelfBooking commit-time capacity re-check on real PostgreSQL',
     await mockConn('scheduled_services').where({ id: NORTH }).update({ route_order: 2 });
     await mockConn('scheduled_services').where({ id: SOUTH }).update({ route_order: 1 });
 
-    const fit = await assertBookCapacityCommit({ ...CANDIDATE, trx: mockConn });
+    const fit = await probe(mockConn);
     expect(fit).toEqual(expect.objectContaining({ feasible: true }));
 
     // The real commit inserts the row BEFORE persisting the fit's order
@@ -154,21 +165,4 @@ describeDb('createSelfBooking commit-time capacity re-check on real PostgreSQL',
     expect(byId[NORTH]).toBeLessThan(byId[SOUTH]);
   });
 
-  test('GATE_BOOK_CAPACITY_COMMIT off: no new check even on an infeasible day (gate-off byte-identical)', async () => {
-    await insertNonOverlappingRouteOverload(mockConn);
-    await expect(findConflictingVisits({
-      db: mockConn,
-      date: DAY,
-      windowStart: CANDIDATE.windowStart,
-      windowEnd: CANDIDATE.windowEnd,
-    })).resolves.toEqual([]);
-    delete process.env.GATE_BOOK_CAPACITY_COMMIT;
-    await expect(assertBookCapacityCommit({ ...CANDIDATE, trx: mockConn })).resolves.toBeUndefined();
-  });
-
-  test('GATE_SCHEDULING_CAPACITY off: no new check either, even with GATE_BOOK_CAPACITY_COMMIT on', async () => {
-    await insertNonOverlappingRouteOverload(mockConn);
-    delete process.env.GATE_SCHEDULING_CAPACITY;
-    await expect(assertBookCapacityCommit({ ...CANDIDATE, trx: mockConn })).resolves.toBeUndefined();
-  });
 });

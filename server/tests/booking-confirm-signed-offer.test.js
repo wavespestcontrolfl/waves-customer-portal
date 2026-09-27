@@ -640,6 +640,33 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     }
   });
 
+  test('the production booking contract rejects an infeasible whole-route re-check as SLOT_TAKEN', async () => {
+    const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+    const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+    const capacitySpy = jest.spyOn(require('../services/scheduling/arrival-route'), 'checkArrivalPlacement')
+      .mockResolvedValue({ feasible: false, reason: 'arrival_window' });
+    const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+    try {
+      const sig = mintSlotOfferField(offerPayload());
+      await expect(createSelfBooking(confirmPayload(sig))).resolves.toMatchObject({
+        ok: false,
+        status: 409,
+        code: 'SLOT_TAKEN',
+      });
+      expect(capacitySpy).toHaveBeenCalledTimes(1);
+      expect(capturedScheduledInsert).toBeUndefined();
+    } finally {
+      capacitySpy.mockRestore();
+      conflictSpy.mockRestore();
+      if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+      if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+      else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
+    }
+  });
+
   test('a missing-coordinate re-service uses one canonical pin for conflict, capacity, and the visit stamp', async () => {
     const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
     const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;

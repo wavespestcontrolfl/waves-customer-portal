@@ -1004,6 +1004,32 @@ async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
   return { lat: resolvedLat, lng: resolvedLng, disclosable };
 }
 
+// /book's offer location (/availability and /find-slots). When the request is
+// for an existing customer — the estimate's, else the unique customer at the
+// typed address (the step-1 lookup's own match) — confirmation books at
+// customerBookingLocation and refuses an offer signed on any other grid cell,
+// so the offer is built there too (Codex #4992 P1: a staff-verified pin the
+// address geocoder never returns would refuse every retry), and never
+// echoed exactly — it is a customer record's pin. Everyone else keeps
+// resolveBookingCoords. estimate_id is a raw public value: only a UUID
+// (LEAD_ID_RE's shape) is looked up.
+async function resolveOfferCoords({ lat, lng, address, city, estimate_id }) {
+  let customerId = estimate_id && LEAD_ID_RE.test(String(estimate_id))
+    ? (await db('estimates').where('id', estimate_id).first('customer_id'))?.customer_id
+    : null;
+  if (!customerId && address) {
+    const parsed = parseRawAddress(address);
+    const line1 = parsed.line1 || address;
+    customerId = (await findUniqueCustomerByAddress(line1, city || parsed.city, parsed.zip, submittedInlineUnit(line1)))?.id;
+  }
+  const customer = customerId
+    ? await db('customers').where({ id: customerId })
+      .first('id', 'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+    : null;
+  const pin = customer ? await customerBookingLocation(customer) : null;
+  return pin ? { ...pin, disclosable: false } : resolveBookingCoords({ lat, lng, address, city, estimate_id });
+}
+
 // Load the singleton booking_config row, falling back to the same defaults the
 // public routes use. Exported so non-route callers (e.g. the voice agent's
 // read-only quoting tools) share one source of truth for the config window.
@@ -1794,7 +1820,7 @@ router.get('/availability', async (req, res, next) => {
       max_self_books_per_day: 3,
     };
 
-    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveBookingCoords({ lat, lng, address, city, estimate_id });
+    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({ lat, lng, address, city, estimate_id });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
@@ -1901,7 +1927,7 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
       max_self_books_per_day: 3,
     };
 
-    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveBookingCoords({ lat, lng, address, city, estimate_id });
+    const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({ lat, lng, address, city, estimate_id });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
@@ -1992,6 +2018,17 @@ async function preloadBookingLocation(customer) {
   return require('../services/scheduling/day-stops').resolveServiceLocation({
     ...customer, lat: null, lng: null,
   });
+}
+
+// The pin a booking for this existing customer commits at: its stored pin,
+// else preloadBookingLocation's staff-verified pin or canonical geocode of
+// the server-owned address — null while a staff review holds it, or when
+// nothing resolves. The offer paths build on it too (resolveOfferCoords,
+// reservice-public's buildAvailabilityForCustomer), so an offer is made at
+// the location its confirmation re-derives (Codex #4992 P1).
+async function customerBookingLocation(customer) {
+  const location = storedBookingPin(customer) || await preloadBookingLocation(customer);
+  return storedBookingPin({ latitude: location?.lat, longitude: location?.lng });
 }
 
 // createSelfBooking — the booking-commit operation behind POST /api/booking/confirm,
@@ -3662,17 +3699,46 @@ async function createSelfBooking(payload = {}) {
       }
 
       // Commit-time whole-route capacity re-check (GATE_BOOK_CAPACITY_COMMIT,
-      // owner-approved 2026-09-26 dispatch backlog) — see
-      // assertBookCapacityCommit above the transaction for the full design
-      // rationale. One call, no branch, under the tech-day advisory lock
-      // already held above (rung 1) — never a second locking scheme. The
-      // certified fit (undefined when the check didn't run) is applied onto
-      // the row below once it has an id.
-      const capacityCommitFit = await assertBookCapacityCommit({
-        trx, technicianId: technician_id, date: slotDateStr,
-        windowStart: slot_start, windowEnd: endTime, durationMinutes: duration,
-        lat: bookingLat, lng: bookingLng, serviceType: resolvedServiceType,
-      });
+      // owner-approved 2026-09-26 dispatch backlog). The overlap checks above
+      // answer "did another visit land on this exact window"; under
+      // GATE_SCHEDULING_CAPACITY the OFFER was certified by arrival-route.js's
+      // WHOLE-ROUTE simulation (find-time's findCapacitySlots), so a booking
+      // landing on this tech-day since can push a LATER stop past its promise
+      // or the day over capacity without overlapping this window. Re-run the
+      // same single-candidate evaluation (checkArrivalPlacement) against the
+      // live day, on this transaction under the tech-day lock already held
+      // (rung 1) — never a second locking scheme. A zone/no-tech confirm has
+      // no single route to simulate; the overlap checks stay its only guard.
+      // The certified fit is applied onto the row below once it has an id:
+      // it may certify through the clockOrder fallback (a corrected order,
+      // not the day's stale stored route_order), and discarding it would
+      // leave dispatch a route that no longer keeps every promise (Codex r1
+      // P1 on #4992).
+      let capacityCommitFit;
+      if (technician_id && bookCapacityCommitLive() && capacityEnabled()) {
+        const { checkArrivalPlacement } = require('../services/scheduling/arrival-route');
+        capacityCommitFit = await checkArrivalPlacement({
+          conn: trx,
+          date: slotDateStr,
+          technicianId: technician_id,
+          prospective: {
+            lat: Number.isFinite(bookingLat) ? bookingLat : null,
+            lng: Number.isFinite(bookingLng) ? bookingLng : null,
+            estimated_duration_minutes: duration,
+            service_type: resolvedServiceType,
+          },
+          windowStart: slot_start,
+          windowEnd: endTime,
+          durationMinutes: duration,
+        });
+        if (!capacityCommitFit.feasible) {
+          throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'SLOT_TAKEN',
+          });
+        }
+      }
 
       const [bookingRow] = await trx('self_booked_appointments').insert({
         customer_id: custId,
@@ -5819,72 +5885,6 @@ async function createSelfBooking(payload = {}) {
     return { ok: true, body: { booking, confirmationCode: confCode, ...(secureCard ? { secureCard } : {}) } };
 }
 
-// Commit-time whole-route capacity re-check (GATE_BOOK_CAPACITY_COMMIT,
-// owner-approved 2026-09-26 dispatch backlog). createSelfBooking's existing
-// commit-time checks (conflictQuery, findConflictingVisits) answer "did
-// another visit land on this exact window" — the same overlap predicate
-// every commit path has always run. Under GATE_SCHEDULING_CAPACITY the OFFER
-// is stronger: find-time's findCapacitySlots (server/services/scheduling/
-// find-time.js) certifies each candidate through arrival-route.js's
-// WHOLE-ROUTE arrival simulation (owner planning minutes, every promised
-// window on the tech's day). A booking that lands on this tech-day between
-// offer and confirm can push a LATER stop's promise past its window, or the
-// day over capacity, without ever overlapping THIS window — the overlap
-// checks would miss it and the commit would still succeed on a route the
-// offer engine would now refuse. This re-runs the SAME single-candidate
-// placement evaluation the offer used (checkArrivalPlacement ->
-// loadArrivalRouteContext + evaluateArrivalPlacement, arrival-route.js — no
-// traffic preload, the same conservative model find-time's own offer-time
-// fallback check already requires every capacity slot to also pass) against
-// the LIVE day. Callers pass their already-open transaction (`trx`) so this
-// reads under the SAME tech-day advisory lock the booking transaction
-// already holds (rung 1, scheduling/occupancy.js's ORDERING CONTRACT) —
-// never a second locking scheme. A zone/no-tech confirm (technicianId null)
-// has no single technician's route to simulate and is a no-op here; the
-// overlap checks are that path's only capacity guard either way, unchanged
-// by this gate. Extracted to its own function (rather than inlined in the
-// transaction) so the transaction's own complexity count carries only the
-// one call, not this gate's branch logic. Declared AFTER createSelfBooking
-// (function declarations hoist — this changes nothing at runtime) so this
-// function's own `code: 'SLOT_TAKEN'` string never lands ahead of
-// createSelfBooking's own DAY_FULL/SLOT_TAKEN ordering that
-// booking-slot-commit-validation.test.js pins by source position.
-//
-// Returns the certified `fit` on success (undefined when the check didn't
-// run — gate off or no technician) so the caller can persist it: like every
-// other capacity-mode evaluation, evaluateArrivalPlacement may certify
-// feasibility through the storedOrderStale/clockOrder fallback (route-
-// reorder-window-fit.js, arrival-route.js:406-475) — a DIFFERENT order than
-// the day's stale stored route_order values — and fit.routeOrder carries
-// that corrected order, not the one presently on the rows. Discarding it
-// would leave the stale order in place even though this exact check just
-// certified the day under the corrected one, handing dispatch a route that
-// no longer keeps every promised window. Codex round-1 P1 on #4992.
-async function assertBookCapacityCommit({ trx, technicianId, date, windowStart, windowEnd, durationMinutes, lat, lng, serviceType }) {
-  if (!technicianId || !bookCapacityCommitLive() || !capacityEnabled()) return undefined;
-  const { checkArrivalPlacement } = require('../services/scheduling/arrival-route');
-  const fit = await checkArrivalPlacement({
-    conn: trx,
-    date,
-    technicianId,
-    prospective: {
-      lat: Number.isFinite(lat) ? lat : null,
-      lng: Number.isFinite(lng) ? lng : null,
-      estimated_duration_minutes: durationMinutes,
-      service_type: serviceType,
-    },
-    windowStart,
-    windowEnd,
-    durationMinutes,
-  });
-  if (fit.feasible) return fit;
-  throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
-    statusCode: 409,
-    isOperational: true,
-    code: 'SLOT_TAKEN',
-  });
-}
-
 // Public shape for a self_booked_appointments row — an EXPLICIT allow-list,
 // never `self_booked_appointments.*`. The raw row now persists the full
 // attribution capture (gclid, _fbc/_fbp, full referrer, and landing_url —
@@ -6361,13 +6361,12 @@ module.exports._internals = {
   // phoned-in availability check runs the exact same route-aware slot finder as
   // the web /book funnel (no duplicated scheduling logic).
   resolveBookingCoords,
+  resolveOfferCoords,
+  customerBookingLocation,
   buildBookingAvailability,
   bookingExpectedMinutes,
   loadBookingConfig,
   createSelfBooking,
-  // Commit-time whole-route capacity re-check (GATE_BOOK_CAPACITY_COMMIT),
-  // exported for direct unit coverage of the gate/argument-passing contract.
-  assertBookCapacityCommit,
   MAX_BOOKING_HORIZON_DAYS,
   mintCaptureToken,
   verifyCaptureToken,

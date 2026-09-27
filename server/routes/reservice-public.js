@@ -210,27 +210,21 @@ async function loadLaneCatalog() {
   return byLane;
 }
 
-// Route-aware availability around the CUSTOMER's property — the coords
-// resolution mirrors reschedule-public's buildAvailabilityForService (stored
-// coords first, geocode of the address text as fallback).
+// Route-aware availability around the CUSTOMER's property, built on the
+// pin the re-service commit books at (booking's customerBookingLocation:
+// the stored pin, else a staff-verified pin or the canonical geocode) — an
+// offer made anywhere else would be for a location the commit never uses
+// (Codex #4992 P1). Nothing resolvable, no offers.
 async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, config, duration, timeOfDay, lanes }) {
   const booking = require('./booking');
-  const { resolveBookingCoords, buildBookingAvailability } = booking._internals;
+  const { customerBookingLocation, buildBookingAvailability } = booking._internals;
 
-  let lat = customer.latitude != null ? parseFloat(customer.latitude) : null;
-  let lng = customer.longitude != null ? parseFloat(customer.longitude) : null;
-  if (!lat || !lng) {
-    const address = [customer.address_line1, customer.city, customer.state, customer.zip]
-      .filter(Boolean).join(', ');
-    const resolved = await resolveBookingCoords({ address: address || null, city: customer.city || null });
-    lat = resolved.lat;
-    lng = resolved.lng;
-  }
-  if (!lat || !lng) return null;
+  const location = await customerBookingLocation(customer);
+  if (!location) return null;
 
   return buildBookingAvailability({
-    lat,
-    lng,
+    lat: location.lat,
+    lng: location.lng,
     duration,
     serviceKey: lanes.map(lane => ({ pest: 'pest_control', lawn: 'lawn_care' })[lane]).join('+'),
     rangeFrom,

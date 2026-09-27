@@ -493,6 +493,9 @@ describe('staff geocode review blocks coordinate-less re-service offers', () => 
     latitude: null,
     longitude: null,
   });
+  // The review store reads reviews as a list (with each customer's primary
+  // property, #5035), so the fixture lands on the list result.
+  const setReview = (row) => { listResults.customer_geocode_reviews = row ? [row] : []; };
   const response = () => ({ status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() });
   const getHandler = () => reservicePublicRouter.stack
     .find(layer => layer.route?.path === '/:token' && layer.route.methods.get).route.stack.at(-1).handle;
@@ -521,21 +524,79 @@ describe('staff geocode review blocks coordinate-less re-service offers', () => 
   test.each(['needs_pin', 'needs_details', 'outside_area'])(
     'a matching %s review blocks a coordinate-less customer',
     async (status) => {
-      firstResults.customer_geocode_reviews = review(status);
+      setReview(review(status));
       await expect(reservicePublicRouter._test.reserviceLocationReviewRequired(customer())).resolves.toBe(true);
     },
   );
 
   test('a complete stored pair and a dark review gate preserve the existing offer path', async () => {
-    firstResults.customer_geocode_reviews = review('needs_pin');
+    setReview(review('needs_pin'));
     await expect(reservicePublicRouter._test.reserviceLocationReviewRequired(customer({ latitude: 27.34, longitude: -82.53 })))
       .resolves.toBe(false);
     process.env.GATE_GEOCODE_REVIEW = 'false';
     await expect(reservicePublicRouter._test.reserviceLocationReviewRequired(customer())).resolves.toBe(false);
   });
 
+  // Offers are built on the pin the re-service commit books at (Codex #4992
+  // P1): createSelfBooking's stored pin → staff-verified pin → canonical
+  // geocode, never a different geocoder's answer.
+  const buildOffers = (who) => reservicePublicRouter._test.buildAvailabilityForCustomer(who, {
+    rangeFrom: slotDate, rangeTo: slotDate, config: {}, duration: 20, lanes: ['pest'],
+  });
+
+  test('a coordinate-less customer\'s offers are built at the matching staff-verified pin, not a provider geocode', async () => {
+    const reviewedPin = { lat: 27.40123, lng: -82.50123 };
+    setReview({ ...review('verified'), latitude: reviewedPin.lat, longitude: reviewedPin.lng });
+    const geocode = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue({ lat: 27.34999, lng: -82.53999 });
+    const build = jest.spyOn(require('../routes/booking')._internals, 'buildBookingAvailability')
+      .mockResolvedValue({ slots: [], days: [], nearby: false });
+
+    const res = response();
+    await getHandler()({ params: { token }, query: {} }, res, jest.fn());
+
+    expect(build).toHaveBeenCalledWith(expect.objectContaining(reviewedPin));
+    expect(geocode).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ state: 'bookable', availability: expect.objectContaining({ days: [] }) }));
+  });
+
+  test('a review for a different address is out of scope: the canonical geocode of the customer\'s own address is used', async () => {
+    setReview({ ...review('verified'), latitude: 27.40123, longitude: -82.50123 });
+    const providerPin = { lat: 27.34999, lng: -82.53999 };
+    const geocode = jest.spyOn(require('../services/geocoder'), 'geocodeAddress').mockResolvedValue(providerPin);
+    const build = jest.spyOn(require('../routes/booking')._internals, 'buildBookingAvailability')
+      .mockResolvedValue({ slots: [], days: [], nearby: false });
+
+    await buildOffers(customer({ address_line1: '999 Different Road' }));
+
+    expect(geocode).toHaveBeenCalledWith('999 Different Road, Sarasota, FL, 34236', expect.anything());
+    expect(build).toHaveBeenCalledWith(expect.objectContaining(providerPin));
+  });
+
+  test('a stored pin wins over any review, as it does at commit', async () => {
+    const storedPin = { lat: 27.34, lng: -82.53 };
+    setReview({ ...review('verified'), latitude: 27.40123, longitude: -82.50123 });
+    const geocode = jest.spyOn(require('../services/geocoder'), 'geocodeAddress');
+    const build = jest.spyOn(require('../routes/booking')._internals, 'buildBookingAvailability')
+      .mockResolvedValue({ slots: [], days: [], nearby: false });
+
+    await buildOffers(customer({ latitude: storedPin.lat, longitude: storedPin.lng }));
+
+    expect(build).toHaveBeenCalledWith(expect.objectContaining(storedPin));
+    expect(geocode).not.toHaveBeenCalled();
+  });
+
+  test('a held (unresolved) review with no stored pin builds no offers at all', async () => {
+    setReview(review('needs_pin'));
+    const geocode = jest.spyOn(require('../services/geocoder'), 'geocodeAddress');
+    const build = jest.spyOn(require('../routes/booking')._internals, 'buildBookingAvailability');
+
+    await expect(buildOffers(customer())).resolves.toBeNull();
+    expect(build).not.toHaveBeenCalled();
+    expect(geocode).not.toHaveBeenCalled();
+  });
+
   test('browse and search suppress offers while the matching review is unresolved', async () => {
-    firstResults.customer_geocode_reviews = review('needs_pin');
+    setReview(review('needs_pin'));
     const booking = require('../routes/booking')._internals;
     const build = jest.spyOn(booking, 'buildBookingAvailability');
 
@@ -555,10 +616,10 @@ describe('staff geocode review blocks coordinate-less re-service offers', () => 
   });
 
   test('a review recorded during commit is not remapped to a slot race or refreshed into another offer', async () => {
-    firstResults.customer_geocode_reviews = null;
+    setReview(null);
     const booking = require('../routes/booking')._internals;
     const config = jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({ advance_days_min: 1, advance_days_max: 14 });
-    const coords = jest.spyOn(booking, 'resolveBookingCoords').mockResolvedValue({ lat: 27.34, lng: -82.53 });
+    const coords = jest.spyOn(booking, 'customerBookingLocation').mockResolvedValue({ lat: 27.34, lng: -82.53 });
     const build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({
       slots: [], nearby: false,
       days: [{
@@ -587,7 +648,7 @@ describe('staff geocode review blocks coordinate-less re-service offers', () => 
 
   test('an ordinary DAY_FULL race still refreshes and returns SLOT_TAKEN', async () => {
     firstResults.customers = customer({ latitude: 27.34, longitude: -82.53 });
-    firstResults.customer_geocode_reviews = review('needs_pin');
+    setReview(review('needs_pin'));
     const booking = require('../routes/booking')._internals;
     jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({ advance_days_min: 1, advance_days_max: 14 });
     const build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({

@@ -216,6 +216,12 @@ server-resolved pair must match the signed grid and is stamped with its
 address on the new visit so dispatch uses the same location the commit
 certified. The customer profile is not rewritten, cleared pins are not
 restored, and no geocoder request runs while scheduling locks are held.
+The offer side resolves the same location: `/api/booking/availability` and
+`/find-slots` build an existing customer's offers (the estimate's customer,
+else the unique customer at the typed address) at that commit location — the
+stored pin, else a staff-verified pin or the canonical geocode — over any
+caller coordinates, and echo it only rounded; `/reservice/:token` builds its
+offers on it too. Everyone else keeps the caller's coordinates or address.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`
