@@ -187,8 +187,12 @@ describe('FastCompleteSheet', () => {
     expect(await screen.findByText('Re-service complete')).toBeTruthy();
     expect(screen.getByText(/123 Main St/)).toBeTruthy();
     expect(screen.getByText(/2:00 PM/)).toBeTruthy();
-    // The saved sheet can simply be dismissed, not only moved on from.
+    // The saved sheet can simply be dismissed, not only moved on from, and
+    // dismissing it refreshes the schedule the same way Next stop does.
     expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onCompleted).toHaveBeenCalledTimes(1);
+    onCompleted.mockClear();
     fireEvent.click(screen.getByRole('button', { name: 'Next stop' }));
     expect(onCompleted).toHaveBeenCalled();
   });

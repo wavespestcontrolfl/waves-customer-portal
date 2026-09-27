@@ -323,7 +323,13 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   const submission = useFastCompleteSubmit({ base, request });
   const { submitting, done } = submission;
 
-  const close = useCallback(() => { if (!submitting) onClose?.(); }, [submitting, onClose]);
+  // Dismissing a saved sheet refreshes the schedule like "Next stop" does,
+  // so a missed socket update can't leave the visit showing as open.
+  const close = useCallback(() => {
+    if (submitting) return;
+    if (done) onCompleted?.();
+    else onClose?.();
+  }, [submitting, done, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved, or refused
   // for good; the recap modal (Full form) can't resume a /complete attempt,
