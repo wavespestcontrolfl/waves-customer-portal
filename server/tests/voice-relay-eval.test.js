@@ -4955,6 +4955,23 @@ describe('voice relay eval — named spoken checks', () => {
       expect([text, negated.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')]).toEqual([text, []]);
       expect(replay._internals.scenarioStatus({ checks: negated })).toBe('pass');
     }
+    for (const text of [
+      'La cita aún debe ser confirmada por la oficina. Un miembro del equipo de Waves le dará seguimiento.',
+      'La oficina le llamará para que su cita quede confirmada.',
+    ]) {
+      const pending = grade(SPANISH_CAPTURE_FULL, text);
+      expect([text, pending.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
+      expect([text, replay._internals.scenarioStatus({ checks: pending })]).toEqual([text, 'pass']);
+    }
+    for (const text of [
+      'La cita aún debe ser confirmada por la oficina, pero ya quedó confirmada. Un miembro del equipo le dará seguimiento.',
+      'La oficina le llamará para que su cita quede confirmada, aunque ya está agendada.',
+      'La oficina le llamó para que supiera que su cita quedó confirmada. Un miembro del equipo le dará seguimiento.',
+    ]) {
+      const claimed = grade(SPANISH_CAPTURE_FULL, text);
+      expect([text, claimed.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect([text, replay._internals.scenarioStatus({ checks: claimed })]).toEqual([text, 'fail']);
+    }
   });
 
   // Codex round-6 P1 (finding A): the old patterns were bare words
