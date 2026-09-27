@@ -24,7 +24,7 @@ ant; we can't yet tell you which kind"):
 - **Group** (`ants`, `termites`, `spiders`, `snakes`, 29 total) — "we're sure
   it's an ant". Every group has a `generic` label and a `next_photo`: the one
   photo that would narrow it further.
-- **Subgroup** (`fire-ants`, `widow-spiders`, `venomous-snakes`, 59 total,
+- **Subgroup** (`fire-ants`, `widow-spiders`, `venomous-snakes`, 61 total,
   optional) — a narrower "we're sure it's a fire ant" stop between group and
   entry, for groups where that middle rung matters. Also has its own
   `generic` label and `next_photo`.
@@ -33,14 +33,19 @@ ant; we can't yet tell you which kind"):
   a sign made by an animal with no catalog entry, such as woodpecker damage
   or hog rooting, has an empty `sign_of`).
 
-`server/services/species-catalog.js` exposes `lineage(id)` to walk this
+Subgroups may name a same-group `parent` when a neutral shared taxon has
+more specific situation nodes beneath it. `lineage(id)` includes every such
+parent in order. `server/services/species-catalog.js` exposes it to walk this
 ladder for any id, and `nextPhoto(id)` to get the one photo that would narrow
 a category/group/subgroup/entry further.
 
 When an unapproved entry climbs to a generic node, that node may carry
 `generic_guidance`. It records safety and routing facts shared by every
 descendant represented by that node; omitted compatibility fields keep the
-neutral generic defaults. This keeps a generic result such as “a venomous
+neutral generic defaults. Ancestor guidance is merged with the selected
+subgroup's overlay, including nested safety flags, without consulting any
+descendant. An optional source-backed `safety_line` is customer-visible when
+an unapproved medical-risk entry cannot be named. This keeps a generic result such as “a venomous
 snake” on the high-urgency wildlife referral path without naming an
 unapproved species. Mixed or lower-confidence results that stop above that
 node do not inherit its guidance.
@@ -62,7 +67,7 @@ entry-level name; a no-treatment contract is not inferred from one candidate.
 
 - `index.json` — `catalog_version`, `section` ("pest" — this catalog does not
   yet cover the lawn or tree & shrub photo ID sections), the five
-  `categories`, the 29 `groups` and 59 `subgroups`, `look_alike_groups`
+  `categories`, the 29 `groups` and 61 `subgroups`, `look_alike_groups`
   (group-level look-alike notes,
   e.g. ants vs. termites), `legacy_slug_map` (every v1 `PEST_LIBRARY` slug →
   a v2 catalog node — see below), and `planned_slugs` (see "Cross-worker

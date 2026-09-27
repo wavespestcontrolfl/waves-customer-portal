@@ -504,10 +504,10 @@ function allLineageRungs(candidates) {
   for (const c of candidates) {
     const nodeId = candidateNodeId(c);
     if (!nodeId) continue;
-    for (const rung of catalog.lineage(nodeId)) {
+    for (const [depth, rung] of catalog.lineage(nodeId).entries()) {
       if (rung.level === 'entry') continue;
       const key = `${rung.level}:${rung.id}`;
-      if (!byKey.has(key)) byKey.set(key, rung);
+      if (!byKey.has(key)) byKey.set(key, { ...rung, depth });
     }
   }
   return [...byKey.values()];
@@ -521,7 +521,11 @@ function bestRungAtLevel(candidates, rungs, level) {
   for (const rung of rungs) {
     if (rung.level !== level) continue;
     const sum = sumConfidenceAtNode(candidates, level, rung.id);
-    if (sum >= LINEAGE_CLIMB_MIN && sum > bestSum) { best = rung; bestSum = sum; }
+    if (sum >= LINEAGE_CLIMB_MIN
+      && (sum > bestSum || (sum === bestSum && (rung.depth || 0) > (best?.depth || 0)))) {
+      best = rung;
+      bestSum = sum;
+    }
   }
   return best;
 }
@@ -955,7 +959,7 @@ function buildAnswer(ctx) {
       || climbedOrDisagreedAnswer(answerCandidates, false, null);
   }
   const { level, wording, nodeId, subhead, headline, entry } = picked;
-  const genericGuidance = catalog.getNode(nodeId)?.generic_guidance;
+  const genericGuidance = entry ? null : catalog.genericGuidance(nodeId);
 
   const group = groupBlockFor(level, nodeId, entry);
   // Evidence and other possibilities come from the same filtered list
@@ -982,6 +986,7 @@ function buildAnswer(ctx) {
     nextPhoto,
     referral: referralFor(entry, genericGuidance?.referral, genericGuidance?.referral_template),
     genericCompatibility: Object.assign({ safety: {} }, genericGuidance?.compatibility),
+    genericSafetyLine: entry ? null : genericGuidance?.safety_line || null,
     tier,
     topEntrySlug: entry?.slug || null,
   };
@@ -1452,6 +1457,7 @@ async function identifyPestV2(photos = []) {
     candidates: built.candidatesBlock,
     next_photo: built.nextPhoto,
     referral: built.referral,
+    generic_safety_line: built.genericSafetyLine,
   };
 
   const v1 = mapToV1({ ...built, disagreed });

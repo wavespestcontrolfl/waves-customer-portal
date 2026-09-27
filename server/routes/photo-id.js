@@ -412,9 +412,7 @@ function pestReserviceLane(contract) {
 const INSPECTION_FIRST_NODES = (() => {
   const flagsByNode = new Map();
   for (const entry of speciesCatalog.listEntries()) {
-    const category = speciesCatalog.getGroup(entry.group)?.category;
-    for (const id of [entry.slug, entry.subgroup, entry.group, category]) {
-      if (!id) continue;
+    for (const { id } of speciesCatalog.lineage(entry.slug)) {
       if (!flagsByNode.has(id)) flagsByNode.set(id, []);
       flagsByNode.get(id).push(!!entry.service?.inspection_first);
     }

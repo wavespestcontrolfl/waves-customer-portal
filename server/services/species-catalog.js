@@ -150,8 +150,8 @@ function listEntries(filter = {}) {
 }
 
 /**
- * Ordered ladder from category down to `id`: category → group → subgroup
- * (if any) → entry (if `id` is an entry). Each rung is
+ * Ordered ladder from category down to `id`: category → group → every
+ * parent subgroup → subgroup → entry (if `id` is an entry). Each rung is
  * `{ level, id, label, generic }`. Returns [] if `id` is unknown.
  */
 function lineage(id) {
@@ -183,9 +183,53 @@ function lineage(id) {
     if (category) rungs.push({ level: 'category', id: category.id, label: category.label, generic: category.generic });
     rungs.push({ level: 'group', id: group.id, label: group.label, generic: group.generic });
   }
-  if (subgroup) rungs.push({ level: 'subgroup', id: subgroup.id, label: subgroup.label, generic: subgroup.generic });
+  if (subgroup) {
+    const chain = [];
+    const seen = new Set();
+    for (let current = subgroup; current;) {
+      if (seen.has(current.id)) throw new Error(`species-catalog: subgroup parent cycle at "${current.id}"`);
+      seen.add(current.id);
+      chain.unshift(current);
+      const parent = current.parent ? getSubgroup(current.parent) : null;
+      if (current.parent && !parent) {
+        throw new Error(`species-catalog: subgroup "${current.id}" has unknown parent "${current.parent}"`);
+      }
+      current = parent;
+    }
+    for (const rung of chain) {
+      if (rung.group !== group?.id) {
+        throw new Error(`species-catalog: subgroup "${rung.id}" is outside group "${group?.id || ''}"`);
+      }
+      rungs.push({ level: 'subgroup', id: rung.id, label: rung.label, generic: rung.generic });
+    }
+  }
   if (entry) rungs.push({ level: 'entry', id: entry.slug, label: entry.common_name, generic: null });
   return rungs;
+}
+
+/** Generic guidance inherited only from the selected node's ancestors.
+ * Descendants are never consulted: a broad or mixed answer cannot borrow a
+ * narrower hazard, referral, or service contract. Nested safety flags merge
+ * while a selected child may override the rest of the parent contract. */
+function genericGuidance(id) {
+  let merged = null;
+  for (const rung of lineage(id)) {
+    if (rung.level === 'entry') continue;
+    const guidance = getNode(rung.id)?.generic_guidance;
+    if (!guidance) continue;
+    const compatibility = guidance.compatibility;
+    const inheritedCompatibility = merged?.compatibility;
+    merged = Object.assign({}, merged || {}, guidance);
+    if (compatibility) {
+      merged.compatibility = Object.assign({}, inheritedCompatibility || {}, compatibility);
+      if (compatibility.safety) {
+        merged.compatibility.safety = Object.assign(
+          {}, inheritedCompatibility?.safety || {}, compatibility.safety,
+        );
+      }
+    }
+  }
+  return merged;
 }
 
 /**
@@ -513,6 +557,7 @@ module.exports = {
   getNode,
   listEntries,
   lineage,
+  genericGuidance,
   nextPhoto,
   lookAlikes,
   resolveName,

@@ -414,6 +414,7 @@ function realCatalogV2ResultFor(slug, confidence = 0.95) {
       candidates: built.candidatesBlock,
       next_photo: built.nextPhoto,
       referral: built.referral,
+      generic_safety_line: built.genericSafetyLine,
     },
     v1: mapToV1(built),
     internal: {
@@ -1477,6 +1478,27 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
 
       const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
       expect(detail.next_step.kind).toBe('referral');
+    });
+  });
+
+  test.each([
+    ['fire-ant', /call 911 if someone has trouble breathing/i],
+    ['black-widow', /see a doctor for a suspected bite.+call 911/i],
+  ])('gate on: a real draft %s climb keeps visible generic medical guidance through POST, storage, and GET', async (
+    slug, safety,
+  ) => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultFor(slug);
+    expect(engineResult.v2).toMatchObject({ entry: null, generic_safety_line: expect.stringMatching(safety) });
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.v2.generic_safety_line).toMatch(safety);
+      expect(JSON.parse(TABLES.pest_identifications[0].report_contract).v2.generic_safety_line).toMatch(safety);
+
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.v2.generic_safety_line).toMatch(safety);
     });
   });
 

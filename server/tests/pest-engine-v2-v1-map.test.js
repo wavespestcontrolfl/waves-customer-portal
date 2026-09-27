@@ -66,10 +66,63 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     });
 
   test.each([
-    ['carpenter-bee', 'honey-bee', 'bees', 'insect'],
-    ['aphid', 'aphid-scale', 'plant-pests-small', 'insect'],
+    ['fire-ant', 'fire-ants', /call 911 if someone has trouble breathing/i],
+    ['black-widow', 'widow-spiders', /see a doctor for a suspected bite.+call 911/i],
+  ])('a draft medical-risk %s climb carries visible generic safety guidance', (slug, nodeId, safety) => {
+    const built = answerFor(slug, { approved: false });
+    expect(built).toMatchObject({ answer: { node_id: nodeId }, entry: null });
+    expect(built.genericSafetyLine).toMatch(safety);
+  });
+
+  test.each([
+    ['southern-toad', 'toads', 'No Treatment Needed'],
+    ['brown-anole', 'anoles', 'Wildlife Referral'],
+    ['gecko', 'geckos', 'Wildlife Referral'],
+  ])('a neutral %s subgroup inherits its ancestor service contract', (slug, nodeId, label) => {
+    const built = answerFor(slug, { approved: false });
+    expect(built).toMatchObject({ answer: { node_id: nodeId }, entry: null });
+    expect(mapToV1(built).report_contract.service).toMatchObject({ line: 'none', key: null, label });
+  });
+
+  test('a broader mixed toad result does not borrow toxic-toad safety guidance', () => {
+    const built = buildAnswer({
+      candidates: [
+        { ...candidate('cane-toad', { approved: false }), confidence: 0.55 },
+        { ...candidate('southern-toad', { approved: false }), confidence: 0.35 },
+      ],
+      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
+      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+    });
+    expect(built.answer).toMatchObject({ level: 'group', node_id: 'frogs-toads' });
+    expect(built.genericSafetyLine).toBeNull();
+    expect(mapToV1(built).report_contract).toMatchObject({
+      urgency: 'low', service: { line: 'none', key: null, label: 'No Treatment Needed' },
+    });
+  });
+
+  test('swarm and wall-colony uncertainty stops at their neutral honey-bee parent', () => {
+    const built = buildAnswer({
+      candidates: [
+        { ...candidate('honey-bee-wall-colony', { approved: false }), confidence: 0.55 },
+        { ...candidate('honey-bee-swarm', { approved: false }), confidence: 0.35 },
+      ],
+      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
+      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+    });
+    expect(built).toMatchObject({
+      answer: { level: 'subgroup', node_id: 'bees', headline: 'Looks like a honey bee' },
+      entry: null,
+      referral: { kind: 'bee_relocation' },
+      genericCompatibility: { serviceLabel: 'Bee Assessment & Referral', inspectionRequired: true, urgency: 'moderate' },
+    });
+    expect(built.genericSafetyLine).toMatch(/do not spray or seal active honey bees/i);
+  });
+
+  test.each([
+    ['carpenter-bee', 'honey-bee', 'carpenter-bees', 'insect', { key: 'pest', label: 'General Pest Control', inspection_required: false }],
+    ['aphid', 'aphid-scale', 'plant-pests-small', 'insect', { key: null, label: 'Pest Consultation', inspection_required: true }],
   ])('a draft %s climb preserves category but never borrows the narrower %s identity',
-    (slug, forbiddenLegacySlug, nodeId, category) => {
+    (slug, forbiddenLegacySlug, nodeId, category, service) => {
       const built = answerFor(slug, { approved: false });
       expect(built.topEntrySlug).toBeNull();
       expect(built.answer.node_id).toBe(nodeId);
@@ -78,9 +131,7 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
       expect(mapped.species_slug).toBeNull();
       expect(mapped.species_slug).not.toBe(forbiddenLegacySlug);
       expect(mapped.category).toBe(category);
-      expect(mapped.report_contract.service).toMatchObject({
-        key: null, label: 'Pest Consultation', inspection_required: true,
-      });
+      expect(mapped.report_contract.service).toMatchObject(service);
     });
 
   test('an unmatched draft spider climb preserves the selected spiders category', () => {

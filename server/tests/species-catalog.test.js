@@ -358,7 +358,7 @@ describe('owner approval content binding', () => {
 
 describe('index.json — groups, subgroups, next_photo', () => {
   test('every group and subgroup has an ask/why next_photo within its length caps', () => {
-    expect(index.subgroups).toHaveLength(59);
+    expect(index.subgroups).toHaveLength(61);
     for (const g of index.groups) {
       expect(g.next_photo.ask.length).toBeLessThanOrEqual(180);
       expect(g.next_photo.why.length).toBeLessThanOrEqual(160);
@@ -367,6 +367,11 @@ describe('index.json — groups, subgroups, next_photo', () => {
       expect(s.next_photo.ask.length).toBeLessThanOrEqual(180);
       expect(s.next_photo.why.length).toBeLessThanOrEqual(160);
       expect(groupIds.has(s.group)).toBe(true);
+      if (s.parent) {
+        const parent = index.subgroups.find((candidate) => candidate.id === s.parent);
+        expect(parent).toBeTruthy();
+        expect(parent.group).toBe(s.group);
+      }
     }
   });
 
@@ -472,9 +477,24 @@ describe('name collisions', () => {
     expect(new Set(unresolved.map((collision) => collision.name))).toEqual(new Set(['daddy longlegs', 'daddy long legs']));
   });
 
-  test('Apis mellifera stays above the two different honey-bee situations', () => {
-    const result = catalog.resolveName('Apis mellifera');
-    expect(result.node).toMatchObject({ level: 'group', id: 'wasps-bees' });
+  test.each(['honey bee', 'honey bees', 'honeybee', 'honeybees', 'Apis mellifera'])(
+    '%s stays at the neutral parent above the two honey-bee situations', (name) => {
+      expect(catalog.resolveName(name).node).toMatchObject({ level: 'subgroup', id: 'bees' });
+    },
+  );
+
+  test('the wall-colony situation nests under the neutral honey-bee parent', () => {
+    expect(catalog.lineage('honey-bee-wall-colony').map((node) => node.id)).toEqual([
+      'insect', 'wasps-bees', 'bees', 'structure-bee-colonies', 'honey-bee-wall-colony',
+    ]);
+    expect(catalog.genericGuidance('structure-bee-colonies')).toMatchObject({
+      referral: 'bee_relocation',
+      compatibility: {
+        safety: { stinging: true, venomous: true },
+        serviceLine: 'pest', serviceKey: null, serviceLabel: 'Bee Assessment & Referral',
+        inspectionRequired: true, urgency: 'high',
+      },
+    });
   });
 
   test('bare rat-snake names stay generic while qualified species names remain specific', () => {
@@ -776,6 +796,36 @@ describe('loader API surface', () => {
     expect(rungs.map((r) => r.level)).toEqual(['category', 'group', 'subgroup', 'entry']);
     expect(rungs[0].id).toBe('insect');
     expect(rungs[3].id).toBe('fire-ant');
+  });
+
+  test('generic guidance merges ancestors and subgroup overlays without consulting descendants', () => {
+    expect(catalog.genericGuidance('toads')).toMatchObject({
+      compatibility: { serviceLine: 'none', serviceKey: null, serviceLabel: 'No Treatment Needed', urgency: 'low' },
+    });
+    expect(catalog.genericGuidance('anoles')).toMatchObject({
+      compatibility: { serviceLine: 'none', serviceKey: null, serviceLabel: 'Wildlife Referral', urgency: 'low' },
+    });
+    expect(catalog.genericGuidance('geckos')).toMatchObject({
+      compatibility: { serviceLine: 'none', serviceKey: null, serviceLabel: 'Wildlife Referral', urgency: 'low' },
+    });
+    expect(catalog.genericGuidance('wasps-bees')).toEqual({ compatibility: { safety: { stinging: true } } });
+    expect(catalog.genericGuidance('wasps-bees')).not.toHaveProperty('referral');
+  });
+
+  test('every draft medical-risk fallback exposes source-backed generic safety copy', () => {
+    const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
+    const affected = allEntries.filter((entry) => entry.review.status === 'draft' && entry.risk === 'medical');
+    expect(affected.length).toBeGreaterThan(40);
+    for (const entry of affected) {
+      const candidate = { ...resolveCandidate({ slug: entry.slug, confidence: 0.95 }), checked: true, verified: true };
+      const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
+      if (built.entry) continue;
+      const guidance = catalog.genericGuidance(built.answer.node_id);
+      expect({ slug: entry.slug, safety: built.genericSafetyLine }).toEqual({
+        slug: entry.slug, safety: expect.any(String),
+      });
+      expect(guidance.sources?.length).toBeGreaterThan(0);
+    }
   });
 
   test('lineage on a bare group has no subgroup/entry rungs', () => {

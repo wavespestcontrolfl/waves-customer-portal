@@ -1,7 +1,7 @@
 /**
  * Test-only fixture "species catalog" for `pest-engine.test.js`. Mirrors the
  * REAL `../../services/species-catalog.js` API surface (getEntry, getGroup,
- * getSubgroup, getCategory, getNode, listEntries, lineage, nextPhoto,
+ * getSubgroup, getCategory, getNode, listEntries, lineage, genericGuidance, nextPhoto,
  * lookAlikes, _index, CATALOG_VERSION) over small, hand-built data instead
  * of the live `species-catalog-v1` data files — per the 2026-09-26 contract
  * delta note, the live entry files are being revised in parallel by content
@@ -72,6 +72,26 @@ function buildFixtureCatalog({
     return null;
   }
 
+  function genericGuidance(id) {
+    let merged = null;
+    for (const rung of lineage(id)) {
+      if (rung.level === 'entry') continue;
+      const guidance = getNode(rung.id)?.generic_guidance;
+      if (!guidance) continue;
+      const inheritedCompatibility = merged?.compatibility;
+      merged = { ...(merged || {}), ...guidance };
+      if (guidance.compatibility) {
+        merged.compatibility = { ...(inheritedCompatibility || {}), ...guidance.compatibility };
+        if (guidance.compatibility.safety) {
+          merged.compatibility.safety = {
+            ...(inheritedCompatibility?.safety || {}), ...guidance.compatibility.safety,
+          };
+        }
+      }
+    }
+    return merged;
+  }
+
   function lookAlikes(slug) {
     const entry = getEntry(slug);
     if (!entry) return [];
@@ -89,6 +109,7 @@ function buildFixtureCatalog({
     getNode,
     listEntries,
     lineage,
+    genericGuidance,
     nextPhoto,
     lookAlikes,
     _index: () => ({ legacy_slug_map: legacySlugMap }),

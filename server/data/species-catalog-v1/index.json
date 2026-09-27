@@ -143,6 +143,22 @@
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show an insect already visible on a surface or pet comb, plus any dark specks on bedding. Do not touch or handle it for a photo.",
         "why": "Jumping behavior and flea dirt confirm fleas rather than another tiny biter."
+      },
+      "generic_guidance": {
+        "safety_line": "Flea bites can itch, trigger allergies, and spread disease. See a doctor if bites become infected or a rash spreads.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN137"
+        ],
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "flea",
+          "serviceLabel": "Flea & Tick Treatment",
+          "inspectionRequired": false,
+          "urgency": "high"
+        }
       }
     },
     {
@@ -327,6 +343,22 @@
       "next_photo": {
         "ask": "Use zoom from a safe distance for the animal or signs and their location. Do not approach or handle it, touch droppings, or place objects beside them.",
         "why": "Dropping size and shape, plus location, tell rat from mouse before a tech ever sets a trap."
+      },
+      "generic_guidance": {
+        "safety_line": "Avoid stirring up dust from rodent droppings or nests. See a doctor if flu-like symptoms follow a cleanup or heavy exposure.",
+        "sources": [
+          "https://www.cdc.gov/hantavirus/about/index.html"
+        ],
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "rodent",
+          "serviceKey": null,
+          "serviceLabel": "Rodent Inspection & Exclusion",
+          "inspectionRequired": true,
+          "urgency": "high"
+        }
       }
     },
     {
@@ -477,7 +509,11 @@
           "serviceLabel": "General Pest Control",
           "inspectionRequired": true,
           "urgency": "high"
-        }
+        },
+        "safety_line": "Fire-ant stings can trigger allergic reactions. Keep people and pets away from the mound, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/in352"
+        ]
       }
     },
     {
@@ -586,6 +622,23 @@
       "next_photo": {
         "ask": "Use zoom from a safe distance for legs and back on a wall or another non-contact surface. Do not use your skin as a perch or allow it to bite for a photo.",
         "why": "Leg-stripe pattern and back marking separate Aedes species from each other."
+      },
+      "generic_guidance": {
+        "safety_line": "These mosquitoes can spread disease. See a doctor if fever, rash, or joint pain develops after a bite.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN792",
+          "https://ask.ifas.ufl.edu/publication/IN594"
+        ],
+        "compatibility": {
+          "safety": {
+            "disease_vector": true
+          },
+          "serviceLine": "mosquito",
+          "serviceKey": "mosquito",
+          "serviceLabel": "Mosquito Control",
+          "inspectionRequired": false,
+          "urgency": "high"
+        }
       }
     },
     {
@@ -613,7 +666,11 @@
           "serviceLabel": "Pest Consultation",
           "inspectionRequired": true,
           "urgency": "high"
-        }
+        },
+        "safety_line": "Ticks can spread disease. See a doctor if fever, headache, or a rash develops after a bite.",
+        "sources": [
+          "https://www.cdc.gov/rocky-mountain-spotted-fever/about/index.html"
+        ]
       }
     },
     {
@@ -638,6 +695,22 @@
       "next_photo": {
         "ask": "From a safe distance, use camera zoom on the underside only if it is already visible. Do not approach, disturb, or handle the spider.",
         "why": "The hourglass shape and color (red vs. tan) tell black widow from brown widow."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "high"
+        },
+        "safety_line": "Widow bites can be medically significant. See a doctor for a suspected bite, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1000"
+        ]
       }
     },
     {
@@ -665,6 +738,35 @@
       }
     },
     {
+      "id": "lubber-grasshoppers",
+      "group": "crickets-grasshoppers",
+      "label": "Lubber Grasshoppers",
+      "generic": "a lubber grasshopper",
+      "scientific": "Romalea",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the whole grasshopper and its colors. Do not touch or allow pets to mouth it.",
+        "why": "The bold black, yellow, or orange pattern distinguishes a lubber from other grasshoppers."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "irritant": true,
+            "toxic_to_pets": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "safety_line": "Keep pets away and do not handle it. Its defensive foam can irritate skin and eyes, and a pet can become ill if it eats one; call your vet if that happens.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN132"
+        ]
+      }
+    },
+    {
       "id": "social-wasps",
       "group": "wasps-bees",
       "label": "Social Wasps",
@@ -686,7 +788,11 @@
           "serviceLabel": "General Pest Control",
           "inspectionRequired": false,
           "urgency": "moderate"
-        }
+        },
+        "safety_line": "Stings can trigger allergic reactions. See a doctor if swelling spreads beyond the sting site, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1112"
+        ]
       }
     },
     {
@@ -715,27 +821,65 @@
     {
       "id": "bees",
       "group": "wasps-bees",
-      "label": "Bees",
-      "generic": "a bee",
-      "scientific": "Apidae / Megachilidae",
-      "rank": "group",
+      "label": "Honey Bees",
+      "generic": "a honey bee",
+      "scientific": "Apis mellifera",
+      "rank": "species",
       "next_photo": {
-        "ask": "From a safe distance, use zoom to photograph the bee's body and the occupied hole or gap without approaching or disturbing the activity.",
-        "why": "A shiny black abdomen and a drilled hole point to carpenter bee; fuzzy and a wall gap points to honey bee."
+        "ask": "Use zoom from a safe distance to show the whole cluster or the bee activity and its location. Do not approach, disturb, spray, or seal active bees.",
+        "why": "A temporary cluster versus steady traffic through one opening separates a swarm from a colony in a structure."
       },
       "generic_guidance": {
         "compatibility": {
           "safety": {
             "stinging": true,
             "venomous": true
-          }
-        }
+          },
+          "serviceLine": "pest",
+          "serviceKey": null,
+          "serviceLabel": "Bee Assessment & Referral",
+          "inspectionRequired": true,
+          "urgency": "moderate"
+        },
+        "referral": "bee_relocation",
+        "safety_line": "Keep your distance and do not spray or seal active honey bees. See a doctor for a serious allergic reaction, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1005"
+        ]
       },
       "aliases": [
         "honey bee",
         "honey bees",
+        "honeybee",
+        "honeybees",
         "apis mellifera"
       ]
+    },
+    {
+      "id": "carpenter-bees",
+      "group": "wasps-bees",
+      "label": "Carpenter Bees",
+      "generic": "a carpenter bee",
+      "scientific": "Xylocopa",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "From a safe distance, use camera zoom to show the abdomen and any round drilled opening without approaching or disturbing the bee.",
+        "why": "A shiny bare abdomen and a round drilled hole distinguish a carpenter bee from fuzzy honey bees and bumble bees."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true,
+            "structural_threat": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        }
+      }
     },
     {
       "id": "stinging-caterpillars",
@@ -908,6 +1052,23 @@
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the animal or signs and where you found them. Do not approach or handle the animal, touch droppings, or place objects beside them.",
         "why": "Where the activity is (roofline vs. foundation) separates roof rats from Norway rats."
+      },
+      "generic_guidance": {
+        "safety_line": "Rodents can carry disease and chew wiring. See a doctor after a bite or scratch, or if you feel unwell after contact with droppings.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1397"
+        ],
+        "compatibility": {
+          "safety": {
+            "disease_vector": true,
+            "structural_threat": true
+          },
+          "serviceLine": "rodent",
+          "serviceKey": null,
+          "serviceLabel": "Rodent Inspection & Exclusion",
+          "inspectionRequired": true,
+          "urgency": "high"
+        }
       }
     },
     {
@@ -920,6 +1081,23 @@
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the animal or signs and any nearby gap. Do not approach or handle the animal, touch droppings, or place objects beside them.",
         "why": "Dropping size and a dime-sized gap nearby confirm a mouse over a rat."
+      },
+      "generic_guidance": {
+        "safety_line": "Rodents can carry disease. See a doctor after a bite or scratch, or if you feel unwell after contact with droppings.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1397"
+        ],
+        "compatibility": {
+          "safety": {
+            "disease_vector": true,
+            "structural_threat": true
+          },
+          "serviceLine": "rodent",
+          "serviceKey": null,
+          "serviceLabel": "Rodent Inspection & Exclusion",
+          "inspectionRequired": true,
+          "urgency": "high"
+        }
       }
     },
     {
@@ -969,7 +1147,11 @@
           "inspectionRequired": false,
           "urgency": "moderate"
         },
-        "referral": "wildlife_trapper"
+        "referral": "wildlife_trapper",
+        "safety_line": "Keep people and pets away and do not corner or handle the lizard. It can bite or scratch and may carry Salmonella.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Common_green_iguana"
+        ]
       }
     },
     {
@@ -994,7 +1176,11 @@
           "serviceLabel": "Venomous Snake Removal",
           "inspectionRequired": false,
           "urgency": "high"
-        }
+        },
+        "safety_line": "Keep well back and keep children and pets away. Get medical help right away if anyone is bitten.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/UW229"
+        ]
       }
     },
     {
@@ -1055,7 +1241,8 @@
           "https://www.cdc.gov/rabies/prevention/bats.html",
           "https://www.cdc.gov/coca/media/pdfs/2026/CDC-COCA-Call-Rabies-still-here.pdf",
           "https://myfwc.com/conservation/you-conserve/wildlife/bats/bats-in-buildings/"
-        ]
+        ],
+        "safety_line": "Never touch a bat bare-handed. See a doctor right away after a bite or scratch, or if you wake up with a bat in the room."
       }
     },
     {
@@ -1096,7 +1283,11 @@
           "serviceLabel": "General Pest Control",
           "inspectionRequired": false,
           "urgency": "moderate"
-        }
+        },
+        "safety_line": "A sting can be sharply painful. See a doctor if you have a strong allergic reaction.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/in536"
+        ]
       }
     },
     {
@@ -1117,7 +1308,12 @@
             "venomous": true
           },
           "urgency": "low"
-        }
+        },
+        "safety_line": "Do not touch a caterpillar with spines or dense hairs. Call 911 if someone has trouble breathing, and see a doctor for severe pain or a spreading rash.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/in014",
+          "https://ask.ifas.ufl.edu/publication/IN834"
+        ]
       }
     },
     {
@@ -1141,7 +1337,12 @@
           "serviceLabel": "General Pest Control",
           "inspectionRequired": false,
           "urgency": "moderate"
-        }
+        },
+        "safety_line": "These flies can carry bacteria from waste to food and counters. Keep food covered and clean surfaces where they land.",
+        "sources": [
+          "https://journals.flvc.org/edis/article/view/138696",
+          "https://edis.ifas.ufl.edu/publication/in903"
+        ]
       }
     },
     {
@@ -1162,7 +1363,11 @@
           "serviceLabel": "No Treatment Needed",
           "inspectionRequired": false,
           "urgency": "low"
-        }
+        },
+        "safety_line": "These flies do not bite, but large swarms and dead-insect buildup can bother people with asthma or insect allergies.",
+        "sources": [
+          "https://blogs.ifas.ufl.edu/polkco/2017/10/11/aquatic-midges-also-known-as-blind-mosquitoes/"
+        ]
       }
     },
     {
@@ -1183,7 +1388,11 @@
           "serviceLabel": "No Treatment Needed",
           "inspectionRequired": false,
           "urgency": "high"
-        }
+        },
+        "safety_line": "Keep pets away. If a pet mouths the toad, wipe its mouth and gums with a cloth, rinse only with its head tilted down, and call your vet right away.",
+        "sources": [
+          "https://www.cvcboca.com/keep-your-dog-safe-how-to-spot-treat-bufo-toad-poisoning/"
+        ]
       }
     },
     {
@@ -1208,7 +1417,11 @@
           "inspectionRequired": false,
           "urgency": "high"
         },
-        "referral": "report_fwc"
+        "referral": "report_fwc",
+        "safety_line": "Keep people and pets away and do not corner or handle the lizard; large invasive lizards can bite or scratch.",
+        "sources": [
+          "https://myfwc.com/wildlifehabitats/profiles/reptiles/lizards/nile-monitor/"
+        ]
       }
     },
     {
@@ -1232,7 +1445,11 @@
           "serviceLabel": "Mosquito Control",
           "inspectionRequired": false,
           "urgency": "high"
-        }
+        },
+        "safety_line": "These mosquitoes can spread disease. See a doctor if a bite site becomes very swollen or a fever develops after a bite.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN837"
+        ]
       }
     },
     {
@@ -1256,7 +1473,11 @@
           "serviceLabel": "General Pest Control",
           "inspectionRequired": true,
           "urgency": "high"
-        }
+        },
+        "safety_line": "Indoor roach infestations can trigger allergies and asthma and contaminate food. Keep food sealed and surfaces clean while treatment is underway.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN128"
+        ]
       }
     },
     {
@@ -1277,7 +1498,11 @@
           "serviceLabel": "General Pest Control",
           "inspectionRequired": false,
           "urgency": "high"
-        }
+        },
+        "safety_line": "Clean and disinfect surfaces where droppings or egg cases are found before storing food or dishes there again.",
+        "sources": [
+          "https://journals.flvc.org/edis/article/view/119483"
+        ]
       }
     },
     {
@@ -1302,7 +1527,11 @@
           "serviceLabel": "General Pest Control",
           "inspectionRequired": false,
           "urgency": "moderate"
-        }
+        },
+        "safety_line": "A sting can be painful. Call 911 if someone has trouble breathing, and see a doctor for chest pain or a strong reaction.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Centruroides_gracilis"
+        ]
       }
     },
     {
@@ -1332,7 +1561,8 @@
         "sources": [
           "https://www.fdacs.gov/Agriculture-Industry/Pests-and-Diseases/Plant-Pests-and-Diseases/Giant-African-Land-Snail",
           "https://www.cdc.gov/dpdx/angiostrongyliasis/index.html"
-        ]
+        ],
+        "safety_line": "Never touch a large unidentified land snail bare-handed. Wash your hands after contact and keep children and pets away."
       }
     },
     {
@@ -1356,7 +1586,11 @@
           "serviceLabel": "General Pest Control",
           "inspectionRequired": false,
           "urgency": "moderate"
-        }
+        },
+        "safety_line": "Do not handle the spider. See a doctor if a suspected bite worsens, blisters, or does not start healing within a few days.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Brown_recluse_spider"
+        ]
       }
     },
     {
@@ -1380,7 +1614,11 @@
           "serviceLabel": "General Pest Control",
           "inspectionRequired": true,
           "urgency": "high"
-        }
+        },
+        "safety_line": "Avoid touching the insect or rubbing the bite. See a doctor if the bite site swells or a fever or rash develops.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Triatoma_sanguisuga"
+        ]
       }
     },
     {
@@ -1405,12 +1643,17 @@
           "serviceLabel": "General Pest Control",
           "inspectionRequired": false,
           "urgency": "high"
-        }
+        },
+        "safety_line": "These wasps can sting repeatedly when a colony is disturbed. See a doctor if swelling spreads, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN238"
+        ]
       }
     },
     {
       "id": "structure-bee-colonies",
       "group": "wasps-bees",
+      "parent": "bees",
       "label": "Bee Colonies in Structures",
       "generic": "a bee colony in a structure",
       "scientific": "Apidae",
@@ -1421,17 +1664,8 @@
       },
       "generic_guidance": {
         "compatibility": {
-          "safety": {
-            "stinging": true,
-            "venomous": true
-          },
-          "serviceLine": "pest",
-          "serviceKey": null,
-          "serviceLabel": "Bee Assessment & Referral",
-          "inspectionRequired": true,
           "urgency": "high"
-        },
-        "referral": "bee_relocation"
+        }
       }
     },
     {
@@ -1455,7 +1689,11 @@
           "serviceLabel": "No Treatment Needed",
           "inspectionRequired": false,
           "urgency": "low"
-        }
+        },
+        "safety_line": "Leave the bees undisturbed. See a doctor for a strong allergic reaction to a sting, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Bumblebee"
+        ]
       }
     },
     {
@@ -1480,7 +1718,11 @@
           "inspectionRequired": false,
           "urgency": "low"
         },
-        "referral": "wildlife_trapper"
+        "referral": "wildlife_trapper",
+        "safety_line": "Do not handle the animal bare-handed, and wash your hands after contact with it or soil it disturbed.",
+        "sources": [
+          "https://myfwc.com/wildlifehabitats/profiles/mammals/land/armadillo/"
+        ]
       }
     },
     {
@@ -1533,7 +1775,8 @@
         "sources": [
           "https://www.cdc.gov/rabies/prevention/index.html",
           "https://ask.ifas.ufl.edu/uw033"
-        ]
+        ],
+        "safety_line": "Do not handle the animal and keep pets away. See a doctor right away after a bite or scratch."
       }
     },
     {
