@@ -520,8 +520,13 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
       // for the next fulfillment refresh to re-judge. Unconditional — the
       // `call` snapshot above predates this transaction, so a concurrent
       // relink could make "unchanged" wrong; a same-customer save just
-      // reopens a proof the next refresh restores.
-      const promisesReopened = await require('../services/call-commitments').reopenSlotBookingProofs(trx, call.id);
+      // reopens a proof the next refresh restores. Behind the commitments
+      // gate like every other commitments write (off = nothing written):
+      // with the gate off nothing re-judges a reopened promise, so it would
+      // sit in Owed until the gate came back (codex #5081 r3 P1).
+      const promisesReopened = require('../config/feature-gates').isEnabled('callCommitments')
+        ? await require('../services/call-commitments').reopenSlotBookingProofs(trx, call.id)
+        : 0;
       let leadsUnlinked = 0;
       if (!customerId && call.twilio_call_sid) {
         leadsUnlinked = await trx('leads').where({ twilio_call_sid: call.twilio_call_sid }).update({ twilio_call_sid: null, updated_at: new Date() });

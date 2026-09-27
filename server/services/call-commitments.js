@@ -1459,7 +1459,23 @@ function statedSlot(commitment, after) {
   const at = commitment?.due_at && commitment.due_type !== "deadline" ? new Date(commitment.due_at) : null;
   if (!at || Number.isNaN(at.getTime()) || at.getTime() <= after.getTime()) return null;
   const { hour, minute } = etParts(at);
-  return { day: etDateString(at), minutes: hour * 60 + minute, time: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}` };
+  return { day: etDateString(at), minutes: hour * 60 + minute };
+}
+
+// The V2 extraction's raw confirmed_start_at, and whether two timestamps are
+// one instant (both must parse).
+function confirmedStartOf(extraction) {
+  let parsed = extraction;
+  if (typeof parsed === "string") {
+    try { parsed = JSON.parse(parsed); } catch { return null; }
+  }
+  return parsed?.scheduling?.confirmed_start_at || null;
+}
+
+function sameInstant(a, b) {
+  const x = a ? new Date(a).getTime() : NaN;
+  const y = b ? new Date(b).getTime() : NaN;
+  return !Number.isNaN(x) && x === y;
 }
 
 async function resolveFulfillment(conn, commitment, call) {
@@ -1706,13 +1722,24 @@ async function resolveFulfillment(conn, commitment, call) {
       const slot = commitment.kind === "schedule_visit" ? statedSlot(commitment, after) : null;
       const v2 = slot && await conn("call_log").where({ id: call.id, v2_extraction_status: "valid" }).first("ai_extraction_enriched");
       const confirmedSlot = v2 && require("./call-booking-miss-watchdog").extractConfirmedSlot(v2.ai_extraction_enriched);
-      const grounded = !!confirmedSlot && confirmedSlot.dateET === slot.day && confirmedSlot.minutes === slot.minutes;
+      // The promise names that appointment when it states the same ET wall
+      // clock, or the same instant as the V2 time — a promise written with
+      // the same wrong-season ET offset lands an hour off as an instant, but
+      // on the V2 time's instant (codex #5081 r3 P2). The booking is then
+      // looked for at the V2 wall clock, the spoken time.
+      const grounded = !!confirmedSlot && (
+        (confirmedSlot.dateET === slot.day && confirmedSlot.minutes === slot.minutes)
+        || sameInstant(confirmedStartOf(v2.ai_extraction_enriched), commitment.due_at));
+      const slotTime = grounded && `${String(Math.floor(confirmedSlot.minutes / 60)).padStart(2, "0")}:${String(confirmedSlot.minutes % 60).padStart(2, "0")}`;
       const atSlot = grounded && await conn("scheduled_services")
         .where("customer_id", customerId)
         .where("created_at", ">", after)
-        .where("scheduled_date", slot.day)
-        .whereRaw("to_char(window_start, 'HH24:MI') = ?", [slot.time])
-        .whereNotIn("status", ["cancelled", "canceled"])
+        .where("scheduled_date", confirmedSlot.dateET)
+        .whereRaw("to_char(window_start, 'HH24:MI') = ?", [slotTime])
+        // 'rescheduled' is the legacy reschedule's original row — off the
+        // books, as the booking-miss watchdog's confirmed-booking check reads
+        // it (codex #5081 r3 P1).
+        .whereNotIn("status", ["cancelled", "canceled", "rescheduled"])
         .whereNull("recurring_parent_id")
         .whereNull("parent_service_id")
         .orderBy("created_at", "asc")

@@ -492,6 +492,19 @@ describe('PUT /calls/:id/customer', () => {
     }
   });
 
+  test('with the commitments gate off a relink writes no commitment (codex #5081 r3 P1)', async () => {
+    const { reopenSlotBookingProofs } = require('../services/call-commitments');
+    reopenSlotBookingProofs.mockClear();
+    isEnabled.mockReturnValue(false);
+    mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
+      expect(res.status).toBe(200);
+      expect((await res.json()).promises_reopened).toBe(0);
+    });
+    expect(reopenSlotBookingProofs).not.toHaveBeenCalled();
+  });
+
   test('an unlink removes the call\'s derived timeline entry and reports a failed thread re-home instead of hiding it', async () => {
     const updates = mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }]);
     require('../services/conversations').syncVoiceMessageForCall.mockRejectedValueOnce(new Error('thread busy'));

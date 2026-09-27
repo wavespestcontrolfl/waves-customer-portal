@@ -366,6 +366,9 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     expect(await cc.resolveFulfillment(db, promise, call)).toMatchObject({ record_id: other.id, strength: 'association' });
     await book('15:00', { status: 'cancelled' });
     expect(await cc.resolveFulfillment(db, promise, call)).toMatchObject({ record_id: other.id, strength: 'association' });
+    // The legacy reschedule's original row is off the books (codex #5081 r3 P1).
+    await book('15:00', { status: 'rescheduled' });
+    expect(await cc.resolveFulfillment(db, promise, call)).toMatchObject({ record_id: other.id, strength: 'association' });
     const atSlot = await book('15:00');
     expect(await cc.resolveFulfillment(db, promise, call))
       .toMatchObject({ kind: 'appointment_booked', record_id: atSlot.id, strength: 'direct', basis: 'visit_booked_at_the_promised_time' });
@@ -386,6 +389,13 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     const wrongSeason = new Date(threePm).getUTCHours() === 19 ? '-05:00' : '-04:00';
     await scheduling({ status: 'confirmed', confirmed_start_at: `${day}T15:00:00${wrongSeason}` });
     expect(await cc.resolveFulfillment(db, promise, call)).toMatchObject({ record_id: atSlot.id, strength: 'direct' });
+    // The promise written with the same wrong offset is an hour off as an
+    // instant, but it is the V2 time's instant: still the 3 PM slot (codex
+    // #5081 r3 P2). An hour off with no shared instant is another time.
+    const wrongSeasonDue = new Date(`${day}T15:00:00${wrongSeason}`).toISOString();
+    expect(await cc.resolveFulfillment(db, { ...promise, due_at: wrongSeasonDue }, call)).toMatchObject({ record_id: atSlot.id, strength: 'direct' });
+    await scheduling({ status: 'confirmed', confirmed_start_at: threePm });
+    expect(await cc.resolveFulfillment(db, { ...promise, due_at: wrongSeasonDue }, call)).toMatchObject({ strength: 'association' });
     await scheduling({ status: 'confirmed', confirmed_start_at: threePm });
 
     // Kept through the call's customer: a relink reopens it, and only it.
