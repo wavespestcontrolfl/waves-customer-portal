@@ -593,6 +593,31 @@ jest.setTimeout(30000);
       expect(await claimRow()).toMatchObject({ lead_id: null, outcome: CLAIM.UNCERTAIN });
     });
 
+    test('a definite not-sent carried on a thrown error (the audit write failed after the provider refused) releases the claim for a retry', async () => {
+      sendCustomerMessage.mockImplementationOnce(pipeline(() => {
+        const err = new Error('audit insert failed');
+        err.providerOutcome = { sent: false, provider: 'twilio', deliveryOutcome: 'not_sent', error: 'rejected', retryable: false, terminal: false };
+        throw err;
+      }));
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'error', reason: 'provider_failed' });
+      expect(await claimRow()).toBeUndefined();
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+    });
+
+    test('a permanent rejection carried on a thrown error keeps the claim as blocked', async () => {
+      sendCustomerMessage.mockImplementationOnce(pipeline(() => {
+        const err = new Error('audit insert failed');
+        err.providerOutcome = { sent: false, provider: 'twilio', deliveryOutcome: 'not_sent', error: 'invalid number', retryable: false, terminal: true };
+        throw err;
+      }));
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'provider_rejected' });
+      expect(await claimRow()).toMatchObject({ outcome: CLAIM.BLOCKED });
+    });
+
     test('an uncertain provider outcome keeps the claim and settles', async () => {
       sendCustomerMessage.mockImplementationOnce(pipeline({ sent: false, deliveryOutcome: 'uncertain' }));
       const row = call(READY_MINUTES_AGO);

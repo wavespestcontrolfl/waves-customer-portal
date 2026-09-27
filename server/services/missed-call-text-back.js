@@ -508,9 +508,12 @@ function providerBoundaryCheck(row, phone, attempt) {
   };
 }
 
-// Isolates the try/catch around the provider call: a real or ambiguous
-// outcome carried on a thrown error's .providerOutcome is treated the same
-// as a returned result (the pipeline's own contract).
+// Isolates the try/catch around the provider call: an outcome carried on a
+// thrown error's .providerOutcome (the pipeline attaches the KNOWN provider
+// result when its audit write fails afterwards) is classified exactly like
+// a returned one — accepted, uncertain, or a definite not-sent with its own
+// retryable/terminal semantics. Only a throw with no provider outcome is a
+// bare failure.
 async function dispatchOrThrown(row, phone, body, fromNumber, attempt) {
   try {
     const value = await sendCustomerMessage({
@@ -532,9 +535,7 @@ async function dispatchOrThrown(row, phone, body, fromNumber, attempt) {
     });
     return { value };
   } catch (err) {
-    if (isRealProviderSend(err?.providerOutcome) || isAmbiguousProviderOutcome(err?.providerOutcome)) {
-      return { value: err.providerOutcome };
-    }
+    if (err?.providerOutcome && typeof err.providerOutcome === 'object') return { value: err.providerOutcome };
     return { threw: true, err };
   }
 }
@@ -573,9 +574,10 @@ async function classifySendOutcome(result, phone, attempt, row, { releaseLease, 
     // landline validator) or a permanent provider rejection. Nothing was
     // sent. A claim this attempt took is kept as BLOCKED — a number that
     // can never take a text is not retried by either lane.
+    const reason = result.code || (result.terminal === true ? 'provider_rejected' : 'policy_block');
     if (attempt.claimed) await keepClaim(phone, CLAIM.BLOCKED, true);
-    await settleFenced(`skipped:${result.code || 'policy_block'}`);
-    return { outcome: 'skipped', reason: result.code || 'policy_block' };
+    await settleFenced(`skipped:${reason}`);
+    return { outcome: 'skipped', reason };
   }
   // Nothing left the system and the failure can clear: an upstream
   // suppression sentinel (sent:true with no real send — a gate or template
