@@ -228,11 +228,19 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
     .toContain('ungrounded_time:MIDNIGHT');
   expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM, specifically at 20:00.', facts))
     .toContain('ungrounded_time:20:00');
+  expect(ungroundedClaims('Your next visit is Monday, August 3 at eight AM.', facts))
+    .toContain('ungrounded_time:EIGHT AM');
+  expect(ungroundedClaims("Your next visit is Monday, August 3 at eight o'clock.", facts))
+    .toContain("ungrounded_time:EIGHT O'CLOCK");
   expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM.', facts)).toEqual([]);
   expect(ungroundedClaims('Your next visit is tomorrow, Monday, August 3, arriving 8–10 AM.', facts))
     .toContain('ungrounded_relative_date:tomorrow');
   expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM tomorrow.', facts))
     .toContain('ungrounded_relative_date:tomorrow');
+  expect(ungroundedClaims('Your next visit is next Monday, arriving 8–10 AM.', facts))
+    .toContain('ungrounded_relative_date:next monday');
+  expect(ungroundedClaims('Your next visit is this Monday, arriving 8–10 AM.', facts))
+    .toContain('ungrounded_relative_date:this monday');
   expect(ungroundedClaims('Today we completed service. Your next visit is Monday, August 3, arriving 8–10 AM.', facts))
     .toEqual([]);
   expect(ungroundedClaims('Service was completed this afternoon.', facts)).toEqual([]);
@@ -290,6 +298,9 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
     facts,
   )).toEqual(expect.arrayContaining(['ungrounded_weekday:Tuesday']));
   expect(ungroundedClaims('See you on September 3.', facts)).toContain('ungrounded_date:September 3');
+  expect(ungroundedClaims('Your next visit is Sep 3, arriving 8–10 AM.', facts))
+    .toContain('ungrounded_date:Sep 3');
+  expect(ungroundedClaims('Your next visit is Monday, Aug 3, arriving 8–10 AM.', facts)).toEqual([]);
   // with no grounded next visit, any window/date mention rejects
   const noVisit = groundingFacts(input({ nextAppointment: null }));
   expect(ungroundedClaims('We will arrive 8–10 AM.', noVisit).some((p) => p.startsWith('ungrounded_window'))).toBe(true);
@@ -397,6 +408,31 @@ test('model copy is used when clean, and caches on the facts hash', async () => 
   const again = await applyRodentReportNarrative(one, { callModel });
   expect(again).toBe(first);
   expect(callModel).toHaveBeenCalledTimes(1);
+});
+
+test('grounded relative care timing survives without authorizing a relative appointment', async () => {
+  const args = input();
+  args.typedReport = {
+    ...args.typedReport,
+    todaysResult: {
+      ...args.typedReport.todaysResult,
+      nextStep: 'Contact us tomorrow if activity returns.',
+    },
+  };
+  const facts = groundingFacts(args);
+  const summary = 'Today we completed your rodent trapping visit and inspected all 7 traps, with no captures recorded. '
+    + 'We documented droppings in the attic insulation, and today’s moderate activity reading sets the baseline for your program. '
+    + 'Contact us tomorrow if activity returns. Your next visit is Monday, August 3, arriving 8–10 AM.';
+  expect(ungroundedClaims(summary, facts)).toEqual([]);
+  expect(ungroundedClaims(
+    `${summary} Your next visit is tomorrow.`,
+    facts,
+  )).toContain('ungrounded_relative_date:tomorrow');
+  const out = await applyRodentReportNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toContain(summary);
+  expect(out).toContain('Contact us tomorrow if activity returns.');
 });
 
 test('banned copy, bad length, and withheld-name echoes fall back deterministically', async () => {

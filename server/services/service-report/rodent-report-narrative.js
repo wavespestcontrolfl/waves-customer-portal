@@ -1345,7 +1345,9 @@ function ungroundedClaims(rawText, facts) {
   }
   problems.push(...contextualCountProblems(normalizeWordNumbers(text), facts));
   problems.push(...unsupportedActivityClaims(text, facts));
-  problems.push(...nextVisitProblems(text, facts));
+  problems.push(...nextVisitProblems(text, facts, {
+    relativeDateExemptions: mandatoryCareCopy(facts.todaysResult || {}),
+  }));
   problems.push(...ungroundedDomainTerms(text, facts));
   problems.push(...typedCountProblems(normalizeWordNumbers(text), facts));
   problems.push(...contradictedZeroStates(text, facts));
