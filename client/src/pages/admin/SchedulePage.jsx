@@ -14475,7 +14475,7 @@ export function CompletionPanel({
     const areaEdited = lawnPlanArea !== undefined;
     const endpoint = `/admin/treatment-plans/${service.id}${areaEdited ? "/build" : includeCompletionDefaults ? "?completionDefaults=1" : ""}`;
     const request = areaEdited ? {
-      method: "POST", body: JSON.stringify({ completionDefaults: true, lawnSqft: lawnPlanArea === "" ? null : Number(lawnPlanArea) }),
+      method: "POST", body: JSON.stringify({ completionDefaults: true, lawnSqft: Number(lawnPlanArea) || null }),
     } : {};
     const timer = setTimeout(() => adminFetch(endpoint, request)
       .then((data) => {

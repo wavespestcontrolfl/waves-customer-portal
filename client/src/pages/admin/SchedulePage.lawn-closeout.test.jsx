@@ -1590,13 +1590,20 @@ it('shared reviewed area drives lawn defaults while a partial visit and manual t
   expect(fetch.mock.calls.some(([url, opts]) => url.includes('property-areas') && opts.method === 'PUT')).toBe(false);
 });
 
-it('an unreviewed shared area does not seed amounts from the legacy profile', async () => {
+it.each([null, { sqft: 4200, source: 'imagery', reviewedAt: null }, { sqft: 0, source: 'field', reviewedAt: '2026-09-27' }])('a missing, unreviewed or zero shared lawn area clears planner quantities without an invalid request: %j', async lawn => {
   enableDefaults();
   propertyAreas = { enabled: true, propertyId: 'property-a', version: 'a'.repeat(64), areas: {
-    lawn: { sqft: 4200, source: 'imagery', reviewedAt: null }, beds: null, mosquito: null,
+    lawn, beds: null, mosquito: null,
   } };
   mount();
-  await screen.findByText('Satellite estimate · Not reviewed');
+  await screen.findByRole('button', { name: 'Review areas' });
+  // The real planner accepts null and rejects 0; server route tests pin that
+  // contract. Do not let the permissive UI fixture hide invalid serialization.
+  await waitFor(() => {
+    const requests = fetch.mock.calls.filter(([url, options]) => url.includes('treatment-plans') && options?.body);
+    expect(requests.length).toBeGreaterThan(0);
+    expect(JSON.parse(requests.at(-1)[1].body).lawnSqft).toBeNull();
+  });
   await waitFor(() => expect(totals().map(input => input.value)).toEqual(['', '']));
-  expect(screen.getByLabelText('Area treated today (sq ft)').value).toBe('');
+  expect(screen.getByLabelText('Area treated today (sq ft)').value).toBe(lawn?.reviewedAt ? String(lawn.sqft) : '');
 });
