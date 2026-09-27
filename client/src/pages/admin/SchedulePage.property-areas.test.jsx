@@ -65,6 +65,24 @@ it.each([false, true])('attaches an area arriving after product selection and pr
   await waitFor(() => expect(screen.getByPlaceholderText('Sq ft')).toHaveValue(1200));
   expect(screen.getByPlaceholderText('Total')).toHaveValue(manual ? 7 : 2.76);
 });
+it('a unit edit made before areas load prevents a number being reused under the wrong unit', async () => {
+  const original = fetch.getMockImplementation();
+  let release;
+  fetch.mockImplementation((url, ...rest) => url.includes('property-areas')
+    ? new Promise(resolve => { release = resolve; }) : original(url, ...rest));
+  mount();
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: 'Snapshot 2.5TG' } });
+  fireEvent.click(screen.getByText('Snapshot 2.5TG'));
+  const total = screen.getByPlaceholderText('Total');
+  const amountUnit = within(total.parentElement).getAllByRole('combobox')[1];
+  fireEvent.change(amountUnit, { target: { value: 'oz' } });
+  await act(async () => release(new Response(JSON.stringify(measurements), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+  await waitFor(() => expect(screen.getByPlaceholderText('Sq ft')).toHaveValue(1200));
+  expect(amountUnit).toHaveValue('oz');
+  expect(total).toHaveValue(null);
+  fireEvent.change(screen.getByLabelText('Area treated today (sq ft)'), { target: { value: '600' } });
+  expect(total).toHaveValue(null);
+});
 it('does not reinterpret palm fertilizer as bed area', async () => {
   mount(); await add('LESCO 8-0-12 Palm');
   expect(screen.queryByPlaceholderText('Sq ft')).not.toBeInTheDocument();
