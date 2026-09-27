@@ -329,6 +329,29 @@ postgres('billing Email provider preparation on its held connection', () => {
     }
   }, 15000);
 
+  // Owner ruling 2026-09-27: the shared check serves every billing email
+  // sender, so a customer who never chose a billing channel keeps Email.
+  test.each([
+    ['no explicit billing choice', () => mockPg('notification_prefs').where({ customer_id: customerId }).update({ billing_channels: null })],
+    ['no notification_prefs row', () => mockPg('notification_prefs').where({ customer_id: customerId }).delete()],
+  ])('%s keeps authorized Email dispatch', async (_label, arrange) => {
+    await arrange();
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    try {
+      expect(await dispatchUnderBillingEmailAuthority({
+        input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
+        recipientEmail: 'qa@example.invalid', state,
+        dispatch: (database) => sendgrid.sendOne({ to: 'qa@example.invalid', subject: 'Synthetic update',
+          html: '<p>Authorized Email</p>', text: 'Authorized Email', database }),
+      })).toEqual({ ok: true });
+      expect(state.providerAccepted).toBe(true);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      await mockPg('notification_prefs').insert({ customer_id: customerId, email_enabled: true, billing_channels: ['email'] })
+        .onConflict('customer_id').merge();
+    }
+  }, 15000);
+
   // A staff do-not-contact is the one phone suppression that stops a payment
   // email, so a later STOP, wrong-number reply or carrier opt-out recorded
   // over it keeps it; over any other reason the newer record still wins.
