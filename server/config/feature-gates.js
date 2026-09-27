@@ -3110,6 +3110,12 @@ const gates = {
   // so the dark 404 is checked on every request, before the route's own
   // rate limiter (see server/routes/public-blog-read-depth.js).
   blogReadDepth: process.env.GATE_BLOG_READ_DEPTH === 'true',
+
+  // Seven-day spacing between overdue-payment messages (owner ruling
+  // 2026-09-27, dunning unification PR 1). Ships DARK: off unless exactly
+  // 'true'. This entry is for logGateStatus only — the canonical CALL-TIME
+  // reader is dunningSpacingLive() below, which contact-policy.js uses.
+  dunningSpacing: process.env.GATE_DUNNING_SPACING === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -3258,6 +3264,15 @@ function bookCapacityCommitLive() {
   return gateEnvValue('GATE_BOOK_CAPACITY_COMMIT');
 }
 
+// GATE_DUNNING_SPACING read at CALL time — strict `=== 'true'`. The one
+// reader collections/contact-policy.js uses for the seven-day spacing between
+// overdue-payment messages. Only consulted while the collections policy
+// itself runs (GATE_COLLECTIONS_POLICY), since every rail reaches the rule
+// through that consult.
+function dunningSpacingLive() {
+  return process.env.GATE_DUNNING_SPACING === 'true';
+}
+
 // Fresh annual contracts require the term-aware cancellation path. Read both
 // switches at call time so pricing, availability and delivery agree.
 function termiteAnnualPlanSelectionEnabled() {
@@ -3314,5 +3329,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive, dunningSpacingLive };
 // gates 1775330914

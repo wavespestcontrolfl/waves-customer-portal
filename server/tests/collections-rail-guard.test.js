@@ -163,6 +163,7 @@ describe('detail verdict', () => {
     [['suppression_unsubscribe'], true],
     [['commercial_customer'], true],
     [['contact_within_24h'], false],
+    [['dunning_within_7d'], false],
     [['balance_read_incomplete'], false],
     [['contact_within_24h', 'flag_do_not_email'], true],
   ])('denial %j is durable: %p', async (denialReasons, durable) => {

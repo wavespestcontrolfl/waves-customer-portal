@@ -14,6 +14,7 @@
  *   flag_<flag> (one per active collections_flags row covering the channel),
  *   suppression_<reason> (canonical messaging_suppression row covering the channel),
  *   contact_within_24h, voice_contact_within_7d, live_conversation_within_7d,
+ *   dunning_within_7d (GATE_DUNNING_SPACING),
  *   outside_call_window,
  *   pilot_not_overdue_long_enough (account clock = OLDEST unpaid invoice),
  *   pilot_overdue_too_long, pilot_insufficient_dunning_history,
@@ -31,6 +32,7 @@ const { invoiceAmountDue } = require('../invoice-helpers');
 const { etParts } = require('../../utils/datetime-et');
 const ConsentProvenance = require('./consent-provenance');
 const { anchorInvoiceOf, accountDaysOverdue, dunningTierForOverdue, dueDayOf } = require('./account-anchor');
+const { dunningSpacingLive } = require('../../config/feature-gates');
 
 const CHANNELS = new Set(['sms', 'email', 'push', 'voice', 'manual_call']);
 
@@ -492,6 +494,29 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
       if (live) {
         deny('live_conversation_within_7d');
         proposeNextEligible(new Date(new Date(live.occurred_at).getTime() + 7 * DAY_MS));
+      }
+      // Seven days between ANY two overdue-payment messages (owner ruling
+      // 2026-09-27): from any rail, and between consecutive steps of one
+      // ladder too. Without it, the invoice follow-up's Day 30 touch and the
+      // late-payment checker's next tier landed days apart on the same
+      // invoice. Only a message that may have reached the customer counts:
+      // never_contacted rows are filtered above, and send_failed (a definite
+      // refusal; an uncertain outcome is never stamped send_failed) and
+      // resolved (an episode settled without delivery) do not. Voice spacing
+      // stays with the voice rules above. A rail's own same-run siblings and
+      // retries ride excludeLedgerIds, as for the 24h window. Transient (not
+      // in rail-guard's DURABLE_DENIALS), so an owed leg stays pending.
+      if (dunningSpacingLive()) {
+        const lastMessage = recent.find((r) => {
+          if (!['sms', 'email', 'push'].includes(r.channel) || !within(r, 7 * DAY_MS)) return false;
+          let meta = r.metadata;
+          if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
+          return meta?.send_failed !== true && meta?.resolved !== true;
+        });
+        if (lastMessage) {
+          deny('dunning_within_7d');
+          proposeNextEligible(new Date(new Date(lastMessage.occurred_at).getTime() + 7 * DAY_MS));
+        }
       }
     }
 

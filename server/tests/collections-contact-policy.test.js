@@ -509,6 +509,76 @@ describe('rolling frequency windows', () => {
     expect(clear.allowed).toBe(true);
   });
 
+  describe('seven-day spacing between overdue messages (GATE_DUNNING_SPACING)', () => {
+    // Owner ruling 2026-09-27: at least 7 days between ANY two overdue-payment
+    // messages, from any rail and between one ladder's own steps.
+    const evalText = (channel, purpose = 'late_payment', extra = {}) => ContactPolicy.evaluate('cust-1', {
+      channel, purpose, now: WED_11AM_EDT, ...extra,
+    });
+    afterEach(() => { delete process.env.GATE_DUNNING_SPACING; });
+
+    test('gate off: a message 3 days ago changes nothing (byte-identical to before)', async () => {
+      armAllowedBaseline({ ledger: [{ id: 'l-1', channel: 'sms', occurred_at: at(3 * DAY) }] });
+      const result = await evalText('email');
+      expect(result.denialReasons).not.toContain('dunning_within_7d');
+      expect(result.allowed).toBe(true);
+    });
+
+    test('gate on: a text 3 days ago holds the next message, on any text channel, until 7 days after it', async () => {
+      process.env.GATE_DUNNING_SPACING = 'true';
+      for (const channel of ['sms', 'email', 'push']) {
+        armAllowedBaseline({ ledger: [{ id: 'l-1', channel: 'sms', occurred_at: at(3 * DAY) }] });
+        const result = await evalText(channel);
+        expect(result.allowed).toBe(false);
+        expect(result.denialReasons).toEqual(['dunning_within_7d']);
+        expect(result.nextEligibleAt.toISOString()).toBe(new Date(WED_11AM_EDT.getTime() + 4 * DAY).toISOString());
+      }
+    });
+
+    test('gate on: it spans rails — a late-payment email holds the pre-visit balance reminder', async () => {
+      process.env.GATE_DUNNING_SPACING = 'true';
+      armAllowedBaseline({ ledger: [{ id: 'l-2', channel: 'email', occurred_at: at(2 * DAY) }] });
+      const result = await evalText('sms', 'balance_reminder');
+      expect(result.denialReasons).toContain('dunning_within_7d');
+    });
+
+    test('gate on: 6 days 23 hours ago still holds', async () => {
+      process.env.GATE_DUNNING_SPACING = 'true';
+      armAllowedBaseline({ ledger: [{ id: 'l-3', channel: 'push', occurred_at: at(7 * DAY - HOUR) }] });
+      const result = await evalText('sms');
+      expect(result.denialReasons).toContain('dunning_within_7d');
+    });
+
+    test('gate on: messages that never reached the customer do not count', async () => {
+      process.env.GATE_DUNNING_SPACING = 'true';
+      for (const metadata of [JSON.stringify({ send_failed: true }), { resolved: true }]) {
+        armAllowedBaseline({ ledger: [{ id: 'l-4', channel: 'sms', occurred_at: at(3 * DAY), metadata }] });
+        const result = await evalText('email');
+        expect(result.denialReasons).not.toContain('dunning_within_7d');
+        expect(result.allowed).toBe(true);
+      }
+    });
+
+    test('gate on: a rail\'s own same-run sibling or retry row (excludeLedgerIds) does not hold it', async () => {
+      process.env.GATE_DUNNING_SPACING = 'true';
+      armAllowedBaseline({ ledger: [{ id: 'own-sms', channel: 'sms', occurred_at: at(2 * DAY) }] });
+      const result = await evalText('email', 'late_payment', { excludeLedgerIds: ['own-sms'] });
+      expect(result.denialReasons).not.toContain('dunning_within_7d');
+      expect(result.allowed).toBe(true);
+    });
+
+    test('gate on: voice rows are left to the voice rules, and voice is not held by a text', async () => {
+      process.env.GATE_DUNNING_SPACING = 'true';
+      armAllowedBaseline({ ledger: [{ id: 'l-5', channel: 'voice', occurred_at: at(3 * DAY), metadata: { outcome: 'voicemail', live_conversation: false } }] });
+      const text = await evalText('sms');
+      expect(text.denialReasons).not.toContain('dunning_within_7d');
+
+      armAllowedBaseline({ ledger: [{ id: 'l-6', channel: 'sms', occurred_at: at(3 * DAY) }] });
+      const voice = await evalVoice();
+      expect(voice.denialReasons).not.toContain('dunning_within_7d');
+    });
+  });
+
   test('recent contacts are surfaced on the result', async () => {
     const row = { channel: 'sms', occurred_at: at(2 * HOUR) };
     armAllowedBaseline({ ledger: [row] });
