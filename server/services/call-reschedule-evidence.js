@@ -54,7 +54,7 @@
 const { etDateString } = require('../utils/datetime-et');
 const { etWallClockOfConfirmedStart } = require('./call-triage-flags');
 const {
-  normalize, parseTurns, parseDayMentions, splitTurnSentences, sentenceSpans, extractHourMentions,
+  normalize, parseTurns, parseDayMentions, splitTurnSentences, sentenceSpans, extractHourMentions, offeredWithAnotherHour,
 } = require('./call-time-mentions');
 
 // Fail-closed hedge/unsettled markers, matched as padded substrings.
@@ -94,6 +94,11 @@ const REFUSAL_MARKERS = [
   ' can t do that ', ' cannot do that ', ' can t make it ', ' cannot make it ', ' can t make that ',
   ' never mind ', ' nevermind ', ' forget it ', ' forget that ', ' scratch that ', ' cancel that ',
   ' actually no ', ' no wait ',
+  // Taking the move back without naming another day or time (one that does
+  // is a later mention, and last-mention-wins already fails it).
+  ' keep my original ', ' keep the original ', ' original appointment ', ' original time ', ' original day ',
+  ' changed my mind ', ' change my mind ', ' on second thought ', ' leave it as is ', ' keep it as is ',
+  ' leave it where it is ', ' keep it where it is ',
 ];
 
 // The agent's non-interrogative affirming close. Ordinary short commitment
@@ -210,6 +215,20 @@ function lastDayNamesSlot(dayRefs, turns, slotDate) {
   return chain.every((m) => (pinned && m.weekday != null ? m.weekday === slotWeekday : m.candidates.has(slotDate)));
 }
 
+// Does the call's last hour reference name the slot's hour: on the hour, and
+// not offered with another ("two or four" never settles which)?
+function lastHourNamesSlot(lastHour, turns, slotHour) {
+  return lastHour.hour24 === slotHour && !lastHour.offHour
+    && !offeredWithAnotherHour(turns[lastHour.turnIdx].ns.split(' '), lastHour.pos, lastHour.end);
+}
+
+// Does the caller turn at `idx` answer the agent's closing question
+// ("anything else?" — "No, that's all")?
+function answersClosingQuestion(turns, idx) {
+  const agentIdx = turns.slice(0, idx).map((t) => t.agent).lastIndexOf(true);
+  return agentIdx >= 0 && sentenceSpans(turns[agentIdx].raw).some((sentence) => sentence.question && isClosingQuestion(sentence.ns));
+}
+
 // Words that start a new clause: "Friday doesn't work, BUT we'll see you
 // Thursday at two" refuses Friday, not Thursday.
 const CLAUSE_BREAKS = new Set(['but', 'so', 'however', 'although', 'though', 'instead']);
@@ -281,7 +300,7 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
   const lastDay = dayRefs[dayRefs.length - 1];
   const lastHour = hourRefs[hourRefs.length - 1];
   if (!lastDayNamesSlot(dayRefs, turns, slot.date)) return { ok: false, reason: 'last_day_ref_mismatch', window: null, excerpt: null };
-  if (lastHour.hour24 !== slot.hour24 || lastHour.offHour) return { ok: false, reason: 'last_hour_ref_mismatch', window: null, excerpt: null };
+  if (!lastHourNamesSlot(lastHour, turns, slot.hour24)) return { ok: false, reason: 'last_hour_ref_mismatch', window: null, excerpt: null };
 
   // V2's confirmed_start_at and the transcript-resolved day+hour are checked
   // against the SAME `slot` object derived from confirmed_start_at, so
@@ -290,11 +309,10 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
   // diff against.
   const anchorIdx = Math.max(lastDay.turnIdx, lastHour.turnIdx);
   const failAt = (reason, toTurn = anchorIdx) => ({ ok: false, reason, window: { fromTurn: anchorIdx, toTurn }, excerpt: excerptOf(turns, anchorIdx, toTurn, 2) });
-  // The slot's day and hour words (an on-the-hour mention is one token,
-  // ending at `end`), the clauses stating them, and the rest of the turn
-  // completing the slot.
+  // The slot's day and hour words, the clauses stating them, and the rest of
+  // the turn completing the slot.
   const dayWord = { turnIdx: lastDay.turnIdx, pos: lastDay.pos, end: lastDay.end };
-  const hourWord = { turnIdx: lastHour.turnIdx, pos: lastHour.end - 1, end: lastHour.end };
+  const hourWord = { turnIdx: lastHour.turnIdx, pos: lastHour.pos, end: lastHour.end };
   const dayClause = clauseAt(turns[dayWord.turnIdx].raw, dayWord.pos);
   const hourClause = clauseAt(turns[hourWord.turnIdx].raw, hourWord.pos);
   const slotEndIn = (clause, word, other) => (other.turnIdx === word.turnIdx && other.pos >= clause.start
@@ -319,7 +337,7 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
   // ("would Thursday at two work? Please let me know"), or any question but
   // a closing one ("Thursday at two. Does that work for you?")?
   const asksCaller = (idx) => sentenceSpans(turns[idx].raw).some((sentence) => sentence.question
-    && (!isClosingQuestion(sentence.ns) || [lastDay.turnIdx === idx ? lastDay.pos : -1, lastHour.turnIdx === idx ? lastHour.end - 1 : -1]
+    && (!isClosingQuestion(sentence.ns) || [lastDay.turnIdx === idx ? lastDay.pos : -1, lastHour.turnIdx === idx ? lastHour.pos : -1]
       .some((pos) => pos >= sentence.start && pos < sentence.end)));
 
   // The FIRST agent turn from the slot on must affirm it. The slot's own turn
@@ -335,12 +353,15 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
 
   // A negation on the slot's own words, after it in the turn completing it,
   // or anywhere up to the affirming turn (the caller's "no" to the proposal,
-  // the agent's "okay, I don't have that") turned it down. After the
-  // affirmation only the explicit refusals above count: "no, that's all"
-  // closes the call.
+  // the agent's "okay, I don't have that") turned it down, and so does a
+  // caller's afterwards ("No, please keep my original appointment") — unless
+  // it answers the agent's closing question ("anything else?" — "No, that's
+  // all").
+  const negationWindow = turns.slice(anchorIdx + 1).map((t, k) => anchorIdx + 1 + k).filter((idx) => idx <= affirmIdx || !turns[idx].agent)
+    .map((idx) => (idx > affirmIdx && answersClosingQuestion(turns, idx) ? turns[idx].ns.replace(/^(?:no|nope|nah)\b/, '') : turns[idx].ns));
   if (negatesSlotWord(dayClause, dayWord, slotEndIn(dayClause, dayWord, hourWord))
     || negatesSlotWord(hourClause, hourWord, slotEndIn(hourClause, hourWord, dayWord))
-    || [slotClauses[2], ...turns.slice(anchorIdx + 1, affirmIdx + 1).map((t) => t.ns)].some(hasNegation)) {
+    || [slotClauses[2], ...negationWindow].some(hasNegation)) {
     return failAt('slot_refused', affirmIdx);
   }
 

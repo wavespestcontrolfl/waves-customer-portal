@@ -163,6 +163,9 @@ const OCLOCK = new Set(['o', 'oclock']);
 // A number running into a unit of time is a length, not a clock time.
 const DURATION_UNITS = new Set(['hour', 'hours', 'hr', 'hrs', 'minute', 'minutes', 'min', 'mins']);
 const DURATION_FILLER = new Set(['and', 'a', 'half', 'or', 'to', 'through', 'quarter']);
+// Between two hours offered as alternatives ("at two or at four", "2 pm or 3").
+const HOUR_FILLER = new Set(['at', 'around', 'about', 'am', 'pm', 'o', 'clock', 'oclock', '00']);
+const HOUR_ALTERNATIVES = new Set(['or', 'and']);
 
 // Sentences WITHIN one turn (on . ! ?): an hour's minutes, am/pm or range
 // never run across a sentence end.
@@ -230,8 +233,9 @@ function periodAfter(toks, j) {
 }
 
 /**
- * Hour mentions in one turn, in spoken order: { hour24, offHour, end } with
- * end the turn-level token index after the mention. A number is a clock time
+ * Hour mentions in one turn, in spoken order: { hour24, offHour, pos, end },
+ * the turn-level token span of the number and its minutes (a range's whole
+ * span). A number is a clock time
  * only when something marks it as one: "at", "around" or "about" before it;
  * "ish", am/pm or o'clock after it; being a range's start ("two to four",
  * "between eight and nine" — the end belongs to the range); or minutes
@@ -249,7 +253,7 @@ function extractHourMentions(turnText) {
     const toks = normalize(sentence).split(' ').filter(Boolean);
     let rangeEnd = -1;
     for (let i = 0; i < toks.length; i += 1) {
-      if (Object.hasOwn(NAMED_HOURS, toks[i])) mentions.push({ hour24: NAMED_HOURS[toks[i]], offHour: false, end: offset + i + 1 });
+      if (Object.hasOwn(NAMED_HOURS, toks[i])) mentions.push({ hour24: NAMED_HOURS[toks[i]], offHour: false, pos: offset + i, end: offset + i + 1 });
       const n = hourNumber(toks[i]);
       if (n == null || i === rangeEnd) continue;
       rangeEnd = rangeEndAfter(toks, i);
@@ -259,7 +263,7 @@ function extractHourMentions(turnText) {
       const marked = offHour || rangeEnd > 0 || period || OCLOCK.has(toks[after]) || HOUR_LEADS.has(toks[i - 1]) || toks[i + 1] === 'ish';
       if (!marked || runsIntoDuration(toks, after)) continue;
       const pm = period ? period === 'pm' : n <= 6 || n === 12;
-      mentions.push({ hour24: (n % 12) + (pm ? 12 : 0), offHour, end: offset + after });
+      mentions.push({ hour24: (n % 12) + (pm ? 12 : 0), offHour, pos: offset + i, end: offset + Math.max(after, rangeEnd + 1) });
       i = after - 1;
     }
     offset += toks.length;
@@ -267,7 +271,19 @@ function extractHourMentions(turnText) {
   return mentions;
 }
 
+// Is the hour spanning [pos, end) of these tokens offered with another
+// number joined to it by "or"/"and" ("two or four", "at two or at four", "2
+// pm or 3"), even one no marker makes a clock time? A range ("between two
+// and four") is one mention, never an alternative.
+function offeredWithAnotherHour(toks, pos, end) {
+  const skip = (k, step) => { let j = k; while (HOUR_FILLER.has(toks[j])) j += step; return j; };
+  const next = skip(end, 1);
+  const prev = skip(pos - 1, -1);
+  return (HOUR_ALTERNATIVES.has(toks[next]) && hourNumber(toks[skip(next + 1, 1)]) != null)
+    || (HOUR_ALTERNATIVES.has(toks[prev]) && hourNumber(toks[skip(prev - 1, -1)]) != null);
+}
+
 module.exports = {
   normalize, parseTurns, parseDayMentions,
-  splitTurnSentences, sentenceSpans, extractHourMentions,
+  splitTurnSentences, sentenceSpans, extractHourMentions, offeredWithAnotherHour,
 };

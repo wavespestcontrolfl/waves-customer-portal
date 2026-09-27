@@ -235,6 +235,27 @@ describe('rescheduleAgreementEvidence', () => {
     }
   });
 
+  // After the agent agrees, the caller can still take it back: a "no" does,
+  // unless it answers the agent's closing question, and so do the phrases
+  // that withdraw without naming another time.
+  test('a caller taking the move back after the agreement undoes it', () => {
+    const agreed = 'Caller: Can we move my visit?\nAgent: We will see you Thursday at two.';
+    expect(evidence(`${agreed}\nCaller: No, please don't move it.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence(`${agreed}\nCaller: Actually, let's keep the original time.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence(`${agreed} Anything else?\nCaller: No, I changed my mind about that.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence(`${agreed} Anything else?\nCaller: No, that's all. Thank you.`).ok).toBe(true);
+    expect(evidence(`${agreed}\nCaller: Okay. Thank you. Bye.`).ok).toBe(true);
+  });
+
+  // Two hours offered as alternatives never settle which one, even when the
+  // second has no marker of its own; a range is one time.
+  test('hours offered as alternatives are not an agreed hour', () => {
+    for (const offer of ['Thursday at two or at four', 'Thursday at two or three', 'Thursday at 2 pm or 4']) {
+      expect(evidence(`Caller: Can we do ${offer}?\nAgent: Sounds good.`)).toMatchObject({ ok: false, reason: 'last_hour_ref_mismatch' });
+    }
+    expect(evidence('Caller: Can we do Thursday between two and four?\nAgent: Sounds good.').ok).toBe(true);
+  });
+
   test('an unlabeled transcript line fails closed rather than trusting turn order', () => {
     const r = evidence('Hello, this is a call with no speaker labels.');
     expect(r).toMatchObject({ ok: false, reason: 'unparseable_transcript' });
