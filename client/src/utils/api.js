@@ -781,6 +781,20 @@ export class ApiClient {
     return this.request('/property/termite-bond');
   }
 
+  getTermiteAnnualPlan() {
+    return this.request('/property/termite-annual-plan');
+  }
+
+  // termId (REQUIRED, the term's UUID) names exactly which card the
+  // customer confirmed — multi-property accounts can carry more than one
+  // termite annual term, and the server answers 400 without it.
+  declineTermiteAnnualPlanRenewal(termId) {
+    return this.request('/property/termite-annual-plan/decline', {
+      method: 'POST',
+      body: JSON.stringify({ termId }),
+    });
+  }
+
   updatePropertyPreferences(data) {
     return this.request('/property/preferences', {
       method: 'PUT',

@@ -217,8 +217,103 @@ function isExplicitlyNonOwner(relationship) {
 function suppressUnsupportedModelFlags(modelFlags, extraction) {
   const flags = Array.isArray(modelFlags) ? modelFlags : [];
   if (!flags.includes('caller_not_authorized')) return flags;
-  if (isExplicitlyNonOwner(extraction?.caller?.relationship_to_property)) return flags;
+  if (isExplicitlyNonOwner(extraction?.caller?.relationship_to_property)) {
+    // A real_estate_agent/lender WDO arranger with a confirmed time on the
+    // call is authorized (see isAuthorizedWdoArrangerBooking) — the model
+    // emits caller_not_authorized on these calls itself (it sees the same
+    // third-party relationship), so its copy needs the same demotion the
+    // deterministic derivation gets below, or the merge would reintroduce
+    // the block from the model side alone (live miss, call 17ed9362,
+    // 2026-09-24: a lender ordering a refinance WDO inspection, confirmed
+    // for 10am Monday, blocked with routing.reason "triage_flags" even
+    // though the deterministic pass never raised it — the MODEL's own
+    // triage_flags entry survived the merge unfiltered).
+    if (isAuthorizedWdoArrangerBooking(extraction)) return flags.filter((f) => f !== 'caller_not_authorized');
+    return flags;
+  }
   return flags.filter((f) => f !== 'caller_not_authorized');
+}
+
+// A WDO inspection is identified the same way call-recording-processor.js's
+// catalog anchoring does: the V2 structured category ('wdo') OR the specific
+// catalog service name containing "WDO" (the "WDO Inspection Service" row —
+// see project-types.js's wdo_inspection.defaultTitle and
+// call-recording-processor.js's WDO_KEYWORDS_* / catalog list). Matching on
+// the word boundary rather than an exact string tolerates minor model
+// rephrasing ("WDO Inspection", "WDO Report") without matching an unrelated
+// service that merely mentions "wdo" mid-word (there is none in the catalog,
+// but \b keeps this future-proof).
+//
+// specific_service_name is free-text model output, not a catalog key — a
+// lender/realtor call the model itself labels "WDO Treatment Service" or
+// "Wood-Destroying Organism Treatment" matched the bare identity regex below
+// and, through isAuthorizedWdoArrangerBooking, cleared caller_not_authorized
+// on a third party's TREATMENT request (codex #4890 post-merge review P1).
+// The owner ruling covers only an INSPECTION/report arranged for a lender or
+// closing. A treatment-word blocklist kept missing inflections ("treatments",
+// "retreatment", "tented", "baited" — codex #4966 r2 P1), so the name is now
+// an ALLOWLIST: after normalizing case and punctuation it must be exactly a
+// WDO inspection name ("WDO", "WDO Inspection", "WDO Inspection Service",
+// "Wood-Destroying Organism (WDO) Inspection", optionally "report"/"letter"/
+// "clearance letter"/"certificate"). Any other word anywhere fails closed.
+// There is no catalog service_key here (this predicate is pure over the
+// extraction, by design — see isAuthorizedWdoArrangerBooking's no-clock
+// note). The coarse 'wdo' category below is schema-enumerated
+// (call-extraction.persisted.schema.json), not free text, and that enum has
+// no WDO-treatment value (WDO treatment is categorized 'termite'), so it
+// stays a safe inspection-only signal on its own.
+const WDO_INSPECTION_NAME_RE = /^(?:wdo|wood destroying organisms?(?: wdo)?)(?: inspection)?(?: service| report| letter| clearance(?: letter)?| certificate)?$/;
+function normalizeWdoServiceName(name) {
+  return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+function isWdoInspectionRequest(serviceRequest = {}) {
+  // The extraction's own intent must be an inspection: a treatment (or any
+  // other) intent paired with a catalog-looking "WDO Inspection Service" name
+  // is a model-field inconsistency and fails closed (codex #4966 r1 P1).
+  if (serviceRequest?.service_intent !== 'inspection_only') return false;
+  // A named specific service is the booking's final choice
+  // (resolveCallBookingCatalogService), so when one is present it must itself
+  // be the WDO row — the coarse category cannot override a contradictory pick
+  // like "Termite Inspection Service" (codex #4890 r6 P1).
+  const specific = String(serviceRequest?.specific_service_name || '').trim();
+  if (specific) {
+    // The acronym or the spelled-out form ("Wood-Destroying Organism
+    // Inspection"), the same equivalence service-normalizer.js uses (codex
+    // #4890 r7 P2).
+    return WDO_INSPECTION_NAME_RE.test(normalizeWdoServiceName(specific));
+  }
+  return serviceRequest?.primary_service_category === 'wdo';
+}
+
+// Owner ruling 2026-09-26 (call 17ed9362): a lender or realtor ARRANGING a
+// WDO inspection is an authorized caller when staff agreed the time on the
+// call — the same bar a homeowner's own booking meets (scheduling.status
+// 'confirmed' with a real confirmed_start_at). This is deliberately narrower
+// than, and independent of, the general agent-commitment demotion
+// (hasAgentCommittedEvidence): it does not touch that closed-vocabulary
+// transcript-grounding grammar, which still guards every OTHER third-party
+// case (family members, property managers, tenants) — a lender/realtor
+// arranging a WDO refinance/closing inspection is a routine, recognized
+// professional relationship to the property that the office does not need
+// an agent-spoken confirmation quote to trust.
+//
+// Buyers under contract are explicitly NOT covered (relationship is usually
+// 'other', sometimes misreported) — the owner ruling names lender/realtor
+// only. Direction-independent by construction: this reads only the
+// extraction (caller/service_request/scheduling), never call direction, so
+// an outbound call with the identical extraction shape is authorized the
+// same way an inbound one is.
+const WDO_ARRANGER_RELATIONSHIPS = new Set(['real_estate_agent', 'lender']);
+// Pure (no clock): the route decision must stay a function of the call so a
+// force-reprocess under the same decision version reproduces it (codex #4890
+// r6 P1). An elapsed agreed day is refused where the visit is WRITTEN — see
+// slotElapsedAtBookingTime in call-recording-processor.js (codex #4890 r5 P1).
+function isAuthorizedWdoArrangerBooking(extraction) {
+  const relationship = String(extraction?.caller?.relationship_to_property || '').trim().toLowerCase();
+  if (!WDO_ARRANGER_RELATIONSHIPS.has(relationship)) return false;
+  if (!isWdoInspectionRequest(extraction?.service_request || {})) return false;
+  const scheduling = extraction?.scheduling || {};
+  return scheduling.status === 'confirmed' && !!scheduling.confirmed_start_at;
 }
 
 function computeDeterministicTriageFlags(extraction, opts = {}) {
@@ -373,7 +468,8 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     flags.push('low_extraction_confidence');
   }
 
-  if (caller.on_site_authorization === false && isExplicitlyNonOwner(caller.relationship_to_property)) {
+  if (caller.on_site_authorization === false && isExplicitlyNonOwner(caller.relationship_to_property)
+      && !isAuthorizedWdoArrangerBooking(extraction)) {
     flags.push('caller_not_authorized');
   }
 
@@ -1687,14 +1783,22 @@ function confirmedStartOnTheHour(confirmedStartAt) {
 // trail. Never out_of_service_area — a hard block. Confirmed bookings are
 // deliberately NOT touched here: they keep the gated fail-open contract in
 // canAutoRoute, including its advisory read-back card.
+// A COMPLETE on-file address: street AND ZIP, the same evidence the
+// auto-resolver's address_moot rule demands — hasAddress alone is derived
+// from address_line1 (codex r3 P2). Every path that lets the saved address
+// stand in for one the caller did not state (on-file satisfaction, the
+// confirmed-booking fail-open, dispatchesToOnFileAddress) asks this one
+// predicate, so a legacy row with a street but no ZIP never dispatches — on
+// an inbound or an outbound call.
+function hasCompleteOnFileAddress(known) {
+  return !!(known && known.hasAddress && String(known.addressLine1 || '').trim() && String(known.addressZip || '').trim());
+}
+
 function onFileAddressSatisfaction(flags, extraction, opts = {}) {
   const list = Array.isArray(flags) ? flags : [];
   const none = { flags: list, satisfied: [] };
   const known = opts.knownCustomer;
-  // A COMPLETE on-file address: street AND ZIP, the same evidence the
-  // auto-resolver's address_moot rule demands — hasAddress alone is derived
-  // from address_line1 (codex r3 P2).
-  if (!known || !known.hasAddress || !String(known.addressLine1 || '').trim() || !String(known.addressZip || '').trim()) return none;
+  if (!hasCompleteOnFileAddress(known)) return none;
   if (statesNewAddress(extraction, known)) return none;
   const rec = opts.canonicalRecord;
   if (rec && statesNewAddress({ property: { service_address: {
@@ -1765,7 +1869,7 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   // Hoisted: the auto-route exit below also needs to know whether this booking
   // would dispatch to the customer's on-file (already Google-verified) address
   // rather than one stated on this call.
-  const knownCustomerHasAddress = !!(opts.knownCustomer && opts.knownCustomer.hasAddress);
+  const knownCustomerHasAddress = hasCompleteOnFileAddress(opts.knownCustomer);
   const newAddressGiven = statesNewAddress(extraction, opts.knownCustomer);
   if (opts.failOpen && confirmedWithStart) {
     const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
@@ -2043,7 +2147,7 @@ function streetCompareKey(s) {
  * still confirms it before anyone drives there.
  * Pure: no side effects. The caller mutates `extracted` and persists the reasons.
  */
-function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFlags = [], callerRelationship = null, addressRecovery = null } = {}) {
+function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFlags = [], callerRelationship = null, addressRecovery = null, v2Extraction = null } = {}) {
   const av = addressValidation || null;
   const status = av && av.status ? av.status : null;
   const hadStreet = !!String(extracted.address_line1 || '').trim();
@@ -2120,7 +2224,14 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
   // caller_not_authorized on an unknown / spouse caller would still open
   // the review card enforce mode no longer raises. Only an explicit third
   // party (tenant, agent, manager, other) carries the ask.
-  if (flags.includes('caller_not_authorized') && isExplicitlyNonOwner(callerRelationship)) needsConfirmation.push('caller_not_authorized');
+  // Same owner-ruling exception the enforce gate applies (2026-09-26): a
+  // real_estate_agent/lender arranging a confirmed WDO inspection is
+  // authorized, so this shadow-mode review card must not re-raise it either.
+  // v2Extraction is optional (older callers keep today's behavior) — the one
+  // live call site (call-recording-processor.js) passes the full V2
+  // extraction so the predicate can see service_request/scheduling.
+  if (flags.includes('caller_not_authorized') && isExplicitlyNonOwner(callerRelationship)
+      && !isAuthorizedWdoArrangerBooking(v2Extraction)) needsConfirmation.push('caller_not_authorized');
   // Finding #4 (round 4 P1, PR #4807): callback_number_needed reaches this
   // function inside bridgeTriageFlags (the processor already merges
   // computeDeterministicTriageFlags's output in before calling this), but
@@ -2592,15 +2703,19 @@ function onFileHouseNumberConflict({ addressValidation = null, onFileAddress = n
  */
 function dispatchesToOnFileAddress(extraction, opts = {}) {
   return !!(opts.failOpen
-    && opts.knownCustomer && opts.knownCustomer.hasAddress
+    && hasCompleteOnFileAddress(opts.knownCustomer)
     && !statesNewAddress(extraction, opts.knownCustomer));
 }
 
 module.exports = {
+  hasCompleteOnFileAddress,
   onFileHouseNumberConflict,
   sameHouseNumberStreet,
   SCHEDULING_CHANGE_REVIEW_FLAGS,
   isExplicitlyNonOwner,
+  isAuthorizedWdoArrangerBooking,
+  isWdoInspectionRequest,
+  suppressUnsupportedModelFlags,
   computeDeterministicTriageFlags,
   statesNewAddress,
   dispatchesToOnFileAddress,

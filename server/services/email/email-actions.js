@@ -336,7 +336,7 @@ async function maybeDraftEstimateFromEmailLead({ email, extracted, lead }) {
       outcome = { created: false, skipped: 'duplicate', existingEstimateId: duplicateBlock.existingEstimateId || null };
       return;
     }
-    const built = buildAutomatedLeadDraftEstimate({ intake, customer: {}, body: {}, readiness });
+    const built = await buildAutomatedLeadDraftEstimate({ intake, customer: {}, body: {}, readiness });
     const crypto = require('crypto');
     const estimateData = built?.estimateData
       || { automation: { leadEstimateAutomation: readiness } };
@@ -890,7 +890,7 @@ async function handleLeadInquiry(email, classification) {
             classification.summary || email.subject,
             {
               icon: '📧',
-              link: '/admin/estimates',
+              link: followUpDraft.estimateId ? `/admin/estimates?estimateId=${followUpDraft.estimateId}` : '/admin/estimates',
               metadata: {
                 emailId: email.id,
                 leadId: existingLead.id,
@@ -1030,7 +1030,7 @@ async function handleLeadInquiry(email, classification) {
         : (classification.summary || email.subject),
       {
         icon: '\uD83D\uDCE7',
-        link: drafted ? '/admin/estimates' : '/admin/email',
+        link: drafted ? (emailDraft.estimateId ? `/admin/estimates?estimateId=${emailDraft.estimateId}` : '/admin/estimates') : '/admin/email',
         metadata: {
           emailId: email.id,
           leadId: lead.id,

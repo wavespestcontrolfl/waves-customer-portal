@@ -1,7 +1,8 @@
 'use strict';
 
 // Engine input keys that are SERVER-DERIVED only — recurring-customer
-// identity (priorQualifyingServices, recurringCustomer…) and the
+// identity (priorQualifyingServices, recurringCustomer…), transient catalog
+// pricing, and the
 // stored-estimate replay stamps (treeShrubPricingKnobs, termitePricingKnobs,
 // rodent/palm/commercial replay signals). The authoritative replay paths
 // inject them from the SAVED estimate row; a posted or model-supplied copy
@@ -21,9 +22,10 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   'commercialFloorsArmed',
   'rodentBaitLegacyReplay',
   'rodentWaveguardPostureReplay',
+  'catalogPricing',
 ]);
 
-// Deletes every identity field from `obj` IN PLACE (plain objects only;
+// Deletes every server-owned field from `obj` IN PLACE (plain objects only;
 // arrays and primitives pass through untouched) and returns it.
 function sanitizeClientIdentityFields(obj) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;

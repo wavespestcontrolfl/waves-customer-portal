@@ -249,6 +249,12 @@ function rejectLedgerCall(result, reason, validator) {
     logger.debug(`[llm] call ledger rejection skipped: ${err.message}`);
   }
 }
+// dispatch() has no validate hook: a caller whose own check rejects an answer
+// the adapter filed as ok flips that leg's row with this (dispatchWithFallback
+// callers pass `validate` instead). No-op for a result the adapter did not file.
+function rejectCall(result, reason) {
+  if (result && typeof result === 'object') rejectLedgerCall(result, reason, true);
+}
 function usageOf(provider, data) {
   try { return metrics.extractUsage(provider, data); } catch { return null; }
 }
@@ -766,6 +772,7 @@ function recordDispatchOutcome(policy, outcome) {
 
 module.exports = {
   anthropicText,
+  rejectCall,
   anthropicSchema,
   // Exported so a caller reasoning about how long one pass can run reads the
   // dispatcher's REAL budget instead of mirroring the number (see

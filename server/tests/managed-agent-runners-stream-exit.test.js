@@ -8,11 +8,14 @@
 
 const mockRecordSessionUsage = jest.fn();
 const mockExecuteLeadTool = jest.fn();
+const mockExecuteBITool = jest.fn();
 const mockBreakerFailure = jest.fn();
 jest.mock('../services/llm-dispatch-metrics', () => ({ recordSessionUsage: (...a) => mockRecordSessionUsage(...a) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/bi-agent-tools', () => ({ executeBITool: jest.fn() }));
-jest.mock('../services/bi-agent-config', () => ({ BI_AGENT_CONFIG: { model: 'bi-model' } }));
+jest.mock('../services/bi-agent-tools', () => ({ executeBITool: (...a) => mockExecuteBITool(...a) }));
+jest.mock('../services/bi-agent-config', () => ({
+  BI_AGENT_CONFIG: { model: 'bi-model', system: 'bi-system-prompt', tools: [{ type: 'custom', name: 'get_revenue_snapshot' }] },
+}));
 jest.mock('../services/content/content-agent-tools', () => ({ executeContentTool: jest.fn() }));
 jest.mock('../services/content/content-agent-config', () => ({ CONTENT_AGENT_CONFIG: { model: 'content-model' } }));
 jest.mock('../models/db', () => () => ({ insert: async () => {}, where: () => ({ first: async () => null }) }));
@@ -49,6 +52,13 @@ function load(path) {
   return mod;
 }
 const text = (t) => ({ event: 'assistant', data: { text: t } });
+// bi-agent re-throws a failure after its ledger row is written, so its
+// callers (the Monday cron's job health, /bi/run?wait=true) see the run
+// failed (Codex #4870 r5); the other runners resolve with it recorded.
+async function settleFailedRun(name, promise, code) {
+  if (name === 'bi-agent') await expect(promise).rejects.toMatchObject({ code });
+  else await promise;
+}
 const recorded = () => mockRecordSessionUsage.mock.calls[0][0];
 
 const RUNNERS = [
@@ -95,13 +105,13 @@ describe.each(RUNNERS)('%s — the session recorder sees how the stream ended', 
 
   it('a session.error event is the same failed run as an error event (session_error_event)', async () => {
     global.fetch = fetchFor([text('partial'), { event: 'session.error', data: { type: 'overloaded_error' } }, text('never read')]);
-    await run(load(path));
+    await settleFailedRun(name, run(load(path)), 'session_error_event');
     expect(recorded()).toMatchObject({ sessionId: 'sess-1', failure: 'session_error_event' });
   });
 
   it('a stream that closes before any terminal event is a failed run (session_stream_eof), not a success', async () => {
     global.fetch = fetchFor([text('partial')]);
-    await run(load(path));
+    await settleFailedRun(name, run(load(path)), 'session_stream_eof');
     expect(recorded()).toMatchObject({ sessionId: 'sess-1', failure: 'session_stream_eof' });
   });
 
@@ -190,7 +200,8 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
       { event: 'tool_use', data: { id: 'send-1', name: 'send_lead_response', input: { message: 'Synthetic draft' } } },
       { event: 'done', data: {} },
     ]);
-    expect(await run(load(path))).toMatchObject({ actionTaken: queued.failed ? null : 'auto_send_suppressed_queued' });
+    // The saved draft is reported, but never as a clean hand-off while its owner alert failed (#4179).
+    expect(await run(load(path))).toMatchObject({ actionTaken: queued.failed ? 'auto_send_suppressed_queued_unalerted' : 'auto_send_suppressed_queued' });
     const events = global.fetch.mock.calls.flatMap(([, options]) => JSON.parse(options.body || '{}').events || []);
     const result = events.find(event => event.custom_tool_use_id === 'send-1');
     expect(Boolean(result.is_error)).toBe(Boolean(queued.failed));
@@ -223,5 +234,661 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
     global.fetch = fetchFor([text('first '), idle('requires_action')]);
     await run(load(path));
     expect(recorded()).toMatchObject({ failure: 'session_stream_eof' });
+  });
+
+  it('a run with more than 25 stream events still succeeds — the old 25-event max_events cap is gone', async () => {
+    const chatter = Array.from({ length: 30 }, (_, i) => text(`chunk ${i} `));
+    global.fetch = fetchFor([...chatter, idle('end_turn')]);
+    await expect(run(load(path))).resolves.toMatchObject({ sessionId: 'sess-1' });
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  it('a stream that never reaches a terminal event fails as session_timeout under a small LEAD_AGENT_TIMEOUT_MS', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '500';
+    global.fetch = fetchFor([text('still going'), text('still going 2'), text('still going 3')]);
+    await run(load(path));
+    expect(recorded()).toMatchObject({ sessionId: 'sess-1', failure: expect.objectContaining({ code: 'session_timeout' }) });
+  });
+
+  it('an invalid LEAD_AGENT_TIMEOUT_MS override falls back to the default instead of failing fast', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = 'not-a-number';
+    global.fetch = fetchFor([text('all done'), { event: 'done', data: {} }]);
+    await expect(run(load(path))).resolves.toMatchObject({ sessionId: 'sess-1' });
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  it('opens the SSE stream before posting the kickoff user.message (Managed Agents streams do not replay earlier events)', async () => {
+    global.fetch = fetchFor([{ event: 'done', data: {} }]);
+    await run(load(path));
+    const calls = global.fetch.mock.calls;
+    const streamIndex = calls.findIndex(([url]) => /\/events\/stream$/.test(String(url)));
+    const kickoffIndex = calls.findIndex(([url, opts]) => opts?.method === 'POST' && /\/events$/.test(String(url)));
+    expect(streamIndex).toBeGreaterThan(-1);
+    expect(kickoffIndex).toBeGreaterThan(-1);
+    expect(streamIndex).toBeLessThan(kickoffIndex);
+  });
+
+  it('agent.message content blocks become the returned report, even when the SSE event line is absent', async () => {
+    global.fetch = fetchFor([
+      { event: 'message', data: { type: 'agent.message', content: [{ type: 'text', text: 'Lead ' }, { type: 'text', text: 'handled.' }] } },
+      idle('end_turn'),
+    ]);
+    await expect(run(load(path))).resolves.toMatchObject({ report: 'Lead handled.' });
+  });
+
+  // Frames arrive without advancing the fake clock, then the stream stays
+  // open: only the real-time deadline timers (tool wait, POST signal) can
+  // end these runs — the per-frame deadline check never fires.
+  function openStreamBody(frames) {
+    const enc = new TextEncoder();
+    const chunks = frames.map(({ event, data }) => enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+    return {
+      getReader: () => ({
+        read: () => (chunks.length ? Promise.resolve({ done: false, value: chunks.shift() }) : new Promise(() => {})),
+        cancel: async () => {},
+        releaseLock() {},
+      }),
+    };
+  }
+  function fetchWithOpenStream({ frames = [], onEventsPost }) {
+    const seen = {};
+    const fetchMock = jest.fn((url, opts = {}) => {
+      if (opts.method === 'POST' && String(url).endsWith('/sessions')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'sess-1' }) });
+      if (opts.method === 'POST') return onEventsPost(opts);
+      seen.streamSignal = opts.signal;
+      return Promise.resolve({ ok: true, status: 200, body: openStreamBody(frames) });
+    });
+    return { fetchMock, seen };
+  }
+
+  it('a tool that never returns ends the run at the deadline — session_timeout, no tool result sent', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '50';
+    mockExecuteLeadTool.mockImplementation(() => new Promise(() => {}));
+    const { fetchMock } = fetchWithOpenStream({
+      frames: [{ event: 'agent.custom_tool_use', data: { id: 'tool-1', name: 'get_lead_details', input: {} } }],
+      onEventsPost: () => Promise.resolve({ ok: true, status: 200, json: async () => ({}) }),
+    });
+    global.fetch = fetchMock;
+
+    expect(await run(load(path))).toBeNull();
+    expect(recorded()).toMatchObject({ failure: expect.objectContaining({ code: 'session_timeout' }) });
+    const toolResultPosts = fetchMock.mock.calls
+      .filter(([, opts = {}]) => opts.method === 'POST' && String(opts.body || '').includes('user.custom_tool_result'));
+    expect(toolResultPosts).toHaveLength(0);
+  });
+
+  it('an events POST that hangs is cut off at the deadline, and the open stream is closed', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '50';
+    const { fetchMock, seen } = fetchWithOpenStream({
+      onEventsPost: (opts) => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(opts.signal.reason))),
+    });
+    global.fetch = fetchMock;
+
+    expect(await run(load(path))).toBeNull();
+    expect(recorded()).toMatchObject({ failure: expect.objectContaining({ code: 'session_timeout' }) });
+    expect(seen.streamSignal.aborted).toBe(true);
+  });
+
+  it('a non-2xx stream response whose error body stalls still ends at the deadline (session_timeout)', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '50';
+    global.fetch = jest.fn((url, opts = {}) => {
+      if (opts.method === 'POST' && String(url).endsWith('/sessions')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'sess-1' }) });
+      if (opts.method === 'POST') return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+      return Promise.resolve({
+        ok: false,
+        status: 503,
+        body: {},
+        text: () => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))),
+      });
+    });
+
+    expect(await run(load(path))).toBeNull();
+    expect(recorded()).toMatchObject({ failure: expect.objectContaining({ code: 'session_timeout' }) });
+  });
+
+  const leadTool = (id, name, input = {}) => ({ event: 'agent.custom_tool_use', data: { id, name, input } });
+
+  it('a session-creation POST that stalls ends at the deadline — no paid session, nothing billed', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '50';
+    global.fetch = jest.fn((url, opts = {}) => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(opts.signal.reason))));
+    expect(await run(load(path))).toBeNull();
+    expect(mockRecordSessionUsage).not.toHaveBeenCalled();
+  });
+
+  it('a repeated request for a tool use id already answered is not executed again', async () => {
+    mockExecuteLeadTool.mockResolvedValue({ ok: true });
+    global.fetch = fetchFor([leadTool('tool-1', 'get_lead_details'), leadTool('tool-1', 'get_lead_details'), idle('end_turn')]);
+    await run(load(path));
+    expect(mockExecuteLeadTool).toHaveBeenCalledTimes(1);
+    // ...but the repeat is answered again with the cached result, so the
+    // session is never left waiting on it (as bi-agent.js does).
+    const answers = global.fetch.mock.calls
+      .filter(([url, opts = {}]) => opts.method === 'POST' && /\/events$/.test(String(url)))
+      .flatMap(([, opts]) => JSON.parse(opts.body).events)
+      .filter(e => e.type === 'user.custom_tool_result' && e.custom_tool_use_id === 'tool-1');
+    expect(answers).toHaveLength(2);
+    expect(answers[1]).toEqual(answers[0]);
+  });
+
+  it('a lead gets at most ONE text per run — a second send_lead_response is answered as skipped', async () => {
+    mockExecuteLeadTool.mockImplementation(async (name) => (name === 'send_lead_response' ? { sent: true } : { ok: true }));
+    global.fetch = fetchFor([
+      leadTool('tool-1', 'send_lead_response', { message: 'First' }),
+      leadTool('tool-2', 'send_lead_response', { message: 'Second' }),
+      idle('end_turn'),
+    ]);
+    const result = await run(load(path));
+    expect(mockExecuteLeadTool.mock.calls.filter(([name]) => name === 'send_lead_response')).toHaveLength(1);
+    expect(result).toMatchObject({ actionTaken: 'auto_sent' });
+  });
+
+  it('once the lead is queued for the owner, the agent cannot also text it (one reply decision)', async () => {
+    mockExecuteLeadTool.mockImplementation(async (name) => (name === 'queue_for_adam' ? { queued: true } : { sent: true }));
+    global.fetch = fetchFor([
+      leadTool('tool-1', 'queue_for_adam', { draft_response: 'Draft' }),
+      leadTool('tool-2', 'send_lead_response', { message: 'Text' }),
+      idle('end_turn'),
+    ]);
+    const result = await run(load(path));
+    expect(mockExecuteLeadTool.mock.calls.map(([name]) => name)).toEqual(['queue_for_adam']);
+    expect(result).toMatchObject({ actionTaken: 'queued_for_adam' });
+  });
+
+  it('a blocked text does not use up the reply — the agent may still queue it for the owner', async () => {
+    mockExecuteLeadTool.mockImplementation(async (name) => (name === 'send_lead_response' ? { sent: false, blocked: true } : { queued: true }));
+    global.fetch = fetchFor([
+      leadTool('tool-1', 'send_lead_response', { message: 'Text' }),
+      leadTool('tool-2', 'queue_for_adam', { draft_response: 'Draft' }),
+      idle('end_turn'),
+    ]);
+    const result = await run(load(path));
+    expect(mockExecuteLeadTool.mock.calls.map(([name]) => name)).toEqual(['send_lead_response', 'queue_for_adam']);
+    expect(result).toMatchObject({ actionTaken: 'queued_for_adam' });
+  });
+
+  it('a draft saved for the owner counts as the reply even when the owner alert failed', async () => {
+    mockExecuteLeadTool.mockImplementation(async (name) => (name === 'queue_for_adam'
+      ? { queued: true, failed: true, error: 'Owner alert delivery failed' }
+      : { sent: true }));
+    global.fetch = fetchFor([
+      leadTool('tool-1', 'queue_for_adam', { draft_response: 'Draft' }),
+      leadTool('tool-2', 'queue_for_adam', { draft_response: 'Draft again' }),
+      leadTool('tool-3', 'send_lead_response', { message: 'Text' }),
+      idle('end_turn'),
+    ]);
+    const result = await run(load(path));
+    expect(mockExecuteLeadTool.mock.calls.map(([name]) => name)).toEqual(['queue_for_adam']);
+    expect(result).toMatchObject({ actionTaken: 'queued_for_adam_unalerted' });
+  });
+
+  it('a final agent.message carrying end_turn collects its text AND ends the run', async () => {
+    global.fetch = fetchFor([
+      { event: 'message', data: { type: 'agent.message', stop_reason: { type: 'end_turn' }, content: [{ type: 'text', text: 'Done.' }] } },
+      text('never read'),
+    ]);
+    await expect(run(load(path))).resolves.toMatchObject({ report: 'Done.' });
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  // check_existing_estimates / get_pest_context / triage_lead write rows or spend
+  // on providers as a side effect, so they count as writes here.
+  it.each(['send_lead_response', 'update_lead_pipeline', 'check_existing_estimates', 'get_pest_context', 'triage_lead'])('a %s write still in flight at the deadline is awaited, not abandoned — the run returns only after it lands', async (writeTool) => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '50';
+    let sendLanded = false;
+    mockExecuteLeadTool.mockImplementation((name) => (name === writeTool
+      ? new Promise((resolve) => setTimeout(() => { sendLanded = true; resolve({ sent: true }); }, 120))
+      : Promise.resolve({ ok: true })));
+    let landedWhenRecorded = null;
+    mockRecordSessionUsage.mockImplementation(async () => { landedWhenRecorded = sendLanded; return null; });
+    global.fetch = jest.fn((url, opts = {}) => {
+      if (opts.method === 'POST' && String(url).endsWith('/sessions')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'sess-1' }) });
+      if (opts.method === 'POST') return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+      const enc = new TextEncoder();
+      const chunks = [enc.encode(`event: agent.custom_tool_use\ndata: ${JSON.stringify({ id: 'tool-1', name: writeTool, input: { message: 'Hi' } })}\n\n`)];
+      // Like a real fetch body, the open stream rejects once its signal aborts.
+      const abortError = () => Object.assign(new Error('aborted'), { name: 'AbortError' });
+      const aborted = () => (opts.signal.aborted
+        ? Promise.reject(abortError())
+        : new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(abortError()))));
+      return Promise.resolve({ ok: true, status: 200, body: { getReader: () => ({ read: () => (chunks.length ? Promise.resolve({ done: false, value: chunks.shift() }) : aborted()), cancel: async () => {}, releaseLock() {} }) } });
+    });
+    await run(load(path));
+    expect(landedWhenRecorded).toBe(true);
+  });
+
+  it('a session that asks for more than 20 tool calls is stopped (max_tool_calls)', async () => {
+    mockExecuteLeadTool.mockResolvedValue({ ok: true });
+    global.fetch = fetchFor([
+      ...Array.from({ length: 21 }, (_, i) => leadTool(`tool-${i}`, 'get_lead_details')),
+      idle('end_turn'),
+    ]);
+    expect(await run(load(path))).toBeNull();
+    expect(mockExecuteLeadTool).toHaveBeenCalledTimes(20);
+    expect(recorded()).toMatchObject({ failure: expect.objectContaining({ code: 'max_tool_calls' }) });
+  });
+
+  it('a kickoff POST that fails closes the already-open stream', async () => {
+    const { fetchMock, seen } = fetchWithOpenStream({
+      onEventsPost: () => Promise.resolve({ ok: false, status: 500, text: async () => 'boom' }),
+    });
+    global.fetch = fetchMock;
+
+    expect(await run(load(path))).toBeNull();
+    expect(seen.streamSignal.aborted).toBe(true);
+    expect(recorded().failure).toBeTruthy();
+  });
+});
+
+// bi-agent-only: the requires_action batching (agent.custom_tool_use events
+// collected, then executed and replied to in ONE POST when the idle names
+// their event_ids), the stream-before-kickoff ordering, the wall-clock
+// deadline replacing the old 25-event cap, and the idle stop reasons that
+// are neither requires_action nor end_turn (Codex r7-era rewrite — see
+// bi-agent.js header comment for the protocol this pins).
+describe('bi-agent — current managed agents protocol', () => {
+  const path = '../services/bi-agent';
+  const idle = (stop, eventIds) => ({ event: 'session.status_idle', data: { stop_reason: { type: stop, ...(eventIds ? { event_ids: eventIds } : {}) } } });
+  const customToolUse = (id, name, input = {}) => ({ event: 'agent.custom_tool_use', data: { id, name, input } });
+
+  beforeEach(() => {
+    jest.resetModules();
+    mockExecuteBITool.mockReset();
+    mockRecordSessionUsage.mockReset();
+    mockRecordSessionUsage.mockResolvedValue(null);
+    now = 1_000_000;
+    Date.now = () => now;
+    process.env = { ...ORIGINAL_ENV, ANTHROPIC_API_KEY: 'k', BI_AGENT_ID: 'agent_bi_1', BI_AGENT_ENVIRONMENT_ID: 'env_1' };
+    delete process.env.BI_AGENT_TIMEOUT_MS;
+  });
+  afterAll(() => { process.env = ORIGINAL_ENV; global.fetch = ORIGINAL_FETCH; Date.now = ORIGINAL_NOW; });
+
+  // Every POST body, in call order, alongside the URL it was sent to — lets
+  // a test assert both ordering (stream opened before the kickoff POST) and
+  // exact event batching (one POST per requires_action idle).
+  function postsSent() {
+    return global.fetch.mock.calls
+      .filter(([, opts = {}]) => opts.method === 'POST')
+      .map(([url, opts]) => ({ url: String(url), body: JSON.parse(opts.body || '{}') }));
+  }
+
+  it('the session runs the checked-in BI_AGENT_CONFIG through agent_with_overrides, not the registered agent\'s last sync (Codex #4885 P1)', async () => {
+    global.fetch = fetchFor([{ event: 'done', data: {} }]);
+    await load(path).run({ skipSMS: true });
+    const create = postsSent().find(p => p.url.endsWith('/sessions'));
+    expect(create.body).toEqual({
+      agent: {
+        type: 'agent_with_overrides',
+        id: 'agent_bi_1',
+        model: 'bi-model',
+        system: 'bi-system-prompt',
+        tools: [{ type: 'custom', name: 'get_revenue_snapshot' }],
+      },
+      environment_id: 'env_1',
+    });
+  });
+
+  it('opens the stream before sending the kickoff, and the kickoff is {events:[{type:"user.message",...}]}', async () => {
+    global.fetch = fetchFor([text('done'), { event: 'done', data: {} }]);
+    await load(path).run({ skipSMS: true });
+
+    const calls = global.fetch.mock.calls.map(([url, opts = {}]) => ({ url: String(url), method: opts.method }));
+    const streamIndex = calls.findIndex(c => c.url.endsWith('/events/stream'));
+    const kickoffIndex = calls.findIndex(c => c.method === 'POST' && c.url.endsWith('/sessions/sess-1/events'));
+    expect(streamIndex).toBeGreaterThanOrEqual(0);
+    expect(kickoffIndex).toBeGreaterThan(streamIndex);
+
+    const kickoffBody = JSON.parse(global.fetch.mock.calls[kickoffIndex][1].body);
+    expect(kickoffBody).toEqual({ events: [{ type: 'user.message', content: [{ type: 'text', text: expect.any(String) }] }] });
+  });
+
+  it('agent.message content blocks become the returned report, even when the SSE event line is absent', async () => {
+    global.fetch = fetchFor([
+      { event: 'message', data: { type: 'agent.message', content: [{ type: 'text', text: 'Briefing ' }, { type: 'text', text: 'saved.' }] } },
+      idle('end_turn'),
+    ]);
+    const result = await load(path).run({ skipSMS: true });
+    expect(result.report).toBe('Briefing saved.');
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  it('a final agent.message carrying end_turn collects its text AND ends the run', async () => {
+    global.fetch = fetchFor([
+      { event: 'message', data: { type: 'agent.message', stop_reason: { type: 'end_turn' }, content: [{ type: 'text', text: 'Done.' }] } },
+      text('never read'),
+    ]);
+    const result = await load(path).run({ skipSMS: true });
+    expect(result.report).toBe('Done.');
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  it('two agent.custom_tool_use events + one requires_action idle naming both → exactly ONE POST with both results', async () => {
+    mockExecuteBITool.mockImplementation(async (name) => ({ ok: true, tool: name }));
+    global.fetch = fetchFor([
+      customToolUse('tool-1', 'get_revenue_snapshot'),
+      customToolUse('tool-2', 'get_customer_snapshot'),
+      idle('requires_action', ['tool-1', 'tool-2']),
+      { event: 'done', data: {} },
+    ]);
+
+    const result = await load(path).run({ skipSMS: true });
+    expect(result.toolsExecuted).toEqual(['get_revenue_snapshot', 'get_customer_snapshot']);
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(2);
+
+    const toolResultPosts = postsSent().filter(p => (p.body.events || []).some(e => e.type === 'user.custom_tool_result'));
+    expect(toolResultPosts).toHaveLength(1);
+    const events = toolResultPosts[0].body.events;
+    expect(events).toHaveLength(2);
+    expect(events.find(e => e.custom_tool_use_id === 'tool-1').content[0].text).toBe(JSON.stringify({ ok: true, tool: 'get_revenue_snapshot' }));
+    expect(events.find(e => e.custom_tool_use_id === 'tool-2').content[0].text).toBe(JSON.stringify({ ok: true, tool: 'get_customer_snapshot' }));
+    expect(events.every(e => !e.is_error)).toBe(true);
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  it('is_error is set when the tool threw or returned { error } — never on a good result (Codex r5)', async () => {
+    mockExecuteBITool
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce({ error: 'Unknown tool: nope' })
+      .mockResolvedValueOnce({ ok: true });
+    global.fetch = fetchFor([
+      customToolUse('tool-1', 'get_revenue_snapshot'),
+      customToolUse('tool-2', 'get_tool_health_snapshot'),
+      customToolUse('tool-3', 'get_customer_snapshot'),
+      idle('requires_action', ['tool-1', 'tool-2', 'tool-3']),
+      { event: 'done', data: {} },
+    ]);
+    await load(path).run({ skipSMS: true });
+    const results = postsSent().flatMap(p => p.body.events || []).filter(e => e.type === 'user.custom_tool_result');
+    const byId = Object.fromEntries(results.map(e => [e.custom_tool_use_id, e]));
+    expect(byId['tool-1'].is_error).toBe(true);
+    expect(byId['tool-2'].is_error).toBe(true);
+    expect(byId['tool-3'].is_error).toBeFalsy();
+  });
+
+  it('a requires_action idle naming an id with no pending tool use still sends the results it does have', async () => {
+    mockExecuteBITool.mockImplementation(async (name) => ({ ok: true, tool: name }));
+    global.fetch = fetchFor([
+      customToolUse('tool-1', 'get_revenue_snapshot'),
+      idle('requires_action', ['tool-1', 'tool-unknown']),
+      { event: 'done', data: {} },
+    ]);
+    const result = await load(path).run({ skipSMS: true });
+    expect(result.toolsExecuted).toEqual(['get_revenue_snapshot']);
+    const toolResultPosts = postsSent().filter(p => (p.body.events || []).some(e => e.type === 'user.custom_tool_result'));
+    expect(toolResultPosts[0].body.events).toHaveLength(1);
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  // Frames arrive without advancing the fake clock, then the stream stays
+  // open: only the real-time deadline timers (tool wait, POST signal) can
+  // end these runs — the per-frame deadline check never fires.
+  function openStreamBody(frames) {
+    const enc = new TextEncoder();
+    const chunks = frames.map(({ event, data }) => enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+    return {
+      getReader: () => ({
+        read: () => (chunks.length ? Promise.resolve({ done: false, value: chunks.shift() }) : new Promise(() => {})),
+        cancel: async () => {},
+        releaseLock() {},
+      }),
+    };
+  }
+  function fetchWithOpenStream({ frames = [], onEventsPost }) {
+    const seen = {};
+    const fetchMock = jest.fn((url, opts = {}) => {
+      if (opts.method === 'POST' && String(url).endsWith('/sessions')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'sess-1' }) });
+      if (opts.method === 'POST') return onEventsPost(opts);
+      seen.streamSignal = opts.signal;
+      return Promise.resolve({ ok: true, status: 200, body: openStreamBody(frames) });
+    });
+    return { fetchMock, seen };
+  }
+
+  it('a tool that never returns ends the run at the deadline — session_timeout, no tool result sent', async () => {
+    process.env.BI_AGENT_TIMEOUT_MS = '50';
+    mockExecuteBITool.mockImplementation(() => new Promise(() => {}));
+    const { fetchMock } = fetchWithOpenStream({
+      frames: [customToolUse('tool-1', 'get_revenue_snapshot'), idle('requires_action', ['tool-1'])],
+      onEventsPost: () => Promise.resolve({ ok: true, status: 200, json: async () => ({}) }),
+    });
+    global.fetch = fetchMock;
+
+    const err = await load(path).run({ skipSMS: true }).catch((e) => e);
+    expect(err).toMatchObject({ code: 'session_timeout', toolsExecuted: [] });
+    expect(recorded()).toMatchObject({ failure: 'session_timeout' });
+    expect(postsSent().filter(p => (p.body.events || []).some(e => e.type === 'user.custom_tool_result'))).toHaveLength(0);
+  });
+
+  it('an events POST that hangs is cut off at the deadline, and the open stream is closed', async () => {
+    process.env.BI_AGENT_TIMEOUT_MS = '50';
+    const { fetchMock, seen } = fetchWithOpenStream({
+      onEventsPost: (opts) => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(opts.signal.reason))),
+    });
+    global.fetch = fetchMock;
+
+    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'session_timeout' });
+    expect(recorded()).toMatchObject({ failure: 'session_timeout' });
+    expect(seen.streamSignal.aborted).toBe(true);
+  });
+
+  it('a non-2xx stream response whose error body stalls still ends at the deadline (session_timeout)', async () => {
+    process.env.BI_AGENT_TIMEOUT_MS = '50';
+    global.fetch = jest.fn((url, opts = {}) => {
+      if (opts.method === 'POST' && String(url).endsWith('/sessions')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'sess-1' }) });
+      if (opts.method === 'POST') return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+      return Promise.resolve({
+        ok: false,
+        status: 503,
+        body: {},
+        text: () => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))),
+      });
+    });
+
+    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'session_timeout' });
+    expect(recorded()).toMatchObject({ failure: 'session_timeout' });
+  });
+
+  it('a kickoff POST that fails closes the already-open stream', async () => {
+    const { fetchMock, seen } = fetchWithOpenStream({
+      onEventsPost: () => Promise.resolve({ ok: false, status: 500, text: async () => 'boom' }),
+    });
+    global.fetch = fetchMock;
+
+    await expect(load(path).run({ skipSMS: true })).rejects.toThrow(/API 500/);
+    expect(seen.streamSignal.aborted).toBe(true);
+    expect(recorded().failure).toBeTruthy();
+  });
+
+  it('a session-creation POST that stalls ends at the deadline (session_timeout), never hanging run()', async () => {
+    process.env.BI_AGENT_TIMEOUT_MS = '50';
+    global.fetch = jest.fn((url, opts = {}) => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(opts.signal.reason))));
+    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'session_timeout' });
+    expect(mockRecordSessionUsage).not.toHaveBeenCalled(); // no session, nothing to bill
+  });
+
+  it('a repeated request for a tool use id already answered is not executed again, and its cached result is resent (Codex r4)', async () => {
+    mockExecuteBITool.mockImplementation(async (name) => ({ ok: true, tool: name }));
+    global.fetch = fetchFor([
+      customToolUse('tool-1', 'get_revenue_snapshot'),
+      idle('requires_action', ['tool-1']),
+      customToolUse('tool-1', 'get_revenue_snapshot'),
+      idle('requires_action', ['tool-1']),
+      { event: 'done', data: {} },
+    ]);
+    const result = await load(path).run({ skipSMS: true });
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(1);
+    expect(result.toolsExecuted).toEqual(['get_revenue_snapshot']);
+    // Both requires_action idles got an answer for tool-1, and the second is
+    // the identical cached event — the session is never left waiting.
+    const answers = postsSent()
+      .map(p => (p.body.events || []).filter(e => e.type === 'user.custom_tool_result' && e.custom_tool_use_id === 'tool-1'))
+      .filter(list => list.length);
+    expect(answers).toHaveLength(2);
+    expect(answers[0]).toHaveLength(1);
+    expect(answers[1]).toEqual(answers[0]);
+  });
+
+  it('an id named twice in one requires_action idle is executed and answered once', async () => {
+    mockExecuteBITool.mockImplementation(async (name) => ({ ok: true, tool: name }));
+    global.fetch = fetchFor([
+      customToolUse('tool-1', 'get_revenue_snapshot'),
+      idle('requires_action', ['tool-1', 'tool-1']),
+      { event: 'done', data: {} },
+    ]);
+    await load(path).run({ skipSMS: true });
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(1);
+    const answers = postsSent().flatMap(p => p.body.events || []).filter(e => e.custom_tool_use_id === 'tool-1');
+    expect(answers).toHaveLength(1);
+  });
+
+  it('a report-only run (skipSMS) never executes send_briefing_sms, even when the model asks', async () => {
+    mockExecuteBITool.mockImplementation(async (name) => ({ ok: true, tool: name }));
+    global.fetch = fetchFor([
+      customToolUse('tool-1', 'send_briefing_sms', { message: 'hi' }),
+      idle('requires_action', ['tool-1']),
+      { event: 'done', data: {} },
+    ]);
+    const result = await load(path).run({ skipSMS: true });
+    expect(mockExecuteBITool).not.toHaveBeenCalled();
+    expect(result.smsSent).toBe(false);
+    const answer = postsSent().flatMap(p => p.body.events || []).find(e => e.custom_tool_use_id === 'tool-1');
+    expect(JSON.parse(answer.content[0].text)).toMatchObject({ skipped: true });
+  });
+
+  it('a side-effecting tool still in flight at the deadline does not hold the run past it (Codex r4)', async () => {
+    // The send never settles. The run still ends at the deadline; a second
+    // text is prevented by the tool's once-per-week claim
+    // (bi-briefing-sms.test.js), not by waiting here.
+    process.env.BI_AGENT_TIMEOUT_MS = '50';
+    mockExecuteBITool.mockImplementation(() => new Promise(() => {}));
+    const { fetchMock } = fetchWithOpenStream({
+      frames: [customToolUse('tool-1', 'send_briefing_sms', { message: 'hi' }), idle('requires_action', ['tool-1'])],
+      onEventsPost: () => Promise.resolve({ ok: true, status: 200, json: async () => ({}) }),
+    });
+    global.fetch = fetchMock;
+
+    const err = await load(path).run({}).catch((e) => e);
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(1);
+    expect(err).toMatchObject({ code: 'session_timeout', smsSent: false });
+    expect(recorded()).toMatchObject({ failure: 'session_timeout' });
+  });
+
+  it('the owner SMS is sent at most once per briefing — a second request is answered as skipped', async () => {
+    mockExecuteBITool.mockImplementation(async (name) => (name === 'send_briefing_sms' ? { sent: true } : { ok: true }));
+    global.fetch = fetchFor([
+      customToolUse('tool-1', 'send_briefing_sms'),
+      idle('requires_action', ['tool-1']),
+      customToolUse('tool-2', 'send_briefing_sms'),
+      idle('requires_action', ['tool-2']),
+      { event: 'done', data: {} },
+    ]);
+    const result = await load(path).run({});
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(1);
+    expect(result.smsSent).toBe(true);
+    const second = postsSent().flatMap(p => p.body.events || []).find(e => e.custom_tool_use_id === 'tool-2');
+    expect(JSON.parse(second.content[0].text)).toMatchObject({ skipped: true });
+  });
+
+  it.each([
+    ['the week is already claimed (skipped)', { sent: false, skipped: true, reason: 'The briefing text already went out this week.' }],
+    ['delivery is uncertain', { sent: false, uncertain: true, code: 'PROVIDER_TIMEOUT' }],
+  ])('an SMS answer that keeps the weekly claim (%s) completes the side effect — a repeat is not executed (Codex r8)', async (_label, firstAnswer) => {
+    mockExecuteBITool.mockResolvedValueOnce(firstAnswer);
+    global.fetch = fetchFor([
+      customToolUse('tool-1', 'send_briefing_sms'),
+      idle('requires_action', ['tool-1']),
+      customToolUse('tool-2', 'send_briefing_sms'),
+      idle('requires_action', ['tool-2']),
+      { event: 'done', data: {} },
+    ]);
+    const result = await load(path).run({});
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(1);
+    expect(result.smsSent).toBe(false);
+    const second = postsSent().flatMap(p => p.body.events || []).find(e => e.custom_tool_use_id === 'tool-2');
+    expect(JSON.parse(second.content[0].text)).toMatchObject({ skipped: true });
+  });
+
+  it('a blocked SMS does not count as sent — the agent may retry it', async () => {
+    mockExecuteBITool
+      .mockResolvedValueOnce({ sent: false, blocked: true })
+      .mockResolvedValueOnce({ sent: true });
+    global.fetch = fetchFor([
+      customToolUse('tool-1', 'send_briefing_sms'),
+      idle('requires_action', ['tool-1']),
+      customToolUse('tool-2', 'send_briefing_sms'),
+      idle('requires_action', ['tool-2']),
+      { event: 'done', data: {} },
+    ]);
+    const result = await load(path).run({});
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(2);
+    expect(result.smsSent).toBe(true);
+  });
+
+  it('a session that asks for more than 30 tool calls is stopped (max_tool_calls)', async () => {
+    mockExecuteBITool.mockImplementation(async (name) => ({ ok: true, tool: name }));
+    const ids = Array.from({ length: 31 }, (_, i) => `tool-${i}`);
+    global.fetch = fetchFor([
+      ...ids.map(id => customToolUse(id, 'get_revenue_snapshot')),
+      idle('requires_action', ids),
+      { event: 'done', data: {} },
+    ]);
+    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'max_tool_calls' });
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(30);
+    expect(recorded()).toMatchObject({ failure: 'max_tool_calls' });
+  });
+
+  it('an idle with retries_exhausted is a failed run (session_idle_retries_exhausted)', async () => {
+    global.fetch = fetchFor([text('partial'), idle('retries_exhausted'), text('never read')]);
+    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'session_idle_retries_exhausted' });
+    expect(recorded()).toMatchObject({ failure: 'session_idle_retries_exhausted' });
+  });
+
+  it('an idle with budget_reached is a failed run recorded as the ledger\'s budget class (budget_exhausted, Codex r9)', async () => {
+    global.fetch = fetchFor([idle('budget_reached'), text('never read')]);
+    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'budget_exhausted' });
+    expect(recorded()).toMatchObject({ failure: 'budget_exhausted' });
+    expect(jest.requireActual('../services/agent-control/taxonomy').classifyFailure(recorded().failure)).toBe('budget');
+  });
+
+  it('repeats of a completed side effect never count toward the tool-call cap (Codex r9)', async () => {
+    mockExecuteBITool.mockImplementation(async (name) => (name === 'send_briefing_sms' ? { sent: true } : { ok: true }));
+    const ids = Array.from({ length: 35 }, (_, i) => `sms-${i}`);
+    global.fetch = fetchFor([
+      ...ids.map(id => customToolUse(id, 'send_briefing_sms')),
+      idle('requires_action', ids),
+      { event: 'done', data: {} },
+    ]);
+    const result = await load(path).run({});
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(1);
+    expect(result.smsSent).toBe(true);
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  it('more than 25 stream events in one run no longer fails (the old max-events cap is gone)', async () => {
+    const manyFrames = [...Array.from({ length: 30 }, (_, i) => text(`chunk ${i} `)), { event: 'done', data: {} }];
+    global.fetch = fetchFor(manyFrames);
+    const result = await load(path).run({ skipSMS: true });
+    expect(result.sessionId).toBe('sess-1');
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  it('a stream that never terminates is failed as session_timeout by the deadline (BI_AGENT_TIMEOUT_MS)', async () => {
+    process.env.BI_AGENT_TIMEOUT_MS = '500';
+    // No terminal frame at all — without the deadline this would hang until
+    // the mock stream's own (irrelevant) EOF.
+    global.fetch = fetchFor([text('one'), text('two'), text('three')]);
+    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'session_timeout' });
+    expect(recorded()).toMatchObject({ failure: 'session_timeout' });
+  });
+
+  it('an invalid BI_AGENT_TIMEOUT_MS falls back to the default instead of a NaN/zero deadline', () => {
+    process.env.BI_AGENT_TIMEOUT_MS = 'not-a-number';
+    const { resolveTimeoutMs } = load(path)._test;
+    expect(resolveTimeoutMs()).toBe(10 * 60 * 1000);
+
+    process.env.BI_AGENT_TIMEOUT_MS = '0';
+    expect(load(path)._test.resolveTimeoutMs()).toBe(10 * 60 * 1000);
+
+    process.env.BI_AGENT_TIMEOUT_MS = '90000';
+    expect(load(path)._test.resolveTimeoutMs()).toBe(90000);
   });
 });

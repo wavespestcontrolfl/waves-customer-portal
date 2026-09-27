@@ -126,6 +126,9 @@ function roundedTreeShrubTierQuote(v1Result = {}, tsLI = {}, tier = 'standard') 
     // whether palms fold into the legacy tree terms, so passing them as a
     // property-level value instead would silently reprice the row.
     palmCount: tsLI.palmCountSource === 'service_line' ? tsLI.palmCount : undefined,
+    // ...and the large palms among them, so every cadence row prices the
+    // same canopies the selected row did.
+    largePalmCount: tsLI.palmCountSource === 'service_line' ? tsLI.largePalmCount : undefined,
     // The selected line's quote-time knob snapshot governs every alternate
     // cadence row too — otherwise a post-send admin flip would reprice the
     // rows the customer can still switch to.
@@ -1165,6 +1168,12 @@ function mapV1ToLegacyShape(v1Result) {
         ...(li.debrisRemovalIncluded !== undefined ? { debrisRemovalIncluded: li.debrisRemovalIncluded === true } : {}),
         ...(Number(li.creditableWithinDays) > 0 ? { creditableWithinDays: Number(li.creditableWithinDays) } : {}),
         ...(li.includesScreening !== undefined ? { includesScreening: li.includesScreening === true } : {}),
+        // Trapping allowance the copy pack renders (owner ruling 2026-09-26;
+        // codex #4932 pre-push P1 — without it a new quote read as legacy
+        // unlimited callbacks).
+        ...(li.includedFollowUps !== undefined ? { includedFollowUps: li.includedFollowUps } : {}),
+        ...(li.includedCallbacks !== undefined ? { includedCallbacks: li.includedCallbacks } : {}),
+        ...(typeof li.unlimitedCallbacks === 'boolean' ? { unlimitedCallbacks: li.unlimitedCallbacks } : {}),
         // Trap-only billing mode + Bora-Care purchased areas (codex #3823 r8 P1s).
         ...(li.retainerBilling || li.trapOnlyRetainerBilling
           ? { retainerBilling: li.retainerBilling || li.trapOnlyRetainerBilling } : {}),
@@ -1384,6 +1393,9 @@ function mapV1ToLegacyShape(v1Result) {
           ...(s.debrisRemovalIncluded !== undefined ? { debrisRemovalIncluded: s.debrisRemovalIncluded === true } : {}),
           ...(Number(s.creditableWithinDays) > 0 ? { creditableWithinDays: Number(s.creditableWithinDays) } : {}),
           ...(s.includesScreening !== undefined ? { includesScreening: s.includesScreening === true } : {}),
+          ...(s.includedFollowUps !== undefined ? { includedFollowUps: s.includedFollowUps } : {}),
+          ...(s.includedCallbacks !== undefined ? { includedCallbacks: s.includedCallbacks } : {}),
+          ...(typeof s.unlimitedCallbacks === 'boolean' ? { unlimitedCallbacks: s.unlimitedCallbacks } : {}),
           ...(s.retainerBilling ? { retainerBilling: s.retainerBilling } : {}),
           ...(s.atticSqFt !== undefined ? { atticSqFt: s.atticSqFt } : {}),
           ...(s.surfaceSqFt !== undefined ? { surfaceSqFt: s.surfaceSqFt } : {}),

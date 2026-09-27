@@ -111,6 +111,7 @@ const PREPAID_STAMP_REFUSALS = [
 const {
   auditRecurringScheduleAnomalies,
   auditRecurringScheduleCoverage,
+  readStoppedRecurringRoots,
 } = require('../services/recurring-schedule-audit');
 const {
   detectWaveGuardPlanKeys,
@@ -6027,6 +6028,19 @@ router.get('/', async (req, res, next) => {
       byTech[key].zones[s.zone] = (byTech[key].zones[s.zone] || 0) + 1;
     });
 
+    // Schedule tie-proximity display order (owner ruling 2026-09-26, dark by
+    // default): DISPLAY ONLY — attaches a `displayOrder` index to each of a
+    // tech's stops so the mobile day list and the desktop day board's route-
+    // order badge can break a window-start tie by drive-time proximity to
+    // the previous stop, instead of booking order. Nothing is written to the
+    // DB and no stop is physically reordered here — `enriched` (and every
+    // response field built from it) keeps its DB-query order; only the new
+    // `displayOrder` field is added, in place, on the SAME objects `enriched`
+    // holds. Off = no field, byte-identical to before this gate existed.
+    if (require('../config/feature-gates').gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY')) {
+      Object.values(byTech).forEach((tech) => require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(tech.services));
+    }
+
     // Calculate tech summaries
     Object.values(byTech).forEach(tech => {
       tech.totalServices = tech.services.length;
@@ -6188,6 +6202,10 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.weekend_shift',
           'scheduled_services.source_estimate_id',
           'scheduled_services.annual_prepay_term_id',
+          // Tie-proximity display order (GATE_SCHEDULE_TIE_PROXIMITY) needs
+          // each stop's point — same stamped-vs-customer rule as the day feed.
+          db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as visit_lat`),
+          db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as visit_lng`),
           'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
           'customers.monthly_rate', 'customers.autopay_enabled', 'customers.autopay_paused_until',
           'customers.autopay_payment_method_id',
@@ -6508,6 +6526,13 @@ router.get('/week', async (req, res, next) => {
           visitCloseoutPacket: s.closeout_packet_id ? { id: s.closeout_packet_id, status: s.closeout_packet_status } : null,
         };
       }));
+
+      // Same display-only tie-proximity order as the day feed, per tech per
+      // day, so week mode and day mode agree. Coordinates come from the raw
+      // rows; only `displayOrder` is added to the payload.
+      if (require('../config/feature-gates').gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY')) {
+        require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(servicePayloads, services);
+      }
 
       days.push({
         date: dateStr,
@@ -9337,6 +9362,25 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
     // slot (owner ruling 2026-08-25 — staff-side saves never block on
     // schedule conflicts): { id, warning } per stacked row.
     const overlapWarnings = [];
+    // Single-visit cancels whose series may need a visit added back
+    // (owner ruling 2026-09-24) — evaluated ONCE per series after the whole
+    // batch settled, so a bulk cancel that removes several visits of one
+    // plan reads as the plan reduction it is, not N single cancels.
+    const cancelReseedIds = [];
+    // Rows this request carried that were ALREADY cancelled (a retried bulk
+    // request): their first reseed may have failed or never run, so they
+    // are re-evaluated one at a time — never counted as this request's
+    // plan reduction (pre-push audit P1).
+    const cancelReseedRetryIds = [];
+    // Plan-reduction INTENT, read before any row commits (pre-push audit P1
+    // on #4814): this route cancels row by row, each in its own transaction,
+    // so "2+ visits of one plan" cannot be decided after the fact without a
+    // window in which a replay of an already-committed row (Intelligence
+    // Bar / dispatch) could add it back. Each such row writes its "don't add
+    // back" ledger row INSIDE its own cancel transaction (below), whatever
+    // the reseed gate says.
+    const { isCountingSourceStatus } = require('../services/recurring-series-cancel-reseed');
+    const bulkPlanReductions = action === 'cancel' ? await readBulkPlanReductionIntent(db, serviceIds) : new Map();
 
     const { transitionJobStatus } = require('../services/job-status');
 
@@ -9900,7 +9944,24 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // loop instead of a concurrent pass per cancelled row.
                 qualityDates,
               });
+              // Part of a plan reduction → its ledger row commits WITH the
+              // cancel (see bulkPlanReductions above).
+              const reduction = bulkPlanReductions.get(String(id));
+              if (reduction && isCountingSourceStatus(fromStatus)) {
+                await recordReseedDeclines(trx, {
+                  customerId: svc.customer_id, rootId: reduction.rootId, cancelledIds: [id], batchIds: reduction.groupIds, reductionKey: reduction.reductionKey,
+                  reason: 'batch_series_cancel', source: 'admin-schedule-bulk-cancel',
+                });
+              }
             });
+            // Counted-plan reseed candidate — collected the instant the
+            // cancel committed, BEFORE any fallible post-commit work below
+            // (Codex #4814 P1): a rejected invoice void used to jump to the
+            // per-item catch past the collection, and the retry could not
+            // recover it (fromStatus is 'cancelled' by then). Only a real
+            // transition qualifies; see cancelReseedIds above.
+            if (fromStatus !== 'cancelled') cancelReseedIds.push(id);
+            else cancelReseedRetryIds.push(id);
             try {
               const AppointmentReminders = require('../services/appointment-reminders');
               // payload.notifyCustomer === false (the list view's bulk
@@ -10020,6 +10081,13 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
       await flushDispatchQualityDates(qualityDates);
     } catch (e) {
       logger.error(`[admin-schedule] bulk-action route quality refresh failed: ${e.message}`);
+    }
+    // Counted-plan reseed (owner ruling 2026-09-24): once per series for the
+    // batch's single-visit cancels. Gated, failure-isolated, post-commit.
+    if (cancelReseedIds.length || cancelReseedRetryIds.length) {
+      await require('../services/recurring-series-cancel-reseed').runPostCancelSeriesReseed({
+        db, serviceIds: cancelReseedIds, retryIds: cancelReseedRetryIds, source: 'admin-schedule-bulk-cancel',
+      });
     }
 
     res.json({
@@ -16698,9 +16766,23 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // snapshot so this writer and the pre-lock plan agree; other callers
   // resolve fresh.
   prefNoWeekends = undefined,
+  // Post-cancel reseed only: add exactly one visit past this call's own live
+  // read (target = live + 1, never trims). Not clamped to
+  // MAX_SERIES_VISIT_COUNT — that cap is on the operator's count over this
+  // broader is_recurring population, and the reseed enforces it on the plan
+  // rows (callbacks / included follow-ups excluded) before calling.
+  extendByOne = false,
+  // Post-cancel reseed only: the AUTHORITATIVE extend anchor, replacing
+  // latestLiveSeriesVisit (reseedAnchorFloor — the plan tail by plan
+  // position, cancelled tail and legacy null-flagged children included, the
+  // auto-dispatch due date honoured). Not compared against the broader
+  // reader: its raw scheduled_date would let a dispatch shift win.
+  cadenceFloorRow = null,
 }) {
-  const target = Math.min(Math.max(parseInt(targetCount, 10) || 0, 1), MAX_SERIES_VISIT_COUNT);
   const live = await liveUpcomingSeriesVisits(trx, parentId);
+  const target = extendByOne
+    ? live.length + 1
+    : Math.min(Math.max(parseInt(targetCount, 10) || 0, 1), MAX_SERIES_VISIT_COUNT);
   // `achieved` is the plan length this call actually leaves behind — the
   // number the operator must be shown. It is NOT always `target`: the extend
   // loop can run out of placeable cadence dates, and the trim can stop short
@@ -16765,6 +16847,12 @@ async function reconcileRecurringSeriesVisitCount(trx, {
       });
       result.cancelledIds.push(visit.id);
     }
+    // A deliberate shortening: record it on the plan-reduction ledger in
+    // the SAME transaction, so a later replay of one of these cancels can
+    // never add the visit back (see recordReseedDeclines).
+    await recordReseedDeclines(trx, {
+      customerId: parent.customer_id, rootId: parentId, cancelledIds: result.cancelledIds, reason: 'visit_count_trim', source: 'visit_count',
+    });
     result.achieved = live.length - result.cancelledIds.length;
     return result;
   }
@@ -16793,7 +16881,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     ? !!prefNoWeekends
     : await customerPrefersNoWeekends(trx, parent.customer_id));
   const dirParent = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
-  const latest = await latestLiveSeriesVisit(trx, parentId);
+  const latest = cadenceFloorRow || await latestLiveSeriesVisit(trx, parentId);
   const baseDateStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
   const seen = await loadActiveSeriesDates(trx, parentId);
   seen.add(baseDateStr);
@@ -18144,6 +18232,646 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
     logger.info(`[recurring-topup] Topped up ongoing plan parent=${parentId} → ${spawnedVisit.scheduledDate}`);
   }
   return result;
+}
+
+// ---- Post-cancel reseed (owner ruling 2026-09-24) -------------------------
+//
+// A single-visit cancel inside a counted plan (9 lawn applications a year,
+// 4 quarterly pest visits) must not silently shorten the plan: add ONE visit
+// back at the END of the series. Reached only from the four single-visit
+// cancel surfaces via services/recurring-series-cancel-reseed.js, after
+// their commit — plan-level cancels ('following' / 'series' scope,
+// cancel-plan, cancel-signup, offboarding) stop the series and never call
+// this.
+//
+// Lock order = the completion path's (runRecurringSeriesMaintenance) and the
+// top-up's (topUpRecurringSeriesWithLocks): per-parent maintenance advisory
+// lock, then the customer-comms lock, then the customers row FOR UPDATE —
+// taken BEFORE any scheduled_services write, so it can never invert against
+// the series cancel / merge-undo paths that share those keys.
+//
+// Rule: the plan's term is the 365-day window (anchored on the series root)
+// that contains the cancelled visit's date; the expected count is the
+// pattern's visits-per-year (custom: 365 / recurring_interval_days). When
+// the term now holds FEWER counting visits than that, the series gets one
+// more via reconcileRecurringSeriesVisitCount (extendByOne: live upcoming +
+// 1) — the same writer the "visit count" editor and the ongoing top-up use,
+// so cadence, blackout, weekend, add-on mirror and pricing rules cannot
+// drift. Refusals (all reported as `skipped`, never thrown):
+//   - not a cancelled, recurring row / no series root;
+//   - the series was STOPPED (recurring_plan_alerts ledger: cancel_series /
+//     let_lapse — readStoppedRecurringRoots, the same reader the accepted-
+//     plan audit and the converter consult);
+//   - not a plan row (explicit booster) or no audited cancel transition, or
+//     the transition left a non-counting status ('rescheduled' → cancelled);
+//   - this cancelled visit already produced a reseed (activity_log
+//     'recurring_cancel_reseed' stamp, written in the adding transaction);
+//   - the root's window is unplaceable even after the top-up's floor;
+//   - the customer is deleted / held / inactive / churned
+//     (TOPUP_CUSTOMER_INELIGIBILITY_RULES, FOR UPDATE like the top-up);
+//   - annual-prepay series, family on plan hold, duplicate series
+//     (TOPUP_SERIES_INELIGIBILITY_RULES);
+//   - the annual-prepay namespace is busy (a term is being created);
+//   - the term is still whole (a deliberate "visit count" trim already
+//     reconciled it, or the cancelled visit was outside the counted term);
+//   - the row's lineage or owner changed under the fences
+//     (series_changed_retry — the wrapper retries with fresh reads);
+//   - a COUNTED plan has no upcoming visit left (the plan ended, it was not
+//     interrupted) — an ongoing plan is refilled regardless;
+//   - the extension would be unbillable (extension_unbillable);
+//   - the reconciler could not place a date (at MAX_SERIES_VISIT_COUNT, no
+//     placeable day).
+// An ongoing series keeps its flag on the added row; a counted (non-ongoing)
+// series adds a non-ongoing row, exactly as the visit-count editor does.
+// Step 1 — the cancelled row and the audited transition that produced it.
+// Only a transition that REMOVED a counting visit earns a replacement
+// (Codex #4814 P1): every surface wired to this bridge cancels through
+// transitionJobStatus, whose audit row records the status the row left. A
+// 'rescheduled' placeholder flipped to cancelled removed nothing; a row with
+// no audit row at all was not cancelled by a wired surface; a legacy NULL
+// status counted (Codex r2 P1) and so does its audit row.
+async function readReseedCandidate(trx, cancelledServiceId) {
+  const {
+    isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus, isTrimTransitionNote,
+  } = require('../services/recurring-series-cancel-reseed');
+  const cancelled = await trx('scheduled_services').where({ id: cancelledServiceId }).first();
+  if (!cancelled) return { skipped: 'not_found' };
+  if (cancelled.status !== 'cancelled') return { skipped: 'not_cancelled' };
+  // Plan rows only — the root, an explicitly recurring child, or a legacy
+  // null-flagged child; never an explicit booster (Codex #4814 P1).
+  if (!isPlanSeriesRow(cancelled)) return { skipped: 'not_plan_visit' };
+  // The CURRENT cancellation episode (Codex r7 P1): the newest unbroken run
+  // of rows that landed on 'cancelled' — a same-status retry appends
+  // cancelled→cancelled replays on top of the real transition (Codex r4),
+  // and an older cancel that was compensated back to live must not be
+  // consulted. The episode's entering row says what the visit left.
+  const transitions = await trx('job_status_history')
+    .where({ job_id: cancelledServiceId })
+    .orderBy('transitioned_at', 'desc')
+    .select('id', 'from_status', 'to_status', 'transitioned_at', 'notes');
+  const episode = cancelEpisodeSourceStatus(transitions);
+  if (!episode) return { skipped: 'no_transition_record' };
+  if (!isCountingSourceStatus(episode.fromStatus)) return { skipped: 'non_counting_transition', fromStatus: episode.fromStatus };
+  // A visit-count TRIM cancelled this visit (its own audit note) — a
+  // deliberate plan reduction, so a replay of it must never add the visit
+  // back (pre-push audit P1). Trims since the ledger also carry a ledger row
+  // (reseedRefusal); this covers trims made before the ledger existed, with
+  // the same note test the append anchor uses.
+  if (isTrimTransitionNote(episode.notes)) return { skipped: 'visit_count_trim' };
+  return { cancelled, episodeKey: episode.episodeKey };
+}
+
+// Step 2 — every reason NOT to add a visit, evaluated under the per-parent
+// lock in the top-up's order: stopped-plan ledger, the idempotency stamp,
+// customer eligibility (customers row FOR UPDATE), the annual-prepay
+// TRY-lock, then the series rules. Returns the skip reason or null.
+async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols }) {
+  const stopped = await readStoppedRecurringRoots(trx, [parent.customer_id]);
+  if (stopped.has(parentId)) return 'series_stopped';
+  // Idempotent per cancelled visit (fallback auditor P1): the added visit
+  // lands at the END of the series — usually past the cancelled visit's
+  // term — so the term-count check alone would let a retried request add
+  // another visit each time. The stamp is written in the adding
+  // transaction (stampReseed) and read here under the same lock.
+  const alreadyReseeded = await trx('activity_log')
+    .where({ customer_id: parent.customer_id, action: 'recurring_cancel_reseed' })
+    .whereRaw("metadata->>'cancelled_service_id' = ?", [String(cancelledServiceId)])
+    .first('id');
+  if (alreadyReseeded) return 'already_reseeded';
+  // A deliberate plan reduction (the ledger — a bulk cancel of 2+ visits of
+  // this plan, or a visit-count trim) must never be undone by a replay of
+  // one of its cancels through dispatch / the Intelligence Bar (pre-push
+  // audit P1s). A visit named in a standing reduction whose own cancel
+  // failed back then COMPLETES that reduction now (Codex r10 P1); it gets
+  // its own ledger entry here, in this transaction, so a later restore +
+  // single re-cancel is judged by its own episode.
+  const standing = (await readStandingPlanReductions(trx, {
+    customerIds: [parent.customer_id], parentIds: new Set([String(parentId)]),
+  })).get(String(parentId));
+  if (standing?.own.has(String(cancelledServiceId))) return 'batch_series_cancel';
+  const completedBatch = standing?.completing.get(String(cancelledServiceId));
+  if (completedBatch) {
+    await recordReseedDeclines(trx, {
+      customerId: parent.customer_id, rootId: parentId, cancelledIds: [cancelledServiceId],
+      batchIds: completedBatch.batchIds, reductionKey: completedBatch.reductionKey, reason: 'batch_series_cancel', source: 'plan-reduction-completion',
+    });
+    return 'completes_plan_reduction';
+  }
+  const customer = await trx('customers').where({ id: parent.customer_id })
+    .forUpdate()
+    .first('id', 'active', 'deleted_at', 'service_paused_at', 'service_pause_reason', 'pipeline_stage');
+  const customerSkip = topupCustomerSkipReason(customer);
+  if (customerSkip) return customerSkip;
+  // Same TRY-lock the top-up takes before its prepay-exclusion check (Codex
+  // #4814 r2 P1): a term being created concurrently is invisible to the
+  // series rules below until it commits; a busy namespace refuses rather
+  // than inserting an unstamped visit outside the term's coverage.
+  const { ANNUAL_PREPAY_LOCK_NS } = require('./admin-customers')._private;
+  const prepayLockResult = await trx.raw(
+    'SELECT pg_try_advisory_xact_lock(?, hashtext(?)) AS locked',
+    [ANNUAL_PREPAY_LOCK_NS, String(parent.customer_id)],
+  );
+  if (!advisoryTryLockAcquired(prepayLockResult)) return 'annual_prepay_busy';
+  return topupSeriesSkipReason(trx, parent, parentId, cols);
+}
+
+// The plan-reduction ledger, read as STANDING reductions per series root
+// (standingPlanReductions): every `recurring_cancel_reseed_declined` entry
+// for these customers (optionally only these roots), plus the current
+// cancel episode of each entry's own row. One reader for the three places
+// that ask "was this cancel a deliberate shortening?": the reseed refusal,
+// the append anchor and the bulk route's intent.
+async function readStandingPlanReductions(conn, { customerIds, parentIds = null }) {
+  const { cancelEpisodeSourceStatus, standingPlanReductions } = require('../services/recurring-series-cancel-reseed');
+  const customers = [...new Set((customerIds || []).filter((id) => id != null).map(String))];
+  if (!customers.length) return new Map();
+  const rows = await conn('activity_log')
+    .where({ action: 'recurring_cancel_reseed_declined' })
+    .whereIn('customer_id', customers)
+    .select('metadata');
+  const byParent = new Map();
+  for (const row of rows || []) {
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    if (meta.cancelled_service_id == null || meta.recurring_parent_id == null) continue;
+    const parentId = String(meta.recurring_parent_id);
+    if (parentIds && !parentIds.has(parentId)) continue;
+    if (!byParent.has(parentId)) byParent.set(parentId, []);
+    byParent.get(parentId).push(meta);
+  }
+  if (!byParent.size) return new Map();
+  const ownerIds = [...new Set([...byParent.values()].flat().map((meta) => String(meta.cancelled_service_id)))];
+  const history = await conn('job_status_history')
+    .whereIn('job_id', ownerIds)
+    .orderBy('transitioned_at', 'desc')
+    .select('id', 'job_id', 'from_status', 'to_status', 'transitioned_at');
+  const currentEpisodeById = new Map(ownerIds.map((id) => {
+    const episode = cancelEpisodeSourceStatus((history || []).filter((row) => String(row.job_id) === id));
+    return [id, episode ? episode.episodeKey : null];
+  }));
+  const out = new Map();
+  for (const [parentId, entries] of byParent) out.set(parentId, standingPlanReductions(entries, currentEpisodeById));
+  return out;
+}
+
+// Which of `candidateIds` (cancelled plan rows) belong to a deliberate plan
+// REDUCTION: a standing ledger reduction (their own entry for the current
+// episode, or named in a standing batch they never got an entry of their
+// own for — readStandingPlanReductions), or entered through the visit-count
+// trim's own audit note (a trim made before the ledger existed).
+async function readPlanReductionIds(trx, { customerId, parentId, candidateIds }) {
+  const ids = [...new Set((candidateIds || []).map(String))];
+  if (!ids.length) return new Set();
+  const { cancelEpisodeSourceStatus, isTrimTransitionNote } = require('../services/recurring-series-cancel-reseed');
+  const standing = (await readStandingPlanReductions(trx, {
+    customerIds: [customerId], parentIds: new Set([String(parentId)]),
+  })).get(String(parentId));
+  const history = await trx('job_status_history')
+    .whereIn('job_id', ids)
+    .orderBy('transitioned_at', 'desc')
+    .select('id', 'job_id', 'from_status', 'to_status', 'transitioned_at', 'notes');
+  const out = new Set();
+  for (const id of ids) {
+    if (standing && (standing.own.has(id) || standing.completing.has(id))) { out.add(id); continue; }
+    const episode = cancelEpisodeSourceStatus((history || []).filter((row) => String(row.job_id) === id));
+    if (episode && isTrimTransitionNote(episode.notes)) out.add(id);
+  }
+  return out;
+}
+
+// Step 3 — is the cancelled visit's plan term now short? Terms are one plan
+// year anchored on the series root; the cancelled row's PLAN position (a
+// moved exception keeps its cadence date) picks the term, and the count
+// reads plan rows only (no boosters) by the same position.
+async function reseedTermShortfall(trx, { parent, parentId, cancelled, cols = {} }) {
+  const {
+    plannedVisitsPerYearForSeries, termWindowAtIndex, assignPlanTerms, countTermVisits, planPositionDate, hasUpcomingPlanRow, countUpcomingPlanRows, reseedAnchorFloor, laterCancelledPlanRowIds,
+  } = require('../services/recurring-series-cancel-reseed');
+  const expected = plannedVisitsPerYearForSeries(parent);
+  if (!expected) return { skipped: 'no_planned_count' };
+  // Visits earlier reseeds added belong to the term they REPLACED a visit in
+  // (the stamp's term_index), never to a cadence slot of their own
+  // (fallback auditor P1s on 81e8083efd / 4a67afdc15).
+  const stamps = await trx('activity_log')
+    .where({ customer_id: parent.customer_id, action: 'recurring_cancel_reseed' })
+    .whereRaw("metadata->>'recurring_parent_id' = ?", [String(parentId)])
+    .select('metadata');
+  const termOverrides = new Map();
+  for (const stamp of stamps) {
+    const meta = typeof stamp.metadata === 'string' ? JSON.parse(stamp.metadata) : (stamp.metadata || {});
+    if (!Number.isInteger(meta.term_index)) continue;
+    for (const id of meta.added_service_ids || []) termOverrides.set(String(id), meta.term_index);
+  }
+  // recurring_dispatch_due_date is the cadence position of an auto-dispatched
+  // row whose scheduled_date moved up to three days (Codex r8 P2) — part of
+  // the plan position when the column exists.
+  const seriesCols = ['id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'date_exception', 'date_exception_cadence_date', 'is_callback', 'followup_included'];
+  if (cols.recurring_dispatch_due_date) seriesCols.push('recurring_dispatch_due_date');
+  const seriesRows = await trx('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
+    .select(seriesCols);
+  // Term membership by cadence SLOT (Codex r6 P1) — see assignPlanTerms.
+  const terms = assignPlanTerms(seriesRows, expected, termOverrides);
+  const termIndex = terms.get(String(cancelled.id));
+  if (termIndex == null) return { skipped: 'not_in_plan_sequence' };
+  const counting = countTermVisits(seriesRows, termIndex, terms);
+  if (counting >= expected) return { skipped: 'term_still_whole', counting, expected };
+  // Nothing left upcoming on a COUNTED plan = the plan ended (its last visit
+  // was cancelled, or every remaining visit was), not a gap inside a running
+  // plan. An ONGOING plan never ends by running out of rows (Codex r8 P1):
+  // cancelling its only future visit must refill it — the completion hook
+  // needs a completion and the nightly top-up is separately gated, so
+  // neither is guaranteed to. The reconciler anchors on the latest live
+  // (incl. completed) visit when nothing is upcoming.
+  const todayET = etDateString();
+  const ongoing = parent.recurring_ongoing === true;
+  if (!ongoing && !hasUpcomingPlanRow(seriesRows, todayET)) return { skipped: 'no_live_visits', counting, expected };
+  // The visit cap counts the SAME plan-row population the term does (Codex
+  // r7 P1) — legacy null-flagged children included, callbacks excluded —
+  // not liveUpcomingSeriesVisits' is_recurring = true reader.
+  const upcomingPlanCount = countUpcomingPlanRows(seriesRows, todayET);
+  // The calendar span of that term (anchored on the root's PLAN position —
+  // a single-moved root keeps its cadence date) rides on the stamp for
+  // humans; membership itself is by slot.
+  const window = termWindowAtIndex(planPositionDate(parent), termIndex) || { index: termIndex, start: null, end: null };
+  // The append anchor: later cancelled occurrences still mark the series'
+  // end unless they were a plan reduction (Codex r9 P1; see reseedAnchorFloor).
+  const reductionIds = await readPlanReductionIds(trx, {
+    customerId: parent.customer_id, parentId, candidateIds: laterCancelledPlanRowIds(seriesRows, cancelled.id),
+  });
+  return { window, counting, expected, upcomingPlanCount, anchorFloor: reseedAnchorFloor(seriesRows, cancelled.id, reductionIds) };
+}
+
+// Step 4 — tech-blind occupancy probe on each added row (Codex #4814 P1),
+// same predicate + status exclusions as the parent move probe and the
+// top-up's advisory probe. ADVISORY (owner ruling 2026-08-25: admin writes
+// never block on a clash). Probe-only for the same lock-contract reason as
+// seriesCandidateDateClashes: the date is only known mid-trx, after the
+// rung-6 comms lock, so rung 1 cannot be taken here. Excludes the row it
+// just inserted; a hit names the date only.
+async function probeReseedOverlaps(trx, { parent, parentId, added }) {
+  const overlapDates = [];
+  const block = occupancyBlockFor(parent);
+  if (!block) return overlapDates;
+  for (const child of added) {
+    const clash = await findConflictingVisits({
+      db: trx, date: child.date, windowStart: block.start, windowEnd: block.end,
+      excludeServiceIds: [child.id], excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+    });
+    if (clash.length) {
+      overlapDates.push(child.date);
+      logger.warn(`[recurring-cancel-reseed] parent=${parentId} re-added visit on ${child.date} overlaps an existing visit on the calendar — kept (advisory only)`);
+    }
+  }
+  return overlapDates;
+}
+
+// Step 5 — the idempotency stamp, same trx as the insert, so a rolled-back
+// add leaves no stamp and a committed add can never be repeated.
+function stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, added, term, overlapDates }) {
+  return trx('activity_log').insert({
+    customer_id: parent.customer_id,
+    action: 'recurring_cancel_reseed',
+    description: `Cancelled ${parent.service_type || 'recurring'} visit on ${dateOnly(cancelled.scheduled_date)} re-added to the plan: ${added.map((c) => c.date).join(', ')} (term ${term.window.index + 1} had ${term.counting} of ${term.expected})`,
+    metadata: JSON.stringify({
+      cancelled_service_id: String(cancelledServiceId),
+      recurring_parent_id: String(parentId),
+      added_service_ids: added.map((c) => String(c.id)),
+      term_index: term.window.index, term_start: term.window.start, term_end: term.window.end,
+      counting: term.counting, expected: term.expected, overlap_dates: overlapDates,
+    }),
+  });
+}
+
+// Rung-6 comms lock on the cancelled row's owner, then the re-lock (mirrors
+// topUpRecurringSeriesWithLocks; Codex r4 P1): a merge undo can repoint the
+// cancelled row (and its root) to a different customer while this call
+// waited on the comms lock. Re-read and lock the FRESH owner too; a row
+// that moved AGAIN under the second lock defers to the wrapper's retry
+// rather than evaluating under a stale owner's fence and returning a
+// terminal owner_mismatch. Returns the (possibly re-owned) row or a skip.
+async function lockReseedOwner(trx, cancelledServiceId, cancelled) {
+  await lockCustomerComms(trx, cancelled.customer_id);
+  const relocked = await trx('scheduled_services').where({ id: cancelledServiceId }).first('customer_id');
+  if (!relocked) return { skipped: 'not_found' };
+  if (String(relocked.customer_id) === String(cancelled.customer_id)) return { cancelled };
+  await lockCustomerComms(trx, relocked.customer_id);
+  const relockedAgain = await trx('scheduled_services').where({ id: cancelledServiceId }).first('customer_id');
+  if (!relockedAgain || String(relockedAgain.customer_id) !== String(relocked.customer_id)) {
+    return { skipped: 'owner_changed_under_fence' };
+  }
+  return { cancelled: { ...cancelled, customer_id: relocked.customer_id } };
+}
+
+// Step 4 — the add itself. Legacy off-hour template (Codex #4814 P1): the
+// reconciler copies the root's window verbatim, so a "09:15" root would mint
+// an invalid appointment from this unattended path — same floor + validator
+// the nightly top-up applies; an unplaceable window refuses, never inserts.
+// Exactly ONE visit, even under a concurrent cancel (Codex r2 P1): the
+// reconciler's extendByOne mode sets its target from its OWN live read
+// (live + 1), so no caller-side count can go stale and over-add. It also
+// skips the MAX_SERIES_VISIT_COUNT clamp on that broader is_recurring
+// population (Codex r8 P1): 24 live rows of which some are callbacks /
+// included follow-ups would clamp live + 1 back to 24 and add nothing. The
+// cap is enforced here, on the plan-row population, instead.
+async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount, anchorFloor }) {
+  const normalizedWindow = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end);
+  if (normalizedWindow?.unplaceable) return { skipped: 'window_unplaceable' };
+  const reconcileParent = normalizedWindow
+    ? { ...parent, window_start: normalizedWindow.start, window_end: normalizedWindow.end }
+    : parent;
+  // Cap on the plan-row population (Codex r7 P1); the reconciler's own live
+  // read below only sets its target and baseline.
+  if (upcomingPlanCount >= MAX_SERIES_VISIT_COUNT) return { skipped: 'at_max_visit_count' };
+  try {
+    const result = await reconcileRecurringSeriesVisitCount(trx, {
+      parentId, parent: reconcileParent, cols,
+      extendByOne: true,
+      // Append past a cancelled TAIL (never onto the date just cancelled) and
+      // past legacy null-flagged children — see reseedAnchorFloor.
+      cadenceFloorRow: anchorFloor,
+      actorId: null,
+      // Extend-only by construction (target = live + 1): the trim branch,
+      // the only consumer of the claim token, is unreachable.
+      claimToken: null,
+      ongoingSeries: cols.recurring_ongoing ? !!parent.recurring_ongoing : false,
+    });
+    return { added: result.added, reconcileParent };
+  } catch (e) {
+    // The unbillable-extension refusal fires before any write, so the trx is
+    // intact; it is terminal (a retry would read the same template).
+    if (e?.statusCode === 409) return { skipped: 'extension_unbillable', code: e.code || null };
+    throw e;
+  }
+}
+
+async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
+  const candidate = await readReseedCandidate(trx, cancelledServiceId);
+  if (candidate.skipped) return { added: [], skipped: candidate.skipped, fromStatus: candidate.fromStatus };
+  let { cancelled } = candidate;
+  const cols = await trx('scheduled_services').columnInfo();
+  const parentId = cancelled.recurring_parent_id || cancelled.id;
+  await acquireRecurringSeriesMaintenanceLock(trx, parentId);
+  const fenced = await lockReseedOwner(trx, cancelledServiceId, cancelled);
+  if (fenced.skipped) return { added: [], skipped: fenced.skipped, parentId };
+  // Re-read the WHOLE row under the fences and repeat every eligibility
+  // check (Codex r7 P1): between the pre-lock read and the locks a cancel
+  // can be compensated back to live (offboarding / cancellation-processor)
+  // or the row re-parented; a stale status, lineage or plan position would
+  // add a billable visit to a plan that no longer lost one, or extend the
+  // wrong series. A changed lineage or owner is transient — the wrapper
+  // retries with fresh reads.
+  const fresh = await readReseedCandidate(trx, cancelledServiceId);
+  if (fresh.skipped) return { added: [], skipped: fresh.skipped, fromStatus: fresh.fromStatus, parentId };
+  if (String(fresh.cancelled.recurring_parent_id || fresh.cancelled.id) !== String(parentId)
+    || String(fresh.cancelled.customer_id) !== String(fenced.cancelled.customer_id)) {
+    return { added: [], skipped: 'series_changed_retry', parentId };
+  }
+  cancelled = fresh.cancelled;
+  let parent = await trx('scheduled_services').where({ id: parentId }).first();
+  if (!parent) return { added: [], skipped: 'no_series_root' };
+  if (parent.recurring_parent_id) return { added: [], skipped: 'not_series_root' };
+  // Series-scope price/service overrides beat the parent's own columns —
+  // same overlay the completion path and the top-up apply.
+  parent = overlayRecurringTemplateOverrides(parent, cols);
+  if (parent.is_recurring !== true || !parent.recurring_pattern) return { added: [], skipped: 'not_recurring' };
+  if (String(parent.customer_id) !== String(cancelled.customer_id)) return { added: [], skipped: 'owner_mismatch' };
+
+  const refusal = await reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols });
+  if (refusal) return { added: [], skipped: refusal };
+  const term = await reseedTermShortfall(trx, { parent, parentId, cancelled, cols });
+  if (term.skipped) return { added: [], skipped: term.skipped, counting: term.counting, expected: term.expected };
+
+  const add = await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount, anchorFloor: term.anchorFloor });
+  if (add.skipped) return { added: [], skipped: add.skipped, code: add.code, counting: term.counting, expected: term.expected, parentId };
+  const overlapDates = await probeReseedOverlaps(trx, { parent: add.reconcileParent, parentId, added: add.added });
+  if (add.added.length) {
+    await stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, added: add.added, term, overlapDates });
+  }
+  return {
+    added: add.added,
+    skipped: add.added.length ? null : 'not_placed',
+    counting: term.counting, expected: term.expected, parentId, customerId: parent.customer_id, overlapWarnings: overlapDates,
+  };
+}
+
+// How many times the writer re-opens its transaction after the baselineCount
+// fence refused a stale live read (see reseedRecurringSeriesAfterCancel).
+const RESEED_STALE_READ_ATTEMPTS = 3;
+// The transient refusals that retry re-reads resolve: a live count that went
+// stale under the fence, or an owner that moved under the comms lock.
+const RESEED_TRANSIENT_SKIPS = ['series_changed_retry', 'owner_changed_under_fence'];
+
+// The writing wrapper — same shape as topUpRecurringSeries: ALWAYS opens and
+// commits its OWN transaction, then registers a reminder for every added
+// visit once it's visible to a fresh connection (no confirmation SMS, no
+// other customer comms — the office's cancellation notice already went out
+// for the cancelled visit; the added one is a plain future occurrence).
+async function reseedRecurringSeriesAfterCancel(conn, cancelledServiceId, { source = 'cancel' } = {}) {
+  if (conn.isTransaction) {
+    throw new Error('reseedRecurringSeriesAfterCancel must not be called with an already-open transaction — it registers reminders through a FRESH connection right after its own commit. Call with the plain db handle after the cancel committed.');
+  }
+  // The baselineCount fence inside the locked body refuses (409 →
+  // 'series_changed_retry') when another visit of the series changed
+  // between the live read and the reconciler's own — a concurrent cancel
+  // that does not hold the maintenance lock. That refusal is transient, so
+  // retry the WHOLE locked transaction with fresh reads (Codex #4814 r3 P1:
+  // a terminal skip left the first of two concurrent cancels unreplaced).
+  // Bounded: after the attempts the plan surfaces on the accepted-plan
+  // watchdog like any other failed reseed.
+  let result;
+  for (let attempt = 1; attempt <= RESEED_STALE_READ_ATTEMPTS; attempt += 1) {
+    result = await conn.transaction((trx) => reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId));
+    if (!RESEED_TRANSIENT_SKIPS.includes(result.skipped)) break;
+    logger.warn(`[recurring-cancel-reseed] parent=${result.parentId || '?'} ${result.skipped} (attempt ${attempt}/${RESEED_STALE_READ_ATTEMPTS}) — ${attempt < RESEED_STALE_READ_ATTEMPTS ? 'retrying' : 'giving up'}`);
+  }
+  for (const child of result.added) {
+    await registerSpawnedVisitReminder({
+      scheduledServiceId: child.id,
+      customerId: child.customerId,
+      scheduledDate: child.date,
+      windowStart: child.windowStart,
+      serviceType: child.serviceType,
+      source: 'recurring_cancel_reseed',
+    });
+    // Same terminal re-check the auto-extend and the top-up run: a series
+    // cancel can take the per-parent lock right after our commit.
+    await cancelSpawnedReminderIfVisitTerminal(conn, child.id, 'recurring-cancel-reseed');
+    logger.info(`[recurring-cancel-reseed] cancel of ${cancelledServiceId} (${source}) re-added a visit to parent=${result.parentId} → ${child.date} (term had ${result.counting}/${result.expected})`);
+  }
+  return result;
+}
+
+// Batch form for the bulk cancel: groups the cancelled ids by series root
+// and reseeds ONLY roots that lost exactly one visit in this batch. Two or
+// more of the same plan in one bulk cancel is the operator shortening or
+// ending that plan (fallback auditor P1 on def6002a84) — never something to
+// refill. Each single reseed opens its own transaction (the writer above).
+// A bulk cancel request's plan-reduction INTENT, read before its per-row
+// cancel transactions: 2+ counting plan rows of one series in the selection
+// (planReductionGroups), plus any counting row that COMPLETES a standing
+// reduction — named in an earlier reduction's batch whose own cancel failed
+// or never ran then (Codex #4814 r10 P1: a partially failed bulk reduction
+// retried with the same selection, or with just its failed rows, must not
+// turn the late cancel into a stand-alone one that gets added back).
+async function readBulkPlanReductionIntent(conn, serviceIds) {
+  const { planReductionGroups, isPlanSeriesRow, isCountingSourceStatus } = require('../services/recurring-series-cancel-reseed');
+  const rows = await conn('scheduled_services').whereIn('id', serviceIds)
+    .select('id', 'customer_id', 'status', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
+  const intent = planReductionGroups(rows);
+  // One key per selected reduction (per series root), minted here so every
+  // row's ledger entry — each written in its own cancel transaction — names
+  // the same reduction.
+  const keyByRoot = new Map();
+  for (const reduction of intent.values()) {
+    if (!keyByRoot.has(reduction.rootId)) keyByRoot.set(reduction.rootId, require('crypto').randomUUID());
+    reduction.reductionKey = keyByRoot.get(reduction.rootId);
+  }
+  const lone = (rows || []).filter((row) => isPlanSeriesRow(row) && isCountingSourceStatus(row.status) && !intent.has(String(row.id)));
+  if (!lone.length) return intent;
+  const standing = await readStandingPlanReductions(conn, {
+    customerIds: lone.map((row) => row.customer_id),
+    parentIds: new Set(lone.map((row) => String(row.recurring_parent_id || row.id))),
+  });
+  for (const row of lone) {
+    const rootId = String(row.recurring_parent_id || row.id);
+    const completed = standing.get(rootId)?.completing.get(String(row.id));
+    if (completed) intent.set(String(row.id), { rootId, groupIds: completed.batchIds, reductionKey: completed.reductionKey });
+  }
+  return intent;
+}
+
+// The plan-reduction ledger — the ONE chokepoint every writer that cancels
+// plan visits as a deliberate SHORTENING goes through (pre-push audit P1s:
+// the batch cancel, then the visit-count trim, each let a later same-status
+// replay of one of its ids through dispatch / the Intelligence Bar add the
+// visit back). One activity_log row per cancelled visit, keyed on its
+// cancellation EPISODE (the entering job_status_history row), which
+// reseedRefusal reads under the per-parent lock; an un-cancel + re-cancel is
+// a new episode and is evaluated fresh. Episode keys are read from the
+// audit rows on the caller's connection — call it AFTER the cancels, on the
+// SAME transaction (both writers do, whatever the reseed gate says): any
+// reseed that can see the cancel can then see its ledger row, because they
+// commit together — no extra lock is needed for that, and none is taken
+// here (the bulk route's per-row transaction holds no series locks to
+// order against).
+async function recordReseedDeclines(conn, { customerId, rootId, cancelledIds, batchIds = null, reductionKey = null, reason, source }) {
+  const { cancelEpisodeSourceStatus } = require('../services/recurring-series-cancel-reseed');
+  const ids = [...new Set((cancelledIds || []).map(String))];
+  if (!ids.length) return;
+  // The whole reduction the row belongs to (the bulk route writes one row
+  // per cancel transaction, but the group is the operator's selection).
+  const group = batchIds ? [...new Set(batchIds.map(String))] : ids;
+  // The reduction's identity (standingPlanReductions): the bulk route mints
+  // one per selection and a completion reuses its reduction's; a trim is
+  // one reduction per call.
+  const key = reductionKey != null ? String(reductionKey) : require('crypto').randomUUID();
+  const history = await conn('job_status_history')
+    .whereIn('job_id', ids)
+    .orderBy('transitioned_at', 'desc')
+    .select('id', 'job_id', 'from_status', 'to_status', 'transitioned_at');
+  const episodeKeyFor = (id) => {
+    const episode = cancelEpisodeSourceStatus((history || []).filter((row) => String(row.job_id) === id));
+    return episode ? episode.episodeKey : null;
+  };
+  const customerFor = typeof customerId === 'function' ? customerId : () => customerId;
+  await conn('activity_log').insert(ids.map((id) => ({
+    customer_id: customerFor(id),
+    action: 'recurring_cancel_reseed_declined',
+    // Staff see these in the dashboard's Recent activity feed (the gate does
+    // not hide them), so the text says what it means in plain words.
+    description: reason === 'visit_count_trim'
+      ? 'Recurring plan shortened from Edit appointment — the removed visit will not be added back automatically'
+      : `${group.length} visits of one recurring plan cancelled together — treated as a plan reduction; this visit will not be added back automatically`,
+    metadata: JSON.stringify({
+      cancelled_service_id: id, recurring_parent_id: String(rootId), episode_key: episodeKeyFor(id),
+      reason, source, batch_ids: group, reduction_key: key,
+    }),
+  })));
+}
+
+async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source = 'cancel', retryIds = [] } = {}) {
+  const ids = [...new Set((serviceIds || []).filter(Boolean).map(String))];
+  const retries = [...new Set((retryIds || []).filter(Boolean).map(String))].filter((id) => !ids.includes(id));
+  if (!ids.length && !retries.length) return { results: [], skippedRoots: [] };
+  const results = [];
+  const skippedRoots = [];
+  if (ids.length) await reseedNewBatchCancels(conn, { ids, source, results, skippedRoots });
+  // Already-cancelled rows a retried request carried again (pre-push audit
+  // P1): one at a time, never part of the reduction test above — the stamp
+  // (already reseeded), the current-episode checks and the plan-reduction
+  // ledger (a batch that removed 2+ visits recorded it in each row's cancel
+  // transaction) decide, exactly as on the dispatch / Intelligence Bar
+  // replay paths. Same per-row isolation.
+  for (const id of retries) {
+    try {
+      results.push(await reseedRecurringSeriesAfterCancel(conn, id, { source: `${source}-retry` }));
+    } catch (e) {
+      logger.error(`[recurring-cancel-reseed] reseed retry failed (${source}, cancelled=${id}): ${e.message}`);
+      results.push({ added: [], skipped: 'error', error: e.message });
+    }
+  }
+  return { results, skippedRoots };
+}
+
+// The rows THIS request cancelled: grouped by series, a series that lost 2+
+// visits is a plan reduction (skipped); each other series is reseeded once.
+async function reseedNewBatchCancels(conn, { ids, source, results, skippedRoots }) {
+  const { isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus } = require('../services/recurring-series-cancel-reseed');
+  const rows = await conn('scheduled_services').whereIn('id', ids)
+    .select('id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
+  // Only cancels whose CURRENT episode removed a counting visit take part in
+  // the per-plan count (Codex r2 / r4 / r7 P1s): a 'rescheduled' placeholder
+  // cancelled beside one real visit must not read as a plan reduction, a
+  // cancelled→cancelled replay must not hide the real transition, and an
+  // older cancel compensated back to live must not be consulted. Same
+  // episode rule the locked writer repeats for its own row.
+  const transitions = await conn('job_status_history')
+    .whereIn('job_id', ids)
+    .orderBy('transitioned_at', 'desc')
+    .select('id', 'job_id', 'from_status', 'to_status', 'transitioned_at');
+  const byJob = new Map();
+  for (const t of transitions) {
+    const key = String(t.job_id);
+    if (!byJob.has(key)) byJob.set(key, []);
+    byJob.get(key).push(t);
+  }
+  const countingCancel = new Set();
+  for (const [key, history] of byJob) {
+    const episode = cancelEpisodeSourceStatus(history);
+    if (episode && isCountingSourceStatus(episode.fromStatus)) countingCancel.add(key);
+  }
+  const byRoot = new Map();
+  for (const row of rows) {
+    // Plan rows only: explicit recurring, or a legacy null-flagged child of
+    // a series; explicit boosters never reach the writer (Codex #4814 P1).
+    if (!isPlanSeriesRow(row)) continue;
+    if (!countingCancel.has(String(row.id))) continue;
+    const rootId = String(row.recurring_parent_id || row.id);
+    if (!byRoot.has(rootId)) byRoot.set(rootId, []);
+    byRoot.get(rootId).push(String(row.id));
+  }
+  for (const [rootId, cancelledIds] of byRoot) {
+    if (cancelledIds.length > 1) {
+      skippedRoots.push({ rootId, cancelledIds, skipped: 'batch_series_cancel' });
+      // The "don't add back" ledger rows were already written by the bulk
+      // route, each in its own row's cancel transaction (see
+      // planReductionGroups) — this skip is the belt for the same decision.
+      logger.info(`[recurring-cancel-reseed] ${cancelledIds.length} visits of parent=${rootId} cancelled in one batch (${source}) — plan reduction, no reseed`);
+      continue;
+    }
+    // Per-root isolation (fallback auditor P1 on 9ab2099da1): each reseed is
+    // its own transaction, so one series that fails (lock timeout, an
+    // unplaceable window, a customer row mid-merge) must not take the rest
+    // of the batch's plans down with it. A failure writes NO stamp, is
+    // logged here, and the plan surfaces on the next accepted-plan watchdog
+    // run (missing_applications) — the writer can be re-run for that id.
+    try {
+      results.push(await reseedRecurringSeriesAfterCancel(conn, cancelledIds[0], { source }));
+    } catch (e) {
+      logger.error(`[recurring-cancel-reseed] reseed failed for parent=${rootId} (${source}, cancelled=${cancelledIds[0]}): ${e.message}`);
+      results.push({ added: [], skipped: 'error', parentId: rootId, error: e.message });
+    }
+  }
 }
 
 // PUT /api/admin/schedule/:id/status — change status with automations.
@@ -21416,46 +22144,97 @@ async function generateReportCopyWithFallback({
 // selected values are echoed; raw notes and product names are intentionally
 // excluded because they may contain customer-private details, brand names, or
 // unsafe claims that an AI validator would normally rewrite.
-function buildDeterministicReportCopy({ serviceType, areas, actions, observations, recommendations, ratingLabel } = {}) {
+function buildDeterministicReportCopy({
+  serviceType, areas, actions, observations, recommendations, ratingLabel, customerConcern,
+  applicationRecords,
+} = {}) {
   const cleanItems = (items) => (Array.isArray(items) ? items : [])
-    .map((item) => String(item || '').trim())
+    .map((item) => redactAccessCodes(String(item || '').trim()))
     .filter(Boolean)
+    .filter((item) => !containsReportAccessCode(item))
     .filter((item) => ActivityIndicators.findBannedCustomerCopy(item).length === 0)
     .slice(0, 4);
   const cleanAreas = cleanItems(areas);
   const cleanActions = cleanItems(actions);
   const cleanObservations = cleanItems(observations);
   const cleanRecommendations = cleanItems(recommendations);
-  const hasSafeVisitDetails = cleanAreas.length > 0
-    || cleanActions.length > 0
-    || cleanObservations.length > 0
-    || cleanRecommendations.length > 0
-    || Boolean(ratingLabel);
-  if (!hasSafeVisitDetails) return null;
-  const candidateType = String(serviceType || 'scheduled service').trim().slice(0, 120) || 'scheduled service';
-  const safeType = ActivityIndicators.findBannedCustomerCopy(candidateType).length === 0
-    ? candidateType
-    : 'scheduled service';
-
-  const did = [];
-  did.push(`We completed the ${safeType} visit${cleanAreas.length ? ` in ${cleanAreas.join(', ')}` : ''}.`);
-  did.push(cleanActions.length
-    ? `Completed work included ${cleanActions.join('; ')}.`
-    : 'The technician documented the work performed and the areas addressed during the visit.');
-
-  const found = [];
-  if (cleanObservations.length) found.push(`The technician noted ${cleanObservations.join('; ')}.`);
-  if (ratingLabel) found.push(`Recorded pest activity was ${ratingLabel}.`);
-  if (cleanRecommendations.length) found.push(`Recommended next steps include ${cleanRecommendations.join('; ')}.`);
-  if (!found.length) found.push('The visit details were documented for continued monitoring at the next scheduled service.');
-
+  const cleanConcern = cleanItems([customerConcern])[0];
+  const safeRoles = new Set([
+    'weed-control application', 'fertilizer application', 'insect-control application', 'bait application',
+    'disease-control application', 'moisture-support application', 'soil-support application',
+    'growth-regulator application',
+  ]);
+  const safeMethods = new Set([
+    'perimeter spray', 'broadcast spray', 'spot treatment', 'granular broadcast',
+    'soil drench', 'root injection', 'soil injection', 'bait placement', 'station check',
+    'fog/ULV application', 'foliar spray', 'trunk injection', 'pin stream application',
+  ]);
+  const cleanApplications = (Array.isArray(applicationRecords) ? applicationRecords : [])
+    .flatMap((record) => {
+      if (!safeRoles.has(record?.role)) return [];
+      const method = safeMethods.has(record?.method) ? record.method : null;
+      const area = cleanItems(record?.area ? [record.area] : [])[0] || null;
+      const areaValue = Number(record?.areaValue);
+      const areaUnit = record?.areaUnit === 'sqft' ? 'sq ft'
+        : record?.areaUnit === 'linear_ft' ? 'linear ft' : null;
+      return [{
+        role: record.role,
+        method,
+        area,
+        measurement: Number.isFinite(areaValue) && areaValue > 0 && areaUnit
+          ? `${areaValue} ${areaUnit}` : null,
+      }];
+    })
+    .slice(0, 6);
+  // A concern, observation, rating, area, or recommendation cannot establish
+  // completed work. WDO/pre-slab keep their existing separate document behavior.
+  const legacyDocument = /\bwdo\b|pre[- ]?slab|pre[- ]?treat/i.test(String(serviceType));
+  const evidence = legacyDocument
+    ? [cleanAreas.length, cleanActions.length, cleanObservations.length, cleanRecommendations.length, ratingLabel]
+    : [cleanActions.length, cleanApplications.length];
+  if (!evidence.some(Boolean)) return null;
+  const wording = legacyDocument ? {
+    work: 'Completed work included', finding: 'The technician noted',
+    advice: 'Recommended next steps include',
+    emptyFinding: 'The visit details were documented for continued monitoring at the next scheduled service.',
+  } : {
+    work: 'Recorded completed work:', finding: 'The technician recorded',
+    advice: 'The visit record includes this recommended next step:',
+    emptyFinding: 'No separate technician finding was supplied with the structured details used for this fallback.',
+  };
+  const did = cleanActions.length ? [`${wording.work} ${cleanActions.join('; ')}.`] : [];
+  if (legacyDocument) {
+    const candidateType = String(serviceType).trim().slice(0, 120);
+    const safeType = ActivityIndicators.findBannedCustomerCopy(candidateType).length === 0
+      ? candidateType : 'scheduled service';
+    did.unshift(`We completed the ${safeType} visit${cleanAreas.length ? ` in ${cleanAreas.join(', ')}` : ''}.`);
+    if (!cleanActions.length) did.push('The technician documented the work performed and the areas addressed during the visit.');
+  } else {
+    if (cleanApplications.length) {
+      const applications = cleanApplications.map((application) => {
+        const details = [
+          application.method ? `using ${application.method}` : null,
+          application.area ? `in ${application.area}` : null,
+          application.measurement ? `with ${application.measurement} recorded` : null,
+        ].filter(Boolean).join(' ');
+        return `${application.role}${details ? ` ${details}` : ''}`;
+      });
+      did.push(`Recorded applications: ${applications.join('; ')}.`);
+    }
+    if (cleanAreas.length) did.push(`Recorded service area: ${cleanAreas.join(', ')}.`);
+  }
+  const found = [
+    [cleanObservations.length, `${wording.finding} ${cleanObservations.join('; ')}.`],
+    [!legacyDocument && cleanConcern, `You reported: ${cleanConcern}.`],
+    [ratingLabel, `Recorded pest activity was ${ratingLabel}.`],
+    [cleanRecommendations.length, `${wording.advice} ${cleanRecommendations.join('; ')}.`],
+  ].filter(([present]) => present).map(([, sentence]) => sentence);
+  if (!found.length) found.push(wording.emptyFinding);
   const report = `WHAT WE DID\n\n${did.join(' ')}\n\nWHAT WE FOUND\n\n${found.join(' ')}`;
-  // Same egress rule as the AI path (codex r16): the completion parser must
-  // APPROVE the copy — echoed typed free text can carry parser-only terms
-  // (bare 'infestation'), and returning it would hand the tech a report that
-  // completion later discards for another template.
   if (!reportCopyRejection(report) && technicianReportCustomerCopy(report)?.body) return report;
-  return 'WHAT WE DID\n\nWe completed the scheduled service and documented the work performed.\n\nWHAT WE FOUND\n\nThe visit details were recorded for continued monitoring at the next scheduled service.';
+  return legacyDocument
+    ? 'WHAT WE DID\n\nWe completed the scheduled service and documented the work performed.\n\nWHAT WE FOUND\n\nThe visit details were recorded for continued monitoring at the next scheduled service.'
+    : null;
 }
 
 // Provenance classifier for typed findings fields (codex r2). Some fields
@@ -21467,7 +22246,8 @@ function buildDeterministicReportCopy({ serviceType, areas, actions, observation
 // customer copy).
 // target_animal is EXEMPT from the target rule: wildlife's "Suspected
 // species" is an observation, not what a treatment targets (codex r15).
-const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated|treatment_zones|source_reduction|sensitive_areas_avoided|entry_points_addressed|exclusion_materials|sanitation_areas|plant_groups|areas_inspected|structures_inspected)$|^target_(?!animal\b)|_target$|_performed$|_actions$|_replaced$|_placed$|_applied$|_installed$|_removed$|_sealed$|_cleaned$|_secured$|_treated$|_serviced$|^treated_|notice/;
+const TYPED_WORK_FIELD_RE = /^(?:work_completed|treatments?_completed|treatment_method|areas_treated|treatment_zones|source_reduction|sensitive_areas_avoided|entry_points_addressed|exclusion_materials|sanitation_areas|plant_groups|areas_inspected|structures_inspected)$|_performed$|_actions$|_replaced$|_placed$|_applied$|_installed$|_removed$|_sealed$|_cleaned$|_secured$|_treated$|_serviced$|^treated_|notice/;
+const TYPED_OBJECTIVE_FIELD_RE = /^target_(?!animal\b)|_target$/;
 const TYPED_PRODUCT_FIELD_RE = /product|epa|active_ingredient|concentration|gallon|dilution|_rate$|application|pesticide|^percent_|_solution$|linear_feet|square_footage|trench_depth/i;
 // Recommendation/prep/follow-up fields are FUTURE ADVICE, never findings —
 // presenting a proposed treatment as an observation would let the copy claim
@@ -21495,6 +22275,7 @@ const TYPED_WORK_SECTION_RE = /work completed/i;
 const TYPED_ADVICE_SECTION_RE = /recommendation/i;
 function typedFieldProvenance(field) {
   if (field.type === 'applications' || TYPED_PRODUCT_FIELD_RE.test(field.key)) return 'product';
+  if (TYPED_OBJECTIVE_FIELD_RE.test(field.key)) return 'objective';
   if (TYPED_CUSTOMER_FIELD_RE.test(field.key) || TYPED_CUSTOMER_SECTION_RE.test(field.section || '')) return 'customer';
   if (TYPED_ADVICE_FIELD_RE.test(field.key) || TYPED_ADVICE_SECTION_RE.test(field.section || '')) return 'advice';
   if (TYPED_WORK_FIELD_RE.test(field.key) || TYPED_WORK_SECTION_RE.test(field.section || '')) return 'work';
@@ -21514,7 +22295,7 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
   const schema = ActivityIndicators.findingsSchemaForType(findingsType, { companion });
   // productValues carries the RAW text of product-record fields so the
   // output validator can reject echoed trade names (codex r4).
-  const sections = { work: [], observations: [], products: [], advice: [], customer: [], productValues: [] };
+  const sections = { work: [], observations: [], objectives: [], products: [], advice: [], customer: [], productValues: [] };
   if (!schema) return sections;
   let total = 0;
   for (const field of schema.fields || []) {
@@ -21572,7 +22353,8 @@ function typedFindingsPromptSections(findingsType, values, { companion = false }
       } else {
         sections.advice.push(line);
       }
-    } else if (target === 'customer') sections.customer.push(line);
+    } else if (target === 'objective') sections.objectives.push(line);
+    else if (target === 'customer') sections.customer.push(line);
     else if (target === 'work') {
       // Work-classified CHIP fields can mix actions with observed status
       // ("Damaged or missing traps found"), recommendations ("Insulation
@@ -21671,6 +22453,7 @@ function renderTypedGroupLines(sections) {
   const parts = [];
   if (sections.work.length) parts.push(`Work recorded (completed work):\n${sections.work.join('\n')}`);
   if (sections.observations.length) parts.push(`Findings observed:\n${sections.observations.join('\n')}`);
+  if (sections.objectives?.length) parts.push(`Recorded treatment objectives (targets only — not proof of a sighting, inspection, or completed application):\n${sections.objectives.join('\n')}`);
   if (sections.products.length) parts.push(`Product application record (context only — describe the work plainly, NEVER name these products in customer copy):\n${sections.products.join('\n')}`);
   if (sections.advice.length) parts.push(`Recommendations recorded (future advice — never describe as completed work or observed findings):\n${sections.advice.join('\n')}`);
   if (sections.customer.length) parts.push(`Customer communication (the homeowner's words / what was discussed — attribute it, NEVER present as a technician-verified finding):\n${sections.customer.join('\n')}`);
@@ -21902,7 +22685,7 @@ router.post('/generate-report', async (req, res) => {
       return res.status(500).json({ error: 'AI model not configured' });
     }
 
-    const systemPrompt = `# SERVICE REPORT COPY — SYSTEM PROMPT v3
+    const systemPrompt = `# SERVICE REPORT COPY — SYSTEM PROMPT v4
 
 ## CONTEXT
 
@@ -21925,7 +22708,7 @@ A generic report is a failed report. Build both sections around the concrete det
 
 2. **No overpromising.** Never claim: elimination, eradication, impenetrable, guaranteed, 100%, total protection, pest-free, foolproof. Use language like: reduce activity, manage pressure, support long-term control, limit conducive conditions.
 
-3. **No invented observations.** Only reference conditions, pest types, or findings that appear in the service notes or in a STRUCTURED SERVICE FINDINGS block below (both are technician-recorded for THIS visit) — and a block line's own group decides HOW it may be used per constraint #7: only its "Findings observed" lines are observations. If the inputs say "general pest control" with no specifics, write generally. Do not fabricate sightings. Two narrowly scoped sources may also be used from GROUNDING CONTEXT: tech-confirmed LAWN ASSESSMENT scores are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS may describe reviewed visual appearances only, with their photo-signal provenance. Tree photo signals never establish a diagnosis, confirmed cause, observed pest species, or completed work. Omitted/hidden signals are unavailable, not healthy or absent.
+3. **No invented observations.** Only present conditions, pest types, or findings as observed on THIS visit when they appear in the service notes or in a STRUCTURED SERVICE FINDINGS block below (both are technician-recorded for THIS visit) — and a block line's own group decides HOW it may be used per constraint #7: only its "Findings observed" lines are observations. If the inputs say "general pest control" with no specifics, do not fabricate sightings. A PRODUCT LABELED COVERAGE block may support a separate product-capability statement under the grounding rules below, but those label examples are never observations, visit targets, or proof that every listed species was treated. Two narrowly scoped sources may also be used from GROUNDING CONTEXT: tech-confirmed LAWN ASSESSMENT scores are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS may describe reviewed visual appearances only, with their photo-signal provenance. Tree photo signals never establish a diagnosis, confirmed cause, observed pest species, or completed work. Omitted/hidden signals are unavailable, not healthy or absent.
 
 4. **No brand names for products.** Use active ingredient names (fipronil, bifenthrin, imidacloprid, prodiamine, etc.) or functional descriptions (non-repellent residual, insect growth regulator, pre-emergent herbicide, systemic drench). If the active ingredient is not provided in the inputs, use the functional description only. When the copy tells the homeowner to DO something with a product, lead with the plain-language role, not a bare chemical name — "water in today's grub treatment", never "water in the clothianidin".
 
@@ -21962,7 +22745,8 @@ Vary your opening. Rotate how WHAT WE DID begins — sometimes lead with the pes
 ## USING THE GROUNDING CONTEXT (when present)
 
 The GROUNDING CONTEXT block beneath the inputs holds real, customer-specific facts. Use them to make the copy specific — but still obey every hard constraint, and never assert anything the context or notes don't support:
-- **Targets tagged today**: when the context lists the specific targets the technician tagged per product, NAME them in the copy — "ghost ants and big-headed ants along the foundation," "brown patch in the front turf" — instead of generic categories ("ants," "pests," "disease"). For fertilization goals ("iron chlorosis," "nitrogen green-up"), state the nutritional objective in plain words. Use only the tagged names; never invent a species or condition that isn't tagged or noted. A tagged target is what the product was applied to CONTROL — if the observations do not record that pest or condition as seen, frame the application as protection ("targeting chinch bugs ahead of their peak season"), never as activity that was found. Do not write "no concerns were observed" and "the activity we found" about the same visit.
+- **Targets tagged today**: when the context lists the specific targets the technician tagged per product, NAME them in the copy — "ghost ants and big-headed ants along the foundation," "brown patch in the front turf" — instead of generic categories ("ants," "pests," "disease"). For fertilization goals ("iron chlorosis," "nitrogen green-up"), state the nutritional objective in plain words. Use only the tagged names when describing today's targets or findings; never invent a visit target or observed species. A tagged target is what the product was applied to CONTROL — if the observations do not record that pest or condition as seen, frame the application as protection ("targeting chinch bugs ahead of their peak season"), never as activity that was found. Do not write "no concerns were observed" and "the activity we found" about the same visit.
+- **Product labeled coverage**: for a recurring or general pest report, when the separate PRODUCT LABELED COVERAGE block contains approved facts for products selected on this visit, add one concise broader-capability sentence using the phrase "also helps control other labeled crawling pests in the treated areas." You may add only a few examples that appear in that block. Keep them separate from today's tagged targets and observations: they are product capabilities, not pests found or proof each species was treated. Treat the city as context only, never as proof a pest is endemic or present. Never sum overlapping product lists, state a numeric coverage total, or imply termite, rodent, or mosquito service is included merely because a product label names one of those pests.
 - **Prior visits**: do NOT repeat the prior wording — say something fresh, and note what has CHANGED since (an improvement, a recurring pest, a previously-noted concern that has eased). If the same pest recurs across visits, acknowledge it honestly rather than implying it is brand new.
 - **Pest pressure trend**: if it shows real movement, reflect it ("pest pressure has trended down across recent visits") instead of a vague statement. Claim only what the grounding states — do not invent a "first visit" or all-time baseline it doesn't provide.
 - **Weather (at service + recent rain)**: use it to explain a method choice, timing, or rainfast guidance — not as small talk.
@@ -22124,7 +22908,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // anyone else degrades to a notes-only report (no cross-customer data).
     let groundingCustomerId = null;
     let groundingServiceType = serviceType;
+    let fallbackServiceType = serviceType;
     let groundingServiceDate = serviceDate;
+    let reportPromptContext = { requireCanonical: Boolean(scheduledServiceId) };
     let groundingSuppressPressure = false;
     let typedFindingsBlock = '';
     let authorizedCompanionTypes = [];
@@ -22146,7 +22932,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         // in the projection the flag reads undefined and callback visits on
         // one-time keys would ground differently than /complete scores them
         // (codex P2 r2).
-        .first('id', 'service_id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
+        .first('id', 'service_id', 'service_key_snapshot', 'is_recurring', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
         .catch(() => 'lookup_failed');
       // A transient service-row lookup failure on a typed request would leave
       // typedFindingsBlock empty while primaryTypedInput still opens the
@@ -22198,6 +22984,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
             retryable: true,
           });
         }
+        // Notes-only generation remains useful during a transient appointment
+        // lookup outage. The canonical identity is unavailable in this branch,
+        // so preserve the established label fallback instead of treating the
+        // unresolved service id as a canonical mismatch.
+        reportPromptContext = { requireCanonical: false };
       } else if (!svc && substantiveTypedFacts) {
         // The row is GONE (deleted concurrently — admins pass the ownership
         // check without an existence check). Typed facts can't be
@@ -22214,6 +23005,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
           // report in the wrong service line and pull unrelated prior-visit context.
           // The service line is derived from this type inside buildReportCopyContext.
           groundingServiceType = svc.service_type || serviceType;
+          fallbackServiceType = groundingServiceType;
           // The scheduled service is the source of truth for the date, so season
           // and trailing-rainfall grounding match the visit, not "today" (the
           // client builds serviceDate from new Date()). Fall back to the client
@@ -22230,6 +23022,27 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
           let profileResolutionFailed = false;
           const completionProfile = await resolveCompletionProfileForScheduledService(svc)
             .catch(() => { profileResolutionFailed = true; return null; });
+          const {
+            serviceKey = null,
+            serviceName = null,
+            findingsType = null,
+            billingType: serviceModel = null,
+            companions = [],
+          } = completionProfile || {};
+          const synthesizedGeneric = completionProfile?.synthesized === true && !serviceKey;
+          reportPromptContext = profileResolutionFailed
+            ? { requireCanonical: false }
+            : {
+              requireCanonical: !synthesizedGeneric,
+              serviceKey,
+              findingsType,
+              serviceModel,
+              isCallback: svc.is_callback === true,
+              isBundled: customerFacingCompanionTypes(companions).length > 0,
+            };
+          if (completionProfile) {
+            fallbackServiceType = serviceName || (serviceKey ? 'scheduled service' : groundingServiceType);
+          }
           // A transient profile-resolution failure must not silently drop
           // the typed/companion facts (empty allowlist -> prose from the
           // primary lane alone) or 409 a legitimate typed request — fail
@@ -22380,6 +23193,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       : [];
     let contextText = '';
     let contextSignals = {};
+    let deterministicApplications = [];
     try {
       const ctx = await buildReportCopyContext({
         customerId: groundingCustomerId,
@@ -22401,6 +23215,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       });
       contextText = ctx.contextText || '';
       contextSignals = ctx.signals || {};
+      deterministicApplications = Array.isArray(ctx.deterministicApplications)
+        ? ctx.deterministicApplications : [];
     } catch (ctxErr) {
       logger.warn(`[generate-report] grounding context failed: ${ctxErr.message}`);
     }
@@ -22457,10 +23273,21 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       }
     }
 
+    const { selectReportCopyPrompt } = require('../services/service-report/lawn-report-copy-prompt');
+    const effectiveSystemPrompt = selectReportCopyPrompt(systemPrompt, groundingServiceType, reportPromptContext);
+    if (!effectiveSystemPrompt) {
+      return res.status(503).json({
+        error: 'A report writer could not be matched to this service. Your notes were preserved; review the service profile before generating again.',
+        code: 'report_writer_unavailable',
+        retryable: true,
+      });
+    }
     const fullUserMessage = `${userMessage}${typedFindingsBlock}${contextText}${commsBlock}`;
-    // v6: typed structured findings joined the prompt payload (2026-08-15).
+    // v9: canonical remaining-service modules join the dedicated writers.
+    // Both the selected system
+    // prompt and all visit facts participate in the cache identity.
     const cacheKey = crypto.createHash('sha256')
-      .update(`v6|openai:${primaryModel}|anthropic:${backupModel}|${fullUserMessage}`)
+      .update(`v9|openai:${primaryModel}|anthropic:${backupModel}|${effectiveSystemPrompt}|${fullUserMessage}`)
       .digest('hex');
     const cached = reportCopyCacheGet(cacheKey);
     if (cached) return res.json({ report: cached, cached: true });
@@ -22490,7 +23317,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       });
     }
     const generated = await generateReportCopyWithFallback({
-      systemPrompt,
+      systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,
       extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null),
     });
@@ -22508,7 +23335,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         });
       }
       const report = buildDeterministicReportCopy({
-        serviceType: groundingServiceType,
+        serviceType: fallbackServiceType,
         areas: promptAreas,
         actions: [...promptActions, ...typedFallbackActions],
         // Typed structured findings ride the fallback as technician work /
@@ -22519,6 +23346,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         observations: [...promptObs, ...typedFallbackObservations],
         recommendations: [...promptRecs, ...typedFallbackNextSteps],
         ratingLabel: ratingNum !== null ? PEST_ACTIVITY_LABELS[ratingNum] : null,
+        customerConcern: promptConcern,
+        applicationRecords: deterministicApplications,
       });
       // Same request-specific trade-name guard as the AI path (codex r19):
       // typed free text ("Reapply Termidor HE next visit") can carry names
@@ -23814,6 +24643,23 @@ function blackoutDateString(value) {
 }
 
 router._test = {
+  // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — the split
+  // writer's helpers, so the behavioural suite can drive each one against a
+  // scripted connection (fallback auditor P1: source guards alone would
+  // let an unresolved helper fail silently at runtime).
+  reseedRecurringSeriesAfterCancel,
+  reseedRecurringSeriesAfterCancelBatch,
+  recordReseedDeclines,
+  readStandingPlanReductions,
+  readBulkPlanReductionIntent,
+  readReseedCandidate,
+  reseedRefusal,
+  reseedTermShortfall,
+  probeReseedOverlaps,
+  stampReseed,
+  lockReseedOwner,
+  addOneReseedVisit,
+  RESEED_STALE_READ_ATTEMPTS,
   lineDueOnRecurringDate,
   filterAddonLinesForDate,
   ONE_TIME_ADDON_SERVICE_KEYS,
@@ -23970,6 +24816,11 @@ module.exports.runRecurringSeriesMaintenance = runRecurringSeriesMaintenance;
 module.exports.topUpRecurringSeries = topUpRecurringSeries;
 module.exports.topUpRecurringSeriesLocked = topUpRecurringSeriesLocked;
 module.exports.topUpRecurringSeriesWithLocks = topUpRecurringSeriesWithLocks;
+// Post-cancel counted-plan reseed (owner ruling 2026-09-24) — consumed lazily
+// by services/recurring-series-cancel-reseed.js from the four single-visit
+// cancel surfaces, same avoid-a-route-load-cycle reason as above.
+module.exports.reseedRecurringSeriesAfterCancel = reseedRecurringSeriesAfterCancel;
+module.exports.reseedRecurringSeriesAfterCancelBatch = reseedRecurringSeriesAfterCancelBatch;
 // Shared "your appointment moved" notice (arrival-window copy, recipient
 // routing, terminal/slot recheck, guarded reminder close/re-arm) — consumed
 // lazily by the IB move_stops_to_day tool so its opt-in customer texts go

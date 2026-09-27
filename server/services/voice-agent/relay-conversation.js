@@ -213,6 +213,14 @@ function resolveSessionModel({ sandbox } = {}) {
 
 // output_config.effort — GA, no beta header. See the call site for why `low`.
 const VOICE_EFFORT = 'low';
+// Haiku 4.5 and pre-5 Sonnets 400 on the field, so a session pinned to one of
+// them (an inbound or sandbox override, or a benchmark candidate) sends no
+// effort at all and stamps null — otherwise every turn of that call errors
+// before a word is spoken. Models that accept `low` (incl. Opus 4.5/4.6, which
+// take only some levels) keep it.
+function voiceEffortFor(model) {
+  return MODELS.anthropicAcceptsEffort(model, VOICE_EFFORT) ? VOICE_EFFORT : null;
+}
 // How agent text reaches Twilio today: one whole utterance per frame. Stamped
 // into every call's version record so a renderer change is attributable.
 const RENDERER_VERSION = 'block-v1';
@@ -374,12 +382,17 @@ const SYSTEM_PROMPT = [
   '  full street address.',
   '- Ask for the email naturally ("what is the best email for your confirmation?"). If the',
   '  caller declines, that is fine — capture what they gave and move on; never pressure them.',
+  '- When the caller SAYS a phone number for you to save, read it back once in groups ("nine',
+  '  four one, five five five, zero two four six") and let them confirm or correct it before',
+  '  you save it; after a correction, read the corrected number back the same way.',
   '- ONLY state appointment times that a tool actually returned. Never invent or guess a',
   '  time, date, or that a slot is held. If a tool returns no times, say a team member will',
   '  call to find one.',
   '',
   'Before you end the call, you MUST call the capture_lead tool with everything you gathered',
   '(a brief call_summary is required; include any time they picked in preferred_date_time).',
+  'If the caller said a callback number, read it back in groups and hear them confirm it BEFORE',
+  'that call — never save a spoken number you have not read back.',
   // Neutral copy ON PURPOSE — this is the BASE (gate-off) prompt: gate-off
   // calls carry no CLOCK DATA blocks, so the promise must be true at 2 AM
   // unaided. The gate-on prompt layers the clock-aware callback rules on top.
@@ -705,6 +718,7 @@ class RelayConversation {
     const modelResolution = resolveSessionModel({ sandbox: this.sandbox });
     this.model = modelResolution.model;
     this._modelFallbackReason = modelResolution.fallbackReason;
+    this._effort = voiceEffortFor(this.model);
     // PR C: resolved once, pinned for the session — see resolveSessionRenderer
     // and the file header. 'block' is byte-identical to this file's original
     // behavior; only 'stream' runs the new sentence-chunked path below.
@@ -1224,7 +1238,7 @@ class RelayConversation {
    * verdict or audit finding may need to attribute a difference to.
    */
   _versionStamps() {
-    const { parseTtsVoice } = require('./relay-profiles');
+    const { parseTtsVoice, RELAY_PROFILES } = require('./relay-profiles');
     const voice = this._ttsVoice != null ? this._ttsVoice : defaultTtsVoice();
     const tts = parseTtsVoice(voice, DEFAULT_TTS_PROVIDER);
     // The Spanish leg's <Parameter lang=es> is the setup-frame fallback when
@@ -1233,18 +1247,34 @@ class RelayConversation {
     const { isSpanish } = require('./relay-language');
     const raw = this.language || DEFAULT_LANGUAGE;
     const language = !/[-_]/.test(raw) && isSpanish(raw) ? require('./relay-protocol').SPANISH_LANGUAGE : raw;
+    // The relay profile's OWN `language` (Flux Multilingual's `"multi"`
+    // today — relay-profiles.js) is what Twilio's STT/TTS actually ran
+    // with, distinct from `language` above — the SEMANTIC conversation
+    // marker isSpanish() keys off (cell 10's setup frame carries
+    // <Parameter lang=es> so the prompt addendum/fallback copy run in
+    // Spanish, while the TwiML itself rendered language="multi", not
+    // "es-US"). Looked up from the raw, unvalidated RELAY_PROFILES map by
+    // the UNVERIFIED setup-frame relay_profile id — same trust level
+    // deriveRelayEventsSubscribed already reads it at (telemetry only,
+    // nothing acts on it) — so an unrecognized id is silently absent, never
+    // guessed. A profile with no `language` override ran its transport in
+    // the SAME language the conversation marker already names, so this
+    // falls back to `language` exactly as before this profile existed
+    // (codex r2 P1 on #4947).
+    const profile = this._relayProfileId ? RELAY_PROFILES[this._relayProfileId] : null;
+    const transportLanguage = (profile && profile.language) || language;
     return {
       git_sha: process.env.RAILWAY_GIT_COMMIT_SHA || null,
       model: this.model,
       model_fallback_reason: this._modelFallbackReason || null,
-      effort: VOICE_EFFORT,
+      effort: this._effort,
       prompt_sha: this._promptSha,
       context_snapshot_sha: this._contextSnapshotSha,
       tool_schema_sha: this._toolSchemaSha,
       policy_pack_sha: null,
       relay_profile_id: this._relayProfileId,
-      stt_language: language,
-      tts_language: language,
+      stt_language: transportLanguage,
+      tts_language: transportLanguage,
       tts_provider: DEFAULT_TTS_PROVIDER,
       voice_id: tts.voiceId,
       tts_model: tts.ttsModel,
@@ -1923,7 +1953,7 @@ class RelayConversation {
       toolMs: 0,
       toolCount: 0,
       rounds: 0,
-      effort: VOICE_EFFORT,
+      effort: this._effort,
       renderer: this.renderer === 'stream' ? STREAM_RENDERER_VERSION : 'block',
       interrupted: false,
       durationUntilInterruptMs: null,
@@ -2915,7 +2945,8 @@ class RelayConversation {
             // air on an open line, and the work here is short receptionist turns
             // driven by tools, not reasoning. `low` is the right end of the
             // ladder for that.
-            output_config: { effort: VOICE_EFFORT },
+            // Omitted entirely for models that reject it (voiceEffortFor).
+            ...(this._effort ? { output_config: { effort: this._effort } } : {}),
             tools: this._tools,
             messages: this.messages,
           },
@@ -3771,4 +3802,4 @@ function floorSummary(callerTurns, scrub) {
   return `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`;
 }
 
-module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };
+module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };

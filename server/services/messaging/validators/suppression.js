@@ -10,8 +10,9 @@
  * gracefully — load_suppression_state catches a missing-table error and
  * returns null, and validators interpret null as "no suppression record".
  *
- * Suppression is HARD: an entry here blocks every purpose, every audience,
- * every channel, until the entry is explicitly cleared. The only escape
+ * Consent suppression is HARD across purposes, audiences, and channels.
+ * non_mobile is an SMS-capability fact and does not suppress Email or App.
+ * A consent entry blocks until explicitly cleared. The only escape
  * hatch is a START keyword on the inbound channel, which is handled by
  * the twilio-webhook STOP/START flow and clears the suppression record.
  */
@@ -21,6 +22,20 @@ const { lockSmsPhone } = require('../../../utils/customer-comms-lock');
 const logger = require('../../logger');
 const { toE164 } = require('../../../utils/phone');
 
+// Shared decision point (codex r2 P1): SMS has its own independent kill
+// switch (sms_enabled on notification_prefs) that catches the common
+// opt-out case even when this phone-keyed messaging_suppression read comes
+// back UNKNOWN, so checkSuppression is allowed to fail OPEN for it. Push
+// (App) and billing Email have no independent phone-suppression signal, so
+// their provider-boundary checks use this predicate and fail CLOSED on an
+// unknown read. Otherwise a DB blip could let a manual_dnc / opt-out
+// recipient through on either non-SMS leg while SMS stays protected.
+const SUPPRESSION_RETRY_MS = 5 * 60 * 1000;
+
+function requiresVerifiedSuppression(channel) {
+  return channel === 'push' || channel === 'email';
+}
+
 /**
  * @param {import('../policy').SendCustomerMessageInput} input
  * @param {Object} _policy
@@ -28,8 +43,14 @@ const { toE164 } = require('../../../utils/phone');
  * @returns {Promise<{ ok: boolean, code?: string, reason?: string }>}
  */
 async function checkSuppression(input, _policy, contactState) {
-  if (input.channel === 'push' && contactState?.suppressionLoaded !== true) {
-    return { ok: false, code: 'SUPPRESSION_LOOKUP_FAILED', reason: 'Suppression state unavailable for app delivery' };
+  if (requiresVerifiedSuppression(input.channel) && contactState?.suppressionLoaded !== true) {
+    const unavailable = { ok: false, code: 'SUPPRESSION_LOOKUP_FAILED', reason: `Suppression state unavailable for ${input.channel} delivery` };
+    // An explicit billing leg is often a one-shot notice: still send nothing
+    // now, but return a schedulable hold its producer can queue for replay.
+    return input.metadata?.billingDeliveryLeg ? {
+      ...unavailable, retryable: true, deferred: true, deliveryOutcome: 'not_sent',
+      nextAllowedAt: new Date(Date.now() + SUPPRESSION_RETRY_MS).toISOString(),
+    } : unavailable;
   }
   const suppression = contactState && contactState.suppression;
   if (!suppression) return { ok: true };
@@ -56,6 +77,7 @@ async function checkSuppression(input, _policy, contactState) {
     };
   }
   if (suppression.reason === 'non_mobile') {
+    if (input.channel === 'email' || input.channel === 'push') return { ok: true };
     return {
       ok: false,
       code: 'SUPPRESSED_NON_MOBILE',
@@ -381,4 +403,5 @@ module.exports = {
   recordSuppression,
   recordNonMobileSuppression,
   clearSuppression,
+  requiresVerifiedSuppression,
 };

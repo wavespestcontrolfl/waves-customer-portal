@@ -21,9 +21,15 @@ let catalog;
 let optionalOptions;
 let delayFlags;
 let flagResolvers;
+let completionActions;
+let actionsGate;
+let failActions;
 beforeEach(async () => {
   delayFlags = false;
   flagResolvers = [];
+  completionActions = { actions: [] };
+  actionsGate = null;
+  failActions = false;
   history = [{ confirmed_by_tech: true, service_date: '2026-07-10', overall_score: 81 }];
   improvementsEnabled = true;
   defaultsEnabled = false;
@@ -70,7 +76,11 @@ beforeEach(async () => {
     }
     if (url.includes('tech-tips')) data = { available: true, groups: [{ id: 'lawn', label: 'Lawn care', tips: [{ id: 'lawn_water_morning', label: 'Water in the morning', copy: 'Use the morning irrigation window.' }] }] };
     if (url.includes('generate-report')) data = { report: 'WHAT WE DID:\nApplied the old products.\nWHAT WE FOUND:\nLawn looked fine.' };
-    if (url.includes('completion-actions')) data = { actions: [] };
+    if (url.includes('completion-actions')) {
+      if (actionsGate) await actionsGate;
+      if (failActions) throw new Error('Synthetic protocol list outage');
+      data = completionActions;
+    }
     if (url.includes('property-map')) data = { available: false, stationsLoaded: true };
     return { ok: true, json: async () => data };
   }));
@@ -78,6 +88,88 @@ beforeEach(async () => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const mount = () => render(<CompletionPanel service={service} products={catalog} onClose={() => {}} onSubmit={submit} />);
+
+it.each([false, true])('requires visit facts beyond a typed treatment target: companion=%s', async (companion) => {
+  const targetKey = companion ? 'treatment_target' : 'target_pest';
+  const schema = { type: 'one_time_pest_treatment', fields: [
+    { key: targetKey, label: 'Target pest', type: 'text', placeholder: 'Synthetic target' },
+    { key: 'work_completed', label: 'Work completed', type: 'text', placeholder: 'Synthetic work' },
+  ], nextStepChips: [] };
+  render(<CompletionPanel service={{ ...service, serviceType: 'One-Time Pest Treatment', waveguardTier: null,
+    completionProfile: { serviceKey: 'one_time_pest_treatment', requiresProducts: false, ...(!companion && { findingsType: schema.type }) },
+    ...(companion ? { companionSchemas: [schema] } : { findingsSchema: schema }),
+  }} products={[]} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.change((await screen.findAllByPlaceholderText('Synthetic target'))[0], { target: { value: 'Ants' } });
+  const generate = () => screen.getAllByRole('button', { name: /generate ai/i });
+  fireEvent.click(generate()[0]);
+  expect(alert).toHaveBeenCalledOnce();
+  expect(fetch.mock.calls.some(([url]) => url.includes('generate-report'))).toBe(false);
+  fireEvent.change(screen.getAllByPlaceholderText('Synthetic work')[0], { target: { value: 'Inspected the kitchen.' } });
+  fireEvent.click(generate()[0]);
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('generate-report'))).toBe(true));
+  const request = JSON.parse(fetch.mock.calls.find(([url]) => url.includes('generate-report'))[1].body);
+  expect(companion ? request.companionFindings[0].values : request.structuredFindings.values)
+    .toEqual({ [targetKey]: 'Ants', work_completed: 'Inspected the kitchen.' });
+});
+
+it('sends the recorded application method, scope and edited measurement to Generate', async () => {
+  defaultsEnabled = true;
+  mount();
+  await waitFor(() => expect(screen.getByPlaceholderText('Sq ft').value).toBe('5000'));
+  fireEvent.change(screen.getByPlaceholderText('Sq ft'), { target: { value: '4000' } });
+  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('generate-report'))).toBe(true));
+  const request = JSON.parse(fetch.mock.calls.find(([url]) => url.includes('generate-report'))[1].body);
+  expect(request.products).toEqual([expect.objectContaining({
+    productId: 'test-k',
+    applicationMethod: 'broadcast_spray',
+    applicationArea: 'Front yard, Back yard, Side yards',
+    areaValue: '4000',
+    areaUnit: 'sqft',
+  })]);
+});
+
+it.each(['after generation', 'during generation', 'with a recorded measurement'])('reconciles a delayed treatment trace %s', async (timing) => {
+  const visit = { ...service, serviceType: 'Quarterly Pest Control Service', waveguardTier: null,
+    completionProfile: { serviceKey: 'pest_recurring', requiresProducts: true } };
+  const originalNotes = 'Inspected and treated the exterior perimeter.';
+  const report = 'WHAT WE DID:\nTreated the exterior perimeter.\nWHAT WE FOUND:\nRecorded the visit conditions.';
+  const measured = timing === 'with a recorded measurement';
+  localStorage.setItem(`waves_completion_draft_${visit.id}`, JSON.stringify({
+    serviceId: visit.id, savedAt: Date.now(), notes: originalNotes,
+    selectedProducts: [{ productId: 'test-k', name: products[0].name, rate: 3, rateUnit: 'fl_oz',
+      totalAmount: 3, amountUnit: 'fl_oz', applicationMethod: 'perimeter_spray',
+      areaValue: measured ? 100 : '', areaUnit: 'linear_ft' }],
+  }));
+  let releaseTrace;
+  let releaseReport;
+  const trace = new Promise((resolve) => { releaseTrace = resolve; });
+  const generated = new Promise((resolve) => { releaseReport = resolve; });
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation((url, options) => {
+    if (url.includes('treatment-zone')) return Promise.resolve({ ok: true, json: () => trace });
+    if (url.includes('generate-report')) return Promise.resolve({ ok: true, json: () => generated });
+    return originalFetch(url, options);
+  });
+  render(<CompletionPanel service={visit} products={products} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  await waitFor(() => expect(notes.value).toBe(originalNotes));
+  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('generate-report'))).toBe(true));
+  if (timing === 'during generation') {
+    await act(async () => releaseTrace({ treatmentZone: { linear_ft: 240 } }));
+    await waitFor(() => expect(screen.getByPlaceholderText('Linear ft').value).toBe('240'));
+    await act(async () => releaseReport({ report }));
+  } else {
+    await act(async () => releaseReport({ report }));
+    await waitFor(() => expect(notes.value).toBe(report));
+    await act(async () => releaseTrace({ treatmentZone: { linear_ft: 240 } }));
+  }
+  await waitFor(() => expect(screen.getByPlaceholderText('Linear ft').value).toBe(measured ? '100' : '240'));
+  await waitFor(() => expect(notes.value).toBe(measured ? report : originalNotes));
+  if (!measured) expect(screen.getByText(/the draft\s+was cleared/)).toBeTruthy();
+}, 15000);
 
 it('prefills the engine mix and submits findings and inspection actions once, with edited quantities', async () => {
   mount();
@@ -161,6 +253,131 @@ it('prunes an out-of-line tip restored after the current lawn library has loaded
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
   expect(submit.mock.calls[0][1].techTips.ids).toEqual(['lawn_water_morning']);
+});
+
+// Non-typed Tree & Shrub loads the appointment month's own protocol list.
+const shrubsOn = (scheduledDate, serviceType = 'Tree & Shrub Care') => ({ ...service, serviceType, completionProfile: { serviceKey: 'tree_shrub' }, scheduledDate, waveguardTier: null });
+const monthList = (visit, month, label, programKey = 'tree_shrub') => ({ programKey, visit: { visit, month }, actions: [{ id: `visit-${visit}`, label, note: label, raw: label }] });
+const saveDraft = (visit, draft) => localStorage.setItem(`waves_completion_draft_${visit.id}`, JSON.stringify({
+  serviceId: visit.id, savedAt: Date.now(), visitOutcome: 'incomplete', ...draft,
+}));
+async function restoreAndSubmit(visit, listLabel) {
+  render(<CompletionPanel service={visit} products={[]} onClose={() => {}} onSubmit={submit} />);
+  await screen.findByRole('option', { name: new RegExp(listLabel) });
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+}
+async function submittedBody() {
+  fireEvent.click(screen.getByRole('button', { name: /mark visit incomplete/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  return submit.mock.calls[0][1];
+}
+
+it('drops a restored tree & shrub protocol action the month\'s current list no longer offers', async () => {
+  const visit = shrubsOn('2026-05-12');
+  completionActions = monthList(5, 'May', 'May palm fertilizer');
+  saveDraft(visit, {
+    notes: '[Protocol] Retired May line\n[Protocol] May palm fertilizer\n[Protocol] Pruned dead fronds',
+    selectedProtocolActionLabels: ['Retired May line', 'May palm fertilizer'],
+  });
+  await restoreAndSubmit(visit, 'May palm fertilizer');
+  expect(fetch.mock.calls.some(([url]) => url.includes('completion-actions') && url.includes('month=May'))).toBe(true);
+  const body = await submittedBody();
+  expect(body.protocolActionsCompleted).toEqual(['May palm fertilizer']);
+  // The route reads [Protocol] markers back out of the notes: the dropped
+  // marker leaves with its label; the tech's own typed line stays.
+  expect(body.technicianNotes).toBe('[Protocol] May palm fertilizer\n[Protocol] Pruned dead fronds');
+  expect(body.treeShrubCompletion.customerNote).not.toContain('Retired');
+});
+
+it.each([
+  ['tree & shrub', 'Tree & Shrub Care'],
+  ['palm care, which runs the tree & shrub program,', 'Palm Care'],
+])('a restored %s action the month\'s list doesn\'t offer is dropped and the report written from it is cleared', async (_, serviceType) => {
+  const visit = shrubsOn('2026-05-12', serviceType);
+  completionActions = monthList(5, 'May', 'May palm fertilizer');
+  // Saved after Generate under another visit's list (the visit moved months,
+  // or the protocol changed): the notes are the untouched AI report, the
+  // pre-generation notes still carry that list's chip marker.
+  const report = 'WHAT WE DID:\nApplied palm fertilizer.\nWHAT WE FOUND:\nPalms looked healthy.';
+  saveDraft(visit, {
+    notes: report, generatedReportText: report, aiReportUsed: true, chipLinesDetached: true,
+    preGenerationNotes: '[Protocol] Earlier palm fertilizer\nChecked the side-yard palms.',
+    selectedProtocolActionLabels: ['Earlier palm fertilizer'],
+  });
+  await restoreAndSubmit(visit, 'May palm fertilizer');
+  expect(screen.getByText(/the draft\s+was cleared/)).toBeTruthy();
+  expect(screen.queryByText(/Earlier palm fertilizer/)).toBeNull();
+  const body = await submittedBody();
+  expect(body.protocolActionsCompleted).toEqual([]);
+  expect(body.technicianNotes).toBe('Checked the side-yard palms.');
+});
+
+it('a restored tree & shrub action the month\'s list still offers is kept', async () => {
+  const visit = shrubsOn('2026-01-13');
+  completionActions = monthList(1, 'Jan', 'January palm fertilizer');
+  saveDraft(visit, {
+    notes: '[Protocol] January palm fertilizer',
+    selectedProtocolActionLabels: ['January palm fertilizer'],
+  });
+  await restoreAndSubmit(visit, 'January palm fertilizer');
+  const body = await submittedBody();
+  expect(body.protocolActionsCompleted).toEqual(['January palm fertilizer']);
+  expect(body.technicianNotes).toBe('[Protocol] January palm fertilizer');
+});
+
+// Restore clicked while the completion list is still loading: only the list
+// can say whether the program is month-keyed, so reconciling waits for it.
+function holdCompletionList() {
+  let release;
+  actionsGate = new Promise((resolve) => { release = resolve; });
+  return () => release();
+}
+const detachedReportDraft = (report, preGenerationNotes, label) => ({
+  notes: report, generatedReportText: report, aiReportUsed: true, chipLinesDetached: true,
+  preGenerationNotes, selectedProtocolActionLabels: [label],
+});
+
+it('a tree & shrub draft restored before its list arrives is reconciled once the list lands', async () => {
+  const releaseList = holdCompletionList();
+  completionActions = monthList(5, 'May', 'May palm fertilizer');
+  const visit = shrubsOn('2026-05-12');
+  const report = 'WHAT WE DID:\nApplied palm fertilizer.\nWHAT WE FOUND:\nPalms looked healthy.';
+  saveDraft(visit, detachedReportDraft(report, '[Protocol] Earlier palm fertilizer\nChecked the side-yard palms.', 'Earlier palm fertilizer'));
+  render(<CompletionPanel service={visit} products={[]} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  releaseList();
+  await screen.findByText(/the draft\s+was cleared/);
+  const body = await submittedBody();
+  expect(body.protocolActionsCompleted).toEqual([]);
+  expect(body.technicianNotes).toBe('Checked the side-yard palms.');
+});
+
+it('a palm injection action its "Any" list doesn\'t offer is kept with its report: those visits are not month-keyed', async () => {
+  const releaseList = holdCompletionList();
+  completionActions = monthList(1, 'Any', 'Injected palm trunk', 'palm_injection');
+  const visit = shrubsOn('2026-05-12', 'Palm Injection');
+  const report = 'WHAT WE DID:\nChecked the trunk ports.\nWHAT WE FOUND:\nCrown looked healthy.';
+  saveDraft(visit, detachedReportDraft(report, '[Protocol] Checked trunk ports', 'Checked trunk ports'));
+  render(<CompletionPanel service={visit} products={[]} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  releaseList();
+  await screen.findByRole('option', { name: /Injected palm trunk/ });
+  const body = await submittedBody();
+  expect(screen.queryByText(/the draft\s+was cleared/)).toBeNull();
+  expect(body.protocolActionsCompleted).toEqual(['Checked trunk ports']);
+  expect(body.technicianNotes).toBe(report);
+});
+
+it('a draft restored after its completion list failed keeps its protocol action', async () => {
+  failActions = true;
+  const visit = shrubsOn('2026-05-12');
+  saveDraft(visit, { notes: '[Protocol] Earlier palm fertilizer', selectedProtocolActionLabels: ['Earlier palm fertilizer'] });
+  render(<CompletionPanel service={visit} products={[]} onClose={() => {}} onSubmit={submit} />);
+  await screen.findByText('Protocol actions unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  const body = await submittedBody();
+  expect(body.protocolActionsCompleted).toEqual(['Earlier palm fertilizer']);
+  expect(body.technicianNotes).toBe('[Protocol] Earlier palm fertilizer');
 });
 
 

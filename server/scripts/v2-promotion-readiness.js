@@ -22,8 +22,15 @@
 // Mutable triage cards cannot establish which recovery contract produced the
 // current routing result. Refuse to issue a promotion verdict until that
 // evidence is persisted per processing pass by the metrics follow-up.
-console.error('Promotion readiness unavailable: recovery cohort attribution is pending repair (PR #4437 follow-up). Do not use historical readiness reports to promote routing.');
-process.exit(1);
+//
+// Guarded by require.main (not a bare top-level exit) so a test can require
+// this module to exercise its pure helpers (e.g. contactPhoneForCall) without
+// killing the test process — running it as a script (`node
+// v2-promotion-readiness.js`) is byte-identical to before this guard.
+if (require.main === module) {
+  console.error('Promotion readiness unavailable: recovery cohort attribution is pending repair (PR #4437 follow-up). Do not use historical readiness reports to promote routing.');
+  process.exit(1);
+}
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 const {
@@ -33,7 +40,8 @@ const {
 // Production's own fail-open context builder + V1-conflict demotion, so this
 // audit cannot drift from the live contract (local pre-push audit P1).
 const {
-  buildFailOpenRoutingContext, demoteFailOpenOnV1AddressConflict,
+  buildFailOpenRoutingContext, demoteFailOpenOnV1AddressConflict, resolveCallContactPhone,
+  resolveKnownCallerCustomer,
 } = require('../services/call-recording-processor');
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
@@ -86,6 +94,16 @@ function parseJson(v) {
   return typeof v === 'string' ? JSON.parse(v) : v;
 }
 
+// Production's own resolver (codex #4912 r2 P2), not a raw to_phone/from_phone
+// branch: a lead-webhook-auto-bridge outbound call's to_phone is the STAFF
+// cell, and the real customer leg lives in bridge metadata
+// (metadata.leadPhone). Mirrors the exact call-site shape production uses at
+// the top of processRecording (call-recording-processor.js ~7904), before any
+// extracted-phone override is known — no second argument.
+function contactPhoneForCall(row) {
+  return resolveCallContactPhone(row);
+}
+
 async function main() {
   const db = dbConn();
 
@@ -119,7 +137,14 @@ async function main() {
     .whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
     // ai_extraction (the V1 legacy flat record) feeds demoteFailOpenOnV1AddressConflict,
     // exactly as the live path passes `extracted` to it.
-    .select('id', 'twilio_call_sid', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'customer_id', 'ai_validation');
+    // metadata + source: resolveCallContactPhone needs both to resolve a
+    // lead-webhook-auto-bridge outbound row to the prospect (metadata.leadPhone)
+    // rather than the staff cell that dialed out — buildFailOpenRoutingContext
+    // now derives identity through that resolver (Codex #4933 r1 P2).
+    // customer_id is no longer selected (Codex #4933 r3 P2): the linked
+    // customer is resolved per row via resolveKnownCallerCustomer, which
+    // never reads that column (see the comment at its call site below).
+    .select('id', 'twilio_call_sid', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'ai_validation');
 
   // Cohort boundary: rows are attributed by MODEL, so after a route change
   // a previous primary's rows could masquerade as current-route executions
@@ -205,11 +230,17 @@ async function main() {
   // summarizeKnownCaller reads the pipeline stage and every address
   // component.
   const auditFailOpen = process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true';
-  const linkedCustomerIds = [...new Set(boundedRouteRows.map((r) => r.customer_id).filter(Boolean))];
-  const customerById = new Map((linkedCustomerIds.length
-    ? await db('customers').whereIn('id', linkedCustomerIds)
-      .select('id', 'pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip')
-    : []).map((c) => [c.id, c]));
+  // Codex #4933 r3 P2: the linked customer is resolved PER ROW below via
+  // resolveKnownCallerCustomer — the SAME selection production's Step 2
+  // pre-lookup uses (an operator relink outranks the phone lookup; an
+  // explicit unlink is no known caller at all). Replaces the bulk
+  // customer_id → row prefetch this used to do: that column is not what
+  // production's own selection reads, and could disagree with it (an
+  // operator relink since the row was fetched, or — the concrete miss this
+  // round found — a lead-webhook-auto-bridge row whose contactPhone comes
+  // back null from broken metadata: production has NO knownCaller and
+  // holds; reading customer_id kept using the stale link and reported an
+  // auto-route).
 
   // The GATE scores the PRIMARY leg alone — pooling both legs would let a
   // healthy primary mask a small failing fallback cohort, or pass a route
@@ -291,14 +322,26 @@ async function main() {
     // so omitting it makes the audit report zero production-equivalent
     // auto-routes and the readiness comparison meaningless (codex round-10 P1
     // on PR #3119).
-    const contactPhone = String(r.direction || '').startsWith('outbound') ? r.to_phone : r.from_phone;
+    //
+    // Resolved with production's OWN resolver (see contactPhoneForCall above).
+    const contactPhone = contactPhoneForCall(r);
     const storedAv = parseJson(r.ai_address_validation);
     const effectiveAv = recoveredCallIds.has(r.id)
       ? { status: 'corrected', inServiceArea: true, county: storedAv?.county || null, normalized: storedAv?.normalized || null, reconstructed_from: 'address_recovered' }
       : storedAv;
+    // buildFailOpenRoutingContext resolves its OWN identity internally via
+    // resolveCallContactPhone(r) too (Codex #4933 r1 P2) — same value as
+    // `contactPhone` above (r2 P1 fix), computed independently since
+    // neither side has a genuine extractedPhone signal to pass.
+    // { db } (Codex #4933 r3 P1): this script's own connection
+    // (DATABASE_PUBLIC_URL-aware dbConn()) — never the processor's internal
+    // ../models/db, which can point at a different or unreachable host when
+    // this runs outside Railway's private network, and would otherwise
+    // leave a second pool undestroyed.
+    const linkedCustomer = await resolveKnownCallerCustomer(r, contactPhone, { db }).catch(() => null);
     const { knownCaller, options: failOpenOptions } = buildFailOpenRoutingContext({
       call: r,
-      customer: r.customer_id ? customerById.get(r.customer_id) || null : null,
+      customer: linkedCustomer,
       contactPhone,
       failOpenEnabled: auditFailOpen,
     });
@@ -470,4 +513,8 @@ async function main() {
   console.log(`\n${allPass ? '✅ ALL CRITERIA PASS — safe to flip CALL_EXTRACTION_V2_DRIVES_ROUTING=true (after reviewing disagreements).' : '⛔ NOT READY — criteria above still failing.'}\n`);
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+if (require.main === module) {
+  main().catch((e) => { console.error(e); process.exit(1); });
+}
+
+module.exports = { contactPhoneForCall };
