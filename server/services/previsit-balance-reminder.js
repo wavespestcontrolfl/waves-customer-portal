@@ -215,6 +215,26 @@ async function visitPayerBilled(visit) {
   }
 }
 
+async function previsitPolicySnapshots(channels, consult) {
+  const snapshots = [];
+  for (const channel of channels) {
+    const snapshot = { channel, ...await collectionsChannelVerdict({ ...consult, channel }) };
+    snapshots.push(snapshot);
+    if (snapshot.balanceIncomplete) break;
+  }
+  return snapshots;
+}
+
+function previsitInvoicePolicy(snapshots) {
+  const sms = snapshots.find((snapshot) => snapshot.channel === 'sms');
+  const email = snapshots.find((snapshot) => snapshot.channel === 'email');
+  return {
+    invoiceIds: sms.permitted && sms.eligibleInvoiceIds !== null ? sms.eligibleInvoiceIds : email.eligibleInvoiceIds,
+    smsPolicyPermitted: sms.permitted,
+    emailPolicyPermitted: email.permitted,
+  };
+}
+
 async function prepareVisitReminder(visit, { now, todayEt }) {
   const lane = resolveBillingLane(visit);
   const obligation = duesObligation(todayEt, visit.billing_day);
@@ -227,25 +247,20 @@ async function prepareVisitReminder(visit, { now, todayEt }) {
   const duesLate = lane.mode === 'monthly_membership'
     && duesCollected === false
     && String(todayEt) >= String(obligation.graceDateEt);
-  const duesCents = duesLate ? Math.round((Number(visit.monthly_rate) || 0) * 100) : 0;
+  const monthlyRate = Number(visit.monthly_rate) || 0;
+  const duesCents = duesLate ? Math.round(monthlyRate * 100) : 0;
   const consult = {
     customerId: visit.customer_id,
     purpose: 'balance_reminder',
     offLedgerBalanceCents: duesCents,
     logTag: 'previsit-balance',
   };
-  const smsVerdict = await collectionsChannelVerdict({ ...consult, channel: 'sms' });
-  const emailVerdict = await collectionsChannelVerdict({ ...consult, channel: 'email' });
-  // The first policy snapshots must both be complete before quoting an
-  // aggregate. A transient read leaves the appointment unclaimed for retry.
-  const snapshots = [smsVerdict, emailVerdict];
+  // Stop on the first incomplete read; a later consultation cannot repair it.
+  const snapshots = await previsitPolicySnapshots(['sms', 'email'], consult);
   if (snapshots.some((snapshot) => snapshot.balanceIncomplete)
     || snapshots.every((snapshot) => !snapshot.permitted)) return null;
-  // Preserve the live sweep's channel policy selection for the shared quote.
-  const eligibleIds = smsVerdict.permitted && smsVerdict.eligibleInvoiceIds !== null
-    ? smsVerdict.eligibleInvoiceIds
-    : emailVerdict.eligibleInvoiceIds;
-  const eligible = eligibleIds == null ? null : new Set(eligibleIds.map(String));
+  const policy = previsitInvoicePolicy(snapshots);
+  const eligible = policy.invoiceIds == null ? null : new Set(policy.invoiceIds.map(String));
   const fresh = eligible ? freshAll.filter((invoice) => eligible.has(String(invoice.id))) : freshAll;
   const overdueRecurringDue = fresh.reduce((sum, invoice) => sum + invoiceAmountDue(invoice), 0);
   const verdict = previsitBalanceReminderEligible({
@@ -260,12 +275,12 @@ async function prepareVisitReminder(visit, { now, todayEt }) {
   });
   if (!verdict.send) return null;
   const amount = verdict.duesLate
-    ? (Number(visit.monthly_rate) || 0) + verdict.overdueDue
+    ? monthlyRate + verdict.overdueDue
     : verdict.overdueDue;
   if (!(amount > 0)) return null;
   return {
-    smsPolicyPermitted: smsVerdict.permitted,
-    emailPolicyPermitted: emailVerdict.permitted,
+    smsPolicyPermitted: policy.smsPolicyPermitted,
+    emailPolicyPermitted: policy.emailPolicyPermitted,
     amount,
     duesCents,
     fresh,
@@ -379,6 +394,14 @@ function currentDuesCents(customer, database, now) {
       ? Math.round((Number(customer.monthly_rate) || 0) * 100) : 0));
 }
 
+function visitMatchesPrevisitQuote(current, quoted) {
+  return !!current && String(current.customer_id) === String(quoted.customer_id)
+    && ['pending', 'confirmed'].includes(current.status) && current.is_recurring === true
+    && !!current.balance_reminder_sent_at
+    && dateOnlyString(current.scheduled_date) === dateOnlyString(quoted.scheduled_date)
+    && String(current.service_type || 'service') === String(quoted.service_type || 'service');
+}
+
 function previsitQuoteAuthority({ visit, quotedInvoices, quotedDuesCents, ledgerId }) {
   const quoted = frozenInvoiceQuote(quotedInvoices);
   const changed = (reason) => ({
@@ -403,14 +426,9 @@ function previsitQuoteAuthority({ visit, quotedInvoices, quotedDuesCents, ledger
     providerPreSendCheck: async ({ dbi } = {}) => {
       if (!dbi?.isTransaction || !locked) return PREVISIT_AUTHORITY_BUSY;
       try {
-        return await dbi.transaction(async (savepoint) => {
+        const check = async (savepoint) => {
           const currentVisit = locked.visits.find((row) => String(row.id) === String(visit.id));
-          if (!currentVisit || String(currentVisit.customer_id) !== String(visit.customer_id)
-            || !['pending', 'confirmed'].includes(currentVisit.status)
-            || currentVisit.is_recurring !== true
-            || !currentVisit.balance_reminder_sent_at
-            || dateOnlyString(currentVisit.scheduled_date) !== dateOnlyString(visit.scheduled_date)
-            || String(currentVisit.service_type || 'service') !== String(visit.service_type || 'service')) {
+          if (!visitMatchesPrevisitQuote(currentVisit, visit)) {
             return changed('visit changed before Text dispatch');
           }
           const payer = await require('./payer').resolveForInvoice({
@@ -424,9 +442,8 @@ function previsitQuoteAuthority({ visit, quotedInvoices, quotedDuesCents, ledger
 
           const now = new Date();
           const duesCents = await currentDuesCents({ ...locked.customer, id: visit.customer_id }, savepoint, now);
-          const policy = await collectionsChannelVerdict({
+          const [policy] = await previsitPolicySnapshots(['sms'], {
             customerId: visit.customer_id,
-            channel: 'sms',
             purpose: 'balance_reminder',
             offLedgerBalanceCents: duesCents,
             excludeLedgerIds: ledgerId ? [ledgerId] : [],
@@ -447,7 +464,8 @@ function previsitQuoteAuthority({ visit, quotedInvoices, quotedDuesCents, ledger
           return duesCents === quotedDuesCents
             ? { ok: true }
             : changed('monthly dues changed before Text dispatch');
-        });
+        };
+        return await dbi.transaction(check);
       } catch (err) {
         return { ...PREVISIT_AUTHORITY_BUSY, reason: `Previsit balance recheck failed: ${err.message}` };
       }
