@@ -74,6 +74,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     "The spray won't do a thing to termites; they need a soil treatment.",
     'Termites are unable to harm your home once treated.',
     'Las termitas son incapaces de dañar su hogar una vez tratado.',
+    'Once treated, termites are unable to harm your home.',
     'Ants are incapable of crossing the barrier once it is applied.',
   ])('leaves compliant replies untouched: %s', (reply) => {
     expect(scrubUnsafeClaims({ ...base, reply }).reply).toBe(reply);
@@ -262,6 +263,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['This pesticide is incapable of causing harm to pets.', ''],
     ['The spray is not capable of hurting children.', ''],
     ['Este producto es incapaz de dañar a sus mascotas.', ''],
+    ['This spray for ants is unable to harm your pets.', ''],
+    ['This treatment for termites is incapable of causing harm to children.', ''],
+    ['Este spray para hormigas es incapaz de dañar a sus mascotas.', ''],
     ['This pesticide is not considered hazardous to children.', ''],
     ['The product is not classified as toxic to pets.', ''],
     ['The treatment is not regarded as dangerous for dogs.', ''],
@@ -454,6 +458,7 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Please come back inside after an hour.', 'What should I do after the treatment?'],
     ['Regrese en 30 minutos.', '¿Qué hago después del tratamiento?'],
     ['Vuelva a entrar en 2 horas.', '¿Qué hago después del tratamiento?'],
+    ['Come back inside after 2 hours; you can ask us more in this chat.', 'What should I do after the treatment?'],
   ])('flags: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
   });
@@ -489,6 +494,9 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Come back to this chat anytime with questions.', 'What should I do after the treatment?'],
     ['Entre las 8 y las 10 llegará el técnico.', '¿Cuándo es la cita?'],
     ['Vuelva a llamarnos mañana si ve hormigas.', '¿Qué hago después del tratamiento?'],
+    ['Come back in 2 hours to this chat with questions.', 'What should I do after the treatment?'],
+    ['Please come back after 30 minutes to this chat.', 'What should I do after the treatment?'],
+    ['Regrese mañana a este chat si tiene preguntas.', '¿Qué hago después del tratamiento?'],
   ])('leaves alone: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });
@@ -2178,6 +2186,11 @@ describe('looksLikeEmergency', () => {
     'I need Poison Control',
     'I called poison control',
     'Necesito el control de envenenamientos',
+    'My cow is vomiting after the pesticide treatment',
+    'My sheep collapsed after the lawn spray',
+    'Pesticide made my calf cough',
+    "He didn't swallow it but he choked on the bait",
+    'The dog found it and he ate the bait',
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
@@ -2281,6 +2294,13 @@ describe('looksLikeEmergency', () => {
     'My son says the rats ate the bait',
     "I don't need poison control, just an ant treatment",
     'No necesito el control de envenenamientos, solo control de hormigas',
+    "My child didn't choke on the bait",
+    'My son is not choking on poison',
+    'Mi hijo no se atragantó con el veneno',
+    'No need for Poison Control, just the ants',
+    'Poison Control is not needed',
+    "Don't call Poison Control, I need an ant treatment",
+    'No hace falta llamar a control de envenenamientos',
     'The ants choked on the bait',
     'The rats were poisoned by spray',
     'The roaches were poisoned by the product',
