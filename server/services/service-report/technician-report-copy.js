@@ -219,6 +219,18 @@ const REPORT_MEASUREMENT_QUANTITY_RE = new RegExp(
   'gi',
 );
 const REPORT_MEASUREMENT_AFTER_NUMBER_RE = new RegExp(String.raw`^\s*${REPORT_MEASUREMENT_UNIT_TEXT}\b`, 'i');
+const REPORT_AS_LINKED_MEASUREMENT_CREDENTIAL_RE = new RegExp(
+  String.raw`(${REPORT_NUMERIC_CREDENTIAL_TOKEN})\s+${REPORT_MEASUREMENT_UNIT_TEXT}\s+as\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b`,
+  'gi',
+);
+
+function containsAsLinkedMeasurementCredential(text) {
+  for (const match of String(text || '').matchAll(REPORT_AS_LINKED_MEASUREMENT_CREDENTIAL_RE)) {
+    const digitCount = match[1].replace(/\D/g, '').length;
+    if (digitCount >= 2 && digitCount <= 8) return true;
+  }
+  return false;
+}
 
 // Past access actions can legitimately be followed by a service date or a
 // labeled property/unit identifier. Inspect each bounded numeric candidate so
@@ -440,6 +452,7 @@ const REPORT_POSITIONAL_USE_CODE_RE = /\b(?:use|using)\s+\d{3,8}\b\s+(?:at|for|o
 function containsReportAccessCode(text) {
   const raw = String(text || '');
   if (containsExplicitNumericCredential(raw)) return true;
+  if (containsAsLinkedMeasurementCredential(raw)) return true;
   if (containsPastAccessCredential(raw)) return true;
   // Direct token-to-device relationships outrank fertilizer context. Check the
   // original copy before an application qualifier can mask an N-P-K-shaped

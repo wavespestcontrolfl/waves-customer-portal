@@ -155,6 +155,8 @@ describe('custom action credential screening', () => {
     'Opened rear gate and found 100 German cockroaches, then entered 8842 at the keypad',
     'The rear gate is 2468 ml',
     'Opened rear gate and found 100 dead ants, then entered 8842 at the keypad',
+    'Use 2468 ft as the gate code',
+    'Enter AB24-68 ml as the side door PIN',
   ])('rejects recorded access credentials: %s', (action) => {
     expect(customerCopyViolations(action)).toContain('access_code');
   });
@@ -221,6 +223,7 @@ describe('custom action credential screening', () => {
     'Opened rear gate after using 2 oz around the hinge',
     'Opened rear gate and found 100 dead ants',
     'The rear gate is 100 feet from the lanai',
+    'Use 2468 ft as the treated perimeter length',
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
   });
@@ -279,6 +282,8 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Opened rear gate and found 100 German cockroaches, then entered 8842 at the keypad',
     'The rear gate is 2468 ml',
     'Opened rear gate and found 100 dead ants, then entered 8842 at the keypad',
+    'Use 2468 ft as the gate code',
+    'Enter AB24-68 ml as the side door PIN',
   ])('does not publish disguised access instructions: %s', (instruction) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${instruction}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toBeNull();
@@ -338,6 +343,7 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Opened rear gate after using 2 oz around the hinge',
     'Opened rear gate and found 100 dead ants',
     'The rear gate is 100 feet from the lanai',
+    'Use 2468 ft as the treated perimeter length',
   ])('publishes bounded material, date, unit-id, and fertilizer details: %s', (action) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${action}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toContain(action);
