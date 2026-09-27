@@ -263,6 +263,9 @@ const RENEWAL_CHARGE_FAILED_SMS_KEY = 'termite_annual_renewal_charge_failed';
 // One-hour crash-gap tolerance for reconcile pass 7a (below) — long enough
 // that an ordinary in-flight sweep tick is never mistaken for a crash.
 const RECONCILE_NEVER_ATTEMPTED_AFTER_MS = 60 * 60 * 1000;
+// renewal_charge_failure_kind while a claimed charge's outcome is not yet
+// known (Codex #4971 r4 P1, write-ahead) — see resolveChargeEligibility.
+const CHARGE_OUTCOME_PENDING = 'outcome_pending';
 
 function termiteAnnualRenewalChargeLive() {
   return gateEnvValue('GATE_TERMITE_ANNUAL_PLAN');
@@ -919,10 +922,21 @@ async function resolveChargeEligibility(successorId, conn = db) {
     // concurrent/retried tick that loses this race sees 0 rows updated and
     // does nothing further — no bell, no second charge, no second
     // delivery (whichever tick won already handles those).
+    // Codex #4971 r4 P1 (write-ahead outcome): the follow-through
+    // obligation is persisted WITH the fence, before anything reaches
+    // Stripe — 'outcome_pending' until the outcome is known. The in-line
+    // result (or the paid sync) replaces or clears it; if the process dies,
+    // or the outcome write fails, after the submission, leg 7d resolves it
+    // from durable evidence (never by charging again).
     const claimed = await trx('annual_prepay_terms')
       .where({ id: successorId })
       .whereNull('renewal_charge_attempted_at')
-      .update({ renewal_charge_attempted_at: new Date() });
+      .update({
+        renewal_charge_attempted_at: new Date(),
+        renewal_charge_failure_kind: CHARGE_OUTCOME_PENDING,
+        renewal_charge_failure_reason: null,
+        renewal_charge_failure_handled_at: null,
+      });
     if (!claimed) return { eligible: false, reason: 'already_attempted' };
     return { eligible: true };
   });
@@ -1028,10 +1042,20 @@ async function renewalWasPresented(conn, successor) {
   if (!successor.prepay_invoice_id) return false;
   const invoice = classifyRenewalInvoice(await conn('invoices').where({ id: successor.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS));
   if (invoice.delivered) return true;
+  if (await chargeFollowThroughOwed(conn, successor)) return false;
   const reached = await whereAttemptSubmitted(
     conn('stripe_invoice_charge_attempts as a').where('a.invoice_id', successor.prepay_invoice_id),
   ).first('a.id');
   return Boolean(reached);
+}
+
+// JS twin of the grace-lapse scan's followThroughNotOwed: a charge outcome
+// recorded (or still pending, write-ahead) whose follow-through has not
+// verifiably completed. Read fresh — the caller's row can predate the claim.
+async function chargeFollowThroughOwed(conn, successor) {
+  const row = await conn('annual_prepay_terms').where({ id: successor.id })
+    .first('renewal_charge_failure_kind', 'renewal_charge_failure_handled_at');
+  return Boolean(row?.renewal_charge_failure_kind) && !row.renewal_charge_failure_handled_at;
 }
 
 // Codex #4971 round-3 P1 (item 1) + OWNER RULING (pre-push, item 6) —
@@ -1134,6 +1158,102 @@ async function renewalMoneyInMotion(conn, successor) {
   return reconciliation.ok ? null : reconciliation.reason;
 }
 
+// Codex #4971 r4 P1 (item 4a) — the parent-decision writers' question
+// (annual-prepay-renewals.js refuseWhileRenewalClearing): does any open
+// renewal successor of this parent have money in motion? The SAME test the
+// withdrawal defers on (renewalMoneyInMotion), so a cancel can never land
+// on a renewal the withdrawal could not void. Returns the reason, or null.
+async function renewalMoneyInMotionForParent(conn, parentTermId) {
+  const successors = await conn('annual_prepay_terms')
+    .where({ renewed_from_term_id: parentTermId, status: PAYMENT_PENDING_STATUS })
+    .whereNotNull('annual_plan_version')
+    .select('id', 'prepay_invoice_id');
+  for (const successor of successors || []) {
+    const reason = await renewalMoneyInMotion(conn, successor);
+    if (reason) return reason;
+  }
+  return null;
+}
+
+// Codex #4971 r4 P1 — the paid sync's hook for a termite renewal successor
+// that just activated (annual-prepay-renewals.js syncTermForInvoicePayment,
+// pending -> active, after its own transaction). Best-effort: the
+// activation already committed and stands either way.
+//   1. A known success ends the write-ahead charge outcome (item 3).
+//   2. Late success on an EXTERNAL change (item 4b): the parent-decision
+//      writers refuse while renewal money is in motion, but a refund, void,
+//      dispute or flag removal on the PARENT can still land while an ACH
+//      debit clears. A renewal that activates behind a parent that no
+//      longer authorizes it stays ACTIVE — money received is honored until
+//      a human decides — and staff get ONE alert to refund or honor it
+//      (bellLatePaidRenewal; leg 7e re-rings a lost one). The customer is
+//      not messaged.
+async function onRenewalSuccessorPaid(successor, conn = db) {
+  if (!successor?.renewed_from_term_id || !successor.annual_plan_version || conn.isTransaction) return;
+  if (successor.renewal_charge_failure_kind === CHARGE_OUTCOME_PENDING) await clearChargeOutcomePending(successor, conn);
+  try {
+    await bellLatePaidRenewal(successor, conn);
+  } catch (err) {
+    logger.error(`[termite-annual-renewal] late-paid renewal check failed for term ${successor.id}: ${err.message} — leg 7e retries it`);
+  }
+}
+
+// Returns the bell result when one rang (fresh or deduped), 'eligible' when
+// the parent still authorizes the renewal (nothing to say), or null when
+// the bell did not persist (retried by leg 7e).
+async function bellLatePaidRenewal(successor, conn) {
+  const parent = await conn('annual_prepay_terms').where({ id: successor.renewed_from_term_id }).first();
+  const refusal = await parentRefusalForSuccessor(conn, successor, parent);
+  if (refusal.eligible) return 'eligible';
+  const bell = await ringRenewalBell(successor, 'paid_after_parent_ended', refusal.reason);
+  // The marker is written only where the row shows the column exists
+  // (20260927040000) — a missing column must never fail the activation.
+  if (bell && Object.prototype.hasOwnProperty.call(successor, 'renewal_late_paid_belled_at')) {
+    await conn('annual_prepay_terms').where({ id: successor.id })
+      .whereNull('renewal_late_paid_belled_at')
+      .update({ renewal_late_paid_belled_at: new Date() });
+  }
+  return bell;
+}
+
+// Leg 7e (Codex #4971 r4 P1, item 4b backstop): an ACTIVE, settled renewal
+// whose parent never took its 'renewed' stamp and whose late-paid alert has
+// not persisted — the paid sync's own alert was lost, or never ran. Rings
+// it (bellLatePaidRenewal); a parent that still authorizes the renewal is
+// left to reconcileParentRenewedStamps. Excluded once the alert persisted.
+async function bellLatePaidRenewals({ conn = db, limit = 200, counts }) {
+  try {
+    const candidates = await whereInvoiceSettledNotRevoked(
+      conn('annual_prepay_terms as t')
+        .join('annual_prepay_terms as p', 'p.id', 't.renewed_from_term_id')
+        .join('invoices as i', 'i.id', 't.prepay_invoice_id')
+        .whereNotNull('t.annual_plan_version')
+        .where('t.status', 'active')
+        .whereNull('t.renewal_late_paid_belled_at')
+        .where(function parentNotRenewed() {
+          this.whereNot('p.status', 'renewed').orWhereRaw("p.renewal_decision is distinct from 'renew'");
+        }),
+      'i',
+    )
+      .orderByRaw('t.renewal_sweep_deferred_at asc nulls first')
+      .orderBy('t.term_start', 'asc')
+      .select('t.*')
+      .limit(limit);
+    counts.latePaidScanned = candidates.length;
+    for (const successor of candidates) {
+      try {
+        const outcome = await bellLatePaidRenewal(successor, conn);
+        if (outcome && outcome !== 'eligible') counts.latePaidBelled += 1;
+        else await stampSweepDeferred(successor, conn);
+      } catch (err) {
+        logger.error(`[termite-annual-renewal] late-paid renewal bell failed for term ${successor.id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[termite-annual-renewal] late-paid renewal scan failed: ${err.message}`);
+  }
+}
+
 // Codex #4971 pre-push P1 — the module's one rule for an exclusion that
 // follows a staff bell: exclude only after a TRUTHY bell (a fresh or
 // deduplicated notification — either way staff have been told; the same
@@ -1218,9 +1338,15 @@ async function stampRenewalChargeSkip(successor, reason, conn = db) {
 // a second time, so an invoice that already carries delivery evidence
 // (chokepoint A) is not re-sent — only the bell is retried.
 async function deliverInvoiceAndStampSkip(successor, kind, explanation, conn) {
-  const delivered = await renewalInvoiceAlreadyDelivered(successor, conn)
-    ? { ok: true }
-    : await deliverRenewalInvoice(successor);
+  // Codex #4971 r4 P1: the pay-link chokepoint re-checks eligibility under
+  // the parent's gate right before sending — a cancel that landed during
+  // the saved-method lookup or the surcharge quote withdraws the successor
+  // there (its own bell) instead of mailing the bill.
+  const delivered = await deliverRenewalInvoice(successor, conn, `the renewal charge was skipped (${kind})`);
+  if (delivered?.code === 'delivery_refused') {
+    if (delivered.outcome === 'handled') await stampRenewalChargeSkip(successor, `${kind}:withheld`, conn);
+    return delivered;
+  }
   const deliveryNote = delivered?.ok
     ? 'The renewal invoice was sent with its pay link.'
     : `The renewal invoice could NOT be delivered (${delivered?.error || 'unknown error'}) — it will be retried automatically.`;
@@ -1399,11 +1525,14 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
     const verified = classifyVerifiedCharge(fresh, chargeResult);
     if (verified.status === 'paid') {
       logger.info(`[termite-annual-renewal] renewal charge succeeded for term ${successor.id} (invoice ${successor.prepay_invoice_id})`);
+      await clearChargeOutcomePending(successor, conn);
       return { status: 'charged' };
     }
     if (verified.status === 'processing') {
       // Bank ACH debit initiated — the payment webhook activates the
       // successor when it clears. Not a failure; nothing to bell or send.
+      // The write-ahead 'outcome_pending' stays: the paid sync clears it,
+      // and a debit that fails instead is followed through by leg 7d.
       logger.info(`[termite-annual-renewal] renewal charge pending (bank ACH) for term ${successor.id} (invoice ${successor.prepay_invoice_id})`);
       return { status: 'pending' };
     }
@@ -1483,19 +1612,15 @@ const FOLLOW_THROUGH_SENDS_PAY_LINK = new Set(['declined', 'refused']);
 // charge-failed notice goes out on the first run only.
 async function followThroughChargeOutcome(successor, kind, reason, conn, { first = false } = {}) {
   if (first) await recordChargeFollowThroughOwed(successor, kind, reason, conn);
-  // Codex #4971 pre-push P1: a follow-through that owes a pay link asks the
-  // same "may a recovery leg still deliver?" question as leg 7b first — on
-  // leg 7c's retries AND on the first run: that runs right after the charge
-  // released the parent's gate (decideAndCharge), which is exactly when a
-  // cancel or refund that queued behind the charge lands.
-  if (FOLLOW_THROUGH_SENDS_PAY_LINK.has(kind)) {
-    const settled = await followThroughRefusedDelivery(successor, conn);
-    if (settled !== null) return settled;
-  }
   let delivered = true;
   let bellKind = FOLLOW_THROUGH_BELL_KIND[kind] || 'ambiguous';
-  if (FOLLOW_THROUGH_SENDS_PAY_LINK.has(kind) && !(await renewalInvoiceAlreadyDelivered(successor, conn))) {
-    const delivery = await deliverRenewalInvoice(successor);
+  if (FOLLOW_THROUGH_SENDS_PAY_LINK.has(kind)) {
+    // The pay-link chokepoint asks leg 7b's "may a recovery leg still
+    // deliver?" question under the parent's gate — on leg 7c's retries AND
+    // on the first run, which runs right after the charge released that
+    // gate: exactly when a cancel or refund that queued behind it lands.
+    const delivery = await deliverRenewalInvoice(successor, conn, 'the renewal charge did not go through');
+    if (delivery?.code === 'delivery_refused') return settleWithheldFollowThrough(successor, delivery.outcome, conn);
     // A payer assigned since the charge: the homeowner pay link is not owed
     // (nothing was sent) — staff are told to route it to the payer instead.
     if (delivery?.code === 'payer_billed') bellKind = 'payer_billed';
@@ -1505,7 +1630,7 @@ async function followThroughChargeOutcome(successor, kind, reason, conn, { first
   if (first && kind === 'declined' && bellKind === 'declined') {
     // Best-effort customer notice — never blocks the bell/pay-link
     // fallback above, which are the load-bearing parts of this path.
-    await sendRenewalChargeFailedNotice(successor).catch((noticeErr) => {
+    await sendRenewalChargeFailedNotice(successor, conn).catch((noticeErr) => {
       logger.warn(`[termite-annual-renewal] charge-failed customer notice failed for term ${successor.id}: ${noticeErr.message}`);
     });
   }
@@ -1518,18 +1643,32 @@ async function followThroughChargeOutcome(successor, kind, reason, conn, { first
   return done;
 }
 
-// null: the pay link may go out. Otherwise the follow-through's result —
-// true once this leg is done (the successor withdrawn / left to the lapse,
-// marked handled so leg 7c stops), false when it must be retried.
-async function followThroughRefusedDelivery(successor, conn) {
-  const blocked = await refuseRecoveryDelivery(successor, conn, 'the renewal charge did not go through');
-  if (!blocked) return null;
-  if (blocked === 'handled') await markChargeFollowThroughHandled(successor, conn);
-  return blocked === 'handled';
+// The pay-link chokepoint withheld the link: true once this leg is done
+// (the successor withdrawn, left to the lapse, or no longer pending —
+// marked handled so leg 7c stops), false when it must be retried (the
+// chokepoint already rotated the row).
+async function settleWithheldFollowThrough(successor, outcome, conn) {
+  if (outcome !== 'handled') return false;
+  await markChargeFollowThroughHandled(successor, conn);
+  return true;
 }
 
 async function markChargeFollowThroughHandled(successor, conn) {
   await conn('annual_prepay_terms').where({ id: successor.id }).update({ renewal_charge_failure_handled_at: new Date() });
+}
+
+// A known success ends the write-ahead obligation (in-line, the paid sync's
+// activation hook, or leg 7d on a settled invoice). Only ever clears
+// 'outcome_pending' — a recorded failure kind is left to leg 7c.
+async function clearChargeOutcomePending(successor, conn = db) {
+  try {
+    await conn('annual_prepay_terms')
+      .where({ id: successor.id, renewal_charge_failure_kind: CHARGE_OUTCOME_PENDING })
+      .update({ renewal_charge_failure_kind: null, renewal_charge_failure_reason: null });
+  } catch (err) {
+    // Leg 7d clears it from the settled invoice on a later tick.
+    logger.warn(`[termite-annual-renewal] could not clear the pending charge outcome for term ${successor.id}: ${err.message}`);
+  }
 }
 
 async function recordChargeFollowThroughOwed(successor, kind, reason, conn) {
@@ -1591,6 +1730,13 @@ const RENEWAL_BELL_COPY = {
   // durably ineligible (declined, cancelled, refunded, switched) or its
   // grace window closed first. Its invoice was voided and the renewal term
   // cancelled; no station retrieval and no decision on the prior term.
+  // Codex #4971 r4 P1 (item 4b): the renewal payment landed AFTER the
+  // prior year stopped authorizing it (a refund, void or other change to
+  // the parent while the payment cleared). The renewal is left active.
+  paid_after_parent_ended: (successor, reason) => ({
+    title: 'Termite annual renewal — paid after the prior plan was cancelled or refunded',
+    body: `The renewal payment of $${Number(successor.prepay_amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual plan cleared after the prior plan stopped authorizing it (${reason}). The renewal was left ACTIVE and the customer was not messaged — refund it or honor it by hand.`,
+  }),
   renewal_withdrawn: (successor, reason) => ({
     title: 'Termite annual renewal — withdrawn, renewal invoice voided',
     body: `The renewal for customer ${successor.customer_id} (invoice for $${Number(successor.prepay_amount).toFixed(2)}) is being withdrawn without charging the card: ${reason}. Its renewal invoice is voided — even if it was already sent, it can no longer be paid — and the renewal term cancelled (a separate alert follows if the invoice cannot be voided). No station retrieval was requested, the prior term was left as it is, and the customer was not messaged — review the account and follow up by hand.`,
@@ -1694,29 +1840,76 @@ async function renewalPayerRouting(successor) {
   }
 }
 
-// Delivers the renewal invoice (with its pay link) exactly once per call —
-// best-effort; a delivery failure never blocks the bell above, which is
-// what actually gets a human looking at the account. THE homeowner
-// pay-link sender: every caller goes through here (the no-consent /
-// no-method / surcharge skip delivery, the charge follow-through for a
-// decline or refusal, leg 7b's recovery), and it sends NOTHING when the
-// bill now routes to a third-party payer ({ ok: false, code:
-// 'payer_billed' } — not a retryable delivery failure: the homeowner pay
-// link is simply not owed) or the payer cannot be verified ({ ok: false,
-// code: 'payer_unverifiable' } — transient, fail closed).
-async function deliverRenewalInvoice(successor) {
-  const payerRouting = await renewalPayerRouting(successor);
-  if (payerRouting) {
-    logger.warn(`[termite-annual-renewal] renewal pay link withheld for term ${successor.id}: ${payerRouting}`);
-    return { ok: false, code: payerRouting, error: payerRouting };
-  }
+// Codex #4971 r4 P1 — THE homeowner pay-link chokepoint. Everything that
+// puts the renewal pay link in front of the customer goes through
+// withPayLinkClearance: the renewal invoice (deliverRenewalInvoice — the
+// no-consent / no-method / surcharge skips, a charge follow-through's first
+// run and leg 7c, leg 7b's recovery) and the "your payment didn't go
+// through" notice (sendRenewalChargeFailedNotice). Every caller used to
+// check eligibility on its own and then send — a cancel or refund landing
+// in between (during the saved-method lookup, the surcharge quote, the
+// Stripe round trip) still got the bill sent. Now, IMMEDIATELY before
+// sending and under the PARENT's decision gate (withParentDecisionLock,
+// re-entrant), this:
+//   1. re-reads the successor — no longer payment_pending (paid, withdrawn,
+//      lapsed): nothing is owed, the leg is done ('handled');
+//   2. asks refuseRecoveryDelivery's question — a DURABLE refusal (parent
+//      durably ineligible, grace window closed) withdraws the successor
+//      (chokepoint C); a transient one (the parent's own invoice in
+//      dispute) bells and rotates the row;
+//   3. routes the payer — a third-party payer owns the bill ('payer_billed':
+//      the homeowner link is simply not owed) or the lookup failed
+//      ('payer_unverifiable': fail closed, retry later);
+// and only then sends. A refusal returns { ok: false, code:
+// 'delivery_refused', outcome: 'handled' | 'deferred', withheld: true } — the refusal
+// already belled / rotated, so the caller writes nothing beyond its own
+// done/retry marker. Sends the customer nothing on any refusal.
+async function withPayLinkClearance(successor, conn, context, send) {
+  const cleared = async () => {
+    const refused = await payLinkRefusal(successor, conn, context);
+    if (refused) {
+      logger.warn(`[termite-annual-renewal] renewal pay link withheld for term ${successor.id}: ${refused}`);
+      return { ok: false, withheld: true, code: 'delivery_refused', outcome: refused, error: `delivery refused (${refused})` };
+    }
+    const payerRouting = await renewalPayerRouting(successor);
+    if (payerRouting) {
+      logger.warn(`[termite-annual-renewal] renewal pay link withheld for term ${successor.id}: ${payerRouting}`);
+      return { ok: false, withheld: true, code: payerRouting, error: payerRouting };
+    }
+    return send();
+  };
+  if (!successor.renewed_from_term_id) return cleared();
+  return require('./annual-prepay-renewals').withParentDecisionLock(successor.renewed_from_term_id, cleared);
+}
+
+// null when the pay link may go out; otherwise 'handled' / 'deferred' (see
+// withPayLinkClearance).
+async function payLinkRefusal(successor, conn, context) {
+  const stillPending = await conn('annual_prepay_terms').where({ id: successor.id, status: PAYMENT_PENDING_STATUS }).first('id');
+  if (!stillPending) return 'handled';
+  return refuseRecoveryDelivery(successor, conn, context);
+}
+
+// Delivers the renewal invoice (with its pay link) at most once — through
+// the clearance above, and only while the invoice carries no delivery stamp
+// (chokepoint A: the customer is never texted the invoice twice; a stamped
+// invoice returns { ok: true, alreadyDelivered: true }). Best-effort: never
+// throws, and a delivery failure never blocks the caller's bell.
+async function deliverRenewalInvoice(successor, conn = db, context = 'the renewal invoice was due to be sent') {
+  return withPayLinkClearance(successor, conn, context, async () => {
+    if (await renewalInvoiceAlreadyDelivered(successor, conn)) return { ok: true, alreadyDelivered: true };
+    return sendRenewalInvoice(successor);
+  });
+}
+
+async function sendRenewalInvoice(successor) {
   try {
     const InvoiceService = require('./invoice');
     // Codex #4971 pre-push P1: firstDeliveryOnly — invoice.js's ATOMIC
-    // first-delivery guard. Every caller reads the invoice's delivery stamps
-    // before calling here, but a staff or scheduled send can complete in
-    // between; the claim flip itself (whereNull sent_at/sms_sent_at/
-    // email_sent_at) then refuses instead of texting the customer twice.
+    // first-delivery guard. The stamps were read just above, but a staff or
+    // scheduled send can complete in between; the claim flip itself
+    // (whereNull sent_at/sms_sent_at/email_sent_at) then refuses instead of
+    // texting the customer twice.
     const result = await InvoiceService.sendViaSMSAndEmail(successor.prepay_invoice_id, {
       firstDeliveryOnly: true,
       payUrlParams: {
@@ -1757,10 +1950,15 @@ async function alreadyDeliveredOutcome(successor, err) {
 // in .catch as a second layer). Sends only through the ordinary gated
 // customer-messaging pipeline — nothing here bypasses quiet hours,
 // opt-outs, or template enable state.
-async function sendRenewalChargeFailedNotice(successor) {
-  // It carries the homeowner pay URL — the same payer guard as the pay link.
-  const payerRouting = await renewalPayerRouting(successor);
-  if (payerRouting) return { sent: false, reason: payerRouting };
+async function sendRenewalChargeFailedNotice(successor, conn = db) {
+  // It carries the homeowner pay URL — the same clearance as the pay link
+  // (eligibility under the parent's gate, then the payer guard).
+  const outcome = await withPayLinkClearance(successor, conn, 'the renewal charge was declined', () => composeAndSendChargeFailedNotice(successor));
+  if (outcome?.withheld) return { sent: false, reason: outcome.code };
+  return outcome;
+}
+
+async function composeAndSendChargeFailedNotice(successor) {
   const customer = await db('customers').where({ id: successor.customer_id }).first();
   if (!customer?.phone) return { sent: false, reason: 'no_phone' };
   const invoice = await db('invoices').where({ id: successor.prepay_invoice_id }).first('token');
@@ -1913,6 +2111,14 @@ async function processGraceLapses({ conn = db, limit = 200, counts }) {
         // who was never actually warned.
         this.where(function attemptReachedStripe() {
           this.whereNotNull('t.renewal_charge_attempted_at')
+            // Codex #4971 r4 P1: a submitted charge presents the renewal
+            // only once its follow-through is not owed — an outcome still
+            // pending (write-ahead) or a decline whose pay link / bell has
+            // not verifiably gone out never told the customer anything.
+            // Twin of chargeFollowThroughOwed.
+            .where(function followThroughNotOwed() {
+              this.whereNull('t.renewal_charge_failure_kind').orWhereNotNull('t.renewal_charge_failure_handled_at');
+            })
             .whereExists(function reachedStripe() {
               whereAttemptSubmitted(this.select(1).from('stripe_invoice_charge_attempts as a').whereRaw('a.invoice_id = t.prepay_invoice_id'));
             });
@@ -2529,10 +2735,12 @@ async function bellAndVerifyDeliveryForNeverReachedStripe(successor, conn) {
   // evidence alone, independent of bell dedup — chokepoint A's "delivered"
   // (a sent_at/sms_sent_at/email_sent_at stamp), the SAME proof
   // processGraceLapses' own presented-evidence check uses.
-  const invoice = classifyRenewalInvoice(await conn('invoices').where({ id: successor.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS));
-  if (invoice.delivered) return true;
-  const delivery = await deliverRenewalInvoice(successor);
+  // (The pay-link chokepoint returns { ok, alreadyDelivered } for a stamped
+  // invoice without sending, and re-runs the refusal above under the
+  // parent's gate — a cancel landing after this leg's bell is caught there.)
+  const delivery = await deliverRenewalInvoice(successor, conn, 'the renewal charge was claimed but never reached Stripe');
   if (delivery?.ok) return delivery.alreadyDelivered ? true : 'delivered';
+  if (delivery?.code === 'delivery_refused') return delivery.outcome === 'handled';
   if (delivery?.code === 'payer_billed') {
     // A payer assigned since the mint owns this bill: nothing was sent to
     // the homeowner. Handled once staff are told to route it to the payer.
@@ -2624,7 +2832,12 @@ async function reconcileStuckSuccessors({ conn = db, limit = 200, counts }) {
       // A recorded charge outcome (renewal_charge_failure_kind) means the
       // result is KNOWN — not a crash gap. Leg 7c owns it, with that kind's
       // delivery rules (payer_refused / ambiguous never get a pay link).
-      .whereNull('t.renewal_charge_failure_kind')
+      // The write-ahead 'outcome_pending' is not a known outcome: with no
+      // submitted attempt (this scan's own NOT EXISTS below) it IS the
+      // crash gap this leg recovers.
+      .where(function outcomeNotRecorded() {
+        this.whereNull('t.renewal_charge_failure_kind').orWhere('t.renewal_charge_failure_kind', CHARGE_OUTCOME_PENDING);
+      })
       .whereNull('t.dispute_suspended_at')
       .whereNull('t.renewal_lapse_started_at')
       // Chokepoint A (Codex #4971 round-3 P1, item 7): only an attempt with
@@ -2742,6 +2955,8 @@ async function reconcileChargeFollowThrough({ conn = db, limit = 200, counts }) 
       .whereNotNull('t.annual_plan_version')
       .where('t.status', PAYMENT_PENDING_STATUS)
       .whereNotNull('t.renewal_charge_failure_kind')
+      // Not yet a known outcome — leg 7d resolves it first.
+      .whereNot('t.renewal_charge_failure_kind', CHARGE_OUTCOME_PENDING)
       .whereNull('t.renewal_charge_failure_handled_at')
       .whereNull('t.dispute_suspended_at')
       .whereNull('t.renewal_lapse_started_at')
@@ -2760,6 +2975,93 @@ async function reconcileChargeFollowThrough({ conn = db, limit = 200, counts }) 
   } catch (err) {
     logger.error(`[termite-annual-renewal] reconcile (charge follow-through) scan failed: ${err.message}`);
   }
+}
+
+// Leg 7d (Codex #4971 r4 P1, write-ahead outcome): a claimed charge whose
+// outcome was never recorded — the process died, or the outcome write
+// failed, after the Stripe submission — still reads 'outcome_pending'. Once
+// it is older than any charge still in flight could be, it is resolved from
+// DURABLE evidence only, and NEVER by charging again:
+//   - the successor left payment_pending, or its invoice is settled —
+//     nothing is owed: cleared;
+//   - an ACH debit still clearing — rotated (the paid sync clears it; a
+//     failed debit reads as a failed attempt on a later tick);
+//   - the submitted attempt failed at Stripe — recorded 'declined': leg 7c
+//     sends the pay link and bells (no customer notice from a recovery);
+//   - anything else (an attempt still claimed / ambiguous, or succeeded
+//     without a settled invoice) — recorded 'ambiguous': leg 7c bells staff
+//     to reconcile against Stripe, and never sends a pay link.
+// A pending outcome with NO submitted attempt on a pending successor is leg
+// 7b's crash gap (never reached Stripe), not this leg's. Runs before 7c, so
+// a resolved row is followed through in the same sweep.
+async function resolvePendingChargeOutcomes({ conn = db, limit = 200, counts }) {
+  try {
+    const cutoff = new Date(Date.now() - RECONCILE_NEVER_ATTEMPTED_AFTER_MS);
+    const candidates = await conn('annual_prepay_terms as t')
+      .whereNotNull('t.renewed_from_term_id')
+      .whereNotNull('t.annual_plan_version')
+      .where('t.renewal_charge_failure_kind', CHARGE_OUTCOME_PENDING)
+      .where('t.renewal_charge_attempted_at', '<', cutoff)
+      .where(function ownedByThisLeg() {
+        this.whereNot('t.status', PAYMENT_PENDING_STATUS)
+          .orWhereExists(function reachedStripe() {
+            whereAttemptSubmitted(this.select(1).from('stripe_invoice_charge_attempts as a').whereRaw('a.invoice_id = t.prepay_invoice_id'));
+          });
+      })
+      .orderByRaw('t.renewal_sweep_deferred_at asc nulls first')
+      .orderBy('t.renewal_charge_attempted_at', 'asc')
+      .select('t.*')
+      .limit(limit);
+    counts.reconcilePendingOutcomeScanned = candidates.length;
+    for (const successor of candidates) {
+      try {
+        if (await resolvePendingChargeOutcome(successor, conn)) counts.reconcilePendingOutcomeResolved += 1;
+      } catch (err) {
+        logger.error(`[termite-annual-renewal] reconcile (pending charge outcome) failed for successor ${successor.id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[termite-annual-renewal] reconcile (pending charge outcome) scan failed: ${err.message}`);
+  }
+}
+
+async function resolvePendingChargeOutcome(successor, conn) {
+  const verdict = await pendingChargeOutcomeVerdict(successor, conn);
+  if (verdict.kind === null) {
+    await clearChargeOutcomePending(successor, conn);
+    return true;
+  }
+  if (verdict.kind === 'in_motion') {
+    await stampSweepDeferred(successor, conn);
+    return false;
+  }
+  // Conditional on the pending marker: an in-line outcome that landed late
+  // is never overwritten.
+  const recorded = await conn('annual_prepay_terms')
+    .where({ id: successor.id, renewal_charge_failure_kind: CHARGE_OUTCOME_PENDING })
+    .update({
+      renewal_charge_failure_kind: verdict.kind,
+      renewal_charge_failure_reason: String(verdict.reason).slice(0, 500),
+      renewal_charge_failure_handled_at: null,
+    });
+  return Boolean(recorded);
+}
+
+async function pendingChargeOutcomeVerdict(successor, conn) {
+  if (successor.status !== PAYMENT_PENDING_STATUS) return { kind: null };
+  const invoice = await conn('invoices').where({ id: successor.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS);
+  if (invoice && (await invoiceSettledNotRevoked(conn, invoice))) return { kind: null };
+  if (classifyRenewalInvoice(invoice).processing) return { kind: 'in_motion' };
+  const attempt = await whereAttemptSubmitted(
+    conn('stripe_invoice_charge_attempts as a').where('a.invoice_id', successor.prepay_invoice_id),
+  ).orderBy('a.created_at', 'desc').first('a.status', 'a.error_message');
+  if (attempt?.status === 'failed') {
+    return { kind: 'declined', reason: `the charge failed at Stripe: ${attempt.error_message || 'no reason recorded'}` };
+  }
+  return {
+    kind: 'ambiguous',
+    reason: `the charge reached Stripe but its outcome was never recorded (attempt ${attempt?.status || 'unknown'})`,
+  };
 }
 
 // ---- entry point ----------------------------------------------------------
@@ -2781,6 +3083,8 @@ async function runTermiteAnnualRenewalSweep({ conn = db, limit = 200, today = et
     reconcileNeverAttemptedScanned: 0, reconcileSkipped: 0,
     reconcileNeverReachedStripeScanned: 0, reconcileNeverReachedStripeBelled: 0,
     reconcileFollowThroughScanned: 0,
+    reconcilePendingOutcomeScanned: 0, reconcilePendingOutcomeResolved: 0,
+    latePaidScanned: 0, latePaidBelled: 0,
     withdrawScanned: 0, withdrawn: 0,
     parentRenewedScanned: 0, parentRenewedStamped: 0,
   };
@@ -2795,7 +3099,9 @@ async function runTermiteAnnualRenewalSweep({ conn = db, limit = 200, today = et
   await processGraceLapses({ conn, limit, counts });
   await reconcileMissedLapseEffects({ conn, limit, counts });
   await reconcileStuckSuccessors({ conn, limit, counts });
+  await resolvePendingChargeOutcomes({ conn, limit, counts });
   await reconcileChargeFollowThrough({ conn, limit, counts });
+  await bellLatePaidRenewals({ conn, limit, counts });
   // Codex round-2 P1 backstop: an active, paid successor whose parent
   // never got its 'renewed' stamp (stampParentRenewedForSuccessor's own
   // savepoint failed and was swallowed to protect the successor's own
@@ -2813,10 +3119,17 @@ async function runTermiteAnnualRenewalSweep({ conn = db, limit = 200, today = et
 module.exports = {
   runTermiteAnnualRenewalSweep,
   termiteAnnualRenewalChargeLive,
+  renewalMoneyInMotionForParent,
+  onRenewalSuccessorPaid,
   _private: {
     mintRenewalSuccessor,
     decideAndCharge,
     resolveChargeEligibility,
+    resolvePendingChargeOutcomes,
+    bellLatePaidRenewals,
+    bellLatePaidRenewal,
+    clearChargeOutcomePending,
+    CHARGE_OUTCOME_PENDING,
     resolveLapseVoidEligibility,
     resolveParentEligibility,
     parentInvoicePaidAndNotFullyRefunded,

@@ -4759,7 +4759,11 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     // one extra annual_prepay_terms query ahead of the real write.
     const lockPeekQuery = query({ first: { annual_plan_version: 'v3' } });
     const termUpdateQuery = query({ returning: [decidedRow] });
-    const termQueue = [termSelectQuery, lockPeekQuery, termUpdateQuery];
+    // Codex #4971 r4 P1: a termite cancel first checks the parent's open
+    // renewal successors for money in motion (none here).
+    const ladderCheck = query({ rows: [] }); // the decline's own refusal ladder
+    const successorLookup = query({ rows: [] }); // recordDecision's chokepoint
+    const termQueue = [termSelectQuery, ladderCheck, lockPeekQuery, successorLookup, termUpdateQuery];
     const activityInsert = query();
     setDeclineQueues({
       annual_prepay_terms: termQueue,
@@ -4817,6 +4821,60 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
   // ORIGINAL term's installation_anchored_at being NULL no longer blocks
   // the decline. termite-annual-activation.js's anchor now tolerates the
   // resulting decided-lapse shape (its own suite covers that half).
+  // Codex #4971 r4 P1: no parent decision while an ACH renewal is clearing —
+  // the decline is refused under the gate, nothing is written, and the
+  // portal gets a reason it can explain.
+  test('refused while the renewal payment is still clearing — nothing written, a clear reason', async () => {
+    db.raw = jest.fn().mockResolvedValue({ rows: [{ previous: '0' }] });
+    const termRow = {
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
+      status: 'active', renewal_decision: null, term_end: '2027-05-20', prepay_amount: '450.00',
+    };
+    const termUpdateQuery = query({ returning: [] });
+    const successorLookup = query({ rows: [{ id: 'succ-1', prepay_invoice_id: 'inv-succ' }] });
+    const activityInsert = query();
+    setDeclineQueues({
+      annual_prepay_terms: [query({ first: termRow }), successorLookup, termUpdateQuery],
+      invoices: [query({ first: { status: 'processing' } })], // the renewal's ACH debit
+      activity_log: [activityInsert],
+    });
+
+    const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', today: '2026-09-26' });
+
+    expect(result).toEqual({ ok: false, reason: 'renewal_payment_clearing', termId: 'term-1' });
+    expect(successorLookup.where).toHaveBeenCalledWith({ renewed_from_term_id: 'term-1', status: 'payment_pending' });
+    expect(termUpdateQuery.update).not.toHaveBeenCalled();
+    expect(activityInsert.insert).not.toHaveBeenCalled();
+    const NotificationService = require('../services/notification-service');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test.each(['cancel', 'switch_plan'])('recordDecision(%s) on a termite parent whose renewal is clearing throws one actionable 409 (the admin routes surface it as-is); renew is never refused', async (action) => {
+    db.raw = jest.fn().mockResolvedValue({ rows: [{ previous: '0' }] });
+    const decisionUpdate = query({ returning: [] });
+    setDbQueues({
+      annual_prepay_terms: [
+        // A cancel first probes cancel_disposition support (columnInfo).
+        ...(action === 'cancel' ? [query({ columnInfo: { cancel_disposition: {} } })] : []),
+        query({ first: { annual_plan_version: 'v3' } }),
+        query({ rows: [{ id: 'succ-1', prepay_invoice_id: 'inv-succ' }] }),
+        decisionUpdate,
+      ],
+      invoices: [query({ first: { status: 'processing' } })],
+    });
+    await expect(AnnualPrepayRenewals.recordDecision({ termId: 'term-1', action })).rejects.toMatchObject({
+      code: 'renewal_money_in_motion',
+      statusCode: 409,
+      isOperational: true,
+      message: expect.stringContaining('still clearing (an ACH payment on the renewal invoice is still clearing) — wait for it to settle or refund it first'),
+    });
+    expect(decisionUpdate.update).not.toHaveBeenCalled();
+
+    const renewUpdate = query({ returning: [{ id: 'term-1', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({ annual_prepay_terms: [query({ first: { annual_plan_version: 'v3' } }), renewUpdate] });
+    await expect(AnnualPrepayRenewals.recordDecision({ termId: 'term-1', action: 'renew' })).resolves.toMatchObject({ renewal_decision: 'renew' });
+  });
+
   test('declines an ORIGINAL term still awaiting installation — no longer blocked, records normally', async () => {
     const termRow = {
       id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: null,
@@ -4825,7 +4883,9 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
     const termQueue = [
       query({ first: termRow }),
+      query({ rows: [] }), // the decline's renewal-clearing check: no open successor (Codex #4971 r4 P1)
       query({ first: { annual_plan_version: 'v3' } }), // recordDecision's termite lock peek
+      query({ rows: [] }), // recordDecision's own renewal-clearing check
       query({ returning: [decidedRow] }),
     ];
     setDeclineQueues({
@@ -4915,7 +4975,9 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     setDeclineQueues({
       annual_prepay_terms: [
         query({ first: termRow }),
+        query({ rows: [] }), // the decline's renewal-clearing check: no open successor (Codex #4971 r4 P1)
         query({ first: { annual_plan_version: 'v3' } }), // recordDecision's termite lock peek
+        query({ rows: [] }), // recordDecision's own renewal-clearing check
         query({ returning: [decidedRow] }),
       ],
       activity_log: [query()],
@@ -4943,7 +5005,9 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     setDeclineQueues({
       annual_prepay_terms: [
         query({ first: termRow }),
+        query({ rows: [] }), // the decline's renewal-clearing check: no open successor (Codex #4971 r4 P1)
         query({ first: { annual_plan_version: 'v3' } }), // recordDecision's termite lock peek
+        query({ rows: [] }), // recordDecision's own renewal-clearing check
         query({ returning: [decidedRow] }),
       ],
       activity_log: [activityInsert],
@@ -4972,7 +5036,9 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     setDeclineQueues({
       annual_prepay_terms: [
         query({ first: termRow }),
+        query({ rows: [] }), // the decline's renewal-clearing check: no open successor (Codex #4971 r4 P1)
         query({ first: { annual_plan_version: 'v3' } }), // recordDecision's termite lock peek
+        query({ rows: [] }), // recordDecision's own renewal-clearing check
         query({ returning: [decidedRow] }),
       ],
       activity_log: [activityInsert],
@@ -5067,7 +5133,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     const supersede = query({ returning: [decidedRow] });
     const activityInsert = query();
     setDeclineQueues({
-      annual_prepay_terms: [query({ first: termRow }), query({ first: null }), supersede, query({ first: null })],
+      annual_prepay_terms: [query({ first: termRow }), query({ first: null }), query({ rows: [] }) /* renewal-clearing check */, supersede, query({ first: null })],
       'annual_prepay_terms as t': [query({ first: { id: 'term-1' } })],
       activity_log: [activityInsert],
       customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
@@ -5094,7 +5160,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       status: 'renewed', renewal_decision: 'renew', term_end: '2027-05-20', prepay_amount: '450.00',
     };
     setDeclineQueues({
-      annual_prepay_terms: [query({ first: termRow }), query({ first: null })],
+      annual_prepay_terms: [query({ first: termRow }), query({ first: null }), query({ rows: [] }) /* renewal-clearing check */],
       'annual_prepay_terms as t': [query({ first: null })],
     });
 
@@ -5119,7 +5185,9 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       setDeclineQueues({
         annual_prepay_terms: [
           query({ first: termRow }),
+          query({ rows: [] }), // the decline's renewal-clearing check: no open successor (Codex #4971 r4 P1)
           query({ first: { annual_plan_version: 'v3' } }), // recordDecision's termite lock peek
+          query({ rows: [] }), // recordDecision's own renewal-clearing check
           query({ returning: [decided] }),
         ],
         activity_log: [query()],
@@ -5168,7 +5236,7 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       const write = query({ returning: [decided] });
       const activityInsert = query();
       setDeclineQueues({
-        annual_prepay_terms: [query({ first: unpaidTerm }), write],
+        annual_prepay_terms: [query({ first: unpaidTerm }), query({ rows: [] }) /* renewal-clearing check (Codex #4971 r4 P1) */, write],
         activity_log: [activityInsert],
         customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
       });
@@ -5216,7 +5284,9 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     setDeclineQueues({
       annual_prepay_terms: [
         query({ first: termRow }),
+        query({ rows: [] }), // the decline's renewal-clearing check: no open successor (Codex #4971 r4 P1)
         query({ first: { annual_plan_version: 'v3' } }), // recordDecision's termite lock peek
+        query({ rows: [] }), // recordDecision's own renewal-clearing check
         query({ returning: [decidedRow] }),
       ],
       activity_log: [query()],

@@ -3371,8 +3371,9 @@ const StripeService = {
     ]);
     if (mergedStamps.size) clearedMeta.stamped_refund_ids = [...mergedStamps];
 
-    try {
-      await db('payments')
+    // The ledger write itself — called inside the gated transaction below.
+    const stampRefundOnPayment = async (trx) => {
+      await trx('payments')
         .where({ id: paymentId })
         .update({
           status: isFullRefund ? 'refunded' : 'paid',
@@ -3395,6 +3396,17 @@ const StripeService = {
             : {}),
           metadata: JSON.stringify(clearedMeta),
         });
+    };
+    try {
+      // Chokepoint B (Codex #4971 r4 P1): the stamp runs in its own
+      // transaction whose FIRST lock is the renewal parent-decision gate —
+      // a full-refund stamp flips a termite parent's paid evidence, so it
+      // commits before the renewal charge's last parent re-check or waits
+      // out that charge's submission. No-op without a termite term.
+      await db.transaction(async (trx) => {
+        await require('./annual-prepay-renewals').acquireTermiteGateForCharge(trx, { paymentIds: [paymentId] });
+        await stampRefundOnPayment(trx);
+      });
     } catch (dbErr) {
       // Refund issued, ledger write failed. The pending attempt marker is
       // still set, so a retry replays the SAME idempotency key regardless
@@ -3420,7 +3432,12 @@ const StripeService = {
         const inv = await db('invoices').where({ stripe_payment_intent_id: payment.stripe_payment_intent_id }).first('id');
         if (inv) {
           const { returnAppliedCreditOnRefund } = require('./customer-credit');
-          await db.transaction((trx) => returnAppliedCreditOnRefund({ invoiceId: inv.id, createdBy: 'system:refund' }, trx));
+          // Gate first (Codex #4971 r4 P1): returning credit is money the
+          // renewal charge could consume — same entry rule as the stamp.
+          await db.transaction(async (trx) => {
+            await require('./annual-prepay-renewals').acquireTermiteGateForCharge(trx, { paymentIds: [paymentId] });
+            return returnAppliedCreditOnRefund({ invoiceId: inv.id, createdBy: 'system:refund' }, trx);
+          });
         }
       } catch (creditErr) {
         logger.error(`[stripe] refund credit-restore failed for payment ${paymentId}: ${creditErr.message}`);

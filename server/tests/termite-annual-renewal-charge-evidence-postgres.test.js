@@ -83,6 +83,7 @@ async function createScratchDb() {
     renewal_charge_failure_kind text,
     renewal_charge_failure_reason text,
     renewal_charge_failure_handled_at timestamptz,
+    renewal_late_paid_belled_at timestamptz,
     dispute_suspended_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
@@ -108,6 +109,7 @@ async function createScratchDb() {
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     invoice_id uuid NOT NULL,
     status text NOT NULL DEFAULT 'claimed',
+    error_message text,
     submitted_at timestamptz,
     stripe_payment_intent_id text,
     resolved_at timestamptz,
@@ -313,7 +315,16 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       await db('stripe_invoice_charge_attempts').insert({ invoice_id: sentInvoice.id, status: 'ambiguous', submitted_at: new Date() });
 
       const counts = freshCounts();
-      await Charge._private.reconcileStuckSuccessors({ conn: db, limit: 50, counts });
+      // The pay link clears under the parent's gate (Codex #4971 r4 P1);
+      // this suite's db mock has no pool — run the gate inline.
+      const Renewals2 = require('../services/annual-prepay-renewals');
+      const originalLock = Renewals2.withParentDecisionLock;
+      Renewals2.withParentDecisionLock = (_termId, fn) => fn();
+      try {
+        await Charge._private.reconcileStuckSuccessors({ conn: db, limit: 50, counts });
+      } finally {
+        Renewals2.withParentDecisionLock = originalLock;
+      }
 
       expect(counts.reconcileNeverReachedStripeScanned).toBe(1);
       expect(mockSendViaSMSAndEmail).toHaveBeenCalledTimes(1);
@@ -354,6 +365,145 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       const submitted = await claimedDraftSuccessor({ status: 'failed', submitted_at: new Date() });
       expect(await Charge._private.renewalWasPresented(db, bare)).toBe(false);
       expect(await Charge._private.renewalWasPresented(db, submitted)).toBe(true);
+    });
+  });
+
+  // Codex #4971 r4 P1 (write-ahead outcome): the fence claim persists
+  // renewal_charge_failure_kind = 'outcome_pending' before Stripe. A process
+  // that dies (or an outcome write that fails) after the submission leaves
+  // it there; leg 7d resolves it from DURABLE evidence only — never by
+  // charging again — and the grace lapse never counts a submitted attempt
+  // whose follow-through is still owed as "presented".
+  describe('r4 item 3: write-ahead charge outcome', () => {
+    const HOUR = 3600000;
+    // Inside its grace window (term_start 2 days ago): a pay link is still
+    // the right recovery for a decline.
+    async function pendingOutcome({ invoice = { status: 'draft' }, attempt, attemptedAgoMs = 2 * HOUR, fields = {} } = {}) {
+      const parent = await insertParent({ term_end: daysFromToday(-3) });
+      const inv = await insertInvoice(invoice);
+      const successor = await insertSuccessor(parent, inv, {
+        term_start: daysFromToday(-2), created_at: new Date(),
+        renewal_charge_attempted_at: new Date(Date.now() - attemptedAgoMs),
+        renewal_charge_failure_kind: 'outcome_pending',
+        ...fields,
+      });
+      if (attempt) await db('stripe_invoice_charge_attempts').insert({ invoice_id: inv.id, ...attempt });
+      return { successor, invoice: inv };
+    }
+    const kindOf = async (id) => (await db('annual_prepay_terms').where({ id }).first('renewal_charge_failure_kind', 'renewal_charge_failure_reason', 'renewal_charge_failure_handled_at', 'renewal_sweep_deferred_at'));
+    const sweepCounts = () => ({ reconcilePendingOutcomeScanned: 0, reconcilePendingOutcomeResolved: 0, reconcileFollowThroughScanned: 0 });
+
+    test('leg 7d resolves each stale pending outcome from durable evidence only — and never charges', async () => {
+      const settled = await pendingOutcome({ invoice: { status: 'paid', paid_at: new Date() }, attempt: { status: 'succeeded', submitted_at: new Date() } });
+      const declined = await pendingOutcome({ attempt: { status: 'failed', submitted_at: new Date(), resolved_at: new Date(), error_message: 'Your card was declined.' } });
+      const unknown = await pendingOutcome({ attempt: { status: 'claimed', stripe_payment_intent_id: 'pi_lost' } });
+      const clearing = await pendingOutcome({ invoice: { status: 'processing' }, attempt: { status: 'succeeded', submitted_at: new Date() } });
+      const fresh = await pendingOutcome({ attempt: { status: 'claimed', submitted_at: new Date() }, attemptedAgoMs: 5 * 60000 });
+      const neverReached = await pendingOutcome({ attempt: { status: 'failed' } }); // leg 7b's crash gap
+      const activated = await pendingOutcome({ attempt: { status: 'succeeded', submitted_at: new Date() }, fields: { status: 'active' } });
+
+      const counts = sweepCounts();
+      await Charge._private.resolvePendingChargeOutcomes({ conn: db, limit: 50, counts });
+
+      expect(counts.reconcilePendingOutcomeScanned).toBe(5); // not the fresh one, not 7b's
+      expect((await kindOf(settled.successor.id)).renewal_charge_failure_kind).toBeNull();
+      expect(await kindOf(declined.successor.id)).toMatchObject({
+        renewal_charge_failure_kind: 'declined', renewal_charge_failure_reason: expect.stringContaining('Your card was declined.'), renewal_charge_failure_handled_at: null,
+      });
+      expect(await kindOf(unknown.successor.id)).toMatchObject({ renewal_charge_failure_kind: 'ambiguous', renewal_charge_failure_handled_at: null });
+      expect(await kindOf(clearing.successor.id)).toMatchObject({ renewal_charge_failure_kind: 'outcome_pending', renewal_sweep_deferred_at: expect.any(Date) });
+      expect((await kindOf(fresh.successor.id)).renewal_charge_failure_kind).toBe('outcome_pending');
+      expect((await kindOf(neverReached.successor.id)).renewal_charge_failure_kind).toBe('outcome_pending');
+      expect((await kindOf(activated.successor.id)).renewal_charge_failure_kind).toBeNull();
+      expect(counts.reconcilePendingOutcomeResolved).toBe(4);
+
+      // Leg 7c then follows each resolved outcome through in the same sweep:
+      // the decline gets its pay link + bell; the unknown outcome a bell only.
+      const Renewals2 = require('../services/annual-prepay-renewals');
+      const originalLock = Renewals2.withParentDecisionLock;
+      Renewals2.withParentDecisionLock = (_termId, fn) => fn();
+      try {
+        await Charge._private.reconcileChargeFollowThrough({ conn: db, limit: 50, counts });
+      } finally {
+        Renewals2.withParentDecisionLock = originalLock;
+      }
+      expect(counts.reconcileFollowThroughScanned).toBe(2);
+      expect(mockSendViaSMSAndEmail).toHaveBeenCalledTimes(1);
+      expect(mockSendViaSMSAndEmail).toHaveBeenCalledWith(declined.invoice.id, expect.objectContaining({ firstDeliveryOnly: true }));
+      expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.any(String), expect.objectContaining({
+        dedupeKey: `termite-renewal-charge:${unknown.successor.id}:ambiguous`,
+      }));
+      expect((await kindOf(declined.successor.id)).renewal_charge_failure_handled_at).toBeInstanceOf(Date);
+      expect((await kindOf(unknown.successor.id)).renewal_charge_failure_handled_at).toBeInstanceOf(Date);
+    });
+
+    test('the grace lapse never counts a submitted attempt whose follow-through is still owed as "presented" (SQL and JS twins agree)', async () => {
+      const Renewals2 = require('../services/annual-prepay-renewals');
+      const originalLock = Renewals2.withParentDecisionLock;
+      Renewals2.withParentDecisionLock = (_termId, fn) => fn();
+      try {
+        // Past the grace deadline (term_start 34 days ago), undelivered draft,
+        // attempt genuinely submitted.
+        const make = async (fields) => {
+          const parent = await insertParent();
+          const invoice = await insertInvoice({ status: 'draft' });
+          const successor = await insertSuccessor(parent, invoice, { renewal_charge_attempted_at: new Date(Date.now() - 86400000), ...fields });
+          await db('stripe_invoice_charge_attempts').insert({ invoice_id: invoice.id, status: 'failed', submitted_at: new Date() });
+          return successor;
+        };
+        const pending = await make({ renewal_charge_failure_kind: 'outcome_pending' });
+        const owedDecline = await make({ renewal_charge_failure_kind: 'declined' });
+        const handled = await make({ renewal_charge_failure_kind: 'ambiguous', renewal_charge_failure_handled_at: new Date() });
+        const cleared = await make({});
+
+        for (const [row, presented] of [[pending, false], [owedDecline, false], [handled, true], [cleared, true]]) {
+          expect(await Charge._private.renewalWasPresented(db, row)).toBe(presented);
+        }
+        await Charge._private.processGraceLapses({ conn: db, limit: 50, counts: { graceScanned: 0, graceLapsed: 0, graceReconciliationDeferred: 0, graceRetiredSettled: 0 } });
+        const started = await db('annual_prepay_terms').whereNotNull('renewal_lapse_started_at').pluck('id');
+        expect(started.sort()).toEqual([handled.id, cleared.id].sort());
+      } finally {
+        Renewals2.withParentDecisionLock = originalLock;
+      }
+    });
+  });
+
+  // Codex #4971 r4 P1 (item 4b backstop, leg 7e): an ACTIVE, settled
+  // renewal behind a parent that no longer authorizes it gets its one
+  // late-paid alert even when the paid sync's own alert was lost — then is
+  // excluded; a parent that still authorizes it is left alone.
+  describe('r4 item 4b: leg 7e late-paid renewal alert', () => {
+    test('rings once for a renewal paid behind a cancelled or refunded parent, never for a renewed one, and excludes it once the alert persisted', async () => {
+      const paidRenewal = async (parentFields) => {
+        const parent = await insertParent(parentFields);
+        const invoice = await insertInvoice({ status: 'paid', paid_at: new Date() });
+        return insertSuccessor(parent, invoice, { status: 'active', term_start: daysFromToday(-34) });
+      };
+      const behindCancelled = await paidRenewal({ status: 'cancelled', renewal_decision: 'cancel' });
+      const refundedInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(), stripe_payment_intent_id: 'pi_parent_refunded' });
+      await db('payments').insert({ status: 'refunded', refund_status: 'full', stripe_payment_intent_id: 'pi_parent_refunded' });
+      const behindRefunded = await paidRenewal({ status: 'active', prepay_invoice_id: refundedInvoice.id });
+      const behindRenewed = await paidRenewal({ status: 'renewed', renewal_decision: 'renew' });
+
+      const counts = { latePaidScanned: 0, latePaidBelled: 0 };
+      await Charge._private.bellLatePaidRenewals({ conn: db, limit: 50, counts });
+
+      expect(counts.latePaidScanned).toBe(2); // the renewed parent never qualifies
+      expect(counts.latePaidBelled).toBe(2);
+      const keys = mockNotifyAdmin.mock.calls.map(([, , , opts]) => opts.dedupeKey).sort();
+      expect(keys).toEqual([
+        `termite-renewal-charge:${behindCancelled.id}:paid_after_parent_ended`,
+        `termite-renewal-charge:${behindRefunded.id}:paid_after_parent_ended`,
+      ].sort());
+      const stamped = await db('annual_prepay_terms').whereNotNull('renewal_late_paid_belled_at').pluck('id');
+      expect(stamped.sort()).toEqual([behindCancelled.id, behindRefunded.id].sort());
+      expect(stamped).not.toContain(behindRenewed.id);
+      expect(await db('annual_prepay_terms').whereIn('id', [behindCancelled.id, behindRefunded.id]).pluck('status')).toEqual(['active', 'active']);
+
+      const again = { latePaidScanned: 0, latePaidBelled: 0 };
+      await Charge._private.bellLatePaidRenewals({ conn: db, limit: 50, counts: again });
+      expect(again.latePaidScanned).toBe(0);
+      expect(mockNotifyAdmin).toHaveBeenCalledTimes(2);
     });
   });
 

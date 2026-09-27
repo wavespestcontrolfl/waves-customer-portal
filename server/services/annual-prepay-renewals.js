@@ -4351,6 +4351,13 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         ? await conn.transaction(reviveFromPending)
         : await reviveFromPending(conn);
       current = updated || term;
+      // Codex #4971 r4 P1: a termite renewal successor just activated — end
+      // its write-ahead charge outcome and alert staff if it was paid behind
+      // a parent that no longer authorizes it. Best-effort; the hook itself
+      // acts only on a termite successor, on the root handle AFTER the
+      // activation committed (a caller's transaction is never touched — the
+      // sweep's legs 7d / 7e cover that shape).
+      await require('./termite-annual-renewal-charge').onRenewalSuccessorPaid(updated, conn);
     } else if (nextStatus === 'active' && term.status === 'cancelled') {
       // Lost-dispute revival (see the marker-gated select above). The
       // conditional WHERE keeps it race-safe and replay-idempotent; a miss
@@ -8825,6 +8832,13 @@ async function acquireParentDecisionXactLock(trx, termId) {
 //   - admin-invoices.js: remove-flag and reverse-prepaid
 //   - declineTermiteAnnualRenewal's own transaction
 //   - recordDecision on the root handle (writeDecisionUnderTermiteLock)
+//   - Codex #4971 r4 P1, every refund / chargeback writer that can revoke a
+//     parent's paid evidence (acquireTermiteGateForCharge /
+//     acquireTermiteGateForStatement below): charge.refunded's generic
+//     transaction, StripeService.refund's stamp and credit restore (the
+//     admin refund route), both dispute.closed(lost) invoice reopens, and
+//     the statement money lock + cascade reversal (statement refunds and
+//     chargebacks). syncTermForRefundedPayment already gates (move 9).
 async function acquireTermiteGateAtEntry(trx, { termIds = [], invoiceIds = [], customerIds = [] } = {}) {
   const ids = await termiteGateKeys(trx, { termIds, invoiceIds, customerIds });
   const held = heldParentDecisionLockStore.getStore();
@@ -8832,6 +8846,85 @@ async function acquireTermiteGateAtEntry(trx, { termIds = [], invoiceIds = [], c
     if (termId !== held) await acquireParentDecisionXactLock(trx, termId);
   }
   return ids;
+}
+
+// Codex #4971 r4 P1 (refund / chargeback writers): a refund or a lost
+// chargeback names a Stripe charge / PaymentIntent (or a payments row), never
+// a term — and it is exactly the write that flips the charge's parent
+// evidence (parentInvoicePaidAndNotFullyRefunded: a payments row stamped
+// 'refunded' / refund_status 'full', or the invoice leaving paid). Resolve
+// every invoice and customer that money touches — its payments rows
+// (invoice_id, a combined share's metadata.invoice_id, customer_id) and the
+// invoices it settled — with plain reads, then take the gate on them as the
+// transaction's FIRST lock. The customer keys cover the credit side: a full
+// refund returns applied account credit to a balance the renewal charge
+// could otherwise consume mid-flight. Termite-only (no termite term on those
+// invoices or customers -> nothing taken). Entry points: charge.refunded's
+// generic transaction, StripeService.refund's stamp and credit restore
+// (the admin refund route), and the lost-dispute invoice reopens.
+async function acquireTermiteGateForCharge(trx, { chargeId = null, paymentIntentId = null, paymentIds = [] } = {}) {
+  const inputs = await chargeGateInputs(trx, {
+    chargeId: chargeId || null,
+    paymentIntentId: paymentIntentId || null,
+    paymentIds: paymentIds.filter(Boolean).map(String),
+  });
+  return acquireTermiteGateAtEntry(trx, inputs);
+}
+
+function paymentMetadataInvoiceId(raw) {
+  try {
+    const meta = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return meta && meta.invoice_id ? String(meta.invoice_id) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function chargeGateInputs(trx, { chargeId, paymentIntentId, paymentIds }) {
+  if (!chargeId && !paymentIntentId && !paymentIds.length) return { invoiceIds: [], customerIds: [] };
+  const invoiceIds = new Set();
+  const customerIds = new Set();
+  const add = (set, value) => { if (value) set.add(String(value)); };
+  // to_jsonb: payments.invoice_id is read column-tolerantly — this runs at
+  // the entry of Stripe money writers, some against schemas without it.
+  const payments = await trx('payments as p')
+    .where(function paymentKeys() {
+      if (chargeId) this.orWhere('p.stripe_charge_id', chargeId);
+      if (paymentIntentId) this.orWhere('p.stripe_payment_intent_id', paymentIntentId);
+      if (paymentIds.length) this.orWhereIn('p.id', paymentIds);
+    })
+    .select(trx.raw("to_jsonb(p) ->> 'invoice_id' AS invoice_id"), 'p.customer_id', 'p.metadata');
+  for (const row of payments || []) {
+    add(invoiceIds, row.invoice_id);
+    add(invoiceIds, paymentMetadataInvoiceId(row.metadata));
+    add(customerIds, row.customer_id);
+  }
+  if (chargeId || paymentIntentId) {
+    const invoices = await trx('invoices')
+      .where(function settledBy() {
+        if (chargeId) this.orWhere('stripe_charge_id', chargeId);
+        if (paymentIntentId) this.orWhere('stripe_payment_intent_id', paymentIntentId);
+      })
+      .select('id', 'customer_id');
+    for (const row of invoices || []) {
+      add(invoiceIds, row.id);
+      add(customerIds, row.customer_id);
+    }
+  }
+  return { invoiceIds: [...invoiceIds], customerIds: [...customerIds] };
+}
+
+// Codex #4971 r4 P1: the payer-statement money writers' entry gate. A termite
+// annual invoice minted at estimate acceptance does not skip statement
+// accrual, so a NET-terms payer's statement can carry a termite PARENT's
+// prepay invoice as a child — and a statement refund / chargeback reverses
+// the cascade (child paid -> draft), revoking the parent's paid evidence.
+// withStatementMoneyLock and reverseStatementCascadeForDispute take this
+// BEFORE the statement money advisory lock.
+async function acquireTermiteGateForStatement(trx, statementId) {
+  if (!statementId) return [];
+  const invoiceIds = await trx('invoices').where({ payer_statement_id: statementId }).pluck('id');
+  return acquireTermiteGateAtEntry(trx, { invoiceIds: invoiceIds || [] });
 }
 
 async function termiteGateKeys(trx, { termIds, invoiceIds, customerIds }) {
@@ -8858,14 +8951,13 @@ async function termiteGateKeys(trx, { termIds, invoiceIds, customerIds }) {
   return [...new Set(rows.map((row) => String(row.id)))].sort();
 }
 
-// The shared "does this write need the gate at all" test: a termite term
-// (annual_plan_version set) not already held by this async tree's own
-// withParentDecisionLock.
-async function termiteLockNeeded(conn, termId) {
+// The shared "is this a termite term" peek (annual_plan_version set) — a
+// termite decision takes the gate unless this async tree's own
+// withParentDecisionLock already holds it.
+async function isTermiteTerm(conn, termId) {
   if (!termId) return false;
   const peek = await conn('annual_prepay_terms').where({ id: termId }).first('annual_plan_version');
-  if (!peek?.annual_plan_version) return false;
-  return heldParentDecisionLockStore.getStore() !== String(termId);
+  return Boolean(peek?.annual_plan_version);
 }
 
 // recordDecision's wrapper around the shared gate above: a decision that
@@ -8877,11 +8969,13 @@ async function termiteLockNeeded(conn, termId) {
 // savepoint) that takes the xact lock first. The charge path's session lock
 // and this xact lock share one Postgres lock table, so they mutually
 // exclude on the SAME key.
+// runUpdate receives { termite } — the one peek answers both questions.
 async function writeDecisionUnderTermiteLock(conn, termId, runUpdate) {
-  if (!(await termiteLockNeeded(conn, termId))) return runUpdate(conn);
+  const termite = await isTermiteTerm(conn, termId);
+  if (!termite || heldParentDecisionLockStore.getStore() === String(termId)) return runUpdate(conn, { termite });
   return conn.transaction(async (trx) => {
     await acquireParentDecisionXactLock(trx, termId);
-    return runUpdate(trx);
+    return runUpdate(trx, { termite });
   });
 }
 async function withParentDecisionLock(termId, fn, { timeoutMs = PARENT_DECISION_LOCK_TIMEOUT_MS } = {}) {
@@ -8988,12 +9082,49 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
     return term || null;
   };
 
+  // Codex #4971 r4 P1: a cancel / switch refused while a renewal payment is
+  // clearing — checked INSIDE the gate, right before the write.
+  const guardedUpdate = async (t, { termite }) => {
+    if (termite && DECISIONS_REFUSED_WHILE_RENEWAL_CLEARING.has(action)) await refuseWhileRenewalClearing(t, termId);
+    return runUpdate(t);
+  };
+
   // Codex round-7 P1 (redesigned per pre-push audit P1 — the original
   // design wrapped EVERY program's recordDecision in a dedicated-connection
   // session lock, doubling pool use even when this write already runs
   // inside an open transaction, e.g. stampParentRenewedForSuccessor's
   // `conn: t`) — see writeDecisionUnderTermiteLock's own doc.
-  return writeDecisionUnderTermiteLock(conn, termId, runUpdate);
+  return writeDecisionUnderTermiteLock(conn, termId, guardedUpdate);
+}
+
+// Codex #4971 r4 P1 — no parent decision while an ACH renewal is clearing.
+// A termite parent decided cancel / switch_plan while its renewal successor
+// has money in motion (an ACH debit still clearing, a charge submitted to
+// Stripe and not resolved, a charge reconciliation pending, or a renewal
+// invoice already paid but not yet activated — the charge module's
+// renewalMoneyInMotion, the SAME test the successor withdrawal uses) would
+// strand that money: the withdrawal must defer on it, so the renewal would
+// settle behind a cancelled plan. Every parent-decision writer that can
+// cancel or switch a termite parent refuses instead, under the gate:
+//   - recordDecision (here): the admin decide route, admin cancel plan's
+//     decideTermCancel (whose preflight already refuses a payable pending
+//     renewal invoice), the grace lapse's decideParentLapse (after the
+//     successor's invoice was voided — nothing left in motion); throws an
+//     operational 409 (err.code 'renewal_money_in_motion') that the admin
+//     routes surface as-is;
+//   - the portal decline (every branch — live, unpaid, superseded renew):
+//     declineRefusalReason refuses up front, as 'renewal_payment_clearing',
+//     inside the decline's own gated transaction.
+const DECISIONS_REFUSED_WHILE_RENEWAL_CLEARING = new Set(['cancel', 'switch_plan']);
+// Termite terms only (recordDecision's gate peek decides).
+async function refuseWhileRenewalClearing(conn, termId) {
+  const reason = await require('./termite-annual-renewal-charge').renewalMoneyInMotionForParent(conn, termId);
+  if (!reason) return;
+  const err = new Error(`The renewal payment is still clearing (${reason}) — wait for it to settle or refund it first.`);
+  err.code = 'renewal_money_in_motion';
+  err.statusCode = 409;
+  err.isOperational = true;
+  throw err;
 }
 
 // ADMIN-BUG-R18: Cancel plan re-deciding a term whose cancel decision is
@@ -9709,6 +9840,19 @@ async function declineReplayResult(term, trx) {
 }
 
 // The refusal shape for each termiteDeclineBlockedReason.
+// The decline's refusal ladder: the term's own shape and dates
+// (termiteDeclineBlockedReason), then — Codex #4971 r4 P1 — a renewal
+// payment still clearing on this term's successor ('renewal_payment_
+// clearing': the decline waits until it settles). Read inside the
+// decline's transaction, which already holds the gate for the customer's
+// termite terms, so no renewal charge can start in between.
+async function declineRefusalReason(term, today, options, trx) {
+  const blocked = termiteDeclineBlockedReason(term, today, options);
+  if (blocked) return blocked;
+  const clearing = await require('./termite-annual-renewal-charge').renewalMoneyInMotionForParent(trx, term.id);
+  return clearing ? 'renewal_payment_clearing' : null;
+}
+
 function declineRefusal(term, reason) {
   const detail = {
     already_decided: { decision: term.renewal_decision },
@@ -9751,7 +9895,7 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
     if (replay) return replay;
     const renewDecided = term.status === 'renewed' && term.renewal_decision === 'renew';
     const hasSuccessor = renewDecided ? await hasSuccessorTerm(term.id, trx) : true;
-    const blocked = termiteDeclineBlockedReason(term, today, { hasSuccessor });
+    const blocked = await declineRefusalReason(term, today, { hasSuccessor }, trx);
     if (blocked) return declineRefusal(term, blocked);
 
     // A superseded staff renew must still be a PAID year — never turn a
@@ -9892,6 +10036,8 @@ module.exports = {
   // cancelled-service void, the dispute webhooks, admin-invoices' remove-
   // flag and reverse-prepaid routes) take it at their transaction entry.
   acquireTermiteGateAtEntry,
+  acquireTermiteGateForCharge,
+  acquireTermiteGateForStatement,
   // Termite renewal grace window (P1-2 / P2-4): the ONE shared cutoff
   // between coveredTermsAsOf's grace-coverage branch (here) and
   // termite-annual-renewal-charge.js's own grace-lapse pass.

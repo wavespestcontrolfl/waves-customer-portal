@@ -491,6 +491,143 @@ postgres('parent-decision lock — real Postgres advisory-lock mechanics', () =>
     }, 20000);
   });
 
+  // Codex #4971 r4 P1 — the refund / chargeback writers' entry gate. A
+  // refund names a Stripe charge / PaymentIntent / payments row, never a
+  // term: the gate keys must be resolved from the money (the invoice it
+  // settled, a combined share's metadata.invoice_id, the customer whose
+  // credit it returns, a payer statement's children) — against the REAL
+  // schema, where payments carries no invoice_id column at all.
+  describe('(C) refund writers resolve the gate from the money and WAIT on a renewal charge in flight', () => {
+    const { randomUUID } = require('crypto');
+    const chargeIds = [];
+    const statementIds = [];
+    const payerIds = [];
+    let acquireTermiteGateForCharge;
+    let acquireTermiteGateForStatement;
+
+    beforeAll(() => {
+      ({ acquireTermiteGateForCharge, acquireTermiteGateForStatement } = require('../services/annual-prepay-renewals'));
+    });
+
+    afterEach(async () => {
+      if (chargeIds.length) await db('payments').whereIn('stripe_charge_id', chargeIds.splice(0)).del();
+      if (statementIds.length) {
+        await db('invoices').whereIn('payer_statement_id', statementIds).update({ payer_statement_id: null });
+        await db('payer_statements').whereIn('id', statementIds.splice(0)).del();
+      }
+      if (payerIds.length) await db('payers').whereIn('id', payerIds.splice(0)).del();
+    });
+
+    const insertPayment = async ({ customerId = null, metadata = {}, chargeId = `ch_${randomUUID().slice(0, 12)}`, paymentIntentId = null }) => {
+      chargeIds.push(chargeId);
+      await db('payments').insert({
+        customer_id: customerId,
+        payment_date: '2026-09-27',
+        amount: 100,
+        status: 'paid',
+        stripe_charge_id: chargeId,
+        stripe_payment_intent_id: paymentIntentId,
+        metadata: JSON.stringify(metadata),
+      });
+      return chargeId;
+    };
+
+    const gatedWrite = (resolve) => () => db.transaction(async (trx) => resolve(trx));
+
+    test('a charge whose invoice is the termite parent\'s prepay invoice (by the invoice\'s own charge id) waits, then proceeds keyed on the parent', async () => {
+      const { termId, invoiceId } = await insertTerm({ annualPlanVersion: 'v3', status: 'active', withInvoice: true });
+      const chargeId = `ch_${randomUUID().slice(0, 12)}`;
+      await db('invoices').where({ id: invoiceId }).update({ stripe_charge_id: chargeId });
+      const { result, order, sawAdvisoryWait } = await raceWriteAgainstCharge(termId,
+        gatedWrite((trx) => acquireTermiteGateForCharge(trx, { chargeId })));
+      expect(sawAdvisoryWait).toBe(true);
+      expect(order).toEqual(['charge-holds-lock', 'charge-releases', 'write-runs']);
+      expect(result).toEqual([String(termId)]);
+    });
+
+    test('a combined share (metadata.invoice_id) and a PaymentIntent-only lookup both resolve the parent', async () => {
+      const { termId, invoiceId } = await insertTerm({ annualPlanVersion: 'v3', status: 'active', withInvoice: true });
+      const chargeId = await insertPayment({ metadata: { combined_payment: true, invoice_id: invoiceId } });
+      const byCharge = await raceWriteAgainstCharge(termId,
+        gatedWrite((trx) => acquireTermiteGateForCharge(trx, { chargeId })));
+      expect(byCharge.sawAdvisoryWait).toBe(true);
+      expect(byCharge.result).toEqual([String(termId)]);
+
+      const paymentIntentId = `pi_${randomUUID().slice(0, 12)}`;
+      await db('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: paymentIntentId });
+      const byPi = await db.transaction((trx) => acquireTermiteGateForCharge(trx, { paymentIntentId }));
+      expect(byPi).toEqual([String(termId)]);
+    });
+
+    test('the admin refund route (a payments row id on an UNRELATED invoice of the same customer) still waits — the credit it returns is money the charge could consume', async () => {
+      const { termId } = await insertTerm({ annualPlanVersion: 'v3', status: 'active', withInvoice: true });
+      const term = await db('annual_prepay_terms').where({ id: termId }).first('customer_id');
+      const chargeId = await insertPayment({ customerId: term.customer_id });
+      const payment = await db('payments').where({ stripe_charge_id: chargeId }).first('id');
+      const { result, sawAdvisoryWait } = await raceWriteAgainstCharge(termId,
+        gatedWrite((trx) => acquireTermiteGateForCharge(trx, { paymentIds: [payment.id] })));
+      expect(sawAdvisoryWait).toBe(true);
+      expect(result).toEqual([String(termId)]);
+    });
+
+    test('a charge touching no termite term takes nothing and never waits', async () => {
+      const plain = await insertTerm({ annualPlanVersion: null, status: 'active', withInvoice: true });
+      const plainTerm = await db('annual_prepay_terms').where({ id: plain.termId }).first('customer_id');
+      const chargeId = await insertPayment({ customerId: plainTerm.customer_id, metadata: { invoice_id: plain.invoiceId } });
+      const { result, sawAdvisoryWait, elapsed } = await raceWriteAgainstCharge(plain.termId,
+        gatedWrite((trx) => acquireTermiteGateForCharge(trx, { chargeId })));
+      expect(result).toEqual([]);
+      expect(sawAdvisoryWait).toBe(false);
+      expect(elapsed).toBeLessThan(250);
+      expect(await db.transaction((trx) => acquireTermiteGateForCharge(trx, {}))).toEqual([]);
+    });
+
+    test('a payer statement whose child is the termite parent\'s prepay invoice gates its refund / chargeback reversal', async () => {
+      const { termId, invoiceId } = await insertTerm({ annualPlanVersion: 'v3', status: 'active', withInvoice: true });
+      const [payer] = await db('payers').insert({ display_name: 'Gate Test Payer' }).returning('id');
+      payerIds.push(payer.id);
+      const [statement] = await db('payer_statements').insert({
+        payer_id: payer.id, period_start: '2026-08-01', period_end: '2026-08-31', terms_snapshot: 'net30', token: randomUUID(),
+      }).returning('id');
+      statementIds.push(statement.id);
+      await db('invoices').where({ id: invoiceId }).update({ payer_statement_id: statement.id });
+      const { result, sawAdvisoryWait } = await raceWriteAgainstCharge(termId,
+        gatedWrite((trx) => acquireTermiteGateForStatement(trx, statement.id)));
+      expect(sawAdvisoryWait).toBe(true);
+      expect(result).toEqual([String(termId)]);
+    });
+  });
+
+  // Codex #4971 r4 P1 — no parent decision while an ACH renewal is clearing:
+  // a cancel / switch of a termite parent is refused (under the gate, before
+  // the write) while its renewal successor's invoice is still processing;
+  // once it is no longer in motion the same cancel goes through.
+  test('(D) a termite parent cannot be cancelled or switched while its renewal payment is clearing — one actionable 409; renew is unaffected', async () => {
+    const { randomUUID } = require('crypto');
+    const { termId } = await insertTerm({ annualPlanVersion: 'v3', status: 'active', withInvoice: true });
+    const parent = await db('annual_prepay_terms').where({ id: termId }).first('customer_id');
+    const [renewalInvoice] = await db('invoices').insert({
+      customer_id: parent.customer_id, token: randomUUID(), invoice_number: `LOCK-R-${randomUUID().slice(0, 8)}`, status: 'processing',
+    }).returning('id');
+    await db('annual_prepay_terms').insert({
+      customer_id: parent.customer_id, term_start: '2027-01-01', term_end: '2027-12-31', status: 'payment_pending',
+      annual_plan_version: 'v3', renewed_from_term_id: termId, prepay_invoice_id: renewalInvoice.id,
+    });
+
+    for (const action of ['cancel', 'switch_plan']) {
+      await expect(recordDecision({ termId, action })).rejects.toMatchObject({
+        code: 'renewal_money_in_motion', statusCode: 409,
+        message: expect.stringContaining('wait for it to settle or refund it first'),
+      });
+    }
+    expect(await db('annual_prepay_terms').where({ id: termId }).first('status', 'renewal_decision')).toEqual({ status: 'active', renewal_decision: null });
+
+    // The debit failed back to an open invoice — nothing in motion: the cancel is allowed.
+    await db('invoices').where({ id: renewalInvoice.id }).update({ status: 'sent' });
+    await expect(recordDecision({ termId, action: 'cancel' })).resolves.toMatchObject({ renewal_decision: 'cancel' });
+    expect(db.client.pool.numUsed()).toBe(0);
+  });
+
   // Codex round-7 P1 (2nd audit round) — REENTRANCY: chargeInvoiceWithSavedCard's
   // own card-on-file success path calls syncTermForInvoicePayment
   // synchronously, which for a termite renewal successor walks straight

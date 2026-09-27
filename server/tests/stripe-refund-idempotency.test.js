@@ -26,6 +26,7 @@ describe('StripeService.refund', () => {
   let dbMock;
   let paymentRow;
   let updatePayments;
+  let mockGateForCharge;
 
   function loadService() {
      
@@ -45,6 +46,7 @@ describe('StripeService.refund', () => {
       status: 'paid',
     };
     updatePayments = jest.fn().mockResolvedValue(1);
+    mockGateForCharge = jest.fn(async () => []);
 
     stripeClient = {
       refunds: {
@@ -86,6 +88,7 @@ describe('StripeService.refund', () => {
     }));
     jest.doMock('../services/annual-prepay-renewals', () => ({
       syncTermForRefundedPayment: jest.fn(async () => undefined),
+      acquireTermiteGateForCharge: mockGateForCharge,
     }));
     jest.doMock('../services/customer-credit', () => ({
       returnAppliedCreditOnRefund: jest.fn(async () => undefined),
@@ -254,6 +257,14 @@ describe('StripeService.refund', () => {
       status: 'refunded',
       refund_amount: 100,
     }));
+    // Codex #4971 r4 P1: the refunded stamp runs inside a transaction whose
+    // FIRST lock is the renewal parent-decision gate (keyed off this
+    // payment), so it can never land mid-way through a renewal charge's
+    // re-check-then-submit window.
+    expect(mockGateForCharge).toHaveBeenCalledWith(dbMock, { paymentIds: ['pay-1'] });
+    const stampCall = updatePayments.mock.calls.findIndex(([patch]) => patch.status === 'refunded');
+    expect(mockGateForCharge.mock.invocationCallOrder[0])
+      .toBeLessThan(updatePayments.mock.invocationCallOrder[stampCall]);
   });
 
   test('omitted-amount refund is fully refunded by definition (out-of-band partials included)', async () => {

@@ -1082,6 +1082,38 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect((await db('annual_prepay_terms').where({ id: current.term.id }).first()).status).toBe('active');
     expect(await billingModeOf(db, current.customerId)).toBe('annual_prepay');
   });
+  // Codex #4971 r4 P1: the REAL paid sync (pending -> active) of a termite
+  // renewal successor ends its write-ahead charge outcome, and — its parent
+  // cancelled while the payment cleared — leaves it ACTIVE with ONE staff
+  // alert to refund or honor it. The parent is not touched.
+  test('a renewal successor paid behind a cancelled parent: activated, pending outcome cleared, one late-paid alert', async () => {
+    const { db, Renewals, notifyAdmin } = await load();
+    await db.raw('ALTER TABLE invoices ADD COLUMN IF NOT EXISTS scheduled_service_id uuid, ADD COLUMN IF NOT EXISTS line_items jsonb, ADD COLUMN IF NOT EXISTS annual_prepay_covered_term_id uuid, ADD COLUMN IF NOT EXISTS payer_id uuid, ADD COLUMN IF NOT EXISTS payment_recorded_at timestamptz, ADD COLUMN IF NOT EXISTS notes text, ADD COLUMN IF NOT EXISTS sent_at timestamptz, ADD COLUMN IF NOT EXISTS sms_sent_at timestamptz, ADD COLUMN IF NOT EXISTS email_sent_at timestamptz, ADD COLUMN IF NOT EXISTS payer_statement_id uuid, ADD COLUMN IF NOT EXISTS credit_applied numeric, ADD COLUMN IF NOT EXISTS total numeric, ADD COLUMN IF NOT EXISTS amount_paid numeric, ADD COLUMN IF NOT EXISTS updated_at timestamptz, ADD COLUMN IF NOT EXISTS annual_prepay_term_id uuid');
+    await db.raw('ALTER TABLE scheduled_services ADD COLUMN IF NOT EXISTS service_id uuid, ADD COLUMN IF NOT EXISTS pending_setup_fee numeric, ADD COLUMN IF NOT EXISTS recurring_parent_id uuid');
+    await db.raw('ALTER TABLE annual_prepay_terms ADD COLUMN IF NOT EXISTS renewal_charge_failure_kind text, ADD COLUMN IF NOT EXISTS renewal_charge_failure_reason text');
+    await require('../models/migrations/20260927040000_termite_annual_renewal_late_paid_bell_marker').up(db);
+    const fx = await paidTermAwaitingAnchor(db, { installedMonthsAgo: 2, declined: false });
+    // The prior year, cancelled while the renewal's ACH debit cleared.
+    const [parent] = await db('annual_prepay_terms').insert({
+      customer_id: fx.customerId, term_start: addMonths(fx.today, -26), term_end: addMonths(fx.today, -14),
+      status: 'cancelled', renewal_decision: 'cancel', annual_plan_version: 'v3',
+    }).returning('*');
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({
+      status: 'payment_pending', renewed_from_term_id: parent.id, renewal_charge_failure_kind: 'outcome_pending',
+    });
+    await db('invoices').where({ id: fx.term.prepay_invoice_id }).update({ status: 'paid', paid_at: new Date() });
+
+    await Renewals.syncTermForInvoicePayment(fx.term.prepay_invoice_id, db);
+
+    const after = await db('annual_prepay_terms').where({ id: fx.term.id }).first();
+    expect(after.status).toBe('active');
+    expect(after.renewal_charge_failure_kind).toBeNull();
+    expect(after.renewal_late_paid_belled_at).toBeInstanceOf(Date);
+    const latePaid = notifyAdmin.mock.calls.filter(([, , , opts]) => opts?.dedupeKey === `termite-renewal-charge:${fx.term.id}:paid_after_parent_ended`);
+    expect(latePaid).toHaveLength(1);
+    expect(await db('annual_prepay_terms').where({ id: parent.id }).first()).toMatchObject({ status: 'cancelled', renewal_decision: 'cancel' });
+  });
+
   // Codex #4940 r11 P1: opening the bell marks the task READ — that is not
   // the retrieval. A read task still gets the date correction.
   test('a READ task, then term_end extended: a replacement task at the new date plus a correction bell; once only', async () => {

@@ -3520,6 +3520,16 @@ async function handleChargeRefunded(charge) {
   // row lock, so a replayed event is a no-op once the credit is back on the balance.
   let feeRefundFencedInLock = false;
   const refundedPayment = await db.transaction(async (trx) => {
+    // Chokepoint B (Codex #4971 r4 P1): the renewal parent-decision gate is
+    // this transaction's FIRST lock — the refund stamp below (and the credit
+    // it returns) is exactly what flips a termite parent's paid evidence, so
+    // it either commits before the renewal charge's last parent re-check or
+    // waits until that charge's submission is done. No-op without a termite
+    // term on the charge's invoices / customers.
+    await require('../services/annual-prepay-renewals').acquireTermiteGateForCharge(trx, {
+      chargeId,
+      paymentIntentId: charge.payment_intent,
+    });
     // Fee-lane refunds serialize with settlement's marker adoption (Codex
     // #3153 r24 P1): an existing fee row (pre-settlement marker or settled
     // row) updated here unlocked could commit between settlement's plain
@@ -6632,6 +6642,12 @@ async function findInvoiceForPayment(payment) {
 // Both idempotent + run under the statement row lock.
 async function reverseStatementCascadeForDispute(statementId, disputedPi, reason, { database = db } = {}) {
   const run = async (trx) => {
+    // Chokepoint B (Codex #4971 r4 P1): the gate before the statement money
+    // lock — reopening the children revokes a termite parent's paid
+    // evidence when one of them is its prepay invoice. Every caller runs
+    // this as its transaction's first step (or inside withStatementMoneyLock,
+    // which already holds the same keys — a re-grant).
+    await require('../services/annual-prepay-renewals').acquireTermiteGateForStatement(trx, statementId);
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['payer.statement.money', String(statementId)]);
     const stmt = await trx('payer_statements').where({ id: statementId }).forUpdate().first();
     if (!stmt) return;
@@ -7746,9 +7762,14 @@ async function handleDisputeClosed(dispute) {
             const lostStatus = String(lostInvoice?.status || '').toLowerCase();
             if (lostInvoice && ['paid', 'processing'].includes(lostStatus)
               && lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi) {
-              await db('invoices')
-                .where({ id: invId })
-                .update({ status: 'overdue', paid_at: null, stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: db.fn.now() });
+              // Gate first (Codex #4971 r4 P1): the reopen revokes a termite
+              // parent's paid evidence when this is its prepay invoice.
+              await db.transaction(async (trx) => {
+                await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [invId] });
+                await trx('invoices')
+                  .where({ id: invId })
+                  .update({ status: 'overdue', paid_at: null, stripe_payment_intent_id: null, stripe_charge_id: null, updated_at: trx.fn.now() });
+              });
             }
             // Refund-shaped term sync (codex r4 P1): lost money cancels the
             // prepaid coverage this invoice funded — but only when the
@@ -8119,14 +8140,20 @@ async function handleDisputeClosed(dispute) {
             dispute_invoice_id: lostInvoice.id,
           }),
         });
-        await db('invoices').where({ id: lostInvoice.id }).update({
-          status: 'overdue',
-          paid_at: null,
-          // Same PI-linkage clear as dispute-created: a lingering
-          // non-canceled intent blocks the pay page / card-on-file
-          // re-collection paths with "payment already in progress".
-          stripe_payment_intent_id: null,
-          stripe_charge_id: null,
+        // Gate first (Codex #4971 r4 P1): a closed(lost) that arrives
+        // without its created event reopens a PAID invoice here, revoking a
+        // termite parent's paid evidence when this is its prepay invoice.
+        await db.transaction(async (trx) => {
+          await require('../services/annual-prepay-renewals').acquireTermiteGateAtEntry(trx, { invoiceIds: [lostInvoice.id] });
+          await trx('invoices').where({ id: lostInvoice.id }).update({
+            status: 'overdue',
+            paid_at: null,
+            // Same PI-linkage clear as dispute-created: a lingering
+            // non-canceled intent blocks the pay page / card-on-file
+            // re-collection paths with "payment already in progress".
+            stripe_payment_intent_id: null,
+            stripe_charge_id: null,
+          });
         });
       }
       // Annual-prepay claw-back: lost = the money is gone for good — the

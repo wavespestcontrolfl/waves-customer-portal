@@ -50,7 +50,7 @@ jest.mock('../services/invoice-helpers', () => ({ ...jest.requireActual('../serv
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendRefundIssued: jest.fn() }));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
-jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
+jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(), acquireTermiteGateForCharge: jest.fn(async () => []) }));
 jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
 // Fee-lane detection's guarded fallback retrieves the PI when no local
 // pointer row exists; model Stripe answering "not a fee PI" so the
