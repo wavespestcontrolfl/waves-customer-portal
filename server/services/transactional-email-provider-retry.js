@@ -323,11 +323,11 @@ async function markRetryUncertain(message, err, now = new Date()) {
 
 // A row stopped before any provider request: terminal for the rail, and a
 // summary's aggregate is settled from the ledger since no webhook follows.
-async function stopRetry(message, { status, reason, exhaustedAlert = false, rejectedAfterStart = false }) {
+async function stopRetry(message, { status, reason, exhaustedAlert = false, rejectedAfterStart = false, requote = false }) {
   const isSummary = message.template_key === 'service.visit_summary';
   const terminalBillingRefusal = status === 'blocked' && billingReplay.isBillingEmailProviderReplay(message);
-  const storedReason = terminalBillingRefusal
-    ? `${billingReservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}${reason}` : reason;
+  const storedReason = requote ? `${billingReservation.BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX}${reason}`
+    : terminalBillingRefusal ? `${billingReservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}${reason}` : reason;
   const settle = async (trx) => {
     const expectedPhase = rejectedAfterStart ? HANDOFF_PHASE_STARTED : HANDOFF_PHASE_PENDING;
     const [row] = await trx('email_messages')
@@ -351,6 +351,10 @@ async function stopRetry(message, { status, reason, exhaustedAlert = false, reje
   if (updated && terminalBillingRefusal) {
     await billingReservation.resolveBillingEmailReservationRefusal(updated)
       .catch((err) => logger.warn(`[email-provider-retry] billing refusal not reconciled for ${message.id}: ${err.message}`));
+  }
+  if (updated && requote) {
+    await billingReservation.releaseBillingEmailReservationForRequote(updated)
+      .catch((err) => logger.warn(`[email-provider-retry] changed quote not reconciled for ${message.id}: ${err.message}`));
   }
   if (updated && exhaustedAlert) await alertExhausted(updated, reason);
   return { sent: false, stopped: true, reason };
@@ -575,7 +579,8 @@ async function retryOne(message) {
           await markRetryFailure(message, err);
           return { sent: false, error: err };
         }
-        return await stopRetry(message, { status: 'blocked', reason: handoff.reason });
+        const requote = handoff.code === 'BILLING_REPLAY_REQUOTE_REQUIRED';
+        return await stopRetry(message, { status: requote ? 'failed' : 'blocked', reason: handoff.reason, requote });
       }
     } else {
       await dispatchToProvider();

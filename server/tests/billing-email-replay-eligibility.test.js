@@ -13,7 +13,7 @@ jest.mock('../services/previsit-balance-reminder', () => ({
   currentDuesAllowanceCents: jest.fn(async () => 0),
   // SQL eligibility is exercised against real PostgreSQL; this suite pins
   // the replay's use of the selector and its saved invoice set.
-  overdueRecurringInvoices: jest.fn(async (customerId, _now, database) => database('invoices')
+  freshOverdueRecurringInvoices: jest.fn(async (customerId, _now, database) => database('invoices')
     .where({ customer_id: customerId }).select('*')),
 }));
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn() }));
