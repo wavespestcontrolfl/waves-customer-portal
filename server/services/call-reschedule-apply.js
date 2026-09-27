@@ -26,9 +26,13 @@
  *     identified property sits within
  *     CANDIDATE_SPAN_DAYS of the target date — two candidates is ambiguous,
  *     zero means the call was about a visit we don't have (the booking lane
- *     owns that). A coarse, absent or unmatched service name falls back to
- *     the property's one in-span visit, and stays in review when more than
- *     one program (or more than one visit) sits in span. A
+ *     owns that). An explicit service name that matches nothing stays in
+ *     review. No name falls back to the property's one in-span visit of V2's
+ *     own confident category (pest, mosquito or lawn only); a name matching
+ *     several programs resolves only among those; either stays in review
+ *     when more than one program (or more than one visit) sits in span or an
+ *     in-span row's catalog identity no longer resolves. The visit moved must
+ *     also be its program's next occurrence from today. A
  *     grouped visit needs the whole-visit mover's
  *     disclosure a phone call never gave
  *   - the pipeline did not itself create an appointment from this call
@@ -299,8 +303,12 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
       if (inSpanOf(atProperty).some((row) => !(row.service_id ? row.catalog_service_name : row.service_type))) return skip('service_needs_review');
       let pool = matchingServices;
       if (!namedServices.size) {
+        // V2's category only stands in for a name when V2 itself is sure of
+        // it: an uncertain "pest_general" on a mosquito call must not pick
+        // the pest visit (same bar as the scheduling window).
         const tags = FALLBACK_CATEGORY_TAGS[v2.service_request?.primary_service_category];
-        if (!tags) return skip('service_needs_review');
+        const categoryConfidence = v2.confidence?.primary_service_category;
+        if (!tags || typeof categoryConfidence !== 'number' || categoryConfidence < MIN_SCHEDULING_CONFIDENCE) return skip('service_needs_review');
         const tagger = require('./appointment-tagger');
         pool = atProperty.filter((row) => tags.includes(tagger.classifyAppointmentType(row.service_id ? row.catalog_service_name : row.service_type).tag));
       }

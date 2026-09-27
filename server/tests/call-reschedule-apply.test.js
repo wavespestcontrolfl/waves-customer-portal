@@ -111,7 +111,7 @@ describe('planRescheduleFromCall', () => {
   // visits of one program in span, nothing in span, or an in-span row whose
   // catalog identity no longer resolves all still need a human to pick.
   test('a call that names no service falls back to the one in-span visit at the property', () => {
-    const base = { v2: v2({ service_request: { specific_service_name: null } }), call: call(), customer: customer(), now: NOW };
+    const base = { v2: v2({ service_request: { specific_service_name: null }, confidence: { primary_service_category: 0.95 } }), call: call(), customer: customer(), now: NOW };
     expect(planRescheduleFromCall({ ...base, candidates: [visit()] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
     expect(planRescheduleFromCall({ ...base, candidates: [visit(), visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-09-25' })] }).reason).toBe('service_needs_review');
     expect(planRescheduleFromCall({ ...base, candidates: [visit({ scheduled_date: '2026-12-01' })] }).reason).toBe('service_needs_review');
@@ -143,11 +143,15 @@ describe('planRescheduleFromCall', () => {
   // No name falls back only within V2's own category: a termite call never
   // moves the property's pest visit, and an unmapped category never falls back.
   test('the no-name fallback requires the visit to match V2\'s service category', () => {
-    const noName = (category) => v2({ service_request: { specific_service_name: null, primary_service_category: category } });
+    const noName = (category, confidence = 0.95) => v2({ service_request: { specific_service_name: null, primary_service_category: category },
+      confidence: { primary_service_category: confidence } });
     const base = { call: call(), customer: customer(), now: NOW, candidates: [visit()] };
     expect(planRescheduleFromCall({ ...base, v2: noName('pest_general') })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
     expect(planRescheduleFromCall({ ...base, v2: noName('termite') }).reason).toBe('service_needs_review');
     expect(planRescheduleFromCall({ ...base, v2: noName('other') }).reason).toBe('service_needs_review');
+    // An uncertain category is not a name: below the confidence bar, or absent, it stays in review.
+    expect(planRescheduleFromCall({ ...base, v2: noName('pest_general', 0.6) }).reason).toBe('service_needs_review');
+    expect(planRescheduleFromCall({ ...base, v2: noName('pest_general', null) }).reason).toBe('service_needs_review');
   });
 
   // An orphaned in-span row may be the caller's target, so it keeps even a
