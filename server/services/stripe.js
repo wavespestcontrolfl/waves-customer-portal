@@ -5485,12 +5485,14 @@ const StripeService = {
       let resolvedPaymentMethod = pi.payment_method_types?.[0] || 'card';
       let bankLastFour = null;
       let pmdType = null;
-      // When the charge's money landed: its balance transaction, which
+      // When a card charge's money landed: its balance transaction, which
       // Stripe creates once the charge succeeds — after 3DS or any delayed
-      // authentication, unlike the charge's own creation (Codex #4996 r13),
-      // and at settlement for a bank charge. Readers date the payment by it,
-      // never by this handler's run time: a /confirm that repairs a missing
-      // row days later must not date old money as new (r12).
+      // authentication, unlike the charge's own creation (Codex #4996 r13).
+      // Readers date the payment by it, never by this handler's run time: a
+      // /confirm that repairs a missing row days later must not date old
+      // money as new (r12). A bank (ACH) charge's balance transaction is
+      // created when it is submitted, before it succeeds, so a bank payment
+      // takes its moment from the succeeded webhook instead (pre-push audit).
       let chargeSettledAt = null;
 
       // Get receipt and card info from the charge
@@ -5887,7 +5889,7 @@ const StripeService = {
             charged_amount: chargedTotal,
             payment_method: resolvedPaymentMethod,
             payment_state: paymentStatus,
-            ...(paymentStatus === 'paid' && chargeSettledAt > 0
+            ...(paymentStatus === 'paid' && pmdType === 'card' && chargeSettledAt > 0
               ? { settled_event_at: new Date(chargeSettledAt * 1000).toISOString() } : {}),
           }),
         };

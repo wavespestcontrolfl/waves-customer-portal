@@ -257,6 +257,26 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
     expect(metadata).toMatchObject({ payment_state: 'paid', settled_event_at: new Date(succeededAt * 1000).toISOString() });
   });
 
+  test('a bank payment /confirm sees succeed takes no moment from its balance transaction, which Stripe creates at submission', async () => {
+    // The succeeded webhook stamps a bank row's settlement moment; a stamp here would outrank it (pre-push audit).
+    existingPaymentRow = { id: 'pay_existing', status: 'processing', metadata: JSON.stringify({ payment_state: 'processing' }) };
+    // ACH pays the base amount: no card surcharge.
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({ ...makePi(), amount: 10700, amount_received: 10700, latest_charge: 'ch_bank',
+      payment_method_types: ['us_bank_account'], metadata: { ...makePi().metadata, card_surcharge: '0', selected_method_category: 'us_bank_account' } });
+    stripeClient.charges.retrieve.mockResolvedValue({ id: 'ch_bank', created: 1789900000, receipt_url: null,
+      balance_transaction: { id: 'txn_bank', created: 1789900005 },
+      payment_method_details: { type: 'us_bank_account', us_bank_account: { last4: '6789' } } });
+    const StripeService = require('../services/stripe');
+    await StripeService.confirmInvoicePayment('inv_123', PI_ID);
+
+    expect(paymentsUpdate).toHaveBeenCalledTimes(1);
+    for (const call of [...paymentsUpdate.mock.calls, ...paymentsInsert.mock.calls]) {
+      const { metadata } = call[0];
+      const written = typeof metadata === 'string' ? metadata : metadata.bindings[0];
+      expect(JSON.parse(written)).not.toHaveProperty('settled_event_at');
+    }
+  });
+
   test('a charge with no balance transaction yet (still settling) carries no settlement moment', async () => {
     stripeClient.paymentIntents.retrieve.mockResolvedValue({ ...makePi(), latest_charge: 'ch_card' });
     stripeClient.charges.retrieve.mockResolvedValue({ id: 'ch_card', created: 1789900000, receipt_url: null, balance_transaction: null,
