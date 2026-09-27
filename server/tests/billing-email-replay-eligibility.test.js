@@ -165,6 +165,28 @@ describe('invoice replay eligibility', () => {
   });
 });
 
+describe('a moved billing sender\'s provider retry (owner ruling 2026-09-27)', () => {
+  const meta = { customer_id: customerId, invoice_id: 'inv-1', category: 'billing',
+    source_entry_point: 'late_payment_email', notificationEventKey: 'late_payment:inv-1:30' };
+  afterEach(() => { delete process.env.GATE_COLLECTIONS_POLICY; });
+
+  test('a late-payment email retry is refused once its invoice is no longer collectible', async () => {
+    const database = databaseWith();
+    invoiceStillCollectible.mockResolvedValueOnce({ eligible: false, reason: 'invoice-terminal:paid' });
+    await expect(billingEmailReplayEligible(meta, database))
+      .resolves.toMatchObject({ eligible: false, reason: 'invoice-terminal:paid' });
+    expect(invoiceStillCollectible).toHaveBeenCalledWith(expect.objectContaining({ invoice_id: 'inv-1' }), database);
+  });
+
+  test('a still-collectible late-payment email retries without consulting the collections policy again', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    invoiceStillCollectible.mockResolvedValueOnce({ eligible: true });
+    selfPayAtDispatch.mockReturnValueOnce(async () => ({ ok: true }));
+    await expect(billingEmailReplayEligible(meta, databaseWith())).resolves.toEqual({ eligible: true });
+    expect(collectionsChannelPermitted).not.toHaveBeenCalled();
+  });
+});
+
 describe('balance-reminder visit identity', () => {
   const meta = { customer_id: customerId, source_entry_point: 'balance_reminder_workflow', appointment_id: 'visit-1',
     appointment_date: '2026-09-28', appointment_service_type: 'General Pest Control', appointment_rendered_on: '2026-09-26' };

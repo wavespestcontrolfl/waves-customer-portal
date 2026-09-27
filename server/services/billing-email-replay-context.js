@@ -5,8 +5,26 @@ const { validDateOnly } = require('../utils/date-only');
 // messaging/invoice-send-replay-eligibility.js imports it, so a source that
 // stores an invoice-pinned context always gets the invoice re-check.
 const INVOICE_SEND_SOURCES = new Set(['invoice_send_via_sms', 'invoice_send_deferred']);
+// Billing email senders moved onto the shared billing email check (owner
+// ruling 2026-09-27) store a context on their OWN email row, so a provider
+// retry of that row re-runs the check too. Each binds its row by template,
+// trigger and idempotency key: a context copied onto any other row is
+// ignored. The trigger and key share the suffix after their prefixes, and
+// the invoice id opens that suffix.
+const SENDER_BINDINGS = Object.freeze({
+  late_payment_email: Object.freeze({
+    category: 'billing',
+    templates: new Set([
+      'billing_late_payment_7_day', 'billing_late_payment_14_day', 'billing_late_payment_30_day',
+      'billing_late_payment_60_day', 'billing_late_payment_90_day',
+    ]),
+    triggerPrefix: 'late_payment:',
+    keyPrefix: 'late_payment_email:',
+  }),
+});
 const SOURCES = new Set([
   ...INVOICE_SEND_SOURCES,
+  ...Object.keys(SENDER_BINDINGS),
   'autopay_pre_charge_reminder',
   'autopay_card_expiry_warning',
   'payment_expiry_workflow',
@@ -82,7 +100,29 @@ function complete(context) {
   if (context.source_entry_point === 'invoice_followup_sequence') {
     return has('invoice_id', 'followup_sequence_id', 'rendered_amount', 'collections_ledger_id');
   }
+  const binding = SENDER_BINDINGS[context.source_entry_point];
+  if (binding) return has('invoice_id') && context.category === binding.category;
   return has('invoice_id', 'collections_ledger_id');
+}
+
+function senderReplayTemplate(templateKey) {
+  return Object.values(SENDER_BINDINGS).some((binding) => binding.templates.has(templateKey));
+}
+
+// Whether a moved sender's context belongs on the row it is stored with (or
+// read back from). Null for a context that is not a moved sender's: the
+// routed notice keeps its own binding in email-template-library.js.
+function senderReplayBindsRow(context, facts = {}) {
+  const binding = SENDER_BINDINGS[context?.source_entry_point];
+  if (!binding) return null;
+  const trigger = String(facts.triggerEventId || '');
+  const suffix = trigger.slice(binding.triggerPrefix.length);
+  return binding.templates.has(facts.templateKey)
+    && facts.recipientType === 'customer' && String(facts.recipientId) === context.customer_id
+    && trigger.startsWith(binding.triggerPrefix) && trigger === context.notificationEventKey
+    && suffix.startsWith(`${context.invoice_id}:`)
+    && facts.idempotencyKey === `${binding.keyPrefix}${suffix}`
+    && (facts.categories || []).includes(context.category);
 }
 
 function sanitizeBillingReplayContext(context) {
@@ -130,4 +170,7 @@ function buildBillingReplayContext(input, authorityContext, notificationEventKey
   });
 }
 
-module.exports = { buildBillingReplayContext, sanitizeBillingReplayContext, INVOICE_SEND_SOURCES };
+module.exports = {
+  buildBillingReplayContext, sanitizeBillingReplayContext, INVOICE_SEND_SOURCES,
+  SENDER_BINDINGS, senderReplayTemplate, senderReplayBindsRow,
+};

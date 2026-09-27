@@ -242,6 +242,11 @@ describe('late-payment email sidecar', () => {
       triggerEventId: 'late_payment:inv-1:7',
       idempotencyKey: 'late_payment_email:inv-1:7',
       suppressionGroupKey: 'transactional_required',
+      // A provider retry of this row re-runs the shared billing email check.
+      billingReplayContext: {
+        schema_version: 1, customer_id: 'cust-1', invoice_id: 'inv-1', category: 'billing',
+        source_entry_point: 'late_payment_email', notificationEventKey: 'late_payment:inv-1:7',
+      },
       payload: expect.objectContaining({
         first_name: 'Taylor',
         invoice_title: 'Quarterly Pest Control',

@@ -8,6 +8,12 @@ const INVOICE_GUARDS = new Set([
   'invoice_followup_sequence', 'balance_reminder_workflow',
   'balance_reminder_late_payment_check', 'late_payment_checker',
 ]);
+// A billing email sender moved onto the shared check (owner ruling
+// 2026-09-27): its provider retry re-checks that the invoice is still
+// collectible. The collections policy is not consulted again: a provider
+// retry is the same contact the policy already allowed, and the sender's own
+// ledger row would otherwise count against it.
+const { SENDER_BINDINGS } = require('../billing-email-replay-context');
 const EXPIRY_ENTRY_POINTS = new Set(['autopay_card_expiry_warning', 'payment_expiry_workflow']);
 
 function refused(reason, retryable = false) {
@@ -147,7 +153,7 @@ async function invoiceRefusal(meta, database) {
   const sendRefusal = await require('./invoice-send-replay-eligibility').invoiceSendRefusal(meta, database);
   if (sendRefusal) return sendRefusal;
   if (!meta.invoice_id) return null;
-  if (INVOICE_GUARDS.has(meta.source_entry_point)) {
+  if (INVOICE_GUARDS.has(meta.source_entry_point) || SENDER_BINDINGS[meta.source_entry_point]) {
     const verdict = await require('./deferred-replay-registry').invoiceStillCollectible(meta, database);
     if (verdict.eligible !== true) return refused(verdict.reason, verdict.retryable === true);
   }

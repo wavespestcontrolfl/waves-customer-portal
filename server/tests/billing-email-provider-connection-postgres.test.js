@@ -261,6 +261,50 @@ postgres('billing Email provider preparation on its held connection', () => {
     expect(global.fetch).toHaveBeenCalledTimes(2);
   }, 15000);
 
+  // A billing email sender moved onto the shared check (owner ruling
+  // 2026-09-27) stores its own context, so its provider retry re-runs the
+  // check with the invoice re-checked as still collectible.
+  test.each([
+    ['still owed', 'sent', true],
+    ['paid since the first attempt', 'paid', false],
+  ])('a late-payment email retry re-runs the shared check: invoice %s', async (_label, invoiceStatus, sends) => {
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({
+      id: invoiceId, customer_id: customerId, status: invoiceStatus,
+      total: '129.00', credit_applied: 0, line_items: JSON.stringify([]),
+    });
+    await mockPg('notification_prefs').where({ customer_id: customerId })
+      .update({ email_enabled: true, billing_channels: ['email'] });
+    const event = `late_payment:${invoiceId}:30`;
+    const attempt = randomUUID();
+    const stored = {
+      id: randomUUID(), template_key: 'billing_late_payment_30_day', recipient_type: 'customer',
+      recipient_id: customerId, recipient_email_snapshot: 'qa@example.invalid', trigger_event_id: event,
+      idempotency_key: `late_payment_email:${invoiceId}:30`, subject_snapshot: 'Synthetic late payment',
+      html_snapshot: '<p>Synthetic late payment</p>', text_snapshot: 'Synthetic late payment',
+      suppression_group_key_snapshot: 'transactional_required',
+      payload_snapshot: { __billing_replay_context: { schema_version: 1, customer_id: customerId,
+        invoice_id: invoiceId, category: 'billing', source_entry_point: 'late_payment_email',
+        notificationEventKey: event } },
+      categories: JSON.stringify(['billing', 'late_payment', 'late_payment_30d']), send_attempt_token: attempt,
+      provider_handoff_attempt_token: attempt, provider_handoff_phase: 'pending', status: 'queued',
+      provider_retry_count: 1,
+    };
+    await mockPg('email_messages').insert(stored);
+
+    const outcome = await retryOne(stored);
+    const saved = await mockPg('email_messages').where({ id: stored.id }).first();
+    if (sends) {
+      expect(outcome).toMatchObject({ sent: true });
+      expect(saved).toMatchObject({ status: 'sent', sent_at: expect.any(Date) });
+      expect(global.fetch).toHaveBeenCalled();
+    } else {
+      expect(outcome).toMatchObject({ sent: false, stopped: true });
+      expect(saved.status).toBe('blocked');
+      expect(global.fetch).not.toHaveBeenCalled();
+    }
+  }, 15000);
+
   test.each([false, true])('the actual billing bounce callback fences raw assignments and phantom inserts (busy=%s)', async (busy) => {
     const chargeDate = etDateString(addETDays(new Date(), 1));
     const corrected = 'qa.billing-boundary@gmail.com';

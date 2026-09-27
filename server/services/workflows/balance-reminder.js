@@ -584,6 +584,16 @@ class BalanceReminder {
           `late_payment_${config.stageDays}d`,
         ],
         suppressionGroupKey: "transactional_required",
+        // A provider retry of this row re-runs the shared billing email
+        // check, with the invoice re-checked as still collectible.
+        billingReplayContext: {
+          schema_version: 1,
+          customer_id: String(customer.id),
+          invoice_id: String(latestInvoice.id),
+          category: "billing",
+          source_entry_point: "late_payment_email",
+          notificationEventKey: `late_payment:${latestInvoice.id}:${config.stageDays}`,
+        },
         withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
           input: authorityInput, recipientEmail: to, templateKey: config.templateKey, dispatch, state,
         }),

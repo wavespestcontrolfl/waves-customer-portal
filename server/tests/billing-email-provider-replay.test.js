@@ -48,6 +48,31 @@ test('recognizes a stored replay contract only on the canonical billing template
   expect(isBillingEmailProviderReplay(message({ template_key: 'invoice.sent' }))).toBe(false);
 });
 
+test('a moved billing sender\'s row with a stored context replays under the shared check with its own template', async () => {
+  const lateContext = {
+    schema_version: 1, customer_id: 'cust-1', invoice_id: 'inv-1', category: 'billing',
+    source_entry_point: 'late_payment_email', notificationEventKey: 'late_payment:inv-1:30',
+  };
+  const late = message({
+    template_key: 'billing_late_payment_30_day', trigger_event_id: 'late_payment:inv-1:30',
+    idempotency_key: 'late_payment_email:inv-1:30',
+    categories: JSON.stringify(['billing', 'late_payment', 'late_payment_30d']),
+    payload_snapshot: JSON.stringify({ first_name: 'Casey', __billing_replay_context: lateContext }),
+  });
+  EmailTemplateLibrary.readStoredBillingReplayContext.mockReturnValue(lateContext);
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => { state.providerAccepted = true; });
+
+  expect(isBillingEmailProviderReplay(late)).toBe(true);
+  expect(isBillingEmailProviderReplay(message({ template_key: 'billing_late_payment_30_day',
+    payload_snapshot: JSON.stringify({ first_name: 'Casey' }) }))).toBe(false);
+  await expect(runBillingEmailProviderReplayHandoff(late, jest.fn())).resolves.toEqual({ handled: true, allowed: true });
+  expect(dispatchUnderBillingEmailAuthority).toHaveBeenCalledWith(expect.objectContaining({
+    input: expect.objectContaining({ customerId: 'cust-1', invoiceId: 'inv-1',
+      metadata: expect.objectContaining({ billingDeliveryCategory: 'billing' }) }),
+    templateKey: 'billing_late_payment_30_day',
+  }));
+});
+
 test.each(['billing.notice', 'billing.receipt_notice'])('contextless %s retains the existing provider retry path', async (templateKey) => {
   const legacy = message({ template_key: templateKey, payload_snapshot: JSON.stringify({ notification_body: 'Payment received' }) });
   expect(isBillingEmailProviderReplay(legacy)).toBe(false);

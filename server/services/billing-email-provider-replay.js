@@ -1,6 +1,7 @@
 const EmailTemplateLibrary = require('./email-template-library');
 const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
 const { billingEmailReplayEligible } = require('./messaging/billing-email-replay-eligibility');
+const { senderReplayTemplate } = require('./billing-email-replay-context');
 
 const BILLING_REPLAY_TEMPLATES = new Set(['billing.notice', 'billing.receipt_notice']);
 
@@ -9,7 +10,8 @@ function clean(value) {
 }
 
 function isBillingEmailProviderReplay(message) {
-  if (!BILLING_REPLAY_TEMPLATES.has(clean(message?.template_key))) return false;
+  const templateKey = clean(message?.template_key);
+  if (!BILLING_REPLAY_TEMPLATES.has(templateKey) && !senderReplayTemplate(templateKey)) return false;
   let payload = message.payload_snapshot;
   if (typeof payload === 'string') {
     try { payload = JSON.parse(payload); } catch { return true; }
