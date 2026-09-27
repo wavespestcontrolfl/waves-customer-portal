@@ -147,6 +147,18 @@ const ALLOWLIST = [
     reason: 'whereIn(status, [blocked, failed, cancelled]) excludes \'sending\' — an unresolved reservation cannot match this status filter.',
   },
   {
+    file: 'services/messaging/deferred-replay-registry.js',
+    snippet: "const row = await db('sms_log')",
+    nth: 1,
+    reason: 'billingTextDurablyAccepted: status-scoped to queued/sent/delivered (excludes sending) AND keyed to notificationEventKey with a real twilio_sid — a send reservation is never a billing-leg provider row.',
+  },
+  {
+    file: 'services/messaging/deferred-replay-registry.js',
+    snippet: "const row = await db('sms_log')",
+    nth: 2,
+    reason: 'billingAppDurablyAccepted: status-scoped to queued/sent/delivered (excludes sending) AND keyed to from_phone \'push\' + notificationEventKey — a send reservation is always an ordinary outbound row, never the push-proof row.',
+  },
+  {
     file: 'services/messaging/sync-optout.js',
     snippet: 'const inbound = await trx(\'sms_log\')',
     reason: 'from_phone = the opting-out customer\'s own number — every send reservation is Waves\' own outbound row and can never match a customer\'s from_phone.',

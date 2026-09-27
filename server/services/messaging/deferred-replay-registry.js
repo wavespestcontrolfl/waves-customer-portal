@@ -266,8 +266,19 @@ const REGISTRY = {
     // WITHOUT re-taking the invoice send-claim lock the immediate path
     // holds — deliberately out of scope here (split PR 3, locked invoice
     // replay dispatch).
+    //
+    // Pre-push audit P1 #A: billingDispatchOutcome (billing-channel-
+    // routing.js) deliberately lets an unfinished TEXT leg outrank an
+    // earlier acceptance (Email accepted, Text still retrying reports
+    // Text's own pending state as the representative outcome) but has no
+    // equivalent for the reverse — Email retryable, TEXT accepted — so it
+    // reports the WHOLE fan-out sent:true/accepted. Passed straight
+    // through, dispatchScheduledSms would mark the sole replay row 'sent'
+    // and the scheduler would finalize it, permanently dropping the Email
+    // obligation. partialFanoutReplayOutcome inspects the fan-out's own
+    // channelResults and overrides only that exact overshadow shape.
     async dispatch(meta, defaultDispatch) {
-      return defaultDispatch();
+      return partialFanoutReplayOutcome(meta, await defaultDispatch());
     },
     async recheck(meta) {
       return invoiceStillCollectible(meta);
@@ -1527,19 +1538,79 @@ async function contactSlotStillAuthorized(meta, label) {
   }
 }
 
+// Pre-push audit P1 #A (#4963 split PR 2): the fan-out's own channelResults
+// is the only trustworthy per-leg truth — billingDispatchOutcome's single
+// "representative" outcome can report sent:true/accepted while another
+// SELECTED leg is still pending (see the dispatch() hook above for the
+// exact overshadow shape). Never trust that representative directly for a
+// partial fan-out: inspect channelResults ourselves and decide whether the
+// scheduler may finish this row.
+async function partialFanoutReplayOutcome(meta, result) {
+  const channelResults = result?.channelResults;
+  const legs = channelResults && typeof channelResults === 'object' ? Object.values(channelResults) : [];
+  if (!legs.length) return result;
+  const accepted = (leg) => leg?.sent === true && leg?.deliveryOutcome === 'accepted';
+  // A leg accepted on THIS attempt needs its durable stamp NOW: the
+  // override below can report the row still retryable while another
+  // selected leg is pending, and finalize() (the other stamping path,
+  // Codex r4-C/r5 P1 #1+#2) only runs once the scheduler marks the WHOLE
+  // row sent. Idempotent (COALESCE-guarded) — stamping again at eventual
+  // finalize is harmless. Never let a stamp-read failure surface as a
+  // dispatch error — the send itself already succeeded.
+  if (meta.partial_fanout_retry === true && meta.invoice_id && legs.some(accepted)) {
+    try {
+      await stampPartialFanoutDeliveryDurably(meta);
+    } catch (err) {
+      logger.warn(`[deferred-replay] partial-fanout in-flight stamp failed for invoice ${meta.invoice_id}: ${err.message}`);
+    }
+  }
+  // Only intervene in the exact overshadow shape described above — every
+  // other outcome (a genuinely fully-accepted fan-out, a replay hold, an
+  // unfinished Text's own retryable/uncertain state) already passes
+  // through billingDispatchOutcome correctly and must keep its own
+  // code/reason/retry timing (e.g. APP_PROVIDER_RETRY's retryAfterMs).
+  if (!accepted(result)) return result;
+  const pending = legs.filter((leg) => !accepted(leg));
+  if (!pending.length) return result;
+  // An uncertain leg means we don't know whether it already went out — the
+  // SAME rule invoice.js's own enqueue-time check follows (a whole-notice
+  // replay would retry it too, risking a double-send): ANY uncertain leg
+  // blocks auto-retry entirely, surfaced via the log line below, never
+  // silently retried — even when another leg here IS genuinely retryable.
+  const uncertain = pending.filter((leg) => leg?.deliveryOutcome === 'uncertain');
+  if (uncertain.length) {
+    logger.warn(`[deferred-replay] invoice ${meta.invoice_id} partial-fanout replay leg outcome uncertain (${uncertain.map((leg) => leg.code || leg.channel).join(', ')}) — not auto-retried (a replay would retry it too, risking a double-send)`);
+    return result;
+  }
+  const retryable = pending.filter((leg) => leg?.retryable === true || leg?.deferred === true);
+  if (!retryable.length) return result;
+  return {
+    channelResults,
+    notificationEventKey: result.notificationEventKey,
+    sent: false,
+    blocked: false,
+    deliveryOutcome: 'not_sent',
+    retryable: true,
+    code: 'PARTIAL_FANOUT_LEG_RETRY',
+    reason: `Selected billing leg(s) still need a retry: ${retryable.map((leg) => leg.code || leg.channel).join(', ')}`,
+  };
+}
+
 // Codex r4-C, r5 P1 #1+#2 pre-push audit (#4963): stamp durably, never from
 // the scheduler's own transient dispatch result — a finalize_only retry
 // re-invokes finalize() with no dispatch result at all, so a value threaded
-// through ctx would silently vanish on that path. Both checks below key
+// through ctx would silently vanish on that path. Every check below keys
 // off this row's own persisted identity, so re-running them on any retry
 // (finalize_only or otherwise) recomputes the SAME answer — idempotent by
 // construction, no state to carry between attempts.
 async function stampPartialFanoutDeliveryDurably(meta) {
   const notificationEventKey = meta.notificationEventKey || (meta.invoice_id ? `invoice:${meta.invoice_id}:sent` : null);
-  const [emailAccepted, smsOrAppAccepted] = await Promise.all([
+  const [emailAccepted, textAccepted, appAccepted] = await Promise.all([
     billingEmailDurablyAccepted(notificationEventKey),
-    partialFanoutReplayAcceptedTextOrApp(meta.invoice_id),
+    billingTextDurablyAccepted(notificationEventKey),
+    billingAppDurablyAccepted(notificationEventKey),
   ]);
+  const smsOrAppAccepted = textAccepted || appAccepted;
   if (!emailAccepted && !smsOrAppAccepted) return { ok: true };
   try {
     // A voided invoice is never re-stamped, even if a delayed replay
@@ -1573,22 +1644,49 @@ async function billingEmailDurablyAccepted(notificationEventKey) {
   return !!row && ['sent', 'delivered', 'opened', 'clicked'].includes(String(row.status || '').toLowerCase());
 }
 
-// Durable evidence for the Text/App leg: this invoice's most recent
-// invoice_send_deferred sms_log row reaching a delivered status. A real
-// twilio_sid proves Twilio itself accepted the message (Text — a hard
-// carrier/API rejection never gets one). A phone-less row (to_phone blank
-// — the only way this replay ever runs without one, per replayWithoutPhone
-// above) can only have succeeded via App: Text requires a phone, and Email
-// never touches this row at all.
-async function partialFanoutReplayAcceptedTextOrApp(invoiceId) {
-  if (!invoiceId) return false;
+// Pre-push audit P1 #B (#4963 split PR 2): the OLD check read this
+// replay's own queue row (the marker sms_log row invoice.js's
+// queuePendingChannelReplay inserts, matched by metadata.entry_point +
+// invoice_id) for a twilio_sid/to_phone it never receives — that row is
+// only ever written by this file's own INSERT, never touched by Twilio or
+// the push router. The REAL provider evidence lives on a SEPARATE sms_log
+// row: twilio.js stamps metadata.notificationEventKey (and
+// scheduled_sms_log_id, back to the queue row) on the row it inserts
+// alongside every real Twilio handoff, with the actual twilio_sid; a hard
+// carrier/API rejection never gets one. notificationEventKey is stable
+// across every replay attempt (forwarded from this row's own metadata into
+// every dispatch, and re-derived identically here), so this is a pure,
+// idempotent read keyed off durable identity, exactly like the Email check
+// above — never the queue row, never scheduler ctx.
+async function billingTextDurablyAccepted(notificationEventKey) {
+  if (!notificationEventKey) return false;
+  // status-scoped to queued/sent/delivered at the query level (matches
+  // acceptedScheduledSms's own shape) — an unresolved 'sending' reservation
+  // can never be the row .first() returns, so multiple attempts sharing the
+  // same notificationEventKey (a failed try, then an accepted retry) can
+  // never have this pick the wrong one.
   const row = await db('sms_log')
-    .whereRaw("metadata->>'entry_point' = ?", ['invoice_send_deferred'])
-    .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
-    .orderBy('updated_at', 'desc')
-    .first('status', 'to_phone', 'twilio_sid');
-  if (!row || !['sent', 'delivered'].includes(String(row.status || '').toLowerCase())) return false;
-  return Boolean(row.twilio_sid) || !String(row.to_phone || '').trim();
+    .where({ direction: 'outbound' })
+    .whereIn('status', ['queued', 'sent', 'delivered'])
+    .whereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey])
+    .first('twilio_sid');
+  return Boolean(row?.twilio_sid);
+}
+
+// Durable evidence for the App leg: the push proof row push-channel-
+// routing.js's persistPushProof writes on an accepted push —
+// from_phone:'push', twilio_sid:null always (App never has a Twilio SID),
+// metadata.notificationEventKey stamped the same way the Text row above
+// is. Never the queue row's own blank to_phone, which only ever proves
+// this replay runs phone-less, not that App delivered.
+async function billingAppDurablyAccepted(notificationEventKey) {
+  if (!notificationEventKey) return false;
+  const row = await db('sms_log')
+    .where({ from_phone: 'push' })
+    .whereIn('status', ['queued', 'sent', 'delivered'])
+    .whereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey])
+    .first('twilio_sid');
+  return !!row && !row.twilio_sid;
 }
 
 // Shared: deferred invoice pay-link/dunning replays must confirm the
