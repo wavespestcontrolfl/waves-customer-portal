@@ -73,8 +73,9 @@ export function formatMeasuredAmount(amount, unit, { round = "nearest" } = {}) {
 
 /**
  * A label-rate range, low to high. Teaspoon ends round inward so the shown
- * range never leaves the label's; a range reaching 1 fl oz stays in fl oz
- * end to end; ends that land on the same measure collapse to one amount.
+ * range never leaves the label's; a range reaching 1 fl oz, or one too narrow
+ * for any spoon step to fit inside it, stays in fl oz end to end; ends that
+ * land on the same measure collapse to one amount.
  */
 export function formatMeasuredRange(low, high, unit) {
   if (high == null) return formatMeasuredAmount(low, unit);
@@ -82,10 +83,11 @@ export function formatMeasuredRange(low, high, unit) {
   const lowFlOz = asFlOz(Number(low), normalized);
   const highFlOz = asFlOz(Number(high), normalized);
   if (lowFlOz != null && highFlOz != null && lowFlOz > 0) {
-    if (highFlOz >= 1) return `${plainNumber(lowFlOz)} fl oz – ${plainNumber(highFlOz)} fl oz`;
+    const flOzRange = `${plainNumber(lowFlOz)} fl oz – ${plainNumber(highFlOz)} fl oz`;
+    if (highFlOz >= 1) return flOzRange;
     const upTsp = roundTeaspoons(lowFlOz * TSP_PER_FL_OZ, "up");
     const downTsp = roundTeaspoons(highFlOz * TSP_PER_FL_OZ, "down");
-    if (downTsp < upTsp) return formatMeasuredAmount((Number(low) + Number(high)) / 2, unit);
+    if (downTsp < upTsp) return flOzRange;
     if (downTsp === upTsp) return teaspoonText(upTsp);
     return `${teaspoonText(upTsp)} – ${teaspoonText(downTsp)}`;
   }

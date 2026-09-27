@@ -58,8 +58,10 @@ describe("formatMeasuredRange", () => {
     expect(formatMeasuredRange(0.06, 0.08, "fl_oz")).toBe("⅜ tsp");
   });
 
-  it("falls back to the midpoint when no spoon step fits inside the range", () => {
-    expect(formatMeasuredRange(0.07, 0.075, "fl_oz")).toBe("⅜ tsp");
+  it("keeps the exact fl oz range when no spoon step fits inside it, never a spoon off the label", () => {
+    // ⅜ tsp (0.0625 fl oz) sits below this range and ½ tsp (0.0833) above it.
+    expect(formatMeasuredRange(0.07, 0.075, "fl_oz")).toBe("0.07 fl oz – 0.075 fl oz");
+    expect(formatMeasuredRange(0.08, 0.081, "fl_oz")).toBe("0.08 fl oz – 0.081 fl oz");
   });
 
   it("keeps a range that reaches 1 fl oz in fluid ounces end to end", () => {
