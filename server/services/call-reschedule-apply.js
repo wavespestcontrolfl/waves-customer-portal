@@ -309,6 +309,9 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     // program regardless of distance. loadCandidates has no upper date bound,
     // so a customer with several quarterly visits on the books was ALWAYS
     // ambiguous_visit before this fix (0/1,089 calls ever moved a visit).
+    // Every visit the call's service evidence could refer to: the grounding
+    // below checks the moved visit against ALL of their upcoming dates.
+    let sourcePool = matchingServices;
     if (programIds.size !== 1) {
       // Fallback ONLY where the call's own service evidence cannot pick a
       // program: no service named at all (a program of V2's own category at
@@ -331,6 +334,7 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
         const tagger = require('./appointment-tagger');
         pool = atProperty.filter((row) => tags.includes(tagger.classifyAppointmentType(row.service_id ? row.catalog_service_name : row.service_type).tag));
       }
+      sourcePool = pool;
       const inSpanAny = inSpanOf(pool);
       if (!inSpanAny.length || new Set(inSpanAny.map(programOf)).size !== 1) return skip('service_needs_review');
       // One program, but two of its visits near the target: which one the
@@ -342,14 +346,15 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
       if (inSpan.length > 1) return skip('ambiguous_visit', { candidateIds: inSpan.map((r) => r.id) });
       nearby = inSpan; // invariant preserved: length is 0 or 1 here
     }
-    // Nearness to the destination cannot say WHICH occurrence the caller
-    // meant, and V2 records only the new slot: with more than one upcoming
-    // occurrence of the program the call itself must identify it
+    // Nearness to the destination cannot say WHICH visit the caller meant,
+    // and V2 records only the new slot: with more than one upcoming visit the
+    // call's service could refer to (every matched program, or the category's
+    // visits for an unnamed service), the call itself must identify it
     // (sourceOccurrenceGrounded).
     if (nearby.length === 1) {
       const chosen = nearby[0];
       const today = etDateString(now);
-      const upcoming = atProperty.filter((row) => programOf(row) === programOf(chosen) && dateOnly(row.scheduled_date) >= today);
+      const upcoming = sourcePool.filter((row) => dateOnly(row.scheduled_date) >= today);
       if (upcoming.length > 1 && !sourceOccurrenceGrounded({ call, chosen, others: upcoming.filter((row) => row.id !== chosen.id), newDate })) {
         return skip('ambiguous_visit', { candidateIds: upcoming.map((r) => r.id) });
       }

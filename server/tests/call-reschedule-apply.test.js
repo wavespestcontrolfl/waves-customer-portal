@@ -199,6 +199,17 @@ describe('planRescheduleFromCall', () => {
       .toMatchObject({ action: 'apply', visitId: 'dec-visit' });
   });
 
+  // A name matching two programs: the other program's upcoming visit counts
+  // as a possible source too, so naming it leaves the choice to a person.
+  test('grounding covers every program the call\'s service name matched', () => {
+    const { hasAgentCommittedEvidence } = require('../services/call-triage-flags');
+    const twin = visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-12-01' });
+    hasAgentCommittedEvidence.mockReturnValueOnce(true);
+    expect(planRescheduleFromCall({ v2: v2({ scheduling: { confirmed_start_at: '2026-09-25T10:00:00-04:00' } }), customer: customer(), now: NOW,
+      candidates: [visit(), twin], call: call({ transcription: 'Caller: Can my December 1st visit be Friday instead?\nAgent: Okay.' }) }))
+      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'other-program'] });
+  });
+
   // A repoint leaves service_type stale, so the label alone can name the
   // requested program while the row now belongs to a different one (r8 P1).
   test('a stale service label cannot stand in for the catalog identity', () => {
