@@ -116,7 +116,7 @@ test('reviewed prompt keeps pressure qualitative and treats missing or zero pres
   expect(SYSTEM_PROMPT).toContain('Report change only when supplied');
   expect(SYSTEM_PROMPT).toContain('Mention at most one customer-visible finding');
   expect(SYSTEM_PROMPT).toContain('Never blame the customer');
-  expect(PROMPT_VERSION).toBe('pest_visit_summary_narrative_v6');
+  expect(PROMPT_VERSION).toBe('pest_visit_summary_narrative_v7');
 });
 
 test('current next visit replaces stale recap appointment in model facts and fallback', () => {
@@ -303,7 +303,7 @@ test('clean model output is used verbatim', async () => {
   expect(callModel).toHaveBeenCalledWith(expect.objectContaining({
     jsonMode: true,
     maxTokens: 400,
-    promptVersion: 'pest_visit_summary_narrative_v6',
+    promptVersion: 'pest_visit_summary_narrative_v7',
   }));
 });
 
@@ -463,9 +463,15 @@ test('model cannot invent an appointment when no next visit was supplied', async
   expect(out).toBe(deterministicSummary(groundingFacts(args)));
 });
 
-test('model cannot invent a come-back promise when no next visit was supplied', async () => {
+test.each([
+  'We’ll come back next week to inspect again.',
+  "We'll check back next week to inspect again.",
+  'We will check back next week to inspect again.',
+  "We'll follow up next week to inspect again.",
+  'We’ll follow-up next week to inspect again.',
+])('model cannot invent an appointment promise without a next visit: %s', async (promise) => {
   const args = input({ nextAppointment: null });
-  const summary = 'We refreshed the perimeter and entry points today. We’ll come back next week to inspect again.';
+  const summary = `We refreshed the perimeter and entry points today. ${promise}`;
   expect(appointmentClaimProblems(summary, groundingFacts(args))).toContain('ungrounded_appointment_claim');
   const out = await applyVisitSummaryNarrative(args, {
     callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
@@ -475,6 +481,7 @@ test('model cannot invent a come-back promise when no next visit was supplied', 
 
 test('zero pressure uses deterministic assessed-area wording instead of model absence claims', async () => {
   const args = input({
+    findings: [],
     pestPressure: { enabled: true, displayScore: 0, label: 'None', trend: null },
     pestPressureEvidence: {
       zeroInspectionSupported: hasTechnicianZeroEvidence({
@@ -493,12 +500,12 @@ test('zero pressure uses deterministic assessed-area wording instead of model ab
   expect(callModel).not.toHaveBeenCalled();
 });
 
-test.each(['activity', 'pest_activity'])('zero pressure does not add absence copy beside a positive %s finding', async (category) => {
+test.each(['activity', 'pest_activity', 'observation', undefined])('zero pressure does not add absence copy beside a positive %s finding', async (category) => {
   const args = input({
     pestPressure: { enabled: true, displayScore: 0, label: 'None', trend: null },
     pestPressureEvidence: { zeroInspectionSupported: true },
     findings: [
-      { category, title: 'Ant activity noted', severity: 'medium' },
+      { category, title: 'Ant activity observed', severity: category === 'observation' ? 'low' : 'medium' },
       { category: 'no_activity', title: 'No activity observed', severity: 'info' },
     ],
   });
@@ -553,6 +560,7 @@ test('customer-only zero score does not become a technician inspection claim', a
   expect(callModel).not.toHaveBeenCalled();
 
   const technicianFacts = groundingFacts(input({
+    findings: [],
     pestPressure: { enabled: true, displayScore: technicianScore.displayedScore, label: technicianScore.label.name },
     pestPressureEvidence: {
       zeroInspectionSupported: hasTechnicianZeroEvidence(technicianScore.componentScores),
