@@ -3743,6 +3743,8 @@ describe('_citabilityNudgeFindings — early-gate retries carry citability feedb
     for (const code of ['CITABILITY_NAMED_SOURCES', 'CITABILITY_CONCRETE_SPECIFICS', 'CITABILITY_COMPARISON', 'CITABILITY_HOW_TO_CHOOSE']) {
       expect(GATE_RETRY_INSTRUCTIONS[code]).toMatch(/non-blocking/);
     }
+    // The comparison nudge keeps the writer prompt's NAMED-COMPETITOR exception (Codex P2).
+    expect(GATE_RETRY_INSTRUCTIONS.CITABILITY_COMPARISON).toMatch(/unless the brief authorizes NAMED-COMPETITOR mode/);
   });
   test('the reviewer summary names every soft miss — a cap of 3 dropped the last nudges (Codex P2)', () => {
     const soft = ['blog_meta_soft_cta', 'citability_named_sources', 'citability_concrete_specifics', 'citability_comparison', 'citability_how_to_choose']

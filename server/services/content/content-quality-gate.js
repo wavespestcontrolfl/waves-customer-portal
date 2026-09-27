@@ -1113,15 +1113,18 @@ const NAMED_SOURCE_RE = new RegExp(
   + String.raw`|\b(?:[Pp]er|[Oo]n|[Uu]nder|[Aa]ccording to|[Rr]ead|[Ff]ollow) the (?:product )?label\b`,
 );
 
-// Rendered lines only: fenced code, HTML/MDX comments and other non-rendered
-// Markdown must not satisfy (or trip) a citability check (Codex r8 P2).
-// The shared guardrails blanker preserves line structure but flattens list
+// Rendered lines only: fenced code, HTML/MDX comments, other non-rendered
+// Markdown (Codex r8 P2) and elements a browser definitely never shows
+// (`hidden`, aria-hidden, display:none — Codex P2, 2026-09-27) must not
+// satisfy (or trip) a citability check. Styled or classed markup still
+// counts: it is usually visible, and these checks only nudge.
+// The shared guardrails blankers preserve line structure but flatten list
 // indentation, so restore only leading whitespace onto the masked text —
 // never restore inline comments or code beside otherwise visible prose.
 function renderedCitabilityBody(body) {
   const raw = String(body || '');
-  const { blankNonRenderedMarkdown } = require('./content-guardrails');
-  const blanked = blankNonRenderedMarkdown(raw);
+  const { blankNonRenderedMarkdown, blankDefinitelyHiddenContent } = require('./content-guardrails');
+  const blanked = blankDefinitelyHiddenContent(blankNonRenderedMarkdown(raw));
   const orig = raw.split(/\r?\n/);
   const mask = blanked.split(/\r?\n/);
   if (orig.length !== mask.length) return blanked;
@@ -1154,14 +1157,16 @@ const OWN_SOURCE_RE = /^(?:waves|our|we|us)\b/i;
 // ("Leading Experts", "Trusted Industry Research") — unless the phrase names
 // its institution ("Department of Agriculture Researchers").
 const GENERIC_SOURCE_HEADS = new Set([
-  'agencies', 'analyst', 'analysts', 'authorities', 'authority', 'companies', 'company',
-  'control', 'data', 'entomologist', 'entomologists', 'evidence', 'expert', 'experts',
-  'exterminator', 'exterminators', 'findings', 'groups', 'homeowners', 'industry',
-  'institutions', 'official', 'officials', 'organizations', 'pest', 'professional',
-  'professionals', 'pros', 'report', 'reports', 'research', 'researcher', 'researchers',
-  'science', 'scientist', 'scientists', 'services', 'source', 'sources', 'specialist',
+  'agencies', 'analyst', 'analysts', 'article', 'articles', 'authorities', 'authority',
+  'blog', 'blogs', 'companies', 'company', 'control', 'data', 'entomologist',
+  'entomologists', 'evidence', 'expert', 'experts', 'exterminator', 'exterminators',
+  'findings', 'groups', 'guide', 'guides', 'homeowners', 'industry', 'institutions',
+  'official', 'officials', 'organizations', 'page', 'pages', 'pest', 'post', 'posts',
+  'professional', 'professionals', 'pros', 'publication', 'publications', 'report',
+  'reports', 'research', 'researcher', 'researchers', 'resource', 'resources', 'science',
+  'scientist', 'scientists', 'services', 'site', 'sites', 'source', 'sources', 'specialist',
   'specialists', 'statistics', 'studies', 'study', 'surveys', 'team', 'technician',
-  'technicians', 'universities',
+  'technicians', 'universities', 'website', 'websites',
 ]);
 // A bare institution type names nobody ("according to the University").
 const BARE_INSTITUTION_TYPES = new Set([
@@ -1184,14 +1189,18 @@ function namedAttributedSource(frame, raw) {
   return !GENERIC_SOURCE_HEADS.has(head) || NAMED_INSTITUTION_RE.test(source);
 }
 
-// Prose lines only: a Title-Case heading ("Research by Region") reads as a
-// proper noun to the capitalization test, and headings carry no attribution.
-function hasAttributedSource(body) {
-  const prose = String(body || '').split('\n').filter((line) => !/^\s{0,3}#{1,6}\s/.test(line)).join('\n');
+function hasAttributedSource(prose) {
   for (const m of prose.matchAll(ATTRIBUTED_SOURCE_RE)) {
     if (namedAttributedSource(m[1], m[2])) return true;
   }
   return false;
+}
+
+// Prose lines only, for BOTH matchers: headings carry no attribution
+// ("## EPA data" names a topic, Codex P2), and a Title-Case heading
+// ("Research by Region") reads as a proper noun to the capitalization test.
+function proseOnly(body) {
+  return String(body || '').split('\n').filter((line) => !/^\s{0,3}#{1,6}\s/.test(line)).join('\n');
 }
 
 // Reduce inline Markdown/HTML to its visible text so a LINKED or emphasized
@@ -1206,8 +1215,8 @@ function visibleInlineText(body) {
 }
 
 function checkCitabilityNamedSources(draft) {
-  const body = visibleInlineText(renderedCitabilityBody(draft.body));
-  if (NAMED_SOURCE_RE.test(body) || hasAttributedSource(body)) return { ok: true };
+  const prose = proseOnly(visibleInlineText(renderedCitabilityBody(draft.body)));
+  if (NAMED_SOURCE_RE.test(prose) || hasAttributedSource(prose)) return { ok: true };
   return { ok: false, reason: 'no_named_source_attribution' };
 }
 
@@ -1257,10 +1266,11 @@ const COMPARISON_TABLE_RE = /<ComparisonTable\b/;
 // is NOT scanned ("DIY" appears in most posts) — the nudge must not push a
 // generic DIY-vs-pro table onto every post (the no-filler visual rule).
 // Deliberately narrow: "X vs Y", "X or Y?" as a whole heading/title, and
-// "which option/approach…". A bare "Should you…?" or a yes/no question is
+// "which [termite] treatment should / is / fits…" (Codex P2, 2026-09-27).
+// A bare "Should you…?" or a yes/no question is
 // NOT a two-path comparison (it fired on 73% of the live corpus in the
 // 2026-09-25 calibration run — most were single-answer questions).
-const CHOICE_FRAMING_RE = /\bvs\.?\b|\bversus\b|^#*\s*[\w'’-]+(?: [\w'’-]+){0,3} or [\w'’-]+(?: [\w'’-]+){0,3}\?\s*$|\bwhich (?:one|option|approach|method|plan|treatment|service) (?:is|fits|works|makes|do)\b/i;
+const CHOICE_FRAMING_RE = /\bvs\.?\b|\bversus\b|^#*\s*[\w'’-]+(?: [\w'’-]+){0,3} or [\w'’-]+(?: [\w'’-]+){0,3}\?\s*$|\bwhich (?:[\w'’-]+ ){0,2}?(?:one|option|approach|method|plan|product|treatment|service)s? (?:is|are|fits|works|makes|do|does|should)\b/i;
 
 function headingLines(body) {
   return String(body || '').split(/\r?\n/).filter((l) => /^#{1,3}\s+\S/.test(l));
