@@ -2259,7 +2259,7 @@ async function pollPending() {
     try {
       const queueRows = await db('opportunity_queue')
         .whereIn('id', oppIds)
-        .select('id', 'status', 'skip_reason', 'claim_id');
+        .select('id', 'status', 'skip_reason', 'claim_id', 'bucket', 'signal_metadata');
       queueById = new Map(queueRows.map((q) => [q.id, q]));
     } catch (err) {
       logger.warn(`[autonomous-pr-poller] opportunity_queue state query failed: ${err.message}`);
@@ -2281,7 +2281,13 @@ async function pollPending() {
         && sameQueueClaim(queueRow, run)
         && queueRow.status === 'pending_review'
         && queueRow.skip_reason === pendingSkipReasonForRun(run);
-      if (!stillParked) {
+      const currentClaimPrRecovery = !!queueRow
+        && sameQueueClaim(queueRow, run)
+        && queueRow.bucket === 'citability_backfill'
+        && require('./opportunity-queue')._internals.pageEditSuperseded(queueRow)
+        && queueRow.status === 'claimed'
+        && queueRow.skip_reason === 'named_competitor_publishing';
+      if (!stillParked && !currentClaimPrRecovery) {
         const r = await supersedeRun(run, queueRow);
         await reconcileSupersededPr(run);
         results.push({ id: run.id, pr_url: run.astro_pr_url, ...r });

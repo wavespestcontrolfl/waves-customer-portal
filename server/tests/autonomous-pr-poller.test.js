@@ -2554,6 +2554,29 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     }));
   });
 
+  test('pollPending preserves a superseded current-claim PR while approval queue recovery is pending', async () => {
+    const run = makeRun({ action_type: 'refresh_existing_page', queue_claim_id: 'claim-current' });
+    const recoveryClaim = {
+      id: 'opp-1', status: 'claimed', skip_reason: 'named_competitor_publishing', claim_id: 'claim-current',
+      bucket: 'citability_backfill',
+      signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:new' } },
+    };
+    const updates = setupDb({ pending: [run], queue: [recoveryClaim] });
+    gh.getPr.mockResolvedValue({
+      head: { ref: 'content/current-claim', sha: 'current-head' },
+      number: 42, state: 'open', merged: false,
+    });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({
+      pending: true, transient: true, reason: 'citability_retirement_queue_recovery_pending',
+    });
+    expect(runUpdates(updates)).toEqual([]);
+    expect(gh.closePr).not.toHaveBeenCalled();
+    expect(gh.retireBranch).not.toHaveBeenCalled();
+  });
+
   test('operator action landing between tick-start and finalize (closed PR): superseded, never failed', async () => {
     const updates = setupDb({
       pending: [makeRun()],
