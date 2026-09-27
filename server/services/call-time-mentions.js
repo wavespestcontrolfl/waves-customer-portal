@@ -282,12 +282,14 @@ function extractHourMentions(turnText) {
     const toks = normalize(sentence).split(' ').filter(Boolean);
     let rangeEnd = -1;
     for (let i = 0; i < toks.length; i += 1) {
-      if (Object.hasOwn(NAMED_HOURS, toks[i])) mentions.push({ hour24: NAMED_HOURS[toks[i]], offHour: false, pos: offset + i, end: offset + i + 1 });
+      // "Half past two", "quarter past noon": a fraction lead-in is off the hour.
+      const fraction = ['past', 'after', 'to'].includes(toks[i - 1]) && ['half', 'quarter'].includes(toks[i - 2]);
+      if (Object.hasOwn(NAMED_HOURS, toks[i])) mentions.push({ hour24: NAMED_HOURS[toks[i]], offHour: fraction, pos: offset + i, end: offset + i + 1 });
       const n = hourNumber(toks[i]);
       if (n == null || i === rangeEnd) continue;
       const after = i + 1 + minuteTokensAfter(toks, i);
       rangeEnd = rangeEndAfter(toks, i, after);
-      const offHour = after > i + 1 || (['past', 'after', 'to'].includes(toks[i - 1]) && ['half', 'quarter'].includes(toks[i - 2]));
+      const offHour = after > i + 1 || fraction;
       const period = periodAfter(toks, after);
       const marked = offHour || rangeEnd > 0 || period || OCLOCK.has(toks[after]) || HOUR_LEADS.has(toks[i - 1]) || toks[i + 1] === 'ish';
       if (!marked || runsIntoDuration(toks, after)) continue;

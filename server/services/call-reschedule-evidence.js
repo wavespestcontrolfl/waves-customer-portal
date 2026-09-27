@@ -123,6 +123,10 @@ const COMMITMENT_MARKERS = [
   'i ll switch it', 'we ll switch it', 'i will switch it', 'we will switch it',
 ];
 
+// A condition on the commitment itself ("we'll see you then if a slot opens
+// up") leaves the slot unsettled.
+const CONDITION_WORDS = ['if', 'unless', 'as long as', 'provided', 'assuming', 'hopefully', 'should be able'];
+
 function padded(s) { return ` ${s} `; }
 function hasHedgeMarker(ns) {
   const p = padded(ns);
@@ -131,6 +135,12 @@ function hasHedgeMarker(ns) {
 function hasAnyMarker(ns, markers) {
   const p = padded(ns);
   return markers.some((m) => p.includes(padded(m)));
+}
+// Does the agent's turn commit to the slot: a sentence with a commitment and
+// no condition on it ("We'll see you then. If you need anything, call us"
+// commits; "We'll see you then if a slot opens up" does not)?
+function commitsToSlot(turn) {
+  return sentenceSpans(turn.raw).some((sentence) => hasAnyMarker(sentence.ns, COMMITMENT_MARKERS) && !hasAnyMarker(sentence.ns, CONDITION_WORDS));
 }
 function hasRefusalMarker(ns) {
   const p = padded(ns);
@@ -410,7 +420,7 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
   const agentTurnFrom = (from) => turns.findIndex((t, i) => i >= from && t.agent);
   let affirmIdx = agentTurnFrom(anchorIdx);
   if (affirmIdx === anchorIdx && asksCaller(affirmIdx)) affirmIdx = agentTurnFrom(anchorIdx + 1);
-  if (affirmIdx === -1 || asksCaller(affirmIdx) || !hasAnyMarker(turns[affirmIdx].ns, COMMITMENT_MARKERS)) return failAt('no_affirming_agent_turn');
+  if (affirmIdx === -1 || asksCaller(affirmIdx) || !commitsToSlot(turns[affirmIdx])) return failAt('no_affirming_agent_turn');
 
   // A negation on the slot's own words, after it in the turn completing it,
   // or in any later turn — the caller's "no" to the proposal, the agent's
