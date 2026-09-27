@@ -344,7 +344,12 @@ async function callClaude(systemPrompt, userPrompt) {
     const response = await createDeepMessage(client, {
       laneId: 'wiki_compiler',
       model: MODEL,
-      max_tokens: 8192, // DEEP: thinking spends from max_tokens — keep headroom for the visible answer
+      // DEEP: thinking spends from max_tokens ahead of the visible answer.
+      // 16000 (was 8192, 2026-09-26): 5 of 6 prod calls were hitting 8192
+      // exactly (avg output 7515) with thinking eating the whole cap —
+      // paid-for output was being discarded as anthropic_incomplete.
+      // knowledge/wiki-compiler.js is already 12000 — leave it.
+      max_tokens: 16000,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     });
