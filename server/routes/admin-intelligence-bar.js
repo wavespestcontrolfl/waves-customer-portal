@@ -231,7 +231,8 @@ const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/web
 // Stack-safe (sliced) validation — a whole-string regex on a multi-megabyte
 // payload is the CI-only 500 flake; see server/utils/base64-validate.js.
 const { isValidBase64 } = require('../utils/base64-validate');
-const IMAGE_TAINT_MARKER = '[Image attachment context may contain PII]';
+// The persisted-turn markers are defined once, with the thread store.
+const { IMAGE_TAINT_MARKER, PII_TAINT_MARKER } = IbThreads;
 const IMAGE_ATTACHMENT_HISTORY_RE = /\[Operator attached \d+ image(?:s)?\]/;
 
 // Validate attachments server-side — never trust the client downscaler. Drop
@@ -258,7 +259,6 @@ function sanitizeQueryImages(images) {
 // does: a follow-up turn can echo the name with no tool call at all, so the
 // taint must survive the round-trip through the client the same way the
 // image taint does.
-const PII_TAINT_MARKER = '[PII-bearing tool context may contain customer PII]';
 // The persisted user turn of a task continuation. The original request is
 // already in the thread and in the client's history from the first reply.
 const CONTINUATION_TURN = 'Continue the saved request using its recorded step outcomes.';

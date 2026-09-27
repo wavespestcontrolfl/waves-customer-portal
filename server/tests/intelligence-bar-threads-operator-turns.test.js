@@ -85,6 +85,19 @@ describe('IbThreads.recentOperatorTurns', () => {
     expect(result).toEqual(['second operator turn', 'first operator turn']);
   });
 
+  test('returns what the operator typed: server-added taint markers and the attachment note are removed', async () => {
+    const IbThreads = withThreadsModule({
+      threads: [{ id: THREAD_ID, admin_actor_id: ACTOR }],
+      turns: [{
+        thread_id: THREAD_ID, seq: 1, role: 'user', created_at: minutesAgo(2),
+        // The persisted format: the route appends these lines to the typed text.
+        content: 'We bought Alpine WSG\n[Operator attached 1 image]\n[Image attachment context may contain PII]\n[PII-bearing tool context may contain customer PII]',
+      }],
+    });
+    const result = await IbThreads.recentOperatorTurns(ACTOR, THREAD_ID, { limit: 3, maxAgeMinutes: 30 });
+    expect(result).toEqual(['We bought Alpine WSG']);
+  });
+
   test('an assistant-only mention never comes back, even when it is the most recent turn', async () => {
     const IbThreads = withThreadsModule({
       threads: [{ id: THREAD_ID, admin_actor_id: ACTOR }],

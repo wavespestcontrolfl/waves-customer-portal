@@ -151,6 +151,24 @@ async function getThread(actorId, threadId) {
   };
 }
 
+// Lines the IB route appends to a persisted user turn; they are server
+// metadata, never operator text. The taint markers keep follow-ups redacted
+// (see admin-intelligence-bar.js); the attachment note stands in for images.
+const IMAGE_TAINT_MARKER = '[Image attachment context may contain PII]';
+const PII_TAINT_MARKER = '[PII-bearing tool context may contain customer PII]';
+const ATTACHMENT_NOTE_RE = /^\[Operator attached \d+ images?\]$/;
+
+// A persisted user turn with the server-added lines removed: what the
+// operator actually typed.
+function operatorText(content) {
+  return String(content || '').split('\n')
+    .filter((line) => {
+      const trimmed = line.trim();
+      return trimmed !== IMAGE_TAINT_MARKER && trimmed !== PII_TAINT_MARKER && !ATTACHMENT_NOTE_RE.test(trimmed);
+    })
+    .join('\n').trim();
+}
+
 /**
  * The actor's most recent OPERATOR (role='user') turns on one thread, bounded
  * by count and age. Used by the inventory write-target grounding fallback
@@ -180,7 +198,7 @@ async function recentOperatorTurns(actorId, threadId, { limit = 3, maxAgeMinutes
     .where('created_at', '>=', db.raw("NOW() - (? || ' minutes')::interval", [maxAgeMinutes]));
   if (Number.isInteger(maxSeq)) query = query.where('seq', '<=', maxSeq);
   const rows = await query.orderBy('seq', 'desc').limit(limit).select('content');
-  return rows.map((r) => r.content);
+  return rows.map((r) => operatorText(r.content));
 }
 
 /** Recent threads for the picker (no turns). */
@@ -212,6 +230,8 @@ module.exports = {
   getThread,
   listThreads,
   recentOperatorTurns,
+  IMAGE_TAINT_MARKER,
+  PII_TAINT_MARKER,
   purgeExpiredThreads,
   deriveTitle,
   RESUME_TURN_LIMIT,
