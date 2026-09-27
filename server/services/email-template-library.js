@@ -1061,6 +1061,11 @@ async function runProviderHandoff({ withProviderHandoff, dispatchToProvider, tem
   throw new Error('provider handoff returned without a provider result');
 }
 
+async function dispatchWithoutCallerHandoff(dispatch) {
+  await dispatch();
+  return { ok: true };
+}
+
 function queuedRowInFlight(message, now = Date.now()) {
   if (String(message?.status || '').toLowerCase() !== 'queued') return false;
   const queuedAt = message.queued_at ? new Date(message.queued_at).getTime() : null;
@@ -1187,7 +1192,7 @@ async function sendTemplate({
   // pre-provider (ABORTED_BEFORE_DISPATCH), a throw after dispatch began is
   // the provider outcome, and a caller failure after acceptance keeps the
   // acceptance.
-  withProviderHandoff = null,
+  withProviderHandoff = dispatchWithoutCallerHandoff,
   // Delivery-guards slice (re-cut of #4569): the estimate(s) this send is
   // about. When present, passed through to sendgrid.sendOne as an explicit
   // addition to its own content derivation. Codex round 3 on #4608
@@ -1569,21 +1574,17 @@ async function sendTemplate({
   };
   const abortProviderBoundaryBeforeDispatch = async () => {
     const reason = 'provider_boundary_blocked';
-    let failed;
-    try {
-      [failed] = await db('email_messages')
-        .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken,
-          provider_handoff_phase: PROVIDER_HANDOFF_STARTED,
-          provider_handoff_attempt_token: sendAttemptToken })
-        .update({ status: 'failed', error_message: reason,
-          provider_handoff_phase: PROVIDER_HANDOFF_REJECTED,
-          provider_handoff_attempt_token: sendAttemptToken, updated_at: new Date() }).returning('*');
-    } catch (bookkeepingErr) {
-      logger.warn(`[email-template-library] provider boundary refusal bookkeeping failed for ${templateKey}: ${bookkeepingErr.message}`);
-    }
+    const [failed] = await db('email_messages')
+      .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken,
+        provider_handoff_phase: PROVIDER_HANDOFF_STARTED,
+        provider_handoff_attempt_token: sendAttemptToken })
+      .update({ status: 'failed', error_message: reason,
+        provider_handoff_phase: PROVIDER_HANDOFF_REJECTED,
+        provider_handoff_attempt_token: sendAttemptToken, updated_at: new Date() }).returning('*');
+    if (!failed) throw inFlightCollisionError(idempotencyKey || message.id);
     return {
       sent: false, aborted: true, boundaryBlocked: true, reason, providerAttempted: false,
-      message: failed || { ...message, status: 'failed', error_message: reason }, rendered,
+      message: failed, rendered,
     };
   };
   if (typeof onQueued === 'function') {
@@ -1598,7 +1599,7 @@ async function sendTemplate({
 
   let providerAccepted = false;
   let providerHandoffStarted = false;
-  let markerWriteFailed = false;
+  let providerRequestDefinitelyUnsent = false;
   let result;
   const recordAcceptance = () => db('email_messages')
     .where({ id: message.id, send_attempt_token: sendAttemptToken,
@@ -1676,7 +1677,7 @@ async function sendTemplate({
           provider_handoff_attempt_token: sendAttemptToken })
         .update({ provider_handoff_phase: PROVIDER_HANDOFF_STARTED,
           provider_handoff_attempt_token: sendAttemptToken, updated_at: new Date() })
-        .catch((err) => { markerWriteFailed = true; throw err; });
+        .catch((err) => { providerRequestDefinitelyUnsent = true; throw err; });
       if (Number(marked) !== 1) {
         throw inFlightCollisionError(idempotencyKey || message.id);
       }
@@ -1718,19 +1719,24 @@ async function sendTemplate({
       } catch (err) {
         if (err?.annualOfferWithheld) return ANNUAL_OFFER_WITHHELD;
         if (err?.annualOfferGuardFailed) return { [ANNUAL_OFFER_GUARD_FAILED]: true, error: err };
-        if (err?.providerBoundaryBlocked) return PROVIDER_BOUNDARY_BLOCKED;
+        if (err?.providerBoundaryBlocked) {
+          providerRequestDefinitelyUnsent = true;
+          return PROVIDER_BOUNDARY_BLOCKED;
+        }
         throw err;
       }
     };
-    if (typeof withProviderHandoff === 'function') {
-      const handoff = await runProviderHandoff({ withProviderHandoff, dispatchToProvider, templateKey });
-      if (handoff.abortedBeforeDispatch) return abortBeforeDispatch();
-      result = handoff.result;
-    } else {
-      result = await dispatchToProvider();
-    }
+    const handoff = await runProviderHandoff({ withProviderHandoff, dispatchToProvider, templateKey });
+    if (handoff.abortedBeforeDispatch) return abortBeforeDispatch();
+    result = handoff.result;
     if (result === ANNUAL_OFFER_WITHHELD) return abortWithheldBeforeDispatch();
-    if (result === PROVIDER_BOUNDARY_BLOCKED) return abortProviderBoundaryBeforeDispatch();
+    if (result === PROVIDER_BOUNDARY_BLOCKED) {
+      // The final callback ran after preparation but refused before fetch.
+      // If its settlement write fails, recover either visible marker state as
+      // definitely unsent rather than leaving a started row ambiguous.
+      providerHandoffStarted = false;
+      return await abortProviderBoundaryBeforeDispatch();
+    }
     // Pre-push audit P1: both the withProviderHandoff branch and the direct
     // branch above assign `result` from the SAME dispatchToProvider, so this
     // one check covers either caller shape.
@@ -1782,7 +1788,7 @@ async function sendTemplate({
     const expectedFailurePhase = providerHandoffStarted
       ? PROVIDER_HANDOFF_STARTED
       : PROVIDER_HANDOFF_PENDING;
-    const expectedFailurePhases = markerWriteFailed && !providerHandoffStarted
+    const expectedFailurePhases = providerRequestDefinitelyUnsent && !providerHandoffStarted
       ? [PROVIDER_HANDOFF_PENDING, PROVIDER_HANDOFF_STARTED] : [expectedFailurePhase];
     const recordedFailurePhase = definiteRejection
       ? PROVIDER_HANDOFF_REJECTED

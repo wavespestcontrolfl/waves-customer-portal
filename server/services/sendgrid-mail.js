@@ -224,7 +224,11 @@ async function resolveWithheldLinkRewrite({ html, text, estimateIds, templateKey
  * { messageId } where messageId is read from the X-Message-Id response header
  * (plus withheldLinksRewritten: [ids] when the rewrite policy above fired).
  */
-async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs, suppressErrorLog, disableTracking = false, estimateIds, templateKey, withheldLinkPolicy, database, providerBoundaryCheck }) {
+async function sendOne({
+  to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments,
+  customArgs, suppressErrorLog, disableTracking = false, estimateIds, templateKey, withheldLinkPolicy,
+  database, providerBoundaryCheck = async () => ({ ok: true }),
+}) {
   if (!to || !subject) throw new Error('sendOne: to + subject required');
 
   const { sendHtml, sendText, sendEstimateIds, withheldLinksRewritten } = await resolveWithheldLinkRewrite({
@@ -235,26 +239,7 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
 
   // Run caller authority after all asynchronous provider preparation. Once
   // this resolves, payload construction stays synchronous until fetch starts.
-  if (typeof providerBoundaryCheck === 'function') {
-    let verdict;
-    try {
-      verdict = await providerBoundaryCheck({ database });
-    } catch (cause) {
-      verdict = {
-        ok: false,
-        code: cause?.code,
-        reason: cause?.message,
-        retryable: cause?.retryable,
-      };
-    }
-    if (verdict?.ok !== true) {
-      const err = new Error(verdict?.reason || 'Provider boundary check did not pass');
-      err.code = verdict?.code || 'PROVIDER_BOUNDARY_CHECK_FAILED';
-      err.retryable = verdict?.retryable === true;
-      err.providerBoundaryBlocked = true;
-      throw err;
-    }
-  }
+  await providerBoundaryCheck({ database });
 
   const payload = {
     personalizations: [{

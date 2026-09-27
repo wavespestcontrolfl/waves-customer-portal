@@ -137,14 +137,13 @@ postgres('billing Email provider preparation on its held connection', () => {
       const outcome = await dispatchUnderBillingEmailAuthority({
         input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
         recipientEmail: 'qa@example.invalid', state,
-        dispatch: async (database, providerBoundaryCheck) => {
+        dispatch: async (database) => {
           expect(database.isTransaction).toBe(true);
           await database('estimates').insert({ id: estimateId, token, status: 'accepted', estimate_data: {} });
           await sendgrid.sendOne({
             to: 'qa@example.invalid', subject: 'Synthetic billing update',
             html: `<a href="https://example.invalid/estimate/${token}">Review</a>`,
-            text: `https://example.invalid/estimate/${token}`, withheldLinkPolicy: policy,
-            database, providerBoundaryCheck,
+            text: `https://example.invalid/estimate/${token}`, withheldLinkPolicy: policy, database,
           });
         },
       });
@@ -263,7 +262,7 @@ postgres('billing Email provider preparation on its held connection', () => {
 
   test.each([
     ['manual_dnc', 'SUPPRESSED_MANUAL_DNC'],
-    ['opt_out_keyword', 'SUPPRESSED_OPT_OUT'],
+    ['mystery_reason', 'SUPPRESSED_OTHER'],
   ])('%s blocks provider work under the held transaction', async (reason, code) => {
     const phone = '+19415550100';
     await mockPg('customers').where({ id: customerId }).update({ phone });
@@ -307,25 +306,85 @@ postgres('billing Email provider preparation on its held connection', () => {
     }
   }, 15000);
 
-  test('SMS-only non_mobile suppression still permits authorized Email dispatch', async () => {
+  // A landline fact, a STOP text and a wrong-number flag are about the phone:
+  // none of them stops a payment email (owner ruling 2026-09-27 for the
+  // last two). A staff do-not-contact does (below).
+  test.each(['non_mobile', 'opt_out', 'opt_out_keyword', 'opt_out_natural_language', 'wrong_number'])('a %s phone suppression still permits authorized Email dispatch', async (reason) => {
     const phone = '+19415550100';
     await mockPg('customers').where({ id: customerId }).update({ phone });
-    await mockPg('messaging_suppression').insert({ phone, reason: 'non_mobile', active: true });
+    await mockPg('messaging_suppression').insert({ phone, reason, active: true });
     const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
     try {
       expect(await dispatchUnderBillingEmailAuthority({
         input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
         recipientEmail: 'qa@example.invalid', state,
-        dispatch: (database, providerBoundaryCheck) => sendgrid.sendOne({
-          to: 'qa@example.invalid', subject: 'Synthetic update',
-          html: '<p>Authorized Email</p>', text: 'Authorized Email', database, providerBoundaryCheck,
-        }),
+        dispatch: (database) => sendgrid.sendOne({ to: 'qa@example.invalid', subject: 'Synthetic update',
+          html: '<p>Authorized Email</p>', text: 'Authorized Email', database }),
       })).toEqual({ ok: true });
       expect(state.providerAccepted).toBe(true);
       expect(global.fetch).toHaveBeenCalledTimes(1);
     } finally {
       await mockPg('messaging_suppression').where({ phone }).delete();
       await mockPg('customers').where({ id: customerId }).update({ phone: null });
+    }
+  }, 15000);
+
+  // Owner ruling 2026-09-27: the shared check serves every billing email
+  // sender, so a customer who never chose a billing channel keeps Email.
+  test.each([
+    ['no explicit billing choice', () => mockPg('notification_prefs').where({ customer_id: customerId }).update({ billing_channels: null })],
+    ['no notification_prefs row', () => mockPg('notification_prefs').where({ customer_id: customerId }).delete()],
+  ])('%s keeps authorized Email dispatch', async (_label, arrange) => {
+    await arrange();
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    try {
+      expect(await dispatchUnderBillingEmailAuthority({
+        input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
+        recipientEmail: 'qa@example.invalid', state,
+        dispatch: (database) => sendgrid.sendOne({ to: 'qa@example.invalid', subject: 'Synthetic update',
+          html: '<p>Authorized Email</p>', text: 'Authorized Email', database }),
+      })).toEqual({ ok: true });
+      expect(state.providerAccepted).toBe(true);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      await mockPg('notification_prefs').insert({ customer_id: customerId, email_enabled: true, billing_channels: ['email'] })
+        .onConflict('customer_id').merge();
+    }
+  }, 15000);
+
+  // A staff do-not-contact is the one phone suppression that stops a payment
+  // email, so a later STOP, wrong-number reply or carrier opt-out recorded
+  // over it keeps it; over any other reason the newer record still wins.
+  test.each(['opt_out', 'opt_out_keyword', 'wrong_number'])('a %s recorded over a staff do-not-contact keeps the payment email blocked', async (reason) => {
+    const phone = '+19415550100';
+    await mockPg('customers').where({ id: customerId }).update({ phone });
+    await mockPg('messaging_suppression').insert({ phone, reason: 'manual_dnc', source: 'staff', active: true, created_at: new Date() });
+    const dispatch = jest.fn();
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    try {
+      expect(await recordSuppression({ phone, reason, source: 'inbound_stop' })).toEqual({ ok: true });
+      expect(await mockPg('messaging_suppression').where({ phone }).first('reason', 'source', 'active'))
+        .toEqual({ reason: 'manual_dnc', source: 'staff', active: true });
+      await expect(dispatchUnderBillingEmailAuthority({
+        input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
+        recipientEmail: 'qa@example.invalid', state, dispatch,
+      })).resolves.toEqual({ ok: false });
+      expect(state.boundaryBlock).toMatchObject({ code: 'SUPPRESSED_MANUAL_DNC' });
+      expect(dispatch).not.toHaveBeenCalled();
+    } finally {
+      await mockPg('messaging_suppression').where({ phone }).delete();
+      await mockPg('customers').where({ id: customerId }).update({ phone: null });
+    }
+  }, 15000);
+
+  test('a newer phone fact still replaces an older one', async () => {
+    const phone = '+19415550100';
+    await mockPg('messaging_suppression').insert({ phone, reason: 'opt_out_keyword', active: true, created_at: new Date() });
+    try {
+      expect(await recordSuppression({ phone, reason: 'wrong_number', source: 'inbound_wrong_number' })).toEqual({ ok: true });
+      expect(await mockPg('messaging_suppression').where({ phone }).first('reason')).toEqual({ reason: 'wrong_number' });
+    } finally {
+      await mockPg('messaging_suppression').where({ phone }).delete();
     }
   }, 15000);
 
@@ -377,10 +436,10 @@ postgres('billing Email provider preparation on its held connection', () => {
           await waitForPhoneLock(pid);
           return { ok: true };
         },
-        dispatch: async (database, providerBoundaryCheck) => {
+        dispatch: async (database) => {
           expect(committed).toBe(false);
           await sendgrid.sendOne({ to: 'qa@example.invalid', subject: 'Synthetic billing update',
-            html: '<p>Authorized</p>', text: 'Authorized', database, providerBoundaryCheck });
+            html: '<p>Authorized</p>', text: 'Authorized', database });
           expect(committed).toBe(false);
         },
       });

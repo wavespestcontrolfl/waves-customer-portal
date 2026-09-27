@@ -104,6 +104,21 @@ test('emits latest_start_min — the last start whose end still clears the drive
   expect(slots[0].latest_start_min).toBe(16 * 60 + 59 - 60);
 });
 
+test('startFloorByDate floors only its own date; other dates keep their earliest start', async () => {
+  const { slots } = await findAvailableSlots({
+    ...BASE, dateTo: NEXT_FUTURE_DATE, topN: 10, startFloorByDate: { [FUTURE_DATE]: 15 * 60 + 1 },
+  });
+  expect(slots.find((s) => s.date === FUTURE_DATE).start_time).toBe('15:01');
+  expect(slots.find((s) => s.date === NEXT_FUTURE_DATE).start_time).toBe('08:01');
+});
+
+test('startFloorByDate and earliestStartMin combine by max (the preferred-time floor is never lowered)', async () => {
+  const pref = await findAvailableSlots({ ...BASE, earliestStartMin: 13 * 60, startFloorByDate: { [FUTURE_DATE]: 10 * 60 } });
+  expect(pref.slots[0].start_time).toBe('13:00');
+  const date = await findAvailableSlots({ ...BASE, earliestStartMin: 10 * 60, startFloorByDate: { [FUTURE_DATE]: 14 * 60 } });
+  expect(date.slots[0].start_time).toBe('14:00');
+});
+
 test('earliestStartMin default (0) is a no-op — identical legacy behavior', async () => {
   const { slots } = await findAvailableSlots(BASE);
   expect(slots[0].start_time).toBe('08:01');

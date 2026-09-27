@@ -84,13 +84,13 @@ function input(overrides = {}) {
 async function runAuthority(overrides = {}, { preSendCheck, dispatch = jest.fn(async (database, providerBoundaryCheck) => {
   const verdict = await providerBoundaryCheck({ database });
   return verdict.ok === true ? { messageId: 'provider-1' } : null;
-}) } = {}) {
+}), templateKey } = {}) {
   const requestInput = input(overrides);
   const context = await loadBillingEmailContext(requestInput);
   if (context.error) return { context, outcome: { ok: false }, state: null, dispatch };
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
   const outcome = await dispatchUnderBillingEmailAuthority({
-    input: requestInput, recipientEmail: context.recipientEmail, preSendCheck, dispatch, state,
+    input: requestInput, recipientEmail: context.recipientEmail, templateKey, preSendCheck, dispatch, state,
   });
   return { context, outcome, state, dispatch };
 }
@@ -135,6 +135,21 @@ describe('billing channel email authority', () => {
       // dead end.
       blocked: true, code: 'BILLING_PREFERENCES_CHANGED', deliveryOutcome: 'not_sent', deferred: true, retryable: true,
     });
+  });
+
+  // Owner ruling 2026-09-27: the shared check serves every billing email
+  // sender, so a customer who never chose a billing channel keeps Email, as
+  // those senders always did. Only an explicit choice without Email refuses.
+  test.each([
+    ['no explicit choice for the category', { customer_id: 'cust-1', invoice_channels: ['sms'] }],
+    ['no notification_prefs row', undefined],
+  ])('%s keeps Email, at the first read and at the locked recheck', async (_label, prefs) => {
+    rows.notification_prefs = prefs;
+    const { context, outcome, dispatch } = await runAuthority();
+    expect(context.error).toBeUndefined();
+    expect(context.recipientEmail).toBe('casey@example.com');
+    expect(outcome).toEqual({ ok: true });
+    expect(dispatch).toHaveBeenCalledWith(mockDb, expect.any(Function));
   });
 
   test('passes the authority transaction to provider preparation', async () => {
@@ -258,6 +273,12 @@ describe('billing channel email authority', () => {
     expect(mockLoadTemplateByKey).toHaveBeenCalledWith('billing.notice', mockDb);
   });
 
+  test("the locked suppression recheck loads the sender's own template when it names one", async () => {
+    const { outcome } = await runAuthority({}, { templateKey: 'invoice.followup_3_day' });
+    expect(outcome.ok).toBe(true);
+    expect(mockLoadTemplateByKey).toHaveBeenCalledWith('invoice.followup_3_day', mockDb);
+  });
+
   test('the locked suppression recheck loads billing.receipt_notice for the payment_receipt category', async () => {
     rows.notification_prefs = { customer_id: 'cust-1', payment_receipt_channels: ['email'] };
     const { outcome } = await runAuthority({
@@ -347,7 +368,7 @@ describe('billing channel email authority', () => {
     expect(invoiceLocked).toBe(false);
   });
 
-  test('threads the SAME locked transaction into the final provider-boundary check (codex r2 P1)', async () => {
+  test('threads the same locked transaction into both producer checks', async () => {
     const lockedTrx = jest.fn((table) => defaultDbImplementation(table));
     mockWithCustomerCommsLock.mockImplementationOnce(async (database, customerId, callback) => {
       expect(database).toBe(mockDb);
@@ -360,7 +381,10 @@ describe('billing channel email authority', () => {
     });
     const { outcome } = await runAuthority({}, { preSendCheck });
     expect(outcome.ok).toBe(true);
-    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email', database: lockedTrx });
+    expect(preSendCheck.mock.calls).toEqual([
+      [{ channel: 'email', database: lockedTrx, providerBoundary: false }],
+      [{ channel: 'email', database: lockedTrx, providerBoundary: true }],
+    ]);
   });
 
   test('blocks when invoice ownership changes before provider dispatch', async () => {
@@ -409,11 +433,14 @@ describe('billing channel email authority', () => {
     expect(state.boundaryBlock).toMatchObject({ blocked: true, code: 'EMAIL_RECIPIENT_CHANGED' });
   });
 
-  test('invokes the pre-send check for the email channel at dispatch, threading the locked transaction (codex r2 P1)', async () => {
+  test('checks producer authority before preparation and again at the provider boundary', async () => {
     const preSendCheck = jest.fn(async () => ({ ok: true }));
     const { outcome } = await runAuthority({}, { preSendCheck });
     expect(outcome.ok).toBe(true);
-    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email', database: mockDb });
+    expect(preSendCheck.mock.calls).toEqual([
+      [{ channel: 'email', database: mockDb, providerBoundary: false }],
+      [{ channel: 'email', database: mockDb, providerBoundary: true }],
+    ]);
   });
 
   test('blocks the provider request when the pre-send check fails', async () => {
@@ -428,14 +455,16 @@ describe('billing channel email authority', () => {
     expect(state.boundaryBlock).toMatchObject({
       blocked: true, code: 'PORTAL_HOLD', reason: 'Portal hold active', retryable: true,
     });
-    expect(dispatch).toHaveBeenCalledWith(mockDb, expect.any(Function));
+    expect(dispatch).not.toHaveBeenCalled();
     expect(state.handoffStarted).toBe(false);
   });
 
   test('preserves a final caller-authority refusal when dispatch reports it as a throw', async () => {
-    const preSendCheck = jest.fn(async () => ({
-      ok: false, code: 'AUTHORITY_CHANGED', reason: 'Authority changed', retryable: false,
-    }));
+    const preSendCheck = jest.fn()
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({
+        ok: false, code: 'AUTHORITY_CHANGED', reason: 'Authority changed', retryable: false,
+      });
     const dispatch = jest.fn(async (database, providerBoundaryCheck) => {
       const verdict = await providerBoundaryCheck({ database });
       throw Object.assign(new Error(verdict.reason), {
@@ -462,6 +491,6 @@ describe('billing channel email authority', () => {
     await expect(runAuthority({}, { preSendCheck, dispatch })).rejects.toBe(markerError);
 
     expect(dispatch).toHaveBeenCalledWith(mockDb, expect.any(Function));
-    expect(preSendCheck).not.toHaveBeenCalled();
+    expect(preSendCheck).toHaveBeenCalledTimes(1);
   });
 });
