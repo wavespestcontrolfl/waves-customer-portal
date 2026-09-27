@@ -4967,6 +4967,8 @@ describe('voice relay eval — named spoken checks', () => {
       'La cita aún debe ser confirmada por la oficina, pero ya quedó confirmada. Un miembro del equipo le dará seguimiento.',
       'La oficina le llamará para que su cita quede confirmada, aunque ya está agendada.',
       'La oficina le llamó para que supiera que su cita quedó confirmada. Un miembro del equipo le dará seguimiento.',
+      'Para que quede claro que su cita ya está confirmada. Un miembro del equipo le dará seguimiento.',
+      'Para que sea evidente que su cita ya está confirmada. Un miembro del equipo le dará seguimiento.',
     ]) {
       const claimed = grade(SPANISH_CAPTURE_FULL, text);
       expect([text, claimed.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
@@ -5602,6 +5604,8 @@ describe('voice relay eval — named spoken checks', () => {
       'La cita del domingo 4 de octubre a la una de la tarde aún debe ser confirmada por la oficina, pero ya quedó confirmada.',
       'La oficina le llamará para que su cita del domingo 4 de octubre a la una de la tarde quede confirmada, aunque ya está agendada.',
       'La oficina le llamó para que supiera que su cita del domingo 4 de octubre a la una de la tarde quedó confirmada.',
+      'Para que quede claro que su cita del domingo 4 de octubre a la una de la tarde ya está confirmada, la oficina le llamará.',
+      'Para que sea evidente que su cita del domingo 4 de octubre a la una de la tarde ya está confirmada, la oficina le llamará.',
     ]) {
       const claimed = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text }] }));
       expect([text, claimed.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
@@ -5676,6 +5680,14 @@ describe('voice relay eval — named spoken checks', () => {
       const pending = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text }] }));
       expect([text, pending.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
       expect([text, replay._internals.scenarioStatus({ checks: pending })]).toEqual([text, 'pass']);
+    }
+    for (const text of [
+      'Esa hora ya no está disponible; para que quede claro que su cita del lunes 5 de octubre a las diez de la mañana ya está confirmada, la oficina le llamará.',
+      'Esa hora ya no está disponible; para que sea evidente que su cita del lunes 5 de octubre a las diez de la mañana ya está confirmada, la oficina le llamará.',
+    ]) {
+      const claimed = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text }] }));
+      expect([text, claimed.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect([text, replay._internals.scenarioStatus({ checks: claimed })]).toEqual([text, 'fail']);
     }
     // Codex round-2 P1: two more natural Spanish paraphrases the old
     // enumerated-verb-form regex missed ("ya lo tomaron" — a pronoun between
