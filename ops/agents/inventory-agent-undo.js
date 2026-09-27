@@ -30,12 +30,14 @@
 // edit): the row's version must still equal the one the agent recorded, and
 // stock must still equal the movement's stock_after. Reversing past a later
 // write would not cleanly restore the pre-agent state. ALSO refuses (item 4,
-// 2026-09-27 round 7 review) when an operational reference to the product —
-// service_product_usage, service_products, a protocol template/lawn
-// protocol product link, or a fresh product_restock_requests row — was
-// added after the agent's own agent_decided_at: the row hash above only
-// ever covers the products_catalog row itself, never a reference INTO it,
-// so downstream adoption needs its own check (productDownstreamAdoptionSince,
+// 2026-09-27 round 7 review; widened by the 2026-09-27 pre-push audits)
+// when any row referencing the product — a service COGS mapping, a visit's
+// applied product, a protocol or lawn-protocol product, a recorded
+// application, nutrient or limit row, or a restock request — was added,
+// re-pointed, edited or removed since the agent's decision: the row hash
+// above only ever covers the products_catalog row itself, never a reference
+// INTO it, so the agent records a per-table footprint of those rows at its
+// write and this compares it (productReferencesUnchangedSinceAgent,
 // server/services/purchase-receipts/inventory-agent.js).
 //
 //   railway run --service Postgres node ops/agents/inventory-agent-undo.js --line=<id|8-char-prefix>            # dry run
@@ -73,7 +75,7 @@ if (require.main === module) {
 
 const path = require('path');
 const { adjustStock } = require(path.join(__dirname, '..', '..', 'server', 'services', 'inventory-operations'));
-const { productUnchangedSinceAgent, productDownstreamAdoptionSince } = require(path.join(__dirname, '..', '..', 'server', 'services', 'purchase-receipts', 'inventory-agent'));
+const { productUnchangedSinceAgent, productReferencesUnchangedSinceAgent } = require(path.join(__dirname, '..', '..', 'server', 'services', 'purchase-receipts', 'inventory-agent'));
 
 function arg(name, argv) {
   const hit = argv.find((a) => a.startsWith(`--${name}=`));
@@ -139,12 +141,12 @@ async function undoLine(conn, { lineArg, execute = false, log = console.log }) {
   }
   // Checked BEFORE any reversal or restoration (the row hash above only ever
   // covers the product row itself, never a reference INTO it): staff may
-  // have built on this product since the agent's decision — a service now
-  // using it for COGS, a completed visit applying it, a protocol adopting
-  // it, or a fresh restock request — and undoing past that would leave that
-  // reference pointed at a state that no longer makes sense (2026-09-27
-  // review, item 4).
-  const downstream = await productDownstreamAdoptionSince(conn, line);
+  // have built on this product since the agent's decision — a service
+  // mapping it for COGS (new, or an older one re-pointed at it), a completed
+  // visit applying it, a protocol adopting it, or a restock request — and
+  // undoing past that would leave that reference pointed at a state that no
+  // longer makes sense (2026-09-27 review, item 4; pre-push audit).
+  const downstream = await productReferencesUnchangedSinceAgent(conn, line);
   if (!downstream.ok) {
     throw usageError(`Refusing: ${downstream.why}. Reversing now would not account for it; fix the stock by hand instead.`, 1);
   }
@@ -181,7 +183,7 @@ async function undoLine(conn, { lineArg, execute = false, log = console.log }) {
     await trx('products_catalog').where({ id: line.product_id }).forUpdate().first('id');
     const stillUnchanged = await productUnchangedSinceAgent(trx, line, movement);
     if (!stillUnchanged.ok) throw new Error(`Refusing to reverse: ${stillUnchanged.why}.`);
-    const stillNoDownstream = await productDownstreamAdoptionSince(trx, line);
+    const stillNoDownstream = await productReferencesUnchangedSinceAgent(trx, line);
     if (!stillNoDownstream.ok) throw new Error(`Refusing to reverse: ${stillNoDownstream.why}.`);
 
     await adjustStock(line.product_id, { movementType: 'correction', quantity: -Number(line.received_qty), unit: line.received_unit }, {

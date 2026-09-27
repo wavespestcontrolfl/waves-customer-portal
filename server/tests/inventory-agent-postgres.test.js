@@ -595,10 +595,68 @@ jest.setTimeout(30000);
     });
 
     await expect(undoLine(mockConn, { lineArg: line.id, execute: false, log: () => {} }))
-      .rejects.toThrow(/a service now maps this product/);
+      .rejects.toThrow(/a service's COGS usage mapping referencing this product was added, re-pointed, changed or removed/);
     await expect(undoLine(mockConn, { lineArg: line.id, execute: true, log: () => {} }))
-      .rejects.toThrow(/a service now maps this product/);
+      .rejects.toThrow(/a service's COGS usage mapping referencing this product was added, re-pointed, changed or removed/);
     expect(await stockOf(taurus.id)).toBe(156); // never reversed
+  });
+
+  // 2026-09-27 pre-push audit: PUT /api/admin/inventory/service-usage/:id can
+  // re-point an OLDER mapping at this product, bumping only updated_at — a
+  // created_at check never saw it. The recorded reference footprint does.
+  const TAURUS_DECISION = {
+    kind: 'existing', reason: 'matches the candidate', product_id: null, new_product: null,
+    reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
+  };
+  const longAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+
+  test('undo refuses when an OLDER mapping is re-pointed at the product after the agent\'s decision (only updated_at moves)', async () => {
+    const [otherProduct] = await mockConn('products_catalog').insert({ name: 'Other Product', active: true, category: 'insecticide' }).returning('*');
+    const [olderMapping] = await mockConn('service_product_usage').insert({
+      service_type: 'General Pest Control', product_id: otherProduct.id, usage_amount: 2, usage_unit: 'fl_oz', created_at: longAgo, updated_at: longAgo,
+    }).returning('*');
+    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-repoint' });
+    await run({ ok: true, json: { ...TAURUS_DECISION, product_id: taurus.id } });
+    expect((await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).status).toBe('logged');
+
+    await mockConn('service_product_usage').where({ id: olderMapping.id }).update({ product_id: taurus.id, updated_at: new Date() });
+
+    await expect(undoLine(mockConn, { lineArg: line.id, execute: false, log: () => {} }))
+      .rejects.toThrow(/COGS usage mapping referencing this product was added, re-pointed, changed or removed/);
+    await expect(undoLine(mockConn, { lineArg: line.id, execute: true, log: () => {} }))
+      .rejects.toThrow(/COGS usage mapping referencing this product was added, re-pointed, changed or removed/);
+    expect(await stockOf(taurus.id)).toBe(156); // never reversed
+  });
+
+  test('undo refuses when a mapping that already referenced the product is edited after the decision, even with no timestamp change', async () => {
+    const [mapping] = await mockConn('service_product_usage').insert({
+      service_type: 'General Pest Control', product_id: taurus.id, usage_amount: 2, usage_unit: 'fl_oz', created_at: longAgo, updated_at: longAgo,
+    }).returning('*');
+    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-edit' });
+    await run({ ok: true, json: { ...TAURUS_DECISION, product_id: taurus.id } });
+
+    await mockConn('service_product_usage').where({ id: mapping.id }).update({ usage_amount: 3 });
+
+    await expect(undoLine(mockConn, { lineArg: line.id, execute: true, log: () => {} }))
+      .rejects.toThrow(/COGS usage mapping referencing this product was added, re-pointed, changed or removed/);
+    expect(await stockOf(taurus.id)).toBe(156);
+  });
+
+  test('a reference that predates the decision and never moves does not block the undo, nor does a change to another product\'s mapping', async () => {
+    const [otherProduct] = await mockConn('products_catalog').insert({ name: 'Other Product', active: true, category: 'insecticide' }).returning('*');
+    await mockConn('service_product_usage').insert({
+      service_type: 'General Pest Control', product_id: taurus.id, usage_amount: 2, usage_unit: 'fl_oz', created_at: longAgo, updated_at: longAgo,
+    });
+    const [otherMapping] = await mockConn('service_product_usage').insert({
+      service_type: 'General Pest Control', product_id: otherProduct.id, usage_amount: 1, usage_unit: 'fl_oz', created_at: longAgo, updated_at: longAgo,
+    }).returning('*');
+    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-steady' });
+    await run({ ok: true, json: { ...TAURUS_DECISION, product_id: taurus.id } });
+
+    await mockConn('service_product_usage').where({ id: otherMapping.id }).update({ usage_amount: 5, updated_at: new Date() });
+
+    expect(await undoLine(mockConn, { lineArg: line.id, execute: true, log: () => {} })).toEqual({ executed: true });
+    expect(await stockOf(taurus.id)).toBe(0);
   });
 
   test('an admin alias insert racing the agent\'s own alias creation always serializes — never two aliases for one title (item 2, 2026-09-27 round 7)', async () => {

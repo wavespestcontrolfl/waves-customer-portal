@@ -721,6 +721,9 @@ function decisionRecord(decision, extra = {}) {
     createdProductId: extra.createdProductId || null,
     createdAliasId: extra.createdAliasId || null,
     productRowHash: extra.productRowHash || null,
+    // Per-table fingerprint of every row referencing the product, for the
+    // undo CLI's reference check (productReferencesUnchangedSinceAgent).
+    productReferenceFootprint: extra.productFootprint || null,
     // Existing-product field originals for the undo CLI (null for a
     // new_product decision — undo deactivates the whole row instead).
     originalProductFields: extra.originalProductFields || null,
@@ -777,17 +780,16 @@ async function settleTerminalKind(trx, { lineId, line, email, decision }, notify
 // Every table that records or plans APPLYING a product in its application
 // unit — a visit's applied amount, a service's COGS usage, a protocol rate,
 // a compliance, nutrient or lawn-actuals record, an application limit. The
-// `why` texts read as "since the agent's decision" because the undo CLI's
-// adoption check (DOWNSTREAM_ADOPTION_TABLES) reuses this list.
+// undo CLI's reference check (DOWNSTREAM_ADOPTION_TABLES) reuses this list.
 const APPLICATION_USAGE_TABLES = [
-  { table: 'service_product_usage', why: 'a service now maps this product for its COGS usage (service_product_usage)' },
-  { table: 'service_products', why: 'a completed visit recorded applying this product (service_products)' },
-  { table: 'protocol_template_products', why: 'a protocol template now uses this product (protocol_template_products)' },
-  { table: 'lawn_protocol_products', why: 'a lawn protocol now uses this product (lawn_protocol_products)' },
-  { table: 'lawn_protocol_product_actuals', why: 'a lawn visit recorded applying this product (lawn_protocol_product_actuals)' },
-  { table: 'property_application_history', why: 'an application of this product was recorded (property_application_history)' },
-  { table: 'property_nutrient_ledger', why: 'a nutrient ledger entry now uses this product (property_nutrient_ledger)' },
-  { table: 'product_limits', why: 'an application limit now covers this product (product_limits)' },
+  { table: 'service_product_usage', what: "a service's COGS usage mapping" },
+  { table: 'service_products', what: "a completed visit's applied product" },
+  { table: 'protocol_template_products', what: "a protocol template's product" },
+  { table: 'lawn_protocol_products', what: "a lawn protocol's product" },
+  { table: 'lawn_protocol_product_actuals', what: "a lawn visit's recorded application" },
+  { table: 'property_application_history', what: 'a recorded application' },
+  { table: 'property_nutrient_ledger', what: 'a nutrient ledger entry' },
+  { table: 'product_limits', what: 'an application limit' },
 ];
 
 async function productHasApplicationUsage(trx, productId) {
@@ -1038,10 +1040,11 @@ async function commitStockMovement(trx, { line, lineId, vendor, email, decision,
   // start, not the moment its write landed).
   const { row_hash: productRowHash } = await trx('products_catalog').where({ id: productId })
     .first(trx.raw('md5(row_to_json(products_catalog.*)::text) as row_hash'));
+  const productFootprint = await productReferenceFootprint(trx, productId);
 
   await trx('purchase_receipt_lines').where({ id: lineId }).update({
     status: 'logged', product_id: productId, received_qty: decision.amount, received_unit: decision.unit, movement_id: result.movement.id,
-    agent_decision: decisionRecord(decision, { createdProductId, createdAliasId, productRowHash, originalProductFields }), agent_decided_at: new Date(),
+    agent_decision: decisionRecord(decision, { createdProductId, createdAliasId, productRowHash, productFootprint, originalProductFields }), agent_decided_at: new Date(),
     agent_created_product_id: createdProductId, agent_created_alias_id: createdAliasId,
   });
 
@@ -1159,32 +1162,57 @@ async function productUnchangedSinceAgent(conn, line, movement) {
   return { ok: true };
 }
 
-// Every table that maps a products_catalog row into real operations and
-// carries its own created_at — APPLICATION_USAGE_TABLES plus restock
-// requests, found by grepping the migrations for `product_id` referencing
-// products_catalog (item 4, 2026-09-27 round 7 review; the usage tables
-// widened by the 2026-09-27 pre-push audit). productUnchangedSinceAgent's row hash only ever covers the
-// product row ITSELF; it can't see a reference like these, so an undo that
-// only checked the hash could restore a "pre-agent" state a service, a
-// restock request or a protocol has since built on top of.
+// Every table that maps a products_catalog row into real operations —
+// APPLICATION_USAGE_TABLES plus restock requests, found by grepping the
+// migrations for `product_id` referencing products_catalog (item 4,
+// 2026-09-27 round 7 review; widened by the 2026-09-27 pre-push audits).
+// productUnchangedSinceAgent's row hash only ever covers the product row
+// ITSELF; it can't see a reference like these, so an undo that only checked
+// the hash could restore a "pre-agent" state a service, a protocol or a
+// restock request has since built on top of. A restock request counts
+// because the stock level the agent recorded no longer means what it meant
+// once one is raised or moved.
 const DOWNSTREAM_ADOPTION_TABLES = [
   ...APPLICATION_USAGE_TABLES,
-  // A restock request raised since the decision means the stock level the
-  // agent recorded no longer means what it meant then — reversing it would
-  // leave that request's own expectations pointed at the wrong number.
-  { table: 'product_restock_requests', why: 'a restock request was raised for this product since the agent\'s decision (product_restock_requests)' },
+  { table: 'product_restock_requests', what: 'a restock request' },
 ];
 
-// Refuses BEFORE any reversal or restoration when an operational reference
-// to the product was added after the agent decided (line.agent_decided_at)
-// — see DOWNSTREAM_ADOPTION_TABLES above. Called from both the undo CLI's
-// dry run and its transaction (the transaction re-checks under the product
-// lock, same discipline as productUnchangedSinceAgent's own re-check).
-async function productDownstreamAdoptionSince(conn, line) {
-  if (!line.agent_decided_at) return { ok: false, why: 'the line has no recorded agent_decided_at' };
-  for (const { table, why } of DOWNSTREAM_ADOPTION_TABLES) {
-    const row = await conn(table).where({ product_id: line.product_id }).where('created_at', '>', line.agent_decided_at).first('id');
-    if (row) return { ok: false, why };
+// A content fingerprint of every row in `table` that references the
+// product: md5 over the sorted per-row md5(row_to_json). An insert, a row
+// re-pointed to (or away from) the product, an edit or a delete all change
+// it, and no writer's timestamp discipline is trusted — a PUT that
+// re-points an OLDER service-usage mapping at this product bumps only
+// updated_at, which a created_at check never saw (2026-09-27 pre-push
+// audit).
+async function tableReferenceFootprint(conn, table, productId) {
+  const { rows } = await conn.raw(
+    "SELECT md5(coalesce(string_agg(md5(row_to_json(t)::text), ',' ORDER BY md5(row_to_json(t)::text)), '')) AS footprint FROM ?? t WHERE t.product_id = ?",
+    [table, productId],
+  );
+  return rows[0].footprint;
+}
+
+// Taken under the product lock at the agent's own write (commitStockMovement)
+// and stored on the decision, so the undo CLI can prove nothing referencing
+// the product moved since.
+async function productReferenceFootprint(conn, productId) {
+  const footprint = {};
+  for (const { table } of DOWNSTREAM_ADOPTION_TABLES) footprint[table] = await tableReferenceFootprint(conn, table, productId);
+  return footprint;
+}
+
+// Refuses BEFORE any reversal or restoration when any row referencing the
+// product (DOWNSTREAM_ADOPTION_TABLES) differs from the footprint recorded
+// at the agent's decision. Called from both the undo CLI's dry run and its
+// transaction (the transaction re-checks under the product lock, same
+// discipline as productUnchangedSinceAgent's own re-check).
+async function productReferencesUnchangedSinceAgent(conn, line) {
+  const recorded = line.agent_decision?.productReferenceFootprint;
+  if (!recorded) return { ok: false, why: "the agent's decision recorded no footprint of the rows referencing this product" };
+  const current = await productReferenceFootprint(conn, line.product_id);
+  const moved = DOWNSTREAM_ADOPTION_TABLES.find(({ table }) => current[table] !== recorded[table]);
+  if (moved) {
+    return { ok: false, why: `${moved.what} referencing this product was added, re-pointed, changed or removed since the agent's decision (${moved.table})` };
   }
   return { ok: true };
 }
@@ -1408,7 +1436,7 @@ module.exports = {
   runInventoryAgent,
   drainAgentQueue,
   productUnchangedSinceAgent,
-  productDownstreamAdoptionSince,
+  productReferencesUnchangedSinceAgent,
   // Exported for unit tests — see server/tests/inventory-agent.test.js.
   // These are pure (no I/O) except recordAttemptFailure, the one small
   // DB-touching unit worth testing without a full Postgres suite. No
