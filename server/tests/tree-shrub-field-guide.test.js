@@ -41,3 +41,9 @@ test('both palm fertilizers and the old palm product share one three-month/four-
   expect(treeShrubDueReason('f8012', four, '2028-09-30', 'property-a')).toMatch(/Four applications/);
   expect(treeShrubDueReason('f8012', [], '2028-10-01', null)).toMatch(/Confirm the service property/);
 });
+
+test('lawn winterizer does not count as a palm feeding but the confirmed palm SKU does', () => {
+  expect(treeShrubDueReason('f0016', [application('0-0-16 Winterizer', '2028-09-01')], '2028-10-01', 'property-a')).toBeNull();
+  expect(treeShrubDueReason('f0016', [application('LESCO 0-0-16 Winterizer', '2028-09-01')], '2028-10-01', 'property-a')).toBeNull();
+  expect(treeShrubDueReason('f8012', [application('LESCO 0-0-16 #510513', '2028-09-01')], '2028-10-01', 'property-a')).toMatch(/three months/);
+});

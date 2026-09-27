@@ -105,9 +105,9 @@ describe('10/10 SWFL tree and shrub protocol config', () => {
     }
   });
 
-  test('uses the actual appointment month without fixed plan-only labels', () => {
+  test('omits plan-only labels and scheduling filler from the reference', () => {
     const notes = protocols.tree_shrub.notes.join('\n');
     expect(notes).not.toMatch(/9x program|6x only|visit N of/);
-    expect(notes).toMatch(/actual visit month/);
+    expect(notes).not.toMatch(/Customers follow their scheduled appointments|Use the customer's scheduled visit month/);
   });
 });

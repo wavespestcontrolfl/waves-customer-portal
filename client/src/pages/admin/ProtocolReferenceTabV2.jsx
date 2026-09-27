@@ -1204,7 +1204,11 @@ export default function ProtocolReferenceTabV2() {
             onClick={() => setSelectedMonth(i + 1)}
             className={cn('appearance-none bg-transparent min-h-11 px-3 text-14 border-0 border-b-2 border-solid u-focus-ring', selectedMonth === i + 1 ? 'border-zinc-900 text-ink-primary' : 'border-transparent text-ink-secondary')}>{month}</button>)}
         </div>
-        {currentVisit?.fieldGuide && <TreeShrubFieldGuide key={currentVisit.month} guide={currentVisit.fieldGuide} />}
+        {currentVisit?.fieldGuide && <TreeShrubFieldGuide key={currentVisit.month} guide={currentVisit.fieldGuide} safetyRules={safetyRules} />}
+        {trackData.notes?.length > 0 && <details className="mt-4 text-14 text-ink-secondary">
+          <summary className="min-h-11 flex items-center cursor-pointer text-ink-primary">Program notes</summary>
+          <ul className="space-y-3 list-disc pl-5">{trackData.notes.map(note => <li key={note}>{note}</li>)}</ul>
+        </details>}
       </Card>}
       {trackData && !trackData.fieldGuideEnabled && (
         <div className="flex flex-col gap-3">

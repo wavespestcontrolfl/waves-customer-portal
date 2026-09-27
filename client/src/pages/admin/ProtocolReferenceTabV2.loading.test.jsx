@@ -4,6 +4,8 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import ProtocolReferenceTabV2 from './ProtocolReferenceTabV2';
+import fieldGuideReference from '../../../../server/config/tree-shrub-field-guide.json';
+import protocols from '../../../../server/config/protocols.json';
 
 const catalog = {lawn:{tracks:[{key:'st_augustine',name:'Synthetic Lawn',visits:0}]},programs:[{key:'qa_pest',name:'Synthetic Pest',visits:0}]};
 const ok = data => ({ok:true,json:async () => data});
@@ -18,6 +20,23 @@ beforeEach(() => {
   }));
 });
 afterEach(() => {cleanup();vi.unstubAllGlobals();});
+
+it('keeps program safety rules and detailed notes available with the month field guide', async () => {
+  const program = protocols.tree_shrub;
+  fetch.mockImplementation(async url => {
+    if (url === '/api/admin/protocols/programs') return ok({ lawn: { tracks: [] }, programs: [{ key: 'tree_shrub', name: 'Tree & Shrub', visits: 12 }] });
+    if (url.includes('/programs?')) return ok({ program: { ...program, fieldGuideEnabled: true,
+      visits: program.visits.map(visit => ({ ...visit, fieldGuide: { ...visit.fieldGuide, ...fieldGuideReference, month: visit.month } })) } });
+    return ok({ calibrations: [] });
+  });
+  render(<ProtocolReferenceTabV2 />);
+  fireEvent.change(await screen.findByLabelText('Protocol'), { target: { value: 'tree_shrub' } });
+  await screen.findByTestId('tree-shrub-field-guide');
+  expect(screen.getByRole('region', { name: 'Program safety rules' })).toBeInTheDocument();
+  for (const rule of program.safety_rules) expect(screen.getByText(rule)).toBeInTheDocument();
+  fireEvent.click(screen.getByText('Program notes'));
+  expect(screen.getByText(program.notes[0])).toBeInTheDocument();
+});
 
 it('reports initial catalog failure, repeats a failed retry, then loads the catalog and default track',async () => {
   render(<ProtocolReferenceTabV2 />);

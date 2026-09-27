@@ -1,6 +1,7 @@
 const { etCalendarDayOf } = require('../utils/datetime-et');
 
-const PALM = /(?:8[-–]0[-–]12|8[-–]2[-–]12|0[-–]0[-–]16|palm.*fertili|fertili.*palm)/i;
+const PALM = /(?:8[-–]0[-–]12|8[-–]2[-–]12|palm.*fertili|fertili.*palm|\b510513\b)/i;
+const PALM_ZERO_N_LEGACY = /^LESCO\s+0[-–]0[-–]16$/i;
 const SNAPSHOT = /\bsnapshot\b/i;
 const MAX_SNAPSHOT_LB_PER_1000 = 600 / 43.56;
 
@@ -24,8 +25,8 @@ function monthsAfter(value, count) {
 function treeShrubDueReason(key, history, scheduledDate, propertyId) {
   const today = dayNumber(scheduledDate);
   if (!Number.isFinite(today) || !propertyId) return 'Confirm the service property and visit date.';
-  const matcher = key === 'snapshot' ? SNAPSHOT : PALM;
-  const relevant = history.filter(row => matcher.test(row.product_name || '') &&
+  const matches = name => key === 'snapshot' ? SNAPSHOT.test(name) : PALM.test(name) || PALM_ZERO_N_LEGACY.test(name.trim());
+  const relevant = history.filter(row => matches(row.product_name || '') &&
     (!row.property_id || String(row.property_id) === String(propertyId)));
   if (relevant.some(row => !row.property_id || !Number.isFinite(dayNumber(row.application_date)))) {
     return 'Review application history with an unconfirmed property or date.';

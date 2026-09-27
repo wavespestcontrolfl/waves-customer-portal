@@ -123,12 +123,12 @@ function resolveCatalogProductForName(name, catalogRows = [], { exactOnly = fals
     return matches.length === 1 ? matches[0] : null;
   }
 
-  const exact = catalogRows.find((row) => normalizeName(row.name) === target);
-  if (exact) return exact;
+  const exact = catalogRows.filter((row) => normalizeName(row.name) === target);
+  if (exact.length) return exact.length === 1 ? exact[0] : null;
 
-  const aliasHit = catalogRows.find((row) => (row.aliases || [])
+  const aliasHits = catalogRows.filter((row) => (row.aliases || [])
     .some((alias) => normalizeName(alias) === target));
-  if (aliasHit) return aliasHit;
+  if (aliasHits.length) return aliasHits.length === 1 ? aliasHits[0] : null;
 
   const targetTokens = nameTokens(name);
   if (!targetTokens.length) return null;
@@ -144,6 +144,7 @@ function resolveCatalogProductForName(name, catalogRows = [], { exactOnly = fals
   // Prefer the tightest superset (fewest extra tokens) so a short legacy
   // name doesn't grab an unrelated longer product sharing one word.
   candidates.sort((a, b) => a.tokens.size - b.tokens.size);
+  if (candidates[1]?.tokens.size === candidates[0].tokens.size) return null;
   return candidates[0].row;
 }
 

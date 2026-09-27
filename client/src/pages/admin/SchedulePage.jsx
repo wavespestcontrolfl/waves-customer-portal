@@ -14062,6 +14062,7 @@ export function CompletionPanel({
   const selectedProductsMissingActualAmount = selectedProducts.filter(
     (product) =>
       !product.totalAmount ||
+      !Number.isFinite(Number(product.totalAmount)) ||
       Number(product.totalAmount) <= 0 ||
       !product.amountUnit ||
       (product.lawnPlanDefaults && !productApplicationMethod(product, serviceTypeForArea)),
@@ -14094,7 +14095,7 @@ export function CompletionPanel({
   // actual (pre-push audit P1). The empty-list and inventory gates stay
   // tier-scoped.
   const productActualsRequired = (calibrationRequired || lawnDefaultsEnabled
-    || selectedProducts.some((product) => product.lawnPlanDefaults)) && !isIncompleteVisit;
+    || selectedProducts.some((product) => product.lawnPlanDefaults || product.requiresDoseSelection)) && !isIncompleteVisit;
   const protocolActualsCompletionBlocked =
     (calibrationRequired &&
       !isIncompleteVisit &&

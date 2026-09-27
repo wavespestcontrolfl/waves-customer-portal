@@ -31,7 +31,9 @@ use recorded history; they cannot establish unrecorded applications.
 Suggestions remain editable drafts. Snapshot's weed-specific rate and each
 palm's measured canopy dose start blank, rather than inheriting old catalog
 rates. Conditional foliar/soil products still require selection for a finding.
-Normal completion records actual use. The shared reviewed-area calculation is
+An untouched suggestion blocks the client completion action until an actual
+quantity and unit are entered. The existing typed server compliance check also
+rejects missing actuals. Normal completion records actual use. The shared reviewed-area calculation is
 in PR #5050; palm counts/individual canopy measurements and calibrated scoops
 must never be substituted with bed area or tank capacity.
 
@@ -57,6 +59,14 @@ The owner merges; this lane stops before merge.
 - Final preview caught large oil doses rounding up in the inherited formatter.
   Dedicated truck-measure tests now pin 1¼ / 5 / 140¾ fl oz for the 1% oil
   reference, with approximation marks; range bounds stay inside their sources.
+- Product equipment and the phone mix-size selector share the same state.
+  Program safety rules remain visible in both admin and technician guides;
+  detailed notes remain available. Lawn 0-0-16 Winterizer does not count toward
+  palm feeding history. Ambiguous catalog aliases or equally tight name matches
+  are withheld.
+- Review follow-up passed 264 server checks and 24 client checks. The canonical
+  completion-prefill request is registered as reviewed but unsupported/unverified
+  for Intelligence Bar parity. The requested 11px admin label override is retained.
 - Screenshots reviewed in-session. Native attachment unavailable with installed
   gh 2.90.0; no screenshot attachments are claimed.
 - 259 focused server tests passed after reconciling #5049's latest changes,

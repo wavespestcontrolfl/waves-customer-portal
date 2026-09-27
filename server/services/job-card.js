@@ -1169,7 +1169,7 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
   const fieldGuide = treeShrubFieldGuide(visit);
   return { visit, lines, procedure: {
     name: program.name,
-    ...(fieldGuide ? { fieldGuide } : {}),
+    ...(fieldGuide ? { fieldGuide, safetyRules: program.safety_rules || [] } : {}),
     source: 'Service template',
     title: visit.visit_type || `Visit ${visit.visit}${visit.month && visit.month !== 'Any' ? ` · ${visit.month}` : ''}`,
     objective: procedureLines(visit.main_goal).join(' ') || null,

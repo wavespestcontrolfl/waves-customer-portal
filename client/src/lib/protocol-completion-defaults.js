@@ -70,6 +70,7 @@ export function protocolCompletionDefaultSelections(response, clientProducts, bu
       // Snapshot needs its weed rate; palms need individual canopy widths.
       // Clear catalog shortcuts before an area/tank calculator can reuse one.
       ...(item.requiresDoseSelection ? {
+        requiresDoseSelection: true,
         rate: '', totalAmount: '', totalAmountManual: false,
         amountUnit: 'lb', rateUnit: item.treeShrubKey === 'snapshot' ? 'lb' : 'lb/palm',
         catalogRateUnit: item.treeShrubKey === 'snapshot' ? 'lb' : 'lb/palm',

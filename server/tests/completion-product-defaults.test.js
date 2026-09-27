@@ -351,6 +351,18 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
 // ---- catalog name resolution (resolveCatalogProductForName) ----
 
 describe('resolveCatalogProductForName', () => {
+  test('ambiguous exact names, vendorless aliases and equally tight token matches stay unresolved', () => {
+    expect(resolveCatalogProductForName('Fixture product', [
+      { id: 'a', name: 'Fixture product' }, { id: 'b', name: 'Fixture product' },
+    ])).toBeNull();
+    expect(resolveCatalogProductForName('Fixture alias', [
+      { id: 'a', name: 'Product A', aliases: ['Fixture alias'] },
+      { id: 'b', name: 'Product B', aliases: ['Fixture alias'] },
+    ])).toBeNull();
+    expect(resolveCatalogProductForName('Fixture product', [
+      { id: 'a', name: 'Fixture product alpha' }, { id: 'b', name: 'Fixture product beta' },
+    ])).toBeNull();
+  });
   test('T&S identities require one exact name or alias instead of a fuzzy SKU match', () => {
     const rows = [{ id: 'a', name: 'LESCO palm fertilizer', aliases: ['LESCO 8-0-12 #511542'] }];
     expect(resolveCatalogProductForName('LESCO 8-0-12 #511542', rows, { exactOnly: true }).id).toBe('a');
