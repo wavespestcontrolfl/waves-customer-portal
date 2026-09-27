@@ -111,6 +111,19 @@ test('a stale producer reason terminates its Email without clearing provider blo
   expect(reservation.resolveBillingEmailReservationRefusal).toHaveBeenCalledTimes(1);
 });
 
+test('a resendable refusal settles as a definitely-unsent failure, never a block, so the next send re-delivers', async () => {
+  billingEmailReplayEligible.mockResolvedValue({
+    eligible: false, reason: 'invoice-send-not-finalized', retryable: false, resendable: true,
+  });
+  await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, stopped: true, reason: 'invoice-send-not-finalized' });
+  expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  expect(query.update).toHaveBeenCalledWith(expect.objectContaining({
+    status: 'failed', provider_retry_next_at: null, provider_handoff_phase: 'pending',
+  }));
+  expect(query.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked' }));
+  expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
+});
+
 test('a temporary eligibility failure stays on the bounded retry schedule without dispatching', async () => {
   billingEmailReplayEligible.mockResolvedValue({ eligible: false, reason: 'billing-email-eligibility-unavailable', retryable: true });
   await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, error: expect.any(Error) });
