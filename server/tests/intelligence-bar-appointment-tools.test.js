@@ -640,6 +640,13 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  test('a stated price needs a real catalog service — an invented service type is refused, nothing written', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })], services: [catalog([ONE_TIME_PEST])] });
+    const result = await book({ service_type: 'Spider web sweep', price: 150, _booking_price: 150, _booking_service_id: null });
+    expect(result.error).toMatch(/is not a catalog service/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   test('a catalog row only matches the service the operator named — no partial match prices a different service', async () => {
     wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })], services: [catalog([ONE_TIME_PEST])] });
     const result = await book({ service_type: 'Pest Control' });

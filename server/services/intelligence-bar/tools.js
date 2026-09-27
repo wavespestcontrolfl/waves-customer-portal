@@ -299,7 +299,7 @@ The first call returns a PREVIEW (before/after facts) and nothing changes; the o
     description: `Create a new scheduled service appointment.
 service_type examples (catalog names): "Quarterly Pest Control Service", "Bi-Monthly Lawn Care Service", "Seasonal Mosquito Control Service", "Bi-Monthly Tree & Shrub Care Service", "Waves Assessment". Quarterly Tree & Shrub is retired for new sales (existing quarterly plans only).
 time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".
-price: the visit price in dollars when the user states one. Omit it to use the catalog price for service_type; the confirmation card shows the price either way. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.`,
+price: the visit price in dollars when the user states one. A stated price needs service_type to be the exact catalog name. Omit price to use the catalog price for service_type; the confirmation card shows the price either way. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -2454,7 +2454,13 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
     }
     return { price: null, source: null, catalogRow, pricing: null };
   }
-  if (!stated && !catalogRow) return { price: null, source: null, catalogRow: null, pricing: null };
+  // A price rides a real catalog service, as on the Schedule screen (its
+  // modal prices only a picked catalog row) — never an invented service
+  // type with a null service_id, the shape AGENTS.md bars for bookings.
+  if (stated && !catalogRow) {
+    return { error: `"${serviceType}" is not a catalog service, so the price has nothing to attach to. Use the service's exact catalog name and propose again. Nothing was booked.` };
+  }
+  if (!catalogRow) return { price: null, source: null, catalogRow: null, pricing: null };
   // Lazy: the route module is large and requires services that require this
   // module (same avoid-a-route-load-cycle pattern as schedule-tools).
   const { buildAppointmentPricing } = require('../../routes/admin-schedule');
