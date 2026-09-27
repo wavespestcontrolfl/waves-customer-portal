@@ -8003,8 +8003,6 @@ async function sendLegacyPaymentReminder({
   const { body } = await paymentReminderCopy({ term: claimedTerm, invoice, customer, amountDue });
   if (!body) {
     logger.warn(`[annual-prepay] annual_prepay_payment_reminder template missing/disabled for customer ${customer.id}`);
-    await reverseReminderCredit();
-    await releaseClaim();
     return { sent: false, reason: 'missing_sms_template' };
   }
 
@@ -8029,8 +8027,6 @@ async function sendLegacyPaymentReminder({
     logTag: 'annual-prepay',
   });
   if (!policyPermitted) {
-    await reverseReminderCredit();
-    await releaseClaim();
     return { sent: false, reason: 'collections_policy_denied' };
   }
 
@@ -8050,8 +8046,6 @@ async function sendLegacyPaymentReminder({
     });
   } catch (ledgerErr) {
     logger.warn(`[annual-prepay] payment reminder skipped for term ${claimedTerm.id} — contact ledger unavailable: ${ledgerErr.message}`);
-    await reverseReminderCredit();
-    await releaseClaim();
     return { sent: false, reason: 'ledger_unavailable' };
   }
 
@@ -8076,8 +8070,6 @@ async function sendLegacyPaymentReminder({
     const failureReason = smsResult.code || smsResult.reason || 'send_failed';
     await ContactLedger.markSendFailed(prepayLedger, { code: failureReason });
     logger.warn(`[annual-prepay] payment reminder SMS blocked/failed for term ${claimedTerm.id}: ${failureReason}`);
-    await reverseReminderCredit();
-    await releaseClaim();
     return { sent: false, reason: failureReason };
   }
 
@@ -8198,10 +8190,17 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       sentCol, claimCol, releaseClaim, reverseReminderCredit, trackAttempt, explicitAttempt,
     });
     if (explicit) return explicit;
-    return sendLegacyPaymentReminder({
+    const legacy = await sendLegacyPaymentReminder({
       claimedTerm, invoice, customer, daysOut, amountDue, opts,
       sentCol, claimCol, reverseReminderCredit, releaseClaim,
     });
+    // Every ordinary no-delivery refusal shares one cleanup path. The
+    // no-phone branch already stamped the episode sent to prevent reclaims.
+    if (!legacy.sent && legacy.reason !== 'no_phone') {
+      await reverseReminderCredit();
+      await releaseClaim();
+    }
+    return legacy;
   } catch (err) {
     // Only failures BEFORE any channel delivered reach here (the delivered
     // path swallows its bookkeeping errors above).

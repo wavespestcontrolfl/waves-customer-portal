@@ -367,6 +367,26 @@ describe('annual prepay pre-visit payment reminders', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('legacy Text provider throw reverses newly applied credit and releases the claim', async () => {
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 50 });
+    const releaseQ = query();
+    setDbQueues({
+      annual_prepay_terms: [query({ columnInfo: REMINDER_COLS }),
+        query({ returning: [{ ...BASE_TERM }] }), releaseQ],
+      invoices: [query({ first: { ...UNPAID_INVOICE } }),
+        query({ first: { ...UNPAID_INVOICE, credit_applied: '50.00' } })],
+      invoice_followup_sequences: [query({ first: undefined })],
+      customers: [query({ first: { ...CUSTOMER } })],
+    });
+    renderSmsTemplate.mockResolvedValue('pay reminder body');
+    sendCustomerMessage.mockRejectedValueOnce(new Error('provider unavailable'));
+
+    await expect(AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1))
+      .rejects.toThrow('provider unavailable');
+    expect(reverseAppliedCredit).toHaveBeenCalledWith(expect.objectContaining({ amount: 50 }));
+    expect(releaseQ.update).toHaveBeenCalledWith(expect.objectContaining({ payment_reminder_1d_claimed_at: null }));
+  });
+
   test('no phone: marks the reminder sent (email leg already exists) so the cron never re-claims', async () => {
     const claimQ = query({ returning: [{ ...BASE_TERM }] });
     const markQ = query();
