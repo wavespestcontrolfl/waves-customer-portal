@@ -14,7 +14,7 @@
  *    coverage instead); never say Waves will fix mowing (we don't mow).
  */
 
-const { hasCreditableWaterIn, normalizeLawnAftercare } = require('./lawn-aftercare');
+const { hasCreditableWaterIn, normalizeLawnAftercare, wateringRestrictionAction } = require('./lawn-aftercare');
 
 const STATUS_RANK = { needs_attention: 0, urgent: 0, watch: 1, healthy: 2, strong: 2, tracking: 3 };
 
@@ -36,11 +36,7 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
   const has = (kind) => Array.isArray(treatmentKinds) && treatmentKinds.includes(kind);
   const aftercare = normalizeLawnAftercare(rawAftercare) || {};
   const waterInRequired = hasCreditableWaterIn(aftercare);
-  const aftercareWaterAction = aftercare.needsReview === true
-    ? 'Confirm the product watering directions with your technician before changing irrigation.'
-    : aftercare.wateringHold === true
-      ? 'Follow the product-specific watering restriction in Aftercare before making any other irrigation changes.'
-      : null;
+  const aftercareWaterAction = wateringRestrictionAction(aftercare);
 
   // ── Water ───────────────────────────────────────────────────────────────────
   const waterCat = catByKey(categories, 'water_moisture_stress');

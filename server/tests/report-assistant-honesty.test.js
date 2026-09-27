@@ -151,7 +151,7 @@ describe('watering questions answer with the weekly plan when the report carries
   const plan = { title: 'This week: check the rain before you water', detail: 'Leave the turf irrigation off for now; run one cycle only if less than ½" has fallen.' };
   test('plan present → the plan, before re-entry / trend routing', () => {
     const data = { pressureIndex: null, dynamicContext: {}, reportV2: { water: { weekPlan: plan } } };
-    for (const q of ['How should I water this week?', 'What is my irrigation plan?', 'Should I run the sprinklers?']) {
+    for (const q of ['How should I water this week?', 'What is my irrigation plan?', 'Should I run the sprinklers?', 'I found mushrooms; should I water this week?', 'I spotted dry areas; how often should I water?']) {
       expect(answerServiceReportQuestion({ question: q, data })).toBe(`${plan.title} ${plan.detail}`);
     }
     // gh-r38: controller phrasing without the word "water" is a watering question too.
@@ -220,7 +220,7 @@ describe('watering questions answer with the weekly plan when the report carries
       findings: [{ title: 'Sprinkler area checked', detail: 'No pest activity was observed there.' }],
       reportV2: { aftercare, water: { weekPlan: null } },
     };
-    for (const question of ['How should I water?', 'What is my irrigation plan?']) {
+    for (const question of ['How should I water?', 'What is my irrigation plan?', 'I found mushrooms; should I water this week?', 'I spotted dry areas; how often should I water?', 'I observed mushrooms; what is my irrigation plan?']) {
       const answer = answerServiceReportQuestion({ question, data });
       expect(answer).toMatch(expected);
       expect(answer).not.toMatch(/This week:|re-entry guidance/);

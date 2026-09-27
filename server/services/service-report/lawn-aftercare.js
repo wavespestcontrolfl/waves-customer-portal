@@ -11,6 +11,12 @@ function hasCreditableWaterIn(aftercare) {
     && aftercare?.needsReview !== true;
 }
 
+function wateringRestrictionAction(aftercare) {
+  if (aftercare?.needsReview === true) return LEGACY_NOTE_CONFIRMATION;
+  if (aftercare?.wateringHold === true) return 'Follow the product-specific watering restriction in Aftercare before making any other irrigation changes.';
+  return null;
+}
+
 function normalizeLawnAftercare(aftercare, { recordedWateringNotes = [] } = {}) {
   if (!aftercare || typeof aftercare !== 'object') return aftercare;
   // Historical neutral fallbacks carry no product direction. Preserve their
@@ -44,5 +50,6 @@ module.exports = {
   LEGACY_WATER_IN_COPY,
   WATER_IN_CONFIRMATION,
   hasCreditableWaterIn,
+  wateringRestrictionAction,
   normalizeLawnAftercare,
 };

@@ -21,6 +21,7 @@ const {
   LEGACY_WATER_IN_COPY,
   hasCreditableWaterIn,
   normalizeLawnAftercare,
+  wateringRestrictionAction,
 } = require('./lawn-aftercare');
 
 // Classify an applied product into a customer-facing purpose. Prefers the catalog's
@@ -587,6 +588,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // Aftercare is computed early enough for the insight builder to reconcile
   // its damp-area advice with a label-required watering-in (codex P1 r32).
   const aftercare = buildAftercare(applications);
+  const aftercareWaterAction = wateringRestrictionAction(aftercare);
+  if (water && aftercareWaterAction) water.explanation = aftercareWaterAction;
   const insights = buildLawnInsightCards({
     categories,
     water: water ? {
@@ -641,12 +644,12 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // next-visit task. wavesNext carries what Waves WILL do — future tense only: falling
   // back to the past-tense wavesAction ("Applied a fungicide…") under the client's
   // "What Waves will do next" label read as a tense error. Cards without a plan hide the row.
-  const realCustomerAction = topIssue ? (topIssue.customerAction || null) : null;
+  const realCustomerAction = [...new Set([aftercareWaterAction, topIssue?.customerAction].filter(Boolean))].join(' ') || null;
   const wavesNext = topIssue ? (topIssue.nextVisitPlan || null) : null;
 
   // Cross-signal ROOT CAUSE: connect water + coverage + mowing + stress into one
   // explanation instead of leaving the customer to reconcile separate cards.
-  const rootCause = buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, weekPlan: water ? water.weekPlan : null });
+  const rootCause = aftercareWaterAction ? null : buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, weekPlan: water ? water.weekPlan : null });
   const seasonalNote = buildSeasonalNote(lawnAssessment, grassLabel);
 
   const snapshot = {

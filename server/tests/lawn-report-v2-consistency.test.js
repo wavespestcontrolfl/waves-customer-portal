@@ -65,6 +65,27 @@ const CASES = {
   }),
 };
 
+describe('unconfirmed product directions take precedence throughout the report', () => {
+  test.each([
+    ['healthy', null],
+    ['deficit', null],
+    ['deficit', { title: 'Run two cycles this week', action: 'run' }],
+    ['overWatered', { title: 'Skip watering this week', action: 'hold' }],
+  ])('%s with plan %j retains confirmation instead of independent watering advice', (scenario, weekPlan) => {
+    const assessment = CASES[scenario];
+    const report = buildLawnReportV2({
+      lawnAssessment: { ...assessment, waterContext: { ...assessment.waterContext, weekPlan } },
+      applications: [{ product: { irrigation_required: true } }],
+    });
+    expect(report.aftercare.needsReview).toBe(true);
+    expect(report.snapshot.customerAction).toMatch(/Confirm the product watering directions/);
+    expect(report.snapshot.noActionNeeded).toBe(false);
+    expect(report.snapshot.rootCause).toBeNull();
+    expect(report.water.explanation).toMatch(/Confirm the product watering directions/);
+    expect(report.snapshot.customerAction).not.toMatch(/follow it as written|a bit more even watering|Add a little irrigation time/);
+  });
+});
+
 describe('structured moisture evidence owns sprinkler advice', () => {
   const render = (overrides = {}) => buildLawnReportV2({
     lawnAssessment: baseAssessment({ ...CASES.healthy, ...overrides }),

@@ -35,6 +35,7 @@ const FINDINGS_VERB_RE = /\b(find|found|finding|findings|see|saw|notice|noticed|
 // you notice…", "found", "findings") — not lookups ("Can I see my next
 // appointment?") or trend checks ("Did you notice the lawn improving?").
 const OBSERVATION_QUESTION_RE = /\b(?:what|which|anything)\b[^?.!]{0,20}\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\b(?:found|findings|observed|spotted)\b/;
+const WATERING_ADVICE_QUESTION_RE = /\b(?:how\s+(?:much|long|often|should)|when\s+(?:should|can|do)|(?:should|can|could|do)\s+i|what\s+is\s+(?:my|the)\s+(?:watering|irrigation)\s+plan)\b/;
 // Future treatment timing ("When are you spraying next?", "What are you
 // treating next?", "When is the next treatment?") is a scheduling question.
 const FUTURE_TREATMENT_RE = /\b(?:next|again|upcoming|will\s+you|are\s+you\s+(?:going\s+to|coming)|when\s+(?:are|will|do|does|is|can|could|would|should)\b)/;
@@ -585,7 +586,8 @@ function questionRoutingRules({
   return [
     // Explicit observation intent outranks incidental watering vocabulary:
     // "What did you find by the sprinkler?" still asks about findings.
-    { test: (q) => OBSERVATION_QUESTION_RE.test(q) && !EFFECTIVENESS_RE.test(q) && !APPOINTMENT_RE.test(q), answer: () => answerFindings({ data }) },
+    { test: (q) => OBSERVATION_QUESTION_RE.test(q) && !EFFECTIVENESS_RE.test(q) && !APPOINTMENT_RE.test(q)
+      && !(wateringIntent && (ADVICE_RE.test(q) || WATERING_ADVICE_QUESTION_RE.test(q))), answer: () => answerFindings({ data }) },
     // Preserve unverified or restricted aftercare before any watering plan.
     {
       test: () => wateringIntent
