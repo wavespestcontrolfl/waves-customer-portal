@@ -408,8 +408,9 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
   test('App readiness uses the caller transaction with a one-connection pool', async () => {
     await device(owner);
     const previous = mockPg;
+    // Allow proxy connection startup; max: 1 still detects a second acquisition inside the transaction.
     const limited = require('knex')({ client: 'pg', connection, searchPath: [schema],
-      acquireConnectionTimeout: 500, pool: { min: 0, max: 1 } });
+      acquireConnectionTimeout: 10000, pool: { min: 0, max: 1 } });
     mockPg = limited;
     try {
       await limited.transaction(async (trx) => {
