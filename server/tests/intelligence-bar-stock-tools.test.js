@@ -713,6 +713,10 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     ['adjust_stock', 'um so please, have we received two bottles of Taurus SC', { code: 'target_clarification_required' }],
     ['adjust_stock', 'two bottles of Taurus SC did we receive them', { code: 'target_clarification_required' }],
     ['adjust_stock', 'Taurus SC — did we receive two bottles', { code: 'target_clarification_required' }],
+    // Announcing a question makes the prompt one, whatever its grammar.
+    ['adjust_stock', 'Quick question, we received two bottles of Taurus SC', { code: 'target_clarification_required' }],
+    ['adjust_stock', 'quick question we received two bottles of Taurus SC', { code: 'target_clarification_required' }],
+    ['adjust_stock', 'quick, add two bottles of Taurus SC', { productId: 'p-taurus' }],
     ['adjust_stock', 'please add two bottles of Taurus SC', { productId: 'p-taurus' }],
     ['adjust_stock', 'can you log two bottles of Taurus SC', { productId: 'p-taurus' }],
     ['adjust_stock', 'could you receive two bottles of Taurus SC', { productId: 'p-taurus' }],

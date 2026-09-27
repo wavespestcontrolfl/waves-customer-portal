@@ -1187,10 +1187,14 @@ function qualifierConflict(rawText, phrases, identityNames) {
 // did, have, has, had, is, are, was, were) — those carry real grammatical
 // signal for REQUEST_START_RE / QUESTION_START_RE / the aux-inversion check
 // and must never be stripped as if they were content-free filler.
+// "question" is NOT here: announcing one ("Quick question, we received two
+// bottles of Taurus SC") makes the whole prompt a question (see
+// QUESTION_WORD_RE), and it must never count as a neutral closed-vocabulary
+// word either.
 const FILLER_WORDS = [
   'please', 'pls', 'plz', 'kindly', 'hey', 'hi', 'hello', 'ok', 'okay',
   'so', 'and', 'also', 'um', 'uh', 'well', 'oh', 'yeah', 'yes', 'alright',
-  'now', 'just', 'quick', 'question',
+  'now', 'just', 'quick',
 ];
 const CLOSED_VOCAB = new Set([
   // pronouns/determiners
@@ -1422,6 +1426,9 @@ const CLAUSE_SPLIT_RE = /[,;:.!?]+|[-–—]+/;
 // them"). Modals (can/could/would/will) are deliberately excluded: "can
 // you"/"could you" stay requests, never questions (REQUEST_START_RE).
 const AUX_INVERSION_RE = /\b(?:did|do|does|have|has|had)(?:n['’]?t)?\s+(?:we|you|they|i)\b/i;
+// The operator announcing a question anywhere ("quick question", "I have a
+// question") makes the prompt a question, whatever its grammar.
+const QUESTION_WORD_RE = /\bquestions?\b/i;
 function isQuestion(text) {
   const raw = String(text || '');
   // A polite REQUEST ("Can you add...", "Could you add...?") is never a
@@ -1433,7 +1440,7 @@ function isQuestion(text) {
     .map((clause) => clause.replace(LEADING_FILLER_RE, '').trim())
     .filter(Boolean);
   if (clauses.some((clause) => QUESTION_START_RE.test(clause))) return true;
-  if (AUX_INVERSION_RE.test(raw)) return true;
+  if (AUX_INVERSION_RE.test(raw) || QUESTION_WORD_RE.test(raw)) return true;
   return /\?\s*$/.test(raw);
 }
 // `texts` run newest first: the current prompt, any bare turns the look-back
