@@ -498,6 +498,65 @@ describe('processReceiptLine', () => {
     expect(mockAdjustStock).not.toHaveBeenCalled();
   });
 
+  describe('GATE_INVENTORY_AGENT hand-off', () => {
+    const GATE_ORIGINAL = process.env.GATE_INVENTORY_AGENT;
+    afterEach(() => {
+      if (GATE_ORIGINAL === undefined) delete process.env.GATE_INVENTORY_AGENT;
+      else process.env.GATE_INVENTORY_AGENT = GATE_ORIGINAL;
+    });
+
+    test('gate off: unmatched/needs_size/size_mismatch are byte-for-byte unchanged', async () => {
+      delete process.env.GATE_INVENTORY_AGENT;
+      const outcome = await processReceiptLine({ vendor: 'amazon', email, orderNumber: '900-7000007-7000007', shipmentKey: 'ship-1', item: { title: 'Chromebook', quantity: 1 }, lineNo: 1 });
+      expect(outcome).toEqual({ status: 'unmatched', inserted: true, product: null, lineId });
+      expect(mockAdjustStock).not.toHaveBeenCalled();
+    });
+
+    test('gate on: an unmatched line hands off to the agent — no bell, no movement, no product_id', async () => {
+      process.env.GATE_INVENTORY_AGENT = 'true';
+      const ringBell = jest.fn(async () => {});
+      const outcome = await processReceiptLine({ vendor: 'amazon', email, orderNumber: '900-7000007-7000007', shipmentKey: 'ship-1', item: { title: 'Chromebook', quantity: 1 }, lineNo: 1, ringBell });
+      expect(outcome).toEqual({ status: 'agent_pending', inserted: true, product: null, lineId });
+      expect(mockAdjustStock).not.toHaveBeenCalled();
+      expect(mockDbState.lines['amazon|900-7000007-7000007|ship-1|1']).toMatchObject({ status: 'agent_pending', product_id: null });
+      // ringBell is still invoked (processReceiptLine always calls it), but it
+      // rings nothing because 'agent_pending' isn't a HELD_REASONS entry —
+      // sweep.js's own tests cover that no-bell behavior.
+      expect(ringBell).toHaveBeenCalledTimes(1);
+    });
+
+    test('gate on: needs_size/size_mismatch also hand off, keeping the matched product_id', async () => {
+      process.env.GATE_INVENTORY_AGENT = 'true';
+      mockState.match = { matched: true, product: taurus };
+      const outcome = await processReceiptLine(taurusLine({ item: { title: 'Taurus SC Termiticide 96 oz', quantity: 1 } }));
+      expect(outcome).toEqual({ status: 'agent_pending', inserted: true, product: taurus, lineId });
+      expect(mockAdjustStock).not.toHaveBeenCalled();
+      expect(mockDbState.lines['amazon|900-1000001-1000001|ship-1|1']).toMatchObject({ status: 'agent_pending', product_id: 'p-taurus' });
+    });
+
+    test('gate on: a holdAs line never becomes agent_pending, even one the deterministic classifier would hand off', async () => {
+      process.env.GATE_INVENTORY_AGENT = 'true';
+      mockState.match = { matched: true, product: taurus };
+      const outcome = await processReceiptLine(taurusLine({ orderNumber: null, holdAs: 'no_order_number' }));
+      expect(outcome).toEqual({ status: 'no_order_number', inserted: true, product: taurus, lineId });
+    });
+
+    test('gate on: holdAs on an otherwise-unmatched line still skips hand-off (stays unmatched, not agent_pending)', async () => {
+      process.env.GATE_INVENTORY_AGENT = 'true';
+      const outcome = await processReceiptLine(taurusLine({ holdAs: 'returned', item: { title: 'Chromebook', quantity: -1 } }));
+      expect(outcome).toMatchObject({ status: 'unmatched' });
+    });
+
+    test('gate on: a forcedStatus line (no_items) never becomes agent_pending', async () => {
+      process.env.GATE_INVENTORY_AGENT = 'true';
+      const outcome = await processReceiptLine({
+        vendor: 'amazon', email, orderNumber: '900-8000008-8000008', shipmentKey: 'ship-1',
+        item: { title: 'Delivered: 1 Lawn & Garden item', quantity: 1 }, lineNo: 1, forcedStatus: 'no_items',
+      });
+      expect(outcome).toEqual({ status: 'no_items', inserted: true, product: null, lineId });
+    });
+  });
+
   test('forcedStatus "no_items": one placeholder row, no matching, no inventory-operations call', async () => {
     const outcome = await processReceiptLine({
       vendor: 'amazon', email, orderNumber: '900-6000006-6000006', shipmentKey: 'ship-1',
