@@ -389,49 +389,70 @@ async function ringForCall(call, now = new Date()) {
   const stillEligible = async () => {
     const ok = await (async () => {
       try {
-        // Re-run the SAME fulfillment refresh findPromiseToRing's own
-        // snapshot did — direct fulfillment (an estimate actually sent, a
-        // visit actually booked) can land in the gap between that snapshot
-        // and here just as easily as the kept-evidence checks below can
-        // change; without this, an estimate sent in the race window still
-        // rang "still owe them a quote" (Codex #5019 r16 P2). An unverified
-        // refresh (thrown, or its own per-commitment `failed` count) blocks
-        // the send the same way findPromiseToRing already treats it.
-        const refreshed = await commitments.refreshFulfillment(db, promise.call_log_id);
-        if (refreshed.failed > 0) return false;
-        // Reload the commitment row FRESH by id before the renewal recheck
-        // (Codex #5019 r10 P2): `promise` is findPromiseToRing's own
-        // SELECTION SNAPSHOT, taken before this gap — for an AI callback
-        // staff edit or reopen in that gap, the snapshot's own human_state
-        // is still null, and obligationRenewedAt short-circuits on exactly
-        // that field (`if (!['confirmed','edited'].includes(human_state))
-        // return null`) without ever reading the new renewal audit event.
-        // A plain call_commitments read by id carries every mutable staff-
-        // edit field (human_state, status, reviewed_at, snoozed_until,
-        // fulfillment) fresh; merged ONTO the snapshot rather than
-        // replacing it, since call_commitments itself has no call_started_at
-        // / call_ended_at / customer_id / phone columns — those still come
-        // from findPromiseToRing's own join and never change for this call.
-        // A missing row (deleted) or a read failure blocks the same way an
-        // unverified fulfillment refresh does — never a false ring on
-        // unverifiable state; the next tick simply re-evaluates from scratch.
-        const freshRow = await db('call_commitments').where({ id: promise.id }).first();
-        if (!freshRow) return false;
-        const current = { ...promise, ...freshRow };
-        // Re-check renewal precedence too (Codex #5019 r9 P2, then r10 P2
-        // for the fresh read above): staff can reopen/restate the SAME
-        // promise in the gap between findPromiseToRing's own snapshot and
-        // here, exactly like they can fulfill or dismiss it —
-        // findPromiseToRing's own precedence rule (a callback cannot be
-        // "about" a renewal that postdates it) must hold at dispatch time
-        // too, not just at selection time, or a renewal landing in this
-        // exact gap would let a stale obligation ring anyway.
-        const renewedNow = await commitments.obligationRenewedAt(db, current);
-        if (renewedNow && renewedNow.getTime() >= call.created_at.getTime()) return false;
-        const stillLive = await commitments.stillOpenIds(db, [current.id], { now: new Date() });
-        if (!stillLive.has(current.id)) return false;
-        const followedNow = await followedUpIds(db, [current]);
-        return !followedNow.has(current.id);
+        // Every read below runs on the CRON-HELD connection, not a fresh
+        // pool checkout (Codex #5019 r14 P1): shouldContinue/beforePush are
+        // invoked from WITHIN notification-service.js's own open
+        // notifyAdmin dedupe transaction (a second pool connection), while
+        // runExclusive (scheduler.js) already pins a first for this whole
+        // sweep — at DB_POOL_MAX=2 (a supported production floor, see
+        // cron-lock.js's own docstring and every other site that guards
+        // against this exact shape), a THIRD checkout for these queries
+        // would simply never arrive: both existing connections are held by
+        // callers waiting on THIS code to finish. getHeldConnection()
+        // (cron-lock.js's own established reuse mechanism — the same one
+        // appointment-reminders.js already uses for the identical reason)
+        // returns undefined outside a runExclusive context (tests, or any
+        // future non-cron caller), where knex's own `{ connection }` option
+        // simply falls back to a normal pool checkout — this is safe
+        // either way. A single transaction for every read here is harmless
+        // (all SELECTs, no writes) and never nests: this whole function
+        // runs to completion before it, or a sibling call, opens another.
+        const { getHeldConnection } = require('../utils/cron-lock');
+        return await db.transaction(async (trx) => {
+          // Re-run the SAME fulfillment refresh findPromiseToRing's own
+          // snapshot did — direct fulfillment (an estimate actually sent, a
+          // visit actually booked) can land in the gap between that snapshot
+          // and here just as easily as the kept-evidence checks below can
+          // change; without this, an estimate sent in the race window still
+          // rang "still owe them a quote" (Codex #5019 r16 P2). An unverified
+          // refresh (thrown, or its own per-commitment `failed` count) blocks
+          // the send the same way findPromiseToRing already treats it.
+          const refreshed = await commitments.refreshFulfillment(trx, promise.call_log_id);
+          if (refreshed.failed > 0) return false;
+          // Reload the commitment row FRESH by id before the renewal recheck
+          // (Codex #5019 r10 P2): `promise` is findPromiseToRing's own
+          // SELECTION SNAPSHOT, taken before this gap — for an AI callback
+          // staff edit or reopen in that gap, the snapshot's own human_state
+          // is still null, and obligationRenewedAt short-circuits on exactly
+          // that field (`if (!['confirmed','edited'].includes(human_state))
+          // return null`) without ever reading the new renewal audit event.
+          // A plain call_commitments read by id carries every mutable staff-
+          // edit field (human_state, status, reviewed_at, snoozed_until,
+          // fulfillment) fresh; merged ONTO the snapshot rather than
+          // replacing it, since call_commitments itself has no call_started_at
+          // / call_ended_at / customer_id / phone columns — those still come
+          // from findPromiseToRing's own join and never change for this call.
+          // A missing row (deleted) or a read failure blocks the same way an
+          // unverified fulfillment refresh does — never a false ring on
+          // unverifiable state; the next tick simply re-evaluates from scratch.
+          const freshRow = await trx('call_commitments').where({ id: promise.id }).first();
+          if (!freshRow) return false;
+          const current = { ...promise, ...freshRow };
+          // Re-check renewal precedence too (Codex #5019 r9 P2, then r10 P2
+          // for the fresh read above): staff can reopen/restate the SAME
+          // promise in the gap between findPromiseToRing's own snapshot and
+          // here, exactly like they can fulfill or dismiss it —
+          // findPromiseToRing's own precedence rule (a callback cannot be
+          // "about" a renewal that postdates it) must hold at dispatch time
+          // too, not just at selection time, or a renewal landing in this
+          // exact gap would let a stale obligation ring anyway.
+          const renewedNow = await commitments.obligationRenewedAt(trx, current);
+          if (renewedNow && renewedNow.getTime() >= call.created_at.getTime()) return false;
+          const stillLive = await commitments.stillOpenIds(trx, [current.id], { now: new Date() });
+          if (!stillLive.has(current.id)) return false;
+          const followedNow = await followedUpIds(trx, [current]);
+          return !followedNow.has(current.id);
+        }, { connection: getHeldConnection() });
       } catch {
         return false;
       }

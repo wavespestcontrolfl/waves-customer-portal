@@ -742,6 +742,66 @@ const OUR_NUMBER = '+19415550100';
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 
+  describe('the live recheck reuses the cron-held connection under a small pool (Codex #5019 r14 P1)', () => {
+    test('DB_POOL_MAX=2: with the cron connection AND notifyAdmin\'s own OPEN dedupe transaction both already held, shouldContinue must still complete — it reuses the held connection instead of asking the pool for a third', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      // A DEDICATED small pool against the SAME schema — the production
+      // floor this bug is specific to (cron-lock.js's own docstring, and
+      // every other site in this repo that guards against this exact
+      // shape: DB_POOL_MAX=2 is a supported config, not a hypothetical).
+      const smallDb = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema, 'public'], pool: { min: 0, max: 2 } });
+      const originalConn = mockConn; // the real, schema-scoped `database` — restored before/after the exhausted window
+      const cronLock = require('../utils/cron-lock');
+      let cronConn;
+      let notifyConn;
+      try {
+        // Connection #1: simulates runExclusive's own held connection —
+        // ACQUIRED BEFORE findPromiseToRing's own reads run (real timing:
+        // the whole sweep is already inside runExclusive by the time any
+        // call is even read).
+        cronConn = await smallDb.client.acquireConnection();
+        // Connection #2 is acquired, and `db` itself is only pointed at
+        // this exhausted pool, from WITHIN the triggerNotification mock —
+        // exactly the real window: notifyAdmin's own transaction opens
+        // ONLY once triggerNotification actually runs, well after
+        // findPromiseToRing's own (unaffected) reads already completed
+        // against the real pool.
+        triggerNotification.mockImplementationOnce(async (triggerKey, payload, opts) => {
+          notifyConn = await smallDb.client.acquireConnection(); // both of the 2-max pool's slots now held
+          mockConn = smallDb;
+          const spy = jest.spyOn(cronLock, 'getHeldConnection').mockReturnValue(cronConn);
+          let stillWanted;
+          try {
+            stillWanted = await Promise.race([
+              opts.shouldContinue(),
+              new Promise((_, reject) => setTimeout(
+                () => reject(new Error('timed out — stillEligible likely blocked waiting on a third pool connection')), 8000,
+              )),
+            ]);
+          } finally {
+            spy.mockRestore();
+            mockConn = originalConn; // notifyAdmin's own transaction has "committed" — its connection is free again
+          }
+          return stillWanted
+            ? { bellWritten: true, push: { sent: 1 } }
+            : { bellWritten: false, push: { sent: 0, skipped: 'superseded_before_push' } };
+        });
+
+        expect(await sweepPromiseChasers()).toBe(1);
+      } finally {
+        mockConn = originalConn;
+        if (cronConn) smallDb.client.releaseConnection(cronConn);
+        if (notifyConn) smallDb.client.releaseConnection(notifyConn);
+        await smallDb.destroy();
+      }
+    }, 15000);
+  });
+
   describe('the live recheck re-runs direct fulfillment, not just kept-evidence', () => {
     const commitments = require('../services/call-commitments');
 
