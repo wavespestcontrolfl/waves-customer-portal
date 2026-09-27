@@ -1569,7 +1569,7 @@ function purchasedServiceScopeForQuestion(question, rows = []) {
     ? subtypeRows.filter((row) => selectedLabels.includes(cleanText(row.label).toLowerCase()))
     : subtypeRows;
   const amounts = [...question.matchAll(
-    /\$\s*([\d,]+(?:\.\d{1,2})?)|\b([\d,]+(?:\.\d{1,2})?)\s*(?:-|\s)?dollars?\b|\b(?:priced?\s+at|costs?)\s+\$?\s*([\d,]+(?:\.\d{1,2})?)\b/g,
+    /\$\s*([\d,]+(?:\.\d{1,2})?)|\b([\d,]+(?:\.\d{1,2})?)\s*(?:-|\s)?dollars?\b|\b(?:priced?\s+at|costs?)\s+(?:(?:about|around|approximately)\s+)?\$?\s*([\d,]+(?:\.\d{1,2})?)\b/g,
   )].map((match) => Number((match[1] || match[2] || match[3]).replace(/,/g, '')))
     .filter(Number.isFinite);
   const statedPrice = amounts.length > 0

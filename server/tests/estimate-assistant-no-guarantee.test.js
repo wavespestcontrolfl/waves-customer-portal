@@ -469,6 +469,9 @@ describe('estimate assistant no-guarantee context', () => {
       'Does the 700 dollar trenching include a guarantee?',
       'Does the trenching priced at 700 include a guarantee?',
       'Does trenching that costs 700 include a guarantee?',
+      'Does trenching that costs about 700 include a guarantee?',
+      'Does trenching that costs around 700 include a guarantee?',
+      'Does trenching that costs approximately 700 include a guarantee?',
       'Does the Front Trenching include a guarantee?',
     ]) {
       expect(answerEstimateQuestionFallback(question, context))
@@ -479,6 +482,7 @@ describe('estimate assistant no-guarantee context', () => {
       'Does the 900 dollars trenching include a guarantee?',
       'Does the trenching priced at 900 include a guarantee?',
       'Does trenching that costs 900 include a guarantee?',
+      'Does trenching that costs about 900 include a guarantee?',
       'Does the Rear Trenching include a guarantee?',
     ]) {
       expect(answerEstimateQuestionFallback(question, context))
