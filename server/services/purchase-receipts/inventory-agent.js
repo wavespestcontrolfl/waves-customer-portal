@@ -170,6 +170,17 @@ function validateReading(reading, { rawTitle, lineQuantity }) {
   const claims = parsedSizeClaims(afterMultipack);
   const matchedClaim = claims.find((c) => c.unit === claimedUnit && sizesAgree(c.value, claimedNumber));
   if (!matchedClaim) return { ok: false, reason: 'size_not_a_full_title_claim' };
+  // A title that states two different sizes of one kind ("1 gal … 2.5 gal",
+  // "12 Count … 2 Count") is ambiguous, as it is for amountPerItem: the
+  // reading may not pick one. A restatement ("1 Gallon (128 fl oz)") agrees
+  // after conversion, and a size of another kind (a count beside a weight)
+  // doesn't convert, so neither conflicts.
+  const conflictingClaim = claims.some((c) => {
+    if (c === matchedClaim) return false;
+    const converted = convertInventoryQuantity(c.value, c.unit, matchedClaim.unit);
+    return converted != null && !sizesAgree(converted, matchedClaim.value);
+  });
+  if (conflictingClaim) return { ok: false, reason: 'conflicting_size_claims' };
 
   // Whatever remains once the pack marker AND the matched size claim's own
   // text are both gone must carry no OTHER pack/count wording — a second

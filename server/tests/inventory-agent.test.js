@@ -40,6 +40,20 @@ describe('validateReading — grounded vs invented numbers (complete title token
       .toMatchObject({ ok: false, reason: 'size_not_a_full_title_claim' });
   });
 
+  test('a title stating two different sizes of one kind is ambiguous and never validates', () => {
+    expect(validateReading({ size_number: 1, size_unit: 'gal', pack_count: 1 }, { rawTitle: 'Bifen XTS Insecticide 1 gal / 2.5 gal', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'conflicting_size_claims' });
+    expect(validateReading({ size_number: 12, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Rat Snap Trap 12 Count Refill 2 Count', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'conflicting_size_claims' });
+  });
+
+  test('a restated size, or a size of another kind beside it, is not a conflict', () => {
+    expect(validateReading({ size_number: 1, size_unit: 'gal', pack_count: 1 }, { rawTitle: 'Bifen XTS Insecticide 1 Gallon (128 fl oz)', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, sizeNumber: 1, unit: 'gal' });
+    expect(validateReading({ size_number: 20, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Summit Mosquito Dunks 20 Count 1.3 oz', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, sizeNumber: 20, unit: 'each' });
+  });
+
   test('an invented size_unit is rejected the same way', () => {
     expect(validateReading({ size_text: '78 oz', size_number: 78, size_unit: 'gal', pack_count: 1 }, { rawTitle: title, lineQuantity: 1 }))
       .toMatchObject({ ok: false, reason: 'size_not_a_full_title_claim' });
