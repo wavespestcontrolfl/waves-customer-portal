@@ -64,6 +64,30 @@ const ACTIVITY_LEVELS = [
   { value: 'heavy', label: 'Heavy', rating: 5 },
 ];
 const CLOSED_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
+const dayOf = (value) => String(value || '').slice(0, 10);
+
+// Why the live context can't be completed here, or '' when it can: the
+// schedule row the tech tapped may be stale, so the loaded visit must still
+// be that visit (same customer and day), still an open pest re-service, and
+// still eligible for the short form (not typed or project-backed).
+function blockedReasonFor(context, service) {
+  const visit = context?.service || {};
+  const movedCustomer = service?.routedCustomerId && visit.customerId
+    && String(service.routedCustomerId) !== String(visit.customerId);
+  const movedDay = service?.routedScheduledDate && visit.scheduledDate
+    && dayOf(service.routedScheduledDate) !== dayOf(visit.scheduledDate);
+  if (movedCustomer || movedDay) return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
+  if (visit.serviceKey !== 'pest_re_service') return 'This visit is no longer a pest re-service. Use the full form.';
+  if (CLOSED_STATUSES.has(String(visit.status || ''))) return `This visit is already ${visit.status}. Use the full form to edit it.`;
+  if (context?.eligible !== true) return 'This visit needs the full form.';
+  return '';
+}
+
+// "123 Oak St, Bradenton" from the context's resolved address.
+function liveAddressLine(address) {
+  if (!address || typeof address !== 'object') return '';
+  return [address.line1, address.city].filter(Boolean).join(', ');
+}
 
 // Every /complete failure lands in one of four outcomes:
 //  saved       — the visit is already saved: this or an earlier attempt
@@ -198,9 +222,9 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed }) {
 // The context + rating contract for this visit. The routed schedule row can
 // be stale: the context is re-checked to still be an open pest re-service
 // before anything can be completed here.
-function useFastCompleteContext({ base, request, serviceType }) {
+function useFastCompleteContext({ base, request, serviceType, routedCustomerId, routedScheduledDate }) {
   const [ctx, setCtx] = useState({
-    loading: true, loadError: '', blockedReason: '', rows: [], visitIdentity: null,
+    loading: true, loadError: '', blockedReason: '', rows: [], visitIdentity: null, visit: null,
     rating: { allowed: false, scaleLabels: null },
   });
   useEffect(() => {
@@ -216,14 +240,11 @@ function useFastCompleteContext({ base, request, serviceType }) {
         if (!active) return;
         const visit = data?.service || {};
         const products = Array.isArray(data?.products) ? data.products : [];
-        const reclassified = visit.serviceKey !== 'pest_re_service';
-        const closed = CLOSED_STATUSES.has(String(visit.status || ''));
         setCtx({
           loading: false,
           loadError: '',
-          blockedReason: reclassified
-            ? 'This visit is no longer a pest re-service. Use the full form.'
-            : closed ? `This visit is already ${visit.status}. Use the full form to edit it.` : '',
+          blockedReason: blockedReasonFor(data, { routedCustomerId, routedScheduledDate }),
+          visit,
           rows: pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, serviceType, totalAmount)),
           visitIdentity: recapVisitIdentity(visit),
           rating: { allowed: ratingContract?.allowed === true, scaleLabels: ratingContract?.scaleLabels || null },
@@ -233,7 +254,7 @@ function useFastCompleteContext({ base, request, serviceType }) {
       }
     })();
     return () => { active = false; };
-  }, [base, request, serviceType]);
+  }, [base, request, serviceType, routedCustomerId, routedScheduledDate]);
   return ctx;
 }
 
@@ -319,7 +340,13 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
   useLockBodyScroll(true);
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
-  const ctx = useFastCompleteContext({ base, request, serviceType: service?.serviceType });
+  const ctx = useFastCompleteContext({
+    base,
+    request,
+    serviceType: service?.serviceType,
+    routedCustomerId: service?.routedCustomerId,
+    routedScheduledDate: service?.routedScheduledDate,
+  });
   const submission = useFastCompleteSubmit({ base, request });
   const { submitting, done } = submission;
 
@@ -352,9 +379,12 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
         <header className="tech-visit-header">
           <div>
             <h2 id={titleId} className="tech-visit-title">{done ? 'Re-service complete' : 'Complete re-service'}</h2>
+            {/* The LIVE visit once loaded, so the tech sees whose property
+                this completion records against. */}
             <p className="tech-visit-muted">
-              {service?.customerName || 'Customer'}{service?.serviceType ? ` · ${service.serviceType}` : ''}
+              {ctx.visit?.customerName || service?.customerName || 'Customer'}{service?.serviceType ? ` · ${service.serviceType}` : ''}
             </p>
+            {liveAddressLine(ctx.visit?.address) && <p className="tech-visit-muted">{liveAddressLine(ctx.visit.address)}</p>}
           </div>
           {!done && (
             <Button variant="ghost" className="tech-visit-action" onClick={onFullForm} disabled={locked}>Full form</Button>

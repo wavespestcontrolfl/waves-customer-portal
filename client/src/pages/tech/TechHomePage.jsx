@@ -1124,6 +1124,11 @@ export default function TechHomePage({ section = 'today' }) {
             serviceType: fastCompleteService.service_type || fastCompleteService.serviceType,
             address: shortAddress(fastCompleteService.address) || fastCompleteService.address || '',
             timeLabel: serviceWindowLabel(fastCompleteService) || '',
+            // The visit the tech tapped, checked against the live context:
+            // a row that went stale (moved to another customer or day) must
+            // not complete against the new visit.
+            routedCustomerId: fastCompleteService.customerId || fastCompleteService.customer_id || null,
+            routedScheduledDate: fastCompleteService.scheduledDate || fastCompleteService.scheduled_date || null,
           }}
           request={techRequest}
           onClose={() => setFastCompleteService(null)}

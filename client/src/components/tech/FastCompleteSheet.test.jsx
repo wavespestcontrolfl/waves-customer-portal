@@ -28,13 +28,14 @@ const CONTEXT_SERVICE = {
   serviceKey: 'pest_re_service', status: 'confirmed',
 };
 
-function makeRequest({ rating = { allowed: true, scaleLabels: null }, service = CONTEXT_SERVICE } = {}) {
+function makeRequest({ rating = { allowed: true, scaleLabels: null }, service = CONTEXT_SERVICE, eligible = true } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
     if (path.endsWith('/pest-recap/context')) {
       return {
         ok: true,
+        eligible,
         service,
         products: CATALOG,
         existingRecord: null,
@@ -185,8 +186,8 @@ describe('FastCompleteSheet', () => {
 
     // Done view.
     expect(await screen.findByText('Re-service complete')).toBeTruthy();
-    expect(screen.getByText(/123 Main St/)).toBeTruthy();
-    expect(screen.getByText(/2:00 PM/)).toBeTruthy();
+    // The done card names the visit (the header also shows its live address).
+    expect(screen.getByText('123 Main St · 2:00 PM')).toBeTruthy();
     // The saved sheet can simply be dismissed, not only moved on from, and
     // dismissing it refreshes the schedule the same way Next stop does.
     expect(screen.getByRole('button', { name: 'Close' }).disabled).toBe(false);
@@ -377,6 +378,31 @@ describe('FastCompleteSheet', () => {
     expect(screen.queryByRole('button', { name: /Advion/ })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
     expect(onFullForm).toHaveBeenCalled();
+  });
+
+  test('a schedule row that went stale (another customer) is not completed here', async () => {
+    const request = makeRequest();
+    render(<FastCompleteSheet service={{ ...SERVICE, routedCustomerId: 'cust-other' }} request={request} onClose={() => {}} />);
+
+    expect(await screen.findByText('This visit changed since your schedule loaded. Close and reopen it from the schedule.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Complete re-service' })).toBeNull();
+  });
+
+  test('a visit the server no longer allows on the short form is sent to the full form', async () => {
+    const request = makeRequest({ eligible: false });
+    render(<FastCompleteSheet service={{ ...SERVICE, routedCustomerId: 'cust-1' }} request={request} onClose={() => {}} />);
+
+    expect(await screen.findByText('This visit needs the full form.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Complete re-service' })).toBeNull();
+  });
+
+  test('the header shows the live visit\'s customer and address once loaded', async () => {
+    const request = makeRequest({ service: { ...CONTEXT_SERVICE, customerName: 'Live Customer', address: { line1: '9 Live Ln', city: 'Parrish' } } });
+    render(<FastCompleteSheet service={{ ...SERVICE, routedCustomerId: 'cust-1' }} request={request} onClose={() => {}} />);
+
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    expect(screen.getByText(/Live Customer/)).toBeTruthy();
+    expect(screen.getByText('9 Live Ln, Parrish')).toBeTruthy();
   });
 
   test('a visit reclassified since the schedule loaded is not completed here', async () => {
