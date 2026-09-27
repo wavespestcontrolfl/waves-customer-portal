@@ -1,6 +1,8 @@
 const EmailTemplateLibrary = require('./email-template-library');
 const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
-const { billingEmailReplayEligible } = require('./messaging/billing-email-replay-eligibility');
+const {
+  billingEmailReplayEligible, billingEmailReplayProducerRefusal,
+} = require('./messaging/billing-email-replay-eligibility');
 const { senderReplayTemplate } = require('./billing-email-replay-context');
 
 const BILLING_REPLAY_TEMPLATES = new Set(['billing.notice', 'billing.receipt_notice']);
@@ -56,6 +58,14 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch, {
     });
   }
   if (typeof dispatch !== 'function') throw new TypeError('Billing replay dispatch callback is required');
+  const producer = await billingEmailReplayProducerRefusal(context);
+  if (producer) {
+    return refusal({
+      code: producer.resendable === true ? BILLING_REPLAY_RESENDABLE : 'BILLING_REPLAY_INELIGIBLE',
+      reason: producer.reason,
+      retryable: producer.retryable === true,
+    });
+  }
 
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
   await dispatchUnderBillingEmailAuthority({

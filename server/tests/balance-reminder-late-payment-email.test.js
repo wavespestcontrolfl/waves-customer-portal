@@ -246,6 +246,7 @@ describe('late-payment email sidecar', () => {
       billingReplayContext: {
         schema_version: 1, customer_id: 'cust-1', invoice_id: 'inv-1', category: 'billing',
         source_entry_point: 'late_payment_email', notificationEventKey: 'late_payment:inv-1:7',
+        rendered_amount: '129.00',
       },
       payload: expect.objectContaining({
         first_name: 'Taylor',
@@ -958,6 +959,43 @@ describe('balance reminder pay link', () => {
     await expect(BalanceReminder.sendReminder({ id: 'svc-1', cust_id: 'cust-1', scheduled_date: '2026-06-01' }, balance, 'three_day', 3))
       .rejects.toThrow('no unpaid invoice id/token found');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('latePaymentEmailStillOwed (a stored late-payment email\'s provider retry)', () => {
+  const balance = { totalBalance: 129, invoiceIds: ['inv-1'], oldestInvoiceId: 'inv-1' };
+  const ask = () => BalanceReminder.latePaymentEmailStillOwed({
+    customerId: 'cust-1', invoiceId: 'inv-1', renderedTotal: '129.00',
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    InvoiceFollowUps.hasActiveSequence.mockReset().mockResolvedValue(false);
+    InvoiceFollowUps.isDunningStopped.mockReset().mockResolvedValue(false);
+    StripeService.isInvoiceAwaitingMicrodepositVerification.mockReset().mockResolvedValue(false);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  test('still owed while the overdue total is the one it showed and no dunning stop started', async () => {
+    jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
+    setDbQueues({}, { plan: chain({ first: null }), microdeposits: chain({ result: [] }) });
+    await expect(ask()).resolves.toEqual({ owed: true });
+  });
+
+  test.each([
+    ['the overdue total changed', { totalBalance: 99 }, null],
+    ['nothing is overdue any more', null, null],
+    ['a follow-up sequence took over', {}, 'sequence'],
+    ['a payment plan started', {}, 'plan'],
+  ])('refuses when %s', async (_label, balanceOverride, stop) => {
+    jest.spyOn(BalanceReminder, 'getCustomerBalance')
+      .mockResolvedValue(balanceOverride === null ? null : { ...balance, ...balanceOverride });
+    if (stop === 'sequence') InvoiceFollowUps.hasActiveSequence.mockResolvedValue(true);
+    setDbQueues({}, {
+      plan: chain({ first: stop === 'plan' ? { id: 'plan-1' } : null }),
+      microdeposits: chain({ result: [] }),
+    });
+    await expect(ask()).resolves.toMatchObject({ owed: false });
   });
 });
 

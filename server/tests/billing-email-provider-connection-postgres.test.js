@@ -18,6 +18,12 @@ jest.mock('../services/customer-contact', () => ({
   getInvoiceEmailRecipients: (customer) => [{ email: customer.email, name: 'QA' }],
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The late-payment sender's own balance and dunning-stop rules read tables and
+// the payment processor this fixture does not carry; they are pinned in the
+// unit suites and answer "still owed" here.
+jest.mock('../services/workflows/balance-reminder', () => ({
+  latePaymentEmailStillOwed: jest.fn(async () => ({ owed: true })),
+}));
 
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
@@ -130,6 +136,12 @@ postgres('billing Email provider preparation on its held connection', () => {
       table.uuid('id').primary(); table.uuid('customer_id'); table.uuid('payer_id');
       table.text('status'); table.text('send_claim_token'); table.text('scheduled_send_error');
       table.text('total'); table.decimal('credit_applied'); table.jsonb('line_items'); table.text('notes');
+      // The follow-up engine's own retry rule reads it (micro-deposit diversion).
+      table.text('stripe_payment_intent_id');
+    });
+    // A follow-up email's provider retry re-checks its sequence.
+    await mockPg.schema.createTable('invoice_followup_sequences', (table) => {
+      table.uuid('id').primary(); table.text('status');
     });
   }, 30000);
 
@@ -285,7 +297,7 @@ postgres('billing Email provider preparation on its held connection', () => {
       suppression_group_key_snapshot: 'transactional_required',
       payload_snapshot: { __billing_replay_context: { schema_version: 1, customer_id: customerId,
         invoice_id: invoiceId, category: 'billing', source_entry_point: 'late_payment_email',
-        notificationEventKey: event } },
+        notificationEventKey: event, rendered_amount: '129.00' } },
       categories: JSON.stringify(['billing', 'late_payment', 'late_payment_30d']), send_attempt_token: attempt,
       provider_handoff_attempt_token: attempt, provider_handoff_phase: 'pending', status: 'queued',
       provider_retry_count: 1,
@@ -301,6 +313,51 @@ postgres('billing Email provider preparation on its held connection', () => {
     } else {
       expect(outcome).toMatchObject({ sent: false, stopped: true });
       expect(saved.status).toBe('blocked');
+      expect(global.fetch).not.toHaveBeenCalled();
+    }
+  }, 15000);
+
+  // A changed balance is refused under the shared check's locks ('blocked');
+  // a paused or stopped sequence is the follow-up engine's own answer, asked
+  // first and settled resendable ('failed').
+  test.each([
+    ['still owed', { status: 'sent', total: '129.00' }, 'active', 'sent'],
+    ['with a changed balance', { status: 'sent', total: '99.00' }, 'active', 'blocked'],
+    ['with its sequence stopped', { status: 'sent', total: '129.00' }, 'stopped', 'failed'],
+    ['with its sequence paused', { status: 'sent', total: '129.00' }, 'paused', 'failed'],
+  ])('an invoice follow-up email retry re-runs the shared check: %s', async (_label, invoice, sequenceStatus, settled) => {
+    const invoiceId = randomUUID();
+    const sequenceId = randomUUID();
+    await mockPg('invoices').insert({
+      id: invoiceId, customer_id: customerId, credit_applied: 0, line_items: JSON.stringify([]), ...invoice,
+    });
+    await mockPg('invoice_followup_sequences').insert({ id: sequenceId, status: sequenceStatus });
+    // No invoice-channel choice: the shared check keeps Email.
+    await mockPg('notification_prefs').where({ customer_id: customerId }).update({ email_enabled: true });
+    const event = `invoice_followup:${invoiceId}:d7_reminder`;
+    const attempt = randomUUID();
+    const stored = {
+      id: randomUUID(), template_key: 'invoice.followup_7_day', recipient_type: 'customer',
+      recipient_id: customerId, recipient_email_snapshot: 'qa@example.invalid', trigger_event_id: event,
+      idempotency_key: `invoice_followup_email:${invoiceId}:d7_reminder`, subject_snapshot: 'Synthetic follow-up',
+      html_snapshot: '<p>Synthetic follow-up</p>', text_snapshot: 'Synthetic follow-up',
+      suppression_group_key_snapshot: 'transactional_required',
+      payload_snapshot: { __billing_replay_context: { schema_version: 1, customer_id: customerId,
+        invoice_id: invoiceId, category: 'invoice', source_entry_point: 'invoice_followup_email',
+        notificationEventKey: event, followup_sequence_id: sequenceId, rendered_amount: '129.00' } },
+      categories: JSON.stringify(['invoice_followup', 'd7_reminder']), send_attempt_token: attempt,
+      provider_handoff_attempt_token: attempt, provider_handoff_phase: 'pending', status: 'queued',
+      provider_retry_count: 1,
+    };
+    await mockPg('email_messages').insert(stored);
+
+    const outcome = await retryOne(stored);
+    const saved = await mockPg('email_messages').where({ id: stored.id }).first();
+    expect(saved.status).toBe(settled);
+    if (settled === 'sent') {
+      expect(outcome).toMatchObject({ sent: true });
+    } else {
+      expect(outcome).toMatchObject({ sent: false, stopped: true });
       expect(global.fetch).not.toHaveBeenCalled();
     }
   }, 15000);

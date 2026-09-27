@@ -9,17 +9,33 @@ const INVOICE_SEND_SOURCES = new Set(['invoice_send_via_sms', 'invoice_send_defe
 // ruling 2026-09-27) store a context on their OWN email row, so a provider
 // retry of that row re-runs the check too. Each binds its row by template,
 // trigger and idempotency key: a context copied onto any other row is
-// ignored. The trigger and key share the suffix after their prefixes, and
-// the invoice id opens that suffix.
+// ignored. The trigger and key share the suffix after their prefixes, the
+// invoice id opens that suffix, and the row carries the binding's category
+// tag. `pins` are the fields its retry re-checks (see complete()).
 const SENDER_BINDINGS = Object.freeze({
   late_payment_email: Object.freeze({
     category: 'billing',
+    categoryTag: 'billing',
+    pins: ['invoice_id', 'rendered_amount'],
     templates: new Set([
       'billing_late_payment_7_day', 'billing_late_payment_14_day', 'billing_late_payment_30_day',
       'billing_late_payment_60_day', 'billing_late_payment_90_day',
     ]),
     triggerPrefix: 'late_payment:',
     keyPrefix: 'late_payment_email:',
+  }),
+  // The invoice follow-up email: its retry also re-checks the sequence (a
+  // stopped one refuses) and the amount it rendered (a changed balance
+  // refuses; the next touch re-renders).
+  invoice_followup_email: Object.freeze({
+    category: 'invoice',
+    categoryTag: 'invoice_followup',
+    pins: ['invoice_id', 'followup_sequence_id', 'rendered_amount'],
+    templates: new Set([
+      'invoice.followup_3_day', 'invoice.followup_7_day', 'invoice.followup_14_day', 'invoice.followup_30_day',
+    ]),
+    triggerPrefix: 'invoice_followup:',
+    keyPrefix: 'invoice_followup_email:',
   }),
 });
 const SOURCES = new Set([
@@ -101,7 +117,7 @@ function complete(context) {
     return has('invoice_id', 'followup_sequence_id', 'rendered_amount', 'collections_ledger_id');
   }
   const binding = SENDER_BINDINGS[context.source_entry_point];
-  if (binding) return has('invoice_id') && context.category === binding.category;
+  if (binding) return has(...binding.pins) && context.category === binding.category;
   return has('invoice_id', 'collections_ledger_id');
 }
 
@@ -122,7 +138,7 @@ function senderReplayBindsRow(context, facts = {}) {
     && trigger.startsWith(binding.triggerPrefix) && trigger === context.notificationEventKey
     && suffix.startsWith(`${context.invoice_id}:`)
     && facts.idempotencyKey === `${binding.keyPrefix}${suffix}`
-    && (facts.categories || []).includes(context.category);
+    && (facts.categories || []).includes(binding.categoryTag);
 }
 
 function sanitizeBillingReplayContext(context) {

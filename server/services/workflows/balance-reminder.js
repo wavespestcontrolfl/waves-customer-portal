@@ -593,6 +593,9 @@ class BalanceReminder {
           category: "billing",
           source_entry_point: "late_payment_email",
           notificationEventKey: `late_payment:${latestInvoice.id}:${config.stageDays}`,
+          // The total this email shows (payload.amount_due): a retry refuses
+          // once the customer's overdue total differs.
+          rendered_amount: Number(balance.totalBalance || latestInvoice.total || 0).toFixed(2),
         },
         withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
           input: authorityInput, recipientEmail: to, templateKey: config.templateKey, dispatch, state,
@@ -608,6 +611,19 @@ class BalanceReminder {
         logTag: "balance-reminder", label: `late-payment ${config.stageDays}d for invoice ${latestInvoice.id}`,
       });
     }
+  }
+
+  // Whether a stored late-payment email is still true to send: the
+  // customer's overdue total is still the one it showed, and none of this
+  // sender's dunning stops (an active follow-up sequence, stopped dunning, a
+  // payment plan, a pending micro-deposit verification) has started since.
+  // A provider retry of the stored email asks this before it re-runs the
+  // shared billing email check (billing-email-replay-eligibility.js).
+  async latePaymentEmailStillOwed({ customerId, invoiceId, renderedTotal }) {
+    const balance = await this.getCustomerBalance(customerId);
+    if (!balance || balance.totalBalance.toFixed(2) !== renderedTotal) return { owed: false, reason: "balance-changed" };
+    if (await customerDunningStopped(balance, invoiceId)) return { owed: false, reason: "dunning-stopped" };
+    return { owed: true };
   }
 
   async sendExplicitLatePaymentReminder(customer, balance, prefs, channels) {

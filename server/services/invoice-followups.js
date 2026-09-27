@@ -266,6 +266,22 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
       idempotencyKey: `invoice_followup_email:${row.invoice_id}:${step.id}`,
       categories: ['invoice_followup', step.id],
       suppressionGroupKey: 'transactional_required',
+      // A provider retry of this row re-runs the shared billing email check,
+      // with the invoice, the sequence and the rendered amount re-checked.
+      // An operator's explicit send skips the customer's choices, so its
+      // retry does not start enforcing them.
+      ...(enforceBillingPreference ? {
+        billingReplayContext: {
+          schema_version: 1,
+          customer_id: String(customer.id),
+          invoice_id: String(row.invoice_id),
+          category: 'invoice',
+          source_entry_point: 'invoice_followup_email',
+          notificationEventKey: `invoice_followup:${row.invoice_id}:${step.id}`,
+          followup_sequence_id: String(row.id),
+          rendered_amount: invoiceAmountDue(latestInvoice).toFixed(2),
+        },
+      } : {}),
       withProviderHandoff: enforceBillingPreference
         ? (dispatch) => dispatchUnderBillingEmailAuthority({
           input: authorityInput, recipientEmail: to, templateKey, dispatch, state,
@@ -2007,9 +2023,30 @@ async function isDunningStopped(invoiceId, database = db) {
   return !!seq;
 }
 
+// Whether a stored follow-up email is still one this engine would send: its
+// sequence is not paused (an admin or an autopay hold) or stopped, and the
+// invoice has not moved to a micro-deposit verification (fireTouch sends the
+// verification copy instead). A completed sequence still counts: its final
+// touch completes it the moment it fires. A provider retry of the stored
+// email asks this before it re-runs the shared billing email check
+// (billing-email-replay-eligibility.js).
+async function followupEmailStillOwed({ sequenceId, invoiceId }) {
+  const seq = await db('invoice_followup_sequences').where({ id: sequenceId }).first('status');
+  if (!seq || ['paused', 'stopped'].includes(String(seq.status || ''))) return { owed: false, reason: 'sequence-not-active' };
+  if (gates.divertMicrodepositDunning) {
+    const invoice = await db('invoices').where({ id: invoiceId }).first('id', 'stripe_payment_intent_id');
+    if (invoice?.stripe_payment_intent_id
+      && await StripeService.isInvoiceAwaitingMicrodepositVerification(invoice, { throwOnError: true })) {
+      return { owed: false, reason: 'microdeposit-verification-pending' };
+    }
+  }
+  return { owed: true };
+}
+
 module.exports = {
   scheduleForInvoice,
   runPending,
+  followupEmailStillOwed,
   // Used by the scheduled-SMS executor to suppress stale deferred
   // invoice/dunning replays (paid/void overnight).
   isTerminalInvoice,

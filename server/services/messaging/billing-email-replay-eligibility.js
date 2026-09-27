@@ -201,6 +201,30 @@ async function billingEmailReplayEligible(meta, database = db) {
   }
 }
 
+// A moved sender's own "would I still send this?" rules, asked once before
+// the shared check takes its locks (they may call the payment processor).
+// A "no longer owed" answer is resendable: the sender's next send of the
+// same email can still deliver it. An unreadable answer retries later.
+const PRODUCER_RULES = Object.freeze({
+  late_payment_email: (meta) => require('../workflows/balance-reminder').latePaymentEmailStillOwed({
+    customerId: meta.customer_id, invoiceId: meta.invoice_id, renderedTotal: meta.rendered_amount,
+  }),
+  invoice_followup_email: (meta) => require('../invoice-followups').followupEmailStillOwed({
+    sequenceId: meta.followup_sequence_id, invoiceId: meta.invoice_id,
+  }),
+});
+
+async function billingEmailReplayProducerRefusal(meta) {
+  const rule = PRODUCER_RULES[meta?.source_entry_point];
+  if (!rule) return null;
+  try {
+    const verdict = await rule(meta);
+    return verdict?.owed === true ? null : { eligible: false, reason: verdict?.reason || 'no-longer-owed', resendable: true };
+  } catch {
+    return refused('billing-email-producer-check-unavailable', true);
+  }
+}
+
 // Producer-state eligibility only. Recipient resolution and provider-boundary
 // send authorization remain the caller's responsibility when this is wired.
-module.exports = { billingEmailReplayEligible };
+module.exports = { billingEmailReplayEligible, billingEmailReplayProducerRefusal };

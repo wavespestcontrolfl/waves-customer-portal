@@ -1,10 +1,15 @@
 jest.mock('../services/email-template-library', () => ({ readStoredBillingReplayContext: jest.fn() }));
 jest.mock('../services/billing-channel-email-authority', () => ({ dispatchUnderBillingEmailAuthority: jest.fn() }));
-jest.mock('../services/messaging/billing-email-replay-eligibility', () => ({ billingEmailReplayEligible: jest.fn() }));
+jest.mock('../services/messaging/billing-email-replay-eligibility', () => ({
+  billingEmailReplayEligible: jest.fn(),
+  billingEmailReplayProducerRefusal: jest.fn(async () => null),
+}));
 
 const EmailTemplateLibrary = require('../services/email-template-library');
 const { dispatchUnderBillingEmailAuthority } = require('../services/billing-channel-email-authority');
-const { billingEmailReplayEligible } = require('../services/messaging/billing-email-replay-eligibility');
+const {
+  billingEmailReplayEligible, billingEmailReplayProducerRefusal,
+} = require('../services/messaging/billing-email-replay-eligibility');
 const {
   isBillingEmailProviderReplay,
   runBillingEmailProviderReplayHandoff,
@@ -52,6 +57,7 @@ test('a moved billing sender\'s row with a stored context replays under the shar
   const lateContext = {
     schema_version: 1, customer_id: 'cust-1', invoice_id: 'inv-1', category: 'billing',
     source_entry_point: 'late_payment_email', notificationEventKey: 'late_payment:inv-1:30',
+    rendered_amount: '129.00',
   };
   const late = message({
     template_key: 'billing_late_payment_30_day', trigger_event_id: 'late_payment:inv-1:30',
@@ -71,6 +77,16 @@ test('a moved billing sender\'s row with a stored context replays under the shar
       metadata: expect.objectContaining({ billingDeliveryCategory: 'billing' }) }),
     templateKey: 'billing_late_payment_30_day',
   }));
+});
+
+test('a moved sender\'s own "no longer owed" answer settles the retry resendably before the shared check', async () => {
+  billingEmailReplayProducerRefusal.mockResolvedValueOnce({ eligible: false, reason: 'balance-changed', resendable: true });
+
+  await expect(runBillingEmailProviderReplayHandoff(message(), jest.fn())).resolves.toMatchObject({
+    handled: true, allowed: false, terminal: true, code: 'BILLING_REPLAY_RESENDABLE', reason: 'balance-changed',
+  });
+  expect(billingEmailReplayProducerRefusal).toHaveBeenCalledWith(context);
+  expect(dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
 });
 
 test.each(['billing.notice', 'billing.receipt_notice'])('contextless %s retains the existing provider retry path', async (templateKey) => {
