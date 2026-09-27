@@ -309,7 +309,7 @@ postgres('billing Email provider preparation on its held connection', () => {
   // A landline fact, a STOP text and a wrong-number flag are about the phone:
   // none of them stops a payment email (owner ruling 2026-09-27 for the
   // last two). A staff do-not-contact does (below).
-  test.each(['non_mobile', 'opt_out_keyword', 'opt_out_natural_language', 'wrong_number'])('a %s phone suppression still permits authorized Email dispatch', async (reason) => {
+  test.each(['non_mobile', 'opt_out', 'opt_out_keyword', 'opt_out_natural_language', 'wrong_number'])('a %s phone suppression still permits authorized Email dispatch', async (reason) => {
     const phone = '+19415550100';
     await mockPg('customers').where({ id: customerId }).update({ phone });
     await mockPg('messaging_suppression').insert({ phone, reason, active: true });
@@ -326,6 +326,42 @@ postgres('billing Email provider preparation on its held connection', () => {
     } finally {
       await mockPg('messaging_suppression').where({ phone }).delete();
       await mockPg('customers').where({ id: customerId }).update({ phone: null });
+    }
+  }, 15000);
+
+  // A staff do-not-contact is the one phone suppression that stops a payment
+  // email, so a later STOP, wrong-number reply or carrier opt-out recorded
+  // over it keeps it; over any other reason the newer record still wins.
+  test.each(['opt_out', 'opt_out_keyword', 'wrong_number'])('a %s recorded over a staff do-not-contact keeps the payment email blocked', async (reason) => {
+    const phone = '+19415550100';
+    await mockPg('customers').where({ id: customerId }).update({ phone });
+    await mockPg('messaging_suppression').insert({ phone, reason: 'manual_dnc', source: 'staff', active: true, created_at: new Date() });
+    const dispatch = jest.fn();
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    try {
+      expect(await recordSuppression({ phone, reason, source: 'inbound_stop' })).toEqual({ ok: true });
+      expect(await mockPg('messaging_suppression').where({ phone }).first('reason', 'source', 'active'))
+        .toEqual({ reason: 'manual_dnc', source: 'staff', active: true });
+      await expect(dispatchUnderBillingEmailAuthority({
+        input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
+        recipientEmail: 'qa@example.invalid', state, dispatch,
+      })).resolves.toEqual({ ok: false });
+      expect(state.boundaryBlock).toMatchObject({ code: 'SUPPRESSED_MANUAL_DNC' });
+      expect(dispatch).not.toHaveBeenCalled();
+    } finally {
+      await mockPg('messaging_suppression').where({ phone }).delete();
+      await mockPg('customers').where({ id: customerId }).update({ phone: null });
+    }
+  }, 15000);
+
+  test('a newer phone fact still replaces an older one', async () => {
+    const phone = '+19415550100';
+    await mockPg('messaging_suppression').insert({ phone, reason: 'opt_out_keyword', active: true, created_at: new Date() });
+    try {
+      expect(await recordSuppression({ phone, reason: 'wrong_number', source: 'inbound_wrong_number' })).toEqual({ ok: true });
+      expect(await mockPg('messaging_suppression').where({ phone }).first('reason')).toEqual({ reason: 'wrong_number' });
+    } finally {
+      await mockPg('messaging_suppression').where({ phone }).delete();
     }
   }, 15000);
 

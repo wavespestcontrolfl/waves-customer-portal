@@ -42,9 +42,11 @@ function requiresVerifiedSuppression(channel) {
 
 // The one rule for which phone suppressions stop a payment or billing email
 // (owner ruling 2026-09-27): a staff do-not-contact and any reason not named
-// here do; a STOP text, a natural-language opt-out, a wrong-number flag and a
-// landline fact do not. The collections contact policy reads the same rule.
-const PHONE_FACT_REASONS = new Set(['opt_out_keyword', 'opt_out_natural_language', 'wrong_number', 'non_mobile']);
+// here do; a STOP text (keyword, natural-language, or the carrier-reported
+// 'opt_out' the Twilio callback and 21610 paths write), a wrong-number flag
+// and a landline fact do not. The collections contact policy reads the same
+// rule.
+const PHONE_FACT_REASONS = new Set(['opt_out', 'opt_out_keyword', 'opt_out_natural_language', 'wrong_number', 'non_mobile']);
 
 function suppressionBlocksPaymentEmail(reason) {
   return !PHONE_FACT_REASONS.has(reason);
@@ -213,7 +215,12 @@ async function recordSuppression({ phone, reason, source, capturedBody, dbh = db
         captured_body: capturedBody ? String(capturedBody).slice(0, 1000) : null,
         active: true,
         cleared_at: null,
-      });
+      })
+      // A standing staff do-not-contact is never replaced: it is the one
+      // suppression that also stops payment emails (owner ruling
+      // 2026-09-27), and a later STOP, wrong-number reply or carrier opt-out
+      // only restates that the phone is blocked.
+      .whereRaw("NOT (messaging_suppression.active AND messaging_suppression.reason = 'manual_dnc')");
     return { ok: true };
   } catch (err) {
     logger.warn(`[messaging:suppression] recordSuppression failed: ${err.message}`);

@@ -218,7 +218,7 @@ describe('checkSuppression payment-email carve-out', () => {
   const loaded = (reason) => ({ suppressionLoaded: true, suppression: { reason, created_at: '2026-09-01T12:00:00Z' } });
 
   test.each(billingEmails.flatMap(([label, input]) => [
-    'opt_out_keyword', 'opt_out_natural_language', 'wrong_number',
+    'opt_out', 'opt_out_keyword', 'opt_out_natural_language', 'wrong_number',
   ].map((reason) => [label, reason, input])))('%s is not stopped by %s', async (_label, reason, input) => {
     expect(await checkSuppression(input, {}, loaded(reason))).toEqual({ ok: true });
   });

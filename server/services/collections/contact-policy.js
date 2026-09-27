@@ -56,7 +56,9 @@ const FLAG_BLOCKED_CHANNELS = {
   collection_hold: ALL_CHANNELS,
   attorney_represented: ALL_CHANNELS,
   bankruptcy: ALL_CHANNELS,
-  wrong_number: ALL_CHANNELS,
+  // A wrong number is a fact about the phone: it never stops a payment email
+  // (owner ruling 2026-09-27, the suppression list's rule for the same fact).
+  wrong_number: ALL_CHANNELS.filter((channel) => channel !== 'email'),
   do_not_call: ['voice', 'manual_call'],
   do_not_text: ['sms'],
   do_not_email: ['email'],

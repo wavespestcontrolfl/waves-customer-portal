@@ -357,7 +357,9 @@ describe('flag matrix — each flag vs each channel', () => {
     collection_hold: ALL,
     attorney_represented: ALL,
     bankruptcy: ALL,
-    wrong_number: ALL,
+    // A wrong number is a fact about the phone: never a stop on the payment
+    // email (owner ruling 2026-09-27).
+    wrong_number: ['sms', 'push', 'voice', 'manual_call'],
     do_not_call: ['voice', 'manual_call'],
     do_not_text: ['sms'],
     do_not_email: ['email'],
@@ -882,7 +884,7 @@ describe('canonical suppression list', () => {
   // about the phone, so they never stop a payment email; every other channel
   // keeps the canonical HARD semantics (codex r3).
   test('STOP-style opt-outs and wrong_number deny every channel except the payment email', async () => {
-    for (const reason of ['opt_out_keyword', 'opt_out_natural_language', 'wrong_number']) {
+    for (const reason of ['opt_out', 'opt_out_keyword', 'opt_out_natural_language', 'wrong_number']) {
       for (const ch of ['voice', 'manual_call', 'sms', 'push']) {
         armWithSuppression(reason);
         const result = await ContactPolicy.evaluate('cust-1', { channel: ch, purpose: 'late_payment', now: WED_11AM_EDT });
