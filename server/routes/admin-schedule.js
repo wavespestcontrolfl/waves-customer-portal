@@ -15631,11 +15631,22 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // prediction both billed the fee. The schedule sheet's Charge preview now
 // reads that same prediction (codex pre-push P1: previewing a positive
 // Charge amount this resolver would then reject as "no chargeable amount").
-function resolveScheduledServiceCharge({ estimatedPrice, isCallback, monthlyRate, billingMode, perApplicationFee }) {
+//
+// completionInvoiceAmount itself has no serviceType/always-free concept —
+// only predictCompletionBilling's per_application branch adds that guard,
+// BEFORE ever computing an amount (codex pre-push P0): an unpriced
+// estimate/follow-up visit under an explicit per_application lane predicts
+// $0 there, so this resolver must refuse the SAME per-application-fee
+// fallback for it, or Charge Now / the prepaid receipt would mint the
+// acceptance fee for a visit completion never bills. Mirrors the guard,
+// not completionInvoiceAmount's own contract, so an explicit estimatedPrice
+// still wins on this resolver exactly as it always has (unchanged for
+// isCallback too — only the always-free-TYPE fallback is narrowed here).
+function resolveScheduledServiceCharge({ estimatedPrice, isCallback, monthlyRate, billingMode, perApplicationFee, serviceType }) {
   return completionInvoiceAmount({
     estimatedPrice,
     isCallback,
-    perApplicationBilling: billingMode === 'per_application',
+    perApplicationBilling: billingMode === 'per_application' && !isAlwaysFreeServiceType(serviceType),
     perApplicationFee,
     monthlyRate,
     billingMode,
@@ -15684,6 +15695,7 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     monthlyRate: svc.cust_monthly_rate,
     billingMode: svc.cust_billing_mode || null,
     perApplicationFee: svc.cust_per_application_fee,
+    serviceType: svc.service_type,
   });
   if (!(amount > 0)) return { invoice: null, reason: 'no_chargeable_amount' };
   const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService(svc.id, {
@@ -16357,6 +16369,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       monthlyRate: svc.cust_monthly_rate,
       billingMode: svc.cust_billing_mode || null,
       perApplicationFee: svc.cust_per_application_fee,
+      serviceType: svc.service_type,
     });
 
     // Mobile checkout sheet can append extra services + discount lines before

@@ -43,3 +43,33 @@ describe('ScheduleCustomerSidebar appointment history', () => {
     expect(screen.getByText('Current')).toBeTruthy();
   });
 });
+
+describe('ScheduleCustomerSidebar unpriced-visit billingLane.prediction fallback', () => {
+  // Codex pre-push P1: prediction.amount for a 'prepaid' kind is what was
+  // ALREADY collected out of band, not a balance still due — displaying it
+  // as the Total above the Take-payment action told the office $100 was
+  // owed on a visit that was already fully paid.
+  it('reads a fully-covered "prepaid" prediction as $0 due, never the prepaid figure itself', async () => {
+    render(
+      <ScheduleCustomerSidebar
+        service={{
+          id: 'v0',
+          customerId: 'c1',
+          customerName: 'Test Customer',
+          status: 'confirmed',
+          estimatedPrice: null,
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            prediction: { kind: 'prepaid', amount: 100, grossAmount: 97.2, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText('Total')).toBeTruthy());
+    expect(screen.getAllByText('$0.00').length).toBeGreaterThan(0);
+    expect(screen.queryByText('$100.00')).toBeNull();
+  });
+});

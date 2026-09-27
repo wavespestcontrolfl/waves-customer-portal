@@ -107,4 +107,29 @@ describe('resolveScheduledServiceCharge', () => {
       estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_visit',
     })).toBe(0);
   });
+
+  // Codex pre-push P0: completionInvoiceAmount itself has no serviceType
+  // concept — only predictCompletionBilling's per_application branch
+  // excludes always-free types (estimate/follow-up/re-service), BEFORE ever
+  // computing an amount. An unpriced follow-up under an explicit
+  // per_application lane predicts $0 there; this resolver must refuse the
+  // SAME acceptance-fee fallback for it, or Charge Now / the prepaid
+  // receipt would mint a fee completion never bills.
+  test('an unpriced always-free-type visit under an explicit per_application lane never bills the acceptance fee', () => {
+    expect(resolveScheduledServiceCharge({
+      estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
+      perApplicationFee: 97.2, serviceType: 'Pest Control Follow-Up',
+    })).toBe(0);
+    // An explicit price still wins over the always-free-type guard, same
+    // as it always has over isCallback on this resolver.
+    expect(resolveScheduledServiceCharge({
+      estimatedPrice: 50, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
+      perApplicationFee: 97.2, serviceType: 'Pest Control Follow-Up',
+    })).toBe(50);
+    // A genuinely billable per_application type is unaffected.
+    expect(resolveScheduledServiceCharge({
+      estimatedPrice: null, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
+      perApplicationFee: 97.2, serviceType: 'Quarterly Pest Control',
+    })).toBe(97.2);
+  });
 });

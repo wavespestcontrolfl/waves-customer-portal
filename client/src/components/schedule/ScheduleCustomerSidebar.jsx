@@ -151,10 +151,17 @@ export default function ScheduleCustomerSidebar({
   // detail-sheet / checkout-sheet fix). c.billingMode is the customer
   // record's raw column, used only as a last-resort fallback when the visit
   // payload carries no billingLane at all (older cached payloads).
+  // A 'prepaid' kind's amount is what was ALREADY collected out of band —
+  // informational (BillingLaneCard's own "already paid $X" line), never a
+  // balance still due — so it reads as $0 here, matching the detail sheet
+  // and CompletionPanel (codex pre-push P1: displayed the prepaid figure
+  // itself as "Total" above the Take-payment action).
   const basePrice = service?.estimatedPrice != null
     ? Number(service.estimatedPrice)
     : service?.billingLane
-      ? (Number(service.billingLane?.prediction?.amount) || 0)
+      ? (service.billingLane.prediction?.kind === 'prepaid'
+        ? 0
+        : Number(service.billingLane?.prediction?.amount) || 0)
       : (!!c.billingMode && c.billingMode !== 'monthly_membership' ? 0 : Number(c.monthlyRate || 0));
   const appointmentAddons = Array.isArray(service?.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
