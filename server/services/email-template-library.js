@@ -1173,7 +1173,7 @@ async function sendTemplate({
   // Preserve a fail-closed marker when a registered producer cannot build a
   // valid replay context. Legacy billing templates that do not declare the
   // contract continue without the marker and keep their existing retry path.
-  billingReplayDeclared = false,
+  billingReplayDeclared,
   // PII-sensitive bulk callers (e.g. the weekly irrigation sweep) set this so
   // sendOne does NOT log the raw SendGrid response body — provider rejections
   // can echo the recipient address, and email addresses in logs are a P1. The
