@@ -444,8 +444,7 @@ class OpportunityQueue {
         -- Reconciliation holds must survive until that external state is resolved.
         AND COALESCE(skip_reason, '') NOT IN ('named_competitor_review', 'affiliate_review',
           'astro_pr_audit_failed', 'published_audit_failed',
-          'astro_pr_queue_transition_failed', 'published_queue_complete_failed',
-          'gate_infrastructure_error')
+          'astro_pr_queue_transition_failed', 'published_queue_complete_failed')
         AND COALESCE(skip_reason, '') !~ '^trust_build_[0-9]+_of_[0-9]+$'
         AND NOT EXISTS (SELECT 1 FROM autonomous_runs r
           WHERE r.opportunity_id = opportunity_queue.id

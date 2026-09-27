@@ -21,6 +21,7 @@ function makeDbMock() {
         onConflict: jest.fn(() => ({ ignore: jest.fn(() => ({ returning: jest.fn().mockResolvedValue([{ id: 'run_1' }]) })) })),
       })),
       where: jest.fn(function where(...args) { chain._wheres.push(args); return chain; }),
+      whereRaw: jest.fn(function whereRaw(...args) { chain._wheres.push(['raw', ...args]); return chain; }),
       update: jest.fn((patch) => { updates.push({ table, wheres: chain._wheres, patch }); return Promise.resolve(1); }),
     };
     return chain;
@@ -79,6 +80,7 @@ function makeQueue(opp) {
 
 afterEach(() => {
   delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+  delete process.env.SHADOW_MODE_REFRESH_EXISTING_PAGE;
   delete process.env.AUTONOMOUS_CONTENT_MAX_PUBLISHES_PER_WEEK;
   delete process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS;
 });
@@ -254,13 +256,19 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
   });
 
   test('an unsupported persisted citability gap parks as infrastructure/manual review', async () => {
-    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.SHADOW_MODE_REFRESH_EXISTING_PAGE = 'false';
     process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = 'false';
-    const queue = makeQueue({ id: 'opp_unknown_gap', action_type: 'new_supporting_blog', claimed_at: claimedAt, signal_metadata: {} });
+    const queue = makeQueue({ id: 'opp_unknown_gap', action_type: 'refresh_existing_page', claimed_at: claimedAt, signal_metadata: {} });
+    const briefBuilder = makeBriefBuilder();
+    briefBuilder.compose.mockResolvedValue({
+      id: 'brief_unknown_gap', action_type: 'refresh_existing_page', page_type: 'blog', human_review_required: false,
+      gsc_signal: { bucket: 'citability_backfill', citability_gaps: ['named_sorces'] },
+    });
     const { runner } = loadRunner({
       queue,
-      briefBuilder: makeBriefBuilder(),
+      briefBuilder,
       dispatcher: makeDispatcher(),
+      contentGuardrails: { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) },
       uniquenessGate: { evaluateBlog: jest.fn().mockReturnValue({ ok: true }), evaluate: jest.fn().mockReturnValue({ ok: true }) },
       qualityGate: { evaluate: jest.fn().mockReturnValue({
         ok: false,
@@ -270,12 +278,52 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
         min_total_score: 80,
       }) },
     });
+    runner._deriveGuardrailOptions = jest.fn().mockResolvedValue({});
 
     await expect(runner.runNext()).resolves.toMatchObject({
       outcome: 'completed_pending_review', skip_reason: 'gate_infrastructure_error',
     });
     expect(queue.pendingReview).toHaveBeenCalledWith('opp_unknown_gap', 'gate_infrastructure_error', { claimToken: claimedAt });
     expect(queue.defer).not.toHaveBeenCalled();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+
+  test('an unattended blog retries infrastructure once without a writer directive, then skips', async () => {
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = 'false';
+    const qualityGate = { evaluate: jest.fn().mockReturnValue({ ok: false, error: 'scanner unavailable' }) };
+    const firstQueue = makeQueue({
+      id: 'opp_infra_first', action_type: 'new_supporting_blog', claimed_at: claimedAt, signal_metadata: {},
+    });
+    const first = loadRunner({
+      queue: firstQueue, briefBuilder: makeBriefBuilder(), dispatcher: makeDispatcher(),
+      uniquenessGate: { evaluateBlog: jest.fn().mockReturnValue({ ok: true }), evaluate: jest.fn().mockReturnValue({ ok: true }) },
+      qualityGate,
+    });
+
+    await expect(first.runner.runNext()).resolves.toMatchObject({
+      outcome: 'deferred_infrastructure_retry', skip_reason: 'gate_infrastructure_error',
+    });
+    expect(firstQueue.defer).toHaveBeenCalledWith('opp_infra_first', expect.any(Date), { claimToken: claimedAt });
+    expect(first.dbMock.raw).toHaveBeenCalledWith(
+      expect.stringContaining("'{infrastructure_retry}'"),
+      [expect.stringContaining('"skip_reason":"gate_infrastructure_error"')],
+    );
+
+    const secondQueue = makeQueue({
+      id: 'opp_infra_second', action_type: 'new_supporting_blog', claimed_at: claimedAt,
+      signal_metadata: { infrastructure_retry: { skip_reason: 'gate_infrastructure_error' } },
+    });
+    const second = loadRunner({
+      queue: secondQueue, briefBuilder: makeBriefBuilder(), dispatcher: makeDispatcher(),
+      uniquenessGate: { evaluateBlog: jest.fn().mockReturnValue({ ok: true }), evaluate: jest.fn().mockReturnValue({ ok: true }) },
+      qualityGate,
+    });
+    await expect(second.runner.runNext()).resolves.toMatchObject({
+      outcome: 'skipped_gate_fail', skip_reason: 'gate_infrastructure_error',
+    });
+    expect(secondQueue.skip).toHaveBeenCalledWith('opp_infra_second', 'gate_infrastructure_error', { claimToken: claimedAt });
+    expect(secondQueue.pendingReview).not.toHaveBeenCalled();
   });
 
   test('second failure (gate_retry already recorded) skips silently — never pending_review', async () => {

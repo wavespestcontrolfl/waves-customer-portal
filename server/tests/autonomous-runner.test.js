@@ -2538,14 +2538,15 @@ describe('runNext post-publish bookkeeping', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('skipped');
+      expect(result.outcome).toBe('skipped_gate_fail');
       expect(result.skip_reason).toBe('gate_infrastructure_error');
       expect(result.quality_gate_result.seo_completion).toMatchObject({
         passed: false,
         summary: { p0: 1 },
       });
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_seo_unavailable', 'gate_infrastructure_error', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_seo_unavailable', 'gate_infrastructure_error', { claimToken: claimedAt });
+      expect(queue.pendingReview).not.toHaveBeenCalled();
       expect(queue.release).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
@@ -2614,7 +2615,7 @@ describe('runNext post-publish bookkeeping', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('skipped');
+      expect(result.outcome).toBe('skipped_gate_fail');
       expect(result.skip_reason).toBe('gate_infrastructure_error');
       expect(result.quality_gate_result.seo_completion).toMatchObject({
         passed: false,
@@ -2629,7 +2630,8 @@ describe('runNext post-publish bookkeeping', () => {
         pageType: 'supporting-blog',
       }));
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_seo_skipped', 'gate_infrastructure_error', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_seo_skipped', 'gate_infrastructure_error', { claimToken: claimedAt });
+      expect(queue.pendingReview).not.toHaveBeenCalled();
       expect(queue.release).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
@@ -2691,14 +2693,15 @@ describe('runNext post-publish bookkeeping', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('skipped');
+      expect(result.outcome).toBe('skipped_gate_fail');
       expect(result.skip_reason).toBe('gate_infrastructure_error');
       expect(result.quality_gate_result.seo_completion).toMatchObject({
         passed: false,
         summary: { p0: 1 },
       });
       expect(result.reviewer_notes).toContain('seo_completion: P0=1');
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_seo_throw', 'gate_infrastructure_error', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_seo_throw', 'gate_infrastructure_error', { claimToken: claimedAt });
+      expect(queue.pendingReview).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
       else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
