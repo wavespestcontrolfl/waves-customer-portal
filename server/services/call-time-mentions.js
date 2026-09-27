@@ -315,6 +315,9 @@ function offeredWithAnotherHour(toks, pos, end) {
 
 // The hours of the day a part-of-day word covers.
 const DAY_PARTS = { morning: [7, 11], afternoon: [12, 17], evening: [17, 21] };
+// "One" is a time only right after these ("make that one", "switch it to
+// one"): elsewhere it counts things ("one more thing").
+const ONE_LEADS = new Set(['that', 'it', 'to']);
 
 // Does this text, read beside the mentions parsed from it, talk about a
 // time other than `hour24` — an hour no marker makes a clock time ("make that
@@ -325,7 +328,8 @@ const DAY_PARTS = { morning: [7, 11], afternoon: [12, 17], evening: [17, 21] };
 function talksOtherTime(ns, hour24) {
   const toks = ns.split(' ');
   return toks.some((tok, i) => {
-    if (!TIME_WORDS.has(tok) && !/^(?:[1-9]|1[0-2])$/.test(tok)) return false;
+    const one = tok === 'one' && ONE_LEADS.has(toks[i - 1]);
+    if (!one && !TIME_WORDS.has(tok) && !/^(?:[1-9]|1[0-2])$/.test(tok)) return false;
     if (runsIntoDuration(toks, i + 1)) return false;
     const n = hourNumber(tok);
     if (n != null) return rangeStartHour(toks, n, -1) !== hour24;

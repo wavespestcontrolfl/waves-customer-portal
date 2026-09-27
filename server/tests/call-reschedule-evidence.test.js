@@ -272,6 +272,7 @@ describe('rescheduleAgreementEvidence', () => {
     expect(evidence(`${agreed}\nCaller: Actually three instead.\nAgent: We will do that.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
     expect(evidence(`${agreed}\nCaller: Can we do three?\nAgent: We will do that.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
     expect(evidence(`${agreed}\nCaller: Make that three.\nAgent: We will do that.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence(`${agreed}\nCaller: Make that one.\nAgent: We will do that.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
     expect(evidence(`${agreed}\nCaller: Thanks, and one more thing, my name is spelled with a C.`).ok).toBe(true);
     // Before the commitment too, from either side: an unmarked hour is a
     // correction no mention reads.
@@ -303,6 +304,11 @@ describe('rescheduleAgreementEvidence', () => {
     expect(evidence('Agent: Would Thursday at two work?\nCaller: I need to ask my husband.\nAgent: Okay, I will put you down for Thursday at two.'))
       .toMatchObject({ ok: false, reason: 'hedge_on_slot' });
     expect(evidence('Agent: Would Thursday at two work?\nCaller: How about three?\nAgent: Okay, I will put you down for Thursday at two.').ok).toBe(false);
+    // The caller's own first mention of the slot counts too, less a leading
+    // "no" answering what came before it.
+    expect(evidence('Caller: I cannot make it Thursday at two.\nAgent: Okay, I will put you down for Thursday at two.').ok).toBe(false);
+    expect(evidence('Caller: I need to ask my husband about Thursday at two.\nAgent: Okay, I will put you down for Thursday at two.').ok).toBe(false);
+    expect(evidence('Agent: How about Friday at two?\nCaller: No, Thursday at two.\nAgent: Okay, I will put you down for Thursday at two.').ok).toBe(true);
     expect(evidence('Agent: Would Thursday at two work?\nCaller: Yes, Thursday works.\nAgent: Great, I will put you down for Thursday at two.').ok).toBe(true);
     expect(evidence('Caller: Can we do Thursday at two?\nAgent: Let me check.\nAgent: Okay, we will see you Thursday at two.').ok).toBe(true);
     // A counter-proposal the caller then takes, or the caller offering two
