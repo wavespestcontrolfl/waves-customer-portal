@@ -66,32 +66,39 @@ const ACTIVITY_LEVELS = [
 ];
 const CLOSED_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
 const dayOf = (value) => String(value || '').slice(0, 10);
-const normText = (value) => String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+// Letters and digits only: the row's address is built in SQL and the live
+// one from fields, so spacing and punctuation may differ, but a different
+// unit never matches ("apt 4" vs "apt 5").
+const addressKey = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
-// The tapped row's address against the live one: both come from the visit's
-// service address, falling back to the customer's. The row carries it as
-// "line1 line2, city, state zip", so its first segment must start with the
-// live line1, and it must carry the live zip. Unknown on either side = no
-// verdict (older payloads carry no address).
-function propertyMoved(routedAddress, liveAddress) {
-  if (!routedAddress || !liveAddress?.line1) return false;
-  const routed = normText(routedAddress);
-  const street = normText(String(routedAddress).split(',')[0]);
-  if (!street.startsWith(normText(liveAddress.line1))) return true;
-  return !!liveAddress.zip && !routed.includes(normText(liveAddress.zip));
+// Whether the tapped row's property is no longer the live visit's. The row's
+// property id decides: a move to another unit at the same street is another
+// property. A visit never stamped with one (null on both sides) falls back to
+// the whole address, unit included. A row without the fields (an older
+// payload) gives no verdict.
+function propertyMoved(service, visit) {
+  const routedId = service?.routedPropertyId;
+  if (routedId !== undefined) {
+    if (String(routedId ?? '') !== String(visit?.propertyId ?? '')) return true;
+    if (routedId != null) return false;
+  }
+  const live = visit?.address;
+  if (!service?.routedAddress || !live?.line1) return false;
+  return addressKey(service.routedAddress) !== addressKey([live.line1, live.line2, live.city, live.state, live.zip].join(' '));
 }
 
 // Why the live context can't be completed here, or '' when it can: the
 // schedule row the tech tapped may be stale, so the loaded visit must still
-// be that visit (same customer and day), still an open pest re-service, and
-// still eligible for the short form (not typed or project-backed).
+// be that visit (same customer, day and property), still an open pest
+// re-service, and still eligible for the short form (not typed or
+// project-backed).
 function blockedReasonFor(context, service) {
   const visit = context?.service || {};
   const movedCustomer = service?.routedCustomerId && visit.customerId
     && String(service.routedCustomerId) !== String(visit.customerId);
   const movedDay = service?.routedScheduledDate && visit.scheduledDate
     && dayOf(service.routedScheduledDate) !== dayOf(visit.scheduledDate);
-  const movedProperty = propertyMoved(service?.routedAddress, visit.address);
+  const movedProperty = propertyMoved(service, visit);
   if (movedCustomer || movedDay || movedProperty) return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
   if (visit.serviceKey !== 'pest_re_service') return 'This visit is no longer a pest re-service. Use the full form.';
   if (CLOSED_STATUSES.has(String(visit.status || ''))) return `This visit is already ${visit.status}. Close and reopen it from the schedule.`;
@@ -102,7 +109,7 @@ function blockedReasonFor(context, service) {
 // "123 Oak St, Bradenton" from the context's resolved address.
 function liveAddressLine(address) {
   if (!address || typeof address !== 'object') return '';
-  return [address.line1, address.city].filter(Boolean).join(', ');
+  return [[address.line1, address.line2].filter(Boolean).join(' '), address.city].filter(Boolean).join(', ');
 }
 
 // Every /complete failure lands in one of four outcomes:
@@ -253,7 +260,7 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed }) {
 // The context + rating contract for this visit. The routed schedule row can
 // be stale: the context is re-checked to still be an open pest re-service
 // before anything can be completed here.
-function useFastCompleteContext({ base, request, serviceType, routedCustomerId, routedScheduledDate, routedAddress }) {
+function useFastCompleteContext({ base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress }) {
   const [ctx, setCtx] = useState({
     loading: true, loadError: '', blockedReason: '', rows: [], visitIdentity: null, visit: null,
     rating: { allowed: false, scaleLabels: null },
@@ -274,7 +281,7 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
         setCtx({
           loading: false,
           loadError: '',
-          blockedReason: blockedReasonFor(data, { routedCustomerId, routedScheduledDate, routedAddress }),
+          blockedReason: blockedReasonFor(data, { routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress }),
           visit,
           rows: pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, serviceType, totalAmount)),
           visitIdentity: recapVisitIdentity(visit),
@@ -285,7 +292,7 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
       }
     })();
     return () => { active = false; };
-  }, [base, request, serviceType, routedCustomerId, routedScheduledDate, routedAddress]);
+  }, [base, request, serviceType, routedCustomerId, routedScheduledDate, routedPropertyId, routedAddress]);
   return ctx;
 }
 
@@ -375,6 +382,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
     serviceType: service?.serviceType,
     routedCustomerId: service?.routedCustomerId,
     routedScheduledDate: service?.routedScheduledDate,
+    routedPropertyId: service?.routedPropertyId,
     routedAddress: service?.routedAddress,
   });
   const submission = useFastCompleteSubmit({ base, request });

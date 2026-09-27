@@ -1129,8 +1129,11 @@ export default function TechHomePage({ section = 'today' }) {
             // not complete against the new visit.
             routedCustomerId: fastCompleteService.customerId || fastCompleteService.customer_id || null,
             routedScheduledDate: fastCompleteService.scheduledDate || fastCompleteService.scheduled_date || null,
-            // The row's full address ("line1 line2, city, state zip", built
-            // from the same visit-then-customer address the context resolves).
+            // The row's property (null = never stamped with one; absent on
+            // an older payload = no verdict), then its full address ("line1
+            // line2, city, state zip", built from the same visit-then-customer
+            // address the context resolves) for visits without a property.
+            routedPropertyId: 'propertyId' in fastCompleteService ? fastCompleteService.propertyId : undefined,
             routedAddress: typeof fastCompleteService.address === 'string' ? fastCompleteService.address : null,
           }}
           request={techRequest}

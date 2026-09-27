@@ -5940,6 +5940,10 @@ router.get('/', async (req, res, next) => {
         autopayEnabled: s.autopay_enabled !== false,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
         customerId: s.customer_id, customerPhone: s.customer_phone,
+        // The visit's premise (null = never stamped with a property). The tech
+        // Fast Complete sheet checks it against the live visit, so a stale row
+        // can't complete a visit since moved to another unit or property.
+        propertyId: s.property_id ?? null,
         address: [[s.address_line1, s.address_line2].filter(Boolean).join(" "), s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
         city: s.city,
         state: s.state,

@@ -445,7 +445,7 @@ describe('FastCompleteSheet', () => {
   test('a visit moved to another property of the same customer is not completed here', async () => {
     const request = makeRequest();
     render(<FastCompleteSheet
-      service={{ ...SERVICE, routedCustomerId: 'cust-1', routedAddress: '9 Other Rd, Parrish, FL 34219' }}
+      service={{ ...SERVICE, routedCustomerId: 'cust-1', routedPropertyId: 'prop-2', routedAddress: '9 Other Rd, Parrish, FL 34219' }}
       request={request}
       onClose={() => {}}
     />);
@@ -454,10 +454,63 @@ describe('FastCompleteSheet', () => {
     expect(screen.queryByRole('button', { name: 'Complete re-service' })).toBeNull();
   });
 
-  test('the same property (row address matches the live one) is completed normally', async () => {
-    const request = makeRequest({ service: { ...CONTEXT_SERVICE, address: { line1: '123 Main St', city: 'Bradenton', zip: '34211' } } });
+  test('a visit moved to another unit at the same street is not completed here', async () => {
+    // Same street, city and ZIP; only the unit (and so the property) differs.
+    const request = makeRequest({ service: { ...CONTEXT_SERVICE, propertyId: 'prop-apt-5', address: { line1: '100 Bay Dr', line2: 'Apt 5', city: 'Bradenton', state: 'FL', zip: '34211' } } });
     render(<FastCompleteSheet
-      service={{ ...SERVICE, routedCustomerId: 'cust-1', routedAddress: '123 Main St, Bradenton, FL 34211' }}
+      service={{ ...SERVICE, routedCustomerId: 'cust-1', routedPropertyId: 'prop-apt-4', routedAddress: '100 Bay Dr Apt 4, Bradenton, FL 34211' }}
+      request={request}
+      onClose={() => {}}
+    />);
+
+    expect(await screen.findByText('This visit changed since your schedule loaded. Close and reopen it from the schedule.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Complete re-service' })).toBeNull();
+    // The header names the live unit, so the tech sees where the visit went.
+    expect(screen.getByText('100 Bay Dr Apt 5, Bradenton')).toBeTruthy();
+  });
+
+  test('a unit move on a visit with no property is caught by the full address', async () => {
+    const request = makeRequest({ service: { ...CONTEXT_SERVICE, propertyId: null, address: { line1: '100 Bay Dr', line2: 'Apt 5', city: 'Bradenton', state: 'FL', zip: '34211' } } });
+    render(<FastCompleteSheet
+      service={{ ...SERVICE, routedCustomerId: 'cust-1', routedPropertyId: null, routedAddress: '100 Bay Dr Apt 4, Bradenton, FL 34211' }}
+      request={request}
+      onClose={() => {}}
+    />);
+
+    expect(await screen.findByText('This visit changed since your schedule loaded. Close and reopen it from the schedule.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Complete re-service' })).toBeNull();
+  });
+
+  test('a row with no property is stale once the live visit has one', async () => {
+    const request = makeRequest();
+    render(<FastCompleteSheet
+      service={{ ...SERVICE, routedCustomerId: 'cust-1', routedPropertyId: null, routedAddress: '123 Main St' }}
+      request={request}
+      onClose={() => {}}
+    />);
+
+    expect(await screen.findByText('This visit changed since your schedule loaded. Close and reopen it from the schedule.')).toBeTruthy();
+  });
+
+  test('the same property is completed normally', async () => {
+    // The property id decides: the row's SQL-built line may not match the
+    // context's fields character for character.
+    const request = makeRequest({ service: { ...CONTEXT_SERVICE, address: { line1: '123 Main St', line2: 'Unit 2', city: 'Bradenton', state: 'FL', zip: '34211' } } });
+    render(<FastCompleteSheet
+      service={{ ...SERVICE, routedCustomerId: 'cust-1', routedPropertyId: 'prop-1', routedAddress: '123 Main St, Bradenton, FL 34211' }}
+      request={request}
+      onClose={() => {}}
+    />);
+
+    expect(await screen.findByRole('button', { name: 'Complete re-service' })).toBeTruthy();
+    expect(screen.queryByText(/changed since your schedule loaded/)).toBeNull();
+  });
+
+  test('a visit with no property at the same address, unit included, is completed normally', async () => {
+    const request = makeRequest({ service: { ...CONTEXT_SERVICE, propertyId: null, address: { line1: '100 Bay Dr', line2: 'Apt 4', city: 'Bradenton', state: 'FL', zip: '34211' } } });
+    render(<FastCompleteSheet
+      // Spacing and punctuation differ from the live fields; the address does not.
+      service={{ ...SERVICE, routedCustomerId: 'cust-1', routedPropertyId: null, routedAddress: '100 Bay Dr  Apt 4 , Bradenton, FL 34211' }}
       request={request}
       onClose={() => {}}
     />);
