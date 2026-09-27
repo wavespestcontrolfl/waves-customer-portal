@@ -154,6 +154,18 @@ jest.setTimeout(30000);
     expect(await mockConn('product_aliases').where({ product_id: bifenXts.id })).toHaveLength(0);
   });
 
+  test('a pending line whose email row is gone goes to a person on the first pass instead of blocking the queue', async () => {
+    const line = await pendingLine();
+    await mockConn('purchase_receipt_lines').where({ id: line.id }).update({ email_id: null });
+    const llm = jest.fn(async () => ({ ok: true, json: { kind: 'unsure', reason: 'unused' } }));
+    await runInventoryAgent({ conn: mockConn, llm, notifyAdmin });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved.status).toBe('agent_unsure');
+    expect(saved.agent_decision).toMatchObject({ reason: 'its email record is gone' });
+    expect(llm).not.toHaveBeenCalled();
+    expect(await bellsFor(line.id)).toHaveLength(1);
+  });
+
   test('a needs_size line: the model reads the title\'s size, the catalog container is set once, and the line logs', async () => {
     const [bare] = await mockConn('products_catalog').insert({
       name: 'Granular Bait', active: true, category: 'bait', container_size: null, inventory_unit: null, inventory_on_hand: 0,

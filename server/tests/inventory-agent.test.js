@@ -208,6 +208,14 @@ describe('classifyDecision — existing product', () => {
     expect(decision).toMatchObject({ kind: 'existing', status: 'logged', amount: 156, unit: 'fl_oz' });
   });
 
+  test('a catalog container that counts boxes or packs never takes a single-item count', () => {
+    const boxes = { id: 'p-boxes', name: 'Glue Board Refill', category: 'supplies', container_size: '12 boxes', inventory_unit: null };
+    const raw = { kind: 'existing', product_id: 'p-boxes', reading: { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_count: 1 } };
+    const decision = classifyDecision(raw, ctx({ rawTitle: 'Glue Board Refill 12 Count', lineQuantity: 1, candidates: [boxes] }));
+    expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+    expect(decision.reason).toMatch(/counts box/);
+  });
+
   test('container disagreement -> agent_unsure, never a guessed amount', () => {
     const raw = { kind: 'existing', product_id: 'p-taurus', reading: { size_text: '32 oz', size_number: 32, size_unit: 'oz', pack_count: 1 } };
     const decision = classifyDecision(raw, ctx({ rawTitle: 'Control Solutions Taurus SC Termiticide 32 oz', lineQuantity: 1, candidates: [taurus] }));

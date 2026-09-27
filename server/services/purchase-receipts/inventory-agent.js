@@ -28,7 +28,7 @@ const { gateEnvValue } = require('../../config/feature-gates');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { normalizeForMatch, containsWholeWords } = require('./product-matcher');
-const { parsePackSize, parsePackCount } = require('../product-costing');
+const { parsePackSize, parsePackCount, countUnitsCompatible } = require('../product-costing');
 const { convertInventoryQuantity, normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
 const inventoryOperations = require('../inventory-operations');
 const {
@@ -277,6 +277,11 @@ function validateExisting(raw, ctx) {
 
   if (countContainer) {
     if (reading.unit !== 'each') return { kind: 'unsure', status: 'agent_unsure', reason: 'the catalog container is a count; the title reads a measured size' };
+    // "12 boxes" or "3 packs" counts containers, not single items; there is
+    // no known box-to-item conversion (order-dispatch applies the same rule).
+    if (!countUnitsCompatible('each', countContainer.unit)) {
+      return { kind: 'unsure', status: 'agent_unsure', reason: `the catalog container counts ${countContainer.unit}, not single items` };
+    }
     if (candidate.inventory_unit && normalizeInventoryUnit(candidate.inventory_unit) !== 'each') {
       return { kind: 'unsure', status: 'agent_unsure', reason: 'a count product must track in each' };
     }
@@ -728,12 +733,13 @@ async function productUnchangedSinceAgent(conn, line, movement) {
   return { ok: true };
 }
 
-async function recordAttemptFailure(conn, lineId, notifyAdmin, reason = 'unknown_error') {
+// `final` hands the line to a person now (a failure no retry can fix).
+async function recordAttemptFailure(conn, lineId, notifyAdmin, reason = 'unknown_error', { final = false } = {}) {
   const reasonText = String(reason || 'unknown_error').slice(0, 300);
   return conn.transaction(async (trx) => {
     const line = await trx('purchase_receipt_lines').where({ id: lineId }).forUpdate().first();
     if (!line || line.status !== 'agent_pending') return { status: 'no_longer_pending' };
-    const attempts = Number(line.agent_attempts || 0) + 1;
+    const attempts = final ? Math.max(MAX_ATTEMPTS, Number(line.agent_attempts || 0) + 1) : Number(line.agent_attempts || 0) + 1;
     if (attempts < MAX_ATTEMPTS) {
       await trx('purchase_receipt_lines').where({ id: lineId }).update({ agent_attempts: attempts });
       return { status: 'still_pending' };
@@ -782,15 +788,21 @@ async function decideForTitle(conn, dispatch, { rawTitle, quantity, vendor, site
 }
 
 async function processOneLine(conn, line, { dispatch, notifyAdmin, allowedCategories, activeProducts }) {
+  // Every pass over a pending line either resolves it or spends an attempt,
+  // so no line can sit at the head of the oldest-first queue forever. A line
+  // whose email row is gone can never be checked for duplicates: hand it to
+  // a person now.
   const email = line.email_id && await conn('emails').where({ id: line.email_id }).first('id', 'received_at');
-  if (!email) return { status: 'still_pending' }; // its email row is gone; nothing to key the duplicate guard on
+  if (!email) return recordAttemptFailure(conn, line.id, notifyAdmin, 'its email record is gone', { final: true });
 
   const siteOneFields = line.vendor === 'siteone' ? await siteOneLineFields(conn, line) : null;
   const outcome = await decideForTitle(conn, dispatch, { rawTitle: line.raw_title, quantity: Number(line.quantity), vendor: line.vendor, siteOneFields }, { allowedCategories, activeProducts });
   if (outcome.llmFailed) return recordAttemptFailure(conn, line.id, notifyAdmin, outcome.reason || 'llm_unavailable');
 
   const applied = await applyDecision(conn, { lineId: line.id, vendor: line.vendor, shipmentKey: line.shipment_key, email, decision: outcome.decision }, notifyAdmin);
-  return applied.applied ? { status: applied.status } : { status: 'still_pending' };
+  if (applied.applied) return { status: applied.status };
+  if (applied.reason === 'no_longer_pending') return { status: 'no_longer_pending' };
+  return recordAttemptFailure(conn, line.id, notifyAdmin, applied.reason);
 }
 
 /**
