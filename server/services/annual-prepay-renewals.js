@@ -8066,7 +8066,7 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       customerId: customer.id,
       codePrefix: invoiceShortCodePrefix(invoice),
     });
-    const amountText = Number.isFinite(amountDue) && amountDue > 0
+    const amountText = Number.isFinite(amountDue)
       ? ` for $${amountDue.toFixed(2)}`
       : '';
 
@@ -8152,11 +8152,12 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       },
     });
     if (!smsResult.sent) {
-      await ContactLedger.markSendFailed(prepayLedger, { code: smsResult.code || smsResult.reason || 'send_failed' });
-      logger.warn(`[annual-prepay] payment reminder SMS blocked/failed for term ${claimedTerm.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      const failureReason = smsResult.code || smsResult.reason || 'send_failed';
+      await ContactLedger.markSendFailed(prepayLedger, { code: failureReason });
+      logger.warn(`[annual-prepay] payment reminder SMS blocked/failed for term ${claimedTerm.id}: ${failureReason}`);
       await reverseReminderCredit();
       await releaseClaim();
-      return { sent: false, reason: smsResult.code || smsResult.reason || 'send_failed' };
+      return { sent: false, reason: failureReason };
     }
 
     // Touch DELIVERED — everything past this point is bookkeeping and must
