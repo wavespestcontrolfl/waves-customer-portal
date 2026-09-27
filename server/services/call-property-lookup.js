@@ -41,6 +41,18 @@ const { gateEnvValue } = require('../config/feature-gates');
 const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
 const geocodeReview = require('./customer-geocode-review');
 
+async function withReviewWriteFence({ propertyId, customerId }, write) {
+  if (!geocodeReview.reviewEnabled()) return write(db);
+  return db.transaction(async (trx) => {
+    const customer = await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    if (!customer) return null;
+    const property = await trx('customer_properties')
+      .where({ id: propertyId, customer_id: customerId, active: true }).forUpdate().first('id');
+    if (!property) return null;
+    return write(trx);
+  });
+}
+
 /**
  * One-line lookup address from a customer_properties row (empty → '').
  * line2 goes through normalizeUnitLine so a bare "4" becomes "Unit 4" —
@@ -237,10 +249,12 @@ async function enrichPropertyById(propertyId) {
     // authoritative values (this lookup's, or a concurrent writer's that
     // the CASE/COALESCE correctly preserved) that everything downstream
     // derives from.
-    let propertyUpdate = db('customer_properties')
-      .where({ id: propertyId, address_key: row.address_key, active: true });
-    if (patch.latitude) propertyUpdate = geocodeReview.excludePrimaryPropertyReviewForId(propertyUpdate, propertyId);
-    const rows = await propertyUpdate.update(patch, ['latitude', 'longitude', 'property_type']);
+    const rows = await withReviewWriteFence({ propertyId, customerId: row.customer_id }, async (conn) => {
+      let propertyUpdate = conn('customer_properties')
+        .where({ id: propertyId, address_key: row.address_key, active: true });
+      if (patch.latitude) propertyUpdate = geocodeReview.excludePrimaryPropertyReviewForId(propertyUpdate, propertyId);
+      return propertyUpdate.update(patch, ['latitude', 'longitude', 'property_type']);
+    });
     after = rows && rows[0];
     if (!after) {
       logger.info('[call-property-lookup] row changed during lookup — result discarded', {
@@ -326,12 +340,14 @@ async function enrichPropertyById(propertyId) {
           }) === propKey)
           .map((v) => v.id);
         if (matchedIds.length) {
-          let visitUpdate = db('scheduled_services')
-            .whereIn('id', matchedIds)
-            .whereNull('lat')
-            .whereNull('lng');
-          visitUpdate = geocodeReview.excludePrimaryPropertyReviewForId(visitUpdate, propertyId);
-          await visitUpdate.update({ lat: mirrorLat, lng: mirrorLng });
+          await withReviewWriteFence({ propertyId, customerId: row.customer_id }, async (conn) => {
+            let visitUpdate = conn('scheduled_services')
+              .whereIn('id', matchedIds)
+              .whereNull('lat')
+              .whereNull('lng');
+            visitUpdate = geocodeReview.excludePrimaryPropertyReviewForId(visitUpdate, propertyId);
+            return visitUpdate.update({ lat: mirrorLat, lng: mirrorLng });
+          });
         }
       }
     }
@@ -379,13 +395,15 @@ async function enrichPropertyById(propertyId) {
         }
         if (Object.keys(mirror).length) {
           mirror.updated_at = db.fn.now();
-          let customerUpdate = db('customers')
-            .where({ id: liveRole.customer_id })
-            .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
-              customer.address_line1 || '', customer.address_line2 || '', customer.city || '', customer.zip || '',
-            ]);
-          if (mirror.latitude) customerUpdate = geocodeReview.excludePrimaryPropertyReviewForId(customerUpdate, propertyId);
-          await customerUpdate.update(mirror);
+          await withReviewWriteFence({ propertyId, customerId: liveRole.customer_id }, async (conn) => {
+            let customerUpdate = conn('customers')
+              .where({ id: liveRole.customer_id })
+              .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
+                customer.address_line1 || '', customer.address_line2 || '', customer.city || '', customer.zip || '',
+              ]);
+            if (mirror.latitude) customerUpdate = geocodeReview.excludePrimaryPropertyReviewForId(customerUpdate, propertyId);
+            return customerUpdate.update(mirror);
+          });
         }
       }
     }
@@ -801,7 +819,7 @@ async function reconcileVisitCoordinates() {
           db.raw('ss.created_at::text as visit_created_key'),
           'ss.service_address_line1', 'ss.service_address_line2',
           'ss.service_address_city', 'ss.service_address_zip',
-          'cp.id as property_id', 'cp.latitude', 'cp.longitude',
+          'cp.id as property_id', 'cp.customer_id as property_customer_id', 'cp.latitude', 'cp.longitude',
           'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.zip',
         )
         .orderBy([{ column: 'ss.created_at', order: 'asc' }, { column: 'ss.id', order: 'asc' }])
@@ -835,12 +853,16 @@ async function reconcileVisitCoordinates() {
         const lng = Number(r.longitude);
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
         // Null-pair re-asserted: fill-only under concurrent writers.
-        let visitUpdate = db('scheduled_services')
-          .where({ id: r.visit_id })
-          .whereNull('lat')
-          .whereNull('lng');
-        visitUpdate = geocodeReview.excludePrimaryPropertyReviewForId(visitUpdate, r.property_id);
-        filled += await visitUpdate.update({ lat, lng });
+        filled += (await withReviewWriteFence({
+          propertyId: r.property_id, customerId: r.property_customer_id,
+        }, async (conn) => {
+          let visitUpdate = conn('scheduled_services')
+            .where({ id: r.visit_id })
+            .whereNull('lat')
+            .whereNull('lng');
+          visitUpdate = geocodeReview.excludePrimaryPropertyReviewForId(visitUpdate, r.property_id);
+          return visitUpdate.update({ lat, lng });
+        })) || 0;
       }
       if (rows.length < RECONCILE_VISIT_PAGE) {
         exhausted = true;
@@ -894,7 +916,8 @@ async function reconcileCustomerMirrors() {
           'c.id as customer_id',
           db.raw('c.created_at::text as customer_created_key'),
           'c.address_line1 as c_line1', 'c.address_line2 as c_line2', 'c.city as c_city', 'c.zip as c_zip',
-          'cp.id as property_id', 'cp.latitude', 'cp.longitude', 'cp.property_type as cp_type',
+          'cp.id as property_id', 'cp.customer_id as property_customer_id',
+          'cp.latitude', 'cp.longitude', 'cp.property_type as cp_type',
           'cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.zip',
         )
         .orderBy([{ column: 'c.created_at', order: 'asc' }, { column: 'c.id', order: 'asc' }])
@@ -935,13 +958,17 @@ async function reconcileCustomerMirrors() {
         }
         if (!Object.keys(mirror).length) continue;
         mirror.updated_at = db.fn.now();
-        let customerUpdate = db('customers')
-          .where({ id: r.customer_id })
-          .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
-            r.c_line1 || '', r.c_line2 || '', r.c_city || '', r.c_zip || '',
-          ]);
-        if (mirror.latitude) customerUpdate = geocodeReview.excludePrimaryPropertyReviewForId(customerUpdate, r.property_id);
-        filled += await customerUpdate.update(mirror);
+        filled += (await withReviewWriteFence({
+          propertyId: r.property_id, customerId: r.property_customer_id,
+        }, async (conn) => {
+          let customerUpdate = conn('customers')
+            .where({ id: r.customer_id })
+            .whereRaw("COALESCE(address_line1, '') = ? AND COALESCE(address_line2, '') = ? AND COALESCE(city, '') = ? AND COALESCE(zip, '') = ?", [
+              r.c_line1 || '', r.c_line2 || '', r.c_city || '', r.c_zip || '',
+            ]);
+          if (mirror.latitude) customerUpdate = geocodeReview.excludePrimaryPropertyReviewForId(customerUpdate, r.property_id);
+          return customerUpdate.update(mirror);
+        })) || 0;
       }
       if (rows.length < RECONCILE_VISIT_PAGE) {
         exhausted = true;
@@ -1077,6 +1104,6 @@ module.exports = {
   sweepUnenrichedProperties,
   _private: {
     snakePropertyType, propertyRowAddress, fetchBackfillCandidates, recentLookupVerdict, backfillBatchSize,
-    reconcileVisitCoordinates, reconcileCustomerMirrors, SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE,
+    reconcileVisitCoordinates, reconcileCustomerMirrors, withReviewWriteFence, SQL_PRIMARY_NUMBER_RE, SQL_LEADING_UNIT_RE,
   },
 };
