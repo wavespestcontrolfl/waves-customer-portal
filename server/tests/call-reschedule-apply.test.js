@@ -198,6 +198,11 @@ describe('planRescheduleFromCall', () => {
     expect(planRescheduleFromCall({ v2: v2(), customer: customer(), candidates: [visit(), march], now: NOW,
       call: call({ transcription: `Caller: Move my March 24th visit to September 24th at noon.\nAgent: ${QUOTE}` }) }))
       .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'march-visit'] });
+    // A date written as numbers counts too: "12/24" brings up December.
+    hasAgentCommittedEvidence.mockReturnValueOnce(true);
+    expect(planRescheduleFromCall({ v2: v2(), customer: customer(), candidates: [visit(), december], now: NOW,
+      call: call({ transcription: `Caller: Move my 12/24 visit to September 24 at noon.\nAgent: ${QUOTE}` }) }))
+      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
     // Once September is behind today, December 24 is the only upcoming visit.
     expect(plan('2026-12-17T12:00:00-05:00', 'Caller: Move it to December 17th.\nAgent: Okay.', new Date('2026-09-25T19:00:00Z')))
       .toMatchObject({ action: 'apply', visitId: 'dec-visit' });

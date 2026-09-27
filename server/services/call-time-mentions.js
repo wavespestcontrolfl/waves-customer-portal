@@ -24,8 +24,19 @@ const DAY_OF_MONTH = /^(\d{1,2})(?:st|nd|rd|th)?$/;
 function joinMeridiem(s) {
   return String(s || '').replace(/\b([ap])\.\s?m\b\.?/gi, '$1m');
 }
+// A date written as numbers ("12/24", "12/24/26") reads as its month and day
+// ("december 24"), so it is a mention like any other. The year is dropped: a
+// month and day already stands for this year's and next year's date. A stray
+// match ("1/2 hour") can only add a mention, which only ever adds review.
+function spellNumericDates(s) {
+  return s.replace(/\b(\d{1,2})\/(\d{1,2})(?:\/\d{2,4})?\b/g, (whole, mo, d) => {
+    const month = Number(mo);
+    const day = Number(d);
+    return month >= 1 && month <= 12 && day >= 1 && day <= 31 ? `${MONTH_NAMES[month - 1]} ${day}` : whole;
+  });
+}
 function normalize(s) {
-  return joinMeridiem(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return spellNumericDates(joinMeridiem(s)).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 // null on any unlabeled line: turn boundaries cannot be trusted, fail closed.

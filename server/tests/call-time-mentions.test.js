@@ -11,6 +11,11 @@ describe('exactDatesNamed', () => {
       .toEqual(['2026-09-26', '2026-09-27', '2026-09-28', '2026-10-02', '2027-10-02']);
   });
 
+  test('a date written as numbers is a month and day', () => {
+    expect([...exactDatesNamed({ transcript: 'Caller: Can we do 12/24 or 1/5/27?\nAgent: Sure.', callStartedAt: CALL_STARTED_AT })].sort())
+      .toEqual(['2026-01-05', '2026-12-24', '2027-01-05', '2027-12-24']);
+  });
+
   test('a weekday names two dates, so it names none exactly', () => {
     expect(exactDatesNamed({ transcript: 'Caller: Why not next Saturday, or Friday?\nAgent: Sure.', callStartedAt: CALL_STARTED_AT }).size).toBe(0);
   });
