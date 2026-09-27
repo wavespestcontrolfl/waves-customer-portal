@@ -259,6 +259,9 @@ function useFastCompleteSubmit({ base, request }) {
       pendingBodyRef.current = null;
       setFailure(null);
       setDone({ summary });
+      // Saved: the done view can be dismissed (Close, Escape, backdrop).
+      setSubmitting(false);
+      inFlight.current = false;
     } catch (err) {
       const outcome = completionFailureOutcome(err);
       pendingBodyRef.current = outcome === 'retry' ? body : null;
