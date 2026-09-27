@@ -2434,6 +2434,30 @@ describe('topic routing (GATE_ASK_WAVES_TOPIC_ROUTING)', () => {
     expect(out.reply).toMatch(VET);
   });
 
+  test('a question about a vet adds the veterinary line to a model-classified emergency', () => {
+    const out = normalizeIntakeResult(withTopic('medical_emergency'), 'openai', 'Should I call a vet?');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toMatch(VET);
+  });
+
+  test('loose access wording is left to the model topic', () => {
+    expect(normalizeIntakeResult(withTopic('none'), 'openai', 'When can we walk on the lawn?').reply).toBe(neutral);
+    expect(normalizeIntakeResult(withTopic('reentry_timing'), 'openai', 'When can we walk on the lawn?').reply).toMatch(LABEL_COPY);
+  });
+
+  test.each([
+    'I passed out flyers for my business',
+    'We live at 911 Palm Ave',
+  ])('a known false positive earlier in the chat never turns a safety answer into the emergency script: %s', (earlier) => {
+    const out = normalizeIntakeResult(withTopic('product_safety'), 'openai', `${earlier}\nIs your spray safe for kids?`, 'Is your spray safe for kids?');
+    expect(out.reply).toMatch(LABEL_COPY);
+  });
+
+  test('trouble breathing earlier in the chat turns a re-entry answer into the emergency script', () => {
+    const out = normalizeIntakeResult(withTopic('reentry_timing'), 'openai', 'My son cannot breathe after the spray\nWhen can we go back in?', 'When can we go back in?');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+  });
+
   test('a safety question the model labeled "emergency" gets its quote offer back', () => {
     const out = normalizeIntakeResult(withTopic('product_safety', { intent: 'emergency', ready_for_quote: true, service_keys: ['rodentBait'] }), 'openai', 'Is your rodent bait safe for my kids?');
     expect(out.reply).toMatch(LABEL_COPY);
@@ -2465,6 +2489,8 @@ describe('topic routing (GATE_ASK_WAVES_TOPIC_ROUTING)', () => {
     'Do you treat dangerous spiders?',
     'Are spiders dangerous for my dog?',
     'Can I use your lawn care service for weeds?',
+    'Can I use your lawn service today?',
+    'Do you treat dry rot?',
   ])('the regex never forces reviewed or emergency copy on its own: %s', (message) => {
     expect(normalizeIntakeResult(withTopic('none'), 'openai', message).reply).toBe(neutral);
   });

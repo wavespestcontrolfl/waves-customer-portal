@@ -1009,21 +1009,20 @@ function visitorSafetyQuestion(active) {
   const pestSubject = PEST_NOUN_RE.test(active.replace(PEST_PRODUCT_PHRASE_RE, ' ').replace(new RegExp(SAFETY_TARGET_RE.source, 'gi'), ' '));
   return !pestSubject && (INTAKE_TREATMENT_CONTEXT_RE.test(active) || SAFETY_TARGET_RE.test(active));
 }
-// Access wording alone is not a re-entry question ("Can I use your lawn care
-// service for weeds?"): it also needs a timing ask or re-entry words.
-const TIMING_ASK_RE = /\b(?:when|how\s+(?:long|soon)|until|till|after|before|yet|right\s+away|immediately|now|today|tonight|tomorrow|cu[aá]ndo|cu[aá]nto\s+tiempo|despu[eé]s|antes|todav[ií]a)(?![a-zñáéíóú])/i;
-const REENTRY_WORD_RE = /\b(?:re-?ent\w*|re-?occup\w*|dry|dries|dried|drying|wet|sec[oa]s?|secarse|volver\s+a\s+entrar|let\s+\S+(?:\s+\S+)?\s+(?:out|in|back)|back\s+(?:inside|in|outside|out|home))(?![a-zñáéíóú])/i;
+// The re-entry floor reads only strong signals — occupants coming back, or
+// re-entry / drying / letting-out words. Loose access wording ("Can I use
+// your lawn service today?") is left to the model's topic.
+const REENTRY_WORD_RE = /\b(?:re-?ent(?:er|ers|ered|ering|ry)|re-?occup\w*|(?:is|are|it'?s|gets?|got|until|till|once|when|after|before|be)\s+(?:completely\s+|fully\s+|totally\s+)?dr(?:y|ied)|dries|drying|let\s+\S+(?:\s+\S+)?\s+(?:out|in|back)|(?:go|come|get|head)\s+back\s+(?:inside|in|outside|out|home)|volver\s+a\s+entrar|(?:est[eé]|sea|quede)\s+sec[oa])(?![a-zñáéíóú])/i;
 function visitorReentryQuestion(active) {
   const physical = active.replace(DIGITAL_ACCESS_RE, ' ');
-  if (!QUESTION_SHAPE_RE.test(active)) return false;
-  return OCCUPANT_RETURN_RE.test(physical)
-    || (ACCESS_SIGNAL_RE.test(physical) && (TIMING_ASK_RE.test(physical) || REENTRY_WORD_RE.test(physical)));
+  return QUESTION_SHAPE_RE.test(active) && (OCCUPANT_RETURN_RE.test(physical) || REENTRY_WORD_RE.test(physical));
 }
 
 // The emergency script for a model-classified emergency: the visitor's words
 // pick the Poison Control and veterinary lines as usual, and a pet named in
-// the conversation adds the veterinary line even when the regex saw nothing.
-const PET_NAMED_RE = new RegExp(`\\b(?:my|our|the|mi|mis|su|sus|nuestr[oa]s?|el|la|los|las)\\s+${PET_WORD}(?![a-zñáéíóú])`, 'i');
+// the conversation, or a question about a vet or animal hospital ("Should I
+// call a vet?"), adds the veterinary line even when the regex saw nothing.
+const PET_NAMED_RE = new RegExp(`\\b(?:my|our|the|mi|mis|su|sus|nuestr[oa]s?|el|la|los|las)\\s+${PET_WORD}(?![a-zñáéíóú])|\\b(?:vets?|veterinarian|veterinary|animal\\s+(?:hospital|er|emergency|poison\\s+control)|veterinari[oa]s?|hospital\\s+veterinario)(?![a-zñáéíóú])`, 'i');
 function topicEmergencyScript(base, context) {
   const script = emergencyGuidance({ ...base, reply: '', intent: 'emergency' }, context);
   if (PET_NAMED_RE.test(foldTypography(context)) && !script.reply.includes(VET_EMERGENCY_SCRIPT)) {
@@ -1039,9 +1038,19 @@ function topicEmergencyScript(base, context) {
 // topic is the main signal; the visitor's words are a floor for safety and
 // re-entry. The regex emergency detector never forces the emergency script
 // on its own — it fires on "911 Palm Ave" and "passed out flyers" (#4899) —
-// but emergency evidence in the conversation upgrades a safety or re-entry
-// answer to it. Anything else returns null and keeps the model's answer,
+// but qualified evidence in the conversation (qualifiedEmergencyIn) upgrades
+// a safety or re-entry answer to it. Anything else returns null and keeps the model's answer,
 // still checked by the claim chokepoint.
+// Evidence strong enough to turn a safety or re-entry answer into the
+// emergency script: a product exposure, a symptom after a treatment, or
+// trouble breathing. The broad detector's "passed out" / "911" / hospital
+// phrases never count here (#4899: "I passed out flyers", "911 Palm Ave").
+const BREATHING_EMERGENCY_RE = /\b(?:(?:can'?t|cannot|can\s+not)\s+breathe|(?:not|isn'?t|aren'?t|stopped|stops|quit)\s+breathing|(?:trouble|difficulty)\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|throat\s+(?:is\s+)?(?:closing|swelling)|no\s+pued[eo]\s+respirar|dej[oó]\s+de\s+respirar|dificultad\s+para\s+respirar)(?![a-zñáéíóú])/i;
+function qualifiedEmergencyIn(context) {
+  return productExposureIn(context)
+    || stripDenials(context).split(/\n+/).some((turn) => treatmentSymptom(turn) || BREATHING_EMERGENCY_RE.test(turn.replace(NEGATED_BREATHING_RE, ' ')));
+}
+
 function routeByTopic(modelTopic, base, contextText, activeMessage, quoteFields) {
   const emergencyContext = emergencyContextOf(contextText, activeMessage);
   if (modelTopic === 'medical_emergency') return topicEmergencyScript(base, emergencyContext);
@@ -1049,7 +1058,7 @@ function routeByTopic(modelTopic, base, contextText, activeMessage, quoteFields)
   const reviewedTopic = modelTopic === 'product_safety' || modelTopic === 'reentry_timing'
     || visitorSafetyQuestion(active) || visitorReentryQuestion(active);
   if (!reviewedTopic) return null;
-  if (looksLikeEmergency(foldTypography(emergencyContext))) return topicEmergencyScript(base, emergencyContext);
+  if (qualifiedEmergencyIn(foldTypography(emergencyContext))) return topicEmergencyScript(base, emergencyContext);
   const spanish = looksSpanish(activeMessage) || looksSpanish(base.reply);
   const reply = spanish ? UNSAFE_CLAIM_REPLY_ES : UNSAFE_CLAIM_REPLY;
   // A safety question the model labeled "emergency" had its quote offer
