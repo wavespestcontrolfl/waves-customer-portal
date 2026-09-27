@@ -29,6 +29,23 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
+it('keeps landscape-phone tier content inside horizontal safe areas', async () => {
+  const originalWidth = window.innerWidth;
+  window.innerWidth = 852;
+  try {
+    render(<MyPlanTab customer={{ id: 'fixture-account', firstName: 'Fixture', tier: 'Gold', property: {} }} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Explore WaveGuard tiers' }));
+
+    const dialog = screen.getByRole('dialog', { name: 'Explore WaveGuard tiers' });
+    expect(dialog.style.padding).toContain('safe-area-inset-right');
+    expect(dialog.style.padding).toContain('safe-area-inset-left');
+    expect(dialog.style.paddingTop).toBe('20px');
+    expect(dialog.style.paddingBottom).toBe('20px');
+  } finally {
+    window.innerWidth = originalWidth;
+  }
+}, 15000);
+
 it.each([
   ['Gold', 'Silver', 'other'],
   ['Gold', 'Gold', 'other'],

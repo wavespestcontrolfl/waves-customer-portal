@@ -1631,7 +1631,9 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
           background: 'rgba(255,255,255,0.96)',
           backdropFilter: 'blur(12px)',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
-          padding: compact ? '12px 14px' : '14px 18px',
+          padding: compact
+            ? 'calc(12px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-right, 0px)) 12px calc(14px + env(safe-area-inset-left, 0px))'
+            : '14px 18px',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -1653,7 +1655,16 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
           <ShellCloseButton onClick={guardedClose} label="Close purchase" />
         </header>
 
-        <div style={{ flex: 1, overflowY: 'auto', padding: compact ? 16 : 20, display: 'grid', gap: 14, alignContent: 'start' }}>
+        <div style={{
+          flex: 1,
+          overflowY: 'auto',
+          padding: compact
+            ? '16px calc(16px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))'
+            : 20,
+          display: 'grid',
+          gap: 14,
+          alignContent: 'start',
+        }}>
           {initError === 'stale' ? (
             <div style={softBox}>
               <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>This offer changed</div>
@@ -4020,7 +4031,9 @@ function ServicesTab() {
         <div onClick={() => setLightbox(null)}
           style={{
             position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 9999,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: 'calc(20px + env(safe-area-inset-top, 0px)) calc(20px + env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) calc(20px + env(safe-area-inset-left, 0px))',
+            cursor: 'pointer',
           }}>
           <div ref={lightboxRef} role="dialog" aria-modal="true" aria-label={lightbox.caption || lightbox.type || 'Service photo'} onClick={(e) => e.stopPropagation()}
             style={{ position: 'relative', maxWidth: '95vw', maxHeight: '95vh', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
@@ -7132,7 +7145,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         <div data-glass-scrim="" style={{
           position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
           background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 9999, padding: 20,
+          zIndex: 9999,
+          padding: 'calc(20px + env(safe-area-inset-top, 0px)) calc(20px + env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) calc(20px + env(safe-area-inset-left, 0px))',
         }} onClick={(e) => { if (e.target === e.currentTarget) setDefaultConsentPrompt(null); }}>
           <div ref={defaultConsentDialogRef} role="dialog" aria-modal="true" aria-label="Authorize Auto Pay" data-glass="modal" style={{
             background: '#fff', borderRadius: 8, padding: 24, width: '100%', maxWidth: 460,
@@ -7177,7 +7191,8 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         <div data-glass-scrim="" style={{
           position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
           background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 9999, padding: 20,
+          zIndex: 9999,
+          padding: 'calc(20px + env(safe-area-inset-top, 0px)) calc(20px + env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) calc(20px + env(safe-area-inset-left, 0px))',
         }} onClick={(e) => { if (e.target === e.currentTarget) { setShowAddCard(false); paymentElementRef.current = null; elementsRef.current = null; } }}>
           <div ref={addCardDialogRef} role="dialog" aria-modal="true" aria-label="Add payment method" data-glass="modal" style={{
             background: '#fff', borderRadius: 8, padding: 24, width: '100%', maxWidth: 460,
@@ -10577,7 +10592,9 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
         border: `1px solid ${PORTAL_SHELL.border}`,
         borderRadius: compact ? '8px 8px 0 0' : 8,
         boxShadow: PORTAL_SHELL.shadow,
-        padding: compact ? 16 : 20,
+        padding: compact
+          ? 'calc(16px + env(safe-area-inset-top, 0px)) calc(16px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))'
+          : '20px calc(20px + env(safe-area-inset-right, 0px)) 20px calc(20px + env(safe-area-inset-left, 0px))',
         boxSizing: 'border-box',
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start' }}>
@@ -14336,6 +14353,10 @@ function DocumentPreviewOverlay({ preview, onClose, onError }) {
     <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={doc.title || 'Document preview'} data-glass="modal" style={{
       position: 'fixed', inset: 0, zIndex: 9999, background: '#FAF8F3',
       display: 'flex', flexDirection: 'column',
+      paddingLeft: 'env(safe-area-inset-left, 0px)',
+      paddingRight: 'env(safe-area-inset-right, 0px)',
+      paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+      boxSizing: 'border-box',
     }}>
       <div data-glass="soft" style={{
         display: 'flex', alignItems: 'center', gap: 10,
@@ -15194,7 +15215,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
           backdropFilter: 'blur(12px)',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           // Full-screen overlay: keep the header below the iOS status bar / notch.
-          padding: compact ? 'calc(12px + env(safe-area-inset-top, 0px)) 14px 12px' : '14px 18px',
+          padding: compact
+            ? 'calc(12px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-right, 0px)) 12px calc(14px + env(safe-area-inset-left, 0px))'
+            : '14px 18px',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -15220,7 +15243,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            padding: compact ? 20 : 32,
+            padding: compact
+              ? '20px calc(20px + env(safe-area-inset-right, 0px)) calc(20px + env(safe-area-inset-bottom, 0px)) calc(20px + env(safe-area-inset-left, 0px))'
+              : 32,
           }}>
             <div style={{ ...card, width: '100%', maxWidth: 460, padding: compact ? 24 : 30, textAlign: 'center' }}>
               <div data-request-check="" style={{ animation: 'checkPop 0.5s ease-out' }}>
@@ -15260,7 +15285,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
               minHeight: 0,
               overflowY: 'auto',
               WebkitOverflowScrolling: 'touch',
-              padding: compact ? '14px 14px 18px' : '18px 20px',
+              padding: compact
+                ? '14px calc(14px + env(safe-area-inset-right, 0px)) 18px calc(14px + env(safe-area-inset-left, 0px))'
+                : '18px 20px',
               display: 'grid',
               gap: 12,
             }}>
@@ -15712,7 +15739,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
               borderTop: '1px solid #E7E2D7',
               background: 'rgba(255,255,255,0.96)',
               backdropFilter: 'blur(12px)',
-              padding: compact ? '10px 14px max(14px, env(safe-area-inset-bottom))' : '14px 18px',
+              padding: compact
+                ? '10px calc(14px + env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px))'
+                : '14px 18px',
               display: 'grid',
               gridTemplateColumns: compact ? '1fr' : '1fr auto',
               gap: 10,
@@ -15958,7 +15987,11 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, tabs = PRIMARY
   );
   return (
     <nav aria-label="Main" data-glass="" style={{
-      position: 'fixed', bottom: 8, left: 10, right: 10, zIndex: 98,
+      position: 'fixed',
+      bottom: 8,
+      left: 'calc(10px + env(safe-area-inset-left, 0px))',
+      right: 'calc(10px + env(safe-area-inset-right, 0px))',
+      zIndex: 98,
       background: 'rgba(255,255,255,0.98)', backdropFilter: 'blur(16px)',
       border: `1px solid ${PORTAL_SHELL.border}`,
       borderRadius: 8,
@@ -16032,12 +16065,12 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, onOpenPhot
         background: PORTAL_SHELL.page,
         borderRadius: '8px 8px 0 0',
         position: 'relative',
-        padding: '12px 14px max(18px, env(safe-area-inset-bottom))',
+        padding: '12px calc(14px + env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px))',
         boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
         animation: 'moreSheetUp 0.25s ease',
         borderTop: `1px solid ${PORTAL_SHELL.border}`,
         // dvh: 100vh over-measures behind the iOS Safari toolbar.
-        maxHeight: `calc(100${DVH} - 16px)`,
+        maxHeight: `calc(100${DVH} - 16px - env(safe-area-inset-top, 0px))`,
         overflowY: 'auto',
         WebkitOverflowScrolling: 'touch',
         overscrollBehavior: 'contain',
@@ -16364,7 +16397,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
 
         <div style={{
           flexShrink: 0,
-          padding: '16px 18px',
+          padding: '16px calc(18px + env(safe-area-inset-right, 0px)) 16px calc(18px + env(safe-area-inset-left, 0px))',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           background: 'rgba(255,255,255,0.96)',
@@ -16385,7 +16418,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
           minHeight: 0,
           overflowY: 'auto',
           overscrollBehavior: 'contain',
-          padding: '16px 18px',
+          padding: '16px calc(18px + env(safe-area-inset-right, 0px)) 16px calc(18px + env(safe-area-inset-left, 0px))',
           background: 'transparent',
         }}>
           {messages.map((msg, i) => (
@@ -16451,9 +16484,9 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
 
         <div style={{
           flexShrink: 0,
-          padding: '12px 16px',
+          padding: '12px calc(16px + env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))',
           borderTop: `1px solid ${PORTAL_SHELL.border}`,
-          display: 'flex', gap: 8, alignItems: 'center', paddingBottom: 'max(12px, env(safe-area-inset-bottom))',
+          display: 'flex', gap: 8, alignItems: 'center',
         }}>
           <input
             name="chatMessage"
@@ -16710,6 +16743,10 @@ export default function PortalPage() {
   const [requestRefreshKey, setRequestRefreshKey] = useState(0);
   const [switchingPropertyId, setSwitchingPropertyId] = useState(null);
   const menuRef = useRef(null);
+  // Pin the page at its current offset while the account menu is open. The
+  // shared lock preserves sticky-header geometry on iOS and restores the
+  // exact scroll position on close.
+  useLockBodyScroll(showMenu);
   // Home is the hero surface (full scene with orbs). Glass is the unconditional
   // portal theme now, so the scene always mounts.
   useGlassSurface(true);
@@ -16724,16 +16761,6 @@ export default function PortalPage() {
     return () => {
       document.removeEventListener('mousedown', onPointer);
     };
-  }, [showMenu]);
-
-  // Lock the page scroll while the account menu is open — on iOS a touch
-  // scroll on the dropdown otherwise chains to the page behind it, so the
-  // background moved while the menu stayed put.
-  useEffect(() => {
-    if (!showMenu) return;
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prevOverflow; };
   }, [showMenu]);
 
   if (!customer) return null;
@@ -16910,6 +16937,8 @@ export default function PortalPage() {
         padding: '12px max(16px, calc((100vw - 1440px) / 2 + 16px))',
         // Clear the iPhone notch/status bar in standalone PWA mode (viewport-fit=cover).
         paddingTop: 'calc(12px + env(safe-area-inset-top, 0px))',
+        paddingLeft: 'max(calc(16px + env(safe-area-inset-left, 0px)), calc((100vw - 1440px) / 2 + 16px))',
+        paddingRight: 'max(calc(16px + env(safe-area-inset-right, 0px)), calc((100vw - 1440px) / 2 + 16px))',
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         gap: 12,
         position: 'sticky', top: 0, zIndex: 100,
@@ -17353,7 +17382,17 @@ export default function PortalPage() {
       {/* Mobile bottom padding budgets the floating nav (minHeight 58 + 8px
           float) plus the iOS home-indicator inset — a flat 92px left the last
           card underneath the bar on notched phones. */}
-      <main id="portal-main" tabIndex={-1} style={{ padding: isMobileShell ? '24px 16px calc(108px + env(safe-area-inset-bottom, 0px))' : '24px 16px 32px', maxWidth: shellMaxWidth, margin: '0 auto', outline: 'none'  }}>
+      <main id="portal-main" tabIndex={-1} style={{
+        padding: isMobileShell
+          ? '24px calc(16px + env(safe-area-inset-right, 0px)) calc(108px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))'
+          : '24px calc(16px + env(safe-area-inset-right, 0px)) 32px calc(16px + env(safe-area-inset-left, 0px))',
+        // shellMaxWidth is the content cap. Preserve the existing 760px
+        // desktop content column now that safe-area padding is border-box.
+        maxWidth: shellMaxWidth + 32,
+        margin: '0 auto',
+        outline: 'none',
+        boxSizing: 'border-box',
+      }}>
         {/* No shell-level h1: every non-dashboard tab renders its own visible
             h1, and doubling it here exposed two h1s to assistive tech. */}
         {/* Desktop tab nav (owner 2026-07-09): the portal's section nav —

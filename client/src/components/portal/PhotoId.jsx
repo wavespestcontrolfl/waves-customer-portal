@@ -258,7 +258,7 @@ export function PhotoIdFab({ onOpen, hasBottomNav }) {
       data-glass-accent=""
       style={{
         position: 'fixed',
-        right: 14,
+        right: 'calc(14px + env(safe-area-inset-right, 0px))',
         // The mobile nav includes the home-indicator inset in its height.
         // Keep the whole button above that bar, including its bottom gap.
         bottom: hasBottomNav
@@ -638,11 +638,11 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
           background: SHELL.page,
           borderRadius: '8px 8px 0 0',
           position: 'relative',
-          padding: '12px 16px max(18px, env(safe-area-inset-bottom))',
+          padding: '12px calc(16px + env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))',
           boxShadow: '0 -8px 40px rgba(15,23,42,0.18)',
           animation: 'photoIdSheetUp 0.25s ease',
           borderTop: `1px solid ${SHELL.border}`,
-          maxHeight: 'calc(100dvh - 16px)',
+          maxHeight: 'calc(100dvh - 16px - env(safe-area-inset-top, 0px))',
           overflowY: 'auto',
           WebkitOverflowScrolling: 'touch',
           overscrollBehavior: 'contain',
