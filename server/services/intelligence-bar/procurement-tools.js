@@ -1127,7 +1127,18 @@ function qualifiersPreceding(rawText, toIndex) {
 // over the WHOLE raw text, not just adjacent to a matched span, because the
 // analysis reads as the product's own identity wherever it sits in the
 // sentence ("K-Flow — we bought 0-0-20 of it" is still a mismatch).
-const ANALYSIS_RE = /\b\d{1,2}(?:\.\d)?\s*[-–—/]\s*\d{1,2}(?:\.\d)?\s*[-–—/]\s*\d{1,2}(?:\.\d)?\b/g;
+//
+// A REAL analysis uses the SAME separator twice ("0-0-25", "0/0/20") — a
+// mixed number like "1-1/2" (gallons) uses TWO DIFFERENT separators ("-"
+// then "/") and must never read as one (Codex round-13 P2: "We bought
+// Taurus SC, 1-1/2 gallons" misread "1-1/2" as an analysis and refused a
+// product with no analysis in its identity at all). \1 backreferences the
+// first separator so the second must match it exactly. –/— are normalized
+// to a plain "-" first (each is one code unit, same as "-", so match
+// indices against the original text are unaffected) so "0–0—25" still
+// reads as one analysis with the separator repeated, rather than as two
+// different separators that would now fail the backreference.
+const ANALYSIS_RE = /\b\d{1,2}(?:\.\d)?\s*([-/])\s*\d{1,2}(?:\.\d)?\s*\1\s*\d{1,2}(?:\.\d)?\b/g;
 function normalizeAnalysis(raw) {
   return String(raw).replace(/\s+/g, '').replace(/[–—/]/g, '-');
 }
@@ -1144,14 +1155,25 @@ function isCuedDate(text, match) {
 }
 function analysesIn(text) {
   const raw = String(text);
-  return [...raw.matchAll(ANALYSIS_RE)].filter((m) => !isCuedDate(raw, m)).map((m) => normalizeAnalysis(m[0]));
+  // Normalize –/— to a plain "-" (same code-unit length, so match.index
+  // still lines up with `raw` for isCuedDate's look-back) before matching,
+  // so the backreference reads a triple that mixes dash STYLES ("0–0—25")
+  // as one repeated separator rather than two different ones.
+  const normalized = raw.replace(/[–—]/g, '-');
+  return [...normalized.matchAll(ANALYSIS_RE)].filter((m) => !isCuedDate(raw, m)).map((m) => normalizeAnalysis(m[0]));
 }
 function qualifierConflict(rawText, phrases, identityNames) {
   const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
   const nameTokens = new Set(identityNames.flatMap((name) => normalizeForMatch(name).split(' ')));
   const nameConcentrations = identityNames.flatMap((name) => [...String(name).matchAll(/(\d+(?:\.\d+)?)\s*%/g)].map((m) => Number(m[1])));
   const nameAnalyses = new Set(identityNames.flatMap((name) => analysesIn(name)));
-  const analysisConflict = analysesIn(rawText).some((analysis) => !nameAnalyses.has(analysis));
+  // An analysis only matters for a product whose OWN identity (catalog name
+  // or a registered alias) names one (Codex round-13 P2): with no analysis
+  // anywhere in its identity, nameAnalyses is empty and no analysis-shaped
+  // text in the operator's words can ever conflict with it — a plain
+  // "Taurus SC" (no analysis) is never refused by a date, a mixed number,
+  // or anything else analysis-shaped sitting anywhere in the sentence.
+  const analysisConflict = nameAnalyses.size > 0 && analysesIn(rawText).some((analysis) => !nameAnalyses.has(analysis));
   return analysisConflict || phrases.some((phrase) => phrase.spans.some((span) => {
     const before = qualifiersPreceding(rawText, span.start);
     const after = qualifiersFollowing(rawText, span.end);
@@ -1460,6 +1482,49 @@ function isQuestion(text) {
   if (AUX_INVERSION_RE.test(raw) || QUESTION_WORD_RE.test(raw)) return true;
   return /\?\s*$/.test(raw);
 }
+
+// A statement about the FUTURE, ability, or obligation is not a write
+// instruction — exactly like a question, it describes something rather
+// than asking for it to be done now (Codex round-13 P2: "We will receive
+// two bottles of Taurus SC today" and "We can receive two bottles of
+// Taurus SC" both grounded a restock card for a shipment that hasn't
+// arrived; base-form "receive" reads as a receipt with no tense check at
+// all). A subject pronoun immediately followed by a modal verb, or its
+// contraction, is a modal statement: "we will", "we can", "we'll" (curly
+// or straight apostrophe), and the apostrophe-less "we ll" normalizeForMatch
+// leaves once it collapses "we'll" to two words. The pronoun must come
+// FIRST — "Can you ...?"/"Could you ...?" are requests (REQUEST_START_RE
+// already reads them as non-questions) and must keep grounding, and this
+// order requirement is exactly why they never match here either. A bare
+// "can"/"cans" naming a container unit ("two cans of Taurus SC") never
+// matches: nothing here reads "can" unless a subject pronoun sits directly
+// before it.
+const MODAL_WORD_ALT = 'can|could|would|will|shall|should|may|might|must';
+const MODAL_STATEMENT_RE = new RegExp(
+  `\\b(?:i|we|you|they|he|she|it)\\b(?:['’]?\\s*(?:ll|d)\\b|\\s+(?:${MODAL_WORD_ALT})\\b)`,
+  'i',
+);
+// An infinitive write ("have to receive", "are to receive", "got to
+// receive") is the same future/obligation statement spelled without a
+// modal verb: an obligation-carrying verb (have/has/had/am/is/are/was/
+// were/got) immediately before "to <write verb>". Requiring that lead-in —
+// never a bare "to <verb>" anywhere in the text — matters: real
+// ungrammatical voice-typed prompts routinely drop an ordinary "to add"
+// into a sentence with no obligation sense at all ("...a thing of Taurus
+// as to add this to your inventory..." must still ground).
+const INFINITIVE_OBLIGATION_LEAD_ALT = 'have|has|had|am|is|are|was|were|got';
+const INFINITIVE_WRITE_VERB_ALT = 'receive|add|put|log|record|restock|buy|order|reorder|purchase';
+const INFINITIVE_WRITE_RE = new RegExp(
+  `\\b(?:${INFINITIVE_OBLIGATION_LEAD_ALT})\\s+to\\s+(?:${INFINITIVE_WRITE_VERB_ALT})\\b`,
+  'i',
+);
+// The one check every operator-grounding gate uses in place of a bare
+// isQuestion: a question, a modal statement, or an infinitive write are all
+// read-only or future/hypothetical, never a write instruction right now.
+function isNotAnInstruction(text) {
+  const raw = String(text || '');
+  return isQuestion(raw) || MODAL_STATEMENT_RE.test(raw) || INFINITIVE_WRITE_RE.test(raw);
+}
 // `texts` run newest first: the current prompt, any bare turns the look-back
 // skipped, then the turn that named the product. The newest text with an
 // operation decides, so "It arrived, one bottle" after "Order Taurus SC" is
@@ -1482,7 +1547,7 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { 
 }
 
 async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName }) {
-  if (!preview?.product?.id || isQuestion(prompt)) return null;
+  if (!preview?.product?.id || isNotAnInstruction(prompt)) return null;
   // `texts` are the operator's words the grounding rests on (this prompt,
   // plus the prior turn that named the product): they must also ask for the
   // same operation as the tool (operationMatches).
@@ -1517,9 +1582,9 @@ async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { 
   const turns = await IbThreads.recentOperatorTurns(actorId, threadId, { limit: 3, maxAgeMinutes: 30, maxSeq: observedSeq });
   const skipped = [];
   for (const turn of turns) {
-    // A question never authorizes a write, even as the turn a "Yes" answers:
-    // the look-back stops at it.
-    if (isQuestion(turn)) return null;
+    // A question, modal statement, or infinitive write never authorizes a
+    // write, even as the turn a "Yes" answers: the look-back stops at it.
+    if (isNotAnInstruction(turn)) return null;
     const turnResult = await productsNamedIn(turn);
     if (turnResult.conflict || turnResult.named.size) return decide(turnResult, [prompt, ...skipped, turn]);
     // Named nothing. Only a bare reply ("yes", "1 bottle") has no opinion

@@ -1514,5 +1514,149 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         expect(result).toMatchObject({ code: 'target_clarification_required' });
       });
     });
+
+    // Codex round-13 P2: qualifierConflict's analysis check compared the
+    // text's own analyses against nameAnalyses with `!nameAnalyses.has(...)`
+    // — with no analysis anywhere in Taurus SC's identity, nameAnalyses was
+    // EMPTY, so `!emptySet.has(x)` was always true and ANY analysis-shaped
+    // text (a mixed number, a date, anything) refused it outright. Fixed
+    // structurally, two parts: (1) an analysis only matters for a product
+    // whose own identity actually names one (nameAnalyses.size > 0); (2) a
+    // REAL analysis uses the SAME separator twice (a backreference), so a
+    // mixed number like "1-1/2" (two DIFFERENT separators) never reads as
+    // one.
+    describe('an analysis only matters for a product whose own identity names one', () => {
+      const K_FLOW = { id: 'p-k-flow', name: 'LESCO K-Flow 0-0-25', active: true };
+      const K_FLOW_ALIASES = [{ product_id: K_FLOW.id, alias_name: 'K-Flow' }];
+
+      // The finding's own sentence: Taurus SC has no analysis in its
+      // identity at all, so "1-1/2" (a mixed number, not an analysis under
+      // the same-separator-twice rule either) never refuses it.
+      test('the finding\'s own order grounds: "We bought Taurus SC, 1-1/2 gallons"', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt: 'We bought Taurus SC, 1-1/2 gallons',
+          preview: { product: { id: TAURUS.id, name: TAURUS.name }, movement_type: 'restock' },
+        });
+        expect(result).toEqual({ productId: TAURUS.id });
+      });
+
+      test('"We bought two bottles of Taurus SC 9-27-26" grounds — Taurus SC has no analysis to conflict with', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt: 'We bought two bottles of Taurus SC 9-27-26',
+          preview: { product: { id: TAURUS.id, name: TAURUS.name }, movement_type: 'restock' },
+        });
+        expect(result).toEqual({ productId: TAURUS.id });
+      });
+
+      // A product that DOES carry an analysis in its identity still refuses
+      // a mismatched one — the fix narrows WHEN the check applies, it never
+      // weakens the check itself.
+      test('"We bought two bottles of K-Flow 0-0-20" still refuses — K-Flow\'s own identity names 0-0-25', async () => {
+        setGroundingDb({ products: [K_FLOW, ALPINE], aliases: K_FLOW_ALIASES });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt: 'We bought two bottles of K-Flow 0-0-20',
+          preview: { product: { id: K_FLOW.id, name: K_FLOW.name } },
+        });
+        expect(result).toMatchObject({ code: 'target_clarification_required' });
+      });
+
+      test('"We bought two bottles of K-Flow 0/0/20" still refuses — the "/" separator reads the same repeated-separator analysis', async () => {
+        setGroundingDb({ products: [K_FLOW, ALPINE], aliases: K_FLOW_ALIASES });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt: 'We bought two bottles of K-Flow 0/0/20',
+          preview: { product: { id: K_FLOW.id, name: K_FLOW.name } },
+        });
+        expect(result).toMatchObject({ code: 'target_clarification_required' });
+      });
+
+      test('a mismatched analysis grounds an unrelated product that DOES carry an analysis, "We bought two bottles of K-Flow 0-0-25, 1-1/2 gallons"', async () => {
+        setGroundingDb({ products: [K_FLOW, ALPINE], aliases: K_FLOW_ALIASES });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt: 'We bought two bottles of K-Flow 0-0-25, 1-1/2 gallons',
+          preview: { product: { id: K_FLOW.id, name: K_FLOW.name }, movement_type: 'restock' },
+        });
+        expect(result).toEqual({ productId: K_FLOW.id });
+      });
+
+      // "1-1/2" is never read as an analysis (mixed separators), so it's
+      // ordinary closed-vocabulary quantity text and remains a bare
+      // follow-up after a turn that named the product.
+      test('"1-1/2 more gallons" after a K-Flow receipt turn is a bare follow-up', async () => {
+        setGroundingDb({ products: [K_FLOW, ALPINE], aliases: K_FLOW_ALIASES });
+        IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+        IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We received two bottles of K-Flow 0-0-25']);
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt: '1-1/2 more gallons',
+          preview: { product: { id: K_FLOW.id, name: K_FLOW.name }, movement_type: 'restock' },
+          actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 5,
+        });
+        expect(result).toEqual({ productId: K_FLOW.id });
+      });
+    });
+
+    // Codex round-13 P2: a statement about the FUTURE, ability, or
+    // obligation ("We will receive...", "We can receive...") is not a write
+    // instruction any more than a question is — base-form "receive" read as
+    // a completed receipt with no tense check at all, grounding a restock
+    // card for a shipment that hasn't arrived yet. Structural fix:
+    // isNotAnInstruction gates grounding everywhere isQuestion used to
+    // (both the current prompt and every look-back turn).
+    describe('a modal or future statement is never a write instruction, exactly like a question', () => {
+      test.each([
+        'We will receive two bottles of Taurus SC today',
+        'We can receive two bottles of Taurus SC',
+        "We'll receive two bottles of Taurus SC",
+        'We have to receive two bottles of Taurus SC',
+      ])('"%s" refuses — a modal/future statement is not an instruction', async (prompt) => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt,
+          preview: { product: { id: TAURUS.id, name: TAURUS.name }, movement_type: 'restock' },
+        });
+        expect(result).toMatchObject({ code: 'target_clarification_required' });
+      });
+
+      test.each([
+        'Can you receive two bottles of Taurus SC',
+        'Will you log two bottles of Taurus SC',
+        'please receive two bottles of Taurus SC',
+        'We received two bottles of Taurus SC',
+        'We got two cans of Taurus SC',
+        // "to inventory" sits right next to "to <verb>" text elsewhere in
+        // real prompts without ever being an infinitive obligation — the
+        // INFINITIVE_WRITE_RE lead-in requirement (have/has/had/am/is/are/
+        // was/were/got before "to <verb>") is what keeps this grounding.
+        // (Worded as "We added ... to inventory" rather than the literal
+        // imperative "add ... to inventory" because that imperative phrasing
+        // matches the RIGID grammar clause a few lines up in this file —
+        // `^(?:add|record|request|receive|write off) <qty> <unit> of
+        // (.+)$` — which captures the trailing "to inventory" into the
+        // product name and fails to resolve it; that's a separate,
+        // pre-existing gap in the rigid clause's own name/suffix stripping,
+        // not something this round's isNotAnInstruction gate touches.)
+        'We added two bottles of Taurus SC to inventory',
+      ])('"%s" still grounds — a request, a completed receipt, and "cans" as a container unit are not modal statements', async (prompt) => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt,
+          preview: { product: { id: TAURUS.id, name: TAURUS.name }, movement_type: 'restock' },
+        });
+        expect(result).toEqual({ productId: TAURUS.id });
+      });
+
+      test('a modal turn in the look-back stops it, exactly like a question', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+        IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We will receive two bottles of Taurus SC today']);
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt: 'Yes',
+          preview: { product: { id: TAURUS.id, name: TAURUS.name }, movement_type: 'restock' },
+          actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 5,
+        });
+        expect(result).toMatchObject({ code: 'target_clarification_required' });
+      });
+    });
   });
 });

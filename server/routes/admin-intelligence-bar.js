@@ -267,35 +267,32 @@ function sanitizeQueryImages(images) {
 const { CONTINUATION_TURN } = IbThreads;
 
 // Phantom-card guard (see the finalResponse assembly below): text that
-// claims confirmation cards. When the reply claims more cards than the turn
-// created pending actions for, it gets a notice saying how many exist. It is
-// not narrowed to "new" cards: a claim that also mentions a prior card ("a
-// new card to replace the previous card") is still a claim, and the
-// notice's wording is true either way.
-const CARD_CLAIM_RE = /\bcards? below\b|\bconfirm(?:ation)? cards?\b|\bconfirm(?:ation)? buttons?\b|\b(?:click|press|tap|hit|use)\s+(?:the\s+)?confirm\b|\bconfirm(?:ation)? on the cards?\b/i;
+// claims confirmation cards. Rounds 10–13 all found a new prose edge case
+// for turning a card CLAIM into an exact card COUNT ("two confirmation
+// cards below; use both cards below to continue" summed to 4; "I've
+// prepared two confirmation cards for the customer updates and another
+// confirmation card for inventory" undercounted to 2 instead of 3) —
+// counting distinct cards from free text is inherently ambiguous and kept
+// producing one more failing prompt. Structural fix: stop inferring a
+// count from prose entirely. A claim only ever gets one of three
+// responses:
+//   - no CARD_CLAIM_RE claim at all — nothing;
+//   - a claim and this turn created ZERO cards — the existing zero-card
+//     notice (nothing to point the operator at is still the one case worth
+//     a correction, not just information);
+//   - a claim and this turn created ONE OR MORE cards — nothing when the
+//     reply reads as a single-card claim (at most one CARD_PHRASE_RE match,
+//     singular, no cardinal/"both"/"another" — including a bare claim with
+//     no noun phrase at all, "click Confirm"); otherwise ("multi-card
+//     language": more than one CARD_PHRASE_RE match, any plural noun, any
+//     cardinal ≥2, "both", or "another") a single NEUTRAL, TRUTHFUL line
+//     stating the real count — never a claim about whether the reply's own
+//     count was right, since that's exactly the ambiguous judgment this
+//     fix removes.
 // A confirmation BUTTON claim ("two confirmation buttons below") is read
 // exactly like a card claim (Codex round-12 P2): each pending action is one
 // card with one Confirm button, so the two nouns count the same thing.
-// How many DISTINCT cards a reply claims: a lower bound, not a sum of every
-// numeral in the text (Codex round-11 P2: "I've prepared two confirmation
-// cards below; use both cards below to continue" summed 2 + 2 ("both") = 4
-// for a reply that created only 2). Every card-noun-phrase in the text
-// sorts into one of three buckets, each read independently, then the
-// claimed count is the MAX across buckets — never their sum, since a
-// plural/cardinal phrase and an indefinite-singular phrase can equally well
-// be re-describing the SAME cards:
-//   - indefinite singular ("a card", "an … card", "one card", "another
-//     card") — each occurrence names a DIFFERENT new card, so these SUM;
-//   - plural/cardinal ("two cards", "both cards", an unnumbered plural
-//     "cards") — every one of these describes the SAME shared set, so the
-//     largest one found wins, never added to another;
-//   - definite singular ("the card", "this card", "that card", "your
-//     card") or a bare mention with no determiner at all — too ambiguous to
-//     say whether it's a new card or a repeat of one already counted, so it
-//     only ever contributes a floor of 1, exactly like round-10's fix for
-//     "a confirmation card ... the card below" being one card however often
-//     it's named.
-const CARD_INDEFINITE_SINGULAR_WORDS = new Set(['a', 'an', 'one', 'another']);
+const CARD_CLAIM_RE = /\bcards? below\b|\bconfirm(?:ation)? cards?\b|\bconfirm(?:ation)? buttons?\b|\b(?:click|press|tap|hit|use)\s+(?:the\s+)?confirm\b|\bconfirm(?:ation)? on the cards?\b/i;
 const CARD_CARDINAL_WORDS = { two: 2, three: 3, four: 4, five: 5, six: 6, both: 2 };
 const CARD_DETERMINER_ALT = '\\d+|a|an|one|two|three|four|five|six|another|both|the|this|that|your';
 const CARD_PHRASE_RE = new RegExp(
@@ -307,29 +304,26 @@ function cardinalValue(determiner) {
   const n = Number(determiner);
   return Number.isFinite(n) && n >= 2 ? n : null;
 }
-function claimedCardCount(text) {
-  if (!CARD_CLAIM_RE.test(text)) return 0;
-  let indefiniteSingularSum = 0;
-  let pluralCardinalMax = 0;
-  let singularFloor = 0;
-  let sawAnyPhrase = false;
-  for (const [, word, noun, nounBelow] of String(text).matchAll(CARD_PHRASE_RE)) {
-    sawAnyPhrase = true;
+// "Multi-card language": any signal in the reply's own wording that it
+// might be describing more than one card. Never a count — just a trigger
+// for switching from silence to the truthful server-side line.
+function hasMultiCardLanguage(text) {
+  const matches = [...String(text).matchAll(CARD_PHRASE_RE)];
+  if (matches.length > 1) return true;
+  return matches.some(([, word, noun, nounBelow]) => {
     const determiner = (word || '').toLowerCase();
-    const isPlural = /s$/i.test(noun || nounBelow);
-    const cardinal = cardinalValue(determiner);
-    if (cardinal != null) pluralCardinalMax = Math.max(pluralCardinalMax, cardinal);
-    else if (isPlural) pluralCardinalMax = Math.max(pluralCardinalMax, 2);
-    else if (determiner === '1' || CARD_INDEFINITE_SINGULAR_WORDS.has(determiner)) indefiniteSingularSum += 1;
-    else singularFloor = 1;
-  }
-  if (!sawAnyPhrase) return 1; // a claim with no noun phrase ("click Confirm") is one card
-  return Math.max(indefiniteSingularSum, pluralCardinalMax, singularFloor);
+    if (/s$/i.test(noun || nounBelow || '')) return true;
+    if (determiner === 'both' || determiner === 'another') return true;
+    return cardinalValue(determiner) != null;
+  });
 }
-function phantomCardNotice(created) {
-  if (created === 0) return "This reply didn't create a confirmation card. If you want a change, ask again and say exactly what to change.";
-  return `Only ${created} confirmation card${created === 1 ? ' was' : 's were'} created for this reply. `
-    + 'If something is missing, ask again and say exactly what to change.';
+function cardClaimNotice(text, created) {
+  if (!CARD_CLAIM_RE.test(text)) return null;
+  if (created === 0) {
+    return "This reply didn't create a confirmation card. If you want a change, ask again and say exactly what to change.";
+  }
+  if (!hasMultiCardLanguage(text)) return null;
+  return `${created} confirmation card${created === 1 ? ' was' : 's were'} created for this reply.`;
 }
 
 function hasImageTaintedHistory(conversationHistory) {
@@ -2659,8 +2653,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // before analytics logging and thread persistence, so the logged and
     // persisted text match what the operator sees. The notice is
     // tool-agnostic: it never names a specific field.
-    if (claimedCardCount(finalResponse) > pendingProposals.length) {
-      finalResponse += `\n\n${phantomCardNotice(pendingProposals.length)}`;
+    {
+      const cardNotice = cardClaimNotice(finalResponse, pendingProposals.length);
+      if (cardNotice) finalResponse += `\n\n${cardNotice}`;
     }
 
     // Log the query for analytics. tool_calls stores names + field keys only;

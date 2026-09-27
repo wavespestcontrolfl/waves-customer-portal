@@ -230,7 +230,7 @@ test('a claim after a semicolon is its own clause: the earlier-card mention befo
   });
 });
 
-test('a reply claiming more cards than this turn created gets a notice with the real count', async () => {
+test('a reply with multi-card language gets a truthful count line, not a claim about whether it matched', async () => {
   mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
   mockExecuteTool.mockImplementation(async () => ({
     preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
@@ -243,11 +243,11 @@ test('a reply claiming more cards than this turn created gets a notice with the 
     const { status, body } = await postQuery(baseUrl, { prompt: 'set Test Customer city to Venice', context: 'customers' });
     expect(status).toBe(200);
     expect(body.pendingActions).toHaveLength(1);
-    expect(body.response).toContain('Only 1 confirmation card was created for this reply.');
+    expect(body.response).toContain('1 confirmation card was created for this reply.');
   });
 });
 
-test('every card claim in a reply is counted: two singular claims against one created card get the notice', async () => {
+test('every card claim in a reply counts toward multi-card language: two singular claims against one created card get the truthful line', async () => {
   mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
   mockExecuteTool.mockImplementation(async () => ({
     preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
@@ -260,19 +260,20 @@ test('every card claim in a reply is counted: two singular claims against one cr
     const { status, body } = await postQuery(baseUrl, { prompt: 'set Test Customer city to Venice', context: 'customers' });
     expect(status).toBe(200);
     expect(body.pendingActions).toHaveLength(1);
-    expect(body.response).toContain('Only 1 confirmation card was created for this reply.');
+    expect(body.response).toContain('1 confirmation card was created for this reply.');
   });
 });
 
-// Codex round-11 P2: claimedCardCount used to just ADD every numeral it
-// found, so "I've prepared two confirmation cards below; use both cards
-// below to continue" summed 2 ("two") + 2 ("both") = 4 for a reply that
-// created only 2 real cards — a false partial-card notice on a correct
-// reply. Fixed structurally: the claimed count is a LOWER BOUND (the max
-// across indefinite-singular / plural-cardinal / definite-singular
-// buckets), never a sum of every plural/cardinal phrase, since "two cards"
-// and "both cards" describe the SAME set.
-test('the finding\'s own reply is not a phantom card: "two" and "both" describe the same 2 cards, not 2+2', async () => {
+// Codex rounds 10-13 each found a new way for prose-based card COUNTING to
+// misfire: round 11's "two confirmation cards below; use both cards below
+// to continue" summed to 4 against 2 real cards; round 13's "I've prepared
+// two confirmation cards for the customer updates and another confirmation
+// card for inventory" undercounted to 2 when the claim actually names 3.
+// Structural fix (this round): stop trying to parse an exact claimed count
+// out of prose at all. Multi-card language just switches the guard from
+// silence to a plain, always-true statement of the real count — so it
+// reads the same whether the reply's own phrasing was right or wrong.
+test('the round-11 finding\'s reply ("two" and "both" describing the same 2 cards) still gets the neutral truthful line', async () => {
   mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
   mockExecuteTool.mockImplementation(async () => ({
     preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
@@ -292,10 +293,38 @@ test('the finding\'s own reply is not a phantom card: "two" and "both" describe 
     expect(status).toBe(200);
     expect(body.pendingActions).toHaveLength(2);
     expect(body.response).not.toContain(NOTICE);
+    expect(body.response).toContain('2 confirmation cards were created for this reply.');
   });
 });
 
-test('a lower-bound mismatch is still caught: "two confirmation cards ... both confirmation cards" against one created card gets the real count', async () => {
+// Codex round-13 P2: the old MAX-across-buckets logic read "two ... and
+// another" as 2 (the plural bucket's max), never summing past it, so a
+// reply naming 3 cards for a turn that made only 2 was never flagged. The
+// structural fix has no count to get wrong — it just states the truth.
+test('the round-13 finding\'s reply ("two ... and another") gets the truthful count for what this turn actually created', async () => {
+  mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
+  mockExecuteTool.mockImplementation(async () => ({
+    preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
+  }));
+  mockCreatePendingAction
+    .mockResolvedValueOnce({ id: 'pending-1', tool_name: 'update_customer', summary: 'update_customer', expires_at: new Date(Date.now() + 600000).toISOString() })
+    .mockResolvedValueOnce({ id: 'pending-2', tool_name: 'update_customer', summary: 'update_customer', expires_at: new Date(Date.now() + 600000).toISOString() });
+  scriptModelTurns([
+    [
+      { type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } },
+      { type: 'tool_use', id: 'tu_2', name: 'update_customer', input: { customer_id: 'c2', updates: { city: 'Sarasota' } } },
+    ],
+    [{ type: 'text', text: "I've prepared two confirmation cards for the customer updates and another confirmation card for inventory." }],
+  ]);
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'set Test Customer city and state', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.pendingActions).toHaveLength(2);
+    expect(body.response).toContain('2 confirmation cards were created for this reply.');
+  });
+});
+
+test('a mismatch still gets the truthful count: "two confirmation cards ... both confirmation cards" against one created card', async () => {
   mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
   mockExecuteTool.mockImplementation(async () => ({
     preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
@@ -308,13 +337,13 @@ test('a lower-bound mismatch is still caught: "two confirmation cards ... both c
     const { status, body } = await postQuery(baseUrl, { prompt: 'set Test Customer city to Venice', context: 'customers' });
     expect(status).toBe(200);
     expect(body.pendingActions).toHaveLength(1);
-    expect(body.response).toContain('Only 1 confirmation card was created for this reply.');
+    expect(body.response).toContain('1 confirmation card was created for this reply.');
   });
 });
 
 // Codex round-12 P2: a button claim ("two confirmation buttons below") is
-// counted with the same cardinality logic as a card claim.
-test('a plural confirmation-button claim counts like cards: "two confirmation buttons" against one created card gets the real count', async () => {
+// read as multi-card language exactly like a plural card claim.
+test('a plural confirmation-button claim reads as multi-card language like a plural card claim', async () => {
   mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
   mockExecuteTool.mockImplementation(async () => ({
     preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
@@ -327,14 +356,13 @@ test('a plural confirmation-button claim counts like cards: "two confirmation bu
     const { status, body } = await postQuery(baseUrl, { prompt: 'set Test Customer city to Venice', context: 'customers' });
     expect(status).toBe(200);
     expect(body.pendingActions).toHaveLength(1);
-    expect(body.response).toContain('Only 1 confirmation card was created for this reply.');
+    expect(body.response).toContain('1 confirmation card was created for this reply.');
   });
 });
 
-// Indefinite-singular references ("a card", "another card") each name a
-// DIFFERENT card and sum; a plural/cardinal reference ("both confirmation
-// cards") describing the same set never adds on top of that sum.
-test('indefinite-singular references sum to the real distinct-card count, unaffected by a plural restating the same set', async () => {
+// "another" is multi-card language on its own (a second, different card),
+// same as "both" — both created cards get the truthful line.
+test('"a card ... and another card ... both cards" is multi-card language and gets the truthful count', async () => {
   mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
   mockExecuteTool.mockImplementation(async () => ({
     preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
@@ -353,15 +381,17 @@ test('indefinite-singular references sum to the real distinct-card count, unaffe
     const { status, body } = await postQuery(baseUrl, { prompt: 'set Test Customer city and state', context: 'customers' });
     expect(status).toBe(200);
     expect(body.pendingActions).toHaveLength(2);
-    expect(body.response).not.toContain(NOTICE);
+    expect(body.response).toContain('2 confirmation cards were created for this reply.');
   });
 });
 
-// A definite-singular reference and an indefinite-singular reference to a
-// single created card contribute a floor of 1 each, taken by max — never
-// summed to 2 (the same class of bug round-10 fixed for two unnumbered
-// mentions, now also proven across a mixed indefinite + definite pair).
-test('an indefinite mention and a later definite mention of the same one card do not sum to 2', async () => {
+// Two singular card-phrase mentions (even of what is plainly the SAME
+// card) are still more than one CARD_PHRASE_RE match, so this also reads as
+// multi-card language and gets the same neutral, truthful line — the
+// simplification this round makes deliberately stops trying to tell "two
+// mentions of one card" apart from "two different cards" in prose, since
+// telling the truth about the real count costs nothing either way.
+test('two singular mentions of the same one card still get the truthful line (no longer specially exempted)', async () => {
   mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
   mockExecuteTool.mockImplementation(async () => ({
     preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
@@ -375,10 +405,11 @@ test('an indefinite mention and a later definite mention of the same one card do
     expect(status).toBe(200);
     expect(body.pendingActions).toHaveLength(1);
     expect(body.response).not.toContain(NOTICE);
+    expect(body.response).toContain('1 confirmation card was created for this reply.');
   });
 });
 
-test('an unnumbered card mentioned twice is still one card: no notice when one was created', async () => {
+test('an unnumbered card mentioned twice also gets the truthful line (two CARD_PHRASE_RE matches)', async () => {
   mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
   mockExecuteTool.mockImplementation(async () => ({
     preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
@@ -391,7 +422,49 @@ test('an unnumbered card mentioned twice is still one card: no notice when one w
     const { status, body } = await postQuery(baseUrl, { prompt: 'set Test Customer city to Venice', context: 'customers' });
     expect(status).toBe(200);
     expect(body.pendingActions).toHaveLength(1);
-    expect(body.response).not.toContain('Only 1 confirmation card');
+    expect(body.response).toContain('1 confirmation card was created for this reply.');
+  });
+});
+
+// A claim with exactly one singular card phrase — the common case — gets
+// no noise at all: no zero-card notice (a card WAS created) and no
+// truthful-count line either (nothing ambiguous to clarify).
+test('a claim with exactly one singular card phrase and a created card gets no notice at all', async () => {
+  mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
+  mockExecuteTool.mockImplementation(async () => ({
+    preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
+  }));
+  scriptModelTurns([
+    [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } }],
+    [{ type: 'text', text: "I've prepared a confirmation card below." }],
+  ]);
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'set Test Customer city to Venice', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.pendingActions).toHaveLength(1);
+    expect(body.response).not.toContain(NOTICE);
+    expect(body.response).not.toContain('confirmation card was created');
+    expect(body.response).not.toContain('confirmation cards were created');
+  });
+});
+
+// A claim with no card/button noun phrase at all ("click Confirm") and a
+// created card also gets no notice.
+test('a bare claim with no noun phrase ("click Confirm") and a created card gets no notice', async () => {
+  mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
+  mockExecuteTool.mockImplementation(async () => ({
+    preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
+  }));
+  scriptModelTurns([
+    [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } }],
+    [{ type: 'text', text: 'Click Confirm below to proceed.' }],
+  ]);
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'set Test Customer city to Venice', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.pendingActions).toHaveLength(1);
+    expect(body.response).not.toContain(NOTICE);
+    expect(body.response).not.toContain('confirmation card was created');
   });
 });
 
