@@ -223,8 +223,11 @@ const REPORT_MEASUREMENT_AFTER_NUMBER_RE = new RegExp(String.raw`^\s*${REPORT_ME
 // Past access actions can legitimately be followed by a service date or a
 // labeled property/unit identifier. Inspect each bounded numeric candidate so
 // those structured values stay legal without exempting an unlabeled number.
-const REPORT_PAST_ACCESS_DEVICE_RE = /\b(?:opened|unlocked|accessed|entered)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b((?:\.(?=\d)|[^\n.!?])*)/gi;
+const REPORT_PAST_ACCESS_DEVICE_RE = /\b(?:opened|unlocked|accessed|entered)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b/gi;
+const REPORT_PAST_ACCESS_CONTEXT_RE = /\b(?:opened|unlocked|accessed|entered)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b/i;
 const REPORT_PAST_ACCESS_NUMBER_RE = /\b\d{3,8}\b(?!\.\d)/g;
+const REPORT_STRUCTURED_DATE_RE = /\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b/g;
+const REPORT_AFFIXED_OR_GROUPED_NUMBER_RE = /(?:\b[A-Za-z#*]+\d[A-Za-z0-9#*]*\b|\b\d[A-Za-z0-9#*]*[A-Za-z#*]\b|\b\d{1,2}(?:[\s–—-]+\d{1,2}){1,7}\b)/;
 
 function isStructuredDateNumber(value, index, length) {
   const before = value.slice(Math.max(0, index - 14), index);
@@ -236,8 +239,8 @@ function isStructuredDateNumber(value, index, length) {
 function containsPastAccessCredential(text) {
   const value = String(text || '');
   for (const relationship of value.matchAll(REPORT_PAST_ACCESS_DEVICE_RE)) {
-    const tail = relationship[1];
-    const tailOffset = relationship.index + relationship[0].length - tail.length;
+    const tailOffset = relationship.index + relationship[0].length;
+    const tail = value.slice(tailOffset).match(/^(?:\.(?=\d)|[^\n.!?])*/)?.[0] || '';
     for (const numeric of tail.matchAll(REPORT_PAST_ACCESS_NUMBER_RE)) {
       if (numeric.index > 20) break;
       const index = tailOffset + numeric.index;
@@ -370,7 +373,7 @@ function accessCodeDetectionText(text) {
 // "Opened rear gate, applied 100 ml around hinges" has no access connector.
 const REPORT_DIRECT_ACCESS_CODE_RES = [
   /\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,
-  new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b(?:\s+(?!(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|broadcast(?:ed|ing)?|spread(?:ing)?|distribut(?:e|ed|ing))\b)[a-z][a-z'’\-]*){1,5}\s+(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b`, 'i'),
+  new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b(?:\s+(?!(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|broadcast(?:ed|ing)?|spread(?:ing)?|distribut(?:e|ed|ing)|spray(?:ed|ing)?|dust(?:ed|ing)?|clean(?:ed|ing)?)\b)[a-z][a-z'’\-]*){1,5}\s+(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b`, 'i'),
   new RegExp(String.raw`\b\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:(?:to|for)\s+)?(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,20}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b`, 'i'),
   new RegExp(String.raw`\b(?:enter|entering|type|typing|press|pressing|punch(?:ing)?|input(?:ting)?|try|trying)\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b`, 'i'),
   new RegExp(String.raw`\b(?:use|using)\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s+(?:to|for)\s+(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b`, 'i'),
@@ -383,6 +386,15 @@ function containsReportAccessCode(text) {
   const raw = String(text || '');
   if (containsExplicitNumericCredential(raw)) return true;
   if (containsPastAccessCredential(raw)) return true;
+  if (REPORT_PAST_ACCESS_CONTEXT_RE.test(raw)) {
+    const normalizedPastInput = raw
+      .replace(REPORT_STRUCTURED_DATE_RE, '[structured-date]')
+      .replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]');
+    if (REPORT_AFFIXED_OR_GROUPED_NUMBER_RE.test(normalizedPastInput)) {
+      const normalizedPastRelationships = accessCodeDetectionText(normalizedPastInput);
+      if (containsPastAccessCredential(normalizedPastRelationships)) return true;
+    }
+  }
   // Direct token-to-device relationships outrank fertilizer context. Check the
   // original copy before an application qualifier can mask an N-P-K-shaped
   // credential ("Applied override 24-0-11 to open the rear gate").

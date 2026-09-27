@@ -135,6 +135,10 @@ describe('custom action credential screening', () => {
     'Opened rear gate using unit2468',
     'The gate opens with unit2468',
     'Use unit2468 to open the rear gate',
+    'Opened rear gate on 24-68',
+    'Opened rear gate on AB2468',
+    'Opened rear gate on 2 4 6 8',
+    'Opened rear gate on 9/27/2026, checked the hinges, and opened the side door on 2468',
   ])('rejects recorded access credentials: %s', (action) => {
     expect(customerCopyViolations(action)).toContain('access_code');
   });
@@ -181,6 +185,9 @@ describe('custom action credential screening', () => {
     'APPLIED LESCO 24-0-11 AFTER OPENING THE REAR GATE',
     'APPLIED LESCO 24-0-11 WHILE OPENING THE REAR GATE',
     'Using 100 ml at the rear gate before opening it, we treated the hinge area',
+    'Opened rear gate and sprayed with 100 ml',
+    'Opened rear gate and dusted with 100 grams',
+    'Opened rear gate and cleaned with 100 ml',
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
   });
@@ -219,6 +226,10 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Opened rear gate using unit2468',
     'The gate opens with unit2468',
     'Use unit2468 to open the rear gate',
+    'Opened rear gate on 24-68',
+    'Opened rear gate on AB2468',
+    'Opened rear gate on 2 4 6 8',
+    'Opened rear gate on 9/27/2026, checked the hinges, and opened the side door on 2468',
   ])('does not publish disguised access instructions: %s', (instruction) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${instruction}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toBeNull();
@@ -258,6 +269,9 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'APPLIED LESCO 24-0-11 AFTER OPENING THE REAR GATE',
     'APPLIED LESCO 24-0-11 WHILE OPENING THE REAR GATE',
     'Using 100 ml at the rear gate before opening it, we treated the hinge area',
+    'Opened rear gate and sprayed with 100 ml',
+    'Opened rear gate and dusted with 100 grams',
+    'Opened rear gate and cleaned with 100 ml',
   ])('publishes bounded material, date, unit-id, and fertilizer details: %s', (action) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${action}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toContain(action);
