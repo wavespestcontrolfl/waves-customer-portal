@@ -119,28 +119,17 @@ const WITNESS_TRANSITION_STATUSES = Object.freeze(['confirmed', 'rescheduled', '
 // payment go through?" asks about a setup fee, Codex #4996 r5), nor a payment
 // as the thing changed ("did you add my cash payment?" asks whether it was
 // recorded, r7): the change must be to a card, method, autopay or billing.
-const NOT_ANSWERED_BY_PAYMENT = /\b(?:(?:two|2|multiple)\s+(?:payment\s+)?(?:methods|cards)|(?:update|change|switch|replace|remove|add|set up|cancel|turn (?:on|off))\s+(?:\w+\s+){0,3}?(?:cards?|methods?|autopay|auto ?pay|billing)|setup\s+(?:autopay|auto ?pay)|refund\w*|disput\w*|chargeback\w*|overcharg\w*|double[- ]?charg\w*)\b/gi;
-// A term the customer negates names what they are NOT asking for: "Don't
-// refund it, did my payment go through?", "I don't want to change my card —
-// did the charge land?" (Codex #4996 r2). A negation counts only inside the
-// term's own clause: within four words before it, or three after ("a refund
-// isn't needed"). "Can't"/"haven't" are not negations of the ask ("I can't
-// update my card online", "you haven't refunded me"). Reading a real request
-// as negated only hands it to the model, whose prompt already says a payment
-// never answers a refund or a change of how the customer pays.
-const NEGATION = /\b(?:not|no|never|without|nor|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|shouldn'?t|isn'?t|aren'?t|wasn'?t|needn'?t|instead of|rather than)\b/i;
-function negatedIn(clause, match) {
-  const before = clause.slice(0, match.index).trim().split(/\s+/).slice(-4).join(' ');
-  const after = clause.slice(match.index + match[0].length).trim().split(/\s+/).slice(0, 3).join(' ');
-  return NEGATION.test(before) || NEGATION.test(after);
-}
-// The ask itself decides. The extractor grounds a description as a verbatim
-// phrase of its quote naming the requested action (groundExtraction), so
-// when it is found there the rest of the quote is context: a clause that
-// only narrates ("I set up autopay on Friday. Did the first payment go
-// through?") must not make money unable to answer the question (Codex #4996
-// review before r10). A description not found in its quote is read with the
-// quotes, as before.
+const NOT_ANSWERED_BY_PAYMENT = /\b(?:(?:two|2|multiple)\s+(?:payment\s+)?(?:methods|cards)|(?:update|change|switch|replace|remove|add|set up|cancel|turn (?:on|off))\s+(?:\w+\s+){0,3}?(?:cards?|methods?|autopay|auto ?pay|billing)|setup\s+(?:autopay|auto ?pay)|refund\w*|disput\w*|chargeback\w*|overcharg\w*|double[- ]?charg\w*)\b/i;
+// The ask itself decides, whatever its grammar. The extractor grounds a
+// description as a verbatim phrase of its quote naming the requested action
+// (groundExtraction), so when it is found there the rest of the quote is
+// context: a clause beside the ask that narrates ("I set up autopay on
+// Friday. Did the first payment go through?") or declines ("Don't refund it;
+// did my payment go through?") never shuts money out (Codex #4996 r2, review
+// before r10). Inside the ask any such term does, however it is negated:
+// "you did not refund me" and "no refund has arrived" are refund
+// complaints, not a refund declined (r11). A description not found in its
+// quote is read with the quotes.
 function askText(commitment) {
   const description = String(commitment.description || '');
   const quotes = (Array.isArray(commitment.evidence) ? commitment.evidence : []).map((item) => item?.quote || '');
@@ -148,8 +137,7 @@ function askText(commitment) {
   return [description, ...quotes].join('\n');
 }
 function paymentCanAnswer(commitment) {
-  return askText(commitment).replace(/[‘’]/g, "'").split(/[.,;:!?\n–—]+/)
-    .every((clause) => [...clause.matchAll(NOT_ANSWERED_BY_PAYMENT)].every((match) => negatedIn(clause, match)));
+  return !NOT_ANSWERED_BY_PAYMENT.test(askText(commitment));
 }
 
 // The keys a payments row names its invoice by, as the Stripe webhook's
@@ -173,14 +161,16 @@ const NOT_FULLY_REFUNDED = (t) => `COALESCE(${t}.refund_amount, 0) < ${t}.amount
 const FEE_PURPOSES = ['card_hold_no_show_fee', 'appointment_card_no_show_fee'];
 // The one test of whether a payments row can be money landing, shared by
 // both payment legs and the watcher's event page (sms-operational-actions.js):
-// settled; the customer's own (a third-party payer's money never is, rule 5);
+// settled; the customer's own (a third-party payer's money never is, rule 5:
+// the payer column that customer-keyed payment readers exclude, or the payer
+// a webhook stamps in metadata);
 // not a prepaid balance applied at completion (the invoice leg explains);
 // not a fee; not refunded in full; and no refund in flight —
 // StripeService.refund stamps pending_refund_key before it calls Stripe and
 // clears it only once Stripe has answered, so a row carrying it may be
 // refunded at any moment (Codex #4996 r9).
 const paymentEvidenceRow = (t) => `${t}.status = 'paid'
-  AND COALESCE(${t}.metadata::jsonb ->> 'payer_id', '') = ''
+  AND ${t}.payer_id IS NULL AND COALESCE(${t}.metadata::jsonb ->> 'payer_id', '') = ''
   AND COALESCE(${t}.metadata::jsonb ->> 'source', '') <> 'scheduled_service_prepaid'
   AND COALESCE(${t}.metadata::jsonb ->> 'purpose', '') NOT IN (${FEE_PURPOSES.map((purpose) => `'${purpose}'`).join(', ')})
   AND COALESCE(${t}.metadata::jsonb ->> 'pending_refund_key', '') = ''
@@ -319,6 +309,19 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // clears (stripe-webhook.js), so created_at is the wrong clock there.
       const settledAt = (alias) => `COALESCE((${alias}.metadata::jsonb ->> 'settled_event_at')::timestamptz, ${alias}.created_at)`;
       const settledAtSql = settledAt('p');
+      // An ask is scoped to a property only when the customer has one active
+      // property (intake). When it is the only property the customer has
+      // ever had, every payment of theirs is for it, so a payment nothing
+      // ties to a property (an office invoice, autopay, a staff-recorded
+      // payment) belongs to it too. A customer with a property history keeps
+      // the explicit links alone. The close holds the customer row, which a
+      // property being added or moved to the customer waits on (its foreign
+      // key), so this cannot change under a close (Codex #4996 r11).
+      const scopedProperty = commitment.sms_context?.property_id || null;
+      const onlyProperty = scopedProperty
+        ? conn('customer_properties').where({ customer_id: customerId }).limit(2).pluck('id')
+          .then((ids) => (ids.length === 1 && ids[0] === scopedProperty ? scopedProperty : null))
+        : null;
       return Promise.all([
         // Every settled payment toward one of this customer's invoices, one
         // record each: two installments after the question are two answers,
@@ -347,13 +350,15 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .joinRaw(`JOIN invoices pinv ON pinv.customer_id = p.customer_id AND pinv.payer_id IS NULL
             AND (${exactMatchSql} OR ${manualMatchSql} OR ${sharedPiSql})`)
           .leftJoin('scheduled_services as pinv_visit', 'pinv_visit.id', 'pinv.scheduled_service_id')
-          // A setup-only invoice from an estimate has no visit; its setup-fee
-          // claim (one per invoice) keeps the estimate, and so the property
-          // (Codex #4996 r5). So does an annual-prepay invoice through its
-          // term (one per invoice) and the estimate the term came from (r10).
-          // A property-scoped close holds each of these rows
-          // (holdsPaymentProperty).
+          // A setup-only invoice has no visit; its setup-fee claim (one per
+          // invoice) keeps the series visit it was booked for or the estimate
+          // it came from, and so the property (Codex #4996 r5, r11: a
+          // Customer 360 prepay for a direct series). So does an
+          // annual-prepay invoice through its term (one per invoice) and the
+          // estimate the term came from (r10). A property-scoped close holds
+          // each of these rows (holdsPaymentProperty).
           .leftJoin('setup_fee_claims as sfc', 'sfc.invoice_id', 'pinv.id')
+          .leftJoin('scheduled_services as sfc_visit', 'sfc_visit.id', 'sfc.scheduled_service_id')
           .leftJoin('estimates as sfc_estimate', 'sfc_estimate.id', 'sfc.estimate_id')
           .leftJoin('annual_prepay_terms as prepay_term', 'prepay_term.prepay_invoice_id', 'pinv.id')
           .leftJoin('estimates as prepay_estimate', 'prepay_estimate.id', 'prepay_term.source_estimate_id')
@@ -374,7 +379,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .select('p.id', 'p.amount as payment_amount', 'p.base_amount_cents', 'p.surcharge_amount_cents', 'p.refund_amount',
             ...tenderColumns(conn, 'p', invoiceTender),
             conn.raw(`${settledAtSql} AS settled_at`), 'pinv.id as invoice_id', 'pinv.title', 'pinv.service_type', 'pinv.invoice_number',
-            conn.raw('COALESCE(pinv_visit.property_id, sfc_estimate.property_id, prepay_estimate.property_id) AS property_id'),
+            conn.raw('COALESCE(pinv_visit.property_id, sfc_visit.property_id, sfc_estimate.property_id, prepay_estimate.property_id) AS property_id'),
             conn.raw('COALESCE(p.stripe_payment_intent_id, p.id::text) AS charge_key'),
             conn.raw('pinv.paid_at IS NOT NULL AS paid_in_full'))
           .as('invoice_payments'))
@@ -384,8 +389,9 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         // /:id/credits), and customer-level Stripe charges such as the
         // monthly autopay dues (billing-cron.js), which carry a
         // PaymentIntent but no invoice (Codex #4996 r2). It carries no
-        // property — an unlinked payment never vouches for a property-scoped
-        // ask (rule 6). Never a row the invoice leg claims, through the
+        // property of its own: it vouches for a property-scoped ask only as
+        // money of a customer whose only property that is (rule 6, above).
+        // Never a row the invoice leg claims, through the
         // manual-settlement stamp (Codex round 1 P1-A) or a shared
         // PaymentIntent: no double count.
         conn('payments as lp').leftJoin('payment_methods as lp_method', 'lp_method.id', 'lp.payment_method_id')
@@ -421,13 +427,14 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .orderBy('ed.received_at', 'desc').limit(LIMIT + 1)
           .select('ed.id', 'ed.estimate_id', 'ed.amount', 'ed.card_surcharge', 'ed.refunded_amount', 'ed.received_at',
             'estimates.property_id as property_id', 'estimates.service_interest'),
-      ]).then(([invoicePayments, ledger, deposits]) => {
+        onlyProperty,
+      ]).then(([invoicePayments, ledger, deposits, soleProperty]) => {
         // The tender columns reach the model only through tenderText.
         const untendered = ({ method_type: _type, card_brand: _brand, last_four: _lastFour, method: _method, ...row }) => row;
         const legs = [
           invoicePayments.map((payment) => {
             const { paid_in_full: paidInFull, charge_key: _charge, charge_total: chargeTotal, charge_invoices: chargeInvoices, ...row } = untendered(payment);
-            return { ...row, payment_source: 'invoice',
+            return { ...row, property_id: row.property_id || soleProperty, payment_source: 'invoice',
               text: `Payment of ${paidAmount(row.payment_amount, row)}${tenderText(payment)} toward invoice ${row.invoice_number || row.invoice_id}`
                 + `${row.title || row.service_type ? ` (${row.title || row.service_type})` : ''}`
                 + ` received ${etDateString(new Date(row.settled_at))}${refundNote(row.refund_amount)}`
@@ -436,7 +443,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           }),
           ledger.map((payment) => {
             const { billed_month: billedMonth, ...row } = untendered(payment);
-            return { ...row, payment_source: 'ledger', property_id: null,
+            return { ...row, payment_source: 'ledger', property_id: soleProperty,
               text: `Payment of ${paidAmount(row.amount, row)}${tenderText(payment)} recorded ${dateOnlyString(row.payment_date)}`
                 + `${/^\d{4}-\d{2}$/.test(billedMonth || '') ? ` (monthly plan charge for ${billedMonth})` : ''}${refundNote(row.refund_amount)}` };
           }),
@@ -626,12 +633,13 @@ function scopedToProperty(record, commitment) {
     // an unscoped ask never takes cancelled_at, only progressed_at.
     return true;
   }
-  // A settlement question is usually unscoped ("did you receive my
-  // payment?"); only a promise scoped to one property narrows which payment
-  // can answer it (rule 6, Codex #4816 r13 P1). An unscoped ask admits any
-  // of the customer's own payments — the query is already customer-scoped —
-  // but a scoped ask needs the payment tied to THAT property: an unlinked
-  // ledger prepayment (no property at all) can never vouch for it.
+  // Only an ask scoped to one property narrows which payment can answer it
+  // (rule 6, Codex #4816 r13 P1). An unscoped ask admits any of the
+  // customer's own payments — the query is already customer-scoped — but a
+  // scoped ask needs the payment tied to THAT property: through its links,
+  // or because it is the only property the customer has ever had (the loader
+  // attributes a payment with no link to it). Otherwise an unlinked payment
+  // never vouches for it.
   if (record.type === 'payment') return !propertyId || witnessProperty === propertyId;
   return !!propertyId && witnessProperty === propertyId;
 }
@@ -831,14 +839,14 @@ async function holdsLeadOwnership(trx, estimateId, customerId) {
 }
 
 // A property-scoped ask admits an invoice payment through the property of
-// the invoice's own visit or, when it has none, of the estimate its
-// setup-fee claim or annual-prepay term came from. Those rows can change
+// the invoice's own visit or, when it has none, of the visit or estimate its
+// setup-fee claim or annual-prepay term names. Those rows can change
 // under a close (a geocode review repoints a visit), so they are held too,
 // under the same no-wait rule: a busy row fails the close rather than let it
 // rest on a property association that moved after the re-read (Codex #4996
 // r9). The invoice is already held, so its visit link cannot change.
-const ESTIMATE_PROPERTY_LINKS = [
-  { table: 'setup_fee_claims', invoiceColumn: 'invoice_id', estimateColumn: 'estimate_id' },
+const PROPERTY_LINKS = [
+  { table: 'setup_fee_claims', invoiceColumn: 'invoice_id', visitColumn: 'scheduled_service_id', estimateColumn: 'estimate_id' },
   { table: 'annual_prepay_terms', invoiceColumn: 'prepay_invoice_id', estimateColumn: 'source_estimate_id' },
 ];
 async function holdsPaymentProperty(trx, invoiceId) {
@@ -846,12 +854,14 @@ async function holdsPaymentProperty(trx, invoiceId) {
   if (!invoice) return false;
   if (invoice.scheduled_service_id
     && !await trx('scheduled_services').where({ id: invoice.scheduled_service_id }).forUpdate().skipLocked().first('id')) return false;
-  // Each link row (one per invoice), then the estimate it names.
-  for (const { table, invoiceColumn, estimateColumn } of ESTIMATE_PROPERTY_LINKS) {
+  // Each link row (one per invoice), then the visit and estimate it names.
+  for (const { table, invoiceColumn, visitColumn, estimateColumn } of PROPERTY_LINKS) {
     const link = await trx(table).where({ [invoiceColumn]: invoiceId }).first('id');
     if (!link) continue;
-    const held = await trx(table).where({ id: link.id }).forUpdate().skipLocked().first(estimateColumn);
+    const held = await trx(table).where({ id: link.id }).forUpdate().skipLocked().first();
     if (!held) return false;
+    if (visitColumn && held[visitColumn]
+      && !await trx('scheduled_services').where({ id: held[visitColumn] }).forUpdate().skipLocked().first('id')) return false;
     if (held[estimateColumn] && !await trx('estimates').where({ id: held[estimateColumn] }).forUpdate().skipLocked().first('id')) return false;
   }
   return true;

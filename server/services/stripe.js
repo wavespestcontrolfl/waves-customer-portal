@@ -5901,10 +5901,24 @@ const StripeService = {
           // the payments row before it settles the invoice, so /confirm racing
           // (or repairing after) a half-applied webhook must still be able to
           // mark the open invoice paid — money genuinely arrived (Codex P2).
+          // A webhook that flipped the row first stamped Stripe's settlement
+          // moment and, for payer-funded money, the payer; the rewrite keeps
+          // both, or an ACH that settled days after it began would read as
+          // settled when it started and payer money as the homeowner's own
+          // (Codex #4996 r11).
+          let priorMeta = {};
+          try {
+            priorMeta = existingPayment.metadata
+              ? (typeof existingPayment.metadata === 'string' ? JSON.parse(existingPayment.metadata) : existingPayment.metadata) : {};
+          } catch { priorMeta = {}; }
+          const settlementMeta = Object.fromEntries(['settled_event_at', 'payer_id']
+            .filter((key) => priorMeta[key] != null && priorMeta[key] !== '').map((key) => [key, priorMeta[key]]));
           const [record] = await trx('payments')
             .where({ id: existingPayment.id })
             .whereNotIn('status', ['refunded', 'disputed'])
-            .update(paymentPayload)
+            .update(Object.keys(settlementMeta).length
+              ? { ...paymentPayload, metadata: JSON.stringify({ ...JSON.parse(paymentPayload.metadata), ...settlementMeta }) }
+              : paymentPayload)
             .returning('*');
           if (!record) {
             throw new Error('Payment record changed while confirming — refresh the invoice and try again');

@@ -1282,11 +1282,14 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
       'Did you add my cash payment?', 'Can you update me on my payment?']) {
       expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(true);
     }
-    // Codex #4996 r2: a term the customer negates in its own clause is not the request.
-    for (const quote of ["Don't refund it; I only want to know whether my payment went through",
-      "I don't want to change my card, did the charge land?", 'I don’t want to change my card — did the charge land?',
-      "A refund isn't needed, did my payment go through?", 'No refund needed. Did you get my check?']) {
-      expect(admissibleWitness(invoicePaid, { kind: 'other', description: 'Did the payment go through?', evidence: [{ quote }] })).toBe(true);
+    // Codex #4996 r2: a refund or method change the customer declines BESIDE the ask is not the request;
+    // the ask is the grounded description, a verbatim phrase of its quote.
+    for (const [quote, description] of [["Don't refund it; I only want to know whether my payment went through", 'whether my payment went through'],
+      ["I don't want to change my card, did the charge land?", 'did the charge land?'],
+      ['I don’t want to change my card — did the charge land?', 'did the charge land?'],
+      ["A refund isn't needed, did my payment go through?", 'did my payment go through?'],
+      ['No refund needed. Did you get my check?', 'Did you get my check?']]) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description, evidence: [{ quote }] })).toBe(true);
     }
     // The ask itself decides: a clause that only narrates a change beside the question does not stop money
     // answering it, while the ask's own words still do (Codex #4996 review before r10).
@@ -1296,9 +1299,16 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     }
     expect(admissibleWitness(invoicePaid, { kind: 'other', description: 'Please refund the double charge',
       evidence: [{ quote: 'You charged me twice. Please refund the double charge' }] })).toBe(false);
-    // A negation elsewhere in the sentence, "can't", or "haven't" leaves the request standing.
-    for (const quote of ['I did not authorize this charge, please refund it', 'No, I want a refund',
-      "I can't update my card online, can you do it?", "You haven't refunded me yet", 'Refund the extra charge not the whole invoice']) {
+    // r11: inside the ask the term counts however it is negated — a refund complaint is a refund request.
+    for (const [quote, description] of [['You did not refund me', 'You did not refund me'], ['I was not refunded', 'I was not refunded'],
+      ['No refund has arrived yet, where is it?', 'No refund has arrived yet'], ["You haven't refunded me yet", "You haven't refunded me yet"],
+      ["Don't refund it, did my payment go through?", "Don't refund it, did my payment go through?"],
+      ['I did not authorize this charge, please refund it', 'please refund it'],
+      ["I can't update my card online, can you do it?", "I can't update my card online, can you do it?"]]) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description, evidence: [{ quote }] })).toBe(false);
+    }
+    // A description not found in its quote (a hand-written row) is read with the quote.
+    for (const quote of ['I did not authorize this charge, please refund it', 'No, I want a refund', 'Refund the extra charge not the whole invoice']) {
       expect(admissibleWitness(invoicePaid, { kind: 'other', description: 'Billing request', evidence: [{ quote }] })).toBe(false);
     }
   });

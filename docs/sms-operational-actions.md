@@ -53,15 +53,18 @@ amount with no money arriving), so a prepayment counts only once it is recorded 
 payment. Nor is a no-show or late-cancellation fee: Waves takes it from the card on file
 and the row carries no settlement time of its own. Account credit, third-party payers,
 refunds and disputes are never money landing, nor is a payment while a refund of it is
-in flight (a partial refund is shown beside the payment it reduces); a payment never
-answers a request to change how the customer pays, though a term the customer negates
-("don't refund it") is not such a request, and only the request itself counts, not a
-clause beside it that narrates ("I set up autopay on Friday"); money tied to another property never answers
-a question about this one; and a staff "received" text never closes it. The model must
-cite the payment, which shows how it was paid (card brand and last four, bank account,
-or the tender staff recorded, including on the invoice a payment settled); the close locks it, the invoice or estimate it depends on, and
-for a question about one property the rows that tie the payment to it, and rechecks it.
-Staff payment notes never reach the model.
+in flight (a partial refund is shown beside the payment it reduces). A payment never
+answers a request for a refund, a dispute or a change of how the customer pays. Only
+the request itself counts: a clause beside it that declines or narrates ("don't refund
+it", "I set up autopay on Friday") does not shut money out, while such a term inside the
+request does, however it is negated ("you did not refund me"). Money tied to another
+property never answers a question about this one, and money tied to no property answers
+one only when that is the only property the customer has ever had. A staff "received"
+text never closes it. The model must cite the payment, which shows how it was paid (card
+brand and last four, bank account, or the tender staff recorded, including on the
+invoice a payment settled); the close locks it, the invoice or estimate it depends on,
+and for a question about one property the rows that tie the payment to it, and rechecks
+it. Staff payment notes never reach the model.
 
 ## Verification
 

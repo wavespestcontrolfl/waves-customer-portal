@@ -31,6 +31,10 @@ const TABLES = ['customers', 'customer_properties', 'property_preferences', 'sms
   'emails', 'email_messages', 'estimates', 'estimate_deposits', 'invoices', 'payments', 'payment_methods', 'payers', 'setup_fee_claims', 'annual_prepay_terms', 'scheduled_services', 'job_status_history', 'reschedule_log', 'system_settings', 'leads', 'messaging_audit_log'];
 let mockPg;
 let admin;
+// A property the customer no longer has: with it on file their scoped asks
+// rest on a payment's explicit links, never on the only-property rule.
+const giveFormerProperty = (customerId) => mockPg('customer_properties').insert({ id: randomUUID(), customer_id: customerId,
+  address_line1: '300 Former Lane', city: 'Sarasota', zip: '34236', active: false });
 let message;
 let result;
 let context;
@@ -1841,7 +1845,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(payments.filter((r) => r.payment_source === 'ledger')).toHaveLength(1);
   });
 
-  test('R2 rule 5: money a third-party payer settles is not the customer\'s own payment (invoices.payer_id and payments.metadata.payer_id)', async () => {
+  test('R2 rule 5: money a third-party payer settles is not the customer\'s own payment (invoices.payer_id, payments.payer_id and payments.metadata.payer_id)', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     const [payer] = await mockPg('payers').insert({ display_name: 'Synthetic Property Manager' }).returning('id');
     const [payerInvoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0412',
@@ -1850,12 +1854,16 @@ postgres('SMS commitments on PostgreSQL', () => {
       metadata: JSON.stringify({ invoice_id: payerInvoice.id, settled_event_at: after.toISOString() }), created_at: after });
     await mockPg('payments').insert({ customer_id: message.customer_id, amount: 300, status: 'paid', payment_date: etDateString(after),
       metadata: JSON.stringify({ payer_id: String(payer.id) }), created_at: after });
+    // The payer column that customer-keyed payment readers exclude (waves-billing invariant 12).
+    await mockPg('payments').insert({ customer_id: message.customer_id, payer_id: payer.id, amount: 200, status: 'paid',
+      payment_date: etDateString(after), metadata: JSON.stringify({}), created_at: after });
     const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
     expect(evidence.records.filter((r) => r.type === 'payment')).toHaveLength(0);
   });
 
-  test('R2 rule 6: a property-scoped ask needs the invoice\'s own visit property; an unlinked ledger payment cannot vouch for it', async () => {
+  test('R2 rule 6: for a customer with a property history, a property-scoped ask needs the invoice\'s own visit property; an unlinked ledger payment cannot vouch for it', async () => {
+    await giveFormerProperty(message.customer_id);
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null, property_id: context.properties[0].id,
       quote: 'Did you receive my payment?', description: 'Did you receive my payment?' };
@@ -2300,6 +2308,7 @@ postgres('SMS commitments on PostgreSQL', () => {
   });
 
   test('Codex #4996 r10: an annual-prepay invoice takes its property from the estimate its term came from, and a scoped close holds the term and that estimate', async () => {
+    await giveFormerProperty(message.customer_id);
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);
     const propertyId = context.properties[0].id;
@@ -2327,6 +2336,66 @@ postgres('SMS commitments on PostgreSQL', () => {
         await writer(table).where({ id }).forUpdate().first('id');
         expect(await closes()).toBe(false);
       } finally { await writer.rollback(); }
+    }
+  });
+
+  test('Codex #4996 r11: a Customer 360 prepay for a direct series takes its property from the series visit its setup-fee claim names, and a scoped close holds that visit', async () => {
+    await giveFormerProperty(message.customer_id);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const propertyId = context.properties[0].id;
+    const [seriesRoot] = await mockPg('scheduled_services').insert({ customer_id: message.customer_id, property_id: propertyId,
+      service_type: 'Rodent Bait Stations', scheduled_date: etDateString(message.created_at), window_start: '09:00:00', status: 'confirmed',
+      created_at: new Date(message.created_at.getTime() - 86400000) }).returning('id');
+    // No visit on the invoice and no estimate on the claim: the series root is the only link (secure-appointment-plans.js).
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-1003',
+      title: 'Rodent annual prepay', total: 480, subtotal: 480, line_items: '[]', status: 'paid', paid_at: after }).returning('id');
+    await mockPg('setup_fee_claims').insert({ invoice_id: invoice.id, scheduled_service_id: seriesRoot.id, amount: 99 });
+    const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 480, status: 'paid', payment_date: etDateString(after),
+      created_at: after, metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: after.toISOString() }) }).returning('id');
+    const commitment = { kind: 'other', description: 'Did my prepayment go through?', sms_context: { property_id: propertyId, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const witness = evidence.records.find((r) => r.id === payment.id);
+    expect(witness).toMatchObject({ invoice_id: invoice.id, property_id: propertyId });
+    const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
+    const verdict = { ...grounded, evidence_hash: fulfillmentFingerprint(commitment, evidence).evidenceHash };
+    const closes = () => mockPg.transaction((trx) => revalidateSmsFulfillment(trx, commitment, message, verdict, now));
+    expect(await closes()).toBe(true);
+    const writer = await mockPg.transaction();
+    try {
+      await writer('scheduled_services').where({ id: seriesRoot.id }).forUpdate().first('id');
+      expect(await closes()).toBe(false);
+    } finally { await writer.rollback(); }
+  });
+
+  test('Codex #4996 r11: money no link ties to a property belongs to the customer\'s only property, and never when they have had another', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const propertyId = context.properties[0].id;
+    // An office invoice with no visit, and the monthly autopay on no invoice.
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-1004',
+      title: 'Service call', total: 95, subtotal: 95, line_items: '[]', status: 'paid', paid_at: after }).returning('id');
+    const row = (amount, metadata) => ({ customer_id: message.customer_id, amount, status: 'paid', payment_date: etDateString(after),
+      created_at: after, metadata: JSON.stringify({ ...metadata, settled_event_at: after.toISOString() }) });
+    const [office, autopay] = await mockPg('payments').insert([row(95, { invoice_id: invoice.id }),
+      row(89, { billed_month: '2026-09' })]).returning('id');
+    const scoped = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: propertyId, source_at: message.created_at.toISOString() } };
+    const unscoped = { ...scoped, sms_context: { property_id: null, source_at: scoped.sms_context.source_at } };
+    const payments = async (commitment) => Object.fromEntries((await loadSmsFulfillmentEvidence(mockPg, commitment, message, now)).records
+      .filter((r) => r.type === 'payment').map((r) => [r.id, r]));
+    const only = await payments(scoped);
+    for (const id of [office.id, autopay.id]) {
+      expect(only[id].property_id).toBe(propertyId);
+      expect(admissibleWitness(only[id], scoped)).toBe(true);
+    }
+    // An unscoped ask attributes nothing: it needs no property.
+    expect((await payments(unscoped))[autopay.id].property_id).toBeNull();
+    // Once the customer has had another property, a payment with no link could be for either.
+    await giveFormerProperty(message.customer_id);
+    const history = await payments(scoped);
+    for (const id of [office.id, autopay.id]) {
+      expect(history[id].property_id).toBeNull();
+      expect(admissibleWitness(history[id], scoped)).toBe(false);
     }
   });
 
@@ -2438,6 +2507,7 @@ postgres('SMS commitments on PostgreSQL', () => {
   });
 
   test('Codex #4996 r5: a setup-only invoice from an estimate is scoped to the estimate\'s property through its setup-fee claim', async () => {
+    await giveFormerProperty(message.customer_id);
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);
     const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,

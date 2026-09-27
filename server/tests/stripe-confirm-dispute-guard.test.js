@@ -220,4 +220,27 @@ describe('StripeService.confirmInvoicePayment dispute guard', () => {
     expect(invoiceUpdate.mock.calls[0][0]).toMatchObject({ status: 'paid' });
     expect(paymentsInsert).not.toHaveBeenCalled();
   });
+
+  test('repairing after the webhook keeps the settlement moment and payer it stamped on the row (Codex #4996 r11)', async () => {
+    existingPaymentRow = { id: 'pay_existing', status: 'paid',
+      metadata: { payment_state: 'paid', settled_event_at: '2026-09-20T14:00:00.000Z', payer_id: '7', stale_key: 'dropped' } };
+    const StripeService = require('../services/stripe');
+    await StripeService.confirmInvoicePayment('inv_123', PI_ID);
+
+    expect(paymentsUpdate).toHaveBeenCalledTimes(1);
+    const metadata = JSON.parse(paymentsUpdate.mock.calls[0][0].metadata);
+    expect(metadata).toMatchObject({ invoice_id: 'inv_123', payment_state: 'paid', settled_event_at: '2026-09-20T14:00:00.000Z', payer_id: '7' });
+    // Only the settlement stamps carry over; the rest is rewritten as before.
+    expect(metadata).not.toHaveProperty('stale_key');
+  });
+
+  test('a row with no settlement stamp is rewritten exactly as before', async () => {
+    existingPaymentRow = { id: 'pay_existing', status: 'processing', metadata: JSON.stringify({ payment_state: 'processing' }) };
+    const StripeService = require('../services/stripe');
+    await StripeService.confirmInvoicePayment('inv_123', PI_ID);
+
+    const metadata = JSON.parse(paymentsUpdate.mock.calls[0][0].metadata);
+    expect(metadata).not.toHaveProperty('settled_event_at');
+    expect(metadata).not.toHaveProperty('payer_id');
+  });
 });
