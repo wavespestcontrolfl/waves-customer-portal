@@ -16,6 +16,7 @@ const logger = require('../logger');
 const { applyAssignable, assertAssignableTechnician } = require('../technician-eligibility');
 const { createDefaultCustomerRows } = require('../customer-default-rows');
 const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
+const { resolveBillingLane } = require('../billing-lane');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed, dateOnlyString,
   windowDurationMinutes, deriveWindowEnd,
@@ -2436,17 +2437,42 @@ async function resolveTechnicianByName(name) {
 // buildAppointmentPricing: an operator-stated price is the primary line
 // price; with none, the price the Schedule screen pre-fills for the named
 // catalog service (the one-time mosquito lot ladder, else the catalog price
-// range minimum, else its base price). The catalog row resolves by exact name only — the call pipeline's
-// findServiceByName (name / short name / service key, plus rename
-// bridging), never a partial match: a price must come from the service the
-// operator named. A free visit type (appointment / estimate / re-service /
-// follow-up) never carries a price — completion never bills one.
-// Returns { price, source, catalogRow, pricing } or { error }.
+// range minimum, else its base price). The catalog row resolves through
+// resolveBookingCatalogRow — one identity or a refusal, never a guess: a
+// price must come from the service the operator named. A free visit type
+// (appointment / estimate / re-service / follow-up) never carries a price —
+// completion never bills one. Returns { price, source, catalogRow, pricing }
+// or { error }.
+// The one catalog row a booking names, or an ambiguity. An exact name (with
+// the rename-bridging candidates) or a service key identifies a row; a short
+// name only counts when exactly ONE active row carries it. The live catalog
+// shares "Lawn Care" across five services and "Mosquito" across a recurring
+// and a one-time row, and a first match there prices — and bills — the
+// wrong service (the fail-closed rule of catalog-shortname-ambiguity.test.js).
+function resolveBookingCatalogRow(services, serviceType) {
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const { serviceNameCandidates } = require('../service-completion-profiles');
+  for (const candidate of serviceNameCandidates(serviceType)) {
+    const want = norm(candidate);
+    const hits = services.filter((s) => norm(s.name) === want || norm(s.service_key) === want);
+    if (hits.length === 1) return { row: hits[0] };
+    if (hits.length > 1) return { ambiguous: hits };
+  }
+  const byShortName = services.filter((s) => s.short_name && norm(s.short_name) === norm(serviceType));
+  if (byShortName.length === 1) return { row: byShortName[0] };
+  if (byShortName.length > 1) return { ambiguous: byShortName };
+  return { row: null };
+}
+
 async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db }) {
   const services = await conn('services').where({ is_active: true })
-    .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category');
-  const { findServiceByName } = require('../call-booking-catalog');
-  const catalogRow = findServiceByName(Array.isArray(services) ? services : [], serviceType);
+    .select('id', 'name', 'short_name', 'service_key', 'base_price', 'price_range_min', 'category', 'billing_type');
+  const match = resolveBookingCatalogRow(Array.isArray(services) ? services : [], serviceType);
+  if (match.ambiguous) {
+    const names = match.ambiguous.map((r) => r.name).join(', ');
+    return { error: `"${serviceType}" names several catalog services (${names}) — use the exact service name and propose again. Nothing was booked.` };
+  }
+  const catalogRow = match.row;
   const stated = statedPrice !== undefined && statedPrice !== null;
   if (isAlwaysFreeServiceType(serviceType)) {
     if (stated) {
@@ -2461,6 +2487,16 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
     return { error: `"${serviceType}" is not a catalog service, so the price has nothing to attach to. Use the service's exact catalog name and propose again. Nothing was booked.` };
   }
   if (!catalogRow) return { price: null, source: null, catalogRow: null, pricing: null };
+  // A dues-billed member's PLAN service carries no catalog default: the
+  // Schedule POST strips the price and create-invoice stamps from a member's
+  // recurring series (memberSeriesCovered — monthly lane, no payer), and
+  // completion prices a non-recurring visit out of dues coverage, so a
+  // defaulted price here would invoice a plan visit on top of the dues. An
+  // operator-stated price still stands: an extra visit they chose to bill.
+  if (!stated && catalogRow.billing_type === 'recurring' && !customer?.payer_id
+    && resolveBillingLane(customer).mode === 'monthly_membership') {
+    return { price: null, source: null, catalogRow, pricing: null };
+  }
   // The Schedule modal's own pre-fill for a picked catalog line
   // (CreateAppointmentModal addServiceFromCatalog), sent as the line price:
   // blank for the one-time mosquito line, so the server's lot ladder prices

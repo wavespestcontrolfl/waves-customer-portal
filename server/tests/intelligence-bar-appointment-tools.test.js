@@ -576,6 +576,54 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
     expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 125, primary_line_price: 125, service_id: 'svc-ranged' });
   });
 
+  test('a shared short name never picks a catalog row: the booking is refused with the candidates, nothing written', async () => {
+    // The live catalog shares "Lawn Care" across five services (recurring
+    // and one-time) — a first match would price and bill the wrong one.
+    const lawn = [
+      { id: 'svc-lq', name: 'Quarterly Lawn Care Service', short_name: 'Lawn Care', service_key: 'lawn_care_quarterly', base_price: null, category: 'lawn', billing_type: 'recurring' },
+      { id: 'svc-lo', name: 'One-Time Lawn Care Service', short_name: 'Lawn Care', service_key: 'lawn_care_one_time', base_price: '95.00', category: 'lawn', billing_type: 'one_time' },
+    ];
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })], services: [catalog(lawn)] });
+    const result = await book({ service_type: 'Lawn Care' });
+    expect(result.error).toMatch(/names several catalog services \(Quarterly Lawn Care Service, One-Time Lawn Care Service\)/);
+    expect(db.transaction).not.toHaveBeenCalled();
+    // The exact name still resolves its one row.
+    const insertChain = wirePriced({ rows: lawn });
+    const ok = await book({ service_type: 'One-Time Lawn Care Service', _booking_price: 95, _booking_service_id: 'svc-lo' });
+    expect(ok.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 95, service_id: 'svc-lo' });
+  });
+
+  test('a dues-billed member\'s plan service carries no catalog default — dues cover it, as on the Schedule screen', async () => {
+    const foam = {
+      id: 'svc-foam', name: 'Recurring Termite Foam Service', short_name: null, service_key: 'foam_recurring',
+      price_range_min: '146.00', base_price: '164.00', category: 'termite', billing_type: 'recurring',
+    };
+    const insertChain = wirePriced({ customer: { ...PER_VISIT, ...MEMBER_BILLING }, rows: [foam] });
+    const result = await book({ service_type: foam.name, _booking_price: null, _booking_service_id: 'svc-foam' });
+    expect(result.success).toBe(true);
+    const payload = insertChain.insert.mock.calls[0][0];
+    expect(payload).toMatchObject({ service_id: 'svc-foam' });
+    expect(payload).not.toHaveProperty('estimated_price');
+    expect(payload).not.toHaveProperty('create_invoice_on_complete');
+  });
+
+  test('the same plan service for a per-visit customer carries the catalog default, and a member\'s stated price still stands', async () => {
+    const foam = {
+      id: 'svc-foam', name: 'Recurring Termite Foam Service', short_name: null, service_key: 'foam_recurring',
+      price_range_min: '146.00', base_price: '164.00', category: 'termite', billing_type: 'recurring',
+    };
+    let insertChain = wirePriced({ rows: [foam] });
+    let result = await book({ service_type: foam.name, _booking_price: 146, _booking_service_id: 'svc-foam' });
+    expect(result.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 146, create_invoice_on_complete: true });
+    jest.clearAllMocks();
+    insertChain = wirePriced({ customer: { ...PER_VISIT, ...MEMBER_BILLING }, rows: [foam] });
+    result = await book({ service_type: foam.name, price: 200, _booking_price: 200, _booking_service_id: 'svc-foam' });
+    expect(result.success).toBe(true);
+    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 200, create_invoice_on_complete: true });
+  });
+
   test('a stated price wins over the catalog price', async () => {
     const insertChain = wirePriced({ rows: [ONE_TIME_PEST] });
     const result = await book({ price: 180, _booking_price: 180, _booking_service_id: 'svc-otp' });
