@@ -1991,7 +1991,7 @@ function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSi
 // callback cards (deadline, default owner, audit row) as they read; every
 // other caller — the Intelligence Bar's read-only tool, the integrations
 // worker — gets a pure read and sees whatever those paths persisted.
-async function listOpenCommitments(conn, { party = null, kind = null, customerId = null, leadId = null, phone = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null } = {}) {
+async function listOpenCommitments(conn, { party = null, kind = null, kinds = null, customerId = null, leadId = null, phone = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null } = {}) {
   let leadSid = null;
   if (leadId) {
     // No local catch: a failed lookup must reach the route's error handler
@@ -2013,7 +2013,14 @@ async function listOpenCommitments(conn, { party = null, kind = null, customerId
     .whereRaw(`NOT ${staleAiRowSql('cc')}`)
     .modify((b) => {
       if (party === 'waves' || party === 'customer') b.where('cc.party', party);
-      if (kind) b.where('cc.kind', kind);
+      // Additive: kinds (a list) pushes a multi-kind filter into the QUERY
+      // itself, page and limit both — a caller scanning for one of several
+      // kinds on a shared/long-lived number must not have those rows
+      // crowded out of every LIMIT-bounded page by unrelated kinds it will
+      // only discard client-side anyway (Codex #5019 r10 P2). kind (single)
+      // is unchanged for every existing caller.
+      const kindFilter = kinds && kinds.length ? kinds : (kind ? [kind] : null);
+      if (kindFilter) b.whereIn('cc.kind', kindFilter);
       scopeCommitmentRows(b, { customerId, leadId, leadSid, phone });
       if (!includeHints) b.whereNull('cc.fulfillment');
       // activeSince (the follow-up pager): only promises made, dated or

@@ -168,8 +168,13 @@ async function findPromiseToRing(call, now) {
   // links the call within minutes, and a later tick inside the 30-minute
   // window re-reads the link and rings then.
   const rows = (await commitments.listOpenCommitments(db, {
-    party: 'waves', phone: call.from_phone, limit: 200, includeHints: true, now,
-  })).filter((r) => SLA_KINDS.includes(r.kind) && String(r.call_log_id) !== String(call.id)
+    // kinds pushes the SLA_KINDS filter into the QUERY itself (Codex #5019
+    // r10 P2): filtering client-side AFTER a LIMIT 200 page let a shared
+    // or long-lived number's unrelated commitments (customer-party rows,
+    // other kinds) crowd the one relevant promise out of every tick's page
+    // entirely — it was never wrong, just never reached.
+    party: 'waves', kinds: SLA_KINDS, phone: call.from_phone, limit: 200, includeHints: true, now,
+  })).filter((r) => String(r.call_log_id) !== String(call.id)
     // Strictly PRECEDES this callback — never the current call's own row
     // (excluded above), and never a call that arrived AFTER it either. A
     // later tick can land well after this callback, by which time a NEWER
@@ -381,22 +386,39 @@ async function ringForCall(call, now = new Date()) {
         // the send the same way findPromiseToRing already treats it.
         const refreshed = await commitments.refreshFulfillment(db, promise.call_log_id);
         if (refreshed.failed > 0) return false;
-        // Re-check renewal precedence too (Codex #5019 r9 P2): staff can
-        // reopen/restate the SAME promise in the gap between
-        // findPromiseToRing's own snapshot and here, exactly like they can
-        // fulfill or dismiss it — findPromiseToRing's own precedence rule
-        // (a callback cannot be "about" a renewal that postdates it) must
-        // hold at dispatch time too, not just at selection time, or a
-        // renewal landing in this exact gap would let a stale obligation
-        // ring anyway. A lookup failure blocks the same way an unverified
-        // fulfillment refresh does — never a false ring on unverifiable
-        // renewal state; the next tick simply re-evaluates from scratch.
-        const renewedNow = await commitments.obligationRenewedAt(db, promise);
+        // Reload the commitment row FRESH by id before the renewal recheck
+        // (Codex #5019 r10 P2): `promise` is findPromiseToRing's own
+        // SELECTION SNAPSHOT, taken before this gap — for an AI callback
+        // staff edit or reopen in that gap, the snapshot's own human_state
+        // is still null, and obligationRenewedAt short-circuits on exactly
+        // that field (`if (!['confirmed','edited'].includes(human_state))
+        // return null`) without ever reading the new renewal audit event.
+        // A plain call_commitments read by id carries every mutable staff-
+        // edit field (human_state, status, reviewed_at, snoozed_until,
+        // fulfillment) fresh; merged ONTO the snapshot rather than
+        // replacing it, since call_commitments itself has no call_started_at
+        // / call_ended_at / customer_id / phone columns — those still come
+        // from findPromiseToRing's own join and never change for this call.
+        // A missing row (deleted) or a read failure blocks the same way an
+        // unverified fulfillment refresh does — never a false ring on
+        // unverifiable state; the next tick simply re-evaluates from scratch.
+        const freshRow = await db('call_commitments').where({ id: promise.id }).first();
+        if (!freshRow) return false;
+        const current = { ...promise, ...freshRow };
+        // Re-check renewal precedence too (Codex #5019 r9 P2, then r10 P2
+        // for the fresh read above): staff can reopen/restate the SAME
+        // promise in the gap between findPromiseToRing's own snapshot and
+        // here, exactly like they can fulfill or dismiss it —
+        // findPromiseToRing's own precedence rule (a callback cannot be
+        // "about" a renewal that postdates it) must hold at dispatch time
+        // too, not just at selection time, or a renewal landing in this
+        // exact gap would let a stale obligation ring anyway.
+        const renewedNow = await commitments.obligationRenewedAt(db, current);
         if (renewedNow && renewedNow.getTime() >= call.created_at.getTime()) return false;
-        const stillLive = await commitments.stillOpenIds(db, [promise.id], { now: new Date() });
-        if (!stillLive.has(promise.id)) return false;
-        const followedNow = await followedUpIds(db, [promise]);
-        return !followedNow.has(promise.id);
+        const stillLive = await commitments.stillOpenIds(db, [current.id], { now: new Date() });
+        if (!stillLive.has(current.id)) return false;
+        const followedNow = await followedUpIds(db, [current]);
+        return !followedNow.has(current.id);
       } catch {
         return false;
       }

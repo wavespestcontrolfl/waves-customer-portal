@@ -775,6 +775,64 @@ const OUR_NUMBER = '+19415550100';
       const row = await mockConn('promise_chaser_deliveries').where({ dedupe_key: dedupeKey }).first('dedupe_key');
       expect(row).toBeFalsy(); // retryable, not settled — the next tick re-evaluates from scratch
     });
+
+    test('an UNREVIEWED AI callback reopened between selection and dispatch is blocked at the live recheck too — the FRESH row, not the stale selection snapshot, is what sees the renewal (Codex #5019 r10 P2)', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id); // default source 'ai', human_state null — never reviewed
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      triggerNotification.mockImplementationOnce(async (triggerKey, payload, opts) => {
+        // Staff REVIEW and reopen the commitment in the gap between
+        // findPromiseToRing's own snapshot (still human_state: null there)
+        // and this dispatch-time recheck. obligationRenewedAt short-circuits
+        // on human_state NOT IN ('confirmed','edited') before it ever looks
+        // at renewal events — passing the STALE snapshot (still null) would
+        // silently skip the whole check, exactly the bug this fixes.
+        const renewedAt = new Date(now + 1000);
+        await mockConn('call_commitments').where({ id: commitment.id }).update({ human_state: 'confirmed' });
+        await mockConn('audit_log').insert({
+          id: randomUUID(), actor_type: 'admin', action: 'callback_reopen',
+          resource_type: 'call_commitment', resource_id: commitment.id,
+          metadata: JSON.stringify({ renewed_at: renewedAt.toISOString() }), created_at: renewedAt,
+        });
+        const stillWanted = await opts.shouldContinue();
+        expect(stillWanted).toBe(false);
+        return { bellWritten: false, push: { sent: 0, skipped: 'superseded_before_push' } };
+      });
+
+      expect(await sweepPromiseChasers()).toBe(0);
+      const dedupeKey = `promise_chaser:${commitment.id}:0:${etDateString(new Date(now))}`;
+      const row = await mockConn('promise_chaser_deliveries').where({ dedupe_key: dedupeKey }).first('dedupe_key');
+      expect(row).toBeFalsy();
+    });
+  });
+
+  test('205 non-SLA commitments on the number never crowd out the one SLA promise — the kind filter is now in the QUERY, not a client-side filter after the page (Codex #5019 r10 P2)', async () => {
+    // All 205 are explicitly OVERDUE (due_at in the past) — the query's
+    // own ORDER BY sorts every overdue row (tier 0) before every
+    // not-yet-due one (tier 1) REGARDLESS of any other tiebreak, so this
+    // forces the noise rows ahead of the SLA promise (tier 1: its own
+    // implicit 'callback' due date, tomorrow ET, is comfortably in the
+    // future) no matter how effectiveDueSql or the id tiebreak would
+    // otherwise land. Without the query-side kinds filter, 205 tier-0 rows
+    // alone fill the whole LIMIT 200 candidate page and the SLA promise —
+    // sorting last, in tier 1 — is never even READ, let alone discarded.
+    const overdueAt = new Date(now - 60 * 60000); // 1h ago — already due
+    const noiseCall = callRow(240);
+    const noiseRows = Array.from({ length: 205 }, () => commitmentRow(noiseCall.id, {
+      kind: 'send_report', description: 'noise — not an SLA kind', due_at: overdueAt,
+    }));
+    const slaCall = callRow(100);
+    const slaCommitment = commitmentRow(slaCall.id); // default kind 'callback' — an SLA kind, not (yet) due
+    const back = callRow(0);
+    await mockConn('call_log').insert([noiseCall, slaCall, back]);
+    await mockConn('call_commitments').insert([...noiseRows, slaCommitment]);
+
+    expect(await sweepPromiseChasers()).toBe(1);
+    const [, payload] = triggerNotification.mock.calls[0];
+    expect(payload.commitmentId).toBe(slaCommitment.id);
   });
 
   test('paging with a forced-small page size still reaches a genuinely actionable call several pages deep in the sweep window', async () => {
