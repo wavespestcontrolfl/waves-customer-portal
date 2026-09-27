@@ -442,6 +442,30 @@ describe('FastCompleteSheet', () => {
     expect(onClose).toHaveBeenCalledWith({ refresh: true });
   });
 
+  test('a visit moved to another property of the same customer is not completed here', async () => {
+    const request = makeRequest();
+    render(<FastCompleteSheet
+      service={{ ...SERVICE, routedCustomerId: 'cust-1', routedAddress: '9 Other Rd, Parrish, FL 34219' }}
+      request={request}
+      onClose={() => {}}
+    />);
+
+    expect(await screen.findByText('This visit changed since your schedule loaded. Close and reopen it from the schedule.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Complete re-service' })).toBeNull();
+  });
+
+  test('the same property (row address matches the live one) is completed normally', async () => {
+    const request = makeRequest({ service: { ...CONTEXT_SERVICE, address: { line1: '123 Main St', city: 'Bradenton', zip: '34211' } } });
+    render(<FastCompleteSheet
+      service={{ ...SERVICE, routedCustomerId: 'cust-1', routedAddress: '123 Main St, Bradenton, FL 34211' }}
+      request={request}
+      onClose={() => {}}
+    />);
+
+    expect(await screen.findByRole('button', { name: 'Complete re-service' })).toBeTruthy();
+    expect(screen.queryByText(/changed since your schedule loaded/)).toBeNull();
+  });
+
   test('a visit the server no longer allows on the short form is sent to the full form', async () => {
     const request = makeRequest({ eligible: false });
     render(<FastCompleteSheet service={{ ...SERVICE, routedCustomerId: 'cust-1' }} request={request} onClose={() => {}} />);

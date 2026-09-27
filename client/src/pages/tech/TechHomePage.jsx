@@ -1129,6 +1129,9 @@ export default function TechHomePage({ section = 'today' }) {
             // not complete against the new visit.
             routedCustomerId: fastCompleteService.customerId || fastCompleteService.customer_id || null,
             routedScheduledDate: fastCompleteService.scheduledDate || fastCompleteService.scheduled_date || null,
+            // The row's full address ("line1 line2, city, state zip", built
+            // from the same visit-then-customer address the context resolves).
+            routedAddress: typeof fastCompleteService.address === 'string' ? fastCompleteService.address : null,
           }}
           request={techRequest}
           onClose={(options) => {

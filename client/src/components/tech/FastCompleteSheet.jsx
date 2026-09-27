@@ -66,6 +66,20 @@ const ACTIVITY_LEVELS = [
 ];
 const CLOSED_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show']);
 const dayOf = (value) => String(value || '').slice(0, 10);
+const normText = (value) => String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+// The tapped row's address against the live one: both come from the visit's
+// service address, falling back to the customer's. The row carries it as
+// "line1 line2, city, state zip", so its first segment must start with the
+// live line1, and it must carry the live zip. Unknown on either side = no
+// verdict (older payloads carry no address).
+function propertyMoved(routedAddress, liveAddress) {
+  if (!routedAddress || !liveAddress?.line1) return false;
+  const routed = normText(routedAddress);
+  const street = normText(String(routedAddress).split(',')[0]);
+  if (!street.startsWith(normText(liveAddress.line1))) return true;
+  return !!liveAddress.zip && !routed.includes(normText(liveAddress.zip));
+}
 
 // Why the live context can't be completed here, or '' when it can: the
 // schedule row the tech tapped may be stale, so the loaded visit must still
@@ -77,7 +91,8 @@ function blockedReasonFor(context, service) {
     && String(service.routedCustomerId) !== String(visit.customerId);
   const movedDay = service?.routedScheduledDate && visit.scheduledDate
     && dayOf(service.routedScheduledDate) !== dayOf(visit.scheduledDate);
-  if (movedCustomer || movedDay) return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
+  const movedProperty = propertyMoved(service?.routedAddress, visit.address);
+  if (movedCustomer || movedDay || movedProperty) return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
   if (visit.serviceKey !== 'pest_re_service') return 'This visit is no longer a pest re-service. Use the full form.';
   if (CLOSED_STATUSES.has(String(visit.status || ''))) return `This visit is already ${visit.status}. Close and reopen it from the schedule.`;
   if (context?.eligible !== true) return 'This visit needs the full form.';
@@ -238,7 +253,7 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed }) {
 // The context + rating contract for this visit. The routed schedule row can
 // be stale: the context is re-checked to still be an open pest re-service
 // before anything can be completed here.
-function useFastCompleteContext({ base, request, serviceType, routedCustomerId, routedScheduledDate }) {
+function useFastCompleteContext({ base, request, serviceType, routedCustomerId, routedScheduledDate, routedAddress }) {
   const [ctx, setCtx] = useState({
     loading: true, loadError: '', blockedReason: '', rows: [], visitIdentity: null, visit: null,
     rating: { allowed: false, scaleLabels: null },
@@ -259,7 +274,7 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
         setCtx({
           loading: false,
           loadError: '',
-          blockedReason: blockedReasonFor(data, { routedCustomerId, routedScheduledDate }),
+          blockedReason: blockedReasonFor(data, { routedCustomerId, routedScheduledDate, routedAddress }),
           visit,
           rows: pestDefaultMixSelections(products).map(({ product, totalAmount }) => productRow(product, serviceType, totalAmount)),
           visitIdentity: recapVisitIdentity(visit),
@@ -270,7 +285,7 @@ function useFastCompleteContext({ base, request, serviceType, routedCustomerId, 
       }
     })();
     return () => { active = false; };
-  }, [base, request, serviceType, routedCustomerId, routedScheduledDate]);
+  }, [base, request, serviceType, routedCustomerId, routedScheduledDate, routedAddress]);
   return ctx;
 }
 
@@ -360,6 +375,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
     serviceType: service?.serviceType,
     routedCustomerId: service?.routedCustomerId,
     routedScheduledDate: service?.routedScheduledDate,
+    routedAddress: service?.routedAddress,
   });
   const submission = useFastCompleteSubmit({ base, request });
   const { submitting, done } = submission;
