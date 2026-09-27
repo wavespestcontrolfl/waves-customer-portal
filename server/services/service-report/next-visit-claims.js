@@ -38,8 +38,8 @@ function maskAftercareTimes(text) {
     if (/\b\d{1,2}(?::\d{2})?\s*[ap]m\.$/i.test(instruction)) return ' ';
     const continuation = source.slice(offset + instruction.length).match(/^[^\n.!?]{0,80}/)?.[0] || '';
     const action = new RegExp(`\\b${AFTERCARE_APPOINTMENT_ACTION}\\b`, 'i').exec(continuation);
-    const groundedClaim = new RegExp(APPOINTMENT_CLAIM_RE.source, 'i').exec(continuation);
-    return action && (!groundedClaim || action.index < groundedClaim.index)
+    const canonicalClaim = /\b(?:(?:your|the)\s+)?(?:next|upcoming)\s+(?:visit|appointment|service|follow[-\s]?up)(?:\s*:\s*|\s+(?:is|has\s+been|will\s+be|scheduled|booked|set|on|for)\b)/i.exec(continuation);
+    return action && (!canonicalClaim || action.index < canonicalClaim.index)
       ? instruction
       : ' ';
   });

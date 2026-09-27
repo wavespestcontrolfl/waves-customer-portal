@@ -20,6 +20,13 @@ const {
 } = _test;
 
 const RECAP = 'Your quarterly pest control visit is complete! We treated the perimeter and entry points.';
+const AFTERCARE_ARRIVAL_CONTINUATIONS = [
+  'Keep pets inside until 8 PM when the technician will arrive.',
+  'Keep pets inside until 8 PM, when the technician will arrive.',
+  'Keep pets inside until 8 p.m. when the technician will arrive.',
+  'Keep pets inside until 8 PM, when the technician will arrive on Friday, October 2, arriving 8–10 AM.',
+  'Keep pets inside until 8 PM, when we will arrive on Friday, October 2, arriving 8–10 AM.',
+];
 
 // distinct recaps keep the module-level fact-hash cache from bleeding between tests
 let seq = 0;
@@ -247,11 +254,7 @@ test.each([
   const prefix = facts.nextVisit
     ? 'Your next visit is Friday, October 2, arriving 8–10 AM. '
     : '';
-  for (const instruction of [
-    'Keep pets inside until 8 PM when the technician will arrive.',
-    'Keep pets inside until 8 PM, when the technician will arrive.',
-    'Keep pets inside until 8 p.m. when the technician will arrive.',
-  ]) {
+  for (const instruction of AFTERCARE_ARRIVAL_CONTINUATIONS) {
     expect(appointmentClaimProblems(`${prefix}${instruction}`, facts)).toContain('ungrounded_time:8 PM');
   }
 });
@@ -260,10 +263,7 @@ test.each([
   ['with the grounded slot', input(), 'Your next visit is Friday, October 2, arriving 8–10 AM. '],
   ['without a grounded slot', input({ nextAppointment: null }), ''],
 ])('an arrival after an aftercare time forces deterministic fallback %s', async (_label, args, prefix) => {
-  for (const instruction of [
-    'Keep pets inside until 8 PM, when the technician will arrive.',
-    'Keep pets inside until 8 p.m. when the technician will arrive.',
-  ]) {
+  for (const instruction of AFTERCARE_ARRIVAL_CONTINUATIONS) {
     const summary = `${prefix}${instruction}`;
     const out = await applyVisitSummaryNarrative(args, {
       callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
