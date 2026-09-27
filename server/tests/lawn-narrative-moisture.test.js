@@ -29,6 +29,8 @@ describe('structured moisture governs the optional whole-report narrative', () =
     { irrigation_required: true, irrigation_notes: 'Don’t water for 24 hours.' },
     { irrigation_required: true, irrigation_notes: 'Water in after application.' },
     { irrigation_required: true, irrigation_notes: 'Water within 1 hour. Water only after 24 hours.' },
+    { irrigation_required: true, irrigation_notes: 'Water in with 0.25 inches if no rain occurs within 24 hours.' },
+    { irrigation_required: true, irrigation_notes: 'If no rain occurs within 24 hours, water in with 0.25 inches.' },
   ])('aftercare constraints bypass model and cached prose: %j', async (product) => {
     const lawnAssessment = assessment('minor', true, 'deficit');
     const unguarded = buildLawnReportV2({ lawnAssessment });
