@@ -71,6 +71,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     'Your technician follows the product label directions for every application.',
     'There is no chance of rain tomorrow, so we can treat.',
     'There is a chance of mild irritation, so follow the label.',
+    "The spray won't do a thing to termites; they need a soil treatment.",
   ])('leaves compliant replies untouched: %s', (reply) => {
     expect(scrubUnsafeClaims({ ...base, reply }).reply).toBe(reply);
   });
@@ -251,6 +252,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ["There's no chance your kids get sick from this.", ''],
     ['No hay ninguna posibilidad de efectos secundarios.', ''],
     ['Cero probabilidad de daño.', ''],
+    ["This treatment won't do a thing to your pets.", ''],
+    ["This product won't do anything to children.", ''],
+    ['The spray does nothing to your pets.', ''],
     ['This pesticide is not considered hazardous to children.', ''],
     ['The product is not classified as toxic to pets.', ''],
     ['The treatment is not regarded as dangerous for dogs.', ''],
@@ -462,6 +466,9 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Please bring your dog inside while we treat the yard.', 'Can my dog be in the yard while you treat?'],
     ['Una vez que esté seco, según la etiqueta; su técnico le confirmará.', '¿Cuándo puedo volver a entrar?'],
     ['No pueden volver hasta que esté seco.', '¿Cuándo pueden volver los niños?'],
+    ['Our technician will go inside to inspect two rooms.', ''],
+    ['The technician can go inside at 4 PM for the appointment.', ''],
+    ['Yes, for about 30 minutes.', 'Will the technician need to go inside?'],
   ])('leaves alone: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });
@@ -2133,6 +2140,10 @@ describe('looksLikeEmergency', () => {
     'Mi hijo inhaló los vapores del tratamiento',
     'The fumes made my child dizzy',
     'My son can not breathe in',
+    'John swallowed poison',
+    'The boy swallowed poison',
+    'A woman inhaled poison fumes',
+    "My neighbor's little boy drank the weed killer",
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
@@ -2229,6 +2240,11 @@ describe('looksLikeEmergency', () => {
     'Put bait in the mouth of the burrow',
     "My child didn't breathe in the fumes",
     'The fumes killed the roaches',
+    'It ate the bait',
+    'No one ate the bait',
+    'The bait was swallowed whole by the rats',
+    'I think a raccoon ate the bait',
+    'My son says the rats ate the bait',
     'The rats were poisoned by spray',
     'The roaches were poisoned by the product',
     'The ants got poisoned by chemicals',
