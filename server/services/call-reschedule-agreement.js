@@ -136,7 +136,13 @@ function statedHour(hourWords, periodWords) {
   if (tok === 'midnight') return 0;
   const n = /^\d{1,2}$/.test(tok) ? Number(tok) : HOUR_WORDS[tok];
   if (!(n >= 1 && n <= 12)) return null;
-  const halves = new Set(normalize(periodWords).split(' ').filter((t) => Object.hasOwn(PERIOD_WORDS, t)).map((t) => PERIOD_WORDS[t]));
+  const periodToks = normalize(periodWords).split(' ');
+  // "12 noon" / "12 midnight" name the hour itself; for any other hour noon
+  // or midnight is a window's end (see PERIOD_WORDS).
+  if (n === 12 && periodToks.length === 1 && (periodToks[0] === 'noon' || periodToks[0] === 'midnight')) {
+    return periodToks[0] === 'noon' ? 12 : 0;
+  }
+  const halves = new Set(periodToks.filter((t) => Object.hasOwn(PERIOD_WORDS, t)).map((t) => PERIOD_WORDS[t]));
   if (halves.size !== 1) return null;
   return (n % 12) + (halves.has('pm') ? 12 : 0);
 }
