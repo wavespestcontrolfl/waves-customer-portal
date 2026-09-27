@@ -288,7 +288,6 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
   });
 
   test.each([
-    ['the portal-wide email switch', { ok: false, error: 'email_opted_out' }],
     ['an explicit receipt choice without Email', {
       ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected',
     }],

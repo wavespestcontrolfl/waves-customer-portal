@@ -119,7 +119,7 @@ function terminalFollowupEmailRefusal(result) {
   if (result?.resolved === true) return true;
   return result?.ok === false && result.retryable !== true && result.deferred !== true
     && result.deliveryOutcome !== 'uncertain' && (
-      ['billing_email_not_selected', 'email_disabled', 'missing_email', 'template_unavailable'].includes(result.reason)
+      ['billing_email_not_selected', 'missing_email', 'template_unavailable'].includes(result.reason)
       || (result.blocked === true && /^Suppressed: /.test(result.reason || ''))
     );
 }
