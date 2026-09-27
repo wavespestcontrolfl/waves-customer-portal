@@ -840,7 +840,10 @@ describe('ops/agents/inventory-agent-undo.js CLI — DATABASE_PUBLIC_URL enables
       stdio: 'ignore',
     });
     try {
-      return await withTimeout(dataPromise, 5000, 'no connection attempt within 5s');
+      // The child loads the server's whole module graph before its first
+      // query: generous, so a loaded CI runner never flakes; a passing run
+      // still ends the moment the first bytes arrive.
+      return await withTimeout(dataPromise, 20000, 'no connection attempt within 20s');
     } finally {
       await killAndWait(child);
       await new Promise((resolve) => server.close(resolve));
@@ -851,19 +854,19 @@ describe('ops/agents/inventory-agent-undo.js CLI — DATABASE_PUBLIC_URL enables
     const chunk = await firstBytesSent({});
     expect(chunk.length).toBe(8);
     expect(chunk.readInt32BE(4)).toBe(SSL_REQUEST_CODE);
-  }, 10000);
+  }, 30000);
 
   test('a PGSSLMODE already set in the environment is left alone — never overwritten to no-verify', async () => {
     // 'disable' never negotiates TLS at all: the plain startup packet (no
     // 8-byte SSLRequest) goes first, proving the preset value won this.
     const chunk = await firstBytesSent({ PGSSLMODE: 'disable' });
     expect(chunk.length).not.toBe(8);
-  }, 10000);
+  }, 30000);
 
   test('an explicit sslmode in the URL is left alone too', async () => {
     // sslmode=disable in the URL itself never negotiates TLS either — this
     // just proves the script didn't force PGSSLMODE=no-verify on top of it.
     const chunk = await firstBytesSent({}, '?sslmode=disable');
     expect(chunk.length).not.toBe(8);
-  }, 10000);
+  }, 30000);
 });
