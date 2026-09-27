@@ -356,6 +356,29 @@ cadence, visit count, cadence wording, catalog key, or an explicit tier field
 grandfathered and untouched by this gate; it only blocks a NEW self-serve
 accept from landing on the retired cadence.
 
+Missing-contact capture (owner ruling 2026-09-27). GET
+`/api/estimates/:token/data` carries `contactGaps: { lastName, email }` —
+booleans only — while the estimate is accept-active (never on
+accepted/declined/expired/off-surface estimates or the PDF render pass).
+`lastName` is true when the estimate's `customer_name` has fewer than two
+name tokens AND the linked customer (if any) has no real last name (blank or
+the `'Customer'` placeholder); `email` is true when neither the estimate nor
+the linked customer has an email. The linked customer's name/email are never
+returned. The page renders "Last name" (required client-side) and "Email (for
+your service reports and receipts)" (optional) above Accept for whichever is
+true, and blocks Accept on a typed-but-malformed email.
+`PUT /api/estimates/:token/accept` accepts optional `contactLastName`
+(trimmed, whitespace-collapsed, ≤80 chars) and `contactEmail` (lowercased,
+≤254 chars, `EMAIL_RE`). A malformed non-empty value answers 400
+`{ error, code: 'CONTACT_LAST_NAME_INVALID' | 'CONTACT_EMAIL_INVALID' }` before
+any mutation; a blank or absent value is never an error (a tab loaded before
+this shipped still accepts). Values fill GAPS only and never overwrite: the
+estimate row is written inside the acceptance transaction, after the row lock
+and eligibility checks, compare-and-set (name only if still the value read,
+email only if still blank), so a rejected accept changes nothing; the
+matched/linked/new customer gets `last_name` only when blank or `'Customer'`
+and `email` only when blank. No message is sent because of these fields.
+
 GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
 estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
 12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the

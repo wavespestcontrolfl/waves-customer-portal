@@ -9067,7 +9067,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // real values instead of the 'Customer' placeholder / blank email.
     // Never overwrites an existing value — computeContactGaps and the
     // customers-table fills below (fillExistingCustomerLastName/Email) are
-    // both gap-guarded independently.
+    // both gap-guarded independently. The patch is applied IN MEMORY here
+    // and PERSISTED only inside the acceptance transaction, after the
+    // estimate row lock and every eligibility check (codex pre-push P1): a
+    // rejected accept must not change stored contact details, and the
+    // persisted write is compare-and-set so a concurrent accept that read
+    // the same gap cannot overwrite a value that has since landed.
     const { value: sanitizedContactLastName, error: contactLastNameError } = sanitizeContactLastName(req.body?.contactLastName);
     if (contactLastNameError) {
       return res.status(400).json({ error: contactLastNameError.message, code: contactLastNameError.code });
@@ -9076,6 +9081,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     if (contactEmailError) {
       return res.status(400).json({ error: contactEmailError.message, code: contactEmailError.code });
     }
+    let pendingEstimateContactPatch = null;
     if (sanitizedContactLastName || sanitizedContactEmail) {
       try {
         const linkedCustomerForGaps = estimate.customer_id
@@ -9091,11 +9097,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           estimateContactPatch.customer_email = sanitizedContactEmail;
         }
         if (Object.keys(estimateContactPatch).length) {
-          await db('estimates').where({ id: estimate.id }).update(estimateContactPatch);
-          // Mutate the in-memory row so every downstream read in this
-          // handler (matchAcceptCustomerByPhone's several call sites,
-          // the new-profile nameParts split, firstName below) sees the
-          // supplied values instead of re-fetching.
+          // Remember the pre-patch values for the in-transaction
+          // compare-and-set, then mutate the in-memory row so every
+          // downstream read in this handler (matchAcceptCustomerByPhone's
+          // several call sites, the new-profile nameParts split, firstName
+          // below) sees the supplied values instead of re-fetching.
+          pendingEstimateContactPatch = { patch: estimateContactPatch, priorName: estimate.customer_name ?? null };
           Object.assign(estimate, estimateContactPatch);
         }
       } catch (e) {
@@ -10798,6 +10805,24 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           .update({ status: 'resolved', updated_at: trx.fn.now() });
       }
 
+      // Persist the accept-card contact patch now that the estimate row is
+      // locked and the accept is past its eligibility checks — rolls back
+      // with the transaction on any later failure. Compare-and-set: the
+      // name only if it still reads what we patched against, the email only
+      // if still blank, so a concurrent writer's value is never overwritten.
+      if (pendingEstimateContactPatch) {
+        const { patch, priorName } = pendingEstimateContactPatch;
+        if (patch.customer_name) {
+          await trx('estimates').where({ id: estimate.id })
+            .where((q) => (priorName == null ? q.whereNull('customer_name') : q.where('customer_name', priorName)))
+            .update({ customer_name: patch.customer_name });
+        }
+        if (patch.customer_email) {
+          await trx('estimates').where({ id: estimate.id })
+            .where((q) => q.whereNull('customer_email').orWhere('customer_email', ''))
+            .update({ customer_email: patch.customer_email });
+        }
+      }
       let customerId = estimate.customer_id;
       // Already-linked customer: fill its last_name/email ONLY if blank/the
       // 'Customer' placeholder (the fill helpers re-check that under this

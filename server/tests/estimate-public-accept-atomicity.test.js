@@ -1710,6 +1710,51 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(cust.email).toBe('original@example.com');
   });
 
+  test('a rejected accept (rolled-back transaction) leaves the stored contact details untouched', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-7',
+      token: 'tok-contact-7-x0123456789',
+      customer_id: null,
+      customer_name: 'Testy',
+      customer_email: null,
+    }));
+    EstimateConverter.convertEstimate.mockRejectedValueOnce(new Error('conversion boom'));
+
+    const res = await putAccept('tok-contact-7-x0123456789', {
+      contactLastName: 'Sample',
+      contactEmail: 'testy@example.com',
+    });
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().customer_name).toBe('Testy');
+    expect(storedEstimate().customer_email == null).toBe(true);
+  });
+
+  test('the persisted email fill never overwrites an email that landed after the accept read the gap', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-8',
+      token: 'tok-contact-8-x0123456789',
+      customer_id: null,
+      customer_name: 'Testy',
+      customer_email: null,
+    }));
+    // A concurrent writer stamps an email after the handler read the gap
+    // but before the accept transaction opens — the in-transaction
+    // compare-and-set must leave that value alone.
+    const stored = storedEstimate();
+    conversionOk();
+    const origTransaction = db.transaction;
+    db.transaction = async (fn) => {
+      stored.customer_email = 'office@example.com';
+      db.transaction = origTransaction;
+      return origTransaction.call(db, fn);
+    };
+
+    const res = await putAccept('tok-contact-8-x0123456789', { contactEmail: 'testy@example.com' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_email).toBe('office@example.com');
+  });
+
   test('an invalid contactEmail 400s before any mutation — nothing commits', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-5',
