@@ -726,11 +726,15 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
     const laneSuffix = lane === 'live' ? '' : `:${lane}`;
     const routed = await dispatchWithFallback(
       { name: `smsShadow:${route.provider}${laneSuffix}`, primary: route, ...(fallback ? { fallback } : {}) },
-      // 600 caps BOTH live and sealed legs (codex #3423 r46): the sealed
-      // exam gates the live drafter, so it must measure the live cap —
-      // sealed truncation noise belongs to the sealed-eval lane, not a
-      // more permissive harness.
-      { laneId, system, text: userContent, jsonMode: false, maxTokens: 600, anthropicClient: client },
+      // Caps BOTH live and sealed legs (codex #3423 r46): the sealed exam
+      // gates the live drafter, so it must measure the live cap — sealed
+      // truncation noise belongs to the sealed-eval lane, not a more
+      // permissive harness. 2000 (was 600, 2026-09-26): Sonnet 5 thinks by
+      // default even though its tier isn't in ANTHROPIC_THINKING_FLOOR_RE,
+      // and thinking spends from this same maxTokens ahead of the ~270-token
+      // real draft — 10 of 71 live calls were hitting 600 with the overflow
+      // being thinking, not draft text.
+      { laneId, system, text: userContent, jsonMode: false, maxTokens: 2000, anthropicClient: client },
       { validate: (result) => (parseShadowResponse(result.text || '') ? null : 'unparseable') },
     );
     if (routed.ok) return {
@@ -832,6 +836,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
         laneId: 'sms_verifier',
         model: verifier.VERIFIER_MODEL,
         max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the verdict JSON
+        effort: 'medium', // a yes/no supported-check needs no high-effort reasoning; caps Opus 5.5 spend on a short verdict
         system: verifier.buildVerifierSystemPrompt(),
         messages: [{ role: 'user', content: verifier.buildVerifierUserPrompt(factsBlock, inboundMessage, parsed.reply) }],
       });

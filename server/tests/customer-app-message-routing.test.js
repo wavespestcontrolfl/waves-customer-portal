@@ -2,6 +2,8 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
 jest.mock('../services/billing-channel-email', () => ({ sendBillingChannelEmail: jest.fn() }));
+// The Text-leg event dedupe has its own suites (billing-text-leg-dedupe*); here it is a pass-through.
+jest.mock('../services/messaging/billing-text-leg-dedupe', () => ({ withBillingTextLegLock: (_input, send) => send() }));
 jest.mock('../services/messaging/audit', () => ({ persistAudit: jest.fn(async () => ({ id: 'audit-test' })) }));
 jest.mock('../services/messaging/validators/line-type', () => ({
   ...jest.requireActual('../services/messaging/validators/line-type'),
