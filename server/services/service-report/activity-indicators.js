@@ -1181,27 +1181,39 @@ function parseFindingsValues(value) {
 }
 
 // Poison Control line eligibility for PROJECT reports (owner ruling
-// 2026-09-26): whether the visit this project documents involved product a
-// customer might ask Poison Control/PC24 about. Reuses the CANONICAL typed
-// application verdict, typedTreatmentEvidence — the same evidence read/write
-// service reports already use — over the project's OWN findings and its
-// (bed-bug) follow-up findings, OR'd together, PLUS rodent bait stations:
-// the stations hold rodenticide even though servicing one records no
-// TYPED_TREATMENT_OPTIONS entry (rodent_bait_station, like rodent_sanitation,
-// is deliberately absent from that map — see its own comment). Device-only
-// termite work (`noWork`: "Bait station setup" / "Cartridge replacement") is
-// NOT poison control eligible even though the visit records an EPA
-// registration number at send (admin-projects.js's tt_epa_registration
-// requirement) — recording an EPA reg. no. is not itself a treatment signal;
-// a prior classifier that read products_used/epa_registration as sufficient
-// mistook that requirement for one (Codex P1, replaced here). A project type
-// with no TYPED_TREATMENT_OPTIONS entry and not rodent_bait_station — WDO
-// inspection, pre-treatment termite certificate, termite inspection,
-// exclusion, sanitation — is never eligible: typedTreatmentEvidence returns
-// applied:false for an unregistered type by construction.
-function projectPoisonControl(type, findings, followupFindings) {
+// 2026-09-26). The canonical typed application verdict (typedTreatmentEvidence)
+// over the project's own findings or its bed-bug follow-up findings, plus two
+// owner-ruled additions that verdict deliberately leaves out (adding them to
+// TYPED_TREATMENT_OPTIONS would switch on re-entry timers):
+// - rodent_bait_station: the stations hold rodenticide, though servicing one
+//   is monitoring, not an application;
+// - rodent_sanitation: only when the tech recorded disinfecting (codex r3) —
+//   a mechanical-only cleanup stays out.
+// Device-only termite work ("Bait station setup" / "Cartridge replacement")
+// is noWork in the canonical map, whatever EPA number the send gate demands.
+// A type with no entry (WDO, certificate, inspections, exclusion) never
+// qualifies.
+const POISON_CONTROL_EXTRA_EVIDENCE = Object.freeze({
+  rodent_sanitation: { sanitation_work_completed: ['Disinfected / sanitized affected areas'] },
+});
+
+function poisonControlExtraEvidence(type, values) {
+  const fields = POISON_CONTROL_EXTRA_EVIDENCE[type];
+  if (!fields || !values) return false;
+  return Object.entries(fields).some(([key, options]) => String(values[key] ?? '')
+    .split(',').map((part) => part.trim()).some((part) => options.includes(part)));
+}
+
+// The PRIMARY visit itself left product behind — the one whose technician
+// the applicator line names.
+function projectPrimaryApplication(type, findings) {
   if (type === 'rodent_bait_station') return true;
-  return typedTreatmentEvidence(type, parseFindingsValues(findings)).applied
+  const values = parseFindingsValues(findings);
+  return typedTreatmentEvidence(type, values).applied || poisonControlExtraEvidence(type, values);
+}
+
+function projectPoisonControl(type, findings, followupFindings) {
+  return projectPrimaryApplication(type, findings)
     || typedTreatmentEvidence(type, parseFindingsValues(followupFindings)).applied;
 }
 
@@ -4547,6 +4559,8 @@ module.exports = {
   typedTreatmentEvidence,
   typedTreatmentEvidenceForRecord,
   projectPoisonControl,
+  projectPrimaryApplication,
+  POISON_CONTROL_EXTRA_EVIDENCE,
   SCHEMA_VERSION,
   BANNED_CUSTOMER_COPY,
   findBannedCustomerCopy,

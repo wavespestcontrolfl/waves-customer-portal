@@ -1,7 +1,10 @@
 'use strict';
 
 const { PROJECT_TYPES } = require('../services/project-types');
-const { TYPED_TREATMENT_OPTIONS, typedTreatmentEvidence, typedTreatmentEvidenceForRecord, projectPoisonControl } = require('../services/service-report/activity-indicators');
+const {
+  TYPED_TREATMENT_OPTIONS, typedTreatmentEvidence, typedTreatmentEvidenceForRecord, projectPoisonControl,
+  projectPrimaryApplication, POISON_CONTROL_EXTRA_EVIDENCE,
+} = require('../services/service-report/activity-indicators');
 
 describe('typed treatment evidence', () => {
   test('every classified option exists in its typed field and no field is double-classified', () => {
@@ -116,6 +119,27 @@ describe('project Poison Control eligibility (activity-indicators.projectPoisonC
     const followupFindings = { treatment_method: 'Chemical only' };
     expect(projectPoisonControl('bed_bug', findings, null)).toBe(false);
     expect(projectPoisonControl('bed_bug', findings, followupFindings)).toBe(true);
+  });
+
+  test('rodent sanitation counts only when the tech recorded disinfecting', () => {
+    expect(projectPoisonControl('rodent_sanitation', { sanitation_work_completed: 'Removed droppings, Disinfected / sanitized affected areas' })).toBe(true);
+    expect(projectPoisonControl('rodent_sanitation', { sanitation_work_completed: 'Removed droppings, HEPA vacuum / controlled cleanup' })).toBe(false);
+  });
+
+  test('every Poison Control extra option exists on its field in the project-type registry', () => {
+    for (const [type, fields] of Object.entries(POISON_CONTROL_EXTRA_EVIDENCE)) {
+      for (const [key, options] of Object.entries(fields)) {
+        const field = PROJECT_TYPES[type].findingsFields.find((f) => f.key === key);
+        expect(field).toBeTruthy();
+        for (const option of options) expect(field.options).toContain(option);
+      }
+    }
+  });
+
+  test('the applicator belongs to the primary visit: a follow-up-only application is not a primary one', () => {
+    expect(projectPrimaryApplication('bed_bug', { treatment_method: 'Heat only' })).toBe(false);
+    expect(projectPrimaryApplication('bed_bug', { treatment_method: 'Chemical only' })).toBe(true);
+    expect(projectPrimaryApplication('rodent_bait_station', {})).toBe(true);
   });
 
   test('accepts findings/followup_findings as JSON strings (jsonb round-trip)', () => {

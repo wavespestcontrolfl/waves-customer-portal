@@ -11,6 +11,8 @@ const logger = require('../logger');
 const { minutesFromElapsed } = require('../../utils/duration-minutes');
 const { detectServiceLine } = require('./service-line-configs');
 const { resolveApplicatorFdacsId } = require('./report-data');
+const { applyReportIdentitySnapshot } = require('./report-identity-snapshot');
+const { formatTechnicianForCustomer } = require('../../utils/technician-name');
 
 const FALLBACK_PDF_MARKER = 'Browser PDF rendering was unavailable';
 const MIN_EXPECTED_REPORT_BYTES = 50000;
@@ -150,32 +152,56 @@ function reentryAdjustedPdfSignature(service) {
   }
 }
 
-// Applicator-identity key component (Codex P1, 2026-09-26 Poison Control
-// round): the printed FDACS applicator id is resolveApplicatorFdacsId's
-// verdict over technician_fdacs_id / technician_license_expiry /
-// service_date — the SAME three fields on this row, read the SAME way the
-// payload reads them (report-data.js). Compliance can fill or correct a
-// technician's fl_applicator_license or license_expiry after a report was
-// already cached; without this in the key, the stored PDF's storage key
-// never changes and a corrected/added id (or one that newly expires) never
-// re-renders (codex P1). Empty when the resolved id is null (blank,
-// expired, or a snapshot-name mismatch — applyReportIdentitySnapshot) so an
-// ordinary record's key is unchanged; only a record whose RESOLVED id
-// actually changes gets a new key — no fleet-wide cache bust. Hashed rather
-// than printed raw: a license number is public record (F.S. 482.2265), but
-// this key also rides public download URLs' cache-adjacent logs, and a
-// hash is all the invalidation needs. Must ride in EVERY composition site
-// that builds the storage-key signature (pdf-queue renderAndStore +
-// getOrRender, reports-public expected + store).
-function applicatorIdentityPdfSignature(service) {
-  const id = resolveApplicatorFdacsId(
-    service?.technician_fdacs_id,
-    service?.technician_license_expiry,
-    service?.service_date,
-  );
+// Applicator key component (Poison Control lane, codex r2+r3 on #5032).
+// The document prints "Applicator: <technicianName> · FDACS ID card #<id>"
+// (applicatorIdLine), so the key signs that exact pair — a corrected name
+// or license must re-render a cached PDF. '' when no ID prints, so an
+// ordinary record's key is unchanged. Hashed: the key rides download logs.
+function applicatorLinePdfSignature(technicianName, fdacsId) {
+  const id = String(fdacsId || '').trim();
   if (!id) return '';
-  const hash = crypto.createHash('sha1').update(id).digest('hex').slice(0, 8);
-  return `-ap${hash}`;
+  const name = String(technicianName || '').trim();
+  return `-ap${crypto.createHash('sha1').update(`${name}|${id}`).digest('hex').slice(0, 8)}`;
+}
+
+// STORE side: the pair the render's own payload carried — never a re-read,
+// so a license edit landing mid-render can't key old content as new (same
+// contract as treatmentNarrativeRenderedSignature).
+function applicatorRenderedPdfSignature(data) {
+  return applicatorLinePdfSignature(data?.technicianName, data?.applicatorFdacsId);
+}
+
+// LOOKUP side: the same pair re-derived from the record by ONE loader every
+// expected-key site calls, so no caller's row shape can drift from the
+// payload's (codex r3: the queue's minimal row had no license fields and
+// never matched). Mirrors report-data: technician join, identity-snapshot
+// overlay, formatTechnicianForCustomer, resolveApplicatorFdacsId.
+async function applicatorIdentityPdfSignature(serviceRecordId, knex = db) {
+  try {
+    if (!serviceRecordId) return '';
+    const row = await knex('service_records')
+      .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
+      .where('service_records.id', serviceRecordId)
+      .first(
+        'service_records.service_date',
+        'service_records.service_data',
+        'technicians.name as technician_name',
+        'technicians.fl_applicator_license as technician_fdacs_id',
+        'technicians.license_expiry as technician_license_expiry',
+      );
+    if (!row) return '';
+    const service = applyReportIdentitySnapshot(row);
+    return applicatorLinePdfSignature(
+      formatTechnicianForCustomer({
+        name: service.technician_name,
+        first_name: service.technician_first_name,
+        last_name: service.technician_last_name,
+      }),
+      resolveApplicatorFdacsId(service.technician_fdacs_id, service.technician_license_expiry, service.service_date),
+    );
+  } catch {
+    return ''; // an unreadable lookup misses the cache and re-renders
+  }
 }
 
 // Drop the cached-PDF hint for a service record so the next render rebuilds it
@@ -290,4 +316,5 @@ module.exports = {
   reentryAdjustedPdfSignature,
   treeShrubReviewPdfSignature,
   applicatorIdentityPdfSignature,
+  applicatorRenderedPdfSignature,
 };

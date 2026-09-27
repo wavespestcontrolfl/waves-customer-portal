@@ -58,7 +58,8 @@ jest.mock('../services/service-report/pdf-storage', () => ({
   // report-data.js, which this file mocks separately. Its own behavior is
   // pinned directly against resolveApplicatorFdacsId in
   // report-identity-snapshot.test.js.
-  applicatorIdentityPdfSignature: () => '',
+  applicatorIdentityPdfSignature: async () => '',
+  applicatorRenderedPdfSignature: () => '',
 }));
 jest.mock('../services/pest-pressure/store', () => ({
   loadActiveConfig: mockLoadActiveConfig,

@@ -463,14 +463,14 @@ describe('public project reports', () => {
         customer_id: 'customer-1',
         report_token: '0123456789abcdef0123456789abcdef',
         report_viewed_at: 'earlier',
-        project_type: 'pre_treatment_termite_certificate',
+        project_type: 'termite_treatment',
         status: 'sent',
         first_name: 'Pat',
         last_name: 'Customer',
         project_date: '2026-06-11',
         technician_name: 'Alex Benson',
         created_by_tech_id: 'tech-alex',
-        findings: {},
+        findings: { treatment_method: 'Trenching' },
       }),
     });
     const technicianRead = chain({
@@ -494,7 +494,9 @@ describe('public project reports', () => {
     });
   });
 
-  test("applicatorFdacsId is null when the license expired before the WDO's archived filing date", async () => {
+  // A WDO inspection applies nothing, so it never names an applicator —
+  // whatever the license or the archived filing date says.
+  test("applicatorFdacsId is null on a WDO report (no application to name an applicator for)", async () => {
     const projectRead = chain({
       first: jest.fn().mockResolvedValue({
         id: 'project-fdacs-2',
@@ -672,6 +674,44 @@ describe('public project reports', () => {
   // public route, over the field-level cases already covered directly
   // against activity-indicators.projectPoisonControl.
   describe('poisonControl', () => {
+    test('a bed-bug follow-up-only application keeps Poison Control but names no applicator', async () => {
+      const bedBugRead = chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'project-pc-bb',
+          customer_id: 'customer-1',
+          report_token: '0123456789abcdef0123456789abcdef',
+          report_viewed_at: 'earlier',
+          project_type: 'bed_bug',
+          status: 'sent',
+          first_name: 'Pat',
+          last_name: 'Customer',
+          project_date: '2026-06-11',
+          scheduled_service_id: 'ss-1',
+          created_by_tech_id: 'tech-primary',
+          findings: { treatment_method: 'Heat only' },
+          followup_findings: { treatment_method: 'Chemical only' },
+          followup_completed_at: '2026-06-25T15:00:00.000Z',
+        }),
+      });
+      db.mockImplementation((table) => {
+        if (table === 'projects as p') return bedBugRead;
+        if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
+        if (table === 'service_records') return chain();
+        // the follow-up's technician isn't stored — the primary visit's must
+        // never be looked up to label the follow-up's application
+        if (table === 'scheduled_services' || table === 'technicians') throw new Error(`${table} must not be queried`);
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.poisonControl).toBe(true);
+        expect(body.applicatorFdacsId).toBeNull();
+        expect(body.applicatorName).toBeNull();
+      });
+    });
+
     test('true for a liquid termite treatment, false for device-only work', async () => {
       const liquidRead = chain({
         first: jest.fn().mockResolvedValue({

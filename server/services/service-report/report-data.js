@@ -409,7 +409,16 @@ async function resolveProjectApplicatorTechnician(project, knex = db) {
 // the public route's viewerProjectDate (a WDO archived filing can override
 // project_date) vs the admin route's plain project_date || created_at.
 async function resolveProjectReportPreviewFields(project, judgmentDate, knex = db) {
-  const { projectPoisonControl } = require('./activity-indicators');
+  const { projectPoisonControl, projectPrimaryApplication } = require('./activity-indicators');
+  const poisonControl = projectPoisonControl(project?.project_type, project?.findings, project?.followup_findings);
+  // The applicator line names the PRIMARY visit's technician, judged at the
+  // primary visit's date — so it prints only when that visit itself applied
+  // product. A bed-bug follow-up application alone keeps Poison Control but
+  // names no applicator: the follow-up's technician and date aren't stored
+  // (codex r3 on #5032).
+  if (!projectPrimaryApplication(project?.project_type, project?.findings)) {
+    return { applicatorFdacsId: null, applicatorName: null, poisonControl };
+  }
   const technician = await resolveProjectApplicatorTechnician(project, knex);
   return {
     applicatorFdacsId: resolveApplicatorFdacsId(
@@ -418,7 +427,7 @@ async function resolveProjectReportPreviewFields(project, judgmentDate, knex = d
       judgmentDate,
     ),
     applicatorName: String(technician?.name || '').trim() || null,
-    poisonControl: projectPoisonControl(project?.project_type, project?.findings, project?.followup_findings),
+    poisonControl,
   };
 }
 
