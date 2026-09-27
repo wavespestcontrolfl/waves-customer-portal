@@ -13,6 +13,7 @@ const {
   serviceCategoryForOneTimeChoice,
   applySelectedLawnTierToEstimateData,
   applySelectedTreeShrubTierToEstimateData,
+  applySelectedTermiteBondToEstimateData,
   assertExistingAppointmentUpdateApplied,
   buildEstimateAskQueryLog,
   buildEstimateAcceptanceContract,
@@ -5844,9 +5845,67 @@ describe('public estimate one-time breakdown', () => {
     expect(billing).not.toContain('12-month');
 
     const guarantee = answerEstimateQuestionFallback('Is there a callback guarantee?', context);
-    expect(guarantee).toContain('one-time service');
-    expect(guarantee).toContain('30-day callback');
+    expect(guarantee).toContain('written service scope and terms');
+    expect(guarantee).not.toContain('30-day callback');
     expect(guarantee).not.toContain('90-day');
+  });
+
+  test('one-time general pest context retains its conditional written callback terms', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 171 },
+      pricingBundle: {
+        anchorOneTimePrice: 171,
+        frequencies: [],
+        oneTimeBreakdown: {
+          total: 171,
+          items: [{ service: 'one_time_pest', label: 'One-Time Pest Control', amount: 171 }],
+        },
+      },
+      serviceMode: 'one_time',
+    });
+    const guarantee = answerEstimateQuestionFallback('Is there a callback guarantee?', context);
+    expect(guarantee).toContain('one-time service');
+    expect(guarantee).toContain('30-day callback period when shown on the estimate');
+    expect(guarantee).not.toContain('90-day');
+  });
+
+  test.each(['none', '5yr'].flatMap((term) => ['current', 'bait-only', 'missing'].map((pricing) => [term, pricing])))('assistant honors the persisted bond selector change to %s with %s pricing', (term, pricing) => {
+    const bait = { service: 'termite_bait', name: 'Termite Bait Monitoring', mo: 34, perTreatment: 102, visitsPerYear: 4 };
+    const oldBond = { service: 'termite_bond_10yr', name: 'Termite Bond (10-Year Term)',
+      bondTerm: '10yr', bondYears: 10, mo: 15, monthly: 15, perTreatment: 45, visitsPerYear: 4, annual: 180 };
+    const estData = {
+      inputs: { svcTermiteBait: true, termiteBondTerm: '10yr' },
+      result: {
+        recurring: { services: [bait, oldBond], monthlyTotal: 49, annualAfterDiscount: 588 },
+        results: { tmBait: { selectedBondTerm: '10yr', bondOptions: [
+          { key: '5yr', years: 5, label: '5-Year', monthly: 18, annual: 216, perApp: 54 },
+          { key: '10yr', years: 10, label: '10-Year', monthly: 15, annual: 180, perApp: 45 },
+        ] } },
+      },
+      engineResult: { lineItems: [{ ...bait }, { ...oldBond }] },
+    };
+    expect(applySelectedTermiteBondToEstimateData(estData, term)).toMatchObject({ ok: true, changed: true });
+    // The mapped selector intentionally leaves this historical raw engine row.
+    expect(estData.engineResult.lineItems[1].bondTerm).toBe('10yr');
+    const selectedRows = estData.result.recurring.services;
+    const pricingRows = pricing === 'bait-only' ? [bait] : selectedRows;
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: term === 'none' ? 34 : 52 },
+      estData,
+      pricingBundle: pricing === 'missing' ? {} : { frequencies: [{ key: 'quarterly', monthly: term === 'none' ? 34 : 52,
+        included: pricingRows, perServiceTreatments: pricingRows,
+      }] },
+      noGuaranteeClaims: true,
+    });
+    const terms = context.recurringServices.flatMap((row) => row.purchasedTerms || []);
+    expect(terms).toEqual(term === 'none' ? [] : ['Purchased termite bond: 5-year term with re-treatment coverage.']);
+    if (term === '5yr') {
+      expect(context.recurringServices.find((row) => row.label === 'Termite Bond'))
+        .toMatchObject({ service: 'termite_bond_5yr', monthly: 18, perApplication: 54 });
+    }
+    const answer = answerEstimateQuestionFallback('What warranty did I buy?', context);
+    expect(answer).not.toContain('10-year');
+    expect(answer).toMatch(term === 'none' ? /written service scope and terms/i : /5-year term/);
   });
 
   test('estimate assistant uses invoice-mode billing copy', () => {

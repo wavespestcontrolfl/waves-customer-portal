@@ -33,7 +33,7 @@ describe('estimate assistant no-guarantee context', () => {
       recurring: null,
       oneTime: null,
     });
-    expect(context.guarantees.guidance).toMatch(/Do not describe the estimate as including/i);
+    expect(context.guarantees.guidance).toMatch(/Do not infer an estimate-wide/i);
 
     const answer = answerEstimateQuestionFallback('Does this include a money-back guarantee?', context);
     expect(answer).toMatch(/written service scope and terms/i);
@@ -109,6 +109,39 @@ describe('estimate assistant no-guarantee context', () => {
     },
   );
 
+  test.each(['rodent_bait', 'commercial_pest'])('%s answers its retained satisfaction term without inventing recurring benefits', (service) => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 55 },
+      pricingBundle: { frequencies: [{ key: 'monthly', monthly: 55,
+        included: [{ service, label: service, detail: 'Licensed and insured. Satisfaction guaranteed.' }],
+      }] },
+    });
+
+    const answer = answerEstimateQuestionFallback('Is satisfaction guaranteed?', context);
+    expect(answer).toContain('says “Satisfaction guaranteed.”');
+    expect(answer).toContain('applies to that service only');
+    expect(answer).not.toMatch(/includes the money-back guarantee|free re-treat|callbacks are free/i);
+    expect(answerEstimateQuestionFallback('Are callbacks free?', context)).toMatch(/do not see an estimate-wide callback/i);
+  });
+
+  test('satisfaction answers preserve written limits and reject negated wording', () => {
+    const build = (detail) => buildEstimateAssistantContext({
+      estimate: { monthly_total: 55 },
+      pricingBundle: { frequencies: [{ key: 'monthly', monthly: 55,
+        included: [{ service: 'rodent_bait', label: 'Rodent Bait Stations', detail }],
+      }] },
+    });
+
+    const qualified = answerEstimateQuestionFallback('Is satisfaction guaranteed?',
+      build('Satisfaction guaranteed for the initial treatment only.'));
+    expect(qualified).toContain('“Satisfaction guaranteed for the initial treatment only.”');
+
+    const negated = answerEstimateQuestionFallback('Is satisfaction guaranteed?',
+      build('Satisfaction guaranteed is not included in this service.'));
+    expect(negated).toMatch(/written service scope and terms/i);
+    expect(negated).not.toContain('detail on this estimate says');
+  });
+
   test.each(['pricing', 'saved'])('commercial %s scope remains neutral after normalizing its display name', (source) => {
     const rows = [{ service: 'pest_control', name: 'Commercial Pest Control', label: 'Commercial Pest Control', mo: 55 }];
     const context = buildEstimateAssistantContext({
@@ -119,6 +152,52 @@ describe('estimate assistant no-guarantee context', () => {
     expect(context.services[0].label).toBe('Pest Control');
     expect(context.guarantees.recurringTermsEligible).toBe(false);
     expect(context.guarantees.recurring).toBeNull();
+  });
+
+  test('recurring eligibility unions result and engineResult identities behind a frozen pricing projection', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { waveguard_tier: 'Bronze', monthly_total: 55 },
+      estData: {
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 55 }] } },
+        engineResult: { recurring: { services: [{ service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 24 }] } },
+      },
+      pricingBundle: { waveGuardTier: 'Bronze', frequencies: [{ key: 'quarterly', monthly: 55, annual: 660,
+        included: [{ service: 'pest_control', label: 'Pest Control' }],
+      }] },
+    });
+
+    expect(context.guarantees).toMatchObject({ recurringTermsEligible: false, recurring: null });
+    expect(answerEstimateQuestionFallback('Are callbacks free?', context))
+      .toMatch(/do not see an estimate-wide callback/i);
+  });
+
+  test.each([
+    ['serviceKey identity', { result: { recurring: { services: [
+      { serviceKey: 'commercial_pest', name: 'Pest Control', mo: 55 },
+    ] } } }],
+    ['top-level legacy recurring root', { result: {}, recurring: { services: [
+      { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 24 },
+    ] } }],
+    ['commercial engine line item', { result: {}, engineResult: { lineItems: [
+      { service: 'commercial_pest', name: 'Commercial Pest Control', monthly: 55 },
+    ] } }],
+    ['commercial manual engine line item', { result: {}, engineResult: { lineItems: [
+      { service_key: 'commercial_pest', name: 'Commercial Pest Control', quoteRequired: true },
+    ] } }],
+    ['rodent engine line item', { result: {}, engineResult: { lineItems: [
+      { service: 'rodent_bait', name: 'Rodent Bait Stations', monthly: 24 },
+    ] } }],
+  ])('%s remains terms-neutral behind a frozen residential pest projection', (_label, estData) => {
+    const context = buildEstimateAssistantContext({
+      estimate: { waveguard_tier: 'Bronze', monthly_total: 55 },
+      estData,
+      pricingBundle: { waveGuardTier: 'Bronze', frequencies: [{ key: 'quarterly', monthly: 55, annual: 660,
+        included: [{ service: 'pest_control', label: 'Pest Control' }],
+      }] },
+    });
+
+    expect(context.services.map((row) => row.label)).toEqual(['Pest Control']);
+    expect(context.guarantees).toMatchObject({ recurringTermsEligible: false, recurring: null });
   });
 
   test.each(['pricing', 'saved'])('%s purchased warranty scope survives without allowing arbitrary warranty prose', (source) => {
@@ -140,9 +219,194 @@ describe('estimate assistant no-guarantee context', () => {
     expect(answerEstimateQuestionFallback('What is included?', unproven)).not.toContain('Annual inspection during the warranty period');
   });
 
+  test('a legacy frozen row inherits a purchased trenching warranty only from its matching authoritative raw row', () => {
+    const saved = { service: 'trenching', label: 'Termite Trenching', amount: 1200,
+      warrantyTier: 'one_year_retreat', warrantyAdder: 0 };
+    const build = (pricingRow) => buildEstimateAssistantContext({
+      estimate: { onetime_total: 1200 },
+      estData: { result: { oneTime: { items: [saved] } } },
+      pricingBundle: { anchorOneTimePrice: 1200, oneTimeBreakdown: { items: [pricingRow] } },
+      serviceMode: 'one_time',
+      noGuaranteeClaims: true,
+    });
+
+    const legacy = build({ service: 'trenching', label: 'Termite Trenching', amount: 1200,
+      warrantyTier: 'one_year_retreat' });
+    expect(legacy.oneTime.items[0].purchasedTerms).toEqual(['Annual inspection during the warranty period']);
+    expect(answerEstimateQuestionFallback('Is there an annual inspection?', legacy))
+      .toContain('Annual inspection during the warranty period');
+
+    const explicitRemoval = build({ service: 'trenching', label: 'Termite Trenching', amount: 1200,
+      warrantyTier: 'one_year_retreat', warrantyAdder: null });
+    expect(explicitRemoval.oneTime.items[0].purchasedTerms).toEqual([]);
+
+    const wrongService = build({ service: 'one_time_pest', label: 'Termite Trenching', amount: 1200,
+      warrantyTier: 'one_year_retreat' });
+    expect(wrongService.oneTime.items[0].purchasedTerms || []).toEqual([]);
+  });
+
+  test('a canonically priced termite bond exposes only its selected purchased term under no-guarantee policy', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { waveguard_tier: 'Bronze', monthly_total: 49 },
+      estData: {
+        result: { recurring: { services: [
+          { service: 'termite_bait', name: 'Termite Bait Monitoring', mo: 34, perTreatment: 102, visitsPerYear: 4 },
+        ] } },
+        engineResult: { lineItems: [
+          { service: 'termite_bond', name: 'Termite Bond (10-Year Term)', bondTerm: '10yr', bondYears: 10,
+            monthly: 15, perApp: 45, visitsPerYear: 4, detail: 'Lifetime repair guarantee' },
+        ] },
+      },
+      pricingBundle: { waveGuardTier: 'Bronze', frequencies: [{ key: 'quarterly', monthly: 49, annual: 588,
+        included: [{ service: 'termite_bait', label: 'Termite Bait Monitoring' }],
+        perServiceTreatments: [{ service: 'termite_bait', label: 'Termite Bait Monitoring', perTreatment: 147, visitsPerYear: 4 }],
+      }] },
+      noGuaranteeClaims: true,
+    });
+
+    const bondTerm = context.recurringServices.flatMap((row) => row.purchasedTerms || []);
+    expect(bondTerm).toEqual(['Purchased termite bond: 10-year term with re-treatment coverage.']);
+    expect(JSON.stringify(context)).not.toMatch(/Lifetime repair guarantee/i);
+    const answer = answerEstimateQuestionFallback('What re-treatment does my termite bond include?', context);
+    expect(answer).toContain('Purchased termite bond: 10-year term with re-treatment coverage.');
+    expect(answer).toContain('applies only to that service');
+    expect(answerEstimateQuestionFallback('Does my termite bond include free callbacks?', context))
+      .toMatch(/do not see an estimate-wide callback/i);
+    for (const question of ['What bond did I buy?', 'What warranty did I buy?']) {
+      expect(answerEstimateQuestionFallback(question, context))
+        .toContain('Purchased termite bond: 10-year term with re-treatment coverage.');
+    }
+
+    const unproven = buildEstimateAssistantContext({
+      estimate: { monthly_total: 15 },
+      estData: { result: { recurring: { services: [{ service: 'termite_bait', name: 'Termite Bond (10-Year Term)',
+        bondTerm: '10yr', bondYears: 10, mo: 15, detail: 'Re-treatment coverage' }] } } },
+      noGuaranteeClaims: true,
+    });
+    expect(unproven.recurringServices.flatMap((row) => row.purchasedTerms || [])).toEqual([]);
+    expect(answerEstimateQuestionFallback('What re-treatment does my termite bond include?', unproven))
+      .toMatch(/written service scope and terms/i);
+  });
+
+  test.each([
+    ['1yr', 1, 60],
+    ['5yr', 5, 54],
+    ['10yr', 10, 45],
+  ])('pricing-only canonical %s bond retains its purchased term', (term, years, perTreatment) => {
+    const bond = { service: `termite_bond_${term}`, label: `Termite Bond (${years}-Year Term)`,
+      bondTerm: term, bondYears: years, perTreatment, visitsPerYear: 4 };
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: perTreatment / 3 },
+      pricingBundle: { frequencies: [{ key: 'quarterly', monthly: perTreatment / 3,
+        included: [{ service: bond.service, label: bond.label, bondTerm: term, bondYears: years }],
+        perServiceTreatments: [bond],
+      }] },
+      noGuaranteeClaims: true,
+    });
+    expect(context.recurringServices.flatMap((row) => row.purchasedTerms || []))
+      .toEqual([`Purchased termite bond: ${years}-year term with re-treatment coverage.`]);
+  });
+
+  test('pricing keeps termite bait and its purchased bond as separate service identities', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 49 },
+      pricingBundle: { frequencies: [{ key: 'quarterly', monthly: 49,
+        included: [
+          { service: 'termite_bait', label: 'Termite Bait Monitoring' },
+          { serviceKey: 'termite_bond_10yr', label: 'Termite Bond (10-Year Term)', selectedBondTerm: '10yr', years: 10 },
+        ],
+        perServiceTreatments: [
+          { service: 'termite_bait', label: 'Termite Bait Monitoring', perTreatment: 102, visitsPerYear: 4 },
+          { serviceKey: 'termite_bond_10yr', label: 'Termite Bond (10-Year Term)', selectedBondTerm: '10yr', years: 10,
+            perTreatment: 45, visitsPerYear: 4 },
+        ],
+      }] },
+      noGuaranteeClaims: true,
+    });
+    expect(context.recurringServices.map((row) => row.label)).toEqual(['Termite Service', 'Termite Bond']);
+    expect(context.recurringServices.find((row) => row.label === 'Termite Bond').purchasedTerms)
+      .toEqual(['Purchased termite bond: 10-year term with re-treatment coverage.']);
+  });
+
+  test.each([
+    ['unpaid', { service: 'termite_bond_5yr', bondTerm: '5yr', bondYears: 5, perTreatment: 0 }],
+    ['inconsistent term', { service: 'termite_bond_5yr', bondTerm: '10yr', bondYears: 10, perTreatment: 54 }],
+    ['unsupported term', { service: 'termite_bond_7yr', bondTerm: '7yr', bondYears: 7, perTreatment: 54 }],
+    ['label-only', { service: 'termite_bait', bondTerm: '10yr', bondYears: 10, perTreatment: 45 }],
+    ['selected none', { service: 'termite_bond_10yr', bondTerm: '10yr', selectedBondTerm: 'none', bondYears: 10, perTreatment: 45 }],
+    ['selected null', { service: 'termite_bond_10yr', bondTerm: '10yr', selectedBondTerm: null, bondYears: 10, perTreatment: 45 }],
+    ['conflicting selected term', { service: 'termite_bond_10yr', bondTerm: '10yr', selectedBondTerm: '5yr', bondYears: 10, perTreatment: 45 }],
+  ])('pricing-only %s bond metadata cannot create purchased terms', (_label, row) => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 18 },
+      pricingBundle: { frequencies: [{ key: 'quarterly', monthly: 18,
+        perServiceTreatments: [{ ...row, label: 'Termite Bond (10-Year Term)', visitsPerYear: 4 }],
+      }] },
+      noGuaranteeClaims: true,
+    });
+    expect(context.recurringServices.flatMap((item) => item.purchasedTerms || [])).toEqual([]);
+  });
+
+  test('a contradictory current bond row clears a previously proven normalized Termite Service term', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 18 },
+      estData: {
+        result: { recurring: { services: [{ service: 'termite_bond_10yr', name: 'Termite Bond (10-Year Term)',
+          bondTerm: '10yr', bondYears: 10, mo: 15 }] } },
+        engineResult: { recurring: { services: [{ service: 'termite_bond_5yr', name: 'Termite Bond (5-Year Term)',
+          bondTerm: '10yr', bondYears: 10, mo: 18 }] } },
+      },
+      noGuaranteeClaims: true,
+    });
+    expect(context.recurringServices).toHaveLength(1);
+    expect(context.recurringServices[0].service).toBe('termite_bond_5yr');
+    expect(context.recurringServices[0].purchasedTerms).toEqual([]);
+    expect(answerEstimateQuestionFallback('What warranty did I buy?', context))
+      .toMatch(/written service scope and terms/i);
+  });
+
+  test('an explicit current bond removal clears a saved purchased term', () => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 15 },
+      estData: {
+        result: { recurring: { services: [{ service: 'termite_bond_10yr', name: 'Termite Bond (10-Year Term)',
+          bondTerm: '10yr', bondYears: 10, mo: 15 }] } },
+        engineResult: { recurring: { services: [{ service: 'termite_bond_10yr', name: 'Termite Bond',
+          selectedBondTerm: 'none', bondYears: null, mo: 15 }] } },
+      },
+      noGuaranteeClaims: true,
+    });
+    expect(context.recurringServices).toHaveLength(1);
+    expect(context.recurringServices[0].purchasedTerms).toEqual([]);
+  });
+
+  test.each([
+    ['recurring removal', { recurring: { services: [{ service: 'termite_bond_10yr', selectedBondTerm: 'none', mo: 15 }] } }],
+    ['contradictory replacement', { recurring: { services: [{ service: 'termite_bond_5yr', bondTerm: '10yr', bondYears: 10, mo: 18 }] } }],
+    ['zero-price raw removal', { lineItems: [{ service: 'termite_bond', bondTerm: 'none', monthly: 0, perApp: 0 }] }],
+  ])('%s clears a saved bond before frozen pricing filters fallback rows', (_name, engineResult) => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 34 },
+      estData: {
+        result: { recurring: { services: [{ service: 'termite_bond_10yr', name: 'Termite Bond (10-Year Term)',
+          bondTerm: '10yr', bondYears: 10, mo: 15 }] } },
+        engineResult,
+      },
+      pricingBundle: { frequencies: [{ key: 'quarterly', monthly: 34, annual: 408,
+        included: [{ service: 'termite_bait', label: 'Termite Bait Monitoring' }],
+        perServiceTreatments: [{ service: 'termite_bait', label: 'Termite Bait Monitoring', perTreatment: 102, visitsPerYear: 4 }],
+      }] },
+      noGuaranteeClaims: true,
+    });
+    expect(context.recurringServices.map((row) => row.label)).toEqual(['Termite Service']);
+    expect(context.recurringServices.flatMap((row) => row.purchasedTerms || [])).toEqual([]);
+    expect(answerEstimateQuestionFallback('What warranty did I buy?', context))
+      .toMatch(/written service scope and terms/i);
+  });
+
   test.each([
     { warrantyTier: 'none', warrantyAdder: 0 },
-    { warrantyTier: 'one_year_retreat' },
+    { warrantyTier: null, warrantyAdder: null },
     { warrantyTier: 'one_year_retreat', warrantyAdder: -1 },
   ])('current unproven warranty metadata clears a saved purchased benefit: %j', (liveWarranty) => {
     const row = { service: 'trenching', label: 'Termite Trenching', amount: 1200, price: 1200 };
