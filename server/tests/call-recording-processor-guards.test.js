@@ -2507,3 +2507,16 @@ describe('booking site files the missing_last_name advisory card (codex #4991 r1
     expect(sanitized.stack).not.toContain(raw.message);
   });
 });
+
+// Codex r9 P1 (#5012): an archived customer must never stand in as
+// prior-contact consent. The fallback created_at lookup for call.customer_id
+// applies the same live-customer predicate as the phone pre-lookup. The
+// lookup lives inline in processRecording, so this pins its source shape.
+describe('outbound prior-contact: the call.customer_id created_at lookup is live-customers only', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test("the lookup filters deleted_at IS NULL before reading created_at", () => {
+    expect(src).toContain("db('customers').where({ id: call.customer_id }).whereNull('deleted_at').first('created_at')");
+    expect(src).not.toContain("db('customers').where({ id: call.customer_id }).first('created_at')");
+  });
+});

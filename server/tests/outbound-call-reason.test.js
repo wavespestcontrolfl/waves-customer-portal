@@ -83,9 +83,12 @@ function installDb(byTable = {}) {
         // closed too (SQL's three-valued logic), matching whereIn's own
         // NULL handling just above.
         const statusExclude = q.wheres.find((w) => w[0] === 'NOT IN' && w[1] === 'status');
+        // codex r9 P2: only confirmed spam is excluded now (whereNot).
+        const statusNot = q.wheres.find((w) => w[0] === 'NOT' && w[1] === 'status');
         let rows = state.byTable.leads || [];
         if (allowlistEntry) rows = rows.filter((r) => allowlistEntry[2].includes(r.first_contact_channel));
         if (statusExclude) rows = rows.filter((r) => r.status != null && !statusExclude[2].includes(r.status));
+        if (statusNot) rows = rows.filter((r) => r.status != null && r.status !== statusNot[2]);
         return rows;
       }
       // existsQualifyingInboundCall's call_log query (identified by its own
@@ -110,6 +113,10 @@ function installDb(byTable = {}) {
               const allowlist = !/NOT IN/i.test(String(natureClause[0]));
               if (allowlist ? !listed : listed) return false;
             }
+            // codex r9 P1: a voicemail needs a linked live lead (the EXISTS
+            // clause). Tests mark that with linked_lead: true.
+            const voicemailLink = q.raws.find((r2) => String(r2[0]).includes('EXISTS (SELECT 1 FROM leads'));
+            if (voicemailLink && _private.callNature(r) === 'voicemail_message' && r.linked_lead !== true) return false;
             if (dispositionClause && dispositionClause[1].includes(String(r.disposition || ''))) return false;
             return true;
           });
@@ -133,6 +140,7 @@ function installDb(byTable = {}) {
     };
     b.whereIn = jest.fn((...a) => { q.wheres.push(['IN', ...a]); return b; });
     b.whereNotIn = jest.fn((...a) => { q.wheres.push(['NOT IN', ...a]); return b; });
+    b.whereNot = jest.fn((...a) => { q.wheres.push(['NOT', ...a]); return b; });
     b.orWhereNotIn = jest.fn((...a) => { q.wheres.push(['OR NOT IN', ...a]); return b; });
     b.whereNull = jest.fn((...a) => { q.wheres.push(['NULL', ...a]); return b; });
     b.orWhereBetween = jest.fn((...a) => { q.wheres.push(['OR BETWEEN', ...a]); return b; });
@@ -477,12 +485,30 @@ describe('hasPriorContact', () => {
   );
 
   test.each([['silent_or_noise'], ['voicemail_message'], ['other'], [null]])(
-    'a prior valid inbound call with nature %p never counts (fails closed)',
+    'a prior valid inbound call with nature %p and no linked lead never counts (fails closed)',
     async (nature) => {
       installDb({ call_log: [{ id: 'in-1', created_at: hoursAgo(5), v2_extraction_status: 'valid', ai_extraction_enriched: { call_nature: nature } }] });
       await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
     },
   );
+
+  test('a service voicemail the pipeline tied to a live lead counts (codex r9 P1)', async () => {
+    installDb({ call_log: [{ id: 'vm-1', created_at: hoursAgo(5), v2_extraction_status: 'valid', ai_extraction_enriched: { call_nature: 'voicemail_message' }, linked_lead: true }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+  });
+
+  test('the voicemail linkage clause requires a live, non-spam lead by sid or stamped id', async () => {
+    installDb({ call_log: [{ id: 'vm-1' }] });
+    await hasPriorContact({ customerId: null, phone: PHONE, before: T0 });
+    const callQuery = state.queries.find((q) => q.table === 'call_log');
+    const link = callQuery.raws.find((r) => String(r[0]).includes('EXISTS (SELECT 1 FROM leads'));
+    expect(link[0]).toContain("<> 'voicemail_message'");
+    expect(link[0]).toContain('l.deleted_at IS NULL');
+    expect(link[0]).toContain("l.status <> 'spam'");
+    expect(link[0]).toContain('l.twilio_call_sid = call_log.twilio_call_sid');
+    expect(link[0]).toContain("call_log.metadata->>'lead_id'");
+    expect(link[0]).not.toContain('?');
+  });
 
   test('the call probe is exactly the service allowlist', () => {
     expect([...SERVICE_CONTACT_NATURES].sort()).toEqual(['billing_question', 'existing_customer_scheduling', 'existing_customer_service', 'new_lead']);
@@ -527,8 +553,9 @@ describe('hasPriorContact', () => {
     // and a null nature all fail closed.
     expect(natureClause[0]).toContain(' IN (');
     expect(natureClause[0]).not.toContain('NOT IN');
-    expect(natureClause[1]).toEqual([...SERVICE_CONTACT_NATURES]);
-    for (const excluded of ['job_applicant', 'other', 'silent_or_noise', 'voicemail_message']) {
+    // voicemail_message is listed but gated on a linked lead (codex r9 P1).
+    expect(natureClause[1]).toEqual([...SERVICE_CONTACT_NATURES, 'voicemail_message']);
+    for (const excluded of ['job_applicant', 'other', 'silent_or_noise']) {
       expect(natureClause[1]).not.toContain(excluded);
     }
     // Codex pre-push r7 P1: v2_extraction_status = 'valid' is a plain
@@ -736,15 +763,19 @@ describe('hasPriorContact', () => {
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
   });
 
-  // Codex pre-push r7 P1: exclude leads marked spam/duplicate/cancelled —
-  // NON_ENGAGED_LEAD_STATUSES (server/services/lead-statuses.js), the same
-  // canonical set the dashboard KPIs and conversion-rate scoping already
-  // use, reused verbatim rather than a second list that could drift.
-  test.each(['spam', 'duplicate', 'cancelled'])(
-    'a customer-originated lead marked %s does NOT count as prior contact',
+  // Codex r9 P2: status is lifecycle, not provenance. Only confirmed spam
+  // disqualifies a customer-originated lead; a cancelled lead, or a
+  // duplicate of another real lead, still proves the person contacted us.
+  test('a customer-originated lead marked spam does NOT count as prior contact', async () => {
+    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: 'web', status: 'spam' }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+  });
+
+  test.each(['duplicate', 'cancelled'])(
+    'a customer-originated lead later marked %s still counts as prior contact',
     async (status) => {
       installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: 'web', status }] });
-      await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+      await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
     },
   );
 
@@ -760,13 +791,12 @@ describe('hasPriorContact', () => {
     }
   });
 
-  test('the lead probe reuses lead-statuses.js\'s own NON_ENGAGED_LEAD_STATUSES verbatim (never a drifted copy)', async () => {
-    const { NON_ENGAGED_LEAD_STATUSES } = require('../services/lead-statuses');
+  test('the lead probe excludes exactly one status, confirmed spam', async () => {
     installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: 'web', status: 'new' }] });
     await hasPriorContact({ customerId: null, phone: PHONE, before: T0 });
     const leadsQuery = state.queries.find((q) => q.table === 'leads');
-    const statusExclude = leadsQuery.wheres.find((w) => w[0] === 'NOT IN' && w[1] === 'status');
-    expect(statusExclude[2]).toEqual(NON_ENGAGED_LEAD_STATUSES);
+    expect(leadsQuery.wheres.find((w) => w[0] === 'NOT' && w[1] === 'status')).toEqual(['NOT', 'status', 'spam']);
+    expect(leadsQuery.wheres.find((w) => w[0] === 'NOT IN' && w[1] === 'status')).toBeUndefined();
   });
 
   test('the lead probe reuses the consent-provenance allowlist, minus every call-derived channel', async () => {

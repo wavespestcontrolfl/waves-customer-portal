@@ -9497,7 +9497,10 @@ const CallRecordingProcessor = {
         if (call.customer_id) {
           callCustomerCreatedAt = String(call.customer_id) === String(knownCaller?.id || '')
             ? knownCaller.createdAt
-            : (await db('customers').where({ id: call.customer_id }).first('created_at').catch(() => null))?.created_at || null;
+            // Live customers only (codex r9 P1): the same deleted_at IS NULL
+            // predicate the phone pre-lookup applies. An archived account's
+            // old created_at must never stand in as prior-contact consent.
+            : (await db('customers').where({ id: call.customer_id }).whereNull('deleted_at').first('created_at').catch(() => null))?.created_at || null;
         }
         outboundReturnMessagesEligible = await require('./outbound-call-reason').hasPriorContact({
           customerId: outboundPriorContactCustomerId({

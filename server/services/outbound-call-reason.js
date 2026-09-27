@@ -59,7 +59,6 @@ const { CUSTOMER_ORIGINATED_LEAD_CHANNELS } = require('./collections/consent-pro
 // scoping already use to keep spam/duplicate/cancelled rows out of the
 // prospect population — reused verbatim here so a lead marked spam or a
 // duplicate-wizard repeat can never stand in as prior-contact evidence.
-const { NON_ENGAGED_LEAD_STATUSES } = require('./lead-statuses');
 // NANP-vs-international identity (codex pre-push r7 P1): the SAME rule the
 // repo already uses everywhere else two phone strings are compared for
 // "same contact" (smsThreadKey, the blocked-numbers query) — a non-NANP
@@ -283,15 +282,13 @@ async function anyLeadRecord({ phoneLast10, before }) {
     // owner ever contacted Waves. whereIn also fails closed on a NULL or
     // unrecognized channel (it matches no IN list, never a wildcard).
     .whereIn('first_contact_channel', LEAD_EVIDENCE_CHANNELS)
-    // Exclude spam/duplicate/cancelled leads (codex pre-push r7 P1): the
-    // same NON_ENGAGED_LEAD_STATUSES the dashboard KPIs and conversion-rate
-    // scoping already use — a lead our own pipeline flagged as spam or an
-    // auto-filed duplicate repeat is not evidence this number's owner ever
-    // reached out. whereNotIn also fails closed on a NULL status (SQL's
-    // three-valued logic excludes it, same as whereIn elsewhere in this
-    // file), consistent with "fail closed on anything not positively
-    // classified".
-    .whereNotIn('status', NON_ENGAGED_LEAD_STATUSES)
+    // Exclude only confirmed spam (codex r9 P2). Status is lifecycle, not
+    // provenance: a customer-originated lead later cancelled, or auto-filed
+    // as a duplicate of another real lead, still proves the person contacted
+    // Waves first. Spam is the one status that says the "contact" was never
+    // a person reaching out. whereNot also fails closed on a NULL status
+    // (SQL's three-valued logic excludes it), as elsewhere in this file.
+    .whereNot('status', 'spam')
     .orderBy('created_at', 'desc')
     .first('id', 'created_at');
 }
@@ -316,7 +313,9 @@ async function existsQualifyingInboundCall({ phoneLast10, before }) {
   // NON_SERVICE_NATURES denylist let through a null (indeterminate) nature
   // and silent_or_noise; only a positively service-classified call counts
   // now. A NULL nature fails the IN() test by SQL semantics, so no COALESCE.
-  const natures = [...SERVICE_CONTACT_NATURES];
+  // Plus voicemail_message, gated below on a linked lead (codex r9 P1): a
+  // prospect whose first contact was a service voicemail did reach out.
+  const natures = [...SERVICE_CONTACT_NATURES, 'voicemail_message'];
   // NON_SERVICE_DISPOSITIONS (codex pre-push r6 P1): an OLDER inbound row
   // predating V2 call_nature extraction has no nature at all — the
   // COALESCE above reads it as '', which PASSES the nature filter — but it
@@ -341,6 +340,13 @@ async function existsQualifyingInboundCall({ phoneLast10, before }) {
       `lower(trim(ai_extraction_enriched->>'call_nature')) IN (${natures.map(() => '?').join(',')})`,
       natures,
     )
+    // A voicemail counts only when the pipeline tied it to a live, non-spam
+    // lead, found by the call's own sid or the lead id stamped on the call
+    // (a fresh lead links only through leads.twilio_call_sid). A voicemail
+    // no one turned into a lead is not evidence of a service contact.
+    .whereRaw(`(lower(trim(ai_extraction_enriched->>'call_nature')) <> 'voicemail_message'
+      OR EXISTS (SELECT 1 FROM leads l WHERE l.deleted_at IS NULL AND l.status <> 'spam'
+        AND (l.twilio_call_sid = call_log.twilio_call_sid OR l.id::text = call_log.metadata->>'lead_id')))`)
     .whereRaw(
       `COALESCE(disposition, '') NOT IN (${dispositions.map(() => '?').join(',')})`,
       dispositions,
