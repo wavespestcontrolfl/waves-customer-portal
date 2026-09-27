@@ -61,6 +61,7 @@ function installDb(byTable = {}) {
     };
     b.whereIn = jest.fn((...a) => { q.wheres.push(['IN', ...a]); return b; });
     b.whereNotIn = jest.fn((...a) => { q.wheres.push(['NOT IN', ...a]); return b; });
+    b.orWhereNotIn = jest.fn((...a) => { q.wheres.push(['OR NOT IN', ...a]); return b; });
     b.whereNull = jest.fn((...a) => { q.wheres.push(['NULL', ...a]); return b; });
     b.orWhereBetween = jest.fn((...a) => { q.wheres.push(['OR BETWEEN', ...a]); return b; });
     b.whereBetween = jest.fn((...a) => { q.wheres.push(['BETWEEN', ...a]); return b; });
@@ -418,7 +419,16 @@ describe('hasPriorContact', () => {
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
     const smsQuery = state.queries.find((q) => q.table === 'sms_log');
     expect(smsQuery.limits).toHaveLength(0);
-    expect(smsQuery.wheres.some((w) => w[0] === 'NOT IN' && w[1] === 'message_type')).toBe(true);
+    // The ignored-type exclusion is grouped as NULL OR NOT IN (codex pre-push
+    // r2 P1) — a bare whereNotIn would silently drop every null-typed row,
+    // SQL's three-valued logic for `NULL NOT IN (...)`.
+    expect(smsQuery.wheres.some((w) => w[0] === 'NULL' && w[1] === 'message_type')).toBe(true);
+    expect(smsQuery.wheres.some((w) => w[0] === 'OR NOT IN' && w[1] === 'message_type')).toBe(true);
+  });
+
+  test('a substantive text with a NULL message_type still counts (codex pre-push r2 P1: NOT IN alone drops NULL rows)', async () => {
+    installDb({ sms_log: [{ id: 'sms-null-type', created_at: hoursAgo(2), message_body: 'Can you come look at the ants?', message_type: null }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
   });
 
   test('a text thread of only reschedule replies / bare acknowledgements does not count — isSubstantiveText still applies over the unbounded set', async () => {
@@ -429,8 +439,8 @@ describe('hasPriorContact', () => {
       ],
     });
     // Both rows fail isSubstantiveText (a bare closer, and an ignored type) —
-    // even though the mock "returned" them (it can't apply whereNotIn), the
-    // JS classifier still rejects them.
+    // even though the mock "returned" them (it can't apply the SQL filters),
+    // the JS classifier still rejects them.
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
   });
 

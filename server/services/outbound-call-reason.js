@@ -226,7 +226,14 @@ async function existsQualifyingInboundText({ phoneLast10, before }) {
     .where('direction', 'inbound')
     .where('created_at', '<', before)
     .whereRaw("right(regexp_replace(from_phone, '\\D', '', 'g'), 10) = ?", [phoneLast10])
-    .whereNotIn('message_type', [...IGNORED_TEXT_TYPES])
+    // NOT IN excludes NULL rows entirely (SQL's three-valued logic) —
+    // message_type is nullable, and isSubstantiveText's own JS check
+    // (IGNORED_TEXT_TYPES.has(String(row.message_type || ''))) treats a
+    // null type as '' (never ignored), so a null-typed substantive text
+    // must still qualify (codex pre-push r2 P1).
+    .where(function excludeIgnoredMessageType() {
+      this.whereNull('message_type').orWhereNotIn('message_type', [...IGNORED_TEXT_TYPES]);
+    })
     .whereRaw("message_body ~* '[a-z]'")
     .modify((qb) => excludeRecruitingSmsLog(qb, 'message_type'))
     .select('id', 'message_body', 'message_type');
