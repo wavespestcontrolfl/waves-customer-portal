@@ -293,11 +293,19 @@ async function processReceiptLine({ vendor, email, orderNumber, shipmentKey, ite
       // of these three statuses — those callers asked for a specific
       // person-facing hold (a return, an unreadable invoice, …) and the
       // agent never overrides that.
-      classified = { status: 'agent_pending', productId: classified.productId, product: classified.product };
+      //
+      // handoffFrom (the ORIGINAL status this line would have held under)
+      // rides along in agent_decision so a later gate-off never strands the
+      // line: inventory-agent.js's drainAgentQueue reads it back to restore
+      // the line to the status it would have held under without the agent,
+      // or 'unmatched' when it's missing (a defensive default; every write
+      // here sets it).
+      classified = { status: 'agent_pending', productId: classified.productId, product: classified.product, handoffFrom: classified.status };
     }
     const claim = await claimLine(trx, {
       ...key, email_id: email.id, raw_title: item.title, quantity: item.quantity, product_id: classified.productId,
       received_qty: classified.receivedQty ?? null, received_unit: classified.receivedUnit ?? null, status: classified.status,
+      ...(classified.handoffFrom ? { agent_decision: { handoffFrom: classified.handoffFrom } } : {}),
     });
     if (!claim) return { ...ALREADY_PROCESSED };
     const outcome = classified.status === 'logged'

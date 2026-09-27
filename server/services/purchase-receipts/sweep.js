@@ -324,4 +324,10 @@ async function runPurchaseReceiptRestockSweep({ notify } = {}) {
   return totals;
 }
 
-module.exports = { processReceiptEmail, runPurchaseReceiptRestockSweep, summarize };
+module.exports = {
+  processReceiptEmail, runPurchaseReceiptRestockSweep, summarize,
+  // Reused by inventory-agent.js's drainAgentQueue (never duplicated) — a
+  // line the agent gate stranded is restored to the status it would have
+  // held under without the agent, and rings the SAME "not added" bell text.
+  HELD_REASONS,
+};
