@@ -100,6 +100,29 @@ describe('groundRescheduleAgreement', () => {
     expect(slotQuote('We will see you Thursday PM at 2.').ok).toBe(true);
   });
 
+  // Pre-push audit P1 (552f7a5ac2): a quote that stops partway through a
+  // time, or before a correction, is judged with the rest of its sentence.
+  test('a quote is judged with the whole sentence it sits in', () => {
+    const cut = (said, slotQuote, movedQuote = null, moved = null) => ground(v2({
+      scheduling: moved ? { moved_appointment_date: moved } : {},
+      evidence: [
+        quote('/scheduling/agent_committed_booking', 'agent', said),
+        quote('/scheduling/confirmed_start_at', 'agent', slotQuote),
+        quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+        ...(movedQuote ? [quote('/scheduling/moved_appointment_date', 'agent', movedQuote)] : []),
+      ],
+    }), `Caller: Can we move my visit?\nAgent: ${said}\nCaller: ${ACCEPT}`);
+    expect(cut('We will see you Thursday at 2:30 PM.', 'see you Thursday at 2')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    expect(cut('We will see you Thursday at two or four.', 'see you Thursday at two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    expect(cut('We will see you Thursday at two, actually three.', 'see you Thursday at two')).toMatchObject({ ok: false, reason: 'agreed_slot_ungrounded' });
+    expect(cut('We will move your October 8th visit, or the October 9th one, to Thursday at two.', 'Thursday at two', 'your October 8th visit', '2026-10-08'))
+      .toMatchObject({ ok: false, reason: 'moved_appointment_ungrounded' });
+    // A whole time grounds, and the sentence may name the moved date beside the slot.
+    expect(cut('Okay so we will see you Thursday at 2 PM then.', 'see you Thursday at 2 PM').ok).toBe(true);
+    expect(cut('We will move it from October 8th to Thursday at two.', 'to Thursday at two', 'it from October', '2026-10-08'))
+      .toMatchObject({ ok: true, movedDate: '2026-10-08' });
+  });
+
   test('a weekday beside an explicit date describes that date', () => {
     const at = (text) => agreedAt('2026-12-17T12:00:00-05:00', text);
     expect(at('We will see you Thursday, December 17 at noon.').ok).toBe(true);

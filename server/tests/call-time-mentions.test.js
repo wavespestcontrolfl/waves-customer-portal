@@ -1,5 +1,5 @@
 // Day references in labelled call transcripts. Fixtures are fictitious.
-const { parseDayMentions, extractHourMentions, hasUnexplainedNumber } = require('../services/call-time-mentions');
+const { parseDayMentions, extractHourMentions, readTurn } = require('../services/call-time-mentions');
 
 // Sat Sep 26, 2026, 11:51 AM ET.
 const STARTED = new Date('2026-09-26T15:51:18Z');
@@ -106,7 +106,7 @@ describe('extractHourMentions', () => {
   });
 
   test('a number that is neither a day, an hour nor a length is unexplained', () => {
-    const loose = (text) => hasUnexplainedNumber(text, STARTED);
+    const loose = (text) => readTurn(text, STARTED).unexplained.length > 0;
     expect(loose('We can see you Thursday at two, actually three.')).toBe(true);
     expect(loose('Thursday at 2, 45 minutes early is fine, 123 Main.')).toBe(true);
     expect(loose('We will see you Thursday, October 2 at 2 pm for about two hours, at two properties.')).toBe(false);

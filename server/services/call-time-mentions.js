@@ -372,9 +372,11 @@ function scanHours(turnText, started) {
     .flatMap((d) => Array.from({ length: d.end - d.pos }, (_, k) => d.pos + k)));
   const mentions = [];
   const unexplained = [];
+  const sentences = [];
   let offset = 0; // token offset of this sentence within the whole turn
   for (const sentence of splitTurnSentences(turnText)) {
     const toks = normalize(sentence).split(' ').filter(Boolean);
+    sentences.push({ from: offset, to: offset + toks.length });
     const periods = sentencePeriods(toks);
     const said = {
       period: periods.size === 1 ? [...periods][0] : null,
@@ -401,7 +403,7 @@ function scanHours(turnText, started) {
     }
     offset += toks.length;
   }
-  return { mentions, unexplained };
+  return { mentions, unexplained, sentences };
 }
 
 /**
@@ -430,15 +432,20 @@ function extractHourMentions(turnText, started) {
 }
 
 /**
- * Does this text say a number that is neither a day, an hour nor a length
- * of time? A corrected hour said without a marker ("at two, actually
- * three") is one, and so is any stray figure; a quote that must name
- * exactly one slot fails on it rather than guess what the number meant.
+ * Everything one turn says about days and hours, in turn-level token
+ * positions (the tokens of normalize(turnText)): { days, hours, unexplained,
+ * sentences } with each sentence's { from, to } span
+ * — parseDayMentions, extractHourMentions, and the positions of the numbers
+ * are neither a day, an hour nor a length of time — a corrected hour
+ * said without a marker ("at two, actually three") or any stray figure. For judging a quote INSIDE the turn, so a
+ * quote that stops partway through a time ("at 2" of "at 2:30 PM") is read
+ * with the rest of that time.
  */
-function hasUnexplainedNumber(turnText, started) {
-  return scanHours(turnText, started).unexplained.length > 0;
+function readTurn(turnText, started) {
+  const { mentions, unexplained, sentences } = scanHours(turnText, started);
+  return { days: parseDayMentions(turnText, started), hours: mentions, unexplained, sentences };
 }
 
 module.exports = {
-  normalize, parseTurns, parseDayMentions, extractHourMentions, hasUnexplainedNumber,
+  normalize, parseTurns, parseDayMentions, extractHourMentions, readTurn,
 };
