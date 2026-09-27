@@ -216,6 +216,46 @@ describe('customer notification native push dispatch', () => {
     expect(PushService.sendToCustomer).not.toHaveBeenCalled();
   });
 
+  test('a previsit quote changed after the initial check is rechecked before its bell insert', async () => {
+    const { notifQ, trx } = setupDb();
+    let releaseLock;
+    let lockEntered;
+    const entered = new Promise((resolve) => { lockEntered = resolve; });
+    trx.raw.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseLock = resolve;
+      lockEntered();
+    }));
+
+    const rendered = { visitDate: '2026-10-02', dueCents: 9660 };
+    const current = { ...rendered };
+    const preSendCheck = jest.fn(async () => (
+      current.visitDate === rendered.visitDate && current.dueCents === rendered.dueCents
+        ? { ok: true }
+        : { ok: false, code: 'PREVISIT_QUOTE_CHANGED', retryable: true }
+    ));
+    const shouldContinue = require('../services/messaging/push-channel-routing')._test.windowGuardFrom(preSendCheck);
+
+    // The canonical pipeline already checked this copy before entering the
+    // App provider. Change it while notifyCustomer is waiting on the event
+    // lock; create() must run the same callback again before persistence.
+    await expect(preSendCheck()).resolves.toEqual({ ok: true });
+    const pending = NotificationService.notifyCustomer(
+      'customer-1', 'billing', 'Balance due', 'Your balance is $96.60.',
+      { dedupeKey: 'previsit-balance:visit-1', awaitPush: true, pushOptions: { shouldContinue } },
+    );
+    await entered;
+    current.visitDate = '2026-10-03';
+    current.dueCents = 0;
+    releaseLock();
+
+    await expect(pending).resolves.toMatchObject({
+      id: null, suppressed: true, reason: 'pre_send_check_blocked',
+    });
+    expect(preSendCheck).toHaveBeenCalledTimes(2);
+    expect(notifQ.insert).not.toHaveBeenCalled();
+    expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+  });
+
   test.each([
     ['legacy true', true, true, true],
     ['structured success', { ok: true, validUntil: Date.now() + 60000 }, true, true],
