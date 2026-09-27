@@ -218,6 +218,20 @@ describe('customer-safe routine completion observations', () => {
     expect(result.body?.code).not.toBe('conflicting_structured_observations');
   });
 
+  test('rejects mutually exclusive dry and saturated root-zone soil observations', async () => {
+    service.service_type = 'Every 6 Weeks Tree & Shrub Care Service';
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce({ serviceKey: 'tree_shrub_6week' });
+    const result = await complete({
+      structuredObservations: completionObservationCatalog.tree_shrub
+        .filter(([id]) => ['dry-soil', 'saturated-soil'].includes(id))
+        .map(([, label]) => label),
+    });
+
+    expect(result).toMatchObject({ status: 422, body: { code: 'conflicting_structured_observations' } });
+    expect(attempts.claimCompletionAttempt).toHaveBeenCalled();
+  });
+
   test.each(['Poor', 'Declining'])('rejects no visible plant stress with the typed %s landscape condition', async (landscapeCondition) => {
     service.service_type = 'Every 6 Weeks Tree & Shrub Care Service';
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });

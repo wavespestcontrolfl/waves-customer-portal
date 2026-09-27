@@ -37,6 +37,8 @@ test('the customer payload preserves submitted lawn findings, work, quantities a
     service_data: {},
   }, 'test-preview-token', knex);
   expect(data.protocol.structuredObservations).toEqual([finding, governedFinding]);
+  expect(data.protocol.structuredObservationsProvenance).toBe('completion_form_snapshot');
+  expect(data.protocol.observations).toContain('Internal access instruction');
   expect(data.protocol.actions).toContain('Tested irrigation coverage');
   expect(data.findings.map((item) => item.title)).toContain(finding);
   expect(data.findings.map((item) => item.title)).toContain(governedFinding);

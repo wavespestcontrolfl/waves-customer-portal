@@ -394,6 +394,12 @@ is omitted and that leg stays live. The PDF filename and the canonical lawn
 pin read the same overlaid row. Presentation (technician photo URL, copy
 config) and the deliberately live sections (next visit, review CTA,
 cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`.
+The payload's `protocol.structuredObservations` contains only the saved
+completion-form observation snapshot, and a nonempty snapshot carries
+`structuredObservationsProvenance: "completion_form_snapshot"`. Live reports
+may render those frozen labels even after a catalog rename or deletion.
+Merged protocol observations and tagged technician notes never receive that
+marker and remain excluded from customer-facing observation lists.
 For tree/shrub assessments, a technician-hidden photo metric and its influenced
 overall score are `null` in reports and historical trends. Stored review decisions
 also mask legacy healthy substitutions on read; original AI scores remain in the

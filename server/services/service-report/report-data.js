@@ -1683,6 +1683,7 @@ function buildProtocolPayload(record) {
   const structured = parseJsonObject(record.structured_notes);
   const serviceData = parseJsonObject(record.service_data);
   const protocol = parseJsonObject(serviceData.protocol);
+  const structuredObservations = uniqueStrings(parseJsonArray(structured.formObservations));
   return {
     actions: uniqueStrings([
       ...parseJsonArray(protocol.actions),
@@ -1697,7 +1698,15 @@ function buildProtocolPayload(record) {
     // Safe customer-facing provenance: completion form/chip values only.
     // Never substitute the merged observations list, which also contains
     // raw [Found] technician-note lines.
-    structuredObservations: uniqueStrings(parseJsonArray(structured.formObservations)),
+    structuredObservations,
+    // This marker covers only the completion-form snapshot above. That field
+    // is written after the server-owned service-line allowlist and conflict
+    // checks, so the live client may keep its frozen labels when today's
+    // catalog has renamed or removed one. Never apply this provenance to the
+    // merged observations list, which may contain raw technician-note text.
+    ...(structuredObservations.length ? {
+      structuredObservationsProvenance: 'completion_form_snapshot',
+    } : {}),
     recommendations: uniqueStrings([
       ...parseJsonArray(protocol.recommendations),
       ...parseJsonArray(structured.recommendations),

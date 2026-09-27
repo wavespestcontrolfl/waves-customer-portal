@@ -1452,6 +1452,11 @@ describe('service report v1', () => {
     expect(data.findings).toEqual(expect.arrayContaining([
       expect.objectContaining({ title: 'Yellowjacket', detail: 'Recorded during the structured service closeout.' }),
     ]));
+    expect(data.protocol).toMatchObject({
+      structuredObservations: ['Yellowjacket'],
+      structuredObservationsProvenance: 'completion_form_snapshot',
+    });
+    expect(data.protocol.observations).toContain('Internal access instruction');
     expect(data.findings.filter((finding) => finding.title === 'Yellowjacket')).toHaveLength(1);
     expect(data.findings.some((finding) => finding.title.includes('Internal access'))).toBe(false);
   });
