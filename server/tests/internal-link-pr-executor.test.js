@@ -7,6 +7,7 @@ jest.mock('../services/content-astro/github-client', () => ({
   putFile: jest.fn(),
   createPr: jest.fn(),
   createIssueComment: jest.fn(),
+  findOpenPrByHead: jest.fn(async () => null),
 }));
 
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_name, fn) => fn()) }));
@@ -1271,7 +1272,8 @@ describe('internal-link PR auto-merge', () => {
     GitHubClient.listPrReviewComments = jest.fn(async () => []);
     instance = new InternalLinkPrExecutor();
     instance._markTaskMerged = jest.fn();
-    instance._closeLinkPr = jest.fn();
+    instance._closeLinkPr = jest.fn(async () => true);
+    instance._finalizeOriginatingRuns = jest.fn();
     jest.spyOn(require('../services/content-astro/pages-poll'), 'latestDeploymentForBranch')
       .mockResolvedValue({ latest_stage: { status: 'success' }, deployment_trigger: { metadata: { branch: 'content/internal-link-x', commit_hash: HEAD } } });
   });
@@ -1383,6 +1385,24 @@ describe('internal-link PR auto-merge', () => {
     expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'pr_closed_unmerged' });
   });
 
+  test('a merge closes out the runner run that opened the PR', async () => {
+    await instance.runAutoMerge();
+    expect(instance._finalizeOriginatingRuns).toHaveBeenCalledWith(prUrl, { merged: true });
+  });
+
+  test('a PR retargeted away from production main is closed, never merged', async () => {
+    GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'open', created_at: new Date(0).toISOString(), head: { sha: HEAD, ref: 'content/internal-link-x' }, base: { ref: 'staging' } });
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'base_not_production' });
+    expect(instance._closeLinkPr).toHaveBeenCalledWith(expect.any(Object), expect.any(Array), expect.objectContaining({ failureReason: 'internal_link_pr_base_changed' }));
+    expect(GitHubClient.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a close whose branch is not yet retired holds instead of reporting closed', async () => {
+    instance._closeLinkPr = jest.fn(async () => false);
+    GitHubClient.listPrReviewComments.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector[bot]' }, commit_id: HEAD, body: 'P1' }]);
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'branch_retire_pending' });
+  });
+
   test('kill switch and shadow mode disable it', async () => {
     process.env.AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE = 'false';
     expect(await instance.runAutoMerge()).toEqual({ status: 'disabled' });
@@ -1406,5 +1426,43 @@ describe('internal-link freshness bump', () => {
     const base = '---\nmodified: "2026-06-19T00:00:00"\n---\nB\n';
     expect(restoreFreshnessLine('---\nmodified: "2026-09-27T12:00:00"\n---\nB\n', base)).toBe(base);
     expect(restoreFreshnessLine('---\nmodified: "tomorrow"\n---\nB\n', base)).not.toBe(base);
+  });
+});
+
+describe('internal-link stale reservation recovery', () => {
+  test('restores a reservation whose PR actually opened instead of freeing it', async () => {
+    const instance = new InternalLinkPrExecutor();
+    const updates = [];
+    const q = {
+      where: jest.fn(() => q),
+      whereNull: jest.fn(() => q),
+      select: jest.fn(async () => [{ id: 'r1', pr_branch: 'content/internal-link-x', reviewer_notes: null }]),
+      update: jest.fn(async (patch) => { updates.push(patch); return 1; }),
+    };
+    db.mockImplementation(() => q);
+    GitHubClient.findOpenPrByHead.mockResolvedValueOnce({ html_url: 'https://github.com/x/y/pull/88', head: { sha: 'f'.repeat(40) } });
+    await instance._recoverStalePrReservedTasks();
+    expect(GitHubClient.findOpenPrByHead).toHaveBeenCalledWith('content/internal-link-x');
+    expect(updates).toEqual([expect.objectContaining({ status: 'pr_open', astro_pr_url: 'https://github.com/x/y/pull/88', pr_commit_sha: 'f'.repeat(40) })]);
+  });
+});
+
+describe('internal-link originating run finalize', () => {
+  test('closes out the parked runner run and its opportunity after a merge', async () => {
+    const instance = new InternalLinkPrExecutor();
+    const calls = [];
+    db.mockImplementation((table) => {
+      const q = {
+        where: jest.fn(() => q),
+        select: jest.fn(async () => (table === 'autonomous_runs' ? [{ id: 'run1', opportunity_id: 'opp1', queue_claim_id: 'c1' }] : [])),
+        update: jest.fn(async (patch) => { calls.push({ table, patch }); return 1; }),
+      };
+      return q;
+    });
+    await instance._finalizeOriginatingRuns('https://github.com/x/y/pull/9', { merged: true });
+    expect(calls).toEqual([
+      { table: 'autonomous_runs', patch: expect.objectContaining({ outcome: 'completed_published', skip_reason: null }) },
+      { table: 'opportunity_queue', patch: expect.objectContaining({ status: 'done' }) },
+    ]);
   });
 });

@@ -49,6 +49,200 @@ const DEFAULT_LIMIT = 10;
 // _recoverStalePrReservedTasks).
 const STALE_PR_RESERVED_MS = 2 * 60 * 60 * 1000;
 
+const MISSING_FILE_RE = /^(source_file_not_found|target_file_not_found|target_file_unresolved):/;
+const LINK_RUN_PENDING_REASON = 'internal_links_pr_pending_merge';
+const LINK_RUN_CLOSED_REASON = 'internal_links_pr_closed_unmerged';
+// Reviewer verdicts (the LLM reader check, Codex findings) are terminal: a
+// replan must not re-queue them, or an unchanged link would be retried until
+// a later nondeterministic verdict — or Codex silence — let it through.
+// queueInternalLinkTaskForDryRun honors these prefixes; a human requeue
+// from the review queue still can.
+const REVIEWER_REJECTION_PREFIXES = ['llm_judge_rejected', 'codex_findings'];
+
+function terminalVerdict(task, fields) {
+  return { persist: { task_id: task.id, executor_version: EXECUTOR_VERSION, ...fields } };
+}
+
+// ── PR batch: one candidate's stages (see _evaluateCandidate) ─────────
+async function loadPagesStage(ctx) {
+  try {
+    ctx.source = await this._loadSourcePage(ctx.task);
+    ctx.target = await this._loadTargetPage(ctx.task);
+    return null;
+  } catch (err) {
+    // Only a confirmed-missing file is terminal; a GitHub rate limit,
+    // network error or 5xx leaves the candidate for the next sweep.
+    const reason = String(err?.message || err);
+    if (MISSING_FILE_RE.test(reason)) return terminalVerdict(ctx.task, { status: 'failed', failure_reason: reason.slice(0, 500) });
+    logger.warn(`[internal-link-pr-executor] transient load failure for ${ctx.task.id} (retry next sweep): ${reason}`);
+    return { retry: true };
+  }
+}
+
+// Link TARGETS may be protected money pages; the SOURCE is the page this PR
+// edits, so it keeps the protected-page guard. A check error fails closed
+// without persisting (retried next sweep).
+async function sourceProtectionStage(ctx) {
+  const prot = await this._sourceProtection(ctx.source, ctx.task);
+  if (prot.error) return { retry: true };
+  if (!prot.protected) return null;
+  return terminalVerdict(ctx.task, { status: 'skipped', skip_reason: `source_protected_page:${prot.reason || 'protected'}` });
+}
+
+function validateStage(ctx) {
+  const { task, batch } = ctx;
+  ctx.validation = evaluateDryRunTask(task, {
+    sourcePage: ctx.source,
+    targetPage: ctx.target,
+    options: { targetNewLinksInPr: batch.targetCounts.get(policy.normalizeInternalUrl(task.target_url)) || 0 },
+  });
+  if (ctx.validation.status !== 'patch_candidate') return { persist: ctx.validation };
+  // Key the per-source cap by the RESOLVED path (source.file) so two tasks
+  // for the same post under different extensions (.md + migrated .mdx) count
+  // as one source — otherwise both would write the same file in one PR with
+  // the same base SHA and the second Contents update would conflict.
+  ctx.sourceKey = ctx.source.file || task.source_file;
+  ctx.targetUrl = policy.normalizeInternalUrl(task.target_url || ctx.validation.target_canonical_url);
+  const capped = (batch.sourceCounts.get(ctx.sourceKey) || 0) >= batch.maxLinksPerSource
+    || (batch.targetCounts.get(ctx.targetUrl) || 0) >= batch.maxLinksPerTarget;
+  return capped ? { retry: true } : null;
+}
+
+async function renderedSourceStage(ctx) {
+  const rendered = await this._validateRenderedSourceAnchor(ctx.task, ctx.validation);
+  if (rendered.ok) return null;
+  const failed = rendered.status === 'failed';
+  return {
+    persist: {
+      ...ctx.validation,
+      status: rendered.status || 'skipped',
+      skip_reason: failed ? null : rendered.reason,
+      failure_reason: failed ? rendered.reason : null,
+    },
+  };
+}
+
+// The patch must land on the occurrence that passed validation (same
+// effective terms), add a crawlable link, and leave frontmatter untouched.
+const PATCH_CHECKS = [
+  { fails: (patched, ctx) => patched === ctx.source.body, verdict: { status: 'skipped', skip_reason: 'patch_noop' } },
+  { fails: (patched, ctx) => !patchContainsCrawlableMarkdownLink(patched, ctx.task.anchor_text, ctx.targetUrl), verdict: { status: 'failed', failure_reason: 'rendered_link_validation_failed' } },
+  { fails: (patched, ctx) => !frontmatterUnchanged(ctx.source.body, patched), verdict: { status: 'failed', failure_reason: 'frontmatter_changed' } },
+];
+
+function patchStage(ctx) {
+  const { task, target, targetUrl } = ctx;
+  ctx.patchedContent = planner.applyTaskToBody(
+    ctx.source.body,
+    { ...task, target_url: targetUrl },
+    { targetTerms: effectiveTargetTerms(target, targetUrl, task).targetTerms }
+  );
+  const failed = PATCH_CHECKS.find((check) => check.fails(ctx.patchedContent, ctx));
+  return failed ? { persist: { ...ctx.validation, ...failed.verdict } } : null;
+}
+
+// Reader check (internal-link-judge): link PRs merge unattended, so an LLM
+// reads the link in context before it is committed. No verdict (provider
+// outage) leaves the candidate for the next sweep.
+async function judgeStage(ctx) {
+  const verdict = await this._judgeLink(ctx);
+  if (!verdict.ok) return { retry: true };
+  if (verdict.approve) return null;
+  return { persist: { ...ctx.validation, status: 'skipped', skip_reason: `llm_judge_rejected:${verdict.reason}`.slice(0, 500) } };
+}
+
+const CANDIDATE_STAGES = [loadPagesStage, sourceProtectionStage, validateStage, renderedSourceStage, patchStage, judgeStage];
+
+// ── Auto-merge gates (see runAutoMerge / _applyGateOutcome) ───────────
+function prStateGate(ctx) {
+  const state = String(ctx.pr?.state || '').toLowerCase();
+  if (ctx.pr && !ctx.pr.merged && state === 'closed') {
+    // Closed unmerged (by a gate whose branch retirement failed, or by
+    // hand): retire the branch before the tasks leave pr_open.
+    return {
+      reason: 'pr_closed_unmerged',
+      close: { status: 'failed', failureReason: 'internal_link_pr_closed_unmerged', note: 'Link PR closed without merging; branch retired.' },
+    };
+  }
+  // Merged PRs are settled by runPostMergeVerification.
+  return state === 'open' ? null : { result: { status: 'pr_not_open' } };
+}
+
+// Only a PR this executor opened after the reader check existed (v2), on
+// the exact head it pushed.
+function provenanceGate(ctx) {
+  if (ctx.prTasks.some((t) => t.executor_version !== PR_EXECUTOR_VERSION)) return { hold: 'pre_judge_pr' };
+  ctx.headSha = String(ctx.pr.head?.sha || '').toLowerCase();
+  const foreign = !ctx.headSha || ctx.prTasks.some((t) => String(t.pr_commit_sha || '').toLowerCase() !== ctx.headSha);
+  return foreign ? { hold: 'head_not_executor_commit' } : null;
+}
+
+// The link must land on production main; a PR retargeted to another base
+// would "merge" without ever reaching the site.
+function productionBaseGate(ctx) {
+  const production = process.env.GITHUB_ASTRO_DEFAULT_BRANCH || 'main';
+  if (ctx.pr.base?.ref === production) {
+    ctx.baseRef = production;
+    return null;
+  }
+  return {
+    reason: 'base_not_production',
+    close: { status: 'failed', failureReason: 'internal_link_pr_base_changed', note: `PR base is ${ctx.pr.base?.ref || 'unknown'}, not ${production}; closed without merging.` },
+  };
+}
+
+// Pin main to one commit: the link-only check reads the base files at it and
+// the merge refuses unless main is still there (expectBaseSha) and every
+// source file lands byte-identical to the checked head (verifyPaths).
+async function linkOnlyDiffGate(ctx) {
+  ctx.baseSha = await GitHubClient.getBranchSha(ctx.baseRef);
+  if (!ctx.baseSha) return { hold: 'base_sha_unknown' };
+  const diff = await this._checkLinkOnlyDiff(ctx.pr, ctx.prTasks, ctx.baseSha);
+  if (diff.ok) {
+    ctx.files = diff.files;
+    return null;
+  }
+  return {
+    reason: diff.reason,
+    close: { status: 'patch_candidate', note: `Auto-merge diff check failed (${diff.reason}); PR closed, task returned to the candidate pool.` },
+  };
+}
+
+// Same preview gate the blog lane merges on (autonomous-pr-poller).
+async function previewBuildGate(ctx) {
+  const preview = await require('./autonomous-pr-poller').previewGate(ctx.pr);
+  if (preview.failed) {
+    return {
+      reason: 'preview_build_failed',
+      close: { status: 'failed', failureReason: 'internal_link_preview_build_failed', note: 'Hub preview build failed on the link PR head; PR closed.' },
+    };
+  }
+  return preview.ok ? null : { hold: preview.reason };
+}
+
+// Findings close the PR (a link PR has nothing to remediate). A clean verdict
+// passes at once; silence passes after the grace window.
+async function codexGate(ctx) {
+  ctx.codex = await this._codexVerdict(ctx.prNumber, ctx.headSha);
+  if (ctx.codex.findings) {
+    return {
+      reason: 'codex_findings',
+      close: { status: 'skipped', skipReason: 'codex_findings', note: `Codex left ${ctx.codex.findings} finding(s) on ${ctx.headSha.slice(0, 10)}; PR closed without merging.` },
+    };
+  }
+  const graceMs = envInt('AUTONOMOUS_INTERNAL_LINK_CODEX_GRACE_MIN', 120) * 60 * 1000;
+  const openedAt = Date.parse(ctx.pr.created_at || '') || 0;
+  const waiting = !ctx.codex.clean && new Date(ctx.now).getTime() - openedAt < graceMs;
+  return waiting ? { hold: 'codex_review_pending' } : null;
+}
+
+// The poller's per-tick merge cap: checks still ran (and closed failures).
+function mergeCapGate(ctx) {
+  return ctx.allowMerge ? null : { hold: 'merge_cap_reached' };
+}
+
+const MERGE_GATES = [prStateGate, provenanceGate, productionBaseGate, linkOnlyDiffGate, previewBuildGate, codexGate, mergeCapGate];
+
 class InternalLinkPrExecutor {
   async runDryRun({ limit = DEFAULT_LIMIT, taskIds = null } = {}) {
     const tasks = await this._loadQueuedTasks({ limit, taskIds });
@@ -98,135 +292,56 @@ class InternalLinkPrExecutor {
 
   async _runPrBatchUnlocked({ limit = envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_PR', 3), taskIds = null, scanLimit = null } = {}) {
     // scanLimit lets the sweep look past candidates that fail revalidation
-    // (each failure is persisted, so they drop out of later sweeps).
+    // (each terminal failure is persisted, so they drop out of later sweeps).
     const tasks = await this._loadPatchCandidateTasks({ limit: Math.max(limit, Number(scanLimit) || 0), taskIds });
-    const selected = [];
-    const sourceCounts = new Map();
-    const targetCounts = new Map();
-    // v1 writes one commit per source file from its current main SHA. Keep
-    // source edits capped at one until multi-link same-file patch combining
-    // has its own validation path.
-    const maxLinksPerSource = Math.min(envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_SOURCE', 1), 1);
-    const maxLinksPerTarget = envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_TARGET_PER_PR', 2);
-
+    const batch = {
+      selected: [],
+      sourceCounts: new Map(),
+      targetCounts: new Map(),
+      // v1 writes one commit per source file from its current main SHA. Keep
+      // source edits capped at one until multi-link same-file patch combining
+      // has its own validation path.
+      maxLinksPerSource: Math.min(envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_SOURCE', 1), 1),
+      maxLinksPerTarget: envInt('AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_TARGET_PER_PR', 2),
+    };
     for (const task of tasks) {
-      // A stale row (source/target renamed or deleted) must not abort the
-      // batch: persist the failure and move on, like runDryRun does.
-      let source;
-      let target;
-      try {
-        source = await this._loadSourcePage(task);
-        target = await this._loadTargetPage(task);
-      } catch (err) {
-        const reason = String(err?.message || err);
-        // Only a confirmed-missing file is terminal; a GitHub rate limit,
-        // network error or 5xx leaves the candidate for the next sweep.
-        if (/^(source_file_not_found|target_file_not_found|target_file_unresolved):/.test(reason)) {
-          await this._persistDryRunResult(task.id, {
-            task_id: task.id,
-            status: 'failed',
-            failure_reason: reason.slice(0, 500),
-            executor_version: EXECUTOR_VERSION,
-          });
-        } else {
-          logger.warn(`[internal-link-pr-executor] transient load failure for ${task.id} (retry next sweep): ${reason}`);
-        }
-        continue;
-      }
-      // Link TARGETS may be protected money pages; the SOURCE is the page
-      // this PR edits, so it keeps the protected-page guard. A check error
-      // fails closed without persisting (retried next sweep).
-      const sourceProtection = await this._sourceProtection(source, task);
-      if (sourceProtection.error) continue;
-      if (sourceProtection.protected) {
-        await this._persistDryRunResult(task.id, {
-          task_id: task.id,
-          status: 'skipped',
-          skip_reason: `source_protected_page:${sourceProtection.reason || 'protected'}`,
-          executor_version: EXECUTOR_VERSION,
-        });
-        continue;
-      }
-      const validation = evaluateDryRunTask(task, {
-        sourcePage: source,
-        targetPage: target,
-        options: {
-          targetNewLinksInPr: targetCounts.get(policy.normalizeInternalUrl(task.target_url)) || 0,
-        },
-      });
-      if (validation.status !== 'patch_candidate') {
-        await this._persistDryRunResult(task.id, validation);
-        continue;
-      }
+      const item = await this._evaluateCandidate(task, batch);
+      if (!item) continue;
+      batch.selected.push(item);
+      batch.sourceCounts.set(item.sourceKey, (batch.sourceCounts.get(item.sourceKey) || 0) + 1);
+      batch.targetCounts.set(item.targetUrl, (batch.targetCounts.get(item.targetUrl) || 0) + 1);
+      if (batch.selected.length >= limit) break;
+    }
+    if (!batch.selected.length) return { status: 'no_candidates', count: 0, results: [] };
+    return this._openPrForSelected(batch.selected);
+  }
 
-      // Key the per-source cap by the RESOLVED path (source.file) so two tasks
-      // for the same post under different extensions (.md + migrated .mdx) count
-      // as one source — otherwise both would write the same file in one PR with
-      // the same base SHA and the second Contents update would conflict.
-      const sourceKey = source.file || task.source_file;
-      const sourceCount = sourceCounts.get(sourceKey) || 0;
-      if (sourceCount >= maxLinksPerSource) continue;
-      const targetUrl = policy.normalizeInternalUrl(task.target_url || validation.target_canonical_url);
-      const targetCount = targetCounts.get(targetUrl) || 0;
-      if (targetCount >= maxLinksPerTarget) continue;
-
-      const renderedSource = await this._validateRenderedSourceAnchor(task, validation);
-      if (!renderedSource.ok) {
-        await this._persistDryRunResult(task.id, {
-          ...validation,
-          status: renderedSource.status || 'skipped',
-          skip_reason: renderedSource.status === 'failed' ? null : renderedSource.reason,
-          failure_reason: renderedSource.status === 'failed' ? renderedSource.reason : null,
-        });
-        continue;
-      }
-
-      // Same effective terms the dry-run validation relocated with — the
-      // patch must land on the occurrence that passed the gate, not one a
-      // terms-blind relocation picks after drift.
-      const patchedContent = planner.applyTaskToBody(
-        source.body,
-        { ...task, target_url: targetUrl },
-        { targetTerms: effectiveTargetTerms(target, targetUrl, task).targetTerms }
-      );
-      if (patchedContent === source.body) {
-        await this._persistDryRunResult(task.id, { ...validation, status: 'skipped', skip_reason: 'patch_noop' });
-        continue;
-      }
-      if (!patchContainsCrawlableMarkdownLink(patchedContent, task.anchor_text, targetUrl)) {
-        await this._persistDryRunResult(task.id, { ...validation, status: 'failed', failure_reason: 'rendered_link_validation_failed' });
-        continue;
-      }
-      if (!frontmatterUnchanged(source.body, patchedContent)) {
-        await this._persistDryRunResult(task.id, { ...validation, status: 'failed', failure_reason: 'frontmatter_changed' });
-        continue;
-      }
-
-      // Reader check (internal-link-judge): link PRs merge unattended, so an
-      // LLM reads the link in context before it is committed. No verdict
-      // (provider outage) leaves the candidate for the next sweep.
-      const verdict = await this._judgeLink({ task, source, target, validation, targetUrl });
-      if (!verdict.ok) continue;
-      if (!verdict.approve) {
-        await this._persistDryRunResult(task.id, {
-          ...validation,
-          status: 'skipped',
-          skip_reason: `llm_judge_rejected:${verdict.reason}`.slice(0, 500),
-        });
-        continue;
-      }
-
+  // Runs one candidate through CANDIDATE_STAGES in order. A stage returns
+  // nothing to continue, { persist } to record a terminal verdict and drop
+  // the candidate, or { retry: true } to drop it untouched for a later sweep.
+  async _evaluateCandidate(task, batch) {
+    const ctx = { task, batch };
+    for (const stage of CANDIDATE_STAGES) {
+      const stop = await stage.call(this, ctx);
+      if (!stop) continue;
+      if (stop.persist) await this._persistDryRunResult(task.id, stop.persist);
+      return null;
+    }
+    return {
+      task,
+      source: ctx.source,
+      target: ctx.target,
+      validation: ctx.validation,
+      targetUrl: ctx.targetUrl,
+      sourceKey: ctx.sourceKey,
       // Content edits bump the page's freshness field (sitemap lastmod), the
       // same rule publishRefresh / metadata rewrites follow; a one-line edit
       // so the rest of the frontmatter stays byte-identical.
-      selected.push({ task, source, target, validation, patchedContent: bumpFreshnessLine(patchedContent, etDateString()), targetUrl });
-      sourceCounts.set(sourceKey, sourceCount + 1);
-      targetCounts.set(targetUrl, targetCount + 1);
-      if (selected.length >= limit) break;
-    }
+      patchedContent: bumpFreshnessLine(ctx.patchedContent, etDateString()),
+    };
+  }
 
-    if (!selected.length) return { status: 'no_candidates', count: 0, results: [] };
-
+  async _openPrForSelected(selected) {
     const branch = internalLinkBranchName(selected);
     const reserved = await this._reserveTasksForPr(selected, { branch });
     if (!reserved) return { status: 'reservation_conflict', count: 0, results: [] };
@@ -333,86 +448,45 @@ class InternalLinkPrExecutor {
     const tasks = await db(TABLE).where('status', 'pr_open').whereNotNull('astro_pr_url').orderBy('updated_at', 'asc').select('*');
     if (!tasks.length) return { status: 'no_open_pr' };
     const prUrl = tasks[0].astro_pr_url;
-    const prTasks = tasks.filter((t) => t.astro_pr_url === prUrl);
     const prNumber = parsePrNumber(prUrl);
     if (!prNumber) return { status: 'pr_number_unknown', pr_url: prUrl };
+    const ctx = {
+      prUrl,
+      prNumber,
+      prTasks: tasks.filter((t) => t.astro_pr_url === prUrl),
+      now,
+      allowMerge,
+      pr: await GitHubClient.getPr(prNumber),
+    };
+    for (const gate of MERGE_GATES) {
+      const outcome = await gate.call(this, ctx);
+      if (outcome) return this._applyGateOutcome(ctx, outcome);
+    }
+    return this._mergeLinkPr(ctx);
+  }
 
-    const pr = await GitHubClient.getPr(prNumber);
-    if (pr && !pr.merged && String(pr.state).toLowerCase() === 'closed') {
-      // Closed unmerged (by a gate here whose branch retirement failed, or by
-      // hand): retire the branch before the tasks leave pr_open.
-      const done = await this._closeLinkPr(pr, prTasks, {
-        status: 'failed',
-        failureReason: 'internal_link_pr_closed_unmerged',
-        note: 'Link PR closed without merging; branch retired.',
-      });
-      return { status: done ? 'closed' : 'hold', reason: done ? 'pr_closed_unmerged' : 'branch_retire_pending', pr_number: prNumber };
-    }
-    if (!pr || String(pr.state).toLowerCase() !== 'open') {
-      // Merged PRs are settled by runPostMergeVerification.
-      return { status: 'pr_not_open', pr_number: prNumber };
-    }
-    if (prTasks.some((t) => t.executor_version !== PR_EXECUTOR_VERSION)) {
-      return { status: 'hold', reason: 'pre_judge_pr', pr_number: prNumber };
-    }
-    const headSha = String(pr.head?.sha || '').toLowerCase();
-    const pushed = prTasks.map((t) => String(t.pr_commit_sha || '').toLowerCase());
-    if (!headSha || pushed.some((sha) => !sha || sha !== headSha)) {
-      return { status: 'hold', reason: 'head_not_executor_commit', pr_number: prNumber };
-    }
+  // A gate outcome is { result } (report as-is), { hold } (wait for a later
+  // tick) or { close, reason } (close the PR and move its tasks). A close
+  // whose branch retirement is not yet confirmed holds instead.
+  async _applyGateOutcome(ctx, outcome) {
+    const base = { pr_number: ctx.prNumber };
+    if (outcome.result) return { ...outcome.result, ...base };
+    if (outcome.hold) return { status: 'hold', reason: outcome.hold, ...base };
+    const closed = await this._closeLinkPr(ctx.pr, ctx.prTasks, outcome.close);
+    return closed
+      ? { status: 'closed', reason: outcome.reason, ...base }
+      : { status: 'hold', reason: 'branch_retire_pending', ...base };
+  }
 
-    // Pin main to one commit: the link-only check reads the base files at it
-    // and the merge refuses unless main is still there (expectBaseSha) and
-    // every source file lands byte-identical to the checked head (verifyPaths)
-    // — a main edit to the same paragraph can never ride in unchecked.
-    const baseRef = pr.base?.ref || 'main';
-    const baseSha = await GitHubClient.getBranchSha(baseRef);
-    if (!baseSha) return { status: 'hold', reason: 'base_sha_unknown', pr_number: prNumber };
-    const diff = await this._checkLinkOnlyDiff(pr, prTasks, baseSha);
-    if (!diff.ok) {
-      await this._closeLinkPr(pr, prTasks, {
-        status: 'patch_candidate',
-        note: `Auto-merge diff check failed (${diff.reason}); PR closed, task returned to the candidate pool.`,
-      });
-      return { status: 'closed', reason: diff.reason, pr_number: prNumber };
-    }
-
-    // Same preview gate the blog lane merges on (autonomous-pr-poller).
-    const { previewGate } = require('./autonomous-pr-poller');
-    const preview = await previewGate(pr);
-    if (preview.failed) {
-      await this._closeLinkPr(pr, prTasks, {
-        status: 'failed',
-        failureReason: 'internal_link_preview_build_failed',
-        note: 'Hub preview build failed on the link PR head; PR closed.',
-      });
-      return { status: 'closed', reason: 'preview_build_failed', pr_number: prNumber };
-    }
-    if (!preview.ok) return { status: 'hold', reason: preview.reason, pr_number: prNumber };
-
-    const codex = await this._codexVerdict(prNumber, headSha);
-    if (codex.findings) {
-      await this._closeLinkPr(pr, prTasks, {
-        status: 'skipped',
-        skipReason: 'codex_findings',
-        note: `Codex left ${codex.findings} finding(s) on ${headSha.slice(0, 10)}; PR closed without merging.`,
-      });
-      return { status: 'closed', reason: 'codex_findings', pr_number: prNumber };
-    }
-    const graceMs = envInt('AUTONOMOUS_INTERNAL_LINK_CODEX_GRACE_MIN', 120) * 60 * 1000;
-    const openedAt = Date.parse(pr.created_at || '') || 0;
-    if (!codex.clean && new Date(now).getTime() - openedAt < graceMs) {
-      return { status: 'hold', reason: 'codex_review_pending', pr_number: prNumber };
-    }
-    if (!allowMerge) return { status: 'hold', reason: 'merge_cap_reached', pr_number: prNumber };
-
+  async _mergeLinkPr(ctx) {
+    const { pr, prNumber, prTasks, codex } = ctx;
     let merged;
     try {
       merged = await GitHubClient.mergePr(prNumber, {
         sha: pr.head.sha,
-        expectBaseSha: baseSha,
-        expectBaseRef: baseRef,
-        verifyPaths: diff.files,
+        expectBaseSha: ctx.baseSha,
+        expectBaseRef: ctx.baseRef,
+        verifyPaths: ctx.files,
         title: pr.title,
         message: `Auto-merged: link-only diff, green hub preview, ${codex.clean ? 'clean Codex review' : 'no Codex findings within the grace window'}.`,
       });
@@ -425,8 +499,38 @@ class InternalLinkPrExecutor {
     for (const task of prTasks) {
       await this._markTaskMerged(task.id, { mergedAt, commitSha: merged?.sha || null });
     }
+    await this._finalizeOriginatingRuns(ctx.prUrl, { merged: true });
     logger.info(`[internal-link-pr-executor] auto-merged link PR #${prNumber} (${prTasks.length} link(s), codex ${codex.clean ? 'clean' : 'silent'})`);
     return { status: 'merged', pr_number: prNumber, count: prTasks.length, codex: codex.clean ? 'clean' : 'silent' };
+  }
+
+  // A runner-opened link PR parks its autonomous_runs row and opportunity at
+  // internal_links_pr_pending_merge (_handleInternalLinksAction); nothing in
+  // the blog poller selects that reason, so the link lane closes them out
+  // once the PR is settled. Idempotent (guarded on the parked state) and
+  // fail-soft — a bookkeeping error never undoes a merge.
+  async _finalizeOriginatingRuns(prUrl, { merged }) {
+    if (!prUrl) return;
+    try {
+      const runs = await db('autonomous_runs')
+        .where({ outcome: 'completed_pending_review', skip_reason: LINK_RUN_PENDING_REASON, astro_pr_url: prUrl })
+        .select('id', 'opportunity_id', 'queue_claim_id');
+      const now = new Date();
+      for (const run of runs) {
+        await db('autonomous_runs').where({ id: run.id, skip_reason: LINK_RUN_PENDING_REASON }).update(merged
+          ? { outcome: 'completed_published', skip_reason: null, updated_at: now }
+          : { outcome: 'skipped', skip_reason: LINK_RUN_CLOSED_REASON, updated_at: now });
+        if (!run.opportunity_id) continue;
+        await db('opportunity_queue')
+          .where({ id: run.opportunity_id, status: 'pending_review', skip_reason: LINK_RUN_PENDING_REASON })
+          .where('claim_id', run.queue_claim_id || null)
+          .update(merged
+            ? { status: 'done', completed_at: now, updated_at: now }
+            : { status: 'skipped', skip_reason: LINK_RUN_CLOSED_REASON, completed_at: now, updated_at: now });
+      }
+    } catch (err) {
+      logger.warn(`[internal-link-pr-executor] originating-run finalize failed for ${prUrl}: ${err.message}`);
+    }
   }
 
   async _checkLinkOnlyDiff(pr, prTasks, baseSha) {
@@ -520,6 +624,7 @@ class InternalLinkPrExecutor {
         updated_at: new Date(),
       });
     }
+    await this._finalizeOriginatingRuns(prTasks[0]?.astro_pr_url || pr.html_url, { merged: false });
     logger.info(`[internal-link-pr-executor] closed link PR #${pr.number}: ${note}`);
     return true;
   }
@@ -664,6 +769,7 @@ class InternalLinkPrExecutor {
       mergedAt,
       commitSha: prInfo.merge_commit_sha || task.pr_commit_sha || null,
     });
+    await this._finalizeOriginatingRuns(task.astro_pr_url, { merged: true });
 
     const liveUrl = liveUrlForTask(task);
     if (!liveUrl) {
@@ -882,6 +988,21 @@ class InternalLinkPrExecutor {
       .where('updated_at', '<', cutoff)
       .select('id', 'pr_branch', 'reviewer_notes');
     for (const row of rows) {
+      // A crash after createPr but before _markTasksPrOpen leaves a real open
+      // PR behind a pr_reserved row with no URL. Restore that PR's lifecycle
+      // instead of freeing the task (which would open a duplicate PR).
+      const livePr = row.pr_branch ? await GitHubClient.findOpenPrByHead(row.pr_branch) : null;
+      if (livePr?.html_url) {
+        await db(TABLE).where({ id: row.id, status: 'pr_reserved' }).update({
+          status: 'pr_open',
+          astro_pr_url: livePr.html_url,
+          pr_commit_sha: livePr.head?.sha || null,
+          reviewer_notes: [String(row.reviewer_notes || '').trim(), `[${new Date().toISOString()}] system: restored stale reservation to its open PR ${livePr.html_url}.`]
+            .filter(Boolean).join('\n').slice(-5000),
+          updated_at: new Date(),
+        });
+        continue;
+      }
       const note = `[${new Date().toISOString()}] system: recovered stale pr_reserved reservation`
         + `${row.pr_branch ? ` (branch ${row.pr_branch})` : ''} back to patch_candidate.`;
       await db(TABLE)
@@ -1690,6 +1811,7 @@ async function requestCodexReview(pr, headSha, selected) {
 
 module.exports = new InternalLinkPrExecutor();
 module.exports.InternalLinkPrExecutor = InternalLinkPrExecutor;
+module.exports.REVIEWER_REJECTION_PREFIXES = REVIEWER_REJECTION_PREFIXES;
 module.exports._internals = {
   bumpFreshnessLine,
   restoreFreshnessLine,

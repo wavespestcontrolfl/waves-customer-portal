@@ -88,6 +88,33 @@ describe('internal-link dry-run queue helpers', () => {
     }));
   });
 
+  test('a replan never re-queues a link the reader check or Codex rejected', async () => {
+    const insertChain = {
+      insert: jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(() => ({ returning: jest.fn().mockResolvedValue([]) })) })) })),
+    };
+    const lookupChain = {
+      select: jest.fn(() => lookupChain),
+      where: jest.fn(() => lookupChain),
+      whereIn: jest.fn(() => lookupChain),
+      first: jest.fn().mockResolvedValue(undefined),
+    };
+    db.mockImplementationOnce(() => insertChain).mockImplementationOnce(() => lookupChain);
+
+    await expect(queueInternalLinkTaskForDryRun({
+      source_file: 'src/content/blog/source.md',
+      target_url: '/target/',
+      anchor_text: 'target anchor',
+    }, 'opp_new')).resolves.toBeNull();
+
+    // Render the grouped condition the lookup applied against real knex SQL.
+    const grouped = lookupChain.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    const knex = require('knex')({ client: 'pg' });
+    const sql = knex('content_internal_link_tasks').where(grouped).toString();
+    expect(sql).toContain('"skip_reason" is null');
+    expect(sql).toContain('"skip_reason" not like \'llm_judge_rejected%\'');
+    expect(sql).toContain('"skip_reason" not like \'codex_findings%\'');
+  });
+
   test('does not dry-run duplicates that leave retryable state before refresh update', async () => {
     const insertReturning = jest.fn().mockResolvedValue([]);
     const insertChain = {

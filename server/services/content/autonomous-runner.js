@@ -4380,6 +4380,12 @@ async function queueInternalLinkTaskForDryRun(task, opportunityId) {
   const insertedId = firstReturnedId(inserted);
   if (insertedId) return { id: insertedId, inserted: true };
 
+  // Reviewer verdicts (LLM reader check, Codex findings) stay terminal: a
+  // replan never re-queues them (see REVIEWER_REJECTION_PREFIXES).
+  const { REVIEWER_REJECTION_PREFIXES = [] } = getInternalLinkExecutor() || {};
+  const notReviewerRejected = (q) => q.whereNull('skip_reason').orWhere((inner) => {
+    for (const prefix of REVIEWER_REJECTION_PREFIXES) inner.andWhere('skip_reason', 'not like', `${prefix}%`);
+  });
   const existing = await db('content_internal_link_tasks')
     .select('id', 'status')
     .where({
@@ -4388,12 +4394,14 @@ async function queueInternalLinkTaskForDryRun(task, opportunityId) {
       anchor_text: task.anchor_text,
     })
     .whereIn('status', INTERNAL_LINK_RETRYABLE_STATUSES)
+    .where(notReviewerRejected)
     .first();
   if (!existing?.id) return null;
 
   const refreshed = await db('content_internal_link_tasks')
     .where({ id: existing.id })
     .whereIn('status', INTERNAL_LINK_RETRYABLE_STATUSES)
+    .where(notReviewerRejected)
     .update({
       status: 'queued',
       opportunity_id: opportunityId || task.opportunity_id || null,
