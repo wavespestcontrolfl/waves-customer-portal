@@ -320,4 +320,66 @@ describe('MobileAppointmentDetailSheet sibling-covered first-application visit',
     );
     expect(screen.queryByText(/\$74\.70/)).not.toBeInTheDocument();
   });
+
+  // Codex pre-push P1: predictCompletionBilling already nets prepaidAmount
+  // out of an 'invoice'/'auto_charge' prediction server-side. Comparing
+  // service.prepaidAmount against that ALREADY-NET total a second time
+  // misclassified a partially-prepaid visit as fully covered ($60 prepaid
+  // on a $100 fee predicts $40 due; $60 >= $40 read as "covered"), hiding
+  // the real $40 balance behind a $0.00 total and a disabled checkout.
+  it('shows the real remaining balance on a partially-prepaid per-application visit, never a false "covered"', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...BASE_SERVICE,
+          estimatedPrice: null,
+          // No WaveGuard tier — an untiered per-application customer, so
+          // the unrelated coveredByMembership heuristic (any tier + no
+          // price) doesn't mask the prepaidCovered case under test.
+          waveguardTier: null,
+          monthlyRate: 74.7,
+          prepaidAmount: 60,
+          prepaidMethod: 'cash',
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: 74.7,
+            prediction: { kind: 'invoice', amount: 40, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getAllByText(/\$40\.00/).length).toBeGreaterThan(0);
+    // The real gap this pins: hasChargeableAmount (and so the checkout CTA)
+    // must stay true for the remaining $40 — the double-netted bug flipped
+    // this to the disabled "Review visit details" state instead.
+    expect(screen.getByRole('button', { name: /Review & checkout/i })).toBeInTheDocument();
+  });
+
+  // A 'prepaid' kind means completion mints nothing new — its `amount` is
+  // what was ALREADY collected (informational), never a balance still due.
+  it('reads a fully-covered "prepaid" prediction as no new charge, not a bill for the prepaid figure', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...BASE_SERVICE,
+          estimatedPrice: null,
+          waveguardTier: null,
+          monthlyRate: 74.7,
+          prepaidAmount: 100,
+          prepaidMethod: 'cash',
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: 74.7,
+            prediction: { kind: 'prepaid', amount: 100, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole('button', { name: /Review visit details/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Review & checkout/i })).not.toBeInTheDocument();
+  });
 });

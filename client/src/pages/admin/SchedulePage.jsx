@@ -13748,20 +13748,32 @@ export function CompletionPanel({
   // from what completion actually bills (codex pre-push P1: a local
   // tier/lane guard either showed the wrong monthlyRate for a legacy
   // inferred lane, or zeroed a real per-application fee).
+  //
+  // The prediction's `amount` is ALREADY net of prepaidAmount for an
+  // 'invoice'/'auto_charge' kind (predictCompletionBilling subtracts it
+  // server-side), and a 'prepaid' kind's amount is what was ALREADY
+  // collected, not a new balance — so `usingUnpricedPrediction` keeps
+  // prepaidCovered below from netting the SAME prepayment a second time
+  // against a figure that's already final (codex pre-push P1: double-
+  // netting misclassified a partially-prepaid visit as fully covered and
+  // suppressed the invoice for its real remaining balance).
+  const predictionKind = service.billingLane?.prediction?.kind || null;
+  const usingUnpricedPrediction = !hasVisitPrice && !isCallback;
   const invoiceAmount = hasVisitPrice
     ? Number(completionVisitPrice)
     : isCallback
       ? 0
-      : Number(service.billingLane?.prediction?.amount) || 0;
+      : (predictionKind === 'prepaid' ? 0 : Number(service.billingLane?.prediction?.amount) || 0);
   const autopayCoversVisit =
     !!service.autopayActive &&
     !hasVisitPrice &&
     !!service.waveguardTier &&
     Number(service.monthlyRate || 0) > 0;
-  const prepaidCovered =
-    service.prepaidAmount != null &&
-    Number(service.prepaidAmount) > 0 &&
-    Number(service.prepaidAmount) >= invoiceAmount;
+  const prepaidCovered = usingUnpricedPrediction
+    ? predictionKind === 'prepaid'
+    : (service.prepaidAmount != null &&
+      Number(service.prepaidAmount) > 0 &&
+      Number(service.prepaidAmount) >= invoiceAmount);
   // paid and prepaid are both settled to the server (invoiceBlocksReview,
   // report-only completion) — codex #4140 r15 P2.
   const invoiceAlreadyPaid =

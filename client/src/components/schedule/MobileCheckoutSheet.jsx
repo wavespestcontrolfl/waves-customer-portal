@@ -106,9 +106,21 @@ export default function MobileCheckoutSheet({
   // (nothingToCharge disables Charge) — the covering invoice is on the
   // SIBLING row, never this one's own attached invoice, so there is nothing
   // for this sheet to mint regardless of the prediction amount.
+  //
+  // The prediction's `amount` is ALREADY net of prepaidAmount for an
+  // 'invoice'/'auto_charge' kind (predictCompletionBilling subtracts it
+  // server-side before returning), and a 'prepaid' kind's amount is what was
+  // ALREADY collected, not a new balance — so `usingUnpricedPrediction`
+  // gates the prepaid-credit math below from being applied a SECOND time on
+  // top of a figure that's already final (codex pre-push P1: double-netting
+  // silently zeroed a real remaining balance on a partially-prepaid visit).
+  const predictionKind = service.billingLane?.prediction?.kind || null;
+  const usingUnpricedPrediction = rawPrice == null && !service.isCallback;
   const price = rawPrice != null
     ? rawPrice
-    : (service.isCallback ? 0 : Number(service.billingLane?.prediction?.amount) || 0);
+    : (service.isCallback || predictionKind === 'prepaid'
+      ? 0
+      : Number(service.billingLane?.prediction?.amount) || 0);
   const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
     appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
@@ -241,9 +253,12 @@ export default function MobileCheckoutSheet({
   const totalBeforePrepaid = invoicePreview
     ? invoicePreview.amountDue
     : Math.max(0, servicesSubtotal + extraDiscountsTotal);
-  const prepaidCredit = invoicePreview && invoicePreview.prepaidApplied
-    ? 0
-    : Math.min(prepaidAmount, totalBeforePrepaid);
+  // No SECOND netting against the unpriced-visit prediction (see `price`
+  // above) — there is no attached invoice here to have already applied the
+  // prepayment either, so this is the one and only place it could double up.
+  const prepaidCredit = invoicePreview
+    ? (invoicePreview.prepaidApplied ? 0 : Math.min(prepaidAmount, totalBeforePrepaid))
+    : (usingUnpricedPrediction ? 0 : Math.min(prepaidAmount, totalBeforePrepaid));
   const total = Math.max(0, totalBeforePrepaid - prepaidCredit);
   // A genuinely $0 visit (e.g. a free callback with no added extras) has nothing
   // to mint — the invoice endpoint rejects a zero charge — so disable the Charge

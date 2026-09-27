@@ -156,4 +156,43 @@ describe('CompletionPanel invoiceAmount — server-computed billingLane.predicti
     });
     await expectRecapOnlyCta();
   });
+
+  // Codex pre-push P1: predictCompletionBilling already nets prepaidAmount
+  // out of an 'invoice' prediction server-side ($100 fee − $60 prepaid =
+  // $40 due). Comparing service.prepaidAmount against that ALREADY-NET
+  // invoiceAmount a second time misclassified this as prepaidCovered
+  // (60 >= 40), which suppressed the invoice for the real remaining $40.
+  it('still invoices the real remaining balance on a partially-prepaid unpriced visit (never double-nets the prepayment)', async () => {
+    await renderPanel({
+      ...BASE_SERVICE,
+      waveguardTier: null,
+      prepaidAmount: 60,
+      prepaidMethod: 'cash',
+      billingLane: {
+        mode: 'per_application',
+        source: 'explicit',
+        monthlyRate: null,
+        prediction: { kind: 'invoice', amount: 40, conflictStampedPrice: false },
+      },
+    });
+    await expectInvoiceCta();
+  });
+
+  // A 'prepaid' kind means completion mints nothing new — its `amount` is
+  // what was ALREADY collected (informational), never a balance still due.
+  it('sends a recap only for a fully-covered "prepaid" prediction, never invoicing the prepaid figure itself', async () => {
+    await renderPanel({
+      ...BASE_SERVICE,
+      waveguardTier: null,
+      prepaidAmount: 100,
+      prepaidMethod: 'cash',
+      billingLane: {
+        mode: 'per_application',
+        source: 'explicit',
+        monthlyRate: null,
+        prediction: { kind: 'prepaid', amount: 100, conflictStampedPrice: false },
+      },
+    });
+    await expectRecapOnlyCta();
+  });
 });

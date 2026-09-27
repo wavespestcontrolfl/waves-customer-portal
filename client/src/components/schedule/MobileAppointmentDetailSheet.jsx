@@ -262,9 +262,22 @@ export default function MobileAppointmentDetailSheet({
   // per_application/per_visit customer previewed the annual/12 equivalent
   // (e.g. $74.70) as an unpriced visit's price, a number with no
   // relationship to what that visit bills.
+  //
+  // The prediction's `amount` is ALREADY net of prepaidAmount for an
+  // 'invoice'/'auto_charge' kind (predictCompletionBilling subtracts it
+  // server-side), and a 'prepaid' kind's amount is what was ALREADY
+  // collected, not a new balance — so `usingUnpricedPrediction` below keeps
+  // the prepaidCovered comparison from netting the SAME prepayment a second
+  // time against a figure that's already final (codex pre-push P1:
+  // double-netting misclassified a partially-prepaid visit as fully
+  // covered, hiding a real remaining balance).
+  const predictionKind = service.billingLane?.prediction?.kind || null;
+  const usingUnpricedPrediction = rawPrice == null && !service.isCallback;
   const price = rawPrice != null
     ? rawPrice
-    : (service.isCallback ? 0 : Number(service.billingLane?.prediction?.amount) || 0);
+    : (service.isCallback || predictionKind === 'prepaid'
+      ? 0
+      : Number(service.billingLane?.prediction?.amount) || 0);
   const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
     appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
@@ -283,7 +296,9 @@ export default function MobileAppointmentDetailSheet({
   const coveredByMembership = !!tier && (rawPrice === 0 || rawPrice == null);
   const prepaidAmt = service.prepaidAmount != null ? Number(service.prepaidAmount) : null;
   const isPrepaid = prepaidAmt != null && prepaidAmt > 0;
-  const prepaidCovered = isPrepaid && prepaidAmt >= total;
+  const prepaidCovered = usingUnpricedPrediction
+    ? predictionKind === 'prepaid'
+    : (isPrepaid && prepaidAmt >= total);
   // prepaidSeriesContext is computed server-side when this visit is part of a
   // family-level prepayment (e.g. $360 covering 4 quarterly visits). Falsy on
   // a one-off prepaid visit, in which case we fall back to the original

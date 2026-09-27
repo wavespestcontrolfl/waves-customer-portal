@@ -215,3 +215,59 @@ describe('MobileCheckoutSheet money lines', () => {
     expect(screen.queryByText('$113')).not.toBeInTheDocument();
   });
 });
+
+describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', () => {
+  // Codex pre-push P1: predictCompletionBilling already nets prepaidAmount
+  // out of an 'invoice' prediction server-side ($100 fee − $60 prepaid =
+  // $40 due). With no attached invoice here, this sheet's OWN prepaid-credit
+  // math (the "applies prepaid credit" case above) must not net the SAME
+  // prepayment a second time against that already-net figure — $60 credited
+  // against $40 would zero the charge although $40 is still owed.
+  it('charges the real remaining balance, never double-netting the prepayment', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          waveguardTier: null,
+          estimatedPrice: null,
+          prepaidAmount: 60,
+          prepaidMethod: 'cash',
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            prediction: { kind: 'invoice', amount: 40, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Charge $40.00' })).toBeInTheDocument();
+    expect(screen.queryByText('Prepaid credit')).not.toBeInTheDocument();
+  });
+
+  // A 'prepaid' kind means completion mints nothing new — its `amount` is
+  // what was ALREADY collected (informational), never a balance still due.
+  it('has nothing to charge on a fully-covered "prepaid" prediction', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          waveguardTier: null,
+          estimatedPrice: null,
+          prepaidAmount: 100,
+          prepaidMethod: 'cash',
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            prediction: { kind: 'prepaid', amount: 100, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    const button = screen.getByRole('button', { name: 'No charge — complete from job' });
+    expect(button).toBeDisabled();
+  });
+});
