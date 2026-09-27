@@ -26,6 +26,9 @@ const mockResolveCommsCustomer = jest.fn();
 const mockLoadReviewRecipient = jest.fn();
 const mockResolveTechnician = jest.fn();
 const mockResolveTechnicianById = jest.fn();
+// The create_appointment billing verdict (ADMIN-BUG-R12): null = the booking
+// bills, so these proposals reach their card; the refusal cases set their own.
+const mockIbBookingBillingRefusalFor = jest.fn(async () => null);
 const mockResolveLeadForUpdate = jest.fn();
 const mockPreviewBulkLeadUpdate = jest.fn();
 
@@ -60,6 +63,7 @@ jest.mock('../services/intelligence-bar/tools', () => ({
   executeTool: (...args) => mockExecuteTool(...args),
   resolveTechnicianByName: (...args) => mockResolveTechnician(...args),
   resolveActiveTechnicianById: (...args) => mockResolveTechnicianById(...args),
+  ibBookingBillingRefusalFor: (...args) => mockIbBookingBillingRefusalFor(...args),
 }));
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
@@ -947,6 +951,46 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
       expect(toolResult.ambiguous).toBe(true);
       expect(toolResult.candidates).toHaveLength(2);
+    });
+  });
+
+  test('create_appointment for a customer whose billing needs a visit price: no card, the refusal goes back to the model (ADMIN-BUG-R12)', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingBillingRefusalFor.mockResolvedValueOnce('This visit would complete with no invoice: the Intelligence Bar books without a price, and this customer\'s billing needs one on the visit. Book it from the Schedule screen with a visit price. Nothing was booked.');
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'One-Time Pest Control Service' } }],
+      [{ type: 'text', text: 'Book it from the Schedule screen.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book a one-time pest visit', context: 'schedule' });
+      expect(mockIbBookingBillingRefusalFor).toHaveBeenCalledWith('c1', 'One-Time Pest Control Service');
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult.error).toMatch(/complete with no invoice/);
+      expect(toolResult.error).toMatch(/Schedule screen/);
+    });
+  });
+
+  test('create_appointment whose billing cannot be read: the proposal fails closed, no card', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingBillingRefusalFor.mockRejectedValueOnce(new Error('connection terminated'));
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Quarterly Pest Control Service' } }],
+      [{ type: 'text', text: 'Could not verify.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book it', context: 'schedule' });
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult.error).toMatch(/Could not verify how this customer is billed/);
     });
   });
 

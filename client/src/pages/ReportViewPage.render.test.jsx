@@ -1049,6 +1049,44 @@ describe('Governed routine observations without generated report copy', () => {
     expect(document.body.textContent).not.toContain('Internal custom technician note.');
     expect(document.body.textContent).not.toContain('Thin turf was visible in the inspected area.');
   });
+
+  it('renders a frozen governed label only when the server marks the completion snapshot safe', async () => {
+    const frozenLabel = 'Historic inspected-soil label retained from the completed visit.';
+    const privateNote = 'Private gate and access note from the technician.';
+    const payload = structuredClone(treeShrubReportV2);
+    payload.summary = 'The recorded visit details are available below.';
+    payload.summarySource = 'deterministic';
+    payload.protocol = {
+      observations: [privateNote],
+      structuredObservations: [frozenLabel, frozenLabel],
+      structuredObservationsProvenance: 'completion_form_snapshot',
+    };
+
+    renderReport(payload);
+
+    const finding = await screen.findByText(frozenLabel);
+    expect(document.getElementById('visit-summary')).toContainElement(finding);
+    expect(screen.getAllByText(frozenLabel)).toHaveLength(1);
+    expect(document.body.textContent).not.toContain(privateNote);
+  });
+
+  it('does not trust a historical label without the exact server provenance marker', async () => {
+    const unprovenLabel = 'Historic label from an unproven payload.';
+    const payload = structuredClone(treeShrubReportV2);
+    payload.summary = 'The recorded visit details are available below.';
+    payload.summarySource = 'deterministic';
+    payload.protocol = {
+      observations: ['Private technician observation.'],
+      structuredObservations: [unprovenLabel],
+      structuredObservationsProvenance: 'raw_observations',
+    };
+
+    renderReport(payload);
+
+    await screen.findByText('Visit Summary');
+    expect(document.body.textContent).not.toContain(unprovenLabel);
+    expect(document.body.textContent).not.toContain('Private technician observation.');
+  });
 });
 
 describe('Consolidated lawn report', () => {

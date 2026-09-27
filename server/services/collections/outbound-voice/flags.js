@@ -106,7 +106,7 @@ async function flagWrongNumber(customerId, { detail, createdBy } = {}) {
     await fileFlagCard({
       customerId,
       flag: 'wrong_number',
-      detail: 'An outbound billing follow-up call reached someone who says this number does not belong to the customer. All outreach to this customer is blocked pending a number review.',
+      detail: 'An outbound billing follow-up call reached someone who says this number does not belong to the customer. Calls, texts and App notices to this customer are blocked pending a number review; payment emails still go to the email on file.',
     });
   }
   return res;
