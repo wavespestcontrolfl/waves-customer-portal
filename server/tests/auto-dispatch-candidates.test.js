@@ -139,11 +139,16 @@ describe('findValidCandidateSlots', () => {
     const flex = await findValidCandidateSlots(service, prefs, flexCtx);
     expect(flex.candidates.map((c) => `${c.date} ${c.start_time}`)).toEqual(['2026-10-08 15:00', '2026-10-09 08:00']);
     expect(flex.drops.flex_frozen).toBe(1);
+    // Generation is floored too: the freeze ends Thu 10-08 14:00 ET, so
+    // find-time starts that date's gaps at 14:01 (Codex #4995 pre-push P1).
+    expect(findAvailableSlots.mock.calls[0][0].startFloorByDate).toEqual({ '2026-10-08': 14 * 60 + 1 });
 
     // Route tiers (same window, its own mode): never this filter.
+    findAvailableSlots.mockClear();
     const tiers = await findValidCandidateSlots(service, prefs, { ...flexCtx, tierMeta: { mode: 'tiers' } });
     expect(tiers.candidates).toHaveLength(3);
     expect(tiers.drops.flex_frozen).toBe(0);
+    expect(findAvailableSlots.mock.calls[0][0].startFloorByDate).toBeUndefined();
   });
 
   test('drops candidate dates already occupied by a same-series sibling', async () => {

@@ -41,7 +41,7 @@ const { findAvailableSlots } = require('../scheduling/find-time');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { resolveGeo, driveMin, HQ } = require('./geo');
 const { toDateStr, shiftDateStr } = require('./dates');
-const { destinationFrozen } = require('./flex-tier');
+const { destinationFrozen, freezeBoundaryFloor } = require('./flex-tier');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { isActiveRouteStop } = require('./overlap-predicate');
 const { routeCost, clusterShare } = require('./route-model');
@@ -640,6 +640,13 @@ async function sharedModelCurrentPlacement(service, geo, ctx, dateStr) {
   };
 }
 
+// find-time's startFloorByDate for the flexible tier: the 73h freeze
+// boundary's date, floored just past it.
+function flexStartFloor(nowDate) {
+  const { date, startMin } = freezeBoundaryFloor(nowDate);
+  return { [date]: startMin };
+}
+
 async function findValidCandidateSlots(service, prefs, baseCtx) {
   const geo = resolveGeo(service);
   if (!geo) return { current: null, candidates: [], note: 'no_geo' };
@@ -711,6 +718,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     .select('scheduled_date');
   const siblingDates = new Set(siblingRows.map((r) => toDateStr(r.scheduled_date)));
 
+  const flexMode = !!(ctx.tierMeta && ctx.tierMeta.mode === 'flex');
   const findTimeArgs = {
     lat: geo.lat,
     lng: geo.lng,
@@ -729,6 +737,11 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     ...(prefs.preferred_time_window
       ? { earliestStartMin: prefs.preferred_time_window.startMin }
       : {}),
+    // FLEX-TIER: the same generation-time floor on the one date the 73h
+    // freeze ends (flexTier.freezeBoundaryFloor; find-time keeps the larger
+    // of it and the preferred-time floor). The per-slot filter below still
+    // drops anything inside the freeze.
+    ...(flexMode ? { startFloorByDate: flexStartFloor(ctx.nowDate) } : {}),
     // NOTE: occupancy keeps find-time's default ['cancelled'] so it stays
     // consistent with SmartRebooker's overlap check (which treats 'rescheduled'
     // as a conflict). Excluding it here would propose slots apply then rejects.
@@ -760,7 +773,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
   // inside the 73h freeze — each destination's own instant must clear it
   // (flexTier.destinationFrozen; apply.js re-checks it authoritatively,
   // grouped members' derived starts included).
-  const flexFrozen = ctx.tierMeta && ctx.tierMeta.mode === 'flex'
+  const flexFrozen = flexMode
     ? (slot) => destinationFrozen(service, slot.date, slot.start_time, ctx.nowDate)
     : null;
   const candidates = [];

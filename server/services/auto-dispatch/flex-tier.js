@@ -43,6 +43,7 @@
  */
 const { toDateStr, shiftDateStr } = require('./dates');
 const { MIN_DESTINATION_DAYS_OUT } = require('./route-tiers');
+const { etParts, etDateString } = require('../../utils/datetime-et');
 
 // Owner-ruled constants (not env-tunable — the gate is the kill switch, the
 // numbers themselves are the approved policy, same convention as
@@ -266,6 +267,21 @@ function destinationFrozen(service, date, start, now = new Date()) {
   return STAMP_ARRIVAL.test(arrival) && insideFreeze(date, arrival, now);
 }
 
+/**
+ * Where the freeze ends, as a slot-generation floor: the ET date of the
+ * instant FLEX_TIER_FREEZE_HOURS from `now`, and the first whole minute of
+ * that date strictly past it (insideFreeze treats the boundary itself as
+ * frozen). candidate-slots hands it to find-time (startFloorByDate): the gap
+ * path emits only each gap's earliest feasible start, so without the floor
+ * an open gap on that date yields a frozen morning start that hides a legal
+ * afternoon one (Codex #4995 pre-push P1).
+ */
+function freezeBoundaryFloor(now = new Date()) {
+  const boundary = new Date(now.getTime() + FLEX_TIER_FREEZE_HOURS * 3600000);
+  const { hour, minute } = etParts(boundary);
+  return { date: etDateString(boundary), startMin: hour * 60 + minute + 1 };
+}
+
 module.exports = {
   FLEX_TIER_RADIUS_DAYS,
   FLEX_TIER_FREEZE_HOURS,
@@ -274,4 +290,5 @@ module.exports = {
   flexTierMoveWindow,
   ownScheduleFrozen,
   destinationFrozen,
+  freezeBoundaryFloor,
 };
