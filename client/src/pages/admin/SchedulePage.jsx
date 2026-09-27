@@ -14822,6 +14822,10 @@ export function CompletionPanel({
         notes,
         selectedProducts,
         lawnDefaultMixSnapshot: lawnDefaultMixSnapshotRef.current,
+        // Same round-trip as the lawn snapshot: an untouched protocol seed
+        // restored from a draft must still read as the baseline, not as
+        // tech-authored rows (pre-push audit on #5049).
+        protocolCompletionDefaultsSnapshot: protocolCompletionDefaultsSnapshotRef.current,
         lawnAreaOverride,
         // Persisted whenever removed defaults exist, not only while live
         // defaults are loaded: a draft restored during a plan outage would
@@ -15070,6 +15074,9 @@ export function CompletionPanel({
     setProtocolCompletionDefaultsRemovedIds(Array.isArray(savedDraft.protocolCompletionDefaultsRemovedIds)
       ? [...new Set(savedDraft.protocolCompletionDefaultsRemovedIds.map(String))] : []);
     if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
+    if (savedDraft.protocolCompletionDefaultsSnapshot) {
+      protocolCompletionDefaultsSnapshotRef.current = savedDraft.protocolCompletionDefaultsSnapshot;
+    }
     setLawnAreaOverride(savedDraft.lawnAreaOverride);
     setLawnRemovedDefaultIds(Array.isArray(savedDraft.lawnRemovedDefaultIds) ? [...new Set(savedDraft.lawnRemovedDefaultIds.map(String))] : []);
     lawnRemovedDefaultNamesRef.current = savedDraft.lawnRemovedDefaultNames && typeof savedDraft.lawnRemovedDefaultNames === 'object' && !Array.isArray(savedDraft.lawnRemovedDefaultNames)

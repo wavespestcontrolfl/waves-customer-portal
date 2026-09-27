@@ -462,3 +462,33 @@ it('seeded Alpine WSG / Gentrol IGR carry the protocol\'s spot_treatment method 
   expect(within(gentrolRow).queryByPlaceholderText('Linear ft')).toBeNull();
   expect(within(advionRow).queryByPlaceholderText('Linear ft')).toBeNull();
 });
+
+it('a saved draft carries the untouched-seed snapshot so a restore keeps treating those rows as the baseline (pre-push audit, PR #5049)', async () => {
+  const visit = cockroachService();
+  const draftKey = `waves_completion_draft_${visit.id}`;
+
+  stubFetchWithImmediateDefaults();
+  let view;
+  await act(async () => {
+    view = render(
+      <CompletionPanel
+        service={visit}
+        products={cockroachCatalog}
+        onClose={() => {}}
+        onSubmit={vi.fn().mockResolvedValue({})}
+      />,
+    );
+  });
+  await screen.findByText('Alpine WSG');
+  // A real edit (removing one row) persists a draft; the seed snapshot must
+  // ride along with it, the same way lawnDefaultMixSnapshot does.
+  fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[0]);
+  await waitFor(() => expect(screen.getAllByRole('button', { name: 'Remove product' })).toHaveLength(2));
+  view.unmount();
+
+  const saved = JSON.parse(localStorage.getItem(draftKey));
+  expect(typeof saved.protocolCompletionDefaultsSnapshot).toBe('string');
+  const snapshotNames = JSON.parse(saved.protocolCompletionDefaultsSnapshot).map((row) => row.name || row.productName);
+  expect(snapshotNames.join(' ')).toContain('Alpine WSG');
+  expect(snapshotNames.join(' ')).toContain('Gentrol IGR');
+});
