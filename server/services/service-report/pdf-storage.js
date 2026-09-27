@@ -48,11 +48,15 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // do, on every line. Cached p7 objects for any line could carry the old
 // product/EPA/precaution content, so they re-render on next open.
 // Supersedes p7, whose bust it subsumes.
-// p9: the document now prints the Poison Control line and the applicator's
+// p9: provenance-kept form observations now upgrade matching legacy bare
+// finding rows for PDF rendering. Cached p8 PDFs can omit those governed
+// observations, so every line re-renders on next open.
+// Supersedes p8, whose bust it subsumes.
+// p10: the document now prints the Poison Control line and the applicator's
 // FDACS ID card number on reports that applied product (owner ruling
-// 2026-09-26, F.S. 482.2265(1)(b)). Cached p8 objects carry neither line, so
-// they re-render on next open. Supersedes p8, whose bust it subsumes.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p9-poison-control-20260926';
+// 2026-09-26, F.S. 482.2265(1)(b)). Cached p9 objects carry neither line, so
+// they re-render on next open. Supersedes p9, whose bust it subsumes.
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p10-poison-control-20260926';
 
 const s3 = new S3Client({
   region: config.s3?.region,

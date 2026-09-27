@@ -58,6 +58,7 @@ const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { applyReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
+const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../../shared/service-completion-observations');
 
 let PhotoService = null;
 try {
@@ -1773,6 +1774,7 @@ function buildProtocolPayload(record) {
   const structured = parseJsonObject(record.structured_notes);
   const serviceData = parseJsonObject(record.service_data);
   const protocol = parseJsonObject(serviceData.protocol);
+  const structuredObservations = uniqueStrings(parseJsonArray(structured.formObservations));
   return {
     actions: uniqueStrings([
       ...parseJsonArray(protocol.actions),
@@ -1787,7 +1789,15 @@ function buildProtocolPayload(record) {
     // Safe customer-facing provenance: completion form/chip values only.
     // Never substitute the merged observations list, which also contains
     // raw [Found] technician-note lines.
-    structuredObservations: uniqueStrings(parseJsonArray(structured.formObservations)),
+    structuredObservations,
+    // This marker covers only the completion-form snapshot above. That field
+    // is written after the server-owned service-line allowlist and conflict
+    // checks, so the live client may keep its frozen labels when today's
+    // catalog has renamed or removed one. Never apply this provenance to the
+    // merged observations list, which may contain raw technician-note text.
+    ...(structuredObservations.length ? {
+      structuredObservationsProvenance: 'completion_form_snapshot',
+    } : {}),
     recommendations: uniqueStrings([
       ...parseJsonArray(protocol.recommendations),
       ...parseJsonArray(structured.recommendations),
@@ -3382,14 +3392,27 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
 
 
   for (const observation of protocol.structuredObservations) {
-    if (findings.some((finding) => finding.title.toLowerCase() === observation.toLowerCase())) continue;
+    const persistedFinding = findings.find(
+      (finding) => finding.title.toLowerCase() === observation.toLowerCase(),
+    );
+    if (persistedFinding) {
+      // Older completion rows stored the selected form label as a bare
+      // service_findings title. Once the authoritative formObservations
+      // snapshot proves its provenance, upgrade that row for customer egress.
+      // Unmatched bare rows stay bare so the document's raw-note guard keeps
+      // filtering them.
+      if (!persistedFinding.detail && !persistedFinding.recommendation) {
+        persistedFinding.detail = STRUCTURED_OBSERVATION_FINDING_DETAIL;
+      }
+      continue;
+    }
     findings.push({
       id: `observation-${findings.length + 1}`,
       zoneId: null,
       category: 'observation',
       severity: findingSeverityForObservation(observation),
       title: observation,
-      detail: 'Recorded during the structured service closeout.',
+      detail: STRUCTURED_OBSERVATION_FINDING_DETAIL,
       recommendation: '',
     });
   }

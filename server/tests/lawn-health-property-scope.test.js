@@ -7,6 +7,9 @@
 jest.mock('../models/db', () => { const fn = jest.fn(); fn.raw = jest.fn((s) => s); return fn; });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/photos', () => null);
+jest.mock('../services/fawn-weather', () => ({
+  getCurrent: jest.fn(), getSeasonalContext: jest.fn(() => ({})), getPressureSignals: jest.fn(() => []),
+}));
 jest.mock('../services/turf-height-service', () => ({ getLatestTurfHeight: jest.fn(async () => null), getTurfHeightTrend: jest.fn(async () => []) }));
 jest.mock('../services/service-report/turf-height', () => ({ buildMowingHeightContext: jest.fn(() => null) }));
 jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn((k) => k === 'GATE_LAWN_PROPERTY_HISTORY' && global.__LAWN_GATE__ === true), isEnabled: jest.fn(() => false) }));
@@ -28,7 +31,7 @@ const router = require('../routes/lawn-health');
 
 function chain(rows) {
   const c = {};
-  for (const m of ['where', 'whereIn', 'select', 'orderBy', 'limit', 'first']) c[m] = jest.fn(() => c);
+  for (const m of ['where', 'whereIn', 'select', 'orderBy', 'orderByRaw', 'limit', 'first']) c[m] = jest.fn(() => c);
   c.first = jest.fn(async () => rows[0]);
   c.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   return c;
@@ -51,6 +54,26 @@ const SECONDARY = { customerId: 'cust-1', enabled: true, multi: true, scoped: tr
 const OFF = { customerId: 'cust-1', enabled: false, multi: false, scoped: false, closed: false, property: null };
 
 describe('GET /lawn-health/:customerId under the saved-property scope', () => {
+  test.each([true, false])('weather follows the selected house without a primary-pin fallback (has coordinates: %s)', async (hasCoordinates) => {
+    global.__SCOPE__ = SECONDARY;
+    History.latestForCustomer.mockResolvedValueOnce([{ id: 'assessment', property_id: 'prop-b', visit_date: '2026-09-26' }]);
+    const wheres = [];
+    db.mockImplementation((table) => {
+      const rows = table === 'customer_properties'
+        ? [{ latitude: hasCoordinates ? 27.22 : null, longitude: -81.84 }]
+        : table === 'customers' ? [{ latitude: 27.14, longitude: -82.34 }] : [];
+      const c = chain(rows);
+      c.where = jest.fn((...args) => { wheres.push([table, ...args]); return c; });
+      return c;
+    });
+    const weather = require('../services/fawn-weather');
+    weather.getCurrent.mockResolvedValue({ station: 'Arcadia', temp_f: 82 });
+    const res = await fetch(`${base}/lawn-health/cust-1`);
+    expect(res.status).toBe(200);
+    expect(wheres).toContainEqual(['customer_properties', { id: 'prop-b', customer_id: 'cust-1' }]);
+    if (hasCoordinates) expect(weather.getCurrent).toHaveBeenCalledWith({ latitude: 27.22, longitude: -81.84 });
+    else expect(weather.getCurrent).not.toHaveBeenCalled();
+  });
   test('the selected saved property reaches the history reader and the scope is echoed', async () => {
     global.__SCOPE__ = SECONDARY;
     const res = await fetch(`${base}/lawn-health/cust-1`);

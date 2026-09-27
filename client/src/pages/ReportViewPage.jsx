@@ -5710,9 +5710,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const customerSafeObservationLabels = new Set(
     serviceCompletionChoicesFor(data.serviceLine, 'observations').map(({ label }) => label),
   );
+  const hasServerValidatedObservationSnapshot = data.protocol?.structuredObservationsProvenance
+    === 'completion_form_snapshot';
   const routineFindings = [...new Set(
     (Array.isArray(data.protocol?.structuredObservations) ? data.protocol.structuredObservations : [])
-      .filter((value) => customerSafeObservationLabels.has(value)
+      .filter((value) => typeof value === 'string' && value.trim())
+      .filter((value) => hasServerValidatedObservationSnapshot
+        || customerSafeObservationLabels.has(value)
         || (data.serviceLine === 'lawn' && isLawnFindingSelection(value))),
   )];
   const recordedFindingsList = routineFindings.length > 0 ? (

@@ -808,6 +808,7 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
       findings: [
         { id: 'observation-1', category: 'observation', severity: 'medium', title: 'Gate code 4417, bill the office', detail: '', recommendation: '' },
         { id: 'observation-2', category: 'conducive_condition', severity: 'medium', title: 'Owner concern: lockbox code is 9902', detail: null, recommendation: null },
+        { id: 'observation-3', category: 'observation', severity: 'medium', title: 'Yellowjacket activity was observed around the inspected exterior areas.', detail: 'Recorded during the structured service closeout.', recommendation: '' },
         { id: 'f3', category: 'pest_activity', severity: 'high', title: 'Ant trail at the slider', detail: 'Treated and monitored.' },
       ],
     };
@@ -815,6 +816,8 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toContain('Gate code');
     expect(container.textContent).not.toContain('lockbox');
     expect(container.textContent).not.toContain('9902');
+    expect(container.textContent).toContain('Yellowjacket activity was observed around the inspected exterior areas.');
+    expect(container.textContent).toContain('Recorded during the structured service closeout.');
     expect(container.textContent).toMatch(/Ant trail at the slider/);
   });
 
