@@ -44,7 +44,9 @@ function cleanedNameTokens(value) {
 // must count as a gap, not a filled field.
 function hasRealLastName(value) {
   const cleaned = collapseWhitespace(value || '') || '';
-  return !!cleaned && cleaned.toLowerCase() !== 'customer';
+  // 'undefined' / 'null' are the legacy concatenation artifacts
+  // cleanedNameTokens strips from the estimate name — same verdict here.
+  return !!cleaned && !['customer', 'undefined', 'null'].includes(cleaned.toLowerCase());
 }
 
 function hasEmail(value) {

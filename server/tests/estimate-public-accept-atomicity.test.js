@@ -1843,6 +1843,72 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     }
   });
 
+  test('an authored proposal preparedFor that matched the old name moves with it and drops the PDF-delivery marker', async () => {
+    const base = recurringPestEstimate({
+      id: 'est-contact-14',
+      token: 'tok-contact-14-x0123456789',
+      customer_id: null,
+      customer_name: 'Testy',
+      customer_email: 'testy@example.com',
+    });
+    const data = typeof base.estimate_data === 'string' ? JSON.parse(base.estimate_data) : { ...(base.estimate_data || {}) };
+    data.proposal = { ...(data.proposal || {}), preparedFor: 'Testy' };
+    data.proposalDelivery = { status: 'emailed' };
+    resetStore({ ...base, estimate_data: JSON.stringify(data) });
+    conversionOk();
+
+    const res = await putAccept('tok-contact-14-x0123456789', { contactLastName: 'Sample' });
+    expect(res.status).toBe(200);
+    const stored = storedEstimate();
+    const storedData = typeof stored.estimate_data === 'string' ? JSON.parse(stored.estimate_data) : stored.estimate_data;
+    expect(stored.customer_name).toBe('Testy Sample');
+    expect(storedData.proposal.preparedFor).toBe('Testy Sample');
+    expect(storedData.proposalDelivery).toBeUndefined();
+  });
+
+  test('a custom preparedFor (someone else) is left alone with its delivery marker', async () => {
+    const base = recurringPestEstimate({
+      id: 'est-contact-15',
+      token: 'tok-contact-15-x0123456789',
+      customer_id: null,
+      customer_name: 'Testy',
+      customer_email: 'testy@example.com',
+    });
+    const data = typeof base.estimate_data === 'string' ? JSON.parse(base.estimate_data) : { ...(base.estimate_data || {}) };
+    data.proposal = { ...(data.proposal || {}), preparedFor: 'Sample Property Manager' };
+    data.proposalDelivery = { status: 'emailed' };
+    resetStore({ ...base, estimate_data: JSON.stringify(data) });
+    conversionOk();
+
+    const res = await putAccept('tok-contact-15-x0123456789', { contactLastName: 'Sample' });
+    expect(res.status).toBe(200);
+    const stored = storedEstimate();
+    const storedData = typeof stored.estimate_data === 'string' ? JSON.parse(stored.estimate_data) : stored.estimate_data;
+    expect(storedData.proposal.preparedFor).toBe('Sample Property Manager');
+    expect(storedData.proposalDelivery).toEqual({ status: 'emailed' });
+  });
+
+  test('a new profile keeps the full supplied surname even when the combined name snapshot is capped', async () => {
+    const longFirst = 'F'.repeat(60);
+    const longLast = 'L'.repeat(50);
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-16',
+      token: 'tok-contact-16-x0123456789',
+      customer_id: null,
+      customer_name: longFirst,
+      customer_email: 'testy@example.com',
+    }));
+    conversionOk();
+
+    const res = await putAccept('tok-contact-16-x0123456789', { contactLastName: longLast });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_name).toHaveLength(100);
+    const cust = db.__state.tables.customers.find((c) => c.id === storedEstimate().customer_id);
+    // Full 50 characters survive (contact normalization title-cases it).
+    expect(cust.last_name).toHaveLength(50);
+    expect(cust.last_name.toUpperCase()).toBe(longLast);
+  });
+
   test('a crafted request for a field the page never offered writes nothing (estimate already has full name + email)', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-10',

@@ -10848,11 +10848,36 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // read-then-write is race-free; the email gap uses the same
         // normalized predicate as computeContactGaps (whitespace-only is
         // blank), so a field the page asked for is never silently dropped.
-        const lockedContact = await trx('estimates').where({ id: estimate.id }).first('customer_name', 'customer_email');
+        const lockedContact = await trx('estimates').where({ id: estimate.id }).first('customer_name', 'customer_email', 'estimate_data');
         if (lockedContact) {
           const contactWrite = {};
           if (patch.customer_name && (lockedContact.customer_name ?? null) === priorName) {
             contactWrite.customer_name = patch.customer_name;
+            // An authored proposal snapshots its own preparedFor, which
+            // normalizeProposal PREFERS over the column (codex #5102 r3 P1).
+            // Same rule as customer-contact-fanout's name sync: a
+            // preparedFor matching the old name moves with it, and the
+            // "PDF emailed" marker drops whenever the PDF-visible name moves
+            // (patched preparedFor, or none — the PDF fell back to the
+            // column). A CUSTOM preparedFor (landlord → tenant) is left
+            // alone with its marker. The row is FOR UPDATE-locked above.
+            let lockedData = lockedContact.estimate_data;
+            if (typeof lockedData === 'string') {
+              try { lockedData = JSON.parse(lockedData); } catch { lockedData = null; }
+            }
+            if (lockedData && typeof lockedData === 'object') {
+              const preparedFor = lockedData.proposal?.preparedFor;
+              const priorKey = String(priorName ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+              const patchPreparedFor = !!(preparedFor
+                && String(preparedFor).trim().toLowerCase().replace(/\s+/g, ' ') === priorKey);
+              if ((patchPreparedFor || !preparedFor) && (patchPreparedFor || 'proposalDelivery' in lockedData)) {
+                const { proposalDelivery: _droppedDelivery, ...rest } = lockedData;
+                const nextData = patchPreparedFor
+                  ? { ...rest, proposal: { ...rest.proposal, preparedFor: patch.customer_name } }
+                  : rest;
+                contactWrite.estimate_data = JSON.stringify(nextData);
+              }
+            }
           }
           if (patch.customer_email && !contactGapHasEmail(lockedContact.customer_email)) {
             contactWrite.customer_email = patch.customer_email;
@@ -10994,7 +11019,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           const { ensureCustomerAccount } = require('./admin-customers');
           const account = await ensureCustomerAccount(trx, {
             firstName: nameParts[0] || 'New',
-            lastName: nameParts.slice(1).join(' ') || 'Customer',
+            // The accept-card surname verbatim (codex #5102 r3 P2): the
+            // estimates.customer_name snapshot is capped at 100 chars and
+            // could clip it; customers.last_name holds the full 50.
+            lastName: contactFillLastName || nameParts.slice(1).join(' ') || 'Customer',
             phone: estimate.customer_phone,
             email: estimate.customer_email || null,
           });
@@ -11009,7 +11037,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             is_primary_profile: !account.existingCustomer,
             profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
             first_name: nameParts[0] || 'New',
-            last_name: nameParts.slice(1).join(' ') || 'Customer',
+            last_name: contactFillLastName || nameParts.slice(1).join(' ') || 'Customer',
             phone: estimate.customer_phone,
             email: estimate.customer_email || null,
             address_line1: (parsedAcceptAddress && !parsedAcceptAddress.partial ? parsedAcceptAddress.address_line1 : estimate.address) || '',

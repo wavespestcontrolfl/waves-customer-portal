@@ -126,3 +126,10 @@ describe('computeContactGaps — stored placeholder names', () => {
     expect(computeContactGaps({ estimate: { customer_name: name, customer_email: 'x@example.com' } }).lastName).toBe(true);
   });
 });
+
+describe('computeContactGaps — legacy surname sentinels on the linked customer', () => {
+  test.each(['undefined', 'NULL', ' Null '])('linked last_name %p does not close the gap', (last) => {
+    const gaps = computeContactGaps({ estimate: { customer_name: 'Pat', customer_email: 'x@example.com' }, linkedCustomer: { last_name: last, email: 'x@example.com' } });
+    expect(gaps.lastName).toBe(true);
+  });
+});

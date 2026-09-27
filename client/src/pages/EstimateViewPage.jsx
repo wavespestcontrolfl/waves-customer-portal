@@ -6919,6 +6919,14 @@ function EstimateViewPageInner({ websiteMode = false }) {
       setError('Please enter your last name to continue.');
       return;
     }
+    // Same boundary check for a typed-but-malformed optional email: the
+    // annual-prepay "Confirm & pay" button reaches here without the review
+    // button's disabled state (codex #5102 r3 P2).
+    if (contactEmailInvalid) {
+      setContactEmailTouched(true);
+      setError('Please check your email address, or leave it blank.');
+      return;
+    }
     // Synchronous single-flight guard: React state (`processing`-style flags)
     // lags a double-tap in the same frame — the ref flips before any await,
     // so a second entry can never double-PUT /accept.
@@ -7206,7 +7214,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactLastNameGap, contactEmailGap, contactLastName, contactEmail]);
+  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
