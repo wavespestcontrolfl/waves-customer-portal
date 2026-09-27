@@ -3399,10 +3399,11 @@ export function calculateEstimate(inputs) {
     hasOT = true;
     // Mirror of the server's standard-only trapping plan (owner
     // 2026-08-26): a FIXED $350 (not DB-configurable — one dollar authority
-    // shared with the engine constant and the catalog row), unlimited
-    // callbacks, no footprint/lot adjustments.
+    // shared with the engine constant and the catalog row), covering the
+    // setup visit + 1 trap check (owner ruling 2026-09-26), no
+    // footprint/lot adjustments.
     const fp = otP(350);
-    otItems.push({ name: 'Trapping', price: fp, detail: 'Unlimited trap checks for the same active trapping job' });
+    otItems.push({ name: 'Trapping', price: fp, detail: 'Setup visit + 1 trap check for the same active trapping job; additional checks billed separately' });
   }
 
   /* ── Cockroach Treatment (from pest roach modifier) ──────── */
