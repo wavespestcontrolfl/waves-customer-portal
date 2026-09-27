@@ -1370,8 +1370,11 @@ function textOperation(text) {
 // you add...?") are not questions.
 const QUESTION_START_RE = /^\s*(?:did|do|does|have|has|had|is|are|was|were|how|what|when|where|why|who|which|any)\b/i;
 const REQUEST_START_RE = /^\s*(?:please\s+)?(?:can|could|would|will)\s+you\b/i;
+// Leading greetings and fillers ("Hey, did we receive...") are skipped
+// before the question-start check.
+const LEADING_FILLER_RE = /^\s*(?:(?:hey|hi|hello|ok|okay|so|um|uh|well|yeah|yes|alright|and|also|quick\s+question|question)\b[\s,.:;!-]*)+/i;
 function isQuestion(text) {
-  const raw = String(text || '');
+  const raw = String(text || '').replace(LEADING_FILLER_RE, '');
   if (REQUEST_START_RE.test(raw)) return false;
   return QUESTION_START_RE.test(raw) || /\?\s*$/.test(raw);
 }

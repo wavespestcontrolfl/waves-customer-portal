@@ -689,6 +689,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     ['adjust_stock', 'Please purchase two bottles of Taurus SC', { code: 'target_clarification_required' }],
     ['adjust_stock', 'Did we receive two bottles of Taurus SC?', { code: 'target_clarification_required' }],
     ['create_restock_request', 'Did we order Taurus SC?', { code: 'target_clarification_required' }],
+    ['adjust_stock', 'Hey, did we receive two bottles of Taurus SC', { code: 'target_clarification_required' }],
     ['adjust_stock', 'Can you log that we got two bottles of Taurus SC?', { productId: 'p-taurus' }],
   ])('%s: "%s" (purchase verb is an order; questions never write; polite requests do)', async (toolName, prompt, expected) => {
     setGroundingDb({ products: [TAURUS, ALPINE] });

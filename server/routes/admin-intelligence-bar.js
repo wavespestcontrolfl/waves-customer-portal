@@ -273,20 +273,24 @@ const { CONTINUATION_TURN } = IbThreads;
 // new card to replace the previous card") is still a claim, and the
 // notice's wording is true either way.
 const CARD_CLAIM_RE = /\bcards? below\b|\bconfirm(?:ation)? cards?\b|\bconfirm(?:ation)? buttons?\b|\b(?:click|press|tap|hit|use)\s+(?:the\s+)?confirm\b|\bconfirm(?:ation)? on the cards?\b/i;
-// How many cards a reply claims, summed over every claim phrase: each
-// "confirmation card(s)" or "card(s) below" counts its explicit number ("two
-// confirmation cards"), else 2 for a plural and 1 for a singular. A claim
-// with no such noun phrase ("click Confirm") counts 1.
+// How many cards a reply claims: the explicit numbers add up ("one card for
+// the address and one card for the phone" is two); unnumbered mentions count
+// once however often they repeat ("a confirmation card ... the card below" is
+// one), or two for a plural ("the confirmation cards below").
 const CARD_COUNT_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, both: 2 };
 const CARD_PHRASE_RE = /\b(?:(\d+|one|two|three|four|five|six|both)\s+(?:(?:new|separate)\s+)?)?(?:confirm(?:ation)?\s+(cards?)(?:\s+below)?|(cards?)\s+below)\b/gi;
 function claimedCardCount(text) {
   if (!CARD_CLAIM_RE.test(text)) return 0;
-  const phrases = [...String(text).matchAll(CARD_PHRASE_RE)];
-  if (!phrases.length) return 1;
-  return phrases.reduce((sum, [, count, noun, nounBelow]) => {
-    const explicit = count && (Number(count) || CARD_COUNT_WORDS[count.toLowerCase()]);
-    return sum + (explicit || (/s$/i.test(noun || nounBelow) ? 2 : 1));
-  }, 0);
+  let explicit = 0;
+  let unnumbered = 1; // a claim with no noun phrase ("click Confirm") is one card
+  for (const [, count, noun, nounBelow] of String(text).matchAll(CARD_PHRASE_RE)) {
+    const number = count && (Number(count) || CARD_COUNT_WORDS[count.toLowerCase()]);
+    if (number) explicit += number;
+    // Unnumbered mentions may repeat the same card ("a confirmation card
+    // ... the card below"), so they add nothing; a plural means two or more.
+    else if (/s$/i.test(noun || nounBelow)) unnumbered = 2;
+  }
+  return Math.max(explicit, unnumbered);
 }
 function phantomCardNotice(created) {
   if (created === 0) return "This reply didn't create a confirmation card. If you want a change, ask again and say exactly what to change.";
