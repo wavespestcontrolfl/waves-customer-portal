@@ -158,26 +158,26 @@ async function loadSeriesNeighbors(db, services, { lock = false } = {}) {
 }
 
 /**
- * The Flexible-tier candidate-date window for one visit: ±FLEX_TIER_RADIUS_DAYS
- * of its current date AND of its durable anchor (`anchorDate`, route-tiers'
- * resolveAnchor — the earliest pre-auto-dispatch date on record; the current
- * date when never moved), the same intersection route-tiers' tierMoveWindow
- * takes, so the allowance is never reset by a previous night's move. Then
- * clamped so it
- *   - never reaches or crosses the series' adjacent occurrence (`neighbors`),
- *   - never lands a DAY move below MIN_DESTINATION_DAYS_OUT of today. The
- *     visit's own current date is the one exception (same-day re-time is
- *     owner-mandated right up to the freeze, and the freeze alone already
- *     keeps the current date safely in the future — see FLEX_TIER_FREEZE_HOURS
- *     vs MIN_DESTINATION_DAYS_OUT above): it is added back on its own, never
- *     the dates between it and the floor (Codex #4995 r3 P1). When that
- *     leaves a gap, `dayMoveFrom` names the first date a day move may land
- *     on, and flexWindowAdmits is the one check of a destination,
- *   - never extends the upper bound past the lookahead horizon (the caller,
- *     candidate-slots.js, already applies that cap to any ctx.tierWindow).
- * Returns {dateFrom, dateTo[, dayMoveFrom]} or null when the intersection is
- * empty (e.g. the previous and next occurrence both sit inside the radius) or
- * the anchor is unknown (fail closed — never guess a budget).
+ * The Flexible-tier candidate-date window for one visit. A DAY move lands in
+ * one band: ±FLEX_TIER_RADIUS_DAYS of its current date AND of its durable
+ * anchor (`anchorDate`, route-tiers' resolveAnchor — the earliest
+ * pre-auto-dispatch date on record; the current date when never moved), the
+ * same intersection route-tiers' tierMoveWindow takes, so the allowance is
+ * never reset by a previous night's move — never below
+ * MIN_DESTINATION_DAYS_OUT of today, and never reaching or crossing the
+ * series' adjacent occurrence (`neighbors`). The visit's own current date is
+ * the one exception (same-day re-time is owner-mandated right up to the
+ * freeze, and the freeze alone already keeps the current date safely in the
+ * future — see FLEX_TIER_FREEZE_HOURS vs MIN_DESTINATION_DAYS_OUT above),
+ * unless an adjacent occurrence itself sits on or past it. It joins the band
+ * on its own, never the dates between (Codex #4995 r3/r5): when it sits
+ * below or above the band with dates between, `dayMoveFrom` / `dayMoveTo`
+ * name the band's edge, and flexWindowAdmits is the one check of a
+ * destination. The lookahead horizon is the caller's (candidate-slots.js
+ * caps any ctx.tierWindow).
+ * Returns {dateFrom, dateTo[, dayMoveFrom][, dayMoveTo]} — the span to
+ * generate candidates in — or null when nothing is legal, or the anchor is
+ * unknown (fail closed — never guess a budget).
  */
 function flexTierMoveWindow({ origDate, anchorDate, today, neighbors }) {
   const orig = toDateStr(origDate);
@@ -185,19 +185,17 @@ function flexTierMoveWindow({ origDate, anchorDate, today, neighbors }) {
   if (!orig || !anchor || !today) return null;
   const { prev, next } = neighbors || {};
   const prevFloor = prev ? shiftDateStr(prev, 1) : null;
-  const dayMoveFrom = latestDate(shiftDateStr(orig, -FLEX_TIER_RADIUS_DAYS), shiftDateStr(anchor, -FLEX_TIER_RADIUS_DAYS),
+  const nextCeil = next ? shiftDateStr(next, -1) : null;
+  const from = latestDate(shiftDateStr(orig, -FLEX_TIER_RADIUS_DAYS), shiftDateStr(anchor, -FLEX_TIER_RADIUS_DAYS),
     shiftDateStr(today, MIN_DESTINATION_DAYS_OUT), prevFloor);
-  // The current date always stays inside the radius band's upper edge
-  // (same-day re-time); only the next occurrence can cut below it.
-  const dateTo = earliestDate(latestDate(earliestDate(shiftDateStr(orig, FLEX_TIER_RADIUS_DAYS),
-    shiftDateStr(anchor, FLEX_TIER_RADIUS_DAYS)), orig), next ? shiftDateStr(next, -1) : null);
-  // The current date comes back on its own when only the floor (never the
-  // previous occurrence) sits past it.
-  const sameDayOnly = dayMoveFrom > orig && !(prevFloor && prevFloor > orig);
-  if (!sameDayOnly) return dayMoveFrom > dateTo ? null : { dateFrom: dayMoveFrom, dateTo };
-  if (orig > dateTo) return null;
-  if (dayMoveFrom > dateTo) return { dateFrom: orig, dateTo: orig };
-  return dayMoveFrom > shiftDateStr(orig, 1) ? { dateFrom: orig, dateTo, dayMoveFrom } : { dateFrom: orig, dateTo };
+  const to = earliestDate(shiftDateStr(orig, FLEX_TIER_RADIUS_DAYS), shiftDateStr(anchor, FLEX_TIER_RADIUS_DAYS), nextCeil);
+  const band = from <= to;
+  if ((prevFloor && prevFloor > orig) || (nextCeil && nextCeil < orig)) return band ? { dateFrom: from, dateTo: to } : null;
+  if (!band) return { dateFrom: orig, dateTo: orig };
+  const window = { dateFrom: earliestDate(from, orig), dateTo: latestDate(to, orig) };
+  if (from > shiftDateStr(orig, 1)) window.dayMoveFrom = from;
+  if (to < shiftDateStr(orig, -1)) window.dayMoveTo = to;
+  return window;
 }
 
 // The latest / earliest of some 'YYYY-MM-DD' dates, ignoring absent ones.
@@ -210,14 +208,15 @@ function earliestDate(...dates) {
 
 /**
  * Whether `date` is a legal flex destination for a visit now on `origDate`,
- * under its flexTierMoveWindow: inside [dateFrom, dateTo], and — when the
- * window carries `dayMoveFrom` — either the current date itself (same-day
- * re-time) or on/after it. Used by candidate filtering and the apply-time
- * guards alike.
+ * under its flexTierMoveWindow: inside [dateFrom, dateTo], and either the
+ * current date itself (same-day re-time) or inside the day-move band
+ * (`dayMoveFrom` / `dayMoveTo`, when the window carries them). Used by
+ * candidate filtering and the apply-time guards alike.
  */
 function flexWindowAdmits(window, origDate, date) {
   if (!window || !date || date < window.dateFrom || date > window.dateTo) return false;
-  return !window.dayMoveFrom || date >= window.dayMoveFrom || date === toDateStr(origDate);
+  if (date === toDateStr(origDate)) return true;
+  return !(window.dayMoveFrom && date < window.dayMoveFrom) && !(window.dayMoveTo && date > window.dayMoveTo);
 }
 
 /**
@@ -238,17 +237,16 @@ function flexWindowAdmits(window, origDate, date) {
  * eligibility ctx (`ctx.flexTier`) skips eligibility.js's days-out lock
  * entirely — so this direct computation is the ONLY thing standing between
  * "no reminder row yet" and moving a visit that is due inside 73 hours.
- * Fails closed: an unreadable arrival or an uncomposable instant
- * (missing/malformed scheduled_date or window_start) freezes the visit.
+ * Fails closed: an uncomposable instant (missing/malformed scheduled_date
+ * or window_start) freezes the visit; an unreadable arrival throws (below).
  */
 async function ownScheduleFrozen(conn, service, now = new Date()) {
   const { arrivalStartForService } = require('../reservation-arrival');
-  let arrivalStart;
-  try {
-    arrivalStart = await arrivalStartForService(conn, service);
-  } catch (_) {
-    return true; // fail closed
-  }
+  // An unreadable arrival THROWS (Codex #4995 r5 P2): read as "frozen" it
+  // would pass as an ordinary 73h skip, so a persistent fault could stop
+  // every flex move while the run reported green. Thrown, the caller still
+  // makes no move and the run records the failure (completed_with_errors).
+  const arrivalStart = await arrivalStartForService(conn, service);
   return insideFreeze(service.scheduled_date, arrivalStart, now);
 }
 

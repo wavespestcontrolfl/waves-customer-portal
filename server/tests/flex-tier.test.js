@@ -158,11 +158,16 @@ describe('flexTierMoveWindow — the ±5 days are measured from the durable orig
     expect(w).toEqual({ dateFrom: '2026-09-13', dateTo: '2026-09-21' });
   });
 
-  test('a visit already outside its original band (an older move) keeps only same-day and moves back toward it', () => {
-    // 7 days past its original date — nothing further out, but its own date
-    // (same-day re-time) and anything closer to the original stay legal.
+  test('a visit already outside its original band keeps its own date as a lone exception — never the dates between (Codex #4995 r5 P2)', () => {
+    // 7 days past its original date (a staff move, say): its own date stays
+    // legal for a same-day re-time, and day moves stay inside anchor ± 5 —
+    // 09-22 is still six days past the anchor.
     const w = flexTierMoveWindow({ origDate: '2026-09-23', anchorDate: '2026-09-16', today, neighbors: {} });
-    expect(w).toEqual({ dateFrom: '2026-09-18', dateTo: '2026-09-23' });
+    expect(w).toEqual({ dateFrom: '2026-09-18', dateTo: '2026-09-23', dayMoveTo: '2026-09-21' });
+    expect(flexWindowAdmits(w, '2026-09-23', '2026-09-23')).toBe(true);
+    expect(flexWindowAdmits(w, '2026-09-23', '2026-09-22')).toBe(false);
+    expect(flexWindowAdmits(w, '2026-09-23', '2026-09-21')).toBe(true);
+    expect(flexWindowAdmits(w, '2026-09-23', '2026-09-18')).toBe(true);
   });
 
   test('the series guard still clamps inside the anchored window', () => {
@@ -371,13 +376,13 @@ describe('ownScheduleFrozen — 73h from the canonical arrival (Codex #4995 r1 P
     expect(conn.raw).not.toHaveBeenCalled();
   });
 
-  test('an unreadable arrival or an uncomposable time fails closed (frozen)', async () => {
+  test('an uncomposable time fails closed (frozen); an unreadable arrival throws, never a silent freeze (Codex #4995 r5 P2)', async () => {
+    await expect(ownScheduleFrozen({ raw: jest.fn() }, { id: 's1', scheduled_date: '2026-09-20', window_start: null }, NOW)).resolves.toBe(true);
     const conn = { raw: jest.fn(async () => { throw new Error('db down'); }) };
     const grouped = {
       id: 's1', scheduled_date: '2026-09-20', window_start: '15:00', reservation_service_mix: { allocatedServiceIds: ['s0', 's1'] },
     };
-    await expect(ownScheduleFrozen(conn, grouped, NOW)).resolves.toBe(true);
-    await expect(ownScheduleFrozen({ raw: jest.fn() }, { id: 's1', scheduled_date: '2026-09-20', window_start: null }, NOW)).resolves.toBe(true);
+    await expect(ownScheduleFrozen(conn, grouped, NOW)).rejects.toThrow('db down');
   });
 });
 

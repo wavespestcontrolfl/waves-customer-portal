@@ -804,8 +804,8 @@ async function unitMoveSize(service, best = null) {
  * predicted destination starts (visit-groups predictMemberWindows — the unit
  * mover's own planning, from the same member fields it reads), reading only.
  * Returns null when the move would pass or the visit is not grouped, else
- * { code, description }: a refusal, an unplannable unit or an unreadable
- * group all suppress the recommendation (fail closed).
+ * { code, description } for a refusal or an unplannable unit, which
+ * suppresses the recommendation; a read failure throws (the run records it).
  */
 async function previewGroupMove(service, best, config, conn = db) {
   if (!service.visit_id) return null;
@@ -832,7 +832,13 @@ async function previewGroupMove(service, best, config, conn = db) {
     await makeMemberGuard({ service, best, config, techChanged })({ trx: conn, members, targets });
     return null;
   } catch (err) {
-    return { code: 'GROUP_MEMBER_GUARD', description: `Grouped visit would be refused at apply — ${err.message}` };
+    // A guard refusal (409) suppresses the recommendation; any other error —
+    // an unreadable group or evidence read — propagates, so the run records
+    // the failure instead of passing it off as an ordinary refusal.
+    if (err && err.statusCode === 409) {
+      return { code: 'GROUP_MEMBER_GUARD', description: `Grouped visit would be refused at apply — ${err.message}` };
+    }
+    throw err;
   }
 }
 

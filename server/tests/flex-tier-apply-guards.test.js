@@ -510,6 +510,14 @@ describe('previewGroupMove — pass 1 runs the grouped-member guard, so a dry ru
     expect(conn.raw).toHaveBeenCalled(); // reached the sibling's series fence and window
   });
 
+  test('an unreadable group is a failure the run records, not a quiet refusal', async () => {
+    const conn = jest.fn(() => {
+      const q = { where: () => q, whereNotIn: () => q, select: async () => { throw new Error('db down'); } };
+      return q;
+    });
+    await expect(previewGroupMove(service, { date: '2026-10-13' }, { guardMode: 'flex' }, conn)).rejects.toThrow('db down');
+  });
+
   test('an ungrouped visit, or a visit with one open member, needs no preview', async () => {
     const conn = jest.fn(() => { throw new Error('must not query'); });
     await expect(previewGroupMove({ id: 's1', visit_id: null }, { date: '2026-10-13' }, { guardMode: 'flex' }, conn)).resolves.toBeNull();

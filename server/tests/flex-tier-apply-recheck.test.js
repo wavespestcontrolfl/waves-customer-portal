@@ -138,6 +138,29 @@ test('a grouped move the member guard would refuse is neither recommended nor pl
   apply.previewGroupMove.mockResolvedValue(null);
 });
 
+test('an unreadable canonical arrival refuses the move AND degrades the run — never a silent 73h skip (Codex #4995 r5 P2)', async () => {
+  reminderResults = [[]];
+  const stamped = {
+    ...svc(), reservation_service_mix: { allocatedServiceIds: ['s0', 's1'], scheduledDate: VISIT_DATE, arrivalWindowStart: '09:00' },
+  };
+  db.mockImplementation((table) => {
+    if (table === 'appointment_reminders') return buildChain(reminderResults.length ? reminderResults.shift() : []);
+    if (table === 'scheduled_services') return buildChain([stamped]);
+    return buildChain([]);
+  });
+  db.raw = jest.fn(async () => { throw new Error('function reservation_arrival_start(uuid) does not exist'); });
+  try {
+    const res = await runAutoDispatch({ mode: 'apply', flexTierEnabled: true });
+    expect(res.changed).toBe(0);
+    expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+    expect(res.status).toBe('completed_with_errors');
+    expect(decisions('skipped').map((d) => d.reason_code)).not.toContain('WITHIN_73H');
+    expect(decisions('failed')).toHaveLength(1);
+  } finally {
+    delete db.raw;
+  }
+});
+
 test('route tiers never run the flex group preview (gate-off behavior unchanged)', async () => {
   reminderResults = [[], []];
   await runAutoDispatch({ mode: 'apply', routeTiersEnabled: true });
