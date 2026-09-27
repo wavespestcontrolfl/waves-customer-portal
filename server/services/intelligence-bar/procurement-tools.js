@@ -1220,6 +1220,16 @@ function isBareFollowUp(text) {
 // only a "Taurus 10% SC" row) — a conflict never grounds, on this text or
 // any other (see resolveByOperatorGrounding). See qualifierConflict for the
 // one check every match type routes through.
+const NOUN_POSITION_UNITS = 'fl\\s*oz|oz|ounces?|gal(?:lons?)?|gals|qts?|quarts?|pts?|pints?|lbs?|pounds?|g|grams?|kg|ml|l|liters?'
+  + '|each|items?|bottles?|jugs?|bags?|cases?|box(?:es)?|pails?|cans?|containers?|tubes?|packs?|things?|units?|buckets?';
+const NOUN_POSITION_BEFORE_RE = new RegExp('(?:\\bof'
+  + '|\\b(?:bought|purchased|got|received|restocked|reordered|ordered|add|added|picked\\s+up)(?:\\s+(?:a|an|the|some|more|another))?'
+  + `|(?:\\b\\d+(?:\\.\\d+)?|\\b(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|twelve|dozen))\\s*(?:${NOUN_POSITION_UNITS})(?:\\s+of)?`
+  + ')[^a-zA-Z0-9]*$', 'i');
+function inNounPosition(rawText, start) {
+  return NOUN_POSITION_BEFORE_RE.test(rawText.slice(Math.max(0, start - 40), start));
+}
+
 async function productsNamedIn(rawText) {
   const named = new Set();
   let conflict = false;
@@ -1256,9 +1266,15 @@ async function productsNamedIn(rawText) {
       ...nameNorm.split(' ').filter((token) => isCandidateToken(token) && tokenOwners.get(token)?.size === 1).map((token) => [token]),
     ];
     const phrases = phraseWords
-      .map((words) => ({ spans: findPhraseSpansInRawText(rawText, words) }))
+      .map((words) => ({ single: words.length === 1, spans: findPhraseSpansInRawText(rawText, words) }))
       .filter((phrase) => phrase.spans.length > 0);
     if (!phrases.length) continue;
+    // Named only by a lone word (a distinctive token or a one-word alias):
+    // that word must stand where a product name stands ("a jug of Taurus",
+    // "bought Taurus", "78 oz Taurus"). "Can you dispatch this order?" uses
+    // the same word as a verb, so it names nothing.
+    if (phrases.every((phrase) => phrase.single)
+      && !phrases.some((phrase) => phrase.spans.some((span) => inNounPosition(rawText, span.start)))) continue;
     // The residual rule: remove every one of THIS product's own mention
     // spans (every match type combined — a full-name match and its own
     // token match cover the same ground) and require the rest of the text

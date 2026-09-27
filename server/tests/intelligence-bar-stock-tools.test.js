@@ -414,6 +414,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
   });
 
   const TAURUS = { id: 'p-taurus', name: 'Taurus SC', active: true };
+  const DISPATCH_WORD = { id: 'p-dispatch-word', name: 'Dispatch Sprayable Wetting Agent', active: true };
   const ALPINE = { id: 'p-alpine', name: 'Alpine WSG', active: true };
   const LESCO_FERTILIZER = { id: 'p-lesco-1', name: 'Lesco 24-5-11 Fertilizer', active: true };
   const LESCO_HERBICIDE = { id: 'p-lesco-2', name: 'Lesco Momentum FX2 Herbicide', active: true };
@@ -835,11 +836,11 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       expect(result).toEqual({ productId: TAURUS_10.id });
     });
 
-    test('a bare number with no "%" is never a concentration ("Taurus 78 ounces")', async () => {
+    test('a bare number with no "%" is never a concentration ("We bought Taurus 78 ounces")', async () => {
       setGroundingDb({ products: [TAURUS_10, ALPINE] });
       const result = await resolveInventoryWriteTarget({
         toolName: 'adjust_stock',
-        prompt: 'Taurus 78 ounces',
+        prompt: 'We bought Taurus 78 ounces',
         preview: { product: { id: TAURUS_10.id, name: TAURUS_10.name } },
       });
       expect(result).toEqual({ productId: TAURUS_10.id });
@@ -1005,6 +1006,27 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     // is leftover content outside CLOSED_VOCAB. A full name or a multi-word
     // alias is unaffected (already tested elsewhere above).
     describe('single-word evidence and the closed-vocabulary residual rule', () => {
+      test.each([
+        'Can you dispatch this order?',
+        'Can you dispatch 2 bottles?',
+      ])('a lone product word used as a verb names nothing (%s)', async (prompt) => {
+        setGroundingDb({ products: [TAURUS, ALPINE, DISPATCH_WORD] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt,
+          preview: { product: { id: DISPATCH_WORD.id, name: DISPATCH_WORD.name } },
+        });
+        expect(result).toMatchObject({ code: 'target_clarification_required' });
+      });
+
+      test('a lone product word in a noun position still names it (can you add dispatch to inventory)', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE, DISPATCH_WORD] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt: 'can you add dispatch to inventory',
+          preview: { product: { id: DISPATCH_WORD.id, name: DISPATCH_WORD.name } },
+        });
+        expect(result).toEqual({ productId: DISPATCH_WORD.id });
+      });
+
       const DISPATCH = { id: 'p-dispatch', name: 'Dispatch Sprayable Wetting Agent', active: true };
 
       test.each([
