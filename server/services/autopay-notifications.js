@@ -69,7 +69,7 @@ async function sendPreChargeLegs({ customer, target, legs, sendInput, amountCent
       // stamped as progress.
       result = err.providerOutcome || { sent: false, deliveryOutcome: 'uncertain', code: err.message };
     }
-    if (result.code === 'lane_changed') return { laneChanged: true, reason: result.reason };
+    if (result.code === 'lane_changed') return { code: 'lane_changed', reason: result.reason };
     const delivery = billingLegDeliveryState(channel, result);
     if (delivery) {
       await logAutopay(customer.id, 'pre_charge_reminder_sent', {
@@ -83,7 +83,7 @@ async function sendPreChargeLegs({ customer, target, legs, sendInput, amountCent
       logger.warn(`[autopay-notifications] pre-charge ${channel} leg not delivered for ${customer.id}: ${code}`);
     }
   }
-  return { delivered, settled, code };
+  return { sent: settled > 0, deduped: delivered === 0, code };
 }
 
 async function sendPreChargeReminders() {
@@ -208,30 +208,27 @@ async function sendPreChargeReminders() {
         },
       };
       const amountCents = Math.round(parseFloat(c.monthly_rate) * 100);
-      if (pendingLegs) {
-        const outcome = await sendPreChargeLegs({ customer: c, target, legs: pendingLegs, sendInput, amountCents });
-        if (outcome.laneChanged) {
-          logger.info(`[autopay-notifications] pre-charge skipped for ${c.id}: ${outcome.reason}`);
-          skipped++; continue;
-        }
-        if (!outcome.settled) throw new Error(`autopay reminder blocked: ${outcome.code || 'unknown'}`);
-        if (outcome.delivered) sent++; else skipped++;
-        continue;
-      }
-      const sendResult = await sendCustomerMessage({ to: c.phone, channel: 'sms', ...sendInput });
-      if (sendResult.code === 'lane_changed') {
-        logger.info(`[autopay-notifications] pre-charge skipped for ${c.id}: ${sendResult.reason}`);
+      const outcome = pendingLegs
+        ? await sendPreChargeLegs({ customer: c, target, legs: pendingLegs, sendInput, amountCents })
+        : await sendCustomerMessage({ to: c.phone, channel: 'sms', ...sendInput });
+      if (outcome.code === 'lane_changed') {
+        logger.info(`[autopay-notifications] pre-charge skipped for ${c.id}: ${outcome.reason}`);
         skipped++; continue;
       }
-      if (sendResult.blocked || sendResult.sent === false) {
-        throw new Error(`autopay reminder SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+      if (outcome.blocked || outcome.sent === false) {
+        throw new Error(`autopay reminder blocked: ${outcome.code || outcome.reason || 'unknown'}`);
       }
 
-      await logAutopay(c.id, 'pre_charge_reminder_sent', {
-        ...(sendResult.deduped && sendResult.eventVisibleAt ? { createdAt: sendResult.eventVisibleAt } : { amountCents }),
-        details: { charge_date: etDateString(target) },
-      });
-      if (sendResult.deduped) skipped++; else sent++;
+      // No-phone legs already stamped their individual cooldowns. A phone
+      // send owns the customer-wide progress, using the original App time
+      // only when the guarded provider path supplies that earlier witness.
+      if (!pendingLegs) {
+        await logAutopay(c.id, 'pre_charge_reminder_sent', {
+          ...(outcome.eventVisibleAt ? { createdAt: outcome.eventVisibleAt } : { amountCents }),
+          details: { charge_date: etDateString(target) },
+        });
+      }
+      if (outcome.deduped) skipped++; else sent++;
     } catch (err) {
       logger.error(`[autopay-notifications] reminder failed for ${c.id}: ${err.message}`);
     }
