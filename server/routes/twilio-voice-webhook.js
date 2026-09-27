@@ -577,6 +577,24 @@ async function rememberForwardAccept({ parentCallSid, dialCallSid, answeredByNum
 // values are identical either way — while keys only the fallback wrote
 // (e.g. source: 'status_callback') survive as provenance of which endpoint
 // created the row. Metadata may arrive as a jsonb object or a legacy string.
+// Promise-chaser eligibility, frozen at arrival (Codex #5019 r20/r21): a
+// per-call fact, not a time boundary — a dark-period call is never stamped,
+// so it can never ring however the gate later toggles, and a stamped call
+// keeps ringing across any number of ordinary restarts. Gate off returns
+// {}, so it contributes nothing and the insert payload is unchanged from
+// before this stamp existed. Read fresh, once, at the exact moment this
+// call's own row is built — never re-derived later, so a genuine Twilio
+// redelivery (which never re-reaches this code; see the firstDelivery
+// claim above) could not overwrite it even if it tried. See
+// promise-chaser-bell.js's own docstring for the full rationale, including
+// its known limitation: a call_log row created by a recovery path
+// (/call-status or /recording-status, when /voice itself never landed) is
+// never stamped and never rings — fails closed, and rare.
+function promiseChaserEligibilityStamp() {
+  const { isEnabled } = require('../config/feature-gates');
+  return isEnabled('promiseChaserBell') ? { promise_chaser_eligible: true } : {};
+}
+
 function foldVoiceMetadata(existingMetadata, freshMetadata) {
   let prior = {};
   if (existingMetadata && typeof existingMetadata === 'object') {
@@ -1334,6 +1352,7 @@ router.post('/voice', async (req, res) => {
         ...(screenDecision !== 'none'
           ? { preconnect_screen: screenDecision === 'gate' ? 'gated' : 'would_gate' }
           : {}),
+        ...promiseChaserEligibilityStamp(),
       });
     await db.transaction(async (trx) => {
       // Same per-SID advisory lock as /call-status and /recording-status.
@@ -3696,6 +3715,7 @@ router._test = {
   customerPhoneLookupKey,
   findSingleCustomerByPhone,
   foldVoiceMetadata,
+  promiseChaserEligibilityStamp,
   maskPhone,
   maskSid,
   metadataHasForwardAcceptance,

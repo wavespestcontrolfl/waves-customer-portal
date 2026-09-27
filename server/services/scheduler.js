@@ -13,11 +13,6 @@ const { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms } = req
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
-// Required eagerly (mirroring #5018's own boot-time activation-boundary
-// pattern) so promise-chaser-bell's own MODULE_LOAD_AT is captured at
-// process boot, not lazily on this file's first cron tick — up to 2
-// minutes later, and non-deterministic relative to a Railway restart.
-const promiseChaserBell = require('./promise-chaser-bell');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
 const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
@@ -4799,17 +4794,17 @@ function initScheduledJobs() {
       Promise.resolve().then(() => require('./repeat-caller-bell').sweepRepeatCallers()),
       Promise.resolve().then(() => require('./missed-call-text-back').sweepMissedCallTextBacks()),
       // The promise-chaser bell's ONE path: a stateless, idempotent sweep
-      // (see that file's docstring). promiseChaserBell is required eagerly at
-      // the top of this file so its MODULE_LOAD_AT is process boot, not this
-      // tick's first fire (mirrors #5018's boot-time pattern). Wrapped in the
-      // cross-instance cron lock ON ITS OWN — a Railway deploy overlap or a
-      // slow prior tick could otherwise have two instances paging the same
-      // window at once (Codex #5019 r16 P2); the other three sweeps here are
-      // already fleet-safe through their own atomic claims and stay
-      // unwrapped and uncoupled from this one — a held lease elsewhere is a
-      // quiet skip (runExclusive resolves, never rejects, on a skip), so it
-      // needs no special handling in the results.forEach below.
-      runExclusive('promise-chaser-bell', () => promiseChaserBell.sweepPromiseChasers()),
+      // (see that file's docstring — eligibility is now a per-call stamp,
+      // not a boot-time boundary, so this require is lazy like the other
+      // three sweeps here). Wrapped in the cross-instance cron lock ON ITS
+      // OWN — a Railway deploy overlap or a slow prior tick could otherwise
+      // have two instances paging the same window at once (Codex #5019 r16
+      // P2); the other three sweeps here are already fleet-safe through
+      // their own atomic claims and stay unwrapped and uncoupled from this
+      // one — a held lease elsewhere is a quiet skip (runExclusive resolves,
+      // never rejects, on a skip), so it needs no special handling in the
+      // results.forEach below.
+      runExclusive('promise-chaser-bell', () => require('./promise-chaser-bell').sweepPromiseChasers()),
     ]);
     results.forEach((result, index) => {
       if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller', 'missed-call-text-back', 'promise-chaser'][index]} sweep failed: ${result.reason.message}`);

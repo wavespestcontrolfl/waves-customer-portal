@@ -23,25 +23,43 @@
  * Nothing here is reimplemented — a promise the pager would already count
  * as followed up never rings this bell either.
  *
- * STATELESS, IDEMPOTENT SWEEP — the ONE path (no /voice wiring, no per-call
- * claim, no lease, and no promise-chaser-owned state of its own ever
- * written to call_log or call_commitments — refreshFulfillment's own
- * shared stale-hint stamp on call_commitments, the SAME side effect the
- * SLA pager's own read already triggers, is the one pre-existing write
- * this file's own reads happen to cause, not a new one):
- * the existing 2-minute call-alert recovery cron (scheduler.js — the same
- * one missed-call-bell / repeat-caller-bell use) calls sweepPromiseChasers,
- * which re-evaluates every eligible inbound call from the last 30 minutes
- * (never earlier than the persisted activation boundary — see below) from
- * scratch, every tick.
- * "Nothing qualifies this tick" is never a terminal fact; a promise whose
- * own extraction lands on a LATER tick is simply found then, by a fresh
- * read of call_commitments — this is what replaced the old design's own
- * claim/lease/retry state machine (and, with it, its own P1 history:
+ * STATELESS, IDEMPOTENT SWEEP — the ONE path (no per-call claim, no lease,
+ * and no promise-chaser-owned STATE MACHINE of its own ever written to
+ * call_log or call_commitments — refreshFulfillment's own shared
+ * stale-hint stamp on call_commitments, the SAME side effect the SLA
+ * pager's own read already triggers, is the one pre-existing write this
+ * file's own reads happen to cause, not a new one): the existing 2-minute
+ * call-alert recovery cron (scheduler.js — the same one missed-call-bell /
+ * repeat-caller-bell use) calls sweepPromiseChasers, which re-evaluates
+ * every ELIGIBLE inbound call from the last 30 minutes from scratch, every
+ * tick. "Nothing qualifies this tick" is never a terminal fact; a promise
+ * whose own extraction lands on a LATER tick is simply found then, by a
+ * fresh read of call_commitments — this is what replaced the old design's
+ * own claim/lease/retry state machine (and, with it, its own P1 history:
  * wholesale-vs-merge writes, sweep-batch starvation from stuck leases,
  * cross-call double-ring races, delivered-device history scoped to the
  * wrong promise or the wrong day, and a defer/release livelock between two
  * staggered callers). None of that machinery exists to have those bugs.
+ *
+ * "Eligible" is ONE metadata key, `promise_chaser_eligible: true`, stamped
+ * by the /voice webhook (twilio-voice-webhook.js) ATOMICALLY with the same
+ * call_log row it inserts — gated on isEnabled('promiseChaserBell') at
+ * that exact moment, added to nothing else, no extra query. This is a
+ * PER-CALL fact frozen at arrival, not a time boundary — which turned out
+ * to be structurally the wrong tool (Codex #5019 r20/r21): any floor tied
+ * to "when did the gate go live" or "when did this process boot" cannot
+ * tell "the gate was off" apart from "the process merely restarted" — one
+ * must never be swept (it was dark) and the other must always still be
+ * swept (an ordinary restart must not drop a callback whose extraction or
+ * delivery hadn't finished yet), and no single instant can satisfy both at
+ * once. The stamp sidesteps the whole question: a call from a dark period
+ * is simply never stamped, so it can never ring however the gate toggles
+ * afterward; a call from before a restart keeps whatever stamp it already
+ * had, so an ordinary restart loses nothing. KNOWN LIMITATION: a call_log
+ * row created by a recovery path (the /call-status or /recording-status
+ * fallback insert, when /voice itself never landed for that call) is
+ * never stamped and never rings — this fails closed, and is rare enough
+ * to accept rather than build a second stamping site for.
  *
  * Idempotency rests on TWO durable facts, either one enough to skip a
  * redispatch, both checked BEFORE ever calling triggerNotification: a bell
@@ -59,21 +77,6 @@
  * exactly like those two bells' own "a persisted bell proves delivery"
  * rule.
  *
- * The sweep window's floor is a PERSISTED first-activation boundary
- * (activationBoundary / persistedActivationBoundary below), exactly
- * #5018's own (call-booking-link-text.js) pattern: env override
- * PROMISE_CHASER_ACTIVATED_AT, else the instant in system_settings key
- * promise_chaser_activated_at — written ONCE, ever, by the first process
- * that ever finds nothing stored there, and read back unchanged by every
- * process and every restart after. An in-memory MODULE_LOAD_AT (Codex
- * #5019 r16 P1) moves on every ordinary restart or deploy, not just a gate
- * flip, so a callback taken moments before a routine restart — its own
- * extraction or delivery still in flight — was excluded forever the
- * instant the new process booted. The persisted boundary never does that:
- * it fixes ONE origin instant for the feature's whole life, and the
- * 30-minute lookback is what actually bounds every tick after that,
- * regardless of how many restarts have happened since.
- *
  * Gated by GATE_PROMISE_CHASER_BELL (needs GATE_CALL_COMMITMENTS too — no
  * commitment rows exist without it). Gate off: no query at all, and so no
  * writes either. Bell only — no customer comms, ever.
@@ -86,14 +89,6 @@ const commitments = require('./call-commitments');
 const { whereNotBlockedCall, PHONE_KEY_SQL } = require('../middleware/spam-block');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { SLA_KINDS, followedUpIds, WHAT } = require('./followup-sla-watcher');
-
-// This module's OWN load time — captured once, at require, which happens at
-// process boot (scheduler.js requires this lane eagerly, unconditionally).
-// Used ONLY as the very first persisted boundary's fallback value, instead
-// of a DB-time read taken at whatever moment the first sweep tick happens
-// to run (the same reasoning call-booking-link-text.js's own MODULE_LOAD_AT
-// documents) — never as the boundary itself; see persistedActivationBoundary.
-const MODULE_LOAD_AT = new Date();
 
 // The rule's own scope: "an earlier call ... ended UNBOOKED". Same live
 // statuses repeat-caller-bell's BOOKED_SQL treats as booked — a call that
@@ -108,51 +103,12 @@ const BOOKED_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_
 // generous enough that even a slow commitments-extraction pass (bounded by
 // MODEL_TIMEOUT_MS) gets several retries inside the window on the existing
 // 2-minute cadence, short enough that a genuinely late-arriving promise
-// simply ages out unrung rather than surprise-ringing an hour later.
+// simply ages out unrung rather than surprise-ringing an hour later. This
+// is now the ONLY window boundary: eligibility itself (was a call stamped
+// promise_chaser_eligible at arrival?) is what keeps a dark-period call
+// from ringing, not how far back the sweep looks — see the module
+// docstring (Codex #5019 r20/r21).
 const LOOKBACK_MS = 30 * 60 * 1000;
-
-// Own key/env, since this is a different gate/lane from every other
-// activation-boundary user (reschedule-link-promises.js,
-// call-booking-link-text.js) — mirrors call-booking-link-text.js's own
-// persistedActivationBoundary exactly (see that file, #5018,
-// feat/call-booking-link-text, for the pattern this is copied from): the
-// first live sweep anywhere to find nothing stored writes MODULE_LOAD_AT
-// there; every sweep after, on this process or any future one, reads the
-// same instant back. onConflict('key').ignore() means only the very FIRST
-// process (of a rolling deploy) to find nothing stored ever writes; every
-// other process, and every later restart, just reads the persisted value.
-const ACTIVATION_SETTINGS_KEY = 'promise_chaser_activated_at';
-async function persistedActivationBoundary(conn) {
-  const existing = await conn('system_settings').where({ key: ACTIVATION_SETTINGS_KEY }).first('value');
-  if (existing?.value) return new Date(existing.value);
-  await conn('system_settings').insert({
-    key: ACTIVATION_SETTINGS_KEY, value: MODULE_LOAD_AT.toISOString(), category: 'promise_chaser',
-    description: 'First live-activation instant for GATE_PROMISE_CHASER_BELL; a call that started before it is historical, not a live callback to chase.',
-  }).onConflict('key').ignore();
-  const settled = await conn('system_settings').where({ key: ACTIVATION_SETTINGS_KEY }).first('value');
-  return settled?.value ? new Date(settled.value) : MODULE_LOAD_AT;
-}
-
-// PROMISE_CHASER_ACTIVATED_AT (an ISO instant), when set, always wins —
-// read fresh each call, exactly like reschedule-link-promises' own env
-// override. Unset, falls back to the persisted boundary.
-async function activationBoundary(conn) {
-  const configured = process.env.PROMISE_CHASER_ACTIVATED_AT;
-  const parsed = configured ? new Date(configured) : null;
-  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : persistedActivationBoundary(conn);
-}
-
-// The sweep's own lookback boundary: never earlier than LOOKBACK_MS ago,
-// and never earlier than the activation boundary. Exported (and the pure
-// half factored out as windowFloor) so tests can probe the boundary logic
-// directly rather than racing real wall-clock time against an activation
-// instant a test cannot itself control.
-function windowFloor(boundary, now) {
-  return new Date(Math.max(now.getTime() - LOOKBACK_MS, boundary.getTime()));
-}
-async function sweepSince(conn, now = new Date()) {
-  return windowFloor(await activationBoundary(conn), now);
-}
 
 // A `.catch()` sentinel distinguishable from every genuine obligationRenewedAt
 // result (null = never renewed, or a real Date) — never a value that value
@@ -432,7 +388,7 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
   const now = new Date();
   await db('promise_chaser_deliveries').where('delivered_at', '<', new Date(now.getTime() - DELIVERY_FACT_RETENTION_MS)).del()
     .catch((err) => logger.warn(`[promise-chaser-bell] delivery-fact housekeeping failed: ${err.message}`));
-  const since = await sweepSince(db, now);
+  const since = new Date(now.getTime() - LOOKBACK_MS);
   let rang = 0;
   let cursor = null;
   for (;;) {
@@ -442,6 +398,11 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
       .modify((q) => whereNotSandboxCall(q))
       .whereRaw(`LENGTH(${PHONE_KEY_SQL}) BETWEEN 10 AND 15`)
       .where('created_at', '>', since)
+      // Eligibility, not the window, is what keeps a dark-period call from
+      // ringing (see module docstring) — a call the /voice webhook did not
+      // stamp promise_chaser_eligible: true at arrival is never considered,
+      // however the gate toggles afterward or however recently it arrived.
+      .whereRaw("metadata->>'promise_chaser_eligible' = 'true'")
       .whereRaw("COALESCE(metadata->>'preconnect_screen', '') NOT IN ('gated', 'failed')")
       .modify((q) => { if (cursor) q.whereRaw('(created_at, id) > (?, ?)', [cursor.sweep_created_at, cursor.id]); })
       .orderBy('created_at', 'asc')
@@ -464,6 +425,6 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
 }
 
 module.exports = {
-  sweepPromiseChasers, ringForCall, sweepSince, windowFloor, activationBoundary, persistedActivationBoundary,
-  describePromise, MODULE_LOAD_AT,
+  sweepPromiseChasers, ringForCall,
+  describePromise,
 };
