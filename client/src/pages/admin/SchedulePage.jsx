@@ -9520,6 +9520,22 @@ export function typedFieldLabel(schemaType, field, values = {}) {
 // chips + optional AI-drafted recommendations. Shared by the mobile and
 // desktop renders of CompletionPanel — `variant` only switches the
 // palette/label chrome between the CP mobile tokens and the D palette.
+// Draft-restore rule for a typed activity score. A derive-mapped indicator
+// has no gauge to pin any more (owner ruling 2026-09-26), so a pin saved by
+// an older draft is dropped and the score follows the restored findings —
+// otherwise it would keep steering validation and the AI payload from a
+// picker the tech can't see. Tech-set-only indicators keep their saved pin.
+export function restoredActivityScoreState(activity, values, savedScore, savedTouched) {
+  if (activity?.deriveField) {
+    const derived = activity.deriveScores?.[String((values || {})[activity.deriveField])];
+    return { score: derived == null ? null : derived, touched: false };
+  }
+  return {
+    score: Number.isInteger(savedScore) ? savedScore : null,
+    touched: !!savedTouched,
+  };
+}
+
 export function TypedFindingsSection({
   variant,
   schema,
@@ -15241,12 +15257,14 @@ export function CompletionPanel({
       pruneRestoredFindingsValues(restoredFindings, typedFindingsSchema.fields, typedFindingsSchema.type);
       if (JSON.stringify(restoredFindings) !== prePruneFindings) restorePruned = true;
       setFindingsValues(restoredFindings);
-      setTypedActivityScore(
-        Number.isInteger(savedDraft.typedActivityScore)
-          ? savedDraft.typedActivityScore
-          : null,
+      const restoredActivity = restoredActivityScoreState(
+        typedFindingsSchema.activity,
+        restoredFindings,
+        savedDraft.typedActivityScore,
+        savedDraft.typedActivityTouched,
       );
-      setTypedActivityTouched(!!savedDraft.typedActivityTouched);
+      setTypedActivityScore(restoredActivity.score);
+      setTypedActivityTouched(restoredActivity.touched);
       const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
         ? savedDraft.typedNextStepChips
         : [];
@@ -15321,8 +15339,12 @@ export function CompletionPanel({
             {
               values,
               chips,
-              score: Number.isInteger(saved.score) ? saved.score : null,
-              scoreTouched: !!saved.scoreTouched,
+              ...(() => {
+                const restored = restoredActivityScoreState(
+                  schema.activity, values, saved.score, saved.scoreTouched,
+                );
+                return { score: restored.score, scoreTouched: restored.touched };
+              })(),
             },
           ];
         }),

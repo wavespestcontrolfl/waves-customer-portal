@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../lib/adminApi', () => ({ adminFetch: vi.fn(() => Promise.resolve({})) }));
 
-import { TypedFindingsSection } from './SchedulePage.jsx';
+import { TypedFindingsSection, restoredActivityScoreState } from './SchedulePage.jsx';
 
 afterEach(() => cleanup());
 
@@ -82,5 +82,35 @@ describe('TypedFindingsSection — gauge/findings merge (owner ruling 2026-09-26
     const { container } = renderSection(TECH_SET_SCHEMA, { species: 'Roof rat' });
     expect(container.textContent).toContain('Rodent Activity');
     expect(container.textContent).toContain('Prefills from findings until you choose');
+  });
+});
+
+describe('restoredActivityScoreState — draft restore after the gauge was hidden', () => {
+  const derive = {
+    label: 'Roach Activity',
+    deriveField: 'activity_level',
+    deriveScores: { 'None observed': 0, Low: 1, Moderate: 3, Heavy: 4, Severe: 5 },
+  };
+
+  it('drops a pin saved by an older draft and derives from the restored findings', () => {
+    // An older draft pinned 5 while the findings now say Low: the tech can no
+    // longer see or change that pin, so it must not survive the restore.
+    expect(restoredActivityScoreState(derive, { activity_level: 'Low' }, 5, true))
+      .toEqual({ score: 1, touched: false });
+  });
+
+  it('derives "None observed" to 0, not a falsy null', () => {
+    expect(restoredActivityScoreState(derive, { activity_level: 'None observed' }, 3, true))
+      .toEqual({ score: 0, touched: false });
+  });
+
+  it('leaves the score empty when the findings field is empty', () => {
+    expect(restoredActivityScoreState(derive, {}, 4, true)).toEqual({ score: null, touched: false });
+  });
+
+  it('keeps a tech-set-only indicator pin exactly as saved', () => {
+    const techSet = { label: 'Rodent Activity' };
+    expect(restoredActivityScoreState(techSet, {}, 2, true)).toEqual({ score: 2, touched: true });
+    expect(restoredActivityScoreState(techSet, {}, 'x', false)).toEqual({ score: null, touched: false });
   });
 });
