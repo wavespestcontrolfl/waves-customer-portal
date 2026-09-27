@@ -87,8 +87,25 @@ describe('stagingIneligibleReason', () => {
     expect(stagingIneligibleReason(baseCall, baseExtraction(), null)).toBe('no_lead_linkage');
   });
 
-  test('an existing customer is never eligible, whatever the call says', () => {
+  test('a customer_id that predates this call is never eligible, whatever the call says', () => {
     expect(stagingIneligibleReason({ ...baseCall, customer_id: 'cust-1' }, baseExtraction(), leadId)).toBe('existing_customer');
+    // Same customer_id, but this call's own metadata names a DIFFERENT
+    // customer as its own creation — still a pre-existing customer.
+    expect(stagingIneligibleReason(
+      { ...baseCall, customer_id: 'cust-1', metadata: { lead_id: leadId, created_customer_id: 'cust-other' } },
+      baseExtraction(), leadId,
+    )).toBe('existing_customer');
+  });
+
+  // codex pre-push P1: the legacy call-created-customer path
+  // (call-recording-processor.js) mints a customers row directly for a
+  // first-time caller and stamps customer_id AND created_customer_id on
+  // this SAME call in one transaction — that customer_id is not evidence
+  // of a pre-existing relationship, and must not disqualify an otherwise
+  // eligible new-lead call.
+  test('a customer_id THIS call itself just created is not "an existing customer"', () => {
+    const call = { ...baseCall, customer_id: 'cust-new', metadata: { lead_id: leadId, created_customer_id: 'cust-new' } };
+    expect(stagingIneligibleReason(call, baseExtraction(), leadId)).toBeNull();
   });
 
   test('no extraction to judge', () => {

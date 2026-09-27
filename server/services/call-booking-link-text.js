@@ -149,6 +149,22 @@ function leadIdOf(call) {
   return meta?.lead_id || meta?.relay_lead_id || null;
 }
 
+// call_log.customer_id alone does NOT mean "an existing customer" (codex
+// pre-push P1): the legacy call-created-customer path (call-recording-
+// processor.js's "Create new customer" branch) mints a brand-new customers
+// row for a first-time caller with a name and phone — no prior relationship
+// at all — and stamps BOTH customer_id and this exact provenance marker,
+// created_customer_id, on the SAME call in one transaction. A customer_id
+// this call itself just created is a NEW lead who happens to already have
+// a customer row in this legacy path, not someone "active" before the
+// call; only a customer_id that predates this call (no matching marker) is
+// the owner's "already an active customer" never-rule.
+function customerPredatesThisCall(call) {
+  if (!call.customer_id) return false;
+  const createdId = parseMetadata(call).created_customer_id;
+  return String(createdId || '') !== String(call.customer_id);
+}
+
 function extractionOf(call) {
   try {
     const raw = call?.ai_extraction_enriched;
@@ -218,7 +234,7 @@ function computeSendAt(callEnd) {
 // `no_extraction` entry above it in the list is what actually stops the walk.
 const STAGING_CHECKS = [
   (call, extraction, leadId) => (!leadId ? 'no_lead_linkage' : null),
-  (call) => (call.customer_id ? 'existing_customer' : null),
+  (call) => (customerPredatesThisCall(call) ? 'existing_customer' : null),
   (call, extraction) => (!extraction ? 'no_extraction' : null),
   (call, extraction) => (extraction.meta?.is_voicemail || extraction.meta?.is_spam ? 'voicemail_or_spam' : null),
   (call, extraction) => (extraction.call_nature !== 'new_lead' ? 'not_new_lead_call' : null),
