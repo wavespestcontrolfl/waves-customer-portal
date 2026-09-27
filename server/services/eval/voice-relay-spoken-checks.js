@@ -48,22 +48,45 @@ const { CALLBACK_CONTACT_NOUN, CALLBACK_TIMING_ADVERB, recognizeCallbackCandidat
 
 const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 
-const SPANISH_RELEVANT_INFINITIVE = '(?:enviar|mandar|recibir|llegar|entregar|preparar|ofrecer|tener|haber|estar|quedar|hacer)';
+const SPANISH_ASSERTION_VERB = '(?:enviar|mandar|recibir|llegar|entregar|preparar|ofrecer|tener|haber|estar|quedar|hacer|llamar|contactar|comunicar|escribir|confirmar|devolver|poner|dar)';
 const SPANISH_REGULAR_CONDITIONAL = '[a-záéíóúñü]+(?:ar|er|ir)[ií]a(?:mos|n|s)?';
-const SPANISH_CONDITIONAL_PREDICATE = `(?:(?:${SPANISH_RELEVANT_INFINITIVE}|ser|deber)[ií]a(?:mos|n|s)?|(?:tendr|habr|podr|querr|har)[ií]a(?:mos|n|s)?|${SPANISH_REGULAR_CONDITIONAL}(?=\\s+(?:(?:de|que)\\s+)?${SPANISH_RELEVANT_INFINITIVE}))`;
-const SPANISH_UNCERTAINTY_RE = new RegExp(`\\b(?:quiz[aá]s?|tal\\s+vez|acaso|posiblemente|probablemente|puede\\s+que|es\\s+(?:posible|probable)\\s+que|si|${SPANISH_CONDITIONAL_PREDICATE}|no\\s+(?:s[eé]|sabemos|estoy\\s+segur[oa]|estamos\\s+segur[oa]s?)\\s+si)\\b`, 'i');
+const SPANISH_IRREGULAR_CONDITIONAL = '(?:cabr|dir|habr|har|podr|pondr|querr|sabr|saldr|tendr|valdr|vendr)[ií]a(?:mos|n|s)?';
+const SPANISH_CONDITIONAL_FORM_RE = new RegExp(`\\b(?:${SPANISH_REGULAR_CONDITIONAL}|${SPANISH_IRREGULAR_CONDITIONAL})\\b`, 'gi');
+const SPANISH_DIRECT_CONDITIONAL_RE = new RegExp(`^(?:(?:${SPANISH_ASSERTION_VERB}|ser|deber)[ií]a(?:mos|n|s)?|${SPANISH_IRREGULAR_CONDITIONAL})$`, 'i');
+const SPANISH_ASSERTION_VERB_RE = new RegExp(`\\b${SPANISH_ASSERTION_VERB}[a-záéíóúñü]*\\b`, 'i');
+const SPANISH_CONDITIONAL_NOUN_LEAD_RE = /\b(?:el|la|los|las|un|una|unos|unas|este|esta|ese|esa|mi|tu|su|por|de|del|en|con|sin|para)\s*$/i;
+const SPANISH_CONDITIONAL_NOUN_TAIL_RE = /^\s+(?:para|que)\b/i;
+const SPANISH_UNCERTAINTY_RE = /\b(?:quiz[aá]s?|tal\s+vez|acaso|posiblemente|probablemente|puede\s+que|es\s+(?:posible|probable)\s+que|si|no\s+(?:s[eé]|sabemos|estoy\s+segur[oa]|estamos\s+segur[oa]s?)\s+si)\b/i;
 const SPANISH_NEGATION_RE = /\b(?:no|nunca|jam[aá]s|tampoco)\b/i;
 const SPANISH_WITHOUT_PREDICATE_RE = /\bsin\s+(?:llegar\s+a\s+)?(?:enviar|mandar|recibir|entregar|ofrecer|tener|haber)\b/i;
 const SPANISH_REASSURANCE_RE = /^\s*(?:no\s+(?:se\s+)?preocupe|no\s+hay\s+problema|sin\s+problema)\b[\s,:—–]*/i;
 const SPANISH_CERTAINTY_RE = /\b(?:sin\s+duda|no\s+s[oó]lo)\b/gi;
-const SPANISH_NONASSERTED_COORDINATION_RE = new RegExp(`\\by\\s+(?=(?:${SPANISH_NEGATION_RE.source}|${SPANISH_UNCERTAINTY_RE.source}))`, 'gi');
+const SPANISH_COORDINATION_RE = /\by\b/gi;
+
+function spanishClaimIsUncertain(claim) {
+  if (clauseIsEpistemicallyHedged(claim) || SPANISH_UNCERTAINTY_RE.test(claim)) return true;
+  for (const conditional of String(claim || '').matchAll(SPANISH_CONDITIONAL_FORM_RE)) {
+    if (SPANISH_DIRECT_CONDITIONAL_RE.test(conditional[0])) return true;
+    const before = claim.slice(0, conditional.index);
+    const after = claim.slice(conditional.index + conditional[0].length);
+    if (SPANISH_CONDITIONAL_NOUN_LEAD_RE.test(before) || SPANISH_CONDITIONAL_NOUN_TAIL_RE.test(after)) continue;
+    if (SPANISH_ASSERTION_VERB_RE.test(after)) return true;
+  }
+  return false;
+}
 
 /** A regex hit wholly satisfied by one affirmative clause. */
 function assertedSpokenMatch(text, re) {
   const global = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
   for (const statement of String(text || '').split(SENTENCE_SPLIT_RE)) {
     const candidates = [statement];
-    for (const conjunction of statement.matchAll(SPANISH_NONASSERTED_COORDINATION_RE)) candidates.push(statement.slice(0, conjunction.index));
+    for (const conjunction of statement.matchAll(SPANISH_COORDINATION_RE)) {
+      const left = statement.slice(0, conjunction.index);
+      const right = statement.slice(conjunction.index + conjunction[0].length);
+      const scoped = SPANISH_NEGATION_RE.test(left) || SPANISH_NEGATION_RE.test(right)
+        || spanishClaimIsUncertain(left) || spanishClaimIsUncertain(right);
+      if (scoped) candidates.push(left, right);
+    }
     for (const candidate of candidates) {
       const seen = new Set();
       for (let at = 0; at < candidate.length; at += 1) {
@@ -73,7 +96,7 @@ function assertedSpokenMatch(text, re) {
         seen.add(key);
         const claim = candidate.slice(...bounds).replace(SPANISH_REASSURANCE_RE, '').replace(SPANISH_CERTAINTY_RE, '');
         const denied = clauseIsNegated(claim) || SPANISH_NEGATION_RE.test(claim) || SPANISH_WITHOUT_PREDICATE_RE.test(claim);
-        const uncertain = clauseIsEpistemicallyHedged(claim) || SPANISH_UNCERTAINTY_RE.test(claim);
+        const uncertain = spanishClaimIsUncertain(claim);
         global.lastIndex = 0;
         const match = global.exec(claim);
         if (match && !denied && !uncertain) return match;
