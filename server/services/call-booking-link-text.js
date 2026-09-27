@@ -24,7 +24,10 @@
  * call's own `call_log.metadata.call_booking_link_text` — set once, at most,
  * per call:
  *   { status: 'skipped', reason, staged_at }                — never eligible
- *   { status: 'pending', lead_id, send_at, staged_at }       — waiting out the delay
+ *   { status: 'pending', lead_id, send_at, original_send_at, staged_at } — waiting out the delay
+ *     (original_send_at is set once at staging and never rewritten by a
+ *     later retry deferral, which only ever advances send_at itself — the
+ *     fixed anchor a retry's own 24h give-up measures against)
  *   { status: 'sent', lead_id, send_at, sent_at, ... }        — texted
  *   { status: 'skipped', reason, send_at, dispatched_at }     — was pending, blocked at send time
  * A cron tick (scheduler.js, every 5 min, mirroring reschedule-link-promises)
@@ -554,7 +557,13 @@ async function stageOne(conn, call, now, boundary = null) {
   // the skew," never "delayed indefinitely."
   const clampedEnd = callEnd.getTime() > now.getTime() ? now : callEnd;
   const send_at = computeSendAt(clampedEnd).toISOString();
-  await claimMetadata(conn, call.id, { status: 'pending', lead_id: leadId, send_at, staged_at });
+  // original_send_at is set ONCE here and never overwritten by a later
+  // retry deferral (codex r2 P1): a retry re-queues with a NEW send_at (the
+  // next attempt time), and measuring the 24h retry give-up against that
+  // same, repeatedly-advancing field would let consecutive transient
+  // failures push the deadline out indefinitely. This field is the one
+  // fixed anchor every retry's own give-up check reads instead.
+  await claimMetadata(conn, call.id, { status: 'pending', lead_id: leadId, send_at, original_send_at: send_at, staged_at });
   return 'pending';
 }
 
@@ -774,10 +783,17 @@ async function dispatchClaimedCall(conn, call, now) {
 }
 
 // Bounded by the SAME 24h give-up this lane already applies to a stalled
-// reprocess (NOT_READY_GIVE_UP_MS), measured from the ORIGINAL send_at —
-// not from whenever the most recent retry happened to run.
+// reprocess (NOT_READY_GIVE_UP_MS), measured from original_send_at — the
+// ONE fixed anchor staging sets once and no retry deferral ever rewrites
+// (codex r2 P1). entry.send_at itself is NOT that anchor: each retry
+// re-queues with a NEW send_at (the next attempt time), so measuring
+// against that same, repeatedly-advancing field would let consecutive
+// transient failures push this deadline out indefinitely. A row staged
+// before this field existed falls back to its own send_at once, which is
+// still strictly more correct than never bounding it at all.
 function pastRetryDeadline(entry, now) {
-  const originalSendAt = entry.send_at ? new Date(entry.send_at) : now;
+  const anchor = entry.original_send_at || entry.send_at;
+  const originalSendAt = anchor ? new Date(anchor) : now;
   if (Number.isNaN(originalSendAt.getTime())) return false;
   return now.getTime() - originalSendAt.getTime() > NOT_READY_GIVE_UP_MS;
 }
@@ -820,7 +836,10 @@ async function recordSendOutcome(conn, call, entry, leadId, now, result) {
     if (pastRetryDeadline(entry, now)) return skip(result.code || result.reason || 'send_retry_timeout');
     const nextAllowedAt = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
     const send_at = (nextAllowedAt && !Number.isNaN(nextAllowedAt.getTime()) ? nextAllowedAt : new Date(now.getTime() + RETRY_BACKOFF_MS)).toISOString();
-    await recordDecision(conn, call, { status: 'pending', lead_id: leadId, send_at }, { logActivity: false });
+    // original_send_at carries forward UNCHANGED through every deferral —
+    // it is the fixed anchor pastRetryDeadline reads, never the advancing
+    // send_at (codex r2 P1).
+    await recordDecision(conn, call, { status: 'pending', lead_id: leadId, send_at, original_send_at: entry.original_send_at || entry.send_at }, { logActivity: false });
     return { sent: false, skipped: result.code || result.reason || 'send_retryable', deferred: true };
   }
   const blockedReason = result.blocked ? (result.code || result.reason || 'policy_block') : (result.code || result.reason || 'provider_failed');

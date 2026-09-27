@@ -986,4 +986,35 @@ describe('dispatchClaimedCall', () => {
     expect(result.skipped).toBe('CONSENT_LOOKUP_FAILED');
     expect(result.deferred).toBeUndefined();
   });
+
+  // codex r2 P1: each retry re-queues with a NEW send_at (the next attempt
+  // time). If the 24h bound were measured against THAT field, consecutive
+  // transient failures would push the deadline out indefinitely — a stale
+  // follow-up could send days later. original_send_at is the one fixed
+  // anchor that must survive every deferral unchanged.
+  test('original_send_at survives a retry requeue unchanged — the 24h bound never resets on it', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, retryable: true, code: 'PROVIDER_FAILURE' });
+    const originalSendAt = new Date(NOW.getTime() - 23 * 60 * 60 * 1000).toISOString(); // 23h ago — still inside the 24h bound
+    const entry1 = { status: 'claimed', lead_id: 'lead-1', send_at: originalSendAt, original_send_at: originalSendAt };
+    const call1 = { ...CALL, metadata: { ...CALL.metadata, call_booking_link_text: entry1 } };
+    const conn1 = makeDb();
+    const result1 = await dispatchClaimedCall(conn1, call1, NOW);
+    expect(result1.deferred).toBe(true); // still within bound — requeued, not given up
+
+    const rawCall1 = conn1.raw.mock.calls.find(([, bindings]) => bindings?.[0]?.includes('"status":"pending"'));
+    const written1 = JSON.parse(rawCall1[1][0]).call_booking_link_text;
+    expect(written1.original_send_at).toBe(originalSendAt); // preserved
+    expect(written1.send_at).not.toBe(originalSendAt); // send_at itself DID advance to the next attempt
+
+    // Two hours later — now 25h past the ORIGINAL send_at. A naive
+    // implementation reading the (just-advanced) send_at as its own anchor
+    // would still see itself as within bound; this must not.
+    const laterNow = new Date(NOW.getTime() + 2 * 60 * 60 * 1000);
+    const entry2 = { ...entry1, send_at: written1.send_at, original_send_at: written1.original_send_at };
+    const call2 = { ...CALL, metadata: { ...CALL.metadata, call_booking_link_text: entry2 } };
+    const conn2 = makeDb();
+    const result2 = await dispatchClaimedCall(conn2, call2, laterNow);
+    expect(result2.deferred).toBeUndefined();
+    expect(result2.skipped).toBe('PROVIDER_FAILURE');
+  });
 });
