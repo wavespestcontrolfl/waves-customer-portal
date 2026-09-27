@@ -78,7 +78,7 @@ test('a typed address that uniquely matches a returning customer is offered at t
     .resolves.toEqual({ ...storedPin, disclosable: false });
 });
 
-test('a bearer-proven account wins over an identical global address and caller coordinates', async () => {
+test('a bearer-proven account wins over an identical global address and caller coordinates, including gate-off', async () => {
   const otherAccountId = '8e1f4c3b-7d5a-4e9f-a2b3-4d5e6f7a8b9c';
   const accountPin = { lat: 27.40123, lng: -82.50123 };
   const otherPin = { lat: 27.49999, lng: -82.59999 };
@@ -114,6 +114,31 @@ test('a bearer-proven account wins over an identical global address and caller c
   })).resolves.toEqual({ ...accountPin, disclosable: false });
   await expect(resolveOfferCoords({ ...CALLER, address: TYPED, unit: 'Apt A' }))
     .resolves.toEqual({ ...CALLER, lat: 27.3, lng: -82.5, disclosable: true });
+});
+
+test('gate-off treats a valid bearer as an address hint, while gate-on requires an account property match', async () => {
+  const authedCustomer = customerRow({
+    account_id: CUSTOMER_ID,
+    address_line1: '999 Existing Customer Road',
+  });
+  listResults.customers = [];
+
+  // Customers-only off: confirmation still admits a public/new property, so
+  // an unrelated ambient portal session must not suppress its public offer.
+  await expect(resolveOfferCoords({
+    ...CALLER,
+    address: TYPED,
+    authedCustomer,
+  })).resolves.toEqual({ lat: 27.3, lng: -82.5, disclosable: true });
+
+  // Customers-only on: confirmation binds the bearer account and refuses
+  // this address, so offer construction fails closed on the same boundary.
+  await expect(resolveOfferCoords({
+    ...CALLER,
+    address: TYPED,
+    authedCustomer,
+    requireAuthedAccountMatch: true,
+  })).resolves.toEqual({ lat: null, lng: null, disclosable: false });
 });
 
 test('a dedicated unit only reuses the pin for the matching household', async () => {
@@ -202,8 +227,18 @@ test('an estimate identity with no matching account property never falls through
   firstResults.customers = customerRow({ address_line1: '999 Other Road' });
   listResults.customers = [];
   const geocode = jest.spyOn(geocoder, 'geocodeAddress');
+  const ambientAuthedCustomer = customerRow({
+    id: PROPERTY_B_ID,
+    account_id: PROPERTY_B_ID,
+    address_line1: ADDRESS.address_line1,
+  });
 
-  await expect(resolveOfferCoords({ ...CALLER, address: TYPED, estimate_id: ESTIMATE_ID }))
+  await expect(resolveOfferCoords({
+    ...CALLER,
+    address: TYPED,
+    estimate_id: ESTIMATE_ID,
+    authedCustomer: ambientAuthedCustomer,
+  }))
     .resolves.toEqual({ lat: null, lng: null, disclosable: false });
   expect(geocode).not.toHaveBeenCalled();
 });

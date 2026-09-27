@@ -718,9 +718,10 @@ describe('signed slot offers on the /book surface (source guards)', () => {
     const availabilityBlock = src.slice(availabilityAt, findSlotsAt);
     const findSlotsBlock = src.slice(findSlotsAt, src.indexOf('// POST /api/booking/capture-intent', findSlotsAt));
     for (const block of [availabilityBlock, findSlotsBlock]) {
+      expect(block).toMatch(/const customersOnly = isEnabled\('bookingCustomersOnly'\);/);
       expect(block).toMatch(/const authedCustomer = await resolveBearerCustomer\(req\);/);
-      expect(block).toMatch(/resolveOfferCoords\(\{[\s\S]*authedCustomer,/);
-      expect(block).toMatch(/req\.bearerTokenExpired/);
+      expect(block).toMatch(/resolveOfferCoords\(\{[\s\S]*authedCustomer, requireAuthedAccountMatch: customersOnly,/);
+      expect(block).toMatch(/if \(customersOnly && !authedCustomer && req\.bearerTokenExpired\)/);
       expect(block).not.toMatch(/req\.(?:body|query)\.customer_id/);
     }
   });

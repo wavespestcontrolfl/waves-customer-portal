@@ -1045,10 +1045,15 @@ async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
 // address geocoder never returns would refuse every retry), and never
 // echoed exactly — it is a customer record's pin. A validated optional
 // bearer supplies the same account identity for bare signed-in entries;
-// estimate identity takes precedence for estimate links. Everyone else
-// keeps resolveBookingCoords. estimate_id is a raw public value: only a UUID
-// (LEAD_ID_RE's shape) is looked up.
-async function resolveOfferCoords({ lat, lng, address, city, state, zip, unit, estimate_id, authedCustomer }) {
+// estimate identity takes precedence for estimate links. With the customers-
+// only gate off, a bearer-owned property still gets its exact pin, but a new
+// or off-account address keeps the public fallback that /confirm admits.
+// Everyone else keeps resolveBookingCoords. estimate_id is a raw public
+// value: only a UUID (LEAD_ID_RE's shape) is looked up.
+async function resolveOfferCoords({
+  lat, lng, address, city, state, zip, unit, estimate_id,
+  authedCustomer, requireAuthedAccountMatch = false,
+}) {
   let customer = null;
   let estimateBound = false;
   const parsed = parseRawAddress(address || '');
@@ -1059,28 +1064,29 @@ async function resolveOfferCoords({ lat, lng, address, city, state, zip, unit, e
     zip: firstNonblankAddressValue(zip, parsed.zip),
   };
   const submittedUnit = firstNonblankAddressValue(unit, submittedInlineUnit(line1));
-  if (estimate_id && LEAD_ID_RE.test(String(estimate_id))) {
+  if (LEAD_ID_RE.test(String(estimate_id || ''))) {
     const customerId = (await db('estimates').where('id', estimate_id).first('customer_id'))?.customer_id;
     estimateBound = !!customerId;
     if (customerId) {
       const primary = await db('customers').where({ id: customerId }).whereNull('deleted_at')
         .first('id', 'account_id', 'active', 'deleted_at', 'latitude', 'longitude',
           'address_line1', 'address_line2', 'city', 'state', 'zip');
-      if (primary) {
-        customer = await findAccountPropertyByAddress(primary, {
-          address: line1, zip: locality.zip, unit: submittedUnit,
-        });
-      }
+      customer = await findAccountPropertyByAddress(primary, {
+        address: line1, zip: locality.zip, unit: submittedUnit,
+      });
     }
   }
-  if (!estimateBound && !customer && authedCustomer) {
+  if (!estimateBound && authedCustomer) {
     customer = await findAccountPropertyByAddress(authedCustomer, {
       address: line1, zip: locality.zip, unit: submittedUnit,
     });
-    // A valid bearer proves one account. Confirmation refuses any property
-    // outside it, so offers must not fall through to another household's
-    // identical address or caller-supplied coordinates.
-    if (!customer) return { lat: null, lng: null, disclosable: false };
+    // Under customers-only, confirmation refuses a property outside the
+    // bearer account, so offers must fail the same way. Gate-off confirmation
+    // retains the public/new-address path; there the bearer is only a safe
+    // disambiguator when its account actually owns the submitted property.
+    if (!customer && requireAuthedAccountMatch) {
+      return { lat: null, lng: null, disclosable: false };
+    }
   }
   // A bound estimate proves one account. If its submitted property matches
   // none of that account's rows, confirmation refuses it; do not fall through
@@ -1896,13 +1902,15 @@ router.get('/availability', async (req, res, next) => {
       max_self_books_per_day: 3,
     };
 
+    const customersOnly = isEnabled('bookingCustomersOnly');
     const { resolveBearerCustomer } = require('../middleware/auth');
     const authedCustomer = await resolveBearerCustomer(req);
-    if (!authedCustomer && req.bearerTokenExpired) {
+    if (customersOnly && !authedCustomer && req.bearerTokenExpired) {
       return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
     }
     const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({
-      lat, lng, address, city, state, zip, unit, estimate_id, authedCustomer,
+      lat, lng, address, city, state, zip, unit, estimate_id,
+      authedCustomer, requireAuthedAccountMatch: customersOnly,
     });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
@@ -2011,13 +2019,15 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
       max_self_books_per_day: 3,
     };
 
+    const customersOnly = isEnabled('bookingCustomersOnly');
     const { resolveBearerCustomer } = require('../middleware/auth');
     const authedCustomer = await resolveBearerCustomer(req);
-    if (!authedCustomer && req.bearerTokenExpired) {
+    if (customersOnly && !authedCustomer && req.bearerTokenExpired) {
       return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
     }
     const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({
-      lat, lng, address, city, state, zip, unit, estimate_id, authedCustomer,
+      lat, lng, address, city, state, zip, unit, estimate_id,
+      authedCustomer, requireAuthedAccountMatch: customersOnly,
     });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });

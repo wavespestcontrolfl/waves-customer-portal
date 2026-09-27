@@ -437,6 +437,51 @@ describe('createSelfBooking — customers-only gate', () => {
   });
 });
 
+describe('booking offer routes — customers-only bearer symmetry', () => {
+  const routeHandler = (path, method) => {
+    const layer = bookingRouter.stack.find((item) => item.route?.path === path && item.route.methods[method]);
+    return layer.route.stack[layer.route.stack.length - 1].handle;
+  };
+  const availabilityHandler = routeHandler('/availability', 'get');
+  const findSlotsHandler = routeHandler('/find-slots', 'post');
+
+  async function runOffer(handler, { headers = {}, query = {}, body = {} } = {}) {
+    const req = { headers, query, body, ip: '127.0.0.1', get: () => null };
+    const res = {
+      statusCode: 200,
+      body: null,
+      status(code) { this.statusCode = code; return this; },
+      json(payload) { this.body = payload; return this; },
+    };
+    let error = null;
+    await handler(req, res, (err) => { error = err; });
+    if (error) throw error;
+    return res;
+  }
+
+  test.each([
+    ['availability', availabilityHandler, { query: {} }],
+    ['find-slots', findSlotsHandler, { body: { query: 'tomorrow' } }],
+  ])('%s ignores an expired ambient bearer with the gate off, but refreshes it with the gate on', async (
+    _name,
+    handler,
+    request,
+  ) => {
+    const expired = jwt.sign({ customerId: CUST_ID }, process.env.JWT_SECRET, { expiresIn: '-1s' });
+    const headers = { authorization: `Bearer ${expired}` };
+
+    gateState.bookingCustomersOnly = false;
+    const publicResult = await runOffer(handler, { ...request, headers });
+    expect(publicResult.statusCode).toBe(400);
+    expect(publicResult.body).toEqual({ error: 'address, lat/lng, or city required' });
+
+    gateState.bookingCustomersOnly = true;
+    const gatedResult = await runOffer(handler, { ...request, headers });
+    expect(gatedResult.statusCode).toBe(401);
+    expect(gatedResult.body).toEqual({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+  });
+});
+
 // POST /confirm wiring: the route resolves the bearer server-side (real
 // resolveBearerCustomer — real jwt.verify against JWT_SECRET) and sets the
 // gate fields AFTER spreading req.body, so a client can never forge them.
