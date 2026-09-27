@@ -107,22 +107,35 @@
 // has_own_live_invoice is necessary but NOT sufficient (Codex round-4 P1):
 // a brand-new sibling invoice can exist while the combined invoice still
 // carries that sibling's full original charge (an unresolved duplicate
-// charge). evaluateGroupDivergence additionally requires
-// combinedChargeAdjusted — the combined invoice's CURRENT total strictly
-// less than anchor.estimated_price, which IS the full same-day combined
+// charge). And a group-wide "SOME reduction happened" check is not enough
+// either (Codex round-5 P1): in a 3+ program group, creating both siblings'
+// own invoices but removing only ONE sibling's charge from the combined
+// invoice must not clear either of them. evaluateGroupDivergence's
+// groupFullyAccountedFor therefore requires the combined invoice's
+// reduction to cover AT LEAST the SUM of every diverging sibling with its
+// own invoice's own total — real, attributable evidence, computed against
+// anchor.estimated_price, which IS the full same-day combined APPLICATION
 // total at acceptance (reservedAcceptPerVisitSplit's `reservedPrice` — see
-// estimate-converter.js, "its price is the route's same-day total") — real
-// evidence something was actually carved back out of it, not merely that a
-// second invoice now exists. This is more robust than comparing the shared
-// invoice's line items/total against the per-visit split amounts
+// estimate-converter.js, "its price is the route's same-day total"). The
+// reduction is measured against the invoice's APPLICATION-ONLY total
+// (applicationOnlyCents), never its raw total (Codex round-6 P1): the same
+// auto-generated invoice can ALSO bundle a one-time setup fee (WaveGuard,
+// rodent bait — estimate-converter.js / routes/estimate-public.js both
+// push a setup-fee line beside the application line into ONE invoice), and
+// comparing the raw total against an application-only anchor price would
+// read a correctly-executed split as still short, or worse, whenever a fee
+// is present. This is more robust than comparing the shared invoice's
+// line items/total against the per-visit split amounts
 // (reservedAcceptPerVisitSplit) — those amounts are derived only at
 // itemizeFirstApplication/closeout time (GATE_VISIT_CLOSEOUT-gated) and are
 // not a durable, always-available record to diff against for an arbitrary
 // group on an arbitrary sweep tick; comparing against anchor.estimated_price
 // instead uses a value already persisted at acceptance, no re-derivation.
-// Unreadable/missing evidence FAILS CLOSED (never treated as adjusted).
-// evaluateGroupDivergence excludes any diverging sibling with BOTH
-// has_own_live_invoice AND combinedChargeAdjusted from the alerted set;
+// Unreadable/missing evidence FAILS CLOSED and keeps the ENTIRE group
+// alerting (never guesses which specific sibling(s) a partial reduction
+// covers, and never treats a missing/unparseable application line as
+// "adjusted"). evaluateGroupDivergence excludes any diverging sibling with
+// its own invoice from the alerted set ONLY when groupFullyAccountedFor;
 // once EVERY diverging sibling clears that bar the group clears with reason
 // 'split_completed' (distinct from 'realigned', which means the dates
 // actually matched again).
@@ -187,15 +200,54 @@ function toCents(value) {
   return Number.isFinite(n) ? Math.round(n * 100) : null;
 }
 
+// The combined invoice's APPLICATION-ONLY cents — never its raw total
+// (Codex round-6 P1): the same auto-generated invoice this module targets
+// can ALSO bundle a one-time setup fee (WaveGuard, rodent bait — see
+// estimate-converter.js / routes/estimate-public.js, both push a setup-fee
+// line beside the "First service application" line into ONE invoice).
+// anchor.estimated_price is the application-only combined price
+// (reservedAcceptPerVisitSplit's `reservedPrice`), so comparing it against
+// the invoice's RAW total — fee included — would read a correctly-executed
+// split as still short (or even MORE than the original), keeping the
+// alert stuck open forever whenever a setup fee is present. Reuses
+// InvoiceService.lineIsBaseApplication — the SAME classifier
+// itemizeFirstApplication/estimate-first-application-invoice.js's
+// sumBaseApplicationCents use to identify the application line(s), so
+// "what counts as the application charge" is never re-derived here.
+// FAILS CLOSED (returns null) on unparseable line_items, no line_items at
+// all, an unreadable line amount, or no recognizable application line —
+// never silently reads as "$0 owed".
+function applicationOnlyCents(lineItemsRaw) {
+  let items = lineItemsRaw;
+  if (typeof items === 'string') {
+    try { items = JSON.parse(items); } catch { return null; }
+  }
+  if (!Array.isArray(items) || !items.length) return null;
+  let sum = 0;
+  let sawApplicationLine = false;
+  for (const li of items) {
+    if (!InvoiceService.lineIsBaseApplication(li)) continue;
+    sawApplicationLine = true;
+    const qty = li?.quantity != null ? Number(li.quantity) : 1;
+    const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+    const cents = toCents(amt);
+    if (cents == null) return null;
+    sum += cents;
+  }
+  return sawApplicationLine ? sum : null;
+}
+
 // The pure detection predicate: given the group's anchor row (carrying its
 // own estimated_price — see groupFullyAccountedFor below), every member row
 // (each optionally carrying has_own_live_invoice + own_live_invoice_total —
 // loadGroupMembers stamps these from a real invoices.scheduled_service_id
-// lookup), the shared invoice's current status, and its current total,
-// decide whether to alert, clear a standing alert, or do nothing. No DB
-// access — the sweep and every unit test call this the same way.
+// lookup), the shared invoice's current status, and its current line items
+// (for applicationOnlyCents — never its raw total, which can also carry a
+// setup fee), decide whether to alert, clear a standing alert, or do
+// nothing. No DB access — the sweep and every unit test call this the same
+// way.
 function evaluateGroupDivergence({
-  anchor, members, invoiceStatus, invoiceTotal,
+  anchor, members, invoiceStatus, invoiceLineItems,
 }) {
   if (!anchor || !Array.isArray(members) || members.length < 2) {
     return { action: 'clear', reason: 'no_group' };
@@ -218,22 +270,24 @@ function evaluateGroupDivergence({
   // unrelated discount, must never be read as proof for a specific
   // sibling. So the WHOLE set of diverging siblings that have their own
   // invoice is only treated as resolved TOGETHER when the combined
-  // invoice's reduction (anchor.estimated_price − its CURRENT total —
-  // anchor.estimated_price IS the full same-day combined total at
-  // acceptance, reservedAcceptPerVisitSplit's `reservedPrice`; see
+  // invoice's reduction (anchor.estimated_price − its CURRENT
+  // APPLICATION-ONLY total, applicationOnlyCents — never the invoice's raw
+  // total, which can also carry a setup fee (Codex round-6 P1) —
+  // anchor.estimated_price IS the full same-day combined APPLICATION total
+  // at acceptance, reservedAcceptPerVisitSplit's `reservedPrice`; see
   // estimate-converter.js, "its price is the route's same-day total")
   // covers AT LEAST the SUM of every one of those siblings' own invoice
   // totals — real evidence the specific amount that moved out was actually
   // removed, never merely SOME positive reduction. Unreadable/missing
-  // evidence (no anchor.estimated_price, no invoiceTotal, or an unreadable
-  // own_live_invoice_total on any sibling counted in the sum) FAILS CLOSED
-  // and keeps the ENTIRE group alerting — this never guesses which
-  // specific sibling(s) a partial reduction covers.
+  // evidence (no anchor.estimated_price, no parseable application line, or
+  // an unreadable own_live_invoice_total on any sibling counted in the sum)
+  // FAILS CLOSED and keeps the ENTIRE group alerting — this never guesses
+  // which specific sibling(s) a partial reduction covers.
   const withOwnInvoice = diverging.filter((m) => m.has_own_live_invoice);
   const reductionCents = (() => {
     const anchorCents = toCents(anchor.estimated_price);
-    const totalCents = toCents(invoiceTotal);
-    return anchorCents != null && totalCents != null ? anchorCents - totalCents : null;
+    const applicationCents = applicationOnlyCents(invoiceLineItems);
+    return anchorCents != null && applicationCents != null ? anchorCents - applicationCents : null;
   })();
   const sumOwnInvoiceCents = withOwnInvoice.reduce((sum, m) => {
     if (sum === null) return null;
@@ -275,7 +329,7 @@ function divergenceStateFingerprint({ anchor, diverging, invoiceId, invoiceTotal
 
 const CANDIDATE_COLUMNS = [
   'i.id as invoice_id', 'i.status as invoice_status', 'i.invoice_number', 'i.title', 'i.notes',
-  'i.total as invoice_total', 'i.created_at as invoice_created_at',
+  'i.total as invoice_total', 'i.created_at as invoice_created_at', 'i.line_items as invoice_line_items',
   'anchor.id as anchor_id', 'anchor.customer_id', 'anchor.source_estimate_id',
   'anchor.scheduled_date as anchor_scheduled_date', 'anchor.completed_at as anchor_completed_at',
   'anchor.estimated_price as anchor_estimated_price',
@@ -529,7 +583,7 @@ async function evaluateCandidate(conn, candidate) {
   const {
     anchor_id: anchorId, customer_id: customerId, source_estimate_id: estimateId,
     invoice_id: invoiceId, invoice_status: invoiceStatus, invoice_number: invoiceNumber,
-    invoice_total: invoiceTotal,
+    invoice_total: invoiceTotal, invoice_line_items: invoiceLineItems,
     anchor_scheduled_date: anchorScheduledDate, anchor_completed_at: anchorCompletedAt,
     anchor_estimated_price: anchorEstimatedPrice,
   } = candidate;
@@ -539,7 +593,7 @@ async function evaluateCandidate(conn, candidate) {
       id: anchorId, scheduled_date: anchorScheduledDate, completed_at: anchorCompletedAt, estimated_price: anchorEstimatedPrice,
     };
   const verdict = evaluateGroupDivergence({
-    anchor, members, invoiceStatus, invoiceTotal,
+    anchor, members, invoiceStatus, invoiceLineItems,
   });
   const prefix = DEDUPE_PREFIX(estimateId);
   if (verdict.action === 'clear') {

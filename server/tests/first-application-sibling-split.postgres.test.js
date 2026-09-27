@@ -308,6 +308,55 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(Number(pest.estimated_price)).toBe(153.60);
   }));
 
+  // Codex round-6 P1: the same auto-generated invoice can ALSO bundle a
+  // one-time setup fee beside the application line (estimate-converter.js
+  // / routes/estimate-public.js). A raw-total comparison would read this
+  // correctly-completed split as still short — or even MORE than the
+  // original — since the fee inflates the total above anchor.estimated_price
+  // (which is application-only). The reduction must be measured on the
+  // application-only portion of the invoice.
+  test('a COMPLETE manual split on an invoice that ALSO carries a setup fee → clears correctly', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    // The combined invoice ALSO bills a $100 WaveGuard setup fee beside
+    // the $153.60 application — raw total 253.60, application-only 153.60.
+    await trx('invoices').where({ id: ids.invoiceId }).update({
+      subtotal: 253.60, total: 253.60,
+      line_items: JSON.stringify([
+        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 100, amount: 100 },
+        { description: 'First service application', quantity: 1, unit_price: 153.60, amount: 153.60 },
+      ]),
+    });
+    await sweepOnce(trx, ids.estimateId);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
+
+    // Office splits: sibling gets its own $42 invoice, and the combined
+    // invoice's APPLICATION line drops to 111.60 — the setup fee line is
+    // untouched (it was never part of the sibling's charge).
+    await trx('invoices').insert({
+      id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
+      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      subtotal: 42, total: 42,
+    });
+    await trx('invoices').where({ id: ids.invoiceId }).update({
+      subtotal: 211.60, total: 211.60,
+      line_items: JSON.stringify([
+        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 100, amount: 100 },
+        { description: 'First service application', quantity: 1, unit_price: 111.60, amount: 111.60 },
+      ]),
+    });
+
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('cleared');
+    expect(result.reason).toBe('split_completed');
+
+    const cleared = await readBell(trx, dedupeKey);
+    expect(cleared.read_at).not.toBeNull();
+  }));
+
   // Codex round-4 P1: a sibling's own live invoice is proof the office
   // STARTED the split, never proof they FINISHED it — the combined
   // invoice can still carry the sibling's full original charge even after
