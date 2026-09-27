@@ -353,8 +353,8 @@ async function sendCustomerMessageCore(input) {
     preDispatchCheck,
     preProviderCheck,
     preSendCheck,
-    providerPreSendCheck,
-    withSmsHandoff,
+    providerPreSendCheck: suppliedProviderPreSendCheck,
+    withSmsHandoff: suppliedSmsHandoff,
     withProviderHandoff,
     providerHandoffReservation: suppliedProviderHandoffReservation,
     ...inputRest
@@ -369,6 +369,10 @@ async function sendCustomerMessageCore(input) {
   // Request lifecycle email companions have no text leg. Keep their App
   // intent even when the saved choice or gate changes before dispatch.
   if (sendInput.metadata?.appOnly === true || sendInput.metadata?.billingDeliveryLeg === 'push') sendInput.channel = 'push';
+  // Recursive explicit App routing selects its leg before hook validation.
+  const previsitAppLeg = input.entryPoint === 'previsit_balance_reminder' && sendInput.channel === 'push';
+  const withSmsHandoff = previsitAppLeg ? null : suppliedSmsHandoff;
+  const providerPreSendCheck = previsitAppLeg ? undefined : suppliedProviderPreSendCheck;
   // The locked handoff holds a caller's authority rows through the actual
   // provider request. Immediate lead replies and the visit-summary bearer
   // link (its immediate send and its scheduled replay), plus promised

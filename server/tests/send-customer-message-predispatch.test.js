@@ -224,6 +224,10 @@ test('previsit billing Text fences Twilio while automatic App routing ignores th
   expect(providerInput.channel).toBe('push');
   expect(hooks.withSmsHandoff).toBeFalsy();
   expect(hooks.providerPreSendCheck).toBeUndefined();
+  await expect(sendCustomerMessage({ ...input, metadata: { billingDeliveryCategory: 'billing',
+    billingDeliveryLeg: 'push', appOnly: true } })).resolves.toMatchObject({ sent: true });
+  expect(sendViaTwilio.mock.calls[1][0].channel).toBe('push');
+  expect(sendViaTwilio.mock.calls[1][1].withSmsHandoff).toBeFalsy();
 });
 
 
