@@ -724,7 +724,11 @@ async function dispatchClaimedCall(conn, call, now) {
   // instead of being re-claimed forever.
   const readiness = sendReadiness(call, entry, now);
   if (readiness === 'wait') {
-    await recordDecision(conn, call, { status: 'pending', lead_id: leadId, send_at: entry.send_at }, { logActivity: false });
+    // original_send_at must ride along even though send_at itself is
+    // unchanged here (codex r2 P1): metadataPatch REPLACES the whole
+    // nested entry, so leaving the field out of this write would silently
+    // erase it, not merely leave it as-is.
+    await recordDecision(conn, call, { status: 'pending', lead_id: leadId, send_at: entry.send_at, original_send_at: entry.original_send_at || entry.send_at }, { logActivity: false });
     return { sent: false, skipped: 'call_not_ready', deferred: true };
   }
   if (readiness) return skip(readiness);
@@ -747,7 +751,11 @@ async function dispatchClaimedCall(conn, call, now) {
   // skipping; no activity_log row — this is not a decision, just a wait.
   if (!isWithinSendWindowET(now)) {
     const send_at = nextSendWindowOpenET(now).toISOString();
-    await recordDecision(conn, call, { status: 'pending', lead_id: leadId, send_at }, { logActivity: false });
+    // original_send_at survives this deferral too (codex r2 P1) — an
+    // overnight quiet-hours crossing must not reset the 24h retry anchor
+    // to "tomorrow morning" on top of whatever transient failures already
+    // deferred it.
+    await recordDecision(conn, call, { status: 'pending', lead_id: leadId, send_at, original_send_at: entry.original_send_at || entry.send_at }, { logActivity: false });
     return { sent: false, skipped: 'outside_send_window', deferred: true };
   }
   const lead = await conn('leads').where({ id: leadId }).whereNull('deleted_at').first();

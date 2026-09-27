@@ -861,6 +861,10 @@ describe('dispatchClaimedCall', () => {
     const result = await dispatchClaimedCall(conn, { ...CALL, processing_token: 'tok-1' }, NOW);
     expect(result).toMatchObject({ sent: false, skipped: 'call_not_ready', deferred: true });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // codex r2 P1: this requeue must not silently drop original_send_at —
+    // metadataPatch replaces the whole nested entry.
+    const rawCall = conn.raw.mock.calls.find(([, bindings]) => bindings?.[0]?.includes('"status":"pending"'));
+    expect(JSON.parse(rawCall[1][0]).call_booking_link_text.original_send_at).toBe(NOW.toISOString());
   });
 
   test('an extraction reset by a reprocess (status null) waits too', async () => {
@@ -897,6 +901,9 @@ describe('dispatchClaimedCall', () => {
     // Re-queued as 'pending' with a fresh send_at — never terminally 'skipped'.
     const rawCall = conn.raw.mock.calls.find(([, bindings]) => bindings?.[0]?.includes('"status":"pending"'));
     expect(rawCall).toBeTruthy();
+    // codex r2 P1: original_send_at must survive this deferral too, or an
+    // overnight quiet-hours crossing would reset the 24h retry anchor.
+    expect(JSON.parse(rawCall[1][0]).call_booking_link_text.original_send_at).toBe(CALL.metadata.call_booking_link_text.send_at);
   });
 
   test('the link builder refusing (e.g. GATE_LEAD_INSPECTION_LINK dark) blocks the send with its reason', async () => {
@@ -1016,5 +1023,43 @@ describe('dispatchClaimedCall', () => {
     const result2 = await dispatchClaimedCall(conn2, call2, laterNow);
     expect(result2.deferred).toBeUndefined();
     expect(result2.skipped).toBe('PROVIDER_FAILURE');
+  });
+
+  // codex r2 P1: the OTHER two pending-requeue writers (the call_not_ready
+  // wait branch, and the outside-send-window branch) also replace the
+  // whole nested entry via metadataPatch — a retry that happens to cross
+  // into quiet hours must not have THAT deferral silently drop
+  // original_send_at either.
+  test('a retry that spans an overnight outside-window deferral still measures the 24h bound from the TRUE original', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, retryable: true, code: 'PROVIDER_FAILURE' });
+    const originalSendAt = new Date(NOW.getTime() - 20 * 60 * 60 * 1000).toISOString(); // 20h before the first attempt
+    const entry1 = { status: 'claimed', lead_id: 'lead-1', send_at: originalSendAt, original_send_at: originalSendAt };
+    const call1 = { ...CALL, metadata: { ...CALL.metadata, call_booking_link_text: entry1 } };
+    const conn1 = makeDb();
+    const result1 = await dispatchClaimedCall(conn1, call1, NOW); // still within 24h — requeued
+    expect(result1.deferred).toBe(true);
+    const written1 = JSON.parse(conn1.raw.mock.calls.find(([, b]) => b?.[0]?.includes('"status":"pending"'))[1][0]).call_booking_link_text;
+
+    // The next tick lands overnight — dispatchClaimedCall's OWN send-window
+    // deferral fires before sendCustomerMessage is ever called again.
+    const lateNight = new Date('2026-09-27T03:00:00Z'); // 11 PM ET
+    const entry2 = { ...entry1, send_at: written1.send_at, original_send_at: written1.original_send_at };
+    const call2 = { ...CALL, metadata: { ...CALL.metadata, call_booking_link_text: entry2 } };
+    const conn2 = makeDb();
+    const result2 = await dispatchClaimedCall(conn2, call2, lateNight);
+    expect(result2.skipped).toBe('outside_send_window');
+    const written2 = JSON.parse(conn2.raw.mock.calls.find(([, b]) => b?.[0]?.includes('"status":"pending"'))[1][0]).call_booking_link_text;
+    expect(written2.original_send_at).toBe(originalSendAt); // still the TRUE original
+
+    // The window reopens the next morning — but by now more than 24h has
+    // passed since the TRUE original send_at. This pass must give up, not
+    // requeue a third time.
+    const nextMorning = new Date('2026-09-27T13:00:00Z'); // 9 AM ET
+    const entry3 = { ...entry2, send_at: written2.send_at, original_send_at: written2.original_send_at };
+    const call3 = { ...CALL, metadata: { ...CALL.metadata, call_booking_link_text: entry3 } };
+    const conn3 = makeDb();
+    const result3 = await dispatchClaimedCall(conn3, call3, nextMorning);
+    expect(result3.deferred).toBeUndefined();
+    expect(result3.skipped).toBe('PROVIDER_FAILURE');
   });
 });
