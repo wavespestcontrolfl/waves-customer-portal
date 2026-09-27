@@ -55,6 +55,11 @@ function targetUrlForRow(row, baseUrl = DEFAULT_BASE_URL) {
   return registry.registryLiveTargetUrl(row, baseUrl);
 }
 
+function fleetOrigin(value) {
+  if (!registry.isContentFleetUrl(value)) return '';
+  try { return new URL(String(value)).origin; } catch { return ''; }
+}
+
 function absoluteFromLocation(location, requestedUrl) {
   if (!location) return '';
   try {
@@ -135,16 +140,31 @@ async function fetchText(fetchImpl, url, { redirect = 'manual', timeoutMs = DEFA
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
-    const res = await fetchImpl(url, {
-      redirect,
-      signal: controller?.signal,
-      headers: {
-        'User-Agent': 'WavesContentRegistry/1.0 (+https://www.wavespestcontrol.com)',
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      },
-    });
-    const text = res.status >= 200 && res.status < 300 ? await res.text() : '';
-    return { res, text };
+    let currentUrl = String(url || '');
+    for (let hop = 0; hop <= 5; hop++) {
+      if (!registry.isContentFleetUrl(currentUrl)) throw new Error('Live-check URL is outside the content fleet');
+      const res = await fetchImpl(currentUrl, {
+        // Native follow mode can cross onto an untrusted redirect host before
+        // application code sees it. Walk redirects manually so every hop is
+        // checked against the fleet allowlist first.
+        redirect: 'manual',
+        signal: controller?.signal,
+        headers: {
+          'User-Agent': 'WavesContentRegistry/1.0 (+https://www.wavespestcontrol.com)',
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+      });
+      const location = res.status >= 300 && res.status < 400
+        ? absoluteFromLocation(res.headers.get('location'), currentUrl)
+        : '';
+      if (redirect === 'follow' && location) {
+        currentUrl = location;
+        continue;
+      }
+      const text = res.status >= 200 && res.status < 300 ? await res.text() : '';
+      return { res, text, finalUrl: currentUrl };
+    }
+    throw new Error('Live-check redirect limit exceeded');
   } finally {
     if (timeout) clearTimeout(timeout);
   }
@@ -186,7 +206,7 @@ async function checkRegistryRowLiveStatus(row, {
       try {
         const follow = await fetchText(fetchImpl, redirectTargetUrl, { redirect: 'follow', timeoutMs });
         finalStatus = String(follow.res.status);
-        canonicalTargetUrl = extractCanonical(follow.text, follow.res.url || redirectTargetUrl) || canonicalTargetUrl;
+        canonicalTargetUrl = extractCanonical(follow.text, follow.finalUrl || redirectTargetUrl) || canonicalTargetUrl;
         noindex = noindex || isNoindex(follow.text);
       } catch (err) {
         followError = `Redirect target check failed: ${err.message}`;
@@ -418,20 +438,31 @@ async function runContentRegistryLiveStatusCheck({
     limit: boundedLimit,
   });
 
-  let sitemapPaths = null;
-  let sitemapError = null;
+  const sitemapPathsByOrigin = new Map();
+  const sitemapErrors = [];
   if (useSitemap) {
-    try {
-      sitemapPaths = await fetchSitemapPaths({ baseUrl, sitemapUrl, fetchImpl, timeoutMs });
-    } catch (err) {
-      sitemapError = err.message;
+    const baseOrigin = fleetOrigin(baseUrl);
+    const origins = new Set(rows.map((row) => fleetOrigin(targetUrlForRow(row, baseUrl))).filter(Boolean));
+    for (const origin of origins) {
+      try {
+        const paths = await fetchSitemapPaths({
+          baseUrl: origin,
+          sitemapUrl: sitemapUrl && origin === baseOrigin ? sitemapUrl : null,
+          fetchImpl,
+          timeoutMs,
+        });
+        sitemapPathsByOrigin.set(origin, paths);
+      } catch (err) {
+        sitemapPathsByOrigin.set(origin, null);
+        sitemapErrors.push(`${origin}: ${err.message}`);
+      }
     }
   }
 
   const results = await runWithConcurrency(rows, boundedConcurrency, (row) => checkRegistryRowLiveStatus(row, {
     baseUrl,
     fetchImpl,
-    sitemapPaths,
+    sitemapPaths: sitemapPathsByOrigin.get(fleetOrigin(targetUrlForRow(row, baseUrl))) || null,
     timeoutMs,
   }));
 
@@ -453,7 +484,7 @@ async function runContentRegistryLiveStatusCheck({
     statuses: normalizedStatuses,
     limit: boundedLimit,
     base_url: baseUrl,
-    sitemap_error: sitemapError,
+    sitemap_error: sitemapErrors.length ? sitemapErrors.join('; ') : null,
     summary: summarizeResults(results, updatedCount),
     rows: results,
   };

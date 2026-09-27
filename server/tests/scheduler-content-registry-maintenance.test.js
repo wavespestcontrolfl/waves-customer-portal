@@ -46,7 +46,7 @@ describe('scheduler content registry maintenance', () => {
     await runContentRegistryMaintenance({ registry, liveStatus });
 
     expect(liveStatus.runContentRegistryLiveStatusCheck).toHaveBeenCalledWith(expect.objectContaining({
-      statuses: expect.arrayContaining(['astro_only']),
+      statuses: expect.arrayContaining(['astro_only', 'astro_changed_since_sync']),
     }));
   });
 

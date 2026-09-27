@@ -74,6 +74,32 @@ describe('content registry live status helpers', () => {
     })).toBe('https://www.sarasotaflpestcontrol.com/termite/spoke-post/');
   });
 
+  test('refuses initial and redirected live checks outside the content fleet', async () => {
+    const initialFetch = jest.fn();
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'off-fleet', live_url: 'http://169.254.169.254/latest/meta-data/' },
+      { fetchImpl: initialFetch },
+    )).resolves.toEqual(expect.objectContaining({
+      live_status: 'unknown',
+      error: 'No URL available for registry row',
+    }));
+    expect(initialFetch).not.toHaveBeenCalled();
+
+    const redirectFetch = jest.fn(fetchMap({
+      'https://www.wavespestcontrol.com/redirect-out/': response(302, '', {
+        location: 'http://127.0.0.1/admin',
+      }),
+    }));
+    await expect(liveStatus.checkRegistryRowLiveStatus(
+      { id: 'redirect-out', canonical_url_normalized: '/redirect-out/' },
+      { fetchImpl: redirectFetch },
+    )).resolves.toEqual(expect.objectContaining({
+      live_status: 'error',
+      error: expect.stringMatching(/outside the content fleet/),
+    }));
+    expect(redirectFetch).toHaveBeenCalledTimes(1);
+  });
+
   test('classifies direct canonicalized pages', async () => {
     const result = await liveStatus.checkRegistryRowLiveStatus(
       { id: 'row-1', canonical_url_normalized: '/old/' },
@@ -310,6 +336,50 @@ describe('content registry live status helpers', () => {
 
     expect(paths.has('/blog/live-post/')).toBe(true);
     expect(paths.has('/blog-sitemap.xml/')).toBe(false);
+  });
+
+  test('loads and applies the sitemap for each checked fleet host', async () => {
+    const database = fakeDatabase([
+      { id: 'hub', canonical_url_normalized: '/hub-post/' },
+      {
+        id: 'spoke',
+        live_url: '/spoke-post/',
+        canonical_url: 'https://www.sarasotaflpestcontrol.com/spoke-post/',
+      },
+    ]);
+    const fetchImpl = jest.fn(fetchMap({
+      'https://www.wavespestcontrol.com/sitemap.xml': response(200, `
+        <urlset><url><loc>https://www.wavespestcontrol.com/hub-post/</loc></url></urlset>
+      `),
+      'https://www.sarasotaflpestcontrol.com/sitemap.xml': response(200, `
+        <urlset><url><loc>https://www.sarasotaflpestcontrol.com/spoke-post/</loc></url></urlset>
+      `),
+      'https://www.wavespestcontrol.com/hub-post/': response(200, '<html></html>'),
+      'https://www.sarasotaflpestcontrol.com/spoke-post/': response(200, '<html></html>'),
+    }));
+
+    const result = await liveStatus.runContentRegistryLiveStatusCheck({ database, fetchImpl });
+
+    expect(result.rows).toEqual([
+      expect.objectContaining({ id: 'hub', sitemap_status: 'present' }),
+      expect.objectContaining({ id: 'spoke', sitemap_status: 'present' }),
+    ]);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://www.sarasotaflpestcontrol.com/sitemap.xml',
+      expect.objectContaining({ redirect: 'manual' }),
+    );
+  });
+
+  test('does not follow off-fleet sitemap entries or redirects', async () => {
+    const fetchImpl = jest.fn(fetchMap({
+      'https://www.wavespestcontrol.com/sitemap.xml': response(200, `
+        <sitemapindex><sitemap><loc>http://169.254.169.254/sitemap.xml</loc></sitemap></sitemapindex>
+      `),
+    }));
+
+    await expect(liveStatus.fetchSitemapPaths({ fetchImpl }))
+      .rejects.toThrow(/outside the content fleet/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   test('status normalization preserves default, all, and empty semantics', async () => {

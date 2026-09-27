@@ -21,7 +21,7 @@ const SCHEDULED_ESTIMATE_CLAIM_LIMIT = 20;
 const SCHEDULED_ESTIMATE_STALE_CLAIM_MS = 30 * 60 * 1000;
 const SCHEDULED_ESTIMATE_MAX_ATTEMPTS = 3;
 const SCHEDULED_ESTIMATE_RETRY_DELAY_MS = 5 * 60 * 1000;
-const CONTENT_REGISTRY_LIVE_STATUSES = ['matched', 'astro_only', 'db_changed_since_sync', 'conflict', 'db_published_missing_astro'];
+const CONTENT_REGISTRY_LIVE_STATUSES = ['matched', 'astro_only', 'astro_changed_since_sync', 'db_changed_since_sync', 'conflict', 'db_published_missing_astro'];
 const CONTENT_REGISTRY_LIVE_LIMIT = 300;
 
 function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}) {
