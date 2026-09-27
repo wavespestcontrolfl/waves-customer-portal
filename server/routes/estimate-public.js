@@ -10822,6 +10822,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             .where((q) => q.whereNull('customer_email').orWhere('customer_email', ''))
             .update({ customer_email: patch.customer_email });
         }
+        // A concurrent writer may have won the compare-and-set: re-read the
+        // locked row so everything downstream (customer resolution, the
+        // new-profile insert, notifications) uses what is actually stored,
+        // not the in-memory patch.
+        const lockedContact = await trx('estimates').where({ id: estimate.id }).first('customer_name', 'customer_email');
+        if (lockedContact) {
+          estimate.customer_name = lockedContact.customer_name;
+          estimate.customer_email = lockedContact.customer_email;
+        }
       }
       let customerId = estimate.customer_id;
       // Already-linked customer: fill its last_name/email ONLY if blank/the

@@ -1605,6 +1605,10 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
 });
 
 describe('Missing-contact capture (contactLastName/contactEmail) — owner ruling 2026-09-27', () => {
+  // clearAllMocks keeps queued *Once values; a test whose accept never
+  // reaches conversion would otherwise leak its queued result into the next.
+  beforeEach(() => EstimateConverter.convertEstimate.mockReset());
+
   function conversionOk(customerId = 'cust-1') {
     EstimateConverter.convertEstimate.mockResolvedValueOnce({
       customerId,
@@ -1753,6 +1757,9 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     const res = await putAccept('tok-contact-8-x0123456789', { contactEmail: 'testy@example.com' });
     expect(res.status).toBe(200);
     expect(storedEstimate().customer_email).toBe('office@example.com');
+    // The new profile uses the stored (winning) email, not the stale patch.
+    const cust = db.__state.tables.customers.find((c) => c.id === storedEstimate().customer_id);
+    expect(cust.email).toBe('office@example.com');
   });
 
   test('an invalid contactEmail 400s before any mutation — nothing commits', async () => {
