@@ -167,10 +167,10 @@ describe('rankRelatedPosts — ranking', () => {
       expect(out.map((r) => r.path)).toEqual(['/termite/hub-post/']);
     });
 
-    test('a candidate with no target_sites (legacy pre-filter row) renders everywhere, including hub', () => {
-      const target = { service: 'termite' };
+    test('a candidate with no domains is hub-only, never implicitly available on a spoke', () => {
       const candidates = [candidate({ service: 'termite', path: '/termite/legacy/', targetSites: [] })];
-      expect(rankRelatedPosts(target, candidates)).toHaveLength(1);
+      expect(rankRelatedPosts({ service: 'termite' }, candidates)).toHaveLength(1);
+      expect(rankRelatedPosts({ service: 'termite', domains: ['sarasotaflpestcontrol.com'] }, candidates)).toEqual([]);
     });
 
     test('an explicit spoke domain requires the candidate to render on THAT domain too', () => {
@@ -178,11 +178,12 @@ describe('rankRelatedPosts — ranking', () => {
       const candidates = [
         candidate({ id: 'right-spoke', service: 'termite', path: '/termite/sarasota-post/', targetSites: ['sarasotaflpestcontrol.com'] }),
         candidate({ id: 'wrong-spoke', service: 'termite', path: '/termite/venice-post/', targetSites: ['veniceflpestcontrol.com'] }),
-        candidate({ id: 'renders-everywhere', service: 'termite', path: '/termite/legacy/', targetSites: null }),
+        candidate({ id: 'hub-default', service: 'termite', path: '/termite/legacy/', targetSites: null }),
       ];
       const out = rankRelatedPosts(target, candidates).map((r) => r.path);
-      expect(out).toEqual(expect.arrayContaining(['/termite/sarasota-post/', '/termite/legacy/']));
+      expect(out).toEqual(['/termite/sarasota-post/']);
       expect(out).not.toContain('/termite/venice-post/');
+      expect(out).not.toContain('/termite/legacy/');
     });
   });
 
@@ -340,6 +341,21 @@ describe('candidateFromRegistryRow', () => {
       astroStatus: 'live',
       pathVerified: true,
     });
+  });
+
+  test.each([
+    ['missing', {}],
+    ['empty', { domains: [] }],
+  ])('defaults %s Astro domains to hub-only and excludes the post from spokes', (_label, frontmatter) => {
+    const c = candidateFromRegistryRow({
+      ...liveAstroOnly,
+      metadata: { frontmatter },
+    });
+    expect(c.targetSites).toEqual(['wavespestcontrol.com']);
+    expect(rankRelatedPosts(
+      { service: 'termite', domains: ['sarasotaflpestcontrol.com'] },
+      [c]
+    )).toEqual([]);
   });
 
   test.each([

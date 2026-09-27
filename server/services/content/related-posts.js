@@ -22,10 +22,9 @@
  * accepts unchecked, so it may only ever point at a pipeline-confirmed URL.
  * Domain eligibility mirrors
  * the spoke-fleet per-post targeting rule (server/services/content-astro/
- * spoke-sites.js): a candidate with no target_sites (or an empty one)
- * renders everywhere; otherwise it must render on every domain the NEW post
- * targets. Autonomous supporting-blog briefs are hub-only by default, so
- * with no explicit domains a candidate must be hub-visible.
+ * spoke-sites.js): a candidate with no domains (or an empty list) is hub-only;
+ * otherwise it must render on every domain the NEW post targets. Autonomous
+ * supporting-blog briefs are hub-only by default.
  *
  * Pure ranking (rankRelatedPosts) is dependency-free and unit-tested
  * directly with fixture candidates; getRelatedPostsForBrief is the thin DB
@@ -107,17 +106,16 @@ function normalizePathForCompare(value) {
   return s;
 }
 
-// A candidate with no target_sites (null/empty — legacy pre-filter rows,
-// server/models/migrations/20260424000016) renders on every spoke, so it is
-// always domain-eligible. Otherwise it must render on EVERY domain the new
-// post targets, mirroring the Astro build's own per-site collection filter.
+// Astro defaults a missing/empty domains list to the hub. Otherwise a
+// candidate must render on EVERY domain the new post targets, mirroring the
+// Astro collection filter.
 function candidateRendersOnDomains(targetSites, domains) {
   let arr = targetSites;
   if (typeof arr === 'string') {
     try { arr = JSON.parse(arr); } catch { arr = null; }
   }
-  if (!Array.isArray(arr) || arr.length === 0) return true;
-  return domains.every((d) => arr.includes(d));
+  const publishedSites = Array.isArray(arr) && arr.length ? arr : HUB_SITE_KEYS;
+  return domains.every((d) => publishedSites.includes(d));
 }
 
 // True when `c` is even eligible to be scored: it has a path, is not the
@@ -296,7 +294,7 @@ function candidateFromRegistryRow(row) {
   if (!rawPath || !requiredStates.every(([actual, expected]) => actual === expected) || safeRow.noindex_detected === true) return null;
   const pathSites = normalizeSpokeSites([rawPath]);
   if (/^https?:\/\//i.test(rawPath) && pathSites.length === 0) return null;
-  const configuredSites = normalizeSpokeSites(frontmatter.domains || frontmatter.target_sites);
+  const configuredSites = normalizeSpokeSites(frontmatter.domains);
   return {
     id: safeRow.id,
     title: safeRow.title || frontmatter.title || null,
@@ -305,7 +303,7 @@ function candidateFromRegistryRow(row) {
     city: safeRow.target_city || null,
     service: safeRow.target_service || null,
     category: safeRow.category || frontmatter.category || null,
-    targetSites: configuredSites.length ? configuredSites : (pathSites.length ? pathSites : null),
+    targetSites: configuredSites.length ? configuredSites : (pathSites.length ? pathSites : [...HUB_SITE_KEYS]),
     workflowStatus: 'published',
     astroStatus: 'live',
     pathVerified: true,
