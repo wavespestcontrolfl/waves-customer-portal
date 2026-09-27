@@ -5043,6 +5043,9 @@ describe('voice relay eval — named spoken checks', () => {
     ['Mi vecino confirmará los datos y le llamará para informarle.', 'fail'],
     ['La oficina confirmará los datos.', 'fail'],
     ['La oficina confirmará los datos de la cita.', 'fail'],
+    ['La oficina confirmará los datos de contacto.', 'fail'],
+    ['La oficina confirmará su información de contacto.', 'fail'],
+    ['La oficina confirmará los datos de seguimiento.', 'fail'],
     ['Va a llamar para confirmar.', 'fail'],
     ['La vecina va a dar seguimiento.', 'fail'],
     ['Él se pondrá en contacto.', 'fail'],
@@ -5163,6 +5166,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Mi vecino revisará los datos y enviará el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Mi vecino visitará la oficina y enviará el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Mi vecino revisará los datos y le enviará el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Usted revisará los datos y recibirá el presupuesto por correo.', 'pass'],
+    ['spanish-pricing-gate-off', 'Mi vecino revisará los datos y recibirá el presupuesto por correo.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito a Waves.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito para Waves.', 'fail'],
     ['spanish-pricing-gate-off', 'La oficina recibirá el recibo y le enviará el presupuesto a mi vecino.', 'fail'],
@@ -5908,6 +5913,9 @@ describe('voice relay eval — named spoken checks', () => {
       'Pedí el domingo 4 de octubre a la una de la tarde. Mi vecino confirmará los datos y le llamará para informarle.',
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina confirmará los datos.',
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina confirmará los datos de la cita.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina confirmará los datos de contacto.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina confirmará su información de contacto.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina confirmará los datos de seguimiento.',
     ]) {
       const callerCallback = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', turn: 2, text }] }));
       expect([text, callerCallback.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')]).toEqual([text, expect.arrayContaining([expect.objectContaining({ severity: 'critical' })])]);
@@ -5921,6 +5929,7 @@ describe('voice relay eval — named spoken checks', () => {
       'Pedí el domingo 4 de octubre a la una de la tarde. Llamará la oficina para informarle y revisará la solicitud.',
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina confirmará la hora solicitada.',
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina confirmará con usted la hora solicitada.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina confirmará los datos y llamará para informarle.',
     ]) {
       const prospective = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', turn: 2, text }] }));
       expect([text, replay._internals.scenarioStatus({ checks: prospective })]).toEqual([text, 'pass']);
@@ -6431,9 +6440,13 @@ describe('voice relay eval — named spoken checks', () => {
     ['Ya presenté la solicitud. Un miembro del equipo le va a dar seguimiento.', 'pass'],
     ['Ya presenté la solicitud. Vamos a darle seguimiento.', 'pass'],
     ['La oficina revisará la solicitud y llamará para informarle.', 'pass'],
+    ['La oficina confirmará los datos y llamará para informarle.', 'pass'],
     ['El vecino avisará a la oficina y llamará para informarle.', 'fail'],
     ['Mi vecino confirmará los datos y le llamará para informarle.', 'fail'],
     ['La oficina confirmará los datos.', 'fail'],
+    ['La oficina confirmará los datos de contacto.', 'fail'],
+    ['La oficina confirmará su información de contacto.', 'fail'],
+    ['La oficina confirmará los datos de seguimiento.', 'fail'],
     ['Está bien, gracias.', 'fail'],
     ['Lamento escuchar eso.', 'fail'],
     ['No habrá ningún tipo de seguimiento.', 'fail'],

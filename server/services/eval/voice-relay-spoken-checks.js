@@ -96,6 +96,7 @@ const SPANISH_STAFF_ACTOR = '(?:(?:la|nuestra)\\s+oficina|(?:el|nuestro)\\s+(?:e
 const SPANISH_PERSON_ROLE = '(?:cliente|vecin[oa]|gerente|oficina|equipo|personal|t[eé]cnic[oa]|recepcionista|coordinador(?:a)?|secretari[oa])';
 const SPANISH_CLAUSE_SUBJECT_RE = new RegExp(`^\\s*(${SPANISH_STAFF_ACTOR}|(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas)|(?:el|la|un|una|mi|tu|su|nuestro|nuestra)\\s+[a-záéíóúñü]+)\\b`, 'i');
 const SPANISH_STAFF_CLAUSE_SUBJECT_RE = new RegExp(`^\\s*${SPANISH_STAFF_ACTOR}\\b`, 'i');
+const SPANISH_CALLER_CLAUSE_SUBJECT_RE = /^\s*(?:t[uú]|usted(?:es)?|vosotr[oa]s?|(?:el|la)\s+cliente)\b/i;
 const SPANISH_STAFF_CALLBACK_RE = new RegExp(`(?:${SPANISH_STAFF_ACTOR}\\s+(?:(?:le|les|lo|la|los|las|te|nos|se)\\s+)?(?:(?:va(?:n)?\\s+a)\\s+)?${SPANISH_CALLBACK_ACTION}|${SPANISH_CALLBACK_ACTION}\\s+${SPANISH_STAFF_ACTOR})`, 'i');
 const SPANISH_LATE_STAFF_CALLBACK_RE = new RegExp(`${SPANISH_CALLBACK_ACTION}[^.!?;,]{0,60}${SPANISH_UNMARKED_POSTPOSED_ACTOR}${SPANISH_STAFF_ACTOR}\\b`, 'i');
 const SPANISH_EXPLICIT_CALLBACK_SUBJECT_RE = new RegExp(`(?<![a-záéíóúñü])(?:yo|nosotros|nosotras|t[uú]|usted(?:es)?|vosotr[oa]s?|[eé]l|ella|ellos|ellas|(?:el|la|un|una|mi|tu|su)\\s+[a-záéíóúñü]+)\\s+(?:(?:le|les|lo|la|los|las|te|nos|se)\\s+)?(?:(?:voy|va(?:s|mos|is|n)?)\\s+a\\s+)?${SPANISH_CALLBACK_ACTION}`, 'i');
@@ -105,7 +106,6 @@ const SPANISH_FIRST_PERSON_CALLBACK_RE = new RegExp(`(?<![a-záéíóúñü])(?:
 const SPANISH_CALLER_OBJECT_CALLBACK_RE = new RegExp(`\\b(?:le|les|lo|la|los|las|te)\\s+(?:(?:voy|vamos|va|van)\\s+a\\s+)?${SPANISH_CALLBACK_ACTION}`, 'i');
 const SPANISH_IMPERSONAL_CALLBACK_RE = /\b(?:se\s+(?:(?:va(?:n)?\s+a\s+)(?:comunicar|poner)|comunic[a-záéíóúñü]*|pondr[a-záéíóúñü]*)\s+(?:en\s+contacto)?|habr[aá]\s+seguimiento)\b/i;
 const SPANISH_CONFIRM_CALLBACK_RE = /\bconfirm[a-záéíóúñü]*/i;
-const SPANISH_CONTACT_CALLBACK_RE = /\b(?:llam|contact|comunic|escrib|devolv)[a-záéíóúñü]*|\bseguimiento\b|\ben\s+contacto\b/i;
 const SPANISH_BOOKING_CONFIRM_CONTEXT_RE = /\bconfirm[a-záéíóúñü]*\s+(?:(?:la|el|su)\s+)?(?:cita|visita|solicitud|reserva|fecha|hora|horario|turno)\b|\bconfirm[a-záéíóúñü]*\s+con\s+(?:usted|el\s+cliente)\b/i;
 const SPANISH_ESTIMATE_RE = /\b(?:presupuesto|cotizaci[oó]n|estimado)\b/i;
 const SPANISH_RECEIVE_RE = /(?<![a-záéíóúñü])(?:recib(?:ir[a-záéíóúñü]*|id[oa]s?|ió|ieron|ía(?:s|mos|n)?|e|es|imos|en)|va(?:mos|n)?\s+a\s+recibir)(?![a-záéíóúñü])/i;
@@ -146,7 +146,8 @@ function spanishCoordinatedSubject(beforeClaim) {
   const clause = beforeClaim.slice(0, conjunction.index).split(SPANISH_PREDICATE_BOUNDARY_RE).at(-1);
   const subject = clause.match(SPANISH_CLAUSE_SUBJECT_RE)?.[1];
   if (!subject) return null;
-  return SPANISH_STAFF_CLAUSE_SUBJECT_RE.test(subject) ? 'staff' : 'other';
+  if (SPANISH_STAFF_CLAUSE_SUBJECT_RE.test(subject)) return 'staff';
+  return SPANISH_CALLER_CLAUSE_SUBJECT_RE.test(subject) ? 'caller' : 'other';
 }
 
 function spanishCallbackHasWavesActor(claim, match) {
@@ -161,7 +162,7 @@ function spanishCallbackHasWavesActor(claim, match) {
   const firstPersonActor = SPANISH_FIRST_PERSON_CALLBACK_RE.test(roleEvidence);
   const implicitWavesActor = SPANISH_CALLER_OBJECT_CALLBACK_RE.test(matchText) || SPANISH_IMPERSONAL_CALLBACK_RE.test(matchText);
   const unrelatedConfirmation = SPANISH_CONFIRM_CALLBACK_RE.test(matchText)
-    && !SPANISH_CONTACT_CALLBACK_RE.test(roleEvidence) && !SPANISH_BOOKING_CONFIRM_CONTEXT_RE.test(roleEvidence);
+    && !SPANISH_BOOKING_CONFIRM_CONTEXT_RE.test(roleEvidence);
   if (unrelatedConfirmation) return false;
   if (explicitActor) return staffActor || firstPersonActor;
   if (staffActor || firstPersonActor) return true;
@@ -210,18 +211,18 @@ function spanishSendHasWavesActor(roleEvidence, targetText, sharedSubject) {
 }
 
 function spanishEstimateTargetsCaller(roleEvidence, matchText, sharedSubject) {
-  if (!spanishSendHasWavesActor(roleEvidence, matchText, sharedSubject)) return false;
-  if (SPANISH_SEND_ACTION_RE.test(matchText) && SPANISH_EXPLICIT_SEND_RECIPIENT_RE.test(roleEvidence)
-      && !SPANISH_CALLER_SEND_RECIPIENT_RE.test(roleEvidence)) return false;
   const receivePredicate = SPANISH_RECEIVE_RE.test(matchText) || SPANISH_FIRST_PERSON_RECEIVE_RE.test(roleEvidence);
-  if (!receivePredicate) return true;
-  if (SPANISH_ESTIMATE_REQUEST_RE.test(roleEvidence) || SPANISH_FIRST_PERSON_RECEIVE_RE.test(roleEvidence)) return false;
-  const passive = SPANISH_PASSIVE_RECEIVE_RE.test(roleEvidence);
-  if (passive) return SPANISH_CALLER_PASSIVE_AGENT_RE.test(roleEvidence);
-  const explicitReceiver = SPANISH_EXPLICIT_RECEIVER_RE.test(roleEvidence) || SPANISH_POSTPOSED_RECEIVER_RE.test(roleEvidence);
-  return explicitReceiver
-    ? SPANISH_EXPLICIT_CALLER_RECEIVER_RE.test(roleEvidence) || SPANISH_POSTPOSED_CALLER_RECEIVER_RE.test(roleEvidence)
-    : SPANISH_IMPLICIT_CALLER_RECEIVER_RE.test(matchText);
+  if (receivePredicate) {
+    if (SPANISH_ESTIMATE_REQUEST_RE.test(roleEvidence) || SPANISH_FIRST_PERSON_RECEIVE_RE.test(roleEvidence)) return false;
+    const passive = SPANISH_PASSIVE_RECEIVE_RE.test(roleEvidence);
+    if (passive) return SPANISH_CALLER_PASSIVE_AGENT_RE.test(roleEvidence);
+    const explicitReceiver = SPANISH_EXPLICIT_RECEIVER_RE.test(roleEvidence) || SPANISH_POSTPOSED_RECEIVER_RE.test(roleEvidence);
+    if (explicitReceiver) return SPANISH_EXPLICIT_CALLER_RECEIVER_RE.test(roleEvidence) || SPANISH_POSTPOSED_CALLER_RECEIVER_RE.test(roleEvidence);
+    return sharedSubject ? sharedSubject === 'caller' : SPANISH_IMPLICIT_CALLER_RECEIVER_RE.test(matchText);
+  }
+  if (!spanishSendHasWavesActor(roleEvidence, matchText, sharedSubject)) return false;
+  return !SPANISH_SEND_ACTION_RE.test(matchText) || !SPANISH_EXPLICIT_SEND_RECIPIENT_RE.test(roleEvidence)
+    || SPANISH_CALLER_SEND_RECIPIENT_RE.test(roleEvidence);
 }
 
 function spanishMatchHasValidRoles(claim, match, prospective) {
@@ -302,27 +303,33 @@ function assertedSpokenMatch(text, re, { prospective = false } = {}) {
     const pendingStatus = SPANISH_PENDING_STATUS_RE.test(claim);
     const uncertain = spanishClaimIsUncertain(claim);
     global.lastIndex = 0;
-    const match = global.exec(claim);
-    if (!match) continue;
-    const matchedNegativeAssertion = SPANISH_NEGATION_RE.test(match[0]);
-    const polarityClaim = matchedNegativeAssertion
-      ? `${claim.slice(0, match.index)} afirmado ${claim.slice(match.index + match[0].length)}` : claim;
-    const denied = SPANISH_DENIED_REQUEST_RE.test(polarityClaim) || SPANISH_WITHOUT_PREDICATE_RE.test(polarityClaim) || SPANISH_NON_PENDING_NEGATION_RE.test(polarityClaim)
-      || (!pendingStatus && (clauseIsNegated(polarityClaim) || SPANISH_NEGATION_RE.test(polarityClaim)));
-    const beforeMatch = claim.slice(0, match.index);
-    const sharedAuxiliary = SPANISH_TARGET_PARTICIPLE_RE.test(match[0])
-      ? beforeMatch.match(SPANISH_SHARED_AUXILIARY_PREFIX_RE) : null;
-    const prefix = sharedAuxiliary ? sharedAuxiliary[0] : beforeMatch.split(SPANISH_PREDICATE_BOUNDARY_RE).at(-1);
-    const evidence = `${prefix}${claim.slice(match.index, match.index + match[0].length + 1)}`;
-    const completedForms = [...evidence.matchAll(new RegExp(SPANISH_COMPLETED_ASSERTION_RE.source, 'gi'))];
-    const futureForms = [...evidence.matchAll(new RegExp(SPANISH_FUTURE_ASSERTION_RE.source, 'gi'))];
-    const presentForms = [...evidence.matchAll(new RegExp(SPANISH_PRESENT_COMMITMENT_RE.source, 'gi'))];
-    const completedAt = completedForms.reduce((last, form) => form.index, -1);
-    const prospectiveAt = [...futureForms, ...presentForms].reduce((last, form) => Math.max(last, form.index), -1);
-    // The nearest finite auxiliary governs the delivery predicate, even
-    // when an earlier coordinated predicate used another tense.
-    const prospectiveAssertion = !prospective || prospectiveAt > completedAt;
-    if (!denied && !uncertain && prospectiveAssertion && spanishMatchHasValidRoles(claim, match, prospective)) return match;
+    let match;
+    while ((match = global.exec(claim))) {
+      const matchedNegativeAssertion = SPANISH_NEGATION_RE.test(match[0]);
+      const polarityClaim = matchedNegativeAssertion
+        ? `${claim.slice(0, match.index)} afirmado ${claim.slice(match.index + match[0].length)}` : claim;
+      const denied = SPANISH_DENIED_REQUEST_RE.test(polarityClaim) || SPANISH_WITHOUT_PREDICATE_RE.test(polarityClaim) || SPANISH_NON_PENDING_NEGATION_RE.test(polarityClaim)
+        || (!pendingStatus && (clauseIsNegated(polarityClaim) || SPANISH_NEGATION_RE.test(polarityClaim)));
+      const beforeMatch = claim.slice(0, match.index);
+      const sharedAuxiliary = SPANISH_TARGET_PARTICIPLE_RE.test(match[0])
+        ? beforeMatch.match(SPANISH_SHARED_AUXILIARY_PREFIX_RE) : null;
+      const prefix = sharedAuxiliary ? sharedAuxiliary[0] : beforeMatch.split(SPANISH_PREDICATE_BOUNDARY_RE).at(-1);
+      const evidence = `${prefix}${claim.slice(match.index, match.index + match[0].length + 1)}`;
+      const completedForms = [...evidence.matchAll(new RegExp(SPANISH_COMPLETED_ASSERTION_RE.source, 'gi'))];
+      const futureForms = [...evidence.matchAll(new RegExp(SPANISH_FUTURE_ASSERTION_RE.source, 'gi'))];
+      const presentForms = [...evidence.matchAll(new RegExp(SPANISH_PRESENT_COMMITMENT_RE.source, 'gi'))];
+      const completedAt = completedForms.reduce((last, form) => form.index, -1);
+      const prospectiveAt = [...futureForms, ...presentForms].reduce((last, form) => Math.max(last, form.index), -1);
+      // The nearest finite auxiliary governs the delivery predicate, even
+      // when an earlier coordinated predicate used another tense.
+      const prospectiveAssertion = !prospective || prospectiveAt > completedAt;
+      const assertedPolarity = !denied && !uncertain;
+      if (assertedPolarity && prospectiveAssertion && spanishMatchHasValidRoles(claim, match, prospective)) return match;
+      if (!assertedPolarity) break;
+      // Lookahead-only fact patterns describe the whole claim, so retrying
+      // them at every character cannot uncover a different predicate.
+      if (!match[0].length) break;
+    }
   }
   return null;
 }
