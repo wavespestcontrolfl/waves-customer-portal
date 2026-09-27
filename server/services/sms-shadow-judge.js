@@ -237,6 +237,7 @@ async function judgeOne(draft, humanReply) {
     // exam runs aborted on 'consecutive item failures' (07-30, runs a9e23d74
     // + fb7aef4a). 8192 keeps verdict headroom under the longest real items.
     max_tokens: 8192,
+    effort: 'medium', // scoring rubric judgment, not deep reasoning; caps Opus 5.5 spend on a bounded verdict
     messages: [{
       role: 'user',
       content: buildJudgePrompt({

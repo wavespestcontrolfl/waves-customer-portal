@@ -50,6 +50,13 @@ const { executeTool } = require('../services/intelligence-bar/tools');
 // Real ET "today" — the date a same-day move targets.
 const TODAY_ET = jest.requireActual('../utils/datetime-et').etDateString();
 
+// A dues-billed member (explicit monthly lane with a rate). create_appointment
+// sets no price, so its billing gate (ADMIN-BUG-R12) only lets through a
+// customer whose billing covers an unpriced visit; the create tests below use
+// this profile to keep exercising their own guards. The gate's own cases are
+// in the ADMIN-BUG-R12 describe.
+const MEMBER_BILLING = { billing_mode: 'monthly_membership', monthly_rate: 89 };
+
 // An UPDATE result that resolves to the row count like knex AND answers
 // `.returning([...])` with the committed rows (the reschedule writer reads
 // the committed technician_id off the CAS row).
@@ -146,8 +153,8 @@ describe('create_appointment', () => {
   test('inserts status pending with flat-60 window_end from a 12-hour time', async () => {
     const insertChain = chain();
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
     });
 
@@ -168,8 +175,8 @@ describe('create_appointment', () => {
 
   test('registers the durable reminder row with the insert — registration only, no confirmation SMS', async () => {
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain(), chain()], // first chain: the always-on advisory probe (clean)
     });
 
@@ -198,8 +205,8 @@ describe('create_appointment', () => {
     // registration instead would not help — selfHealMissingReminderRows
     // registers any row-less future visit at 08:00 ARMED within 15 minutes.)
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain()],
     });
     await executeTool('create_appointment', {
@@ -214,8 +221,8 @@ describe('create_appointment', () => {
   test('a reminder-registration failure never fails the already-committed create', async () => {
     AppointmentReminders.registerAppointment.mockRejectedValueOnce(new Error('reminders down'));
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain()],
     });
     const result = await executeTool('create_appointment', {
@@ -227,8 +234,8 @@ describe('create_appointment', () => {
 
   test('success log carries ids only — never the customer name (no-PII-in-logs rule)', async () => {
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain()],
     });
     await executeTool('create_appointment', {
@@ -245,8 +252,8 @@ describe('create_appointment', () => {
     for (const [word, start, end] of [['morning', '08:00', '09:00'], ['afternoon', '12:00', '13:00']]) {
       const insertChain = chain();
       wireDb({
-        customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+        customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
         scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
       });
       const result = await executeTool('create_appointment', {
@@ -261,8 +268,8 @@ describe('create_appointment', () => {
   test('no time_window inserts null start/end (still pending)', async () => {
     const insertChain = chain();
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [insertChain],
     });
     await executeTool('create_appointment', {
@@ -279,8 +286,8 @@ describe('create_appointment', () => {
     // no scheduled_services insert.
     datetimeEt.sameDayWindowElapsed.mockReturnValueOnce(true);
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       // No scheduled_services queue — an insert would throw Unexpected db().
     });
 
@@ -296,8 +303,8 @@ describe('create_appointment', () => {
     datetimeEt.sameDayWindowElapsed.mockReturnValueOnce(false);
     const insertChain = chain();
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
     });
 
@@ -333,8 +340,8 @@ describe('create_appointment', () => {
   test('a 4:00 PM start still derives the flat-60 17:00 end (no midnight rejection)', async () => {
     const insertChain = chain();
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
     });
 
@@ -355,8 +362,8 @@ describe('create_appointment — shared admin window rules (scheduling/window-ru
   test('a 7:00 AM start is accepted (no day-start floor) and inserts 07:00-08:00', async () => {
     const insertChain = chain();
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
     });
     const result = await executeTool('create_appointment', {
@@ -377,8 +384,8 @@ describe('create_appointment — shared admin window rules (scheduling/window-ru
   test('10:00 AM passes and inserts the normalized 10:00-11:00 window', async () => {
     const insertChain = chain();
     wireDb({
-      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
       scheduled_services: [chain(), insertChain], // leading chain: the always-on advisory probe (clean)
     });
     const result = await executeTool('create_appointment', {
@@ -396,8 +403,8 @@ describe('create_appointment — shared admin window rules (scheduling/window-ru
       });
       const insertChain = chain();
       wireDb({
-        customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }),
-        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
+        customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
         scheduled_services: [probe, insertChain],
       });
       const result = await executeTool('create_appointment', {
@@ -407,6 +414,112 @@ describe('create_appointment — shared admin window rules (scheduling/window-ru
       expect(result.warning).toMatch(/2099-01-15/);
       expect(insertChain.insert).toHaveBeenCalled();
     } finally { /* no env to restore — the probe is always on */ }
+  });
+});
+
+describe('create_appointment — billing gate (ADMIN-BUG-R12)', () => {
+  // The executor sets no price. A customer whose billing needs a number ON
+  // the visit would get a visit that completes with no invoice, so the
+  // booking is refused with the Schedule screen's own billable-amount verdict.
+  const customerRow = (billing) => ({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...billing });
+  const book = (serviceType = 'One-Time Pest Control Service') => executeTool('create_appointment', {
+    customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: serviceType, time_window: '9:00 AM',
+  });
+  // Preflight read only: a refused booking never opens the transaction, and
+  // no scheduled_services queue exists, so any probe or insert would throw.
+  const expectRefusedBeforeAnyLock = (result) => {
+    expect(result.error).toMatch(/would complete with no invoice/);
+    expect(result.error).toMatch(/Nothing was booked/);
+    expect(db.transaction).not.toHaveBeenCalled();
+  };
+  const wireBooking = (preflightRow, lockedRow = preflightRow) => {
+    const insertChain = chain();
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue(preflightRow) }),
+        chain({ first: jest.fn().mockResolvedValue(lockedRow) })],
+      scheduled_services: [chain(), insertChain], // leading chain: the advisory probe (clean)
+    });
+    return insertChain;
+  };
+
+  test('an explicit per-visit customer is refused before any lock or write', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(customerRow({ billing_mode: 'per_visit' })) })] });
+    const result = await book();
+    expectRefusedBeforeAnyLock(result);
+    expect(result.error).toMatch(/Schedule screen with a visit price/);
+  });
+
+  test('a one-time customer is refused', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(customerRow({ billing_mode: 'one_time' })) })] });
+    expectRefusedBeforeAnyLock(await book());
+  });
+
+  test('a lead-shaped row (no billing mode, no tier, no rate) is refused', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(customerRow({})) })] });
+    expectRefusedBeforeAnyLock(await book('Waves Assessment'));
+  });
+
+  test('a legacy row with a sentinel tier and a rate is refused — completion mints nothing for it', async () => {
+    // resolveBillingLane infers per_visit (sentinel tier), and with no
+    // create-invoice stamp, no membership tier and no visit price,
+    // shouldAutoInvoiceCompletion declines: the monthly_rate is never billed.
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(customerRow({ waveguard_tier: 'One-Time', monthly_rate: 150 })) })] });
+    expectRefusedBeforeAnyLock(await book());
+  });
+
+  test('annual prepay is refused — an unpriced uncovered visit bills nothing', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(customerRow({ billing_mode: 'annual_prepay', waveguard_tier: 'Gold', monthly_rate: 89 })) })] });
+    expectRefusedBeforeAnyLock(await book('Quarterly Pest Control Service'));
+  });
+
+  test('an explicit member with no monthly rate is refused', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(customerRow({ billing_mode: 'monthly_membership', monthly_rate: 0 })) })] });
+    expectRefusedBeforeAnyLock(await book('Quarterly Pest Control Service'));
+  });
+
+  test('per-application with no fee on file is refused, naming the fee remedy', async () => {
+    wireDb({ customers: [chain({ first: jest.fn().mockResolvedValue(customerRow({ billing_mode: 'per_application', per_application_fee: null })) })] });
+    const result = await book('Quarterly Pest Control Service');
+    expectRefusedBeforeAnyLock(result);
+    expect(result.error).toMatch(/Set a per-application fee on the customer profile/);
+  });
+
+  test('per-application with a fee on file books (the fee bills the visit)', async () => {
+    const insertChain = wireBooking(customerRow({ billing_mode: 'per_application', per_application_fee: 95 }));
+    const result = await book('Quarterly Pest Control Service');
+    expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(insertChain.insert).toHaveBeenCalledTimes(1);
+  });
+
+  test('an inferred member (real tier + rate, no billing mode) books', async () => {
+    const insertChain = wireBooking(customerRow({ waveguard_tier: 'Gold', monthly_rate: 89 }));
+    const result = await book('Quarterly Pest Control Service');
+    expect(result.success).toBe(true);
+    expect(insertChain.insert).toHaveBeenCalledTimes(1);
+  });
+
+  test('free-by-design visit types book for a per-visit customer', async () => {
+    for (const serviceType of ['Pest Control Re-Service', 'Waves Pest Control Appointment Service']) {
+      jest.clearAllMocks();
+      const insertChain = wireBooking(customerRow({ billing_mode: 'per_visit' }));
+      const result = await book(serviceType);
+      expect(result.success).toBe(true);
+      expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ service_type: serviceType });
+    }
+  });
+
+  test('a billing change committed after the preflight is refused on the LOCKED row, before the insert', async () => {
+    // Preflight reads a member; by the time the booking transaction locks the
+    // customer row, the lane is per_visit. The locked verdict governs.
+    const insertChain = wireBooking(
+      customerRow({ billing_mode: 'monthly_membership', monthly_rate: 89 }),
+      customerRow({ billing_mode: 'per_visit', monthly_rate: 89 }),
+    );
+    const result = await book();
+    expect(result.error).toMatch(/would complete with no invoice/);
+    expect(result.preview_changed).toBe(true);
+    expect(insertChain.insert).not.toHaveBeenCalled();
+    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
   });
 });
 

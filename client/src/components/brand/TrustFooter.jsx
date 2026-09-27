@@ -16,7 +16,8 @@ export default function TrustFooter({ tone = 'dark', align = 'center', variant =
 
   const base = {
     width: '100%',
-    padding: '24px 16px',
+    padding: '24px 16px calc(24px + env(safe-area-inset-bottom, 0px))',
+    boxSizing: 'border-box',
     textAlign: align,
     color,
     fontFamily: "'Inter', system-ui, sans-serif",
