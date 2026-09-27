@@ -639,7 +639,16 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     try {
       await runToScheduledInsert();
       expect(persistSpy).toHaveBeenCalledTimes(1);
-      expect(persistSpy).toHaveBeenCalledWith(verifySpy.mock.calls[0][1].conn, fit, 'scheduled-1');
+      const verifyTrx = verifySpy.mock.calls[0][1].conn;
+      expect(persistSpy).toHaveBeenCalledWith(verifyTrx, fit, 'scheduled-1');
+      const dayFenceCalls = verifyTrx.raw.mock.calls
+        .map((call, index) => ({ call, order: verifyTrx.raw.mock.invocationCallOrder[index] }))
+        .filter(({ call }) => call[1]?.[0] === 'slot-reserve')
+        .filter(({ call }) => call[1]?.[1] === `${TECH_ID}:${SLOT_DATE}` || call[1]?.[1] === `unassigned:${SLOT_DATE}`);
+      expect(dayFenceCalls.map(({ call }) => call[1][1])).toEqual([
+        `${TECH_ID}:${SLOT_DATE}`, `unassigned:${SLOT_DATE}`,
+      ]);
+      expect(dayFenceCalls.every(({ order }) => order < verifySpy.mock.invocationCallOrder[0])).toBe(true);
     } finally {
       prepareSpy.mockRestore(); verifySpy.mockRestore(); persistSpy.mockRestore(); conflictSpy.mockRestore();
       if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;

@@ -38,6 +38,7 @@ const TECH = '10000000-0000-4000-8000-000000000011';
 const NORTH = '20000000-0000-4000-8000-000000000011';
 const SOUTH = '20000000-0000-4000-8000-000000000012';
 const BLOCKER = '20000000-0000-4000-8000-000000000013';
+const UNASSIGNED = '20000000-0000-4000-8000-000000000015';
 const CUSTOMER = '30000000-0000-4000-8000-000000000011';
 
 // The candidate self-booking commit under test — never a stored row when the
@@ -57,6 +58,15 @@ async function insertNonOverlappingRouteOverload(conn) {
     scheduled_date: DAY, window_start: '17:00', window_end: '18:00',
     status: 'confirmed', estimated_duration_minutes: 60,
     lat: 27.5, lng: -82.4, created_at: '2020-01-03T12:00:00Z',
+  });
+}
+
+async function insertUnassignedMorningBlocker(conn) {
+  await conn('scheduled_services').insert({
+    id: UNASSIGNED, customer_id: CUSTOMER, technician_id: null,
+    scheduled_date: DAY, window_start: '08:00', window_end: '09:00',
+    status: 'confirmed', estimated_duration_minutes: 60,
+    lat: 27.7, lng: -82.4, created_at: '2020-01-04T12:00:00Z',
   });
 }
 
@@ -138,6 +148,28 @@ describeDb('booking commit whole-route dependency on real PostgreSQL', () => {
 
     await expect(verify(prepared)).rejects.toMatchObject({
       code: 'SLOT_UNAVAILABLE', reason: 'route_changed',
+    });
+  });
+
+  test('an unassigned stop landing after preparation invalidates the locked proof', async () => {
+    const prepared = await prepare();
+    await insertUnassignedMorningBlocker(mockConn);
+
+    await expect(findConflictingVisits({
+      db: mockConn,
+      date: DAY,
+      windowStart: CANDIDATE.windowStart,
+      windowEnd: CANDIDATE.windowEnd,
+    })).resolves.toEqual([]);
+    await expect(verify(prepared)).rejects.toMatchObject({
+      code: 'SLOT_UNAVAILABLE', reason: 'route_changed',
+    });
+  });
+
+  test('an unchanged unassigned 08:00 stop can make the 09:00 candidate fail arrival capacity', async () => {
+    await insertUnassignedMorningBlocker(mockConn);
+    await expect(verify(await prepare())).rejects.toMatchObject({
+      code: 'SLOT_UNAVAILABLE', reason: 'arrival_window',
     });
   });
 

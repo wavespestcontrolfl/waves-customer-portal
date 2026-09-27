@@ -191,9 +191,11 @@ Commit-time capacity re-check (`GATE_BOOK_CAPACITY_COMMIT`, owner-approved
 commit — `/api/booking/confirm` here and the re-service commit below — prepares
 the traffic-aware whole-route proof before scheduling locks, then reuses
 `arrival-route.js`'s `verifyArrivalCapacity` under the transaction's existing
-tech-day advisory lock. Verification locks the relevant route rows, requires
-the live fingerprint to match the prepared route, and evaluates without a
-provider request while locks are held. This closes the gap the
+tech-day advisory locks. Capacity commits acquire the selected and unassigned
+tech-day keys together through `lockTechDays`, in canonical order and before
+row locks, because both memberships are fingerprint inputs. Verification then
+locks the relevant route rows, requires the live fingerprint to match the
+prepared route, and evaluates without a provider request while locks are held. This closes the gap the
 overlap-only re-check (`findConflictingVisits`) leaves: another booking landing
 on the tech-day between offer and confirm can push a LATER stop's promised
 window past its promise, or the day over capacity, without ever overlapping
@@ -223,8 +225,9 @@ restored, and no geocoder request runs while scheduling locks are held.
 The official `/book` client sends its estimate identity and dedicated unit on
 every availability, date-browse, and `/find-slots` request. The offer side
 resolves the same location: `/api/booking/availability` and `/find-slots` build
-an existing customer's offers (the estimate's customer, else the unique
-unit-aware customer at the typed address) at that commit location — the
+an existing customer's offers (an estimate identifies the account and the
+typed address/unit selects the matching property row, else the unique
+unit-aware customer at that address) at that commit location — the
 stored pin, else a staff-verified pin or the canonical geocode — over any
 caller coordinates, and echo it only rounded; `/reservice/:token` builds its
 offers on it too. Everyone else keeps the caller's coordinates or address.

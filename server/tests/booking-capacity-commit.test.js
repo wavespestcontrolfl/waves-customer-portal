@@ -20,17 +20,25 @@ const path = require('path');
 const src = fs.readFileSync(path.join(__dirname, '../routes/booking.js'), 'utf8');
 const fn = src.slice(src.indexOf('async function createSelfBooking'));
 
-test('traffic is prepared before the transaction, then verified under its tech-day lock before either insert', () => {
+test('traffic is prepared before the transaction, then verified under selected + unassigned day fences before row locks or inserts', () => {
   const transaction = fn.indexOf('txResult = await db.transaction');
   const prepare = fn.indexOf('preparedCapacity = await prepareArrivalCapacity({');
-  const techDayLock = fn.indexOf("['slot-reserve', `${technician_id}:${slotDateStr}`]");
+  const capacityLock = fn.indexOf('await lockTechDays(trx, [');
+  const capacityBranch = fn.lastIndexOf('if (preparedCapacity)', capacityLock);
+  const firstRowLock = fn.indexOf('.forShare()', capacityLock);
   const verify = fn.indexOf(".verifyArrivalCapacity(preparedCapacity, {");
   const bookingInsert = fn.indexOf("await trx('self_booked_appointments').insert({");
   const visitInsert = fn.indexOf("trx('scheduled_services')", bookingInsert);
   expect(prepare).toBeGreaterThan(-1);
   expect(prepare).toBeLessThan(transaction);
-  expect(techDayLock).toBeGreaterThan(-1);
-  expect(verify).toBeGreaterThan(techDayLock);
+  expect(capacityLock).toBeGreaterThan(transaction);
+  expect(capacityBranch).toBeGreaterThan(transaction);
+  expect(capacityBranch).toBeLessThan(capacityLock);
+  const lockBlock = fn.slice(capacityLock, capacityLock + 220);
+  expect(lockBlock).toContain('{ techId: technician_id, date: slotDateStr }');
+  expect(lockBlock).toContain('{ techId: null, date: slotDateStr }');
+  expect(firstRowLock).toBeGreaterThan(capacityLock);
+  expect(verify).toBeGreaterThan(firstRowLock);
   expect(bookingInsert).toBeGreaterThan(verify);
   expect(visitInsert).toBeGreaterThan(verify);
   expect(fn.slice(verify, verify + 140)).toContain('conn: trx,');

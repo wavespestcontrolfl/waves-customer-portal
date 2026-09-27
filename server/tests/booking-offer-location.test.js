@@ -11,7 +11,7 @@ const listResults = {};
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
-    for (const m of ['where', 'andWhere', 'whereIn', 'whereNull', 'whereRaw', 'andWhereRaw', 'orWhere', 'orWhereRaw', 'select', 'limit']) {
+    for (const m of ['where', 'whereNot', 'andWhere', 'whereIn', 'whereNull', 'whereRaw', 'andWhereRaw', 'orWhere', 'orWhereRaw', 'select', 'limit']) {
       q[m] = (arg) => {
         if (typeof arg === 'function') arg.call(q, q);
         return q;
@@ -31,6 +31,7 @@ const geocoder = require('../services/geocoder');
 const { resolveOfferCoords } = require('../routes/booking')._internals;
 
 const CUSTOMER_ID = '5b8d1c9e-4a2f-4b6e-9c3d-8e7f6a5b4c3d';
+const PROPERTY_B_ID = '7d0f3b2a-6c4e-4d8f-9a1b-2c3d4e5f6a7b';
 const ESTIMATE_ID = '6c9e2d0f-5b3a-4c7f-8d4e-9f0a7b6c5d4e';
 const ADDRESS = { address_line1: '123 Test Ave', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34236' };
 const TYPED = '123 Test Ave, Sarasota, FL 34236';
@@ -88,6 +89,37 @@ test('a dedicated unit only reuses the pin for the matching household', async ()
     .resolves.toEqual({ ...storedPin, disclosable: false });
   await expect(resolveOfferCoords({ ...CALLER, address: TYPED, unit: 'Apt B' }))
     .resolves.toEqual({ lat: 27.3, lng: -82.5, disclosable: true });
+});
+
+test('an estimate identity follows the typed address to another property on the same account', async () => {
+  const propertyAPin = { lat: 27.35, lng: -82.52 };
+  const propertyBPin = { lat: 27.401, lng: -82.501 };
+  firstResults.estimates = { customer_id: CUSTOMER_ID };
+  firstResults.customers = customerRow({
+    account_id: CUSTOMER_ID, address_line2: 'Apt A',
+    latitude: propertyAPin.lat, longitude: propertyAPin.lng,
+  });
+  listResults.customers = [{
+    ...customerRow({
+      id: PROPERTY_B_ID, account_id: CUSTOMER_ID, address_line2: 'Apt B',
+      latitude: propertyBPin.lat, longitude: propertyBPin.lng,
+    }),
+  }];
+
+  await expect(resolveOfferCoords({
+    ...CALLER, address: TYPED, unit: 'Apt B', estimate_id: ESTIMATE_ID,
+  })).resolves.toEqual({ ...propertyBPin, disclosable: false });
+});
+
+test('an estimate identity with no matching account property never falls through to caller coordinates', async () => {
+  firstResults.estimates = { customer_id: CUSTOMER_ID };
+  firstResults.customers = customerRow({ address_line1: '999 Other Road' });
+  listResults.customers = [];
+  const geocode = jest.spyOn(geocoder, 'geocodeAddress');
+
+  await expect(resolveOfferCoords({ ...CALLER, address: TYPED, estimate_id: ESTIMATE_ID }))
+    .resolves.toEqual({ lat: null, lng: null, disclosable: false });
+  expect(geocode).not.toHaveBeenCalled();
 });
 
 test('a new visitor (no estimate, no matching customer) keeps the caller\'s own coordinates, disclosable', async () => {

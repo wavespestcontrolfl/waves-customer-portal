@@ -791,6 +791,26 @@ async function findUniqueCustomerByAddress(address, city, zip, unit) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+// A token-proven customer identifies an account, while the submitted address
+// identifies the property row that availability and confirmation must share.
+// This is the one account-property binding contract for both paths.
+async function findAccountPropertyByAddress(customer, { address, zip, unit }, conn = db) {
+  if (!customer || !address) return customer || null;
+  if (addressMatchesCustomer(customer, address, zip, unit)) return customer;
+  const accountId = customer.account_id || customer.id;
+  const accountRows = await conn('customers')
+    .where(function () {
+      this.where('account_id', accountId).orWhere('id', accountId);
+    })
+    .whereNot('id', customer.id)
+    .whereNull('deleted_at')
+    .andWhere(function () {
+      this.whereNull('active').orWhere('active', true);
+    })
+    .limit(25);
+  return (accountRows || []).find(row => addressMatchesCustomer(row, address, zip, unit)) || null;
+}
+
 // GET /api/booking/customer-lookup?phone=9415551234 OR ?address=...&city=...&zip=...
 router.get('/customer-lookup', async (req, res, next) => {
   try {
@@ -1005,8 +1025,9 @@ async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
 }
 
 // /book's offer location (/availability and /find-slots). When the request is
-// for an existing customer — the estimate's, else the unique customer at the
-// typed address (the step-1 lookup's own match) — confirmation books at
+// for an existing customer — the estimate's account property selected by the
+// typed address/unit, else the unique customer at that address (the step-1
+// lookup's own match) — confirmation books at
 // customerBookingLocation and refuses an offer signed on any other grid cell,
 // so the offer is built there too (Codex #4992 P1: a staff-verified pin the
 // address geocoder never returns would refuse every retry), and never
@@ -1014,26 +1035,44 @@ async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
 // resolveBookingCoords. estimate_id is a raw public value: only a UUID
 // (LEAD_ID_RE's shape) is looked up.
 async function resolveOfferCoords({ lat, lng, address, city, unit, estimate_id }) {
-  let customerId = estimate_id && LEAD_ID_RE.test(String(estimate_id))
-    ? (await db('estimates').where('id', estimate_id).first('customer_id'))?.customer_id
-    : null;
-  if (!customerId && address) {
-    const parsed = parseRawAddress(address);
-    const line1 = parsed.line1 || address;
-    const submittedUnit = String(unit || '').trim() || submittedInlineUnit(line1);
-    customerId = (await findUniqueCustomerByAddress(
+  let customer = null;
+  let estimateBound = false;
+  const parsed = parseRawAddress(address || '');
+  const line1 = parsed.line1 || address;
+  const submittedUnit = String(unit || '').trim() || submittedInlineUnit(line1);
+  if (estimate_id && LEAD_ID_RE.test(String(estimate_id))) {
+    const customerId = (await db('estimates').where('id', estimate_id).first('customer_id'))?.customer_id;
+    estimateBound = !!customerId;
+    if (customerId) {
+      const primary = await db('customers').where({ id: customerId }).whereNull('deleted_at')
+        .first('id', 'account_id', 'active', 'deleted_at', 'latitude', 'longitude',
+          'address_line1', 'address_line2', 'city', 'state', 'zip');
+      if (primary) {
+        customer = await findAccountPropertyByAddress(primary, {
+          address: line1, zip: parsed.zip, unit: submittedUnit,
+        });
+      }
+    }
+  }
+  // A bound estimate proves one account. If its submitted property matches
+  // none of that account's rows, confirmation refuses it; do not fall through
+  // to another household's globally unique address or the estimate's old pin.
+  if (estimateBound && !customer) return { lat: null, lng: null, disclosable: false };
+  if (!customer && address) {
+    const customerId = (await findUniqueCustomerByAddress(
       line1,
       city || parsed.city,
       parsed.zip,
       submittedUnit,
     ))?.id;
+    customer = customerId
+      ? await db('customers').where({ id: customerId })
+        .first('id', 'account_id', 'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+      : null;
   }
-  const customer = customerId
-    ? await db('customers').where({ id: customerId })
-      .first('id', 'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip')
-    : null;
   const pin = customer ? await customerBookingLocation(customer) : null;
-  return pin ? { ...pin, disclosable: false } : resolveBookingCoords({ lat, lng, address, city, estimate_id });
+  if (customer) return pin ? { ...pin, disclosable: false } : { lat: null, lng: null, disclosable: false };
+  return resolveBookingCoords({ lat, lng, address, city, estimate_id: null });
 }
 
 // Load the singleton booking_config row, falling back to the same defaults the
@@ -2173,26 +2212,11 @@ async function createSelfBooking(payload = {}) {
     // the wrong door. No submitted address → the row's own address is the
     // booking address, bind directly.
     const bindCustomerRowByAddress = async (row) => {
-      const submittedLine1 = new_customer?.address_line1;
-      if (!submittedLine1) return { custId: row.id };
-      let matched = addressMatchesCustomer(row, submittedLine1, new_customer?.zip, new_customer?.address_line2)
-        ? row : null;
-      if (!matched) {
-        const accountId = row.account_id || row.id;
-        const accountRows = await db('customers')
-          .where(function () {
-            this.where('account_id', accountId).orWhere('id', accountId);
-          })
-          .whereNot('id', row.id)
-          .whereNull('deleted_at')
-          .andWhere(function () {
-            this.whereNull('active').orWhere('active', true);
-          })
-          .limit(25);
-        matched = (accountRows || []).find(
-          (r) => addressMatchesCustomer(r, submittedLine1, new_customer?.zip, new_customer?.address_line2),
-        ) || null;
-      }
+      const matched = await findAccountPropertyByAddress(row, {
+        address: new_customer?.address_line1,
+        zip: new_customer?.zip,
+        unit: new_customer?.address_line2,
+      });
       if (!matched) {
         return {
           error: {
@@ -3172,10 +3196,22 @@ async function createSelfBooking(payload = {}) {
       // global order) so concurrent confirms can't deadlock.
       const zoneSlug = zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null;
       if (technician_id) {
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['slot-reserve', `${technician_id}:${slotDateStr}`],
-        );
+        if (preparedCapacity) {
+          // verifyArrivalCapacity fingerprints selected AND unassigned stops.
+          // Dispatch moves a stop to unassigned while holding its source-day
+          // and unassigned-day fences, so hold both in the shared canonical
+          // order before any row lock and through verification + insertion.
+          const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+          await lockTechDays(trx, [
+            { techId: technician_id, date: slotDateStr },
+            { techId: null, date: slotDateStr },
+          ]);
+        } else {
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['slot-reserve', `${technician_id}:${slotDateStr}`],
+          );
+        }
       }
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
