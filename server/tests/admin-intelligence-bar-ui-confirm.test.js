@@ -1013,6 +1013,11 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       expect(body.pendingActions[0].params.price).toBe('$250.00 (catalog price, One-Time Pest Control Service) — invoiced when the visit is completed');
       // The summary is built from the same curated display params.
       expect(stored.summary).toContain('$250.00');
+      // The pins are execution guards, never disclosures: the card payload,
+      // the summary and the contract all drop `_`-prefixed keys.
+      expect(Object.keys(body.pendingActions[0].params).filter((k) => k.startsWith('_'))).toEqual([]);
+      expect(stored.summary).not.toMatch(/_booking|svc-otp/);
+      expect(JSON.stringify(body.pendingActions[0].contract)).not.toMatch(/_booking|svc-otp/);
     });
   });
 
