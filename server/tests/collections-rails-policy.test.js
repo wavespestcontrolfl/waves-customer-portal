@@ -42,6 +42,22 @@ jest.mock('../services/email-template-library', () => ({
 jest.mock('../services/customer-contact', () => ({
   getInvoiceEmailRecipients: jest.fn(() => [{ email: 'billing@example.com', name: 'Taylor' }]),
 }));
+// The follow-up email rides the shared billing email authority (owner ruling
+// 2026-09-27); its locks and rechecks are pinned in its own suites. Here it
+// authorizes the same billing recipient the customer-contact mock returns.
+jest.mock('../services/billing-channel-email-authority', () => ({
+  loadBillingEmailContext: jest.fn(async () => ({
+    category: 'invoice',
+    recipient: { email: 'billing@example.com', name: 'Taylor' },
+    recipientEmail: 'billing@example.com',
+  })),
+  dispatchUnderBillingEmailAuthority: jest.fn(async ({ dispatch, state }) => {
+    state.handoffStarted = true;
+    await dispatch();
+    state.providerAccepted = true;
+    return { ok: true };
+  }),
+}));
 jest.mock('../services/stripe', () => ({ isInvoiceAwaitingMicrodepositVerification: jest.fn(async () => false) }));
 jest.mock('../services/microdeposit-verification-email', () => ({ sendMicrodepositVerificationEmail: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/collections/contact-policy', () => ({

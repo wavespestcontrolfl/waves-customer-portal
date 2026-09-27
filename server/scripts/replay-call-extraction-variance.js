@@ -32,6 +32,10 @@ const FIELD_GROUPS = {
     'preferred_date_time',
     'proposed_start_at',
     'agent_committed_booking',
+    // The reschedule agreement and the appointment it moves (schema 1.16.0)
+    // decide whether the applier moves a visit, and which one.
+    'caller_accepted_slot',
+    'moved_appointment_date',
     'is_spam',
     'is_voicemail',
     'matched_service',
@@ -423,7 +427,7 @@ function normalizeField(field, value) {
   // means "not committed", identical to false — collapse them so replays
   // don't report a spurious high-severity delta on every pre-1.8.0 row
   // (codex P2). A genuine true↔false disagreement still surfaces.
-  if (field === 'agent_committed_booking') return normalizeBool(value) === true;
+  if (field === 'agent_committed_booking' || field === 'caller_accepted_slot') return normalizeBool(value) === true;
   if (field === 'preferred_date_time' || field === 'proposed_start_at') return normalizeDateTime(value);
   return normalizeString(value);
 }

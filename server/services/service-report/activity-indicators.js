@@ -1166,6 +1166,45 @@ function typedTreatmentEvidence(type, values) {
   return result;
 }
 
+function parseFindingsValues(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+// Poison Control line eligibility for PROJECT reports (owner ruling
+// 2026-09-26): the canonical typed application verdict
+// (typedTreatmentEvidence — the same one behind a service report's
+// applicationMade) over the project's own findings or its bed-bug follow-up
+// findings, plus rodent bait stations: the stations hold rodenticide though
+// servicing one is monitoring, not an application. Nothing else: device-only
+// termite work ("Bait station setup" / "Cartridge replacement") is noWork
+// whatever EPA number the send gate demands, and types the canonical map
+// leaves out (WDO, certificate, inspections, exclusion, sanitation) never
+// qualify — widening that map would change applicationMade and re-entry for
+// every report of the type, which is its own decision.
+
+// The PRIMARY visit itself applied product — the only case that names an
+// applicator (a bait-station check applied nothing; a follow-up's
+// technician isn't stored).
+function projectPrimaryApplication(type, findings) {
+  return typedTreatmentEvidence(type, parseFindingsValues(findings)).applied;
+}
+
+function projectPoisonControl(type, findings, followupFindings) {
+  return type === 'rodent_bait_station'
+    || projectPrimaryApplication(type, findings)
+    || typedTreatmentEvidence(type, parseFindingsValues(followupFindings)).applied;
+}
+
 // Combined visits keep the primary snapshot in service_data.typedReportSnapshot
 // and companion sections in service_data.companionReportSnapshots; treatment
 // evidence is the union, and no-work only holds when every section declared it.
@@ -4507,6 +4546,8 @@ module.exports = {
   TYPED_TREATMENT_OPTIONS,
   typedTreatmentEvidence,
   typedTreatmentEvidenceForRecord,
+  projectPoisonControl,
+  projectPrimaryApplication,
   SCHEMA_VERSION,
   BANNED_CUSTOMER_COPY,
   findBannedCustomerCopy,
