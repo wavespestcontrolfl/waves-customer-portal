@@ -105,14 +105,19 @@ describe('reminder settings rows', () => {
     expect(screen.queryByRole('combobox', { name: /Weather & property alerts/i })).not.toBeInTheDocument();
   });
 
-  it('stacks the channel select and switch on a compact phone width', async () => {
+  it('keeps compact Service reports controls together without forcing a full-width row', async () => {
     window.innerWidth = 360;
+    api.getNotificationPrefs.mockResolvedValue({ appPreferencesAvailable: true });
     render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
 
-    await screen.findByRole('switch', { name: 'Appointment updates' });
-    const row = document.querySelector('[data-reminder-row]');
-    expect(row.lastElementChild.style.flex).toContain('1 0 100%');
-    expect(row.firstElementChild.style.flex).toContain('1 1 160px');
+    const alert = await screen.findByRole('switch', { name: 'Service reports' });
+    const channel = screen.getByRole('combobox', { name: 'Delivery method for Service reports' });
+    const controls = alert.closest('[data-reminder-row]').lastElementChild;
+    expect(controls).toContainElement(alert);
+    expect(controls).toContainElement(channel);
+    // jsdom cannot measure wrapping. Keep the regression guard against the
+    // forced second row; the WebKit checks verify the resulting phone layout.
+    expect(controls.style.flexBasis).not.toBe('100%');
   });
 });
 
