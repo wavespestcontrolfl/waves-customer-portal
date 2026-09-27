@@ -399,19 +399,13 @@ async function sendCustomerMessageCore(input) {
       && input.entryPoint === 'reschedule-link-promise'
       && input.metadata?.original_message_type === 'reschedule_link_promise'
       && Boolean(input.metadata?.followThroughCommitmentId))
-    // Annual-prepay Text holds its invoice and term through Twilio dispatch.
-    || (input.audience === 'customer' && input.purpose === 'payment_link'
-      && input.entryPoint === 'annual_prepay_payment_reminder'
-      && input.metadata?.original_message_type === 'annual_prepay_payment_reminder'
-      && Boolean(input.metadata?.annual_prepay_term_id)
-      && typeof providerPreSendCheck === 'function')
-    // Legacy previsit balance Text keeps its current automatic App routing,
-    // but an actual Twilio leg holds the complete balance quote through the
-    // provider request. The producer supplies no preSendCheck; its final
-    // predicate is providerPreSendCheck on the held transaction.
-    || (input.audience === 'customer' && input.purpose === 'billing'
-      && input.entryPoint === 'previsit_balance_reminder'
-      && typeof providerPreSendCheck === 'function')
+    // Both billing Text producers hold their quote through Twilio dispatch.
+    // The annual row additionally requires its frozen term/type binding.
+    || (input.audience === 'customer' && typeof providerPreSendCheck === 'function'
+      && [['billing', 'previsit_balance_reminder'], ['payment_link', 'annual_prepay_payment_reminder']]
+        .some(([purpose, entryPoint]) => input.purpose === purpose && input.entryPoint === entryPoint
+          && (entryPoint === 'previsit_balance_reminder'
+            || (input.metadata?.original_message_type === entryPoint && Boolean(input.metadata?.annual_prepay_term_id)))))
     // Recruiting texts hold the application row through the provider
     // request: the deferred replay (deferred-replay-registry
     // recruiting_comms_deferred) and the immediate sends (recruiting-comms.js
