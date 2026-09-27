@@ -159,7 +159,14 @@ async function lockVisitContext(trx, customerId, prelocked, {
   includeProtected = false, customer, primary, verifyPin = false,
 } = {}) {
   const groups = await groupedPlans(trx, prelocked, { customer, primary, verifyPin });
-  for (const group of groups) await lockAppointmentAddress(trx, group.plan);
+  for (const group of groups) {
+    try {
+      await lockAppointmentAddress(trx, group.plan, {}, { noWait: true });
+    } catch (error) {
+      if (error?.code === 'visit_busy') throw retry();
+      throw error;
+    }
+  }
 
   const visits = await candidateVisits(trx, customerId, { lock: true });
   const roots = await recurringRoots(trx, customerId, { lock: true });
