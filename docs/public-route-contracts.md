@@ -1477,11 +1477,16 @@ Thus disabled itemization retained for document rendering can suppress
 guarantees in the document without changing the current page's policy or
 prices. Generic promise suppression does not remove a row's explicitly
 purchased warranty scope, which still requires that row's sold-tier metadata.
-Projected one-time-choice rows retain verified `warrantyTier` and
-`warrantyAdder` from the same raw row used to resolve their copy, including
+Projected one-time-choice rows retain reconciled `warrantyTier` and
+`warrantyAdder` from the same evidence used to resolve their copy, including
 when a mapped `result` omits evidence that remains in the matching raw
-`engineResult`. Explicit current `none`/`null` decisions remain authoritative,
-including key-alias and zero-price clearing rows. Warranty evidence is audited
+`engineResult`. A current engine replay (including its cache) governs older
+saved rows; a sent snapshot's `snapshotHit` keeps its historical source from
+being mistaken for that replay. In unversioned projections, an explicit
+priced or current saved `none`/`null` decision blocks older purchased proof,
+including key-alias and zero-price clearing rows. Removal metadata survives
+the public response so assistant fallback cannot restore rejected coverage.
+Warranty evidence is audited
 before price filtering or deduplication across `oneTime.items`, nested one-time
 items, supported `specItems`, and `lineItems`; ambiguous repeated service rows
 cannot borrow another row's warranty. Ask Waves coalesces renamed fallback

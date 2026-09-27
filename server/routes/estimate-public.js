@@ -42,9 +42,9 @@ const { GUARANTEE_COPY, resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneT
 const {
   hasPurchasedTrenchingWarranty,
   rawOneTimeWarrantyEvidenceItems,
-  reconcileTrenchingWarrantyEvidence,
   trenchingServiceIdentity,
   trenchingWarrantyDecision,
+  reconcilePricedTrenchingWarrantyEvidence,
 } = require('../../shared/estimate-purchased-warranty.cjs');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -23608,12 +23608,12 @@ function matchingRawOneTimeRow(row, rawRows = []) {
   return { row: null, ambiguous: true };
 }
 
-function withReconciledContractWarranty(row, rawRowGroups = [], target = row) {
+function withReconciledContractWarranty(row, rawRowGroups = [], target = row, pricing = {}) {
   if (trenchingServiceIdentity(row) !== 'termite_trenching') return row;
-  const [currentGroup = { sourceItems: [] }, ...fallbackGroups] = rawRowGroups;
-  const evidence = reconcileTrenchingWarrantyEvidence(
+  const evidence = reconcilePricedTrenchingWarrantyEvidence(
     target,
-    [currentGroup.sourceItems, [target], ...fallbackGroups.map((group) => group.sourceItems)],
+    rawRowGroups.map((group) => group.sourceItems),
+    pricing,
   );
   const reconciled = { ...row };
   delete reconciled.warrantyTier;
@@ -23694,7 +23694,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
           const copyInputs = labeled.map((row) => {
             const raw = rawContractRowFor(row, rawContractRowGroups);
             const input = raw ? { ...raw, ...row } : row;
-            return withReconciledContractWarranty(input, rawContractRowGroups, row);
+            return withReconciledContractWarranty(input, rawContractRowGroups, row, payload);
           });
           const copies = resolveOneTimeRowCopies(copyInputs, { noGuaranteeClaims });
           return labeled.map((row, i) => {
@@ -23703,9 +23703,13 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
             if (trenchingServiceIdentity(row) === 'termite_trenching') {
               delete returned.warrantyTier;
               delete returned.warrantyAdder;
-              if (hasPurchasedTrenchingWarranty(copyInputs[i])) {
-                returned.warrantyTier = copyInputs[i].warrantyTier;
-                returned.warrantyAdder = Number(copyInputs[i].warrantyAdder);
+              // Keep explicit removals as well as purchases. Dropping their
+              // metadata would make downstream legacy fallback restore the
+              // very raw warranty this reconciliation just rejected.
+              for (const key of ['warrantyTier', 'warrantyAdder']) {
+                if (Object.prototype.hasOwnProperty.call(copyInputs[i], key)) {
+                  returned[key] = copyInputs[i][key];
+                }
               }
             }
             return returned;

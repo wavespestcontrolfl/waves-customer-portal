@@ -236,10 +236,9 @@ describe('estimate assistant no-guarantee context', () => {
     expect(answerEstimateQuestionFallback('Is there an annual inspection?', legacy))
       .toContain('Annual inspection during the warranty period');
 
-    const frozenRemoval = build({ service: 'trenching', label: 'Termite Trenching', amount: 1200,
+    const explicitRemoval = build({ service: 'trenching', label: 'Termite Trenching', amount: 1200,
       warrantyTier: 'one_year_retreat', warrantyAdder: null });
-    expect(frozenRemoval.oneTime.items[0].purchasedTerms)
-      .toEqual(['Annual inspection during the warranty period']);
+    expect(explicitRemoval.oneTime.items[0].purchasedTerms).toEqual([]);
 
     const wrongService = build({ service: 'one_time_pest', label: 'Termite Trenching', amount: 1200,
       warrantyTier: 'one_year_retreat' });
@@ -776,6 +775,36 @@ describe('estimate assistant no-guarantee context', () => {
       detail: 'Current measured scope', visitsPerYear: 12, perApplication: 61,
     });
     expect(context.guarantees).toMatchObject({ recurringTermsEligible: false, recurring: null });
+  });
+
+  test.each([
+    { warrantyTier: 'none', warrantyAdder: 0 },
+    { warrantyTier: null, warrantyAdder: null },
+    { warrantyTier: 'one_year_retreat', warrantyAdder: -1 },
+  ])('current pricing removal still clears a saved purchase: %j', (decision) => {
+    const row = { service: 'trenching', label: 'Termite Trenching', amount: 1200, price: 1200 };
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 1200 },
+      estData: { result: { oneTime: { items: [{ ...row, warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }] } } },
+      pricingBundle: { anchorOneTimePrice: 1200, oneTimeBreakdown: { items: [{ ...row, ...decision }] } },
+      noGuaranteeClaims: true,
+    });
+    expect(context.oneTime.items[0].purchasedTerms).toEqual([]);
+    expect(answerEstimateQuestionFallback('What warranty did I buy?', context))
+      .not.toContain('Annual inspection during the warranty period');
+  });
+
+  test.each([false, true])('engine pricing honors actual replay versus sent snapshot provenance: snapshot=%s', (snapshotHit) => {
+    const row = { service: 'trenching', label: 'Termite Trenching', amount: 1200, price: 1200 };
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 1200 },
+      estData: { result: { oneTime: { items: [{ ...row, warrantyTier: 'none', warrantyAdder: 0 }] } } },
+      pricingBundle: { source: 'engine_invocation', snapshotHit, anchorOneTimePrice: 1200,
+        oneTimeBreakdown: { items: [{ ...row, warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }] } },
+      noGuaranteeClaims: true,
+    });
+    expect(context.oneTime.items[0].purchasedTerms)
+      .toEqual(snapshotHit ? [] : ['Annual inspection during the warranty period']);
   });
 
   test.each(['pricing', 'saved'])('%s raw details cannot leak guarantee claims into summaries or inclusion answers', (source) => {

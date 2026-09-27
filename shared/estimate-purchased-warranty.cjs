@@ -115,10 +115,24 @@ function reconcileTrenchingWarrantyEvidence(target, evidenceGroups = []) {
   return current;
 }
 
+// A replayed engine bundle is current unless it came from a sent snapshot.
+// Otherwise neither a priced removal nor a current saved removal may be
+// overwritten by purchased metadata in the other, unversioned projection.
+function reconcilePricedTrenchingWarrantyEvidence(target, evidenceGroups = [], pricing = {}) {
+  const [current = [], ...fallback] = evidenceGroups;
+  const liveEnginePricing = pricing.source === 'engine_invocation' && pricing.snapshotHit !== true;
+  const pricedRemoval = trenchingWarrantyDecision(target) === 'none';
+  const ordered = liveEnginePricing || pricedRemoval
+    ? [[target], current, ...fallback]
+    : [current, [target], ...fallback];
+  return reconcileTrenchingWarrantyEvidence(target, ordered);
+}
+
 module.exports = {
   hasPurchasedTrenchingWarranty,
   rawOneTimeWarrantyEvidenceItems,
   reconcileTrenchingWarrantyEvidence,
+  reconcilePricedTrenchingWarrantyEvidence,
   trenchingServiceIdentity,
   trenchingWarrantyDecision,
   PURCHASED_TRENCHING_WARRANTY_BULLET,

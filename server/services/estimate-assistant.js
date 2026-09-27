@@ -12,6 +12,7 @@ const {
   hasPurchasedTrenchingWarranty,
   rawOneTimeWarrantyEvidenceItems,
   reconcileTrenchingWarrantyEvidence,
+  reconcilePricedTrenchingWarrantyEvidence,
   trenchingServiceIdentity,
 } = require('../../shared/estimate-purchased-warranty.cjs');
 const { serviceKeysFromText } = require('./estimate-service-lines');
@@ -472,13 +473,7 @@ function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {
         item.quoteRequired === true ? 'Quote required' : null,
         Number.isFinite(amount) && amount > 0 ? fmtMoney(amount) : null,
       ].filter(Boolean);
-      const [currentEvidence = [], ...fallbackEvidence] = evidenceGroups;
-      // A frozen pricing projection can fill missing legacy evidence, but a
-      // current saved decision (including removal) must take precedence.
-      const evidence = reconcileTrenchingWarrantyEvidence(
-        item,
-        [currentEvidence, [item], ...fallbackEvidence],
-      );
+      const evidence = reconcilePricedTrenchingWarrantyEvidence(item, evidenceGroups, pricingBundle);
       return {
         service: cleanText(item.service || item.serviceKey || item.service_key || item.key) || null,
         label: cleanText(item.label || item.name || item.service || 'One-time service'),

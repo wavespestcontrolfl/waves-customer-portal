@@ -1,4 +1,7 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
+jest.mock('../models/db', () => jest.fn(() => {
+  throw new Error('Warranty projection tests must not access a database');
+}));
 
 // One-time service copy pack (owner directive 2026-09-03): every one-time
 // row reads like a recurring plan card — outcome line, "what the visit
@@ -18,6 +21,7 @@ const { hasPurchasedTrenchingWarranty } = require('../../shared/estimate-purchas
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
   attachPublicPricingContract,
+  buildPricingBundle,
   buildWaveGuardIntelligencePayload,
   estimateMakesNoGuaranteeClaim,
   renderPage,
@@ -611,7 +615,7 @@ describe('server-rendered page', () => {
     ['saved paid tier over a different frozen purchase',
       { warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 },
       { warrantyTier: 'one_year_retreat', warrantyAdder: 0 }, true],
-    ['saved purchase over frozen projection removal', { warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }, { warrantyTier: 'none', warrantyAdder: 0 }, true],
+    ['explicit pricing removal over saved purchase', { warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }, { warrantyTier: 'none', warrantyAdder: 0 }, false],
     ['missing purchase evidence', { warrantyTier: 'three_year_repair_retreat' }, {}, false],
   ])('aligned trenching rows retain the same verified warranty evidence as their resolved copy: %s', (_label, rawScope, projectedScope, purchased) => {
     const row = { service: 'trenching', label: 'Termite Trenching', amount: 900, ...rawScope };
@@ -644,6 +648,44 @@ describe('server-rendered page', () => {
     const returned = contract.oneTimeBreakdown.items[0];
     expect(returned).toMatchObject({ warrantyTier: 'one_year_retreat', warrantyAdder: 0 });
     expect(returned.copy.includes).toContain('Annual inspection during the warranty period');
+  });
+
+  test.each([
+    ['none', 'three_year_repair_retreat', false],
+    ['one_year_retreat', 'none', true],
+  ])('fresh engine warranty %s survives public projection and assistant fallback over saved %s', async (
+    warrantyTier, savedTier, purchased,
+  ) => {
+    const { generateEstimate } = require('../services/pricing-engine');
+    const { buildEstimateAssistantContext, answerEstimateQuestionFallback } = require('../services/estimate-assistant');
+    const engineInputs = { services: { trenching: {
+      measurements: { perimeterLF: 240, concreteLF: 0 }, labelConfirmed: true, warrantyTier,
+    } } };
+    const generated = generateEstimate(engineInputs);
+    const generatedRow = generated.lineItems.find((row) => row.service === 'trenching');
+    expect(generatedRow.warrantyTier).toBe(warrantyTier);
+    const estData = { engineInputs, result: { oneTime: { items: [{
+      service: 'trenching', label: 'Termite Trenching', amount: 1200, price: 1200,
+      warrantyTier: savedTier, warrantyAdder: savedTier === 'none' ? 0 : 117,
+    }] } } };
+    const estimate = { id: `live-trenching-warranty-${warrantyTier}`, status: 'draft', show_one_time_option: true,
+      onetime_total: generatedRow.price, estimate_data: estData };
+    for (const cached of [false, true]) {
+      const bundle = await buildPricingBundle(estimate, { monthlyBilled: true });
+      expect(bundle.source).toBe('engine_invocation');
+      if (cached) expect(bundle.cacheHit).toBe(true);
+      const item = bundle.oneTimeBreakdown.items.find((row) => row.service === 'trenching');
+      expect(item.warrantyTier).toBe(warrantyTier);
+      expect(hasPurchasedTrenchingWarranty(item)).toBe(purchased);
+      expect(item.copy.includes.includes('Annual inspection during the warranty period')).toBe(purchased);
+      const context = buildEstimateAssistantContext({ estimate, estData, pricingBundle: bundle,
+        noGuaranteeClaims: true, serviceMode: 'one_time' });
+      expect(context.oneTime.items[0].purchasedTerms)
+        .toEqual(purchased ? ['Annual inspection during the warranty period'] : []);
+      expect(answerEstimateQuestionFallback('What warranty did I buy?', context)
+        .includes('Annual inspection during the warranty period')).toBe(purchased);
+    }
+    expect(require('../models/db')).not.toHaveBeenCalled();
   });
 
   test.each([
