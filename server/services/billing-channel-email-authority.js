@@ -158,7 +158,7 @@ async function preSendBlock(preSendCheck, database) {
   );
 }
 
-async function suppressionBlock(trx, recipientEmail, category, customer, templateKey) {
+async function suppressionBlock(trx, recipientEmail, category, customer, templateKey, emailSuppression) {
   await lockCustomerEmail(trx, recipientEmail);
   const suppressionInput = {
     channel: 'email', to: clean(customer?.phone) || null,
@@ -171,6 +171,9 @@ async function suppressionBlock(trx, recipientEmail, category, customer, templat
     return blocked(messagingSuppression.code, messagingSuppression.reason,
       { retryable: messagingSuppression.retryable === true });
   }
+  // A sender outside the email template library (an automation step) names
+  // its own suppression-group check, run here under the recipient lock.
+  if (emailSuppression) return emailSuppression(trx, recipientEmail);
   // The template this send actually uses: its suppression group decides the
   // recheck. A generic billing notice defaults by category.
   const loaded = await EmailTemplateLibrary.loadTemplateByKey(templateKey || billingEmailTemplateKey(category), trx);
@@ -190,7 +193,9 @@ async function suppressionBlock(trx, recipientEmail, category, customer, templat
   return blocked('EMAIL_SUPPRESSED', `Suppressed: ${detail || 'active suppression'}`);
 }
 
-async function verifyAndDispatch({ input, trx, invoice, phone, recipientEmail, templateKey, preSendCheck, dispatch, state }) {
+async function verifyAndDispatch({
+  input, trx, invoice, phone, recipientEmail, templateKey, emailSuppression, preSendCheck, dispatch, state,
+}) {
   const fresh = await loadBillingEmailContext(input, trx, { lockRecipients: true, invoice });
   if (fresh.error) state.boundaryBlock = fresh.error;
   else if (toE164(clean(fresh.customer.phone)) !== phone) {
@@ -205,7 +210,8 @@ async function verifyAndDispatch({ input, trx, invoice, phone, recipientEmail, t
     );
   } else state.boundaryBlock = await preSendBlock(preSendCheck, trx);
   if (!state.boundaryBlock) {
-    state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category, fresh.customer, templateKey);
+    state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category, fresh.customer,
+      templateKey, emailSuppression);
   }
   if (state.boundaryBlock) return { ok: false };
 
@@ -215,7 +221,9 @@ async function verifyAndDispatch({ input, trx, invoice, phone, recipientEmail, t
   return { ok: true };
 }
 
-async function dispatchUnderBillingEmailAuthority({ input, recipientEmail, templateKey = null, preSendCheck, dispatch, state }) {
+async function dispatchUnderBillingEmailAuthority({
+  input, recipientEmail, templateKey = null, emailSuppression = null, preSendCheck, dispatch, state,
+}) {
   try {
     const outcome = await withCustomerCommsLock(db, input.customerId, async (trx) => {
       // Suppression writers take phone before recipient rows. Resolve it
@@ -224,7 +232,7 @@ async function dispatchUnderBillingEmailAuthority({ input, recipientEmail, templ
       const phone = toE164(clean(customer?.phone));
       if (phone) await lockSmsPhone(trx, phone);
       const verifiedDispatch = (database, invoice) => verifyAndDispatch({
-        input, trx: database, invoice, phone, recipientEmail, templateKey, preSendCheck, dispatch, state,
+        input, trx: database, invoice, phone, recipientEmail, templateKey, emailSuppression, preSendCheck, dispatch, state,
       });
       return input.invoiceId
         ? require('./estimate-deposits').withInvoiceDepositSettlement(input.invoiceId, verifiedDispatch, trx)
