@@ -465,6 +465,46 @@ async function parentInvoicePaidAndNotFullyRefunded(trx, invoiceId) {
   return invoiceSettledNotRevoked(trx, invoice);
 }
 
+// "The successor's own payment backs this renewal" — the ONE definition
+// (Codex #4971 r8 / pre-push P1), read by the parent 'renewed' stamp
+// (annual-prepay-renewals.js recordParentRenewedIfEligible and its
+// reconcileParentRenewedStamps backstop) and by the late-paid alert (the
+// paid hook onRenewalSuccessorPaid, bellLatePaidRenewalUnderGate, leg 7e's
+// scan). Two halves:
+//   - the shape: live (active / renewal_pending), or the PAID decided-lapse
+//     shape — move 15: a pending successor whose NEXT renewal the customer
+//     declined, then paid, settles to 'cancelled' + renewal_decision
+//     'cancel'. That payment still proves THIS renewal was bought;
+//   - its own renewal invoice settled and not revoked (chokepoint A). A
+//     voided / refunded decided cancel has the same status and decision, so
+//     the invoice is what tells them apart — never the shape alone. Strict,
+//     unlike the parent's vacuous "no invoice = covered": no linked invoice,
+//     or a missing invoice row, is no evidence at all.
+// A dispute suspension demotes the successor to payment_pending and reopens
+// its invoice, so both halves refuse it. The dispute marker ALONE is not a
+// refusal: on a live row it is the won / re-paid recovery shape, cleared by
+// finishDisputeRecoveryForTerm after the paid sync's stamp, by design.
+function successorShapeBacksRenewal(term) {
+  return RENEWABLE_STATUSES.includes(term.status) || (term.status === 'cancelled' && term.renewal_decision === 'cancel');
+}
+
+async function successorPaymentBacksRenewal(conn, successor) {
+  if (!successor || !successorShapeBacksRenewal(successor) || !successor.prepay_invoice_id) return false;
+  const invoice = await conn('invoices').where({ id: successor.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS);
+  return Boolean(invoice) && invoiceSettledNotRevoked(conn, invoice);
+}
+
+// SQL twin: `term` is the successor's alias, `invoice` its prepay invoice
+// (an inner join on prepay_invoice_id — no invoice, no row).
+function whereSuccessorPaymentBacksRenewal(builder, term, invoice) {
+  builder.where(function successorShape() {
+    this.whereIn(`${term}.status`, RENEWABLE_STATUSES).orWhere(function paidDecidedLapse() {
+      this.where(`${term}.status`, 'cancelled').where(`${term}.renewal_decision`, 'cancel');
+    });
+  });
+  return whereInvoiceSettledNotRevoked(builder, invoice);
+}
+
 // Codex round-4 P0 (round-7 P1: extended to the active/renewal_pending
 // branch too): an ALLOW-list, never a deny-list, for whether a PARENT term
 // is still in a state that authorizes minting a successor against it, or
@@ -1243,6 +1283,10 @@ async function renewalMoneyInMotionForTerm(conn, term) {
 //      not messaged.
 async function onRenewalSuccessorPaid(successor, conn = db) {
   if (!successor?.renewed_from_term_id || !successor.annual_plan_version || conn.isTransaction) return;
+  // Only a payment that really backs the renewal (live or paid decided
+  // lapse, invoice settled and not revoked) — re-checked under the gate
+  // before any alert.
+  if (!(await successorPaymentBacksRenewal(conn, successor))) return;
   if (successor.renewal_charge_failure_kind === CHARGE_OUTCOME_PENDING) await clearChargeOutcomePending(successor, conn);
   try {
     await bellLatePaidRenewal(successor, conn);
@@ -1269,7 +1313,8 @@ async function bellLatePaidRenewal(original, conn) {
 
 async function bellLatePaidRenewalUnderGate(original, conn) {
   const successor = await conn('annual_prepay_terms').where({ id: original.id }).first();
-  if (successor?.status !== 'active' || successor.renewal_late_paid_belled_at) return 'not_owed';
+  if (!successor || successor.renewal_late_paid_belled_at) return 'not_owed';
+  if (!(await successorPaymentBacksRenewal(conn, successor))) return 'not_owed';
   const parent = await conn('annual_prepay_terms').where({ id: successor.renewed_from_term_id }).first();
   const refusal = await parentRefusalForSuccessor(conn, successor, parent);
   if (refusal.eligible || !refusal.durable) return 'not_owed';
@@ -1334,21 +1379,22 @@ async function paidAfterParentChanged(conn, successor, parent) {
   return row?.paid_after === true;
 }
 
-// Leg 7e (Codex #4971 r4 P1, item 4b backstop): an ACTIVE, settled renewal
-// paid after its parent changed, whose parent never took its 'renewed'
+// Leg 7e (Codex #4971 r4 P1, item 4b backstop): a renewal whose own payment
+// backs it (successorPaymentBacksRenewal — live, or the paid decided-lapse
+// shape since the Codex #4971 pre-push P1; settled, not revoked) paid after
+// its parent changed, whose parent never took its 'renewed'
 // stamp and whose late-paid alert has not persisted — the paid sync's own
 // alert was lost, or never ran. Rings it (bellLatePaidRenewal); a parent
 // that still authorizes the renewal is left to reconcileParentRenewedStamps.
 // Excluded once the alert persisted.
 async function bellLatePaidRenewals({ conn = db, limit = 200, counts }) {
   try {
-    const candidates = await whereInvoiceSettledNotRevoked(
+    const candidates = await whereSuccessorPaymentBacksRenewal(
       conn('annual_prepay_terms as t')
         .join('annual_prepay_terms as p', 'p.id', 't.renewed_from_term_id')
         .join('invoices as i', 'i.id', 't.prepay_invoice_id')
         .leftJoin('invoices as pi', 'pi.id', 'p.prepay_invoice_id')
         .whereNotNull('t.annual_plan_version')
-        .where('t.status', 'active')
         .whereNull('t.renewal_late_paid_belled_at')
         // The parent no longer authorizes the renewal. Codex #4971 r8 P1: a
         // parent's 'renewed' / 'renew' stamp alone is not that authority —
@@ -1368,6 +1414,7 @@ async function bellLatePaidRenewals({ conn = db, limit = 200, counts }) {
         // an old legitimate renewal behind a later refund or dispute is
         // never selected, so it can never pin this page either.
         .whereRaw(`i.paid_at > ${parentChangedAtSql()}`),
+      't',
       'i',
     )
       .orderByRaw('t.renewal_sweep_deferred_at asc nulls first')
@@ -1894,7 +1941,7 @@ const RENEWAL_BELL_COPY = {
   // the parent while the payment cleared). The renewal is left active.
   paid_after_parent_ended: (successor, reason) => ({
     title: 'Termite annual renewal — paid after the prior plan was cancelled or refunded',
-    body: `The renewal payment of $${Number(successor.prepay_amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual plan cleared after the prior plan stopped authorizing it (${reason}). The renewal was left ACTIVE and the customer was not messaged — refund it or honor it by hand.`,
+    body: `The renewal payment of $${Number(successor.prepay_amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual plan cleared after the prior plan stopped authorizing it (${reason}). ${successor.status === 'cancelled' ? 'The customer had already declined the NEXT renewal, so the renewal year stands as paid coverage through its end' : 'The renewal was left ACTIVE'}, and the customer was not messaged — refund it or honor it by hand.`,
   }),
   renewal_withdrawn: (successor, reason) => ({
     title: 'Termite annual renewal — withdrawn, renewal invoice voided',
@@ -3372,6 +3419,9 @@ module.exports = {
     classifyRenewalInvoice,
     invoiceSettledNotRevoked,
     INVOICE_EVIDENCE_COLUMNS,
+    successorShapeBacksRenewal,
+    successorPaymentBacksRenewal,
+    whereSuccessorPaymentBacksRenewal,
     whereInvoiceSettledNotRevoked,
     whereInvoiceDelivered,
     whereAttemptSubmitted,

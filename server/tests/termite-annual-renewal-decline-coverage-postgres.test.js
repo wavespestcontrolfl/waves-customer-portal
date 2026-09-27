@@ -753,6 +753,82 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'active', renewal_decision: null });
   });
 
+  // Codex #4971 pre-push P1: a declined-while-unpaid successor paid AFTER its
+  // parent was refunded is still a paid renewal behind a parent that no
+  // longer authorizes it — the parent stamp refuses (r8), and staff get the
+  // ONE refund-or-honor alert: inline from the decided-pending settlement's
+  // own paid hook, or from leg 7e when that alert is lost.
+  async function declinedSuccessorBehindRefundedParent(db) {
+    await db.raw('ALTER TABLE payments ADD COLUMN IF NOT EXISTS updated_at timestamptz');
+    await db.raw('ALTER TABLE annual_prepay_terms ADD COLUMN IF NOT EXISTS renewal_charge_failure_kind text, ADD COLUMN IF NOT EXISTS renewal_charge_failure_reason text, ADD COLUMN IF NOT EXISTS renewal_sweep_deferred_at timestamptz');
+    await require('../models/migrations/20260927040000_termite_annual_renewal_late_paid_bell_marker').up(db);
+    const fx = await declinedPendingSuccessor(db);
+    await declineWhileUnpaid(db, fx);
+    const parentInvoice = await db('invoices').where({ id: fx.parent.prepay_invoice_id }).first();
+    // The parent's year refunded in full while the renewal payment cleared.
+    await db('payments').insert({ status: 'refunded', refund_status: 'full', stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id, updated_at: new Date(Date.now() - 10 * 60000) });
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+    return fx;
+  }
+  const latePaidBells = (notifyAdmin, fx) => notifyAdmin.mock.calls
+    .filter(([, , , opts]) => opts?.dedupeKey === `termite-renewal-charge:${fx.term.id}:paid_after_parent_ended`);
+
+  test('declined while unpaid, parent refunded, then paid: the settlement\'s paid hook rings the refund-or-honor alert once; the parent is never stamped', async () => {
+    const { db, Renewals, notifyAdmin } = await load();
+    const fx = await declinedSuccessorBehindRefundedParent(db);
+
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db); // a replayed sync never re-rings
+
+    const after = await db('annual_prepay_terms').where({ id: fx.term.id }).first();
+    expect(after).toMatchObject({ status: 'cancelled', renewal_decision: 'cancel' });
+    expect(after.renewal_late_paid_belled_at).toBeInstanceOf(Date);
+    expect(latePaidBells(notifyAdmin, fx)).toHaveLength(1);
+    expect(latePaidBells(notifyAdmin, fx)[0][2]).toContain('already declined the NEXT renewal');
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'active', renewal_decision: null });
+
+    // Leg 7e has nothing left to do.
+    const counts = { latePaidScanned: 0, latePaidBelled: 0 };
+    await require('../services/termite-annual-renewal-charge')._private.bellLatePaidRenewals({ conn: db, limit: 50, counts });
+    expect(counts).toEqual({ latePaidScanned: 0, latePaidBelled: 0 });
+  });
+
+  test('the inline alert lost: leg 7e selects the paid decided-lapse successor and rings it once', async () => {
+    const { db, Renewals, notifyAdmin } = await load();
+    const fx = await declinedSuccessorBehindRefundedParent(db);
+    notifyAdmin.mockResolvedValueOnce(null); // the inline notification does not persist
+
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+    expect((await db('annual_prepay_terms').where({ id: fx.term.id }).first()).renewal_late_paid_belled_at).toBeNull();
+
+    const { bellLatePaidRenewals } = require('../services/termite-annual-renewal-charge')._private;
+    const counts = { latePaidScanned: 0, latePaidBelled: 0 };
+    await bellLatePaidRenewals({ conn: db, limit: 50, counts });
+    await bellLatePaidRenewals({ conn: db, limit: 50, counts: { latePaidScanned: 0, latePaidBelled: 0 } });
+
+    expect(counts).toEqual({ latePaidScanned: 1, latePaidBelled: 1 });
+    expect(latePaidBells(notifyAdmin, fx)).toHaveLength(2); // the lost inline one + 7e's
+    expect((await db('annual_prepay_terms').where({ id: fx.term.id }).first()).renewal_late_paid_belled_at).toBeInstanceOf(Date);
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'active', renewal_decision: null });
+  });
+
+  test('parent still eligible: declined-unpaid successor paid → parent stamped renewed, no alert, and 7e never selects it', async () => {
+    const { db, Renewals, notifyAdmin } = await load();
+    await require('../models/migrations/20260927040000_termite_annual_renewal_late_paid_bell_marker').up(db);
+    await db.raw('ALTER TABLE annual_prepay_terms ADD COLUMN IF NOT EXISTS renewal_charge_failure_kind text, ADD COLUMN IF NOT EXISTS renewal_charge_failure_reason text, ADD COLUMN IF NOT EXISTS renewal_sweep_deferred_at timestamptz');
+    const fx = await declinedPendingSuccessor(db);
+    await declineWhileUnpaid(db, fx);
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'renewed', renewal_decision: 'renew' });
+    expect(latePaidBells(notifyAdmin, fx)).toHaveLength(0);
+    const counts = { latePaidScanned: 0, latePaidBelled: 0 };
+    await require('../services/termite-annual-renewal-charge')._private.bellLatePaidRenewals({ conn: db, limit: 50, counts });
+    expect(counts.latePaidScanned).toBe(0);
+  });
+
   // Codex #4940 r10 P1: a staff correction to term_end AFTER the due-time
   // task was raised (and while it is still open).
   test('term_end corrected LATER after the task was raised: re-raised at the new date, the old open row retired', async () => {

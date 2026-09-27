@@ -3757,7 +3757,8 @@ describe('termite annual renewal charge', () => {
           };
         }
         if (table === 'invoices') return { where: jest.fn(() => ({ first: jest.fn(async () => ({ status: 'paid', paid_at: new Date() })) })) };
-        if (table === 'payments') return { whereRaw: jest.fn(() => ({ whereRaw: jest.fn(() => ({ first: jest.fn(async () => undefined) })) })) };
+        // The successor's own ledger (successorPaymentBacksRenewal): no refund.
+        if (table === 'payments') return { whereRaw: jest.fn(() => ({ first: jest.fn(async () => undefined) })) };
         throw new Error(`unexpected table ${table}`);
       });
       conn.raw = jest.fn((sql) => sql);
@@ -3788,6 +3789,46 @@ describe('termite annual renewal charge', () => {
       expect(updates.some(({ payload }) => 'status' in payload)).toBe(false);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+    });
+
+    // Codex #4971 pre-push P1: the paid decided-lapse successor (declined
+    // while unpaid, then paid) is a paid renewal too.
+    test('a PAID decided-lapse successor behind a cancelled parent: one alert that says the next renewal was already declined', async () => {
+      mockCommon();
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      const { onRenewalSuccessorPaid } = require('../services/termite-annual-renewal-charge');
+      const lapse = paidSuccessor({ status: 'cancelled', renewal_decision: 'cancel' });
+      const { conn, updates } = hookConn({ successor: lapse, parent: { id: 'parent-1', status: 'cancelled', renewal_decision: 'cancel', renewal_decision_at: '2026-09-01T12:00:00Z', term_end: '2026-09-26' } });
+
+      await onRenewalSuccessorPaid(lapse, conn);
+
+      expect(notifyAdmin).toHaveBeenCalledTimes(1);
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringContaining('already declined the NEXT renewal'), expect.objectContaining({
+        dedupeKey: 'termite-renewal-charge:succ-term-1:paid_after_parent_ended',
+      }));
+      expect(updates).toContainEqual({ filter: { id: 'succ-term-1' }, payload: { renewal_late_paid_belled_at: expect.any(Date) } });
+    });
+
+    test.each([
+      ['a refunded decided cancel', { status: 'cancelled', renewal_decision: 'cancel' }, { status: 'refunded', paid_at: new Date() }],
+      ['a cancel without a decision', { status: 'cancelled', renewal_decision: null }, { status: 'paid', paid_at: new Date() }],
+      ['a live successor on an unpaid invoice', {}, { status: 'open', paid_at: null }],
+    ])('%s: the hook does nothing — no outcome clear, no alert', async (_label, over, invoice) => {
+      mockCommon();
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      const { onRenewalSuccessorPaid } = require('../services/termite-annual-renewal-charge');
+      const successor = paidSuccessor(over);
+      const { conn, updates } = hookConn({ successor, parent: { id: 'parent-1', status: 'cancelled', renewal_decision: 'cancel', renewal_decision_at: '2026-09-01T12:00:00Z', term_end: '2026-09-26' } });
+      const realConn = conn;
+      const wrapped = jest.fn((table) => (table === 'invoices' ? { where: jest.fn(() => ({ first: jest.fn(async () => invoice) })) } : realConn(table)));
+      wrapped.raw = realConn.raw;
+
+      await onRenewalSuccessorPaid(successor, wrapped);
+
+      expect(notifyAdmin).not.toHaveBeenCalled();
+      expect(updates).toEqual([]);
     });
 
     test('a parent that still authorizes the renewal (renewed / renew): no alert; a lost alert is never marked', async () => {

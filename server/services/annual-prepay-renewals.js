@@ -3965,58 +3965,20 @@ async function stampParentRenewedForSuccessor(successorTerm, contextLabel, conn 
 // evidence — a successor refunded or dispute-suspended between the caller's
 // read and the gate must not record the parent renewed either. Both terms'
 // keys are gated (sorted; re-entrant), and under them the successor is
-// re-read (successorPaymentBacksRenewal) before the parent.
+// re-read before the parent, through the ONE shared "its payment backs the
+// renewal" predicate (termite-annual-renewal-charge.js
+// successorPaymentBacksRenewal — the late-paid alert reads the same one).
 async function recordParentRenewedIfEligible({ successorId, parentTermId }, conn = db) {
   const work = async (t) => {
     await acquireTermiteGateAtEntry(t, { termIds: [parentTermId, successorId] });
     const Charge = require('./termite-annual-renewal-charge')._private;
-    if (!(await successorPaymentBacksRenewal(t, successorId, Charge))) return null;
+    const successor = await t('annual_prepay_terms').where({ id: successorId }).first();
+    if (!(await Charge.successorPaymentBacksRenewal(t, successor))) return null;
     const parent = await t('annual_prepay_terms').where({ id: parentTermId }).first();
     if (!(await Charge.resolveParentEligibility(t, parent)).eligible) return null;
     return recordDecision({ termId: parentTermId, action: 'renew', conn: t });
   };
   return typeof conn.transaction === 'function' ? conn.transaction(work) : work(conn);
-}
-
-// The successor shapes whose own payment can prove the parent renewed:
-// live (ACTIVE_STATUSES), or — Codex #4971 r8 P2 — the PAID decided-lapse
-// shape (move 15: a pending successor whose NEXT renewal the customer
-// declined, then paid: 'cancelled' + renewal_decision 'cancel'). The
-// payment still proves THIS renewal happened. A refunded / voided decided
-// cancel has the same status and decision, so the invoice check (settled,
-// not revoked) is what tells them apart — never the shape alone. JS twin of
-// whereSuccessorShapeBacksRenewal.
-function successorShapeBacksRenewal(term) {
-  return ACTIVE_STATUSES.includes(term.status) || (term.status === 'cancelled' && term.renewal_decision === 'cancel');
-}
-
-function whereSuccessorShapeBacksRenewal(builder, alias) {
-  return builder.where(function successorShape() {
-    this.whereIn(`${alias}.status`, ACTIVE_STATUSES).orWhere(function paidDecidedLapse() {
-      this.where(`${alias}.status`, 'cancelled').where(`${alias}.renewal_decision`, 'cancel');
-    });
-  });
-}
-
-// Read under the gate: the renewal successor is in a shape above and its
-// own renewal invoice is settled and not revoked on the payments ledger
-// (chokepoint A, invoiceSettledNotRevoked). A dispute suspension demotes the
-// successor to payment_pending (suspendActiveTermsForDisputedInvoice) and
-// reopens its invoice, so the status and invoice checks refuse it. The
-// marker ALONE is not a refusal: on an ACTIVE row it is the won / re-paid
-// recovery shape, kept until finishDisputeRecoveryForTerm runs (after this
-// stamp, by design — see syncTermForInvoicePayment), and refusing it would
-// drop the revival branches' stamp.
-async function successorPaymentBacksRenewal(t, successorId, Charge) {
-  const successor = await t('annual_prepay_terms').where({ id: successorId }).first();
-  if (!successor || !successorShapeBacksRenewal(successor)) return false;
-  if (!successor.prepay_invoice_id) return false;
-  // Strict, unlike the parent's vacuous "no invoice = covered": the
-  // successor's own payment is the whole reason to stamp, so a missing
-  // invoice row is no evidence at all.
-  const invoice = await t('invoices').where({ id: successor.prepay_invoice_id })
-    .first(...Charge.INVOICE_EVIDENCE_COLUMNS);
-  return Boolean(invoice) && Charge.invoiceSettledNotRevoked(t, invoice);
 }
 
 // Codex round-2 P1 (backstop): stampParentRenewedForSuccessor's own
@@ -4048,19 +4010,22 @@ async function reconcileParentRenewedStamps({ conn = db, limit = 200 } = {}) {
     // predicate — a parent whose own prepay invoice is revoked on the ledger
     // is never offered to the renew stamp (recordParentRenewedIfEligible
     // re-checks it per row, under the gate, with the JS twin).
-    const { whereInvoiceSettledNotRevoked } = require('./termite-annual-renewal-charge')._private;
-    candidates = await whereInvoiceSettledNotRevoked(
+    // Codex #4971 r8/pre-push: the successor side is the shared SQL twin
+    // (whereSuccessorPaymentBacksRenewal: a live or paid decided-lapse
+    // shape, its invoice settled and not revoked).
+    const { whereInvoiceSettledNotRevoked, whereSuccessorPaymentBacksRenewal } = require('./termite-annual-renewal-charge')._private;
+    candidates = await whereSuccessorPaymentBacksRenewal(
       conn('annual_prepay_terms as s')
         .join('annual_prepay_terms as p', 'p.id', 's.renewed_from_term_id')
         .join('invoices as i', 'i.id', 's.prepay_invoice_id')
         .leftJoin('invoices as pi', 'pi.id', 'p.prepay_invoice_id')
         .whereNotNull('s.renewed_from_term_id')
-        .modify((q) => whereSuccessorShapeBacksRenewal(q, 's'))
         .whereIn('p.status', ACTIVE_STATUSES)
         .whereNull('p.renewal_decision')
         .where(function parentInvoiceSettled() {
           this.whereNull('p.prepay_invoice_id').orWhere(function settled() { whereInvoiceSettledNotRevoked(this, 'pi'); });
         }),
+      's',
       'i',
     )
       .select('s.id as successor_id', 's.renewed_from_term_id as parent_id')
@@ -4232,7 +4197,14 @@ async function settleDecidedPendingTerm(term, nextStatus, conn) {
     return lapse;
   };
   const ownTransaction = paidSuccessor && typeof conn.transaction === 'function' && !conn.isTransaction;
-  return ownTransaction ? conn.transaction(flip) : flip(conn);
+  const lapse = ownTransaction ? await conn.transaction(flip) : await flip(conn);
+  // Codex #4971 pre-push P1: the same paid hook as the pending -> active
+  // branch, after the flip committed (a caller's transaction is left to
+  // legs 7d / 7e, as there) — ends the write-ahead charge outcome, and a
+  // renewal paid behind a parent that no longer authorizes it gets its one
+  // refund-or-honor alert here too, never only from the backstop.
+  if (lapse && paidSuccessor) await require('./termite-annual-renewal-charge').onRenewalSuccessorPaid(lapse, conn);
+  return lapse;
 }
 
 // Paid coverage live TODAY (billing's own test, dated) — the condition for

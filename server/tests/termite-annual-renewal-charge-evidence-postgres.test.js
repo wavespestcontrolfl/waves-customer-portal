@@ -818,9 +818,18 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
     }
     const parentRow = (id) => db('annual_prepay_terms').where({ id }).first('status', 'renewal_decision');
 
-    async function waitForAdvisoryWaiter() {
+    // A waiter on THIS successor's gate key only (the two-key advisory lock
+    // acquireParentDecisionXactLock takes: hashtext(namespace),
+    // hashtext(term id)) — another session's unrelated advisory waiter on
+    // the shared test database must never read as the stamp waiting.
+    async function waitForAdvisoryWaiter(termId) {
+      const oid = (text) => `((hashtext(${text})::bigint + 4294967296) % 4294967296)`;
       for (let i = 0; i < 200; i += 1) {
-        const { rows } = await db.raw("SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted");
+        const { rows } = await db.raw(
+          `SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND objsubid = 2
+             AND classid::bigint = ${oid('?')} AND objid::bigint = ${oid('?::text')}`,
+          ['annual-prepay-parent-decision', String(termId)],
+        );
         if (rows[0].n > 0) return;
         await new Promise((r) => setTimeout(r, 25));
       }
@@ -842,7 +851,7 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       });
       await heldP;
       const run = action();
-      await waitForAdvisoryWaiter();
+      await waitForAdvisoryWaiter(successorId);
       release();
       await holder;
       return run;
