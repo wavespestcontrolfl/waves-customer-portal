@@ -145,15 +145,20 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
     const sibling = ledger({ customerId, invoiceId, eventKey, channel: 'sms' });
     const wrongSource = ledger({ customerId, invoiceId, eventKey, source: 'invoice_followup_sequence' });
     await mockDatabase('collections_contact_ledger').insert([email, sibling, wrongSource]);
+    const accepted = [email, sibling, wrongSource].map((entry) => message(
+      context({ customerId, invoiceId, eventKey, ledgerId: entry.id }),
+      { sent_at: new Date() },
+    ));
+    await mockDatabase('email_messages').insert(accepted);
 
     await expect(Reservation.markBillingEmailReservationDelivered(
-      message(context({ customerId, invoiceId, eventKey, ledgerId: email.id }), { sent_at: new Date() }), mockDatabase,
+      accepted[0], mockDatabase,
     )).resolves.toBe(true);
     await expect(Reservation.markBillingEmailReservationDelivered(
-      message(context({ customerId, invoiceId, eventKey, ledgerId: sibling.id }), { sent_at: new Date() }), mockDatabase,
+      accepted[1], mockDatabase,
     )).resolves.toBe(false);
     await expect(Reservation.markBillingEmailReservationDelivered(
-      message(context({ customerId, invoiceId, eventKey, ledgerId: wrongSource.id }), { sent_at: new Date() }), mockDatabase,
+      accepted[2], mockDatabase,
     )).resolves.toBe(false);
 
     const rows = await mockDatabase('collections_contact_ledger').orderBy('channel');
@@ -161,6 +166,86 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
     expect(rows.find((row) => row.id === sibling.id).metadata.delivered).toBeUndefined();
     expect(rows.find((row) => row.id === wrongSource.id).metadata.delivered).toBeUndefined();
   });
+
+  test.each([
+    ['current-attempt read', 'email_messages', 'send_attempt_token', 'hidden_send_attempt_token'],
+    ['ledger stamp', 'collections_contact_ledger', 'metadata', 'hidden_metadata'],
+  ])('a failed accepted %s rolls back its savepoint and leaves the supplied transaction usable', async (
+    _label, table, column, hiddenColumn,
+  ) => {
+    const customerId = randomUUID();
+    const invoiceId = randomUUID();
+    const eventKey = `late-payment:${invoiceId}:savepoint`;
+    const email = ledger({ customerId, invoiceId, eventKey });
+    const accepted = message(context({ customerId, invoiceId, eventKey, ledgerId: email.id }), {
+      status: 'sent', sent_at: new Date(),
+    });
+    await mockDatabase('collections_contact_ledger').insert(email);
+    await mockDatabase('email_messages').insert(accepted);
+
+    await expect(mockDatabase.transaction(async (parentTrx) => {
+      await parentTrx.schema.alterTable(table, (schemaTable) => schemaTable.renameColumn(column, hiddenColumn));
+      await expect(Reservation.markBillingEmailReservationDelivered(accepted, parentTrx)).resolves.toBe(false);
+      await expect(parentTrx.raw('SELECT 1 AS still_usable')).resolves.toMatchObject({ rows: [{ still_usable: 1 }] });
+      await parentTrx.schema.alterTable(table, (schemaTable) => schemaTable.renameColumn(hiddenColumn, column));
+    })).resolves.toBeUndefined();
+
+    const untouched = await mockDatabase('collections_contact_ledger').where({ id: email.id }).first();
+    expect(untouched.metadata.delivered).toBeUndefined();
+  });
+
+  function pauseAcceptedSnapshot() {
+    let snapshotRead;
+    let releaseSnapshot;
+    const snapshotReady = new Promise((resolve) => { snapshotRead = resolve; });
+    const resumed = new Promise((resolve) => { releaseSnapshot = resolve; });
+    let outerEmailRead = true;
+    const database = (table) => {
+      if (table === 'email_messages' && outerEmailRead) {
+        outerEmailRead = false;
+        return { whereIn: async (column, values) => {
+          const snapshot = await mockDatabase(table).whereIn(column, values);
+          snapshotRead();
+          await resumed;
+          return snapshot;
+        } };
+      }
+      return mockDatabase(table);
+    };
+    database.transaction = (...args) => mockDatabase.transaction(...args);
+    database.raw = (...args) => mockDatabase.raw(...args);
+    return { database, snapshotReady, releaseSnapshot };
+  }
+
+  test.each(['replaced token', 'cleared acceptance'])(
+    'accepted repair does not stamp a stale snapshot after %s', async (change) => {
+      const customerId = randomUUID();
+      const invoiceId = randomUUID();
+      const eventKey = `late-payment:${invoiceId}:repair-race`;
+      const email = ledger({ customerId, invoiceId, eventKey });
+      const accepted = message(context({ customerId, invoiceId, eventKey, ledgerId: email.id }), {
+        status: 'sent', sent_at: new Date(), send_attempt_token: 'old-attempt',
+      });
+      await mockDatabase('collections_contact_ledger').insert(email);
+      await mockDatabase('email_messages').insert(accepted);
+      const loaded = await mockDatabase('collections_contact_ledger').where({ id: email.id }).first();
+      const paused = pauseAcceptedSnapshot();
+      const repairing = Reservation.repairAcceptedBillingEmailReservations([loaded], paused.database);
+      await paused.snapshotReady;
+      try {
+        await mockDatabase('email_messages').where({ id: accepted.id }).update(change === 'replaced token'
+          ? { send_attempt_token: 'new-attempt' } : { sent_at: null, status: 'queued' });
+        await mockDatabase('collections_contact_ledger').where({ id: email.id }).update({
+          metadata: { notificationEventKey: eventKey, send_failed: true },
+        });
+      } finally { paused.releaseSnapshot(); }
+      await expect(repairing).resolves.toEqual(new Set());
+      const current = await mockDatabase('collections_contact_ledger').where({ id: email.id }).first();
+      expect(current.metadata).toMatchObject({ send_failed: true });
+      expect(current.metadata.delivered).toBeUndefined();
+      expect(loaded.metadata).toEqual(current.metadata);
+    },
+  );
 
   test('persisted invoice-followup replay repairs its invoice_followups reservation', async () => {
     const customerId = randomUUID();

@@ -130,4 +130,8 @@ function buildBillingReplayContext(input, authorityContext, notificationEventKey
   });
 }
 
-module.exports = { buildBillingReplayContext, sanitizeBillingReplayContext, INVOICE_SEND_SOURCES };
+function isBillingReplaySource(source) {
+  return SOURCES.has(String(source || '').trim());
+}
+
+module.exports = { buildBillingReplayContext, sanitizeBillingReplayContext, isBillingReplaySource, INVOICE_SEND_SOURCES };
