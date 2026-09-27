@@ -34,6 +34,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { approvalContentHash, isApproved } = require('./species-catalog-approval');
 
 const DATA_DIR = path.join(__dirname, '..', 'data', 'species-catalog-v1');
 
@@ -149,8 +150,8 @@ function listEntries(filter = {}) {
 }
 
 /**
- * Ordered ladder from category down to `id`: category → group → subgroup
- * (if any) → entry (if `id` is an entry). Each rung is
+ * Ordered ladder from category down to `id`: category → group → every
+ * parent subgroup → subgroup → entry (if `id` is an entry). Each rung is
  * `{ level, id, label, generic }`. Returns [] if `id` is unknown.
  */
 function lineage(id) {
@@ -182,9 +183,53 @@ function lineage(id) {
     if (category) rungs.push({ level: 'category', id: category.id, label: category.label, generic: category.generic });
     rungs.push({ level: 'group', id: group.id, label: group.label, generic: group.generic });
   }
-  if (subgroup) rungs.push({ level: 'subgroup', id: subgroup.id, label: subgroup.label, generic: subgroup.generic });
+  if (subgroup) {
+    const chain = [];
+    const seen = new Set();
+    for (let current = subgroup; current;) {
+      if (seen.has(current.id)) throw new Error(`species-catalog: subgroup parent cycle at "${current.id}"`);
+      seen.add(current.id);
+      chain.unshift(current);
+      const parent = current.parent ? getSubgroup(current.parent) : null;
+      if (current.parent && !parent) {
+        throw new Error(`species-catalog: subgroup "${current.id}" has unknown parent "${current.parent}"`);
+      }
+      current = parent;
+    }
+    for (const rung of chain) {
+      if (rung.group !== group?.id) {
+        throw new Error(`species-catalog: subgroup "${rung.id}" is outside group "${group?.id || ''}"`);
+      }
+      rungs.push({ level: 'subgroup', id: rung.id, label: rung.label, generic: rung.generic });
+    }
+  }
   if (entry) rungs.push({ level: 'entry', id: entry.slug, label: entry.common_name, generic: null });
   return rungs;
+}
+
+/** Generic guidance inherited only from the selected node's ancestors.
+ * Descendants are never consulted: a broad or mixed answer cannot borrow a
+ * narrower hazard, referral, or service contract. Nested safety flags merge
+ * while a selected child may override the rest of the parent contract. */
+function genericGuidance(id) {
+  let merged = null;
+  for (const rung of lineage(id)) {
+    if (rung.level === 'entry') continue;
+    const guidance = getNode(rung.id)?.generic_guidance;
+    if (!guidance) continue;
+    const compatibility = guidance.compatibility;
+    const inheritedCompatibility = merged?.compatibility;
+    merged = Object.assign({}, merged || {}, guidance);
+    if (compatibility) {
+      merged.compatibility = Object.assign({}, inheritedCompatibility || {}, compatibility);
+      if (compatibility.safety) {
+        merged.compatibility.safety = Object.assign(
+          {}, inheritedCompatibility?.safety || {}, compatibility.safety,
+        );
+      }
+    }
+  }
+  return merged;
 }
 
 /**
@@ -367,14 +412,36 @@ function fuzzyScanAcross(normalized, indexed) {
   return deeper || best;
 }
 
+function representativeTaxonPair(name, slug) {
+  const match = name.match(/^([A-Z][a-z]+ [a-z][a-z-]+) and others$/);
+  return [match ? match[1] : null, slug];
+}
+
 function buildNameIndices() {
   const scientificPairs = [];
   const aliasPairs = [];
   const commonPairs = [];
   const nodePairs = [];
   for (const e of CATALOG.entries.values()) {
-    for (const part of String(e.scientific_name || '').split('/')) {
+    // A sign's "scientific name" describes the sign ("Rattus / Mus (sign)"),
+    // not a taxon, so it never answers a genus or species query — those
+    // resolve to the organism (Codex #4974 r8).
+    const taxonNames = e.kind === 'sign' ? '' : String(e.scientific_name || '');
+    for (const part of taxonNames.split('/')) {
+      // buildWholeWordIndex centrally discards blank names from every source.
       scientificPairs.push([part, e.slug]);
+      // A stage annotation is still the same taxon. Index its bare binomial
+      // too, so an adult and larval entry sharing one species resolve the
+      // unqualified name to their common ancestor. Keep explicit stage
+      // names pointed at the corresponding entry.
+      const binomial = part.trim().replace(/ \((?:adult|larva|larvae|nymph)\)$/, '');
+      scientificPairs.push([binomial, e.slug]);
+      scientificPairs.push(...e.stages
+        .filter((stage) => /^[A-Z][a-z]+ [a-z][a-z-]+$/.test(binomial) && /^(adult|larva|larvae|nymph)$/.test(stage))
+        .map((stage) => [`${binomial} ${stage}`, e.slug]));
+      // A grouped entry may name one representative species followed by
+      // "and others". The leading binomial is still an exact taxon name.
+      scientificPairs.push(representativeTaxonPair(part.trim(), e.slug));
       // "Phyllophaga spp." also answers to its bare genus.
       const genus = part.trim().match(/^([A-Z][a-z]+) spp?\.?$/);
       if (genus) scientificPairs.push([genus[1], e.slug]);
@@ -397,15 +464,29 @@ function buildNameIndices() {
   // Only a taxon ("Solenopsis", "Latrodectus mactans") indexes as a
   // scientific name — never descriptive text like "several families".
   const TAXON = /^[A-Z][a-z]+( [a-z]+)?$/;
-  for (const g of CATALOG.groups.values()) {
-    nodePairs.push([g.label, g.id], [g.id, g.id]);
-    if (generic(g.generic)) nodePairs.push([generic(g.generic), g.id]);
+  for (const node of [...CATALOG.groups.values(), ...CATALOG.subgroups.values()]) {
+    // The shared index builder already drops blank/category-only generics.
+    nodePairs.push([node.label, node.id], [node.id, node.id], [generic(node.generic), node.id]);
+    for (const alias of node.aliases || []) nodePairs.push([alias, node.id]);
   }
   for (const sg of CATALOG.subgroups.values()) {
-    nodePairs.push([sg.label, sg.id], [sg.id, sg.id]);
-    if (generic(sg.generic)) nodePairs.push([generic(sg.generic), sg.id]);
-    for (const part of String(sg.scientific || '').split('/')) {
-      if (TAXON.test(part.trim())) nodePairs.push([part.trim(), sg.id]);
+    // Species-level situation nodes must not shadow their exact entry taxon.
+    // Multiple entries for that taxon already resolve to their shared ancestor.
+    if (sg.rank === 'species') continue;
+    const taxa = String(sg.scientific || '').split('/').map((part) => part.trim()).filter((part) => TAXON.test(part));
+    for (const taxon of taxa) {
+      const taxonMembers = [...CATALOG.entries.values()].filter((entry) => entry.kind !== 'sign'
+        && String(entry.scientific_name || '').split('/')
+          .some((name) => name.trim() === taxon || name.trim().startsWith(`${taxon} `)))
+        .map((entry) => entry.slug);
+      // A subgroup may contain only part of a taxon. Include every known
+      // member before assigning the unqualified query to that subgroup.
+      const target = commonAncestor([sg.id, ...taxonMembers]);
+      if (!target) continue;
+      nodePairs.push([taxon, target]);
+      // An entry belonging to this same named family/genus must not
+      // claim the whole taxon (for example, native vs Asian lady beetles).
+      scientificPairs.push([taxon, target]);
     }
   }
   return {
@@ -439,9 +520,15 @@ function resolveName(text) {
   const normalized = normalizeName(text);
   if (!normalized) return null;
 
+  // An entry can list phrases that name something else despite containing
+  // its name ("plaster bagworm" is an indoor casebearer, not the outdoor
+  // bagworm): such text never resolves to it (Codex #4974 r10).
+  const allowed = (node) => !(node && Array.isArray(node.not_matches)
+    && node.not_matches.some((phrase) => new RegExp(`\\b${normalizeName(phrase)}(?:s|es)?\\b`).test(normalized)));
+
   for (const via of NAME_ORDER) {
     const exact = exactMatch(normalized, NAME_INDICES[via].index);
-    if (exact) return { node: getNode(exact), via };
+    if (exact) return allowed(getNode(exact)) ? { node: getNode(exact), via } : null;
   }
 
   // On an equal-length fuzzy tie an entry's own common name ("drywood
@@ -449,7 +536,7 @@ function resolveName(text) {
   // ("drywood termites"), while a group still beats a bare generic alias
   // on one species ("termite" on subterranean termite).
   const fuzzy = fuzzyScanAcross(normalized, FUZZY_ORDER.map((via) => ({ via, index: NAME_INDICES[via].index })));
-  return fuzzy ? { node: getNode(fuzzy.id), via: fuzzy.via } : null;
+  return fuzzy && allowed(getNode(fuzzy.id)) ? { node: getNode(fuzzy.id), via: fuzzy.via } : null;
 }
 
 /** Every name claimed by two or more nodes while building the indices, with
@@ -480,11 +567,14 @@ module.exports = {
   getNode,
   listEntries,
   lineage,
+  genericGuidance,
   nextPhoto,
   lookAlikes,
   resolveName,
   resolveLegacySlug,
   nameIndexCollisions,
+  approvalContentHash,
+  isApproved,
   // Test-only escape hatch: the full merged index data, for cross-checks
   // (planned_slugs, look_alike_groups) that don't warrant their own getter.
   _index: () => readJson('index.json'),
