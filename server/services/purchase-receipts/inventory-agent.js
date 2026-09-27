@@ -1258,6 +1258,23 @@ async function productReferenceFootprint(conn, productId) {
   return footprint;
 }
 
+// Holds every row referencing the product (FOR SHARE) until the undo's
+// transaction ends: an edit or delete of one waits for the undo, so the
+// footprint compared next can't go stale before the reversal commits
+// (2026-09-27 pre-push audit). An insert or re-point TO the product needs
+// KEY SHARE on the product row for its foreign-key check, so it already
+// waits on the product lock the undo takes right after this. Taken BEFORE
+// that product lock: a writer holding a referencing row that then needs the
+// product's KEY SHARE never deadlocks against the undo.
+async function lockProductReferences(trx, productId) {
+  for (const reference of DOWNSTREAM_ADOPTION_TABLES) {
+    await trx(reference.table)
+      .where((either) => { for (const column of referenceColumns(reference)) either.orWhere(column, productId); })
+      .forShare()
+      .select('id');
+  }
+}
+
 // Refuses BEFORE any reversal or restoration when any row referencing the
 // product (DOWNSTREAM_ADOPTION_TABLES) differs from the footprint recorded
 // at the agent's decision. Called from both the undo CLI's dry run and its
@@ -1534,6 +1551,7 @@ module.exports = {
   drainAgentQueue,
   productUnchangedSinceAgent,
   productReferencesUnchangedSinceAgent,
+  lockProductReferences,
   // Exported for unit tests — see server/tests/inventory-agent.test.js.
   // These are pure (no I/O) except recordAttemptFailure, the one small
   // DB-touching unit worth testing without a full Postgres suite. No

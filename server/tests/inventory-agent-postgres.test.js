@@ -99,6 +99,19 @@ jest.setTimeout(30000);
     }
     throw new Error('no session ever waited on the catalog lock');
   }
+  // Resolves once some session waits on a ROW lock (a transaction or tuple
+  // lock) — or once `settled` settles first, so code that never waits
+  // (the bug a test is proving) fails its assertion instead of hanging.
+  async function waitForRowLockWaiterOr(settled) {
+    let done = false;
+    settled.then(() => { done = true; }, () => { done = true; });
+    for (let i = 0; i < 100 && !done; i += 1) {
+      const { rows } = await mockConn.raw("SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND wait_event IN ('transactionid', 'tuple')");
+      if (rows[0].n > 0) return;
+      await new Promise((resolve) => { setTimeout(resolve, 50); });
+    }
+  }
+
   // Releases the held side once some session waits on the lock — and ALWAYS
   // releases, even when none ever does, so a failing race test can never
   // leave its held transaction (and its locks) open and hang every later
@@ -924,6 +937,40 @@ jest.setTimeout(30000);
     expect(updated.container_size).toBe('8 oz');
     expect(await stockOf(product.id)).toBe(24);
     expect((await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).status).toBe('logged');
+  });
+
+  // 2026-09-27 pre-push audit: the product lock never blocked an edit to an
+  // EXISTING mapping, so one committing between the undo's footprint check
+  // and its reversal slipped through. The undo now holds those rows.
+  test('an edit to a referencing row that is in flight when the undo runs makes the undo wait, then refuse', async () => {
+    const [mapping] = await mockConn('service_product_usage').insert({
+      service_type: 'General Pest Control', product_id: taurus.id, usage_amount: 2, usage_unit: 'fl_oz', created_at: longAgo, updated_at: longAgo,
+    }).returning('*');
+    const line = await pendingLine({ raw_title: AGENT_ONLY_TAURUS_TITLE, product_id: null, quantity: 2, shipment_key: 'ship-concurrent-edit' });
+    await run({ ok: true, json: { ...TAURUS_DECISION, product_id: taurus.id } });
+    expect(await stockOf(taurus.id)).toBe(156);
+
+    let signalEdited;
+    const edited = new Promise((resolve) => { signalEdited = resolve; });
+    let commitEdit;
+    const commit = new Promise((resolve) => { commitEdit = resolve; });
+    // The mapping edit (as PUT /service-usage/:id makes it), open and
+    // uncommitted while the undo runs.
+    const editor = mockConn.transaction(async (trx) => {
+      await trx('service_product_usage').where({ id: mapping.id }).update({ usage_amount: 3 });
+      signalEdited();
+      await commit;
+    });
+    await edited;
+    const undo = undoLine(mockConn, { lineArg: line.id, execute: true, log: () => {} });
+    try {
+      await waitForRowLockWaiterOr(undo);
+    } finally {
+      commitEdit();
+    }
+    await editor;
+    await expect(undo).rejects.toThrow(/COGS usage mapping referencing this product was added, re-pointed, changed or removed/);
+    expect(await stockOf(taurus.id)).toBe(156); // never reversed
   });
 
   test('a real hand-off through processReceiptLine saves handoffFrom, and a gate-off drain restores that status', async () => {

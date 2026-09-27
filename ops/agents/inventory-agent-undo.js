@@ -75,7 +75,7 @@ if (require.main === module) {
 
 const path = require('path');
 const { adjustStock } = require(path.join(__dirname, '..', '..', 'server', 'services', 'inventory-operations'));
-const { productUnchangedSinceAgent, productReferencesUnchangedSinceAgent } = require(path.join(__dirname, '..', '..', 'server', 'services', 'purchase-receipts', 'inventory-agent'));
+const { productUnchangedSinceAgent, productReferencesUnchangedSinceAgent, lockProductReferences } = require(path.join(__dirname, '..', '..', 'server', 'services', 'purchase-receipts', 'inventory-agent'));
 
 function arg(name, argv) {
   const hit = argv.find((a) => a.startsWith(`--${name}=`));
@@ -180,6 +180,10 @@ async function undoLine(conn, { lineArg, execute = false, log = console.log }) {
     if (!lockedLine || lockedLine.status !== 'logged' || lockedLine.movement_id !== line.movement_id) {
       throw new Error('The line changed since the dry run — re-run to see the current state before undoing.');
     }
+    // References first, then the product (see lockProductReferences): from
+    // here to commit, nothing that references the product can change under
+    // the footprint check below.
+    await lockProductReferences(trx, line.product_id);
     await trx('products_catalog').where({ id: line.product_id }).forUpdate().first('id');
     const stillUnchanged = await productUnchangedSinceAgent(trx, line, movement);
     if (!stillUnchanged.ok) throw new Error(`Refusing to reverse: ${stillUnchanged.why}.`);
