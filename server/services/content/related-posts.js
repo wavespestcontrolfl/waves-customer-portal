@@ -266,6 +266,27 @@ function registryRowLivePath(row) {
   return normalizePathForCompare(rawPath);
 }
 
+function registryRowLiveKeys(row) {
+  const path = registryRowLivePath(row);
+  if (!path) return [];
+  const safeRow = row || {};
+  const metadata = parseJsonObject(safeRow.metadata);
+  const frontmatter = parseJsonObject(metadata.frontmatter);
+  const rawPath = [safeRow.canonical_url_normalized, safeRow.live_url, safeRow.canonical_url].find(Boolean);
+  const configuredSites = normalizeSpokeSites(frontmatter.domains);
+  const pathSites = normalizeSpokeSites([rawPath]);
+  const sites = configuredSites.length ? configuredSites : (pathSites.length ? pathSites : HUB_SITE_KEYS);
+  return sites.map((site) => `${site}|${path}`);
+}
+
+function candidateLiveKeys(candidate) {
+  const path = normalizePathForCompare(candidate?.path);
+  const sites = Array.isArray(candidate?.targetSites) && candidate.targetSites.length
+    ? candidate.targetSites
+    : HUB_SITE_KEYS;
+  return sites.map((site) => `${site}|${path}`);
+}
+
 // The registry is the only durable inventory for Astro-authored posts that
 // have neither a blog_posts row nor an autonomous run. Accept only its
 // strongest state: an Astro source is present, the workflow is published,
@@ -323,7 +344,7 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
       'category',
       'metadata'
     );
-  const liveRegistryPaths = new Set((registryRows || []).map(registryRowLivePath).filter(Boolean));
+  const liveRegistryKeys = new Set((registryRows || []).flatMap(registryRowLiveKeys));
   const candidates = (rows || [])
     .map((row) => {
       try { return candidateFromRow(row); }
@@ -333,7 +354,7 @@ async function getRelatedPostsForBrief(target = {}, { database = db, limit = REL
     // verified. Only astro_status=live proves the URL is actually deployed;
     // never offer a build_failed or still-pending target to a hard link gate.
     .filter((c) => c && c.path && c.pathVerified && c.astroStatus === 'live'
-      && c.workflowStatus === 'published' && liveRegistryPaths.has(c.path));
+      && c.workflowStatus === 'published' && candidateLiveKeys(c).some((key) => liveRegistryKeys.has(key)));
   for (const row of registryRows || []) {
     try {
       const candidate = candidateFromRegistryRow(row);
@@ -350,6 +371,7 @@ module.exports = {
   candidateFromRow,
   candidateFromRegistryRow,
   registryRowLivePath,
+  registryRowLiveKeys,
   getRelatedPostsForBrief,
   _internals: { extractTokens, entityCandidates, candidateRendersOnDomains, normalizePathForCompare, GENERIC_TOPIC_TOKENS },
 };

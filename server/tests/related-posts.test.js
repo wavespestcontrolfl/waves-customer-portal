@@ -397,6 +397,29 @@ describe('getRelatedPostsForBrief — DB wrapper', () => {
     expect(out.some((r) => r.path.includes('failed-build'))).toBe(false);
   });
 
+  test('matches current registry health to an absolute spoke URL by domain and path', async () => {
+    const spoke = 'sarasotaflpestcontrol.com';
+    const path = '/termite/spoke-live/';
+    const blogRows = [{
+      id: 'spoke-db', title: 'Spoke Termite Post', keyword: 'termite damage inspection',
+      category: 'termite', status: 'published', astro_status: 'live',
+      astro_live_url: `https://www.${spoke}${path}`,
+    }];
+    const registryRows = [{
+      id: 'registry-spoke', canonical_url_normalized: `https://www.${spoke}${path}`,
+      content_type: 'blog', reconciliation_status: 'matched', workflow_status: 'published',
+      astro_status: 'present', live_status: 'live', noindex_detected: false,
+      metadata: { frontmatter: { domains: [spoke] } },
+    }];
+
+    const out = await getRelatedPostsForBrief(
+      { service: 'termite', keyword: 'termite damage inspection', domains: [spoke] },
+      { database: fakeDb({ blogRows, registryRows }) }
+    );
+
+    expect(out.map((candidate) => candidate.path)).toEqual([path]);
+  });
+
   test('excludes a historically live DB post when current registry health is missing', async () => {
     const blogRows = [{
       id: 'stale-db', title: 'Stale Termite Post', keyword: 'termite damage inspection',
