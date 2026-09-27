@@ -7767,6 +7767,15 @@ function invoiceStillOwedAsQuoted(context) {
   };
 }
 
+function reminderReachedOnThisAttempt(outcome, thrown = false) {
+  // A deduped bell or receipt predated this run's credit seam. A fresh bell
+  // remains visible even when native push reports not_sent.
+  if (outcome?.deduped === true) return false;
+  if (outcome?.bellPersisted === true) return true;
+  if (!thrown && !outcome?.deliveryOutcome) return false;
+  return classifyDeliveryCertainty(outcome) !== 'not_sent';
+}
+
 async function sendExplicitPaymentReminderChannels({
   claimedTerm, invoice, customer, daysOut, amountDue, channels, opts,
   sentCol, claimCol, releaseClaim, reverseReminderCredit,
@@ -7849,12 +7858,10 @@ async function sendExplicitPaymentReminderChannels({
             },
           });
         } catch (err) {
-          if (err.providerOutcome?.bellPersisted === true
-            || classifyDeliveryCertainty(err.providerOutcome) !== 'not_sent') reachedNow = true;
+          reachedNow ||= reminderReachedOnThisAttempt(err.providerOutcome, true);
           throw err;
         }
-        if (outcome?.bellPersisted === true
-          || (outcome?.deliveryOutcome && classifyDeliveryCertainty(outcome) !== 'not_sent')) reachedNow = true;
+        reachedNow ||= reminderReachedOnThisAttempt(outcome);
         return outcome;
       },
     });
@@ -7902,6 +7909,14 @@ async function routeExplicitPaymentReminder(context) {
     await context.reverseReminderCredit();
     await context.releaseClaim();
     return { sent: false, reason: 'notification_prefs_unavailable' };
+  }
+  // The attempt marker and the claimed episode were decided together. If a
+  // choice appears or disappears before routing, release this claim rather
+  // than sending an unmarked explicit leg or falling through to legacy Text.
+  if (context.trackAttempt && Boolean(channels?.length) !== context.explicitAttempt) {
+    await context.reverseReminderCredit();
+    await context.releaseClaim();
+    return { sent: false, reason: 'notification_prefs_changed' };
   }
   if (context.opts.resume && !channels?.length) {
     await context.reverseReminderCredit();
@@ -8051,7 +8066,7 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
     }
     const explicit = await routeExplicitPaymentReminder({
       claimedTerm, invoice, customer, daysOut, amountDue, opts,
-      sentCol, claimCol, releaseClaim, reverseReminderCredit,
+      sentCol, claimCol, releaseClaim, reverseReminderCredit, trackAttempt, explicitAttempt,
     });
     if (explicit) return explicit;
     if (!customer.phone) {

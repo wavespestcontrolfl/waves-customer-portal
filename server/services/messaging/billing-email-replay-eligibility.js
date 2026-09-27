@@ -151,9 +151,12 @@ function validAnnualPrepayReminderPin(meta) {
     && meta.notificationEventKey === `annual-prepay-payment:${meta.annual_prepay_term_id}:${daysOut}`;
 }
 
-function annualPrepayReminderWindowOpen(firstVisitDate, daysOut, now) {
-  const offsets = Number(daysOut) === 3 ? [3, 2] : [1];
-  return offsets.some((offset) => etDateString(addETDays(now, offset)) === firstVisitDate);
+function annualPrepayReminderWindowOpen(firstVisitDate, daysOut, term, now) {
+  const stage = Number(daysOut);
+  if (etDateString(addETDays(now, stage)) === firstVisitDate) return true;
+  const resumeOffset = stage === 3 ? 2 : 0;
+  return etDateString(addETDays(now, resumeOffset)) === firstVisitDate
+    && dateOnlyString(term[`payment_reminder_${stage}d_attempted_for`]) === firstVisitDate;
 }
 
 function annualInvoiceRefusal(invoice, helpers) {
@@ -169,7 +172,7 @@ function annualTermRefusal(meta, term, now) {
   if (term.status !== 'payment_pending') return refused('annual-prepay-term-settled');
   const liveFirstVisitDate = dateOnlyString(term.first_visit_date) || dateOnlyString(term.term_start);
   if (liveFirstVisitDate !== meta.first_visit_date) return refused('annual-prepay-first-visit-changed');
-  return annualPrepayReminderWindowOpen(meta.first_visit_date, meta.days_out, now)
+  return annualPrepayReminderWindowOpen(meta.first_visit_date, meta.days_out, term, now)
     ? null : refused('annual-prepay-reminder-window-passed');
 }
 
@@ -196,7 +199,8 @@ async function annualPrepayReminderRefusal(meta, database) {
   let termQuery = database('annual_prepay_terms')
     .where({ id: meta.annual_prepay_term_id, prepay_invoice_id: meta.invoice_id, customer_id: meta.customer_id });
   if (lock) termQuery = termQuery.forUpdate();
-  const term = await termQuery.first('id', 'status', 'term_start', 'first_visit_date');
+  const term = await termQuery.first('id', 'status', 'term_start', 'first_visit_date',
+    'payment_reminder_3d_attempted_for', 'payment_reminder_1d_attempted_for');
   const now = new Date();
   const termRefusal = annualTermRefusal(meta, term, now);
   if (termRefusal) return termRefusal;

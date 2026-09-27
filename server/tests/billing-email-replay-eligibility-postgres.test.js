@@ -55,6 +55,7 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     await mockPg.schema.createTable('annual_prepay_terms', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id').notNullable(); table.uuid('prepay_invoice_id').notNullable();
       table.text('status'); table.date('term_start'); table.date('first_visit_date');
+      table.date('payment_reminder_3d_attempted_for'); table.date('payment_reminder_1d_attempted_for');
     });
     await mockPg.schema.createTable('invoice_followup_sequences', (table) => {
       table.uuid('invoice_id'); table.text('status'); table.timestamp('last_touch_at'); table.timestamp('next_touch_at');
@@ -210,4 +211,30 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     await expect(check()).resolves.toMatchObject({ ok: false, retryable: true });
     await expect(mockPg('invoices').where({ id: invoiceId }).update({ status: 'paid' })).resolves.toBe(1);
   }, 15000);
+
+  test.each([
+    [1, 0, true], [1, 0, false], [3, 2, true], [3, 2, false],
+  ])('held annual %i-day final guard on resume offset %i requires persisted attempt: %s', async (daysOut, offset, attempted) => {
+    delete process.env.GATE_COLLECTIONS_POLICY;
+    const termId = randomUUID();
+    const invoiceId = randomUUID();
+    const firstVisitDate = etDateString(addETDays(new Date(), offset));
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: customerId, status: 'sent', total: '392.04',
+      line_items: JSON.stringify([]) });
+    await mockPg('annual_prepay_terms').insert({ id: termId, customer_id: customerId,
+      prepay_invoice_id: invoiceId, status: 'payment_pending', term_start: firstVisitDate,
+      [`payment_reminder_${daysOut}d_attempted_for`]: attempted ? firstVisitDate : null });
+    const check = require('../services/annual-prepay-renewals')._private.invoiceStillOwedAsQuoted({
+      customer_id: customerId, invoice_id: invoiceId,
+      source_entry_point: 'annual_prepay_payment_reminder',
+      notificationEventKey: `annual-prepay-payment:${termId}:${daysOut}`,
+      annual_prepay_term_id: termId, first_visit_date: firstVisitDate,
+      days_out: daysOut, rendered_amount: '392.04', delivery_channel: 'email',
+    });
+    await mockPg.transaction(async (held) => {
+      const result = await check({ database: held });
+      if (attempted) expect(result).toEqual({ ok: true });
+      else expect(result).toMatchObject({ ok: false, reason: 'annual-prepay-reminder-window-passed' });
+    });
+  });
 });

@@ -667,6 +667,27 @@ describe('explicit annual payment reminder channels', () => {
     expect(reverseAppliedCredit).not.toHaveBeenCalled();
   });
 
+  test.each(['returned', 'thrown'])('reverses this run\'s credit for an old deduped App bell (%s)', async (shape) => {
+    arm('push', 40);
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 40 });
+    const oldBell = { sent: true, deliveryOutcome: 'accepted', bellPersisted: true,
+      deduped: true, eventVisibleAt: '2026-07-01T12:00:00.000Z' };
+    if (shape === 'returned') sendCustomerMessage.mockResolvedValueOnce(oldBell);
+    else sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('old bell'), { providerOutcome: oldBell }));
+    sendReminderChannels.mockImplementation(async (args) => {
+      await args.send('push', { id: 'ledger-push' });
+      return { complete: true, deliveredNow: [], results: { push: oldBell } };
+    });
+    if (shape === 'returned') {
+      await expect(AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1))
+        .resolves.toMatchObject({ sent: false, complete: true });
+    } else {
+      await expect(AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1))
+        .rejects.toThrow('old bell');
+    }
+    expect(reverseAppliedCredit).toHaveBeenCalledWith(expect.objectContaining({ amount: 40 }));
+  });
+
   test('an unreadable stored choice retries without falling through to legacy Text', async () => {
     autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 40 });
     const release = query();
@@ -723,6 +744,27 @@ describe('durable annual attempt evidence', () => {
     expect(claim.update).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['legacy to explicit', null, ['email'], null],
+    ['empty choice to explicit', [], ['email'], null],
+    ['explicit to legacy', ['email'], null, '2026-07-11'],
+  ])('holds %s preference change after claim without sending an unmarked or legacy leg', async (_label, before, after, marker) => {
+    const claim = query({ returning: [{ ...BASE_TERM }] });
+    const release = query();
+    setDbQueues({ annual_prepay_terms: [query({ columnInfo: cols }), claim, release],
+      notification_prefs: [query({ first: { billing_channels: before } }),
+        query({ first: { billing_channels: after } })],
+      invoices: [query({ first: { ...UNPAID_INVOICE } }), query({ first: { ...UNPAID_INVOICE } })],
+      invoice_followup_sequences: [query({ first: undefined })],
+      customers: [query({ first: { ...CUSTOMER } })],
+    });
+    await expect(AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 3))
+      .resolves.toEqual({ sent: false, reason: 'notification_prefs_changed' });
+    expect(claim.update).toHaveBeenCalledWith(expect.objectContaining({ payment_reminder_3d_attempted_for: marker }));
+    expect(release.update).toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('clearing the explicit choice after a resumed claim cannot fall through to Text', async () => {
     reminderProgress.mockResolvedValue([]);
     setDbQueues({ annual_prepay_terms: [query({ columnInfo: cols }),
@@ -731,7 +773,7 @@ describe('durable annual attempt evidence', () => {
       invoices: [query({ first: { ...UNPAID_INVOICE } }), query({ first: { ...UNPAID_INVOICE } })],
       invoice_followup_sequences: [query()], customers: [query({ first: { ...CUSTOMER } })] });
     await expect(AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 3, { resume: true }))
-      .resolves.toEqual({ sent: false, reason: 'resume_not_explicit' });
+      .resolves.toEqual({ sent: false, reason: 'notification_prefs_changed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(sendReminderChannels).not.toHaveBeenCalled();
   });

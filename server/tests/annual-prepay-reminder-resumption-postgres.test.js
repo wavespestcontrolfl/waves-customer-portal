@@ -162,6 +162,35 @@ postgres('annual reminder resumption and migration (PostgreSQL)', () => {
   });
 
   test.each([
+    [3, tomorrow, visit, { marker: visit }],
+    [1, today, today, { marker1d: today }],
+  ])('an attempted %i-day episode reaches its held final Email guard on the bounded resume day', async (daysOut, scanDate, firstVisit, marker) => {
+    const f = await fixture({ firstVisit, ...marker });
+    const delivery = require('../services/billing-reminder-delivery');
+    const progress = jest.spyOn(delivery, 'reminderProgress').mockResolvedValue([]);
+    const dispatch = jest.spyOn(delivery, 'sendReminderChannels').mockImplementation(async (args) => {
+      expect(args.eventKey).toBe(`annual-prepay-payment:${f.id}:${daysOut}`);
+      const outcome = await args.send('email', { id: randomUUID() });
+      return { complete: false, deliveredNow: [], results: { email: outcome } };
+    });
+    renderSmsTemplate.mockResolvedValue('Synthetic pay reminder');
+    sendCustomerMessage.mockImplementation(async (input) => {
+      const boundary = await mockPg.transaction((held) => input.preSendCheck({ database: held }));
+      expect(boundary).toEqual({ ok: true });
+      return { sent: true, deliveryOutcome: 'accepted' };
+    });
+    try {
+      await expect(annual.checkAndSendPaymentReminders({ today: scanDate })).resolves.toEqual({ sent: 1 });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
+        annual_prepay_term_id: f.id, days_out: daysOut, first_visit_date: firstVisit,
+      });
+    } finally {
+      progress.mockRestore(); dispatch.mockRestore();
+    }
+  });
+
+  test.each([
     ['never attempted', { marker1d: null }],
     ['moved visit', { marker1d: today, firstVisit: etDateString(addETDays(new Date(), 2)) }],
     ['cleared choice', { marker1d: today, channels: null }],
