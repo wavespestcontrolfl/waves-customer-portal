@@ -1172,6 +1172,17 @@ describe('internal-link PR batch guards', () => {
     expect(instance._reserveTasksForPr).toHaveBeenCalledWith([expect.objectContaining({ task: expect.objectContaining({ id: 'good' }) })], expect.any(Object));
   });
 
+  test('a transient GitHub failure leaves the candidate untouched for the next sweep', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._loadPatchCandidateTasks = jest.fn(async () => [
+      { id: 't1', source_file: 'src/content/blog/a.md', target_url: '/termite-inspection/', anchor_text: 'x' },
+    ]);
+    instance._loadSourcePage = jest.fn(async () => { throw new Error('GitHub 502: Bad Gateway'); });
+    instance._persistDryRunResult = jest.fn();
+    expect(await instance.runPrBatch({ limit: 1 })).toMatchObject({ status: 'no_candidates' });
+    expect(instance._persistDryRunResult).not.toHaveBeenCalled();
+  });
+
   test('a protected source page is skipped; a check error leaves the task for later', async () => {
     const protectedPages = require('../services/content/protected-pages');
     const instance = new InternalLinkPrExecutor();

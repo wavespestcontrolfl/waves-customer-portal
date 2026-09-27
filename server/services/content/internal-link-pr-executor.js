@@ -117,12 +117,19 @@ class InternalLinkPrExecutor {
         source = await this._loadSourcePage(task);
         target = await this._loadTargetPage(task);
       } catch (err) {
-        await this._persistDryRunResult(task.id, {
-          task_id: task.id,
-          status: 'failed',
-          failure_reason: String(err?.message || err).slice(0, 500),
-          executor_version: EXECUTOR_VERSION,
-        });
+        const reason = String(err?.message || err);
+        // Only a confirmed-missing file is terminal; a GitHub rate limit,
+        // network error or 5xx leaves the candidate for the next sweep.
+        if (/^(source_file_not_found|target_file_not_found|target_file_unresolved):/.test(reason)) {
+          await this._persistDryRunResult(task.id, {
+            task_id: task.id,
+            status: 'failed',
+            failure_reason: reason.slice(0, 500),
+            executor_version: EXECUTOR_VERSION,
+          });
+        } else {
+          logger.warn(`[internal-link-pr-executor] transient load failure for ${task.id} (retry next sweep): ${reason}`);
+        }
         continue;
       }
       // Link TARGETS may be protected money pages; the SOURCE is the page
