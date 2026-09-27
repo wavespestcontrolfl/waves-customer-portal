@@ -5,6 +5,8 @@ const knex = require('knex');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
   loadEstimateOwnershipSnapshots,
+  estimateOwnershipCustomerIds,
+  lockCustomerAccountRows,
   validateEstimateOwnershipUnderLock,
 } = require('../services/customer-account-ownership');
 
@@ -63,9 +65,15 @@ describeDb('booking estimate ownership fence on real PostgreSQL', () => {
     const booking = database.transaction(async (trx) => {
       await useSchema(trx);
       const [snapshot] = await loadEstimateOwnershipSnapshots(trx, [ESTIMATE]);
-      for (const id of [BOOKED_PROPERTY, snapshot.customerId].sort()) await lockCustomerComms(trx, id);
-      const bookedCustomer = await trx('customers').where({ id: BOOKED_PROPERTY }).forShare().first('id', 'account_id');
-      await expect(validateEstimateOwnershipUnderLock(trx, snapshot, bookedCustomer)).resolves.toBe(true);
+      const customerIds = estimateOwnershipCustomerIds(snapshot, BOOKED_PROPERTY);
+      for (const id of customerIds) await lockCustomerComms(trx, id);
+      const lockedCustomers = await lockCustomerAccountRows(trx, customerIds);
+      await expect(validateEstimateOwnershipUnderLock(
+        trx,
+        snapshot,
+        BOOKED_PROPERTY,
+        { lockedCustomers },
+      )).resolves.toMatchObject({ id: ESTIMATE, customer_id: OWNER });
       bookingValidated();
       await release;
       await trx('scheduled_services').insert({
@@ -99,5 +107,46 @@ describeDb('booking estimate ownership fence on real PostgreSQL', () => {
     }).first('id')).resolves.toBeTruthy();
     await expect(database.withSchema(schema).table('estimates').where({ id: ESTIMATE }).first('customer_id'))
       .resolves.toEqual({ customer_id: RESTORED_OWNER });
+  });
+
+  test('a committed account move is re-read after waiting on the owner fence', async () => {
+    let releaseMove;
+    let movePublished;
+    let bookingValidated = false;
+    const release = new Promise(resolve => { releaseMove = resolve; });
+    const published = new Promise(resolve => { movePublished = resolve; });
+
+    const move = database.transaction(async (trx) => {
+      await useSchema(trx);
+      await lockCustomerComms(trx, OWNER);
+      await trx('customers').where({ id: OWNER }).update({ account_id: OTHER_ACCOUNT });
+      movePublished();
+      await release;
+    });
+
+    await published;
+    const booking = database.transaction(async (trx) => {
+      await useSchema(trx);
+      const [snapshot] = await loadEstimateOwnershipSnapshots(trx, [ESTIMATE]);
+      const customerIds = estimateOwnershipCustomerIds(snapshot, BOOKED_PROPERTY);
+      for (const id of customerIds) await lockCustomerComms(trx, id);
+      const lockedCustomers = await lockCustomerAccountRows(trx, customerIds, { forUpdate: true });
+      const owned = await validateEstimateOwnershipUnderLock(
+        trx,
+        snapshot,
+        BOOKED_PROPERTY,
+        { forUpdate: true, lockedCustomers },
+      );
+      bookingValidated = true;
+      expect(owned).toBe(false);
+    });
+
+    try {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(bookingValidated).toBe(false);
+    } finally {
+      releaseMove();
+    }
+    await Promise.all([move, booking]);
   });
 });

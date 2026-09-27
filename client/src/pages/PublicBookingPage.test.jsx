@@ -171,6 +171,32 @@ describe('PublicBookingPage offer identity', () => {
       });
     });
   });
+
+  it('uses the authenticated fetch path for all three bare-entry offers', async () => {
+    const browsed = futureDay(40);
+    authState.customer = { id: 'customer-a', first_name: 'Pat', phone: '9415550101', email: 'pat@example.com' };
+    authState.isAuthenticated = true;
+    stubFetch({ browseDay: { date: browsed, fullDate: 'Saturday, September 5', nearby: false, slots: [] } });
+    render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Choose address with Apt A' }));
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    await screen.findByRole('button', { name: /^Choose 9:00 AM/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Test AI search' }));
+    fireEvent.change(await screen.findByLabelText(/Need a date further out/), { target: { value: browsed } });
+
+    await waitFor(() => {
+      const offerCalls = apiMock.fetchRaw.mock.calls.filter(([url]) => (
+        String(url).includes('/booking/availability') || String(url).includes('/booking/find-slots')
+      ));
+      expect(offerCalls).toHaveLength(3);
+      expect(offerCalls.map(([url]) => String(url))).toEqual(expect.arrayContaining([
+        expect.stringContaining('/booking/find-slots'),
+        expect.stringContaining('/booking/availability?'),
+        expect.stringContaining(`date_from=${browsed}`),
+      ]));
+    });
+  });
 });
 
 describe('PublicBookingPage custom-date failures', () => {

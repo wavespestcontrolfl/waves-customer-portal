@@ -169,6 +169,12 @@ export default function PublicBookingPage() {
   // client-side — the server enforces the gate at /confirm regardless, and
   // its refusal carries the quote link, so nothing insecure leaks through.
   const { customer: authCustomer, isAuthenticated, sendCode, verifyCode, clearError: clearAuthError, error: authError } = useAuth();
+  // Bare signed-in entries build offers under the same server-proven account
+  // that /confirm uses. Estimate/accept links carry their own identity and
+  // must not inherit an unrelated ambient portal session.
+  const fetchBookingOffer = useCallback((url, options) => (
+    isAuthenticated && !tokenEntry ? api.fetchRaw(url, options) : fetch(url, options)
+  ), [isAuthenticated, tokenEntry]);
   const [customersOnly, setCustomersOnly] = useState(null);
   // GATE_VAN_SCENE via /booking/config — the confirmation step's van scene.
   const [vanScene, setVanScene] = useState(false);
@@ -385,7 +391,7 @@ export default function PublicBookingPage() {
         params.set('lat', String(coords.lat));
         params.set('lng', String(coords.lng));
       }
-      const res = await fetch(`${API_BASE}/booking/availability?${params}`);
+      const res = await fetchBookingOffer(`${API_BASE}/booking/availability?${params}`);
       // Address edited mid-flight: don't apply this address's slots, capture
       // token, geocode echo, error, OR loading state onto the new one — the
       // re-triggered load owns those now. Checked before the ok/throw branch
@@ -432,7 +438,7 @@ export default function PublicBookingPage() {
       // Only the current request owns the loading flag.
       if (seq === addressLookupSeqRef.current) setLoading(false);
     }
-  }, [service, address, coords]);
+  }, [service, address, coords, fetchBookingOffer]);
 
   const applyCustomer = useCallback((customer) => {
     setExistingCustomerId(customer.id);
@@ -791,7 +797,7 @@ export default function PublicBookingPage() {
     const seq = addressLookupSeqRef.current;
     setAiSearching(true);
     try {
-      const res = await fetch(`${API_BASE}/booking/find-slots`, {
+      const res = await fetchBookingOffer(`${API_BASE}/booking/find-slots`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query, ...slotSearchBody() }),
@@ -842,7 +848,7 @@ export default function PublicBookingPage() {
       });
       if (estimateIdParam) params.set('estimate_id', estimateIdParam);
       if (coords?.lat && coords?.lng) { params.set('lat', String(coords.lat)); params.set('lng', String(coords.lng)); }
-      const res = await fetch(`${API_BASE}/booking/availability?${params}`);
+      const res = await fetchBookingOffer(`${API_BASE}/booking/availability?${params}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Could not check that date');
       if (!isCurrent()) return;

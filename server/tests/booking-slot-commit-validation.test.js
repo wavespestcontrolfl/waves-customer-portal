@@ -712,6 +712,19 @@ describe('signed slot offers on the /book surface (source guards)', () => {
     expect((src.match(/^\s*serviceKey,$/gm) || []).length).toBeGreaterThanOrEqual(3); // 2 routes + sign payload
   });
 
+  test('/availability and /find-slots pass only middleware-resolved bearer identity into offer binding', () => {
+    const availabilityAt = src.indexOf("router.get('/availability'");
+    const findSlotsAt = src.indexOf("router.post('/find-slots'", availabilityAt);
+    const availabilityBlock = src.slice(availabilityAt, findSlotsAt);
+    const findSlotsBlock = src.slice(findSlotsAt, src.indexOf('// POST /api/booking/capture-intent', findSlotsAt));
+    for (const block of [availabilityBlock, findSlotsBlock]) {
+      expect(block).toMatch(/const authedCustomer = await resolveBearerCustomer\(req\);/);
+      expect(block).toMatch(/resolveOfferCoords\(\{[\s\S]*authedCustomer,/);
+      expect(block).toMatch(/req\.bearerTokenExpired/);
+      expect(block).not.toMatch(/req\.(?:body|query)\.customer_id/);
+    }
+  });
+
   test('createSelfBooking requires the signed offer — service + location bound — and rejects with the plain-string 409', () => {
     // Skippable ONLY by the internal callbackVisit option (whose callers
     // re-validate against a fresh availability build); /confirm pins that

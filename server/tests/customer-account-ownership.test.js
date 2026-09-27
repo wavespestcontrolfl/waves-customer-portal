@@ -1,6 +1,7 @@
 const {
   canonicalCustomerAccountId,
   sameCustomerAccount,
+  estimateOwnershipMatchesLockedRows,
 } = require('../services/customer-account-ownership');
 
 describe('canonical customer-account ownership', () => {
@@ -31,5 +32,14 @@ describe('canonical customer-account ownership', () => {
       { id: 'primary', account_id: 'account-before' },
       { id: 'primary', account_id: 'account-after' },
     )).toBe(false);
+  });
+
+  test('a locked sibling draft is rejected after its owner leaves the booked account', () => {
+    const snapshot = { id: 'estimate-1', exists: true, customerId: 'sibling' };
+    const estimate = { id: 'estimate-1', customer_id: 'sibling' };
+    expect(estimateOwnershipMatchesLockedRows(snapshot, estimate, 'primary', [
+      { id: 'sibling', account_id: 'different-account' },
+      { id: 'primary', account_id: 'primary' },
+    ])).toBe(false);
   });
 });

@@ -10,6 +10,9 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const {
   estimateBelongsToCustomerAccount,
   loadEstimateOwnershipSnapshots,
+  estimateOwnershipCustomerIds,
+  lockCustomerAccountRows,
+  estimateOwnershipMatchesLockedRows,
   validateEstimateOwnershipUnderLock,
 } = require('../services/customer-account-ownership');
 const logger = require('../services/logger');
@@ -1040,10 +1043,12 @@ async function resolveBookingCoords({ lat, lng, address, city, estimate_id }) {
 // customerBookingLocation and refuses an offer signed on any other grid cell,
 // so the offer is built there too (Codex #4992 P1: a staff-verified pin the
 // address geocoder never returns would refuse every retry), and never
-// echoed exactly — it is a customer record's pin. Everyone else keeps
-// resolveBookingCoords. estimate_id is a raw public value: only a UUID
+// echoed exactly — it is a customer record's pin. A validated optional
+// bearer supplies the same account identity for bare signed-in entries;
+// estimate identity takes precedence for estimate links. Everyone else
+// keeps resolveBookingCoords. estimate_id is a raw public value: only a UUID
 // (LEAD_ID_RE's shape) is looked up.
-async function resolveOfferCoords({ lat, lng, address, city, state, zip, unit, estimate_id }) {
+async function resolveOfferCoords({ lat, lng, address, city, state, zip, unit, estimate_id, authedCustomer }) {
   let customer = null;
   let estimateBound = false;
   const parsed = parseRawAddress(address || '');
@@ -1067,6 +1072,15 @@ async function resolveOfferCoords({ lat, lng, address, city, state, zip, unit, e
         });
       }
     }
+  }
+  if (!estimateBound && !customer && authedCustomer) {
+    customer = await findAccountPropertyByAddress(authedCustomer, {
+      address: line1, zip: locality.zip, unit: submittedUnit,
+    });
+    // A valid bearer proves one account. Confirmation refuses any property
+    // outside it, so offers must not fall through to another household's
+    // identical address or caller-supplied coordinates.
+    if (!customer) return { lat: null, lng: null, disclosable: false };
   }
   // A bound estimate proves one account. If its submitted property matches
   // none of that account's rows, confirmation refuses it; do not fall through
@@ -1882,8 +1896,13 @@ router.get('/availability', async (req, res, next) => {
       max_self_books_per_day: 3,
     };
 
+    const { resolveBearerCustomer } = require('../middleware/auth');
+    const authedCustomer = await resolveBearerCustomer(req);
+    if (!authedCustomer && req.bearerTokenExpired) {
+      return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+    }
     const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({
-      lat, lng, address, city, state, zip, unit, estimate_id,
+      lat, lng, address, city, state, zip, unit, estimate_id, authedCustomer,
     });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
@@ -1992,8 +2011,13 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
       max_self_books_per_day: 3,
     };
 
+    const { resolveBearerCustomer } = require('../middleware/auth');
+    const authedCustomer = await resolveBearerCustomer(req);
+    if (!authedCustomer && req.bearerTokenExpired) {
+      return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+    }
     const { lat: resolvedLat, lng: resolvedLng, disclosable: coordsDisclosable } = await resolveOfferCoords({
-      lat, lng, address, city, state, zip, unit, estimate_id,
+      lat, lng, address, city, state, zip, unit, estimate_id, authedCustomer,
     });
     if (!resolvedLat || !resolvedLng) {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
@@ -4157,12 +4181,31 @@ async function createSelfBooking(payload = {}) {
     const { verifyEstimateHandoffToken: verifyFeeHandoffToken } = require('../utils/estimate-handoff-token');
     const setupFeeHandoffEligible = !!pricing_estimate_id
       && verifyFeeHandoffToken(pricing_estimate_id, estimate_token);
-    const stampDisclosedSetupFee = async (outerTrx, { allowStamp = true, stampServiceRow = null } = {}) => {
+    const stampDisclosedSetupFee = async (outerTrx, {
+      allowStamp = true,
+      stampServiceRow = null,
+      ownershipSnapshot = null,
+    } = {}) => {
             await outerTrx.transaction(async (sp) => {
-                const freshPricingEst = await sp('estimates')
-                  .where({ id: pricing_estimate_id })
-                  .forUpdate()
-                  .first('*');
+                const snapshot = ownershipSnapshot
+                  || (await loadEstimateOwnershipSnapshots(sp, [pricing_estimate_id]))[0];
+                const ownershipCustomerIds = estimateOwnershipCustomerIds(snapshot, custId);
+                for (const id of ownershipCustomerIds) await lockCustomerComms(sp, id);
+                // Lock account membership before the draft. A merge changes
+                // these rows before it repoints estimates; waiting here and
+                // then comparing the locked current rows prevents a stale
+                // sibling relationship from stamping or archiving a draft.
+                const lockedOwnershipCustomers = await lockCustomerAccountRows(
+                  sp,
+                  ownershipCustomerIds,
+                  { forUpdate: true, columns: ['*'] },
+                );
+                const freshPricingEst = await validateEstimateOwnershipUnderLock(
+                  sp,
+                  snapshot,
+                  custId,
+                  { forUpdate: true, columns: ['*'], lockedCustomers: lockedOwnershipCustomers },
+                );
                 const { wizardDraftSelfServeBookable } = require('../services/booking-pay-at-visit');
                 if (!freshPricingEst || !wizardDraftSelfServeBookable(freshPricingEst)) return;
                 // Ownership: a mirrored draft carries this customer's id; a
@@ -4174,14 +4217,13 @@ async function createSelfBooking(payload = {}) {
                 // (Codex #3489: null !== custId silently dropped the
                 // stamp). A draft linked to a DIFFERENT customer never
                 // stamps.
-                if (freshPricingEst.customer_id) {
-                  if (!await estimateBelongsToCustomerAccount(sp, freshPricingEst, custId)) return;
-                } else {
+                if (!freshPricingEst.customer_id) {
                   const last10 = (v) => {
                     const digits = String(v || '').replace(/\D/g, '');
                     return digits.length >= 10 ? digits.slice(-10) : '';
                   };
-                  const bookerRow = await sp('customers').where({ id: custId }).first('phone', 'email');
+                  const bookerRow = lockedOwnershipCustomers
+                    .find(row => String(row.id) === String(custId));
                   const estPhone10 = last10(freshPricingEst.customer_phone);
                   const estEmail = String(freshPricingEst.customer_email || '').trim().toLowerCase();
                   const contactMatches = estPhone10
@@ -4236,7 +4278,6 @@ async function createSelfBooking(payload = {}) {
                   const configuredSetupFee = `$${(Math.round(Number(RODENT.baitSetupFee) * 100) / 100).toFixed(2).replace(/\.00$/, '')}`;
                   const DRAFT_WAIVING_FAMILIES = ['pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'termite_bait'];
                   if (draftLineServices.some((svc) => DRAFT_WAIVING_FAMILIES.includes(svc))) return;
-                  await sp('customers').where({ id: custId }).forUpdate().first('id');
                   const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
                   const liveFamilies = (await loadExistingQualifyingServiceKeys(sp, custId, { strict: true, planGate: false }) || [])
                     .filter((key) => key !== 'rodent_bait');
@@ -4297,10 +4338,8 @@ async function createSelfBooking(payload = {}) {
                   && (signedFeeComponents.length === 0
                     || !signedFeeComponents.every(draftHasComponent))) return;
                 const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
-                const freshCustomer = await sp('customers')
-                  .where({ id: custId })
-                  .forUpdate()
-                  .first();
+                const freshCustomer = lockedOwnershipCustomers
+                  .find(row => String(row.id) === String(custId));
                 const activeMember = !!freshCustomer
                   && freshCustomer.active !== false
                   && isMembershipCustomerRow(freshCustomer);
@@ -4523,6 +4562,9 @@ async function createSelfBooking(payload = {}) {
       let parentExtension = null;
       try {
         const outcome = await runSeriesTxWithOwnerRetry(db, async (trx) => {
+          const activationOwnershipSnapshot = (
+            await loadEstimateOwnershipSnapshots(trx, [pricing_estimate_id])
+          )[0];
           // Rung 1 FIRST (scheduling/occupancy.js ORDERING CONTRACT — the
           // per-date occupancy locks precede every other lock, and taking
           // them after the comms/row locks below can deadlock with normal
@@ -4542,7 +4584,11 @@ async function createSelfBooking(payload = {}) {
           const lockedSeedDates = [...new Set([slotDateStr, ...plannedSeedDates])].filter(Boolean).sort();
           await acquireOccupancyLocks(trx, lockedSeedDates);
           const lockedSeedDateSet = new Set(lockedSeedDates);
-          await lockCustomerComms(trx, custId);
+          const activationOwnershipCustomerIds = estimateOwnershipCustomerIds(
+            activationOwnershipSnapshot,
+            custId,
+          );
+          for (const id of activationOwnershipCustomerIds) await lockCustomerComms(trx, id);
           // Customer row lock BEFORE any scheduled_services row lock/write in
           // this transaction (Codex #4716 r2 P1): the parent-row FOR UPDATE
           // just below (lockedParent) used to run first, with the customer
@@ -4556,7 +4602,11 @@ async function createSelfBooking(payload = {}) {
           // here, before lockedParent, puts this transaction on the same
           // customer -> row order as the merge and every other creator in
           // this file.
-          await trx('customers').where({ id: custId }).forUpdate().first('id');
+          const activationOwnershipCustomers = await lockCustomerAccountRows(
+            trx,
+            activationOwnershipCustomerIds,
+            { forUpdate: true, columns: ['*'] },
+          );
           // Duplicate-confirmation idempotency (codex #3504 r2 P1): a replay
           // can observe the pricing draft still live BEFORE the winner's
           // activation commits, pass the replay pre-checks, and wait here on
@@ -4712,8 +4762,12 @@ async function createSelfBooking(payload = {}) {
           // #3504): a concurrent refresh/promotion can leave the same
           // recurring line on an archived/promoted/commercial/mixed draft.
           const { wizardDraftSelfServeBookable: lockedShapeOk } = require('../services/booking-pay-at-visit');
-          const lockedDraftOwned = lockedDraft
-            && await estimateBelongsToCustomerAccount(trx, lockedDraft, custId);
+          const lockedDraftOwned = estimateOwnershipMatchesLockedRows(
+            activationOwnershipSnapshot,
+            lockedDraft,
+            custId,
+            activationOwnershipCustomers,
+          );
           const freshPlan = (lockedDraftOwned && lockedShapeOk(lockedDraft))
             ? freshPlanFor(lockedDraft, RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }))
             : null;
@@ -4833,7 +4887,11 @@ async function createSelfBooking(payload = {}) {
             // alone is passive — the office must decide whether this extra
             // visit rides the existing series or gets billed another way.
             await notifySeriesStripInTx(trx, seriesParentRow.id, 'the customer already has an active series for this service');
-            await stampDisclosedSetupFee(trx, { allowStamp: false, stampServiceRow: seriesParentRow });
+            await stampDisclosedSetupFee(trx, {
+              allowStamp: false,
+              stampServiceRow: seriesParentRow,
+              ownershipSnapshot: activationOwnershipSnapshot,
+            });
             return { kept: matches[0] };
           }
           const activationFamilyKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
@@ -5146,7 +5204,10 @@ async function createSelfBooking(payload = {}) {
           }
 
           if (setupFeeHandoffEligible) {
-            await stampDisclosedSetupFee(trx, { stampServiceRow: seriesParentRow });
+            await stampDisclosedSetupFee(trx, {
+              stampServiceRow: seriesParentRow,
+              ownershipSnapshot: activationOwnershipSnapshot,
+            });
           }
           // Fee-exempt families (lawn/tree quotes freeze no setup fee):
           // the stamp helper returns without consuming the draft, but the
@@ -5574,12 +5635,19 @@ async function createSelfBooking(payload = {}) {
     if (shouldSeedQuarterlyPestFollowUps && !pestDuplicateKeptAtBooking) {
       try {
         const outcome = await runSeriesTxWithOwnerRetry(db, async (trx) => {
+          const seedingOwnershipSnapshot = (
+            await loadEstimateOwnershipSnapshots(trx, [pricing_estimate_id])
+          )[0];
           // Rung 6 FIRST (Codex #3109 r37): admin/manual series creators
           // take customer-comms and THEN the series guard — this fresh
           // post-commit seeding transaction must acquire in the same
           // order, or concurrent creation for the same customer/service
           // deadlocks (the in-seeder acquire is then reentrant).
-          await lockCustomerComms(trx, custId);
+          const seedingOwnershipCustomerIds = estimateOwnershipCustomerIds(
+            seedingOwnershipSnapshot,
+            custId,
+          );
+          for (const id of seedingOwnershipCustomerIds) await lockCustomerComms(trx, id);
           // Customer row lock BEFORE the series-advisory lock (Codex #4716
           // r1 P1) — the same customer → series-advisory order admin-
           // schedule.js (~7186) and this file's own in-booking guard
@@ -5593,7 +5661,7 @@ async function createSelfBooking(payload = {}) {
           // waiting on the customer row the merge already holds, and the
           // merge waits on the advisory lock this transaction holds — a
           // deadlock Postgres resolves by aborting one side.
-          await trx('customers').where({ id: custId }).forUpdate().first('id');
+          await lockCustomerAccountRows(trx, seedingOwnershipCustomerIds, { forUpdate: true });
           // Re-read the parent under lock and confirm it is STILL this
           // customer's (Codex #4716 r3 P1): a merge can commit between the
           // booking's own transaction and this post-commit one, repointing
@@ -5686,7 +5754,10 @@ async function createSelfBooking(payload = {}) {
           // pricing path checks (draft shape, customer ownership) is
           // re-read fresh under the savepoint below.
           if (setupFeeHandoffEligible) {
-            await stampDisclosedSetupFee(trx, { stampServiceRow: effectiveParent });
+            await stampDisclosedSetupFee(trx, {
+              stampServiceRow: effectiveParent,
+              ownershipSnapshot: seedingOwnershipSnapshot,
+            });
             // NO catch here: an ERROR while deciding/stamping must abort
             // this whole seeding transaction - series and fee obligation
             // commit together or not at all, never a series with a

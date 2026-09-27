@@ -668,7 +668,7 @@ describe('booking route wiring (source contracts)', () => {
     expect(findBody).toMatch(/where\('e\.source', 'quote_wizard'\)/);
     expect(findBody).not.toMatch(/where\('e\.status', 'draft'\)/);
     expect(findBody).not.toMatch(/whereNull\('e\.archived_at'\)/);
-    expect(recovery).toMatch(/lockCustomerComms\(trx, parent\.customer_id\)/);
+    expect(recovery).toMatch(/for \(const id of ownershipCustomerIds\) await lockCustomerComms\(trx, id\);/);
     // The FULL stranded predicate re-validates under the lock (codex
     // #3504 r6 hook): status, activation, children, and the live draft.
     expect(recovery).toMatch(/\.forUpdate\(\)/);
@@ -845,7 +845,15 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/hasColumn\('scheduled_services', 'source_estimate_generation'\)/);
     // ownership never infers from content — the price match lives only in
     // mintedPriceConfirmed (r25), which is gated on the generation proof.
-    expect(recoverySrc).toMatch(/const draftRepresentsParent = draftLive\s*\n\s*&& await estimateBelongsToCustomerAccount\(trx, freshDraft, fresh\.customer_id\)\s*\n\s*&& !!fresh\.source_estimate_generation/);
+    expect(recoverySrc).toMatch(/const draftRepresentsParent = draftLive\s*\n\s*&& estimateOwnershipMatchesLockedRows\([\s\S]{0,240}draftOwnershipSnapshot,[\s\S]{0,160}lockedOwnershipCustomers,[\s\S]{0,80}\)\s*\n\s*&& !!fresh\.source_estimate_generation/);
+    const ownerFencesAt = recoverySrc.indexOf('for (const id of ownershipCustomerIds) await lockCustomerComms(trx, id);');
+    const accountRowsAt = recoverySrc.indexOf('const lockedOwnershipCustomers = await lockCustomerAccountRows(', ownerFencesAt);
+    const parentRowAt = recoverySrc.indexOf("const fresh = await trx('scheduled_services')", accountRowsAt);
+    const draftRowAt = recoverySrc.indexOf("const freshDraft = await trx('estimates')", parentRowAt);
+    expect(ownerFencesAt).toBeGreaterThan(-1);
+    expect(accountRowsAt).toBeGreaterThan(ownerFencesAt);
+    expect(parentRowAt).toBeGreaterThan(accountRowsAt);
+    expect(draftRowAt).toBeGreaterThan(parentRowAt);
     // The booking stamps the generation on the parent at INSERT, only for
     // trusted wizard pricing, column-guarded.
     expect(booking).toMatch(/sourceEstimateGeneration = pricingTrusted && pricingEstimate\?\.updated_at \? pricingEstimate\.updated_at : null;/);

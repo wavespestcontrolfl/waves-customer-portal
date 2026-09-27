@@ -47,21 +47,57 @@ async function loadEstimateOwnershipSnapshots(conn, estimateIds) {
   }));
 }
 
-async function validateEstimateOwnershipUnderLock(trx, snapshot, bookingCustomer) {
+function estimateOwnershipCustomerIds(snapshot, bookingCustomer) {
+  const bookingCustomerId = typeof bookingCustomer === 'object' ? bookingCustomer?.id : bookingCustomer;
+  return [...new Set([bookingCustomerId, snapshot?.customerId].filter(Boolean).map(String))].sort();
+}
+
+async function lockCustomerAccountRows(trx, customerIds, { forUpdate = false, columns = [] } = {}) {
+  const ids = [...new Set((customerIds || []).filter(Boolean).map(String))].sort();
+  if (!ids.length) return [];
+  const query = trx('customers')
+    .whereIn('id', ids)
+    .whereNull('deleted_at')
+    .orderBy('id');
+  if (forUpdate) query.forUpdate();
+  else query.forShare();
+  const selected = columns.includes('*') ? ['*'] : [...new Set(['id', 'account_id', ...columns])];
+  return query.select(...selected);
+}
+
+function estimateOwnershipMatchesLockedRows(snapshot, estimate, bookingCustomer, lockedCustomers) {
+  if (!snapshot?.exists || !estimate) return false;
+  const freshOwnerId = estimate.customer_id ? String(estimate.customer_id) : null;
+  if (freshOwnerId !== snapshot.customerId) return false;
+  if (!freshOwnerId) return true;
+  const bookingCustomerId = typeof bookingCustomer === 'object' ? bookingCustomer?.id : bookingCustomer;
+  const bookingRow = (lockedCustomers || []).find(row => String(row.id) === String(bookingCustomerId));
+  const ownerRow = (lockedCustomers || []).find(row => String(row.id) === freshOwnerId);
+  return sameCustomerAccount(ownerRow, bookingRow);
+}
+
+async function validateEstimateOwnershipUnderLock(trx, snapshot, bookingCustomer, options = {}) {
   if (!snapshot?.exists) return false;
-  const freshEstimate = await trx('estimates')
-    .where({ id: snapshot.id })
-    .forShare()
-    .first('id', 'customer_id');
+  const query = trx('estimates').where({ id: snapshot.id });
+  if (options.forUpdate) query.forUpdate();
+  else query.forShare();
+  const fields = options.columns?.length ? options.columns : ['id', 'customer_id'];
+  const freshEstimate = await query.first(...fields);
   if (!freshEstimate) return false;
+  if (options.lockedCustomers) {
+    return estimateOwnershipMatchesLockedRows(
+      snapshot,
+      freshEstimate,
+      bookingCustomer,
+      options.lockedCustomers,
+    ) ? freshEstimate : false;
+  }
   const freshOwnerId = freshEstimate.customer_id ? String(freshEstimate.customer_id) : null;
   if (freshOwnerId !== snapshot.customerId) return false;
-  return !freshOwnerId || estimateBelongsToCustomerAccount(
-    trx,
-    freshEstimate,
-    bookingCustomer,
-    { lockOwner: true },
+  const owned = !freshOwnerId || await estimateBelongsToCustomerAccount(
+    trx, freshEstimate, bookingCustomer, { lockOwner: true },
   );
+  return owned ? freshEstimate : false;
 }
 
 module.exports = {
@@ -69,5 +105,8 @@ module.exports = {
   sameCustomerAccount,
   estimateBelongsToCustomerAccount,
   loadEstimateOwnershipSnapshots,
+  estimateOwnershipCustomerIds,
+  lockCustomerAccountRows,
+  estimateOwnershipMatchesLockedRows,
   validateEstimateOwnershipUnderLock,
 };

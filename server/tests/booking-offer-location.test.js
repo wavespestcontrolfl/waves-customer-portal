@@ -78,6 +78,44 @@ test('a typed address that uniquely matches a returning customer is offered at t
     .resolves.toEqual({ ...storedPin, disclosable: false });
 });
 
+test('a bearer-proven account wins over an identical global address and caller coordinates', async () => {
+  const otherAccountId = '8e1f4c3b-7d5a-4e9f-a2b3-4d5e6f7a8b9c';
+  const accountPin = { lat: 27.40123, lng: -82.50123 };
+  const otherPin = { lat: 27.49999, lng: -82.59999 };
+  const authedCustomer = customerRow({
+    account_id: CUSTOMER_ID,
+    address_line2: 'Apt A',
+  });
+  listResults.customers = [
+    authedCustomer,
+    customerRow({ id: otherAccountId, account_id: otherAccountId, address_line2: 'Apt A' }),
+  ];
+  listResults.customer_geocode_reviews = [
+    {
+      customer_id: CUSTOMER_ID, status: 'verified',
+      latitude: accountPin.lat, longitude: accountPin.lng,
+      address_snapshot: [ADDRESS.address_line1, 'Apt A', ADDRESS.city, ADDRESS.state, ADDRESS.zip],
+    },
+    {
+      customer_id: otherAccountId, status: 'verified',
+      latitude: otherPin.lat, longitude: otherPin.lng,
+      address_snapshot: [ADDRESS.address_line1, 'Apt A', ADDRESS.city, ADDRESS.state, ADDRESS.zip],
+    },
+  ];
+
+  await expect(resolveOfferCoords({
+    ...CALLER,
+    address: TYPED,
+    unit: 'Apt A',
+    authedCustomer,
+    // Body/query customer identity is intentionally ignored; only the
+    // middleware-resolved bearer row reaches resolveOfferCoords.
+    customer_id: otherAccountId,
+  })).resolves.toEqual({ ...accountPin, disclosable: false });
+  await expect(resolveOfferCoords({ ...CALLER, address: TYPED, unit: 'Apt A' }))
+    .resolves.toEqual({ ...CALLER, lat: 27.3, lng: -82.5, disclosable: true });
+});
+
 test('a dedicated unit only reuses the pin for the matching household', async () => {
   const storedPin = { lat: 27.35, lng: -82.52 };
   listResults.customers = [{ id: CUSTOMER_ID, ...ADDRESS, address_line2: 'Apt A' }];

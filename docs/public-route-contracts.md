@@ -234,6 +234,13 @@ unit-aware customer at that address) at that commit location — the
 stored pin, else a staff-verified pin or the canonical geocode — over any
 caller coordinates, and echo it only rounded; `/reservice/:token` builds its
 offers on it too. Everyone else keeps the caller's coordinates or address.
+For a bare signed-in `/book` entry, all three offer requests use the portal's
+authenticated fetch path. These routes validate the optional bearer and bind
+the typed property only within that server-resolved account; a body/query
+customer id is never identity. An invalid or absent bearer keeps the public
+address behavior, an expired access token gets the refreshable 401, and an
+estimate-linked request keeps the estimate account instead of inheriting an
+ambient portal session.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`
