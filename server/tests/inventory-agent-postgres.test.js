@@ -973,6 +973,39 @@ jest.setTimeout(30000);
     expect(await stockOf(taurus.id)).toBe(156); // never reversed
   });
 
+  // 2026-09-27 pre-push audit: the catalog gives bait cartridges and blocks
+  // per-basis application rates (20260816000010_catalog_per_basis_rate_render).
+  test.each([
+    ['each/station', 'Termite Bait Cartridges', 'Termite Bait Cartridges 25 cartridges', 25],
+    ['each/placement', 'Rodent Bait Blox', 'Rodent Bait Blox 16 Count', 16],
+  ])('a count product whose application rate is %s logs, keeping that rate unit', async (defaultUnit, name, title, count) => {
+    const [product] = await mockConn('products_catalog').insert({
+      name, active: true, category: 'insecticide', container_size: `${count} count`, inventory_unit: 'each', default_unit: defaultUnit, inventory_on_hand: 0,
+    }).returning('*');
+    const line = await pendingLine({ raw_title: title, product_id: product.id, quantity: 2, shipment_key: `ship-${count}` });
+    const result = await run({ ok: true, json: {
+      kind: 'existing', reason: 'matches the candidate', product_id: product.id, new_product: null,
+      reading: { size_text: title.match(/\d+ \w+$/)[0], size_number: count, size_unit: 'each', pack_text: null, pack_count: 1 },
+    } });
+    expect(result).toMatchObject({ logged: 1, held: 0 });
+    expect(await stockOf(product.id)).toBe(2 * count);
+    expect((await mockConn('products_catalog').where({ id: product.id }).first()).default_unit).toBe(defaultUnit);
+    expect((await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).status).toBe('logged');
+  });
+
+  test('a per-area rate that is not a count (lb/100sf) still holds a count purchase', async () => {
+    const [product] = await mockConn('products_catalog').insert({
+      name: 'Granular Bait Tubs', active: true, category: 'insecticide', container_size: '4 count', inventory_unit: 'each', default_unit: 'lb/100sf', inventory_on_hand: 0,
+    }).returning('*');
+    await pendingLine({ raw_title: 'Granular Bait Tubs 4 Count', product_id: product.id, quantity: 1, shipment_key: 'ship-lb-rate' });
+    const result = await run({ ok: true, json: {
+      kind: 'existing', reason: 'matches the candidate', product_id: product.id, new_product: null,
+      reading: { size_text: '4 Count', size_number: 4, size_unit: 'each', pack_text: null, pack_count: 1 },
+    } });
+    expect(result).toMatchObject({ logged: 0, held: 1 });
+    expect(await stockOf(product.id)).toBe(0);
+  });
+
   test('a real hand-off through processReceiptLine saves handoffFrom, and a gate-off drain restores that status', async () => {
     const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
     const { drainAgentQueue } = require('../services/purchase-receipts/inventory-agent');

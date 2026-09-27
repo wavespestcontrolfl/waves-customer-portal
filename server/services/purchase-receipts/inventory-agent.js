@@ -29,7 +29,7 @@ const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { normalizeForMatch, containsWholeWords } = require('./product-matcher');
 const { parsePackSize, parsePackCount, countUnitsCompatible } = require('../product-costing');
-const { convertInventoryQuantity, normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
+const { baseQuantityUnit, convertInventoryQuantity, normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
 const inventoryOperations = require('../inventory-operations');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const {
@@ -856,7 +856,11 @@ async function fixCountDefaultUnit(trx, { productId, product }) {
     await trx('products_catalog').where({ id: productId }).update({ default_unit: 'each', updated_at: new Date() });
     return 'fixed';
   }
-  if (convertInventoryQuantity(1, defaultUnit, 'each') == null) return 'incompatible';
+  // A per-basis application rate ("each/station" for bait cartridges,
+  // "each/placement" for bait blocks) takes a count when its quantity part
+  // does — the same baseQuantityUnit visit completion deducts through — and
+  // the rate unit itself is kept (2026-09-27 pre-push audit).
+  if (convertInventoryQuantity(1, baseQuantityUnit(defaultUnit), 'each') == null) return 'incompatible';
   return 'unchanged';
 }
 
