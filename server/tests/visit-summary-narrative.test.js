@@ -223,6 +223,7 @@ test.each([
   'See you Sep 24, arriving 1–3 p.m.',
   'Your next service is scheduled for Thursday, September 24, arriving 1–3 PM.',
   'Your next follow-up is booked for Thursday, September 24, arriving 1–3 PM.',
+  'Your next visit is scheduled for Oct 2, 10 to 12 PM.',
 ])('common writer appointment form is replaced: %s', (appointmentCopy) => {
   const recap = `We treated the perimeter today. ${appointmentCopy} Keep people and pets away until dry.`;
   const facts = groundingFacts(input({ recap }));
