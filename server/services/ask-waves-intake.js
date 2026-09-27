@@ -174,12 +174,30 @@ const CHOKING_RE = new RegExp(`\\b(?:chok(?:e|ed|es|ing)|gag(?:s|ged|ging)?)\\s+
 // A person pronoun right before the verb is the patient whatever came
 // earlier ("He didn't swallow it but he choked on the bait").
 const PERSON_SUBJECT_END_RE = /\b(?:i|he|she|we|you|yo|[ée]l|ella|nosotros)\s*$/i;
+// "My child saw ants and choked on the bait": when the words just before a
+// joined verb name a pest, the exposure still counts if the nearest conjunct
+// is a person or pet whose own verb took that pest as its object ("My child
+// saw ants", "My dog chased a roach"). Nothing else changes — "The rats found
+// it and ate the bait" and "My son says the rats ran and ate the bait" keep
+// the pest as the subject.
+const COORDINATED_VERB_RE = /(?:\b(?:and|then|but|so|y|luego|pero)|,)\s*$/i;
+const CONJUNCT_SPLIT_RE = /,|\b(?:and|then|but|so|y|luego|pero)\b/i;
+const PATIENT_VERB_PEST_OBJECT_RE = new RegExp(`^\\W*(?:(?:the|a|an|el|la)\\s+)?${EXPOSURE_SUBJECT}(?:\\s+${EXPOSURE_SUBJECT})?\\s+\\S+\\s+(?:(?:the|a|an|some|two|three|a\\s+few|few|those|these|all\\s+the|una?|unos|unas|las?|los?)\\s+)?(?:${PEST_POSSESSOR}|hormigas?|cucarachas?|ratas?|ratones?|ara[ñn]as?|avispas?)\\W*$`, 'i');
 function anyPatientExposure(turn) {
   const before = (clause, m) => clause.slice(0, m.index).trim().split(/\s+/).slice(-3).join(' ');
   const patient = (words) => PERSON_SUBJECT_END_RE.test(words) || !NON_PATIENT_WORD_RE.test(words);
+  const patientAt = (clause, m) => {
+    if (patient(before(clause, m))) return true;
+    const prefix = clause.slice(0, m.index);
+    // Only a finite verb shares the subject: "choking on the bait is how they
+    // die" after "My child saw ants and" is a gerund phrase, not the child.
+    if (!COORDINATED_VERB_RE.test(prefix) || /^\w+ing\b/i.test(m[0].trim())) return false;
+    const conjuncts = prefix.split(CONJUNCT_SPLIT_RE).map((c) => c.trim()).filter(Boolean);
+    return PATIENT_VERB_PEST_OBJECT_RE.test(conjuncts[conjuncts.length - 1] || '');
+  };
   return String(turn || '').split(/(?<=[.!?;])\s+|\n+/).some((clause) => [...clause.matchAll(ANY_PATIENT_EXPOSURE_RE)]
-    .some((m) => patient(before(clause, m)) && !PASSIVE_END_RE.test(before(clause, m)))
-    || [...clause.matchAll(CHOKING_RE)].some((m) => patient(before(clause, m))));
+    .some((m) => patientAt(clause, m) && !PASSIVE_END_RE.test(before(clause, m)))
+    || [...clause.matchAll(CHOKING_RE)].some((m) => patientAt(clause, m)));
 }
 
 // A product in someone's eyes, mouth or on their skin is an exposure

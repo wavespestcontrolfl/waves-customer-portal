@@ -22,7 +22,13 @@
  * the call from this lane. Two restrictions of its own on top:
  * `customer_id IS NULL`, and no customer record knows the number
  * (utils/known-caller-phone.js — primary, service-contact and secondary
- * phones, even when call_log never linked a customer_id).
+ * phones, even when call_log never linked a customer_id). And the owner's
+ * automated-first-touch holds (rulings 2026-09-27, shared with the
+ * voicemail quote-link text — messaging/auto-text-holds.js): no text to a
+ * number with a quote or estimate on file, an open lead a staff member is
+ * working, a do-not-contact request, a call that showed a salesperson,
+ * vendor, robocall, wrong number or job applicant, or a text either way
+ * from 7 days before the call on.
  *
  * State lives in call_log.metadata under lane-OWN keys (never the bell's):
  *   missed_call_text_leased_at   — fenced lease (reclaimable once stale)
@@ -70,7 +76,7 @@ const { isRealProviderSend, isAmbiguousProviderOutcome } = require('./sms-auto-s
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { knownCallerPhoneExists } = require('../utils/known-caller-phone');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { autoTextHoldReason, deliveredTexts } = require('./messaging/auto-text-holds');
 
 const GATE = 'missedCallTextBack';
 const MESSAGE_TYPE = 'missed_call_text_back';
@@ -94,6 +100,7 @@ const BOUNDARY = {
   CLAIM_BUSY: 'MISSED_CALL_CLAIM_IN_FLIGHT',
   VOICEMAIL_TEXTED: 'MISSED_CALL_VOICEMAIL_TEXTED',
   CONTACT_IN_FLIGHT: 'MISSED_CALL_CONTACT_IN_FLIGHT',
+  HELD: 'MISSED_CALL_AUTO_TEXT_HOLD',
   CHECK_FAILED: 'MISSED_CALL_CHECK_FAILED',
 };
 // Same lease length / shape as missed-call-bell.js — long enough to cover
@@ -126,9 +133,6 @@ const ANSWERED_BY_SOMEONE = ['human', 'ai_agent'];
 const BRIDGE_LIVE_STATUSES = ['initiated', 'queued', 'ringing', 'in-progress'];
 const BRIDGE_PENDING_MS = 15 * 60 * 1000;
 const AI_OUTCOMES = ['ai_handled', 'ai_transferred'];
-// Outbound sms_log statuses that reached nobody — lead-auto-reply.js's
-// delayed-reply rule: scheduled, cancelled, or bounced.
-const UNSENT_STATUSES = ['scheduled', 'cancelled', 'canceled', 'failed', 'undelivered'];
 
 function parseMeta(meta) {
   if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
@@ -250,18 +254,12 @@ function keepClaim(phone, outcome, claimed, callLogId = null) {
   return write.catch((err) => logger.warn(`[missed-call-text-back] claim stamp failed for ${maskPhone(phone)} (${err?.code || err?.name || 'error'})`));
 }
 
-// sms_log rows that are a text that actually reached the other side — the
-// definition lead-auto-reply.js's delayed-reply check uses: an inbound
-// text, or an outbound one Twilio accepted (a real SM/MM sid) that was not
-// scheduled, cancelled or bounced. Never an unresolved send reservation (a
-// 'sending' placeholder — gratitude coordination writes one for THIS send
-// before the boundary; a failed send deletes its own).
-function deliveredTexts(dbi) {
-  return excludeUnresolvedSendReservations(dbi('sms_log'))
-    .where((q) => q.where({ direction: 'inbound' })
-      .orWhere((out) => out.where({ direction: 'outbound' })
-        .whereRaw("COALESCE(twilio_sid, '') ~ '^(SM|MM)'")
-        .where((st) => st.whereNull('status').orWhereNotIn('status', UNSENT_STATUSES))));
+// The shared hold check's options for this call (the early check and the
+// provider boundary): its own time opens the recent-conversation window,
+// its own row is read by id, and this lane's own texts are its one-shot's
+// business, not a conversation.
+function holdOptions(row, dbi = db) {
+  return { callAt: new Date(row.created_at), originCallId: row.id, excludeMessageTypes: [MESSAGE_TYPE], dbi };
 }
 
 // Contact since the missed call — checked before the lease work and again
@@ -492,9 +490,15 @@ async function sendWithLease(row, { fromNumber, phone }, releaseLease, settleFen
       await settleFenced(`skipped:${prior}`);
       return { outcome: 'skipped', reason: prior };
     }
+    // The owner's holds (see header), after the more specific reasons above.
+    const hold = await autoTextHoldReason(phone, holdOptions(row));
+    if (hold) {
+      await settleFenced(`skipped:${hold}`);
+      return { outcome: 'skipped', reason: hold };
+    }
   } catch (e) {
     await releaseLease();
-    logger.warn(`[missed-call-text-back] contact recheck failed — releasing lease (fail closed): ${e.code || e.name || 'db_error'}`);
+    logger.warn(`[missed-call-text-back] contact or hold recheck failed — releasing lease (fail closed): ${e.code || e.name || 'db_error'}`);
     return { outcome: 'error' };
   }
 
@@ -547,11 +551,11 @@ async function sendWithLease(row, { fromNumber, phone }, releaseLease, settleFen
  * preparation await, immediately before the SDK request. Everything that
  * can change between the lease and the handoff is decided again here — the
  * call itself (a voicemail recording that landed late makes it the
- * voicemail lane's), still uncontacted, then the one-shot claim (taken here
- * and nowhere earlier), then the voicemail lane's claim, then, as the last
- * step after the last await, a fresh clock against the 8am-8pm window and
- * the call's send slot. A refusal after the claim leaves it to
- * classifySendOutcome to release.
+ * voicemail lane's), still uncontacted, none of the owner's holds, then the
+ * one-shot claim (taken here and nowhere earlier), then the voicemail lane's
+ * claim, then, as the last step after the last await, a fresh clock against
+ * the 8am-8pm window and the call's send slot. A refusal after the claim
+ * leaves it to classifySendOutcome to release.
  */
 function providerBoundaryCheck(row, phone, attempt) {
   return async ({ dbi = db } = {}) => {
@@ -567,6 +571,11 @@ function providerBoundaryCheck(row, phone, attempt) {
       if (contact === 'in_flight') {
         return { ok: false, code: BOUNDARY.CONTACT_IN_FLIGHT, reason: 'another text or a staff call to this number is mid-handoff', retryable: true };
       }
+      // A hold that appeared since the early check (a quote sent, a lead
+      // assigned, a call that asked not to be contacted) stops the send
+      // here, before any claim; which one rides on the attempt.
+      attempt.hold = await autoTextHoldReason(phone, holdOptions(row, dbi));
+      if (attempt.hold) return { ok: false, code: BOUNDARY.HELD, reason: 'an owner hold applies to this number' };
       const claimed = await dbi('missed_call_text_claims')
         .insert({ phone, outcome: CLAIM.DISPATCHING, call_log_id: row.id })
         .onConflict('phone')
@@ -669,7 +678,9 @@ async function classifySendOutcome(result, phone, attempt, row, { releaseLease, 
     await settleFenced('skipped:provider_uncertain');
     return { outcome: 'skipped', reason: 'provider_uncertain' };
   }
-  const boundaryReason = !result.sent && BOUNDARY_SETTLES[result.code];
+  const boundaryReason = !result.sent && (result.code === BOUNDARY.HELD
+    ? attempt.hold || 'auto_text_hold'
+    : BOUNDARY_SETTLES[result.code]);
   if (boundaryReason) {
     if (attempt.claimed) await releaseClaim(phone);
     await settleFenced(`skipped:${boundaryReason}`);

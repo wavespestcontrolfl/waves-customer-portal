@@ -137,8 +137,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.15.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.15.0');
+  test('schema version is 1.16.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.16.0');
   });
 
   describe('model-output schema', () => {
@@ -203,6 +203,36 @@ describe('schema validation', () => {
       persisted.meta.schema_version = '1.15.0';
       persisted.caller.relationship_to_property = 'home_buyer';
       expect(validatePersisted(persisted).valid).toBe(true);
+    });
+
+    test('1.16.0: a reschedule agreement and the appointment it moves survive validation, normalization and flattening', () => {
+      const out = validModelOutput();
+      out.scheduling.status = 'reschedule_requested';
+      out.scheduling.confirmed_start_at = '2026-11-09T14:00:00-05:00';
+      out.scheduling.agent_committed_booking = true;
+      out.scheduling.caller_accepted_slot = true;
+      out.scheduling.moved_appointment_date = '2026-11-09';
+      expect(validateModelOutput(out).valid).toBe(true);
+      const data = validPersisted();
+      data.meta.schema_version = SCHEMA_VERSION;
+      Object.assign(data.scheduling, out.scheduling);
+      expect(validatePersisted(data).valid).toBe(true);
+      const normalized = normalizeExtractionV2(data);
+      expect(normalized.scheduling).toMatchObject({ caller_accepted_slot: true, moved_appointment_date: '2026-11-09' });
+      expect(flatView(normalized)).toMatchObject({ caller_accepted_slot: true, moved_appointment_date: '2026-11-09' });
+    });
+
+    test('1.16.0: a moved date that is not a date is refused, and older rows without the fields still validate', () => {
+      const out = validModelOutput();
+      out.scheduling.moved_appointment_date = 'the Thursday one';
+      expect(validateModelOutput(out).valid).toBe(false);
+      out.scheduling.moved_appointment_date = null;
+      out.scheduling.caller_accepted_slot = 'yes';
+      expect(validateModelOutput(out).valid).toBe(false);
+      const old = validPersisted();
+      old.meta.schema_version = '1.15.0';
+      expect(validatePersisted(normalizeExtractionV2(old)).valid).toBe(true);
+      expect(flatView(old)).toMatchObject({ caller_accepted_slot: false, moved_appointment_date: null });
     });
 
     test('an as-heard invalid caller email does not fail the whole extraction (server re-validates)', () => {
