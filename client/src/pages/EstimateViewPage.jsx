@@ -1583,7 +1583,10 @@ export function oneTimePriceCopy(breakdown = {}, { noGuarantee = false } = {}) {
   if (fleaItems.length > 0) {
     const hasEliminationPackage = fleaItems.some((item) => item.offerKey === 'flea_elimination_two_visit' || Number(item.visits) === 2);
     if (hasEliminationPackage) {
-      return 'Includes two interior treatments scheduled about 10-21 days apart. Retreat guarantee applies to treated areas when prep, pet-source, and follow-up requirements are met.';
+      const visits = 'Includes two interior treatments scheduled about 10-21 days apart.';
+      return noGuarantee
+        ? visits
+        : `${visits} Retreat guarantee applies to treated areas when prep, pet-source, and follow-up requirements are met.`;
     }
     return 'One interior flea treatment for active flea pressure. No retreat warranty included.';
   }
@@ -1626,7 +1629,11 @@ export function oneTimePriceCopy(breakdown = {}, { noGuarantee = false } = {}) {
   const rodentGuaranteeOnly = items.some((item) => item?.service === 'rodent_guarantee')
     && items.every((item) => item?.service === 'rodent_guarantee' || isNonBillableBreakdownRow(item));
   if (rodentGuaranteeOnly) {
-    return 'Annual rodent guarantee — 12-month re-entry warranty, renewable annually. No service visit to schedule: accept below and we send your invoice.';
+    // On a noGuaranteeClaims estimate (termite work on an authored proposal)
+    // the card states no warranty terms; the row label still names the plan.
+    return noGuarantee
+      ? 'Annual rodent plan renewal. No service visit to schedule: accept below and we send your invoice.'
+      : 'Annual rodent guarantee — 12-month re-entry warranty, renewable annually. No service visit to schedule: accept below and we send your invoice.';
   }
   // A callback period is a guarantee term: an estimate the server marks
   // noGuaranteeClaims (termite, or work it can't classify) states the visit

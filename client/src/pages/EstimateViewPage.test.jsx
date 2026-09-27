@@ -981,6 +981,22 @@ describe('oneTimePriceCopy', () => {
     expect(neutral).toMatch(/pay on service day/);
   });
 
+  it('a two-visit flea package states no retreat guarantee on a noGuaranteeClaims estimate', () => {
+    const breakdown = { total: 350, items: [{ service: 'flea', label: 'Flea Elimination', amount: 350, visits: 2 }] };
+    expect(oneTimePriceCopy(breakdown)).toMatch(/Retreat guarantee/);
+    const neutral = oneTimePriceCopy(breakdown, { noGuarantee: true });
+    expect(neutral).not.toMatch(/guarantee|warranty/i);
+    expect(neutral).toMatch(/two interior treatments/);
+  });
+
+  it('a rodent guarantee renewal states no warranty terms on a noGuaranteeClaims estimate', () => {
+    const breakdown = { total: 199, items: [{ service: 'rodent_guarantee', label: 'Rodent Guarantee', amount: 199 }] };
+    expect(oneTimePriceCopy(breakdown)).toMatch(/12-month re-entry warranty/);
+    const neutral = oneTimePriceCopy(breakdown, { noGuarantee: true });
+    expect(neutral).not.toMatch(/guarantee|warranty/i);
+    expect(neutral).toMatch(/No service visit to schedule/);
+  });
+
   it('drops the Waves Guarantee from a German roach cleanout on a noGuaranteeClaims estimate', () => {
     // The one-time card prices every one-time row: a cleanout quoted beside
     // termite trenching must not read as a guarantee on the whole charge.
