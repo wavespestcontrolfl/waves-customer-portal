@@ -1629,13 +1629,25 @@ function purchasedServiceTermsAnswer(rows, namedService, scopeRows = rows) {
 // policy. This keeps a purchased warranty or written satisfaction term usable
 // without allowing it to authorize unrelated callbacks or money-back terms.
 function writtenServiceClaimAnswer(question, context = {}, fallback = null) {
+  const oneTimeRows = Array.isArray(context.oneTime?.items) ? context.oneTime.items : [];
+  const oneTimeIdentities = new Set(oneTimeRows.map(trenchingServiceIdentity));
   const allRows = [
     ...(Array.isArray(context.services) ? context.services : []),
     ...(Array.isArray(context.recurringServices) ? context.recurringServices : []),
-    ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
+    ...oneTimeRows,
   ];
   const seenRows = new Set();
   const rows = allRows.filter((row) => {
+    // Engine frequency inclusions can carry a bare service-key placeholder
+    // for a separately priced add-on. It is not a distinct job and must not
+    // win exact-label matching over that add-on's actual purchased scope.
+    // Keep actual one-time jobs and any row with its own price or terms.
+    const unpricedPlaceholder = !row.oneTime && !oneTimeRows.includes(row)
+      && oneTimeIdentities.has(trenchingServiceIdentity(row))
+      && cleanText(row.label).toLowerCase() === cleanText(row.service).toLowerCase()
+      && !row.purchasedTerms?.length
+      && ![row.amount, row.monthly, row.perApplication].some(Number.isFinite);
+    if (unpricedPlaceholder) return false;
     const key = [row.service, row.label, row.amount, ...(row.purchasedTerms || [])]
       .map(cleanText).join('|').toLowerCase();
     if (seenRows.has(key)) return false;

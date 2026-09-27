@@ -106,6 +106,34 @@ function savedAdminEstimateData() {
 }
 
 describe('public estimate one-time breakdown', () => {
+  test.each(['one_year_retreat', 'three_year_repair_retreat', 'none'])(
+    'live and cached recurring pricing keeps the actual add-on warranty scope: %s', async (warrantyTier) => {
+      const data = { engineInputs: {
+        homeSqFt: 2400, stories: 1, lotSqFt: 9000, propertyType: 'single_family',
+        services: {
+          pest: { frequency: 'quarterly' },
+          trenching: { measurements: { perimeterLF: 240, concreteLF: 0 }, labelConfirmed: true, warrantyTier },
+        },
+      } };
+      const estimate = { id: `ask-recurring-trench-${warrantyTier}`, status: 'draft',
+        show_one_time_option: false, monthly_total: 55, onetime_total: 2400, estimate_data: data };
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const pricing = await buildPricingBundle(estimate, { monthlyBilled: true });
+        expect(pricing.source).toBe('engine_invocation');
+        const context = buildEstimateAssistantContext({ estimate, estData: data, pricingBundle: pricing,
+          noGuaranteeClaims: true, serviceMode: 'one_time' });
+        expect(context.serviceMode).toBe('recurring');
+        const answer = answerEstimateQuestionFallback('What warranty does the trenching include?', context);
+        if (warrantyTier === 'none') {
+          expect(answer).not.toContain('Annual inspection during the warranty period');
+        } else {
+          expect(answer).toContain('Annual inspection during the warranty period');
+          expect(answer).toContain('For Termite Treatment');
+        }
+      }
+    },
+  );
+
   test('public pricing bundle prefers the send snapshot when present', async () => {
     const bundle = await buildPricingBundle({
       id: 'estimate-snapshot',
