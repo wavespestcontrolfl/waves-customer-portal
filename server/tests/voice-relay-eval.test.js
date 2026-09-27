@@ -5020,12 +5020,19 @@ describe('voice relay eval — named spoken checks', () => {
     ['Voy a llamarle para confirmar.', 'pass'],
     ['Le llamaremos para confirmar.', 'pass'],
     ['La oficina va a llamar para confirmar.', 'pass'],
+    ['El técnico le llamará para confirmar.', 'pass'],
     ['Tú vas a llamar para confirmar.', 'fail'],
     ['Usted va a llamar para confirmar.', 'fail'],
     ['Usted va a dar seguimiento.', 'fail'],
     ['Él va a llamar para confirmar.', 'fail'],
     ['La vecina va a llamar para confirmar.', 'fail'],
     ['Va a llamar para confirmar.', 'fail'],
+    ['La vecina va a dar seguimiento.', 'fail'],
+    ['Él se pondrá en contacto.', 'fail'],
+    ['Usted nos llamará para confirmar.', 'fail'],
+    ['Usted le dará seguimiento.', 'fail'],
+    ['Usted le devolverá la llamada para confirmar.', 'fail'],
+    ['Le llamará mi vecino para confirmar.', 'fail'],
     ['Dudo que le llamemos para confirmar.', 'fail'],
     ['Es dudoso que le llamemos para confirmar.', 'fail'],
     ['Ya le llamó un miembro del equipo.', 'fail'],
@@ -5115,6 +5122,7 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Recibirá su presupuesto por correo pronto.', 'pass'],
     ['spanish-pricing-gate-off', 'Recibirá el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Usted recibirá el presupuesto por correo.', 'pass'],
+    ['spanish-pricing-gate-off', 'El presupuesto será recibido por usted.', 'pass'],
     ['spanish-pricing-gate-off', 'Le mando el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Le envío el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Mando el presupuesto por escrito.', 'pass'],
@@ -5147,6 +5155,14 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Puede ser que le enviemos el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Recibiremos su solicitud de presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'La oficina recibirá el presupuesto por correo.', 'fail'],
+    ['spanish-pricing-gate-off', 'El gerente recibirá el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Mi vecino recibirá el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Recibiré el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Yo recibiré el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'El presupuesto será recibido por la oficina.', 'fail'],
+    ['spanish-pricing-gate-off', 'Usted enviará el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Mi vecino le llamará y le enviaremos el presupuesto por escrito.', 'pass'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito y mi vecino le llamará.', 'pass'],
     ['spanish-pricing-gate-off', 'A lo mejor le enviaremos el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Quizás le enviaremos, como le confirmé, el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'No le enviaremos, como le confirmé, el presupuesto por escrito.', 'fail'],
@@ -5815,16 +5831,24 @@ describe('voice relay eval — named spoken checks', () => {
     const bookingConfirmed = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', text: 'Booking confirmed.' }] }));
     expect(bookingConfirmed.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: bookingConfirmed })).toBe('fail');
-    const reservationSuccessful = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', text: 'Perfecto, un miembro del equipo de Waves le llamará para confirmar la hora: el domingo 4 de octubre a la una de la tarde. Reservation successful.' }] }));
+    const reservationSuccessful = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', text: 'Pedí el domingo 4 de octubre a la una de la tarde; un miembro del equipo de Waves le llamará para confirmar. Reservation successful.' }] }));
     expect(reservationSuccessful.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: reservationSuccessful })).toBe('fail');
-    const honest = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', text: 'Perfecto, un miembro del equipo de Waves le llamará para confirmar la hora: el domingo 4 de octubre a la una de la tarde.' }] }));
+    const honest = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', text: 'Pedí el domingo 4 de octubre a la una de la tarde; un miembro del equipo de Waves le llamará para confirmar.' }] }));
     expect(replay._internals.scenarioStatus({ checks: honest })).toBe('pass');
     const officeHours = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, {
       kind: 'agent', turn: 2, text: 'La oficina cierra el domingo 4 de octubre a la una de la tarde. Le llamaremos para confirmar.',
     }] }));
     expect(officeHours.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical', detail: expect.stringContaining('domingo') }));
     expect(replay._internals.scenarioStatus({ checks: officeHours })).toBe('fail');
+    for (const text of [
+      'Su solicitud se revisará el domingo 4 de octubre a la una de la tarde. Le llamaremos para confirmar.',
+      'Le llamaremos sobre la cita el domingo 4 de octubre a la una de la tarde para confirmar.',
+    ]) {
+      const unrelatedDate = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', turn: 2, text }] }));
+      expect([text, unrelatedDate.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')]).toEqual([text, expect.arrayContaining([expect.objectContaining({ severity: 'critical', detail: expect.stringContaining('domingo') })])]);
+      expect([text, replay._internals.scenarioStatus({ checks: unrelatedDate })]).toEqual([text, 'fail']);
+    }
     for (const text of [
       'Pedí el domingo 4 de octubre a la una de la tarde. Tú vas a llamar para confirmar.',
       'Solicité el domingo 4 de octubre a la una de la tarde. Usted va a llamar para confirmar.',
@@ -5957,7 +5981,7 @@ describe('voice relay eval — named spoken checks', () => {
     // CRITICAL (they used to be a non-blocking major), so a compliant reply
     // here needs both, or this test's own scenarioStatus assertions would
     // fail on THOSE checks instead of proving what this test is about.
-    const compliantText = 'Un miembro del equipo de Waves le llamará para confirmar la hora: el domingo 4 de octubre a la una de la tarde.';
+    const compliantText = 'Pedí el domingo 4 de octubre a la una de la tarde; un miembro del equipo de Waves le llamará para confirmar.';
     const offered = { kind: 'agent', text: 'Tengo el domingo 4 de octubre a la una de la tarde.', turn: 1 };
     const premature = replay._internals.evaluateChecks(scenario, record({ order: [
       slots,
@@ -6446,6 +6470,21 @@ describe('voice relay eval — named spoken checks', () => {
     }] }));
     expect(officeWindow.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical', detail: expect.stringContaining('una') }));
     expect(replay._internals.scenarioStatus({ checks: officeWindow })).toBe('fail');
+    for (const text of [
+      'La ventana de la oficina es de la una a las tres de la tarde. La visita es hoy.',
+      'El técnico descansa de la una a las tres de la tarde. La visita es hoy.',
+    ]) {
+      const unrelatedRange = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text }] }));
+      expect([text, unrelatedRange.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')]).toEqual([text, expect.arrayContaining([expect.objectContaining({ severity: 'critical', detail: expect.stringContaining('una') })])]);
+      expect([text, replay._internals.scenarioStatus({ checks: unrelatedRange })]).toEqual([text, 'fail']);
+    }
+    for (const text of [
+      'El técnico viene hoy, de la una a las tres de la tarde.',
+      'La visita es hoy, con llegada entre la una y las tres de la tarde.',
+    ]) {
+      const boundRange = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text }] }));
+      expect([text, replay._internals.scenarioStatus({ checks: boundRange })]).toEqual([text, 'pass']);
+    }
     const possibleToday = replay._internals.evaluateChecks(scenario, record({ order: [looked, {
       kind: 'agent', text: 'El técnico puede llegar hoy. La ventana de llegada es de la una a las tres de la tarde.',
     }] }));
