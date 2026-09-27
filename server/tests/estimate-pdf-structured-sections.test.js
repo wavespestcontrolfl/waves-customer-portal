@@ -12,7 +12,10 @@ const zlib = require('zlib');
 // operators, so drop the logo (the headerBar text fallback renders instead).
 jest.mock('../services/pdf/brand-logo', () => ({ getLogoBuffer: () => null }));
 
-const { buildEstimateProposalPDFBuffer } = require('../services/pdf/estimate-pdf');
+const {
+  buildEstimateProposalEmailAttachment,
+  buildEstimateProposalPDFBuffer,
+} = require('../services/pdf/estimate-pdf');
 
 // pdfkit deflate-compresses content streams and writes text as hex-encoded
 // TJ arrays split at kern pairs (`[<5045> 20 <5354>] TJ`). Inflate each
@@ -121,6 +124,55 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     };
     const untouched = await buildEstimateProposalPDFBuffer(legacyNoTerms, { billsPerApplication: false });
     expect(extractPdfText(untouched)).toContain('callback guarantee between scheduled visits');
+  });
+
+  test.each(['Termite trenching', 'WDO inspection'])(
+    'a mixed recurring-pest + %s proposal keeps its priced scope but suppresses the fallback guarantee',
+    async (oneTimeDescription) => {
+      const mixed = {
+        ...STRUCTURED_ESTIMATE,
+        estimate_data: {
+          proposal: {
+            enabled: true,
+            title: 'Residential Service Proposal',
+            buildings: [{
+              name: 'Service location',
+              lineItems: [
+                { description: 'Quarterly pest control', unitPrice: 120, frequency: 'quarterly', taxable: false },
+                { description: oneTimeDescription, unitPrice: 1200, frequency: 'one_time', taxable: false },
+              ],
+            }],
+          },
+        },
+      };
+      const buffer = await buildEstimateProposalPDFBuffer(mixed, { billsPerApplication: false });
+      const text = extractPdfText(buffer);
+      expect(text).toContain('Quarterly pest control');
+      expect(text).toContain(oneTimeDescription);
+      expect(text).toContain('$1,200.00');
+      expect(text).not.toContain('callback guarantee between scheduled visits');
+    },
+  );
+
+  test('the email attachment entry point applies the same no-guarantee policy', async () => {
+    const mixed = {
+      ...STRUCTURED_ESTIMATE,
+      estimate_data: {
+        proposal: {
+          enabled: true,
+          buildings: [{
+            name: 'Service location',
+            lineItems: [
+              { description: 'Quarterly pest control', unitPrice: 120, frequency: 'quarterly', taxable: false },
+              { description: 'Termite trenching', unitPrice: 1200, frequency: 'one_time', taxable: false },
+            ],
+          }],
+        },
+      },
+    };
+    const attachment = await buildEstimateProposalEmailAttachment(mixed, { billsPerApplication: false });
+    expect(extractPdfText(Buffer.from(attachment.content, 'base64')))
+      .not.toContain('callback guarantee between scheduled visits');
   });
 
   test('an oversized corrective row (12 long bullets) paginates instead of overflowing (codex #3297 r2)', async () => {

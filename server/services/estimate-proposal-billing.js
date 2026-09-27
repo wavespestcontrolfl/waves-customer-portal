@@ -34,6 +34,22 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { customerPreservesMonthlyMembership } = require('./billing-cadence');
 
+// Every PDF renderer asks the public estimate route's one service-mix policy;
+// this module already owns the route's lazy dependency for proposal pricing,
+// so keeping the guarantee lookup here avoids a second taxonomy in pdf code.
+// Unknown policy context fails closed to neutral copy.
+function proposalMakesNoGuaranteeClaim(estimate, billing = {}) {
+  try {
+    const { estimateMakesNoGuaranteeClaim, parseEstimateDataSafe } = require('../routes/estimate-public');
+    if (typeof estimateMakesNoGuaranteeClaim !== 'function' || typeof parseEstimateDataSafe !== 'function') return true;
+    const liveBundle = billing?.livePricing?.bundle || {};
+    return estimateMakesNoGuaranteeClaim(parseEstimateDataSafe(estimate), liveBundle);
+  } catch (err) {
+    logger.warn(`[estimate-proposal-billing] guarantee-policy lookup failed for estimate ${estimate?.id}: ${err.message}`);
+    return true;
+  }
+}
+
 // An estimate with no customer_id still links at accept through the SAME
 // phone matcher the accept path uses, so an existing member can be on the
 // other end of an unlinked estimate. Mirrors estimateCustomerPreservesMonthly
@@ -226,6 +242,7 @@ module.exports = {
   estimateBillsPerApplication,
   estimateIsPriceLocked,
   estimateSoldAsAnnualPrepay,
+  proposalMakesNoGuaranteeClaim,
   resolveLivePricing,
   resolveProposalBillingContext,
 };

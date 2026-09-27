@@ -149,6 +149,27 @@ describe('GET /:token/data — noGuaranteeClaims', () => {
     expect(body.estimate.noGuaranteeClaims).toBe(true);
   });
 
+  test('unwrapped legacy termite one-time work sets the public policy', async () => {
+    const base = estimateRow();
+    const body = await dataFor(estimateRow({
+      id: 'est-unwrapped', token: 'unwrappedtermitetoken',
+      estimate_data: { ...base.estimate_data.result, sendSnapshot: base.estimate_data.sendSnapshot },
+    }));
+    expect(body.estimate.noGuaranteeClaims).toBe(true);
+  });
+
+  test.each(['pest', 'lawn'])('inputs-only %s recurring estimates keep the public guarantee policy', async (service) => {
+    const body = await dataFor(estimateRow({
+      id: `est-inputs-${service}`, token: `inputsonly${service}token`, onetime_total: 0,
+      estimate_data: { engineInputs: {
+        homeSqFt: 2000, lotSqFt: 8000,
+        services: { [service]: service === 'pest' ? { frequency: 'quarterly' } : { frequency: 'premium' } },
+      } },
+    }));
+    expect(body.estimate).not.toHaveProperty('noGuaranteeClaims');
+    expect(body.pricing.frequencies.length).toBeGreaterThan(0);
+  });
+
   test('a disabled retained termite proposal does not suppress the current pest-plan guarantees', async () => {
     const base = estimateRow();
     const body = await dataFor(estimateRow({

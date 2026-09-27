@@ -20006,14 +20006,28 @@ function serviceMixMakesNoGuaranteeClaim(recurringServices = [], oneTimeItems = 
 function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
   // Mapped pricing can omit a raw one-time line. Classify both persisted
   // roots, just as recurring rows do, without changing displayed totals.
+  const roots = [estData?.result, estData?.engineResult]
+    .filter((root) => root && typeof root === 'object');
+  if (!roots.length) {
+    roots.push(estData);
+    // Inputs-only saves are rendered by replaying the engine. Classify that
+    // same complete result, including its one-time work, instead of treating
+    // a sellable recurring plan as empty or losing its termite add-ons.
+    const engineInputs = extractEngineInputs(estData);
+    if (engineInputs) {
+      try { roots.push(generateEstimate(engineInputs)); }
+      catch (err) {
+        logger.warn(`[estimate-data] guarantee classification replay failed: ${err.message}`);
+        return true;
+      }
+    }
+  }
   const oneTimeItems = [
-    ...[estData?.result, estData?.engineResult]
-      .filter((root) => root && typeof root === 'object')
-      .flatMap((result) => normalizeOneTimeBreakdown({ ...estData, result }).items),
+    ...roots.flatMap((result) => normalizeOneTimeBreakdown({ ...estData, result }).items),
     ...(pricingBundle?.oneTimeBreakdown?.items || []),
     ...guaranteeProposalRows(estData),
   ];
-  return serviceMixMakesNoGuaranteeClaim(guaranteeRecurringRows(estData), oneTimeItems);
+  return serviceMixMakesNoGuaranteeClaim(roots.flatMap(guaranteeRecurringRows), oneTimeItems);
 }
 
 // Optional service-category scope for the glass release: CSV env, e.g.

@@ -1,7 +1,12 @@
 import React, { useMemo, useState } from 'react';
 import { WAVES_ACCOUNT_MANAGER_FIRST_NAME, WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { fmtMoney } from '../lib/money';
-import { glassCtaMicroForKeys, glassRowInclusions, glassServiceSlug } from '../lib/estimate-glass-copy';
+import {
+  copyHasGuaranteeClaim,
+  glassCtaMicroForKeys,
+  glassRowInclusions,
+  glassServiceSlug,
+} from '../lib/estimate-glass-copy';
 import { commercialTermRows, proposalHasAuthoredTerms } from '../lib/proposal-sections';
 import { formatLineBasis, showsLineBasis } from '@proposal-bid';
 import { formatETDateTime } from '../lib/timezone';
@@ -128,6 +133,12 @@ function Bullet({ children }) {
   );
 }
 
+function proposalInclusions(items, noGuarantee) {
+  if (!Array.isArray(items)) return null;
+  const visible = noGuarantee ? items.filter((line) => !copyHasGuaranteeClaim(line)) : items;
+  return visible.length ? visible : null;
+}
+
 export default function EstimateProposalDocument({ data, token }) {
   const estimate = data?.estimate || {};
   const proposal = data?.proposal || null;
@@ -184,11 +195,13 @@ export default function EstimateProposalDocument({ data, token }) {
   const responsibilities = Array.isArray(proposal?.customerResponsibilities)
     ? proposal.customerResponsibilities : [];
   const termRows = commercialTermRows(proposal?.commercialTerms);
+  const noGuarantee = data?.estimate?.noGuaranteeClaims === true;
   const inclusionStacks = useMemo(() => {
     if (authoredTermsPresent || programList.length) return [];
     if (isCommercial) {
       const stack = pestRecurringOnly ? glassRowInclusions('commercial_pest') : null;
-      return stack ? [{ key: 'commercial_pest', title: 'What your commercial pest service includes', items: stack }] : [];
+      const items = proposalInclusions(stack, noGuarantee);
+      return items ? [{ key: 'commercial_pest', title: 'What your commercial pest service includes', items }] : [];
     }
     const seen = new Map();
     for (const building of buildings) {
@@ -199,12 +212,12 @@ export default function EstimateProposalDocument({ data, token }) {
         const visits = item.frequency === 'per_application'
           ? (Number(item.visitsPerYear) || null)
           : (FREQUENCY_VISITS[item.frequency] || null);
-        const items = glassRowInclusions(slug, visits, false);
+        const items = proposalInclusions(glassRowInclusions(slug, visits, false), noGuarantee);
         if (items) seen.set(slug, { key: slug, title: 'What this service includes', items });
       }
     }
     return [...seen.values()];
-  }, [isCommercial, pestRecurringOnly, authoredTermsPresent, buildings, programList]);
+  }, [isCommercial, pestRecurringOnly, authoredTermsPresent, buildings, programList, noGuarantee]);
 
   // Terms line — only claims the estimate page itself already makes for the
   // same services. Authored terms govern (neutral line beside them, never a
@@ -218,7 +231,6 @@ export default function EstimateProposalDocument({ data, token }) {
   // A termite (or unclassifiable) estimate makes no guarantee claim: the
   // server's noGuaranteeClaims decision, shared with the page and the
   // estimate emails.
-  const noGuarantee = data?.estimate?.noGuaranteeClaims === true;
   const NEUTRAL_TERMS = noGuarantee ? 'Licensed & insured' : 'Licensed & insured · Satisfaction guaranteed';
   const recurringLineDescriptions = buildings
     .flatMap((b) => (b.lineItems || []))

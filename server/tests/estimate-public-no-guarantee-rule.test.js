@@ -17,6 +17,7 @@ const {
 } = require('../routes/estimate-public');
 
 const PEST = [{ name: 'Pest Control', mo: 55 }];
+const { generateEstimate } = require('../services/pricing-engine');
 const charge = (service, label, amount) => ({ service, label, amount, kind: 'charge' });
 
 describe('serviceMixMakesNoGuaranteeClaim', () => {
@@ -103,6 +104,26 @@ describe('serviceMixMakesNoGuaranteeClaim', () => {
       result: { recurring: { services: PEST }, oneTime: { items: [] } },
       engineResult: { lineItems: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 250 }] },
     })).toBe(false);
+  });
+
+  test('unwrapped legacy one-time termite work participates beside a recurring pest plan', () => {
+    const estData = {
+      recurring: { services: PEST },
+      oneTime: { items: [{ service: 'termite_trenching', name: 'Termite Trenching', price: 1200 }] },
+    };
+    expect(estimateMakesNoGuaranteeClaim(estData, { oneTimeBreakdown: { items: [] } })).toBe(true);
+    expect(estimateMakesNoGuaranteeClaim({ ...estData, oneTime: { items: [] } })).toBe(false);
+  });
+
+  test.each([
+    ['pest_control', { pest: { frequency: 'quarterly' } }, false],
+    ['lawn_care', { lawn: { frequency: 'premium' } }, false],
+    ['termite_bait', { termite: { stations: 12 } }, true],
+    ['bora_care', { pest: { frequency: 'quarterly' }, boraCare: { areaSqFt: 500 } }, true],
+  ])('inputs-only %s work is classified from its rendered engine result', (service, services, expected) => {
+    const estData = { engineInputs: { homeSqFt: 2000, lotSqFt: 8000, services } };
+    expect(generateEstimate(estData.engineInputs).lineItems.map((row) => row.service)).toContain(service);
+    expect(estimateMakesNoGuaranteeClaim(estData)).toBe(expected);
   });
 
   test('an authored proposal naming termite work is flagged even when its engine rows are pest only (Codex r4)', () => {

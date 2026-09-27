@@ -209,7 +209,7 @@ describe('EstimateProposalDocument', () => {
     expect(text).toContain('Free between-visit service calls');
   });
 
-  it('a no-guarantee estimate (server noGuaranteeClaims: termite work) prints the terms line without a guarantee', () => {
+  it('a no-guarantee estimate filters guarantee-bearing inclusion bullets while retaining scope and prices', () => {
     const lines = [
       { description: 'Pest Control', quantity: 1, unitPrice: 55, amount: 55, frequency: 'monthly', frequencyLabel: 'Monthly', taxable: false },
       { description: 'Termite Trenching', quantity: 1, unitPrice: 1200, amount: 1200, frequency: 'one_time', frequencyLabel: 'One-time', taxable: false },
@@ -234,13 +234,53 @@ describe('EstimateProposalDocument', () => {
     expect(container.textContent).not.toContain(PEST_TERMS);
     expect(container.textContent).not.toMatch(/Satisfaction guaranteed/);
     expect(container.textContent).toContain('Licensed & insured');
-    // The pest line's own inclusion bullets still describe the pest plan's
-    // terms; nothing guarantees the termite work.
-    expect(container.textContent).toMatch(/Money-back guarantee — if we can’t solve/);
+    expect(container.textContent).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat/i);
+    expect(container.textContent).toContain('Premium non-repellent + repellent solutions');
+    expect(container.textContent).toContain('Pest Control');
+    expect(container.textContent).toContain('$55.00');
+    expect(container.textContent).toContain('Termite Trenching');
+    expect(container.textContent).toContain('$1,200.00');
 
-    // Without the flag the same document keeps the pest plan's terms line.
+    // Without the flag the same recurring plan keeps its normal terms and
+    // inclusion guarantees.
     const { container: flagless } = render(<EstimateProposalDocument data={{ ...termite, estimate: { ...termite.estimate, noGuaranteeClaims: undefined } }} token="tok-123" />);
     expect(flagless.textContent).toContain(PEST_TERMS);
+    expect(flagless.textContent).toMatch(/Money-back guarantee — if we can’t solve/);
+  });
+
+  it('applies the same inclusion filter to a mosquito stack and preserves its neutral treatment scope', () => {
+    const mosquito = {
+      ...BASE_DATA,
+      estimate: { ...BASE_DATA.estimate, category: 'RESIDENTIAL', noGuaranteeClaims: true },
+      proposal: {
+        ...BASE_DATA.proposal,
+        enabled: false,
+        synthesized: true,
+        pestRecurringOnly: false,
+        buildings: [{
+          name: '123 Palm Way',
+          note: null,
+          lineItems: [
+            { description: 'Mosquito Control', quantity: 1, unitPrice: 65, amount: 65, frequency: 'monthly', frequencyLabel: 'Monthly', taxable: false },
+            { description: 'WDO Inspection', quantity: 1, unitPrice: 175, amount: 175, frequency: 'one_time', frequencyLabel: 'One-time', taxable: false },
+          ],
+        }],
+        totals: { annualRecurring: 780, monthlyEquivalent: 65, oneTime: 175, totalTax: 0, firstYearTotal: 955, hasTax: false, isMultiBuilding: false },
+      },
+      cta: { commercialProposal: false, commercialAutoPriced: false },
+    };
+    const { container } = render(<EstimateProposalDocument data={mosquito} token="tok-123" />);
+    expect(container.textContent).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat/i);
+    expect(container.textContent).toContain('Barrier treatment where mosquitoes actually rest');
+    expect(container.textContent).toContain('Weather-aware timing');
+    expect(container.textContent).toContain('Mosquito Control');
+    expect(container.textContent).toContain('$65.00');
+
+    const { container: control } = render(<EstimateProposalDocument data={{
+      ...mosquito,
+      estimate: { ...mosquito.estimate, noGuaranteeClaims: undefined },
+    }} token="tok-123" />);
+    expect(control.textContent).toMatch(/Money-back guarantee — if we can’t solve/);
   });
 
   it('authored terms govern — inclusions and plan-terms claims stay out beside them', () => {

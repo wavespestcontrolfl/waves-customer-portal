@@ -14,10 +14,18 @@ const mockMatchByPhone = jest.fn();
 // page reconciles a lapsed membership before building it (#3120 r4/r6/r7).
 const mockBuildPricingBundle = jest.fn();
 const mockReconcileMembership = jest.fn();
+const mockEstimateMakesNoGuaranteeClaim = jest.fn(() => false);
+const mockParseEstimateDataSafe = jest.fn((estimate) => {
+  const raw = estimate?.estimate_data;
+  if (typeof raw !== 'string') return raw || {};
+  try { return JSON.parse(raw); } catch { return {}; }
+});
 jest.mock('../routes/estimate-public', () => ({
   matchAcceptCustomerByPhone: mockMatchByPhone,
   buildPricingBundle: mockBuildPricingBundle,
   reconcileFrozenMembershipSnapshot: mockReconcileMembership,
+  estimateMakesNoGuaranteeClaim: mockEstimateMakesNoGuaranteeClaim,
+  parseEstimateDataSafe: mockParseEstimateDataSafe,
   // Real implementation — selected → recommended → first.
   defaultFrequencyFromList: (list = []) => list.find((f) => f?.selected || f?.isSelected)
     || list.find((f) => f?.recommended || f?.isRecommended)
@@ -30,6 +38,7 @@ const LIVE_BUNDLE = { source: 'live_rebuild', frequencies: [REBUILT] };
 const {
   estimateBillsPerApplication,
   estimateSoldAsAnnualPrepay,
+  proposalMakesNoGuaranteeClaim,
   resolveProposalBillingContext,
   _resetPerApplicationColumnsProbeForTests,
 } = require('../services/estimate-proposal-billing');
@@ -93,6 +102,24 @@ describe('estimateBillsPerApplication', () => {
   it('keeps the monthly description when the lane lookup fails', async () => {
     stubTables({ customersThrow: true });
     expect(await estimateBillsPerApplication({ id: 'e1', customer_id: 'c1' })).toBe(false);
+  });
+});
+
+describe('proposalMakesNoGuaranteeClaim', () => {
+  it('passes parsed estimate data and the live pricing bundle to the canonical route policy', () => {
+    const bundle = { oneTimeBreakdown: { items: [{ service: 'termite' }] } };
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValueOnce(true);
+    expect(proposalMakesNoGuaranteeClaim({
+      id: 'e1', estimate_data: JSON.stringify({ result: { recurringServices: [{ service: 'pest_control' }] } }),
+    }, { livePricing: { bundle } })).toBe(true);
+    expect(mockEstimateMakesNoGuaranteeClaim).toHaveBeenCalledWith(
+      { result: { recurringServices: [{ service: 'pest_control' }] } }, bundle,
+    );
+  });
+
+  it('fails closed when the canonical policy cannot classify the estimate', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockImplementationOnce(() => { throw new Error('classification unavailable'); });
+    expect(proposalMakesNoGuaranteeClaim({ id: 'e1', estimate_data: {} })).toBe(true);
   });
 });
 

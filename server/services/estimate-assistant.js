@@ -7,6 +7,7 @@ const { loadEstimateAiSupportContext, serviceKeysFromContext, serviceFamiliesFro
 const { dispatch, rejectCall } = require('./llm/call');
 const { isMistingSystemService } = require('../utils/mosquito-misting-system');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
+const { GUARANTEE_COPY } = require('./estimate-one-time-copy');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -570,15 +571,16 @@ function buildEstimateAssistantContext({
     ? (oneTimeBillingAmount ? fmtMoney(oneTimeBillingAmount) : null)
     : normalBillingAmountText;
   const rowWithSummary = (row) => {
+    const detail = noGuaranteeClaims && GUARANTEE_COPY.test(row.detail || '') ? null : row.detail;
     const safeRow = quoteRequired
       ? {
           ...row,
           monthly: null,
           perApplication: null,
           amount: null,
-          detail: cleanText(row.detail).replace(/\$[\d,]+(?:\.\d{1,2})?/g, 'price pending inspection'),
+          detail: cleanText(detail).replace(/\$[\d,]+(?:\.\d{1,2})?/g, 'price pending inspection'),
         }
-      : row;
+      : { ...row, detail };
     return {
       ...safeRow,
       summary: serviceLine(safeRow),
