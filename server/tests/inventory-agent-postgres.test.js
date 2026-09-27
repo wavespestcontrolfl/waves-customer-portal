@@ -25,7 +25,7 @@ const inventoryOperations = require('../services/inventory-operations');
 const notifications = require('../services/notification-service');
 const { undoLine } = require('../../ops/agents/inventory-agent-undo');
 
-const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails', 'email_attachments'];
+const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails', 'email_attachments', 'service_product_usage'];
 const RECEIVED_AT = new Date('2026-09-27T15:00:00Z');
 const HOUR = 60 * 60 * 1000;
 
@@ -490,6 +490,8 @@ jest.setTimeout(30000);
     const savedLine = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
     expect(savedLine.agent_created_product_id).toBe(created.id);
     expect(await mockConn('product_aliases').where({ product_id: created.id })).toHaveLength(1);
+    const [loggedBell] = await bellsFor(line.id);
+    expect(loggedBell.read_at).toBeNull(); // the "logged a purchase" bell starts unread
 
     const logged = [];
     const outcome = await undoLine(mockConn, { lineArg: savedLine.id, execute: true, log: (msg) => logged.push(msg) });
@@ -503,6 +505,10 @@ jest.setTimeout(30000);
     expect(undoneLine.status).toBe('agent_unsure');
 
     expect(logged.some((l) => l.includes('was created by the agent') && l.includes('Inventory'))).toBe(true);
+    // Item 5, 2026-09-27 round 7 review: the stale "logged a purchase" bell
+    // is retired (marked read) in the SAME transaction as the reversal.
+    const [retiredBell] = await bellsFor(line.id);
+    expect(retiredBell.read_at).not.toBeNull();
   });
 
   test('undo refuses a --line argument that is neither a full id nor an EXACT 8-character prefix, before any query (review item 3)', async () => {
@@ -543,6 +549,78 @@ jest.setTimeout(30000);
     await expect(undoLine(mockConn, { lineArg: line.id, execute: true, log: () => {} }))
       .rejects.toThrow(/product changed after the agent's restock/);
     expect(await stockOf(taurus.id)).toBe(999); // refused — untouched
+  });
+
+  test('undo refuses when a service now maps the product for COGS after the agent\'s decision, even though the row hash still matches (item 4, 2026-09-27 round 7)', async () => {
+    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-downstream' });
+    const decision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: taurus.id, new_product: null,
+      reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    await run({ ok: true, json: decision });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved.status).toBe('logged');
+    // Nothing touched the product row itself — the hash check alone would
+    // pass — but staff mapped it into a service's COGS usage afterward.
+    await mockConn('service_product_usage').insert({
+      service_type: 'General Pest Control', product_id: taurus.id, usage_amount: 2, usage_unit: 'fl_oz',
+      created_at: new Date(new Date(saved.agent_decided_at).getTime() + 1000),
+    });
+
+    await expect(undoLine(mockConn, { lineArg: line.id, execute: false, log: () => {} }))
+      .rejects.toThrow(/a service now maps this product/);
+    await expect(undoLine(mockConn, { lineArg: line.id, execute: true, log: () => {} }))
+      .rejects.toThrow(/a service now maps this product/);
+    expect(await stockOf(taurus.id)).toBe(156); // never reversed
+  });
+
+  test('an admin alias insert racing the agent\'s own alias creation always serializes — never two aliases for one title (item 2, 2026-09-27 round 7)', async () => {
+    const [productA] = await mockConn('products_catalog').insert({
+      name: 'Bifen XTS', active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', inventory_on_hand: 0,
+    }).returning('*');
+    const [productB] = await mockConn('products_catalog').insert({
+      name: 'Bifen IT', active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', inventory_on_hand: 0,
+    }).returning('*');
+    const title = 'Bifen Insecticide Concentrate 96 oz';
+    const line = await pendingLine({ raw_title: title, quantity: 1 });
+    const decision = {
+      kind: 'existing', reason: 'looks like Bifen XTS', product_id: productA.id, new_product: null,
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+
+    let signalLocked;
+    const locked = new Promise((resolve) => { signalLocked = resolve; });
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    // The admin screen's own alias insert (inventoryOperations.createProductAlias,
+    // the same function POST /api/admin/inventory/aliases calls), holding
+    // its transaction — and the catalog-create lock — open for a DIFFERENT
+    // product than the one the agent's decision names, until the agent is
+    // waiting on that same lock.
+    const adminInsert = mockConn.transaction(async (trx) => {
+      const result = await inventoryOperations.createProductAlias({ productId: productB.id, aliasName: title, vendorId: null }, { trx });
+      expect(result).toEqual({ success: true });
+      signalLocked();
+      await held;
+    });
+    await locked;
+    const agent = run({ ok: true, json: decision });
+    await waitForLockWaiter();
+    release();
+    await adminInsert;
+    await agent;
+
+    // Exactly one alias for this title — the admin's, on productB — never a
+    // second one from the agent racing behind it.
+    const aliases = await mockConn('product_aliases').where({ alias_name: title });
+    expect(aliases).toHaveLength(1);
+    expect(aliases[0].product_id).toBe(productB.id);
+    // The agent's own attempt saw the now-existing alias for a DIFFERENT
+    // product and rolled its whole apply back rather than write against a
+    // stale choice.
+    expect(await stockOf(productA.id)).toBe(0);
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'agent_pending', agent_attempts: 1 });
   });
 
   test('a real hand-off through processReceiptLine saves handoffFrom, and a gate-off drain restores that status', async () => {

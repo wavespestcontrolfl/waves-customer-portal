@@ -191,6 +191,21 @@ describe('validateReading — count items', () => {
       expect(result).toMatchObject({ ok: true, unit: 'each' });
     }
   });
+
+  // Item 3, 2026-09-27 round 7 review: a COUNT claim exempts only its OWN
+  // noun ("Count", "cartridges") — a leftover container quantity beside it
+  // still holds the line, rather than the old blanket exemption for every
+  // count-sized product.
+  test('a leftover container quantity beside a count claim still holds — only the claim\'s own noun is exempt', () => {
+    expect(validateReading({ size_number: 12, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Rat Traps 12 Count 4 Boxes', lineQuantity: 1 }))
+      .toMatchObject({ ok: false, reason: 'plural_containers_without_pack_marker' });
+    expect(validateReading({ size_number: 12, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Victor Rat Traps 12 Count', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, sizeNumber: 12, unit: 'each' });
+    // "Cartridges" recurs as a plain descriptive word earlier in the title —
+    // the SAME noun as the "25 cartridges" claim, not a second container.
+    expect(validateReading({ size_number: 25, size_unit: 'each', pack_count: 1 }, { rawTitle: 'Trelona Compressed Termite Bait Cartridges 25 cartridges', lineQuantity: 1 }))
+      .toMatchObject({ ok: true, sizeNumber: 25, unit: 'each' });
+  });
 });
 
 describe('containerAgreement — measured and count containers', () => {
@@ -335,7 +350,31 @@ describe('classifyDecision — new_product', () => {
       rawTitle: 'Control Solutions Bifen XTS Insecticide 96 oz', lineQuantity: 1, allActiveProducts: [], allowedCategories,
     }));
     expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
-    expect(decision.reason).toMatch(/not taken from the purchase title/);
+    expect(decision.reason).toMatch(/isn't a specific product phrase from the title/);
+  });
+
+  test('an under-specified proposed name — a single word, or a generic catalog word — is held (item 1, 2026-09-27 round 7)', () => {
+    const title = 'Control Solutions Bifen XTS Insecticide 96 oz';
+    const nameFor = (name) => ({
+      kind: 'new_product', reason: 'not in the catalog',
+      new_product: { name, category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_count: 1 },
+    });
+    // "Bifen" alone: a single word — never enough to name a product.
+    expect(classifyDecision(nameFor('Bifen'), ctx({ rawTitle: title, allowedCategories })))
+      .toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+    // "Insecticide Concentrate": two words, both generic catalog/packaging
+    // words — the first word gates it even though both appear in the title.
+    expect(classifyDecision(nameFor('Insecticide Concentrate'), ctx({ rawTitle: title, allowedCategories })))
+      .toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+    // "XTS Bifen": the same two words as the title, but NOT contiguous in
+    // that order ("Bifen XTS" is the title's own order) — held.
+    expect(classifyDecision(nameFor('XTS Bifen'), ctx({ rawTitle: title, allowedCategories })))
+      .toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+    // "Bifen XTS": a real contiguous product phrase from the title — passes
+    // the name check (and validates the rest of the way through).
+    expect(classifyDecision(nameFor('Bifen XTS'), ctx({ rawTitle: title, allowedCategories })))
+      .toMatchObject({ kind: 'new_product', status: 'logged' });
   });
 
   test('a validated new-product proposal computes the container size, inventory unit and amount', () => {

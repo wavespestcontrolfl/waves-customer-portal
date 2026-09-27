@@ -268,6 +268,38 @@ async function findActiveProductByExactName(trx, name) {
     .whereRaw('lower(btrim(name)) = ?', [String(name || '').trim().toLowerCase()]).first();
 }
 
+// The same case/whitespace-insensitive alias lookup BOTH catalog-identity
+// alias writers — the admin alias endpoint (POST /api/admin/inventory/aliases)
+// and the inventory agent's own createAgentAlias — run UNDER lockCatalogCreate
+// before inserting a new alias, checked against ANY product (never scoped to
+// one), so a concurrent insert from the other writer is always seen (item 2,
+// 2026-09-27 round 7 review). `(alias_name, vendor_id)` uniqueness alone lets
+// two products each claim the same alias text with a NULL vendor (NULL <>
+// NULL in Postgres, so the constraint never fires) — this lookup is what
+// actually catches that.
+async function findAliasByNormalizedName(trx, aliasName) {
+  return trx('product_aliases').whereRaw('lower(btrim(alias_name)) = lower(btrim(?))', [String(aliasName || '')]).first();
+}
+
+// The admin alias endpoint's own writer (POST /api/admin/inventory/aliases),
+// pulled out here so the same lock + lookup it shares with the inventory
+// agent's createAgentAlias is exercised from one place, testable without a
+// live HTTP layer. An existing alias with the same normalized name on THIS
+// product is a quiet no-op success (the prior onConflict-ignore behavior,
+// preserved); on a DIFFERENT product it's a conflict the route turns into a
+// 409, never a silently-created duplicate.
+async function createProductAlias(fields, options = {}) {
+  const { productId, aliasName, vendorId } = fields;
+  const run = async (trx) => {
+    await lockCatalogCreate(trx);
+    const existing = await findAliasByNormalizedName(trx, aliasName);
+    if (existing) return existing.product_id === productId ? { success: true } : { success: false, conflict: existing };
+    await trx('product_aliases').insert({ product_id: productId, alias_name: aliasName, vendor_id: vendorId || null });
+    return { success: true };
+  };
+  return options.trx ? run(options.trx) : db.transaction(run);
+}
+
 async function createCatalogProduct(fields, options = {}) {
   const {
     name, category, subcategory, activeIngredient, epaRegNumber, formulation, moaGroup,
@@ -418,4 +450,4 @@ async function updateRestockRequest(requestId, raw, options = {}) {
 
 module.exports = { previewStockAdjustment, adjustStock, previewRestockRequest, createRestockRequest,
   previewRestockAction, updateRestockRequest, productIdentity, createCatalogProduct,
-  lockCatalogCreate, findActiveProductByExactName };
+  lockCatalogCreate, findActiveProductByExactName, findAliasByNormalizedName, createProductAlias };

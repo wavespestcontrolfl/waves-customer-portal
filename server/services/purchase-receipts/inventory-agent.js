@@ -107,7 +107,11 @@ function parsedSizeClaims(text) {
       && fullMatch.match(new RegExp(`^${escapeForRegExp(number)}[\\s-]*${escapeForRegExp(first)}\\.?`, 'i'));
     const matchText = unitOnly ? unitOnly[0] : fullMatch;
     const value = parseSizeNumber(number);
-    if (Number.isFinite(value) && value > 0) claims.push({ value, unit: resolved.unit, matchText });
+    // unitWord is the literal unit text the title used for THIS claim (e.g.
+    // "Count", "cartridges") — kept so a count claim's own noun can be
+    // exempted from the leftover-container check below, wherever else in
+    // the title it recurs (item 3, 2026-09-27 round 7 review).
+    if (Number.isFinite(value) && value > 0) claims.push({ value, unit: resolved.unit, matchText, unitWord: first });
   }
   return claims;
 }
@@ -169,13 +173,39 @@ function hasConflictingClaim(claims, matchedClaim) {
   });
 }
 
+// A digit immediately followed by a container word — "4 Boxes", "2 Cases" —
+// a SECOND quantity of containers beside a count claim's own item count
+// ("Rat Traps 12 Count 4 Boxes" is not simply 12 traps; the "4 Boxes" is an
+// unread multiplier this lane can't resolve). None of these words overlap
+// the count-item nouns COUNT_UNIT_WORD_RE recognizes, so a count claim's own
+// noun never trips this on its own.
+const OTHER_CONTAINER_QTY_RE = /\b\d+\s*(?:box(?:es)?|case(?:s)?|pack(?:s)?|bag(?:s)?|bottle(?:s)?|jug(?:s)?|pail(?:s)?|can(?:s)?|tube(?:s)?|carton(?:s)?|unit(?:s)?|piece(?:s)?|pcs)\b/i;
+
+// Strips every occurrence of a count claim's OWN noun (singular or plural —
+// "Count"/"Counts", "cartridge"/"cartridges") from `text`, wherever it
+// recurs (not just at the claim's own matched text, already gone from
+// `leftover` by the time this runs) — e.g. the descriptive "Bait Cartridges"
+// earlier in "Trelona Compressed Termite Bait Cartridges 25 cartridges" is
+// the SAME noun as the "25 cartridges" claim, not a second container.
+function stripClaimNoun(text, unitWord) {
+  if (!unitWord) return text;
+  const bare = escapeForRegExp(String(unitWord).replace(/s$/i, ''));
+  return text.replace(new RegExp(`\\b${bare}s?\\b`, 'gi'), ' ');
+}
+
 // Plural containers with no pack marker ("4 tubes / 30 g") mean several
 // containers in a form this lane doesn't count, as amountPerItem holds them.
-// A count size is exempt: in "25 cartridges" the plural IS the counted item,
-// not a second quantity.
-function hasPluralContainerWithoutMarker({ multipack, matchedClaim, leftover }) {
-  if (multipack || matchedClaim.unit === 'each') return false;
-  return PLURAL_CONTAINER_RE.test(leftover) || PLURAL_COUNT_NOUN_RE.test(leftover);
+// A count claim ("25 cartridges") is different: the plural noun IS the
+// counted item, not a second quantity — but only that claim's OWN noun is
+// exempt (item 3, 2026-09-27 round 7 review). Once it's stripped out, any
+// OTHER container wording left over — a second count noun ("4 Boxes"), or
+// another PLURAL_CONTAINER_RE word — still holds the line: "Rat Traps 12
+// Count 4 Boxes" logs neither a bare 12 nor a guessed 48.
+function hasLeftoverContainerQuantity({ multipack, matchedClaim, leftover }) {
+  if (multipack) return false;
+  if (matchedClaim.unit !== 'each') return PLURAL_CONTAINER_RE.test(leftover) || PLURAL_COUNT_NOUN_RE.test(leftover);
+  const withoutOwnNoun = stripClaimNoun(leftover, matchedClaim.unitWord);
+  return OTHER_CONTAINER_QTY_RE.test(withoutOwnNoun) || PLURAL_CONTAINER_RE.test(withoutOwnNoun);
 }
 
 // A weight or volume reading may not skip an item count the title states:
@@ -201,7 +231,7 @@ const READING_RULES = [
   // Pack"), or a UOM other than each all land here, exactly mirroring
   // amountPerItem's own ambiguity guard.
   { reason: 'leftover_pack_wording', fails: (c) => PACK_CLAIM_RE.test(c.leftover) },
-  { reason: 'plural_containers_without_pack_marker', fails: (c) => hasPluralContainerWithoutMarker(c) },
+  { reason: 'plural_containers_without_pack_marker', fails: (c) => hasLeftoverContainerQuantity(c) },
   { reason: 'item_count_not_consumed', fails: (c) => hasUnconsumedItemCount(c) },
   { reason: 'bad_line_quantity', fails: (c) => !Number.isFinite(c.lineQty) || c.lineQty <= 0 },
 ];
@@ -285,6 +315,32 @@ function collidesWithActiveProduct(proposedName, rawTitle, activeProducts) {
 
 function unsureResult(reason) {
   return { kind: 'unsure', status: 'agent_unsure', reason };
+}
+
+// Generic catalog/packaging/marketing words that describe a CATEGORY or its
+// packaging rather than naming a specific product — never a legitimate FIRST
+// word of a proposed new-product name (item 1, 2026-09-27 round 7 review:
+// "Insecticide" or "Bifen" alone for "Bifen XTS Insecticide 96 oz" must never
+// pass just because every one of its words appears somewhere in the title).
+// Kept short and reviewable rather than inferred from a bigger word list.
+const GENERIC_NAME_FIRST_WORDS = new Set([
+  'insecticide', 'insecticides', 'termiticide', 'termiticides', 'fungicide', 'fungicides',
+  'herbicide', 'herbicides', 'fertilizer', 'fertilizers', 'concentrate', 'concentrated',
+  'liquid', 'granular', 'granules', 'bait', 'baits', 'gel', 'spray', 'control',
+  'professional', 'pro', 'plus', 'the', 'a', 'and', 'for', 'with', 'of',
+]);
+
+// True when `nameWords` (normalizeForMatch'd) is a CONTIGUOUS run of at
+// least 2 of `titleWords`, in that exact order, whose first word is not a
+// generic catalog word — a real product phrase lifted whole from the
+// listing ("Bifen XTS"), never a subset scattered across it ("XTS Bifen" out
+// of order, or a single generic word like "Insecticide").
+function isContiguousTitlePhrase(nameWords, titleWords) {
+  if (nameWords.length < 2 || GENERIC_NAME_FIRST_WORDS.has(nameWords[0])) return false;
+  for (let start = 0; start + nameWords.length <= titleWords.length; start += 1) {
+    if (nameWords.every((word, offset) => titleWords[start + offset] === word)) return true;
+  }
+  return false;
 }
 
 // The candidate's container_size normalized to ONE shape, so
@@ -396,13 +452,17 @@ function validateNewProduct(raw, ctx) {
     return { kind: 'unsure', status: 'agent_unsure', reason: 'no product name proposed' };
   }
   const name = proposed.name.trim();
-  // The name must come from the listing: every word of it, as a whole word
-  // of the title. A made-up name ("Termidor SC" for a Bifen XTS listing)
-  // would create the wrong product, and its exact-title alias would then
-  // make the error self-confirming.
-  const titleWords = new Set(normalizeForMatch(rawTitle).split(' '));
-  if (!normalizeForMatch(name).split(' ').every((word) => word && titleWords.has(word))) {
-    return { kind: 'unsure', status: 'agent_unsure', reason: `the proposed name ("${name}") is not taken from the purchase title` };
+  // The name must come from the listing: a CONTIGUOUS run of at least 2 of
+  // the title's own words, in order, whose first word isn't a generic
+  // catalog word — never just any subset of the title's words. A made-up
+  // name ("Termidor SC" for a Bifen XTS listing), a single word ("Bifen" or
+  // "Insecticide" alone), or words out of order ("XTS Bifen") would create
+  // the wrong product — or a name too vague to mean anything — and its
+  // exact-title alias would then make the error self-confirming.
+  const titleWords = normalizeForMatch(rawTitle).split(' ').filter(Boolean);
+  const nameWords = normalizeForMatch(name).split(' ').filter(Boolean);
+  if (!isContiguousTitlePhrase(nameWords, titleWords)) {
+    return { kind: 'unsure', status: 'agent_unsure', reason: `the proposed name ("${name}") isn't a specific product phrase from the title` };
   }
   if (collidesWithActiveProduct(name, rawTitle, allActiveProducts)) {
     return { kind: 'unsure', status: 'agent_unsure', reason: `looks like an existing product ("${name}")` };
@@ -832,8 +892,24 @@ async function resolveTargetProduct(trx, { line, vendor, decision }) {
 // alias as owner-vetted for a size-less title).
 async function createAgentAlias(trx, { line, productId }) {
   if (line.product_id) return null;
-  const existingAlias = await trx('product_aliases').whereRaw('LOWER(alias_name) = LOWER(?)', [line.raw_title]).first('id');
-  if (existingAlias) return null;
+  // The SAME lock + case/whitespace-insensitive lookup the admin alias
+  // endpoint runs under (findAliasByNormalizedName, item 2, 2026-09-27 round
+  // 7 review): taken here, not left to createCatalogProduct's own call
+  // (never reached on the 'existing' branch), so an admin insert racing this
+  // one always serializes and is always seen, whichever decision kind this
+  // line resolved to.
+  await inventoryOperations.lockCatalogCreate(trx);
+  const existingAlias = await inventoryOperations.findAliasByNormalizedName(trx, line.raw_title);
+  if (existingAlias) {
+    // Already this exact product's alias (created by staff, or by this same
+    // run's earlier phase) — nothing to add. A DIFFERENT product's alias for
+    // this title is the catalog moving under the decision: throw to roll the
+    // whole savepoint back, same discipline as findIdentityOrDuplicateHold's
+    // own re-checks, spending an attempt rather than writing against a stale
+    // identity.
+    if (existingAlias.product_id === productId) return null;
+    throw new Error(`an alias for "${line.raw_title}" was just added for a different product`);
+  }
   const [alias] = await trx('product_aliases').insert({ product_id: productId, alias_name: line.raw_title, vendor_id: null }).returning('*');
   return alias.id;
 }
@@ -1038,6 +1114,38 @@ async function productUnchangedSinceAgent(conn, line, movement) {
   if (row.row_hash !== recorded) return { ok: false, why: 'the product changed after the agent\'s restock' };
   if (Number(row.inventory_on_hand) !== Number(movement.stock_after)) {
     return { ok: false, why: `stock is ${row.inventory_on_hand}, not the ${movement.stock_after} the agent left` };
+  }
+  return { ok: true };
+}
+
+// Every table that maps a products_catalog row into real operations and
+// carries its own created_at — found by grepping the migrations for
+// `product_id` referencing products_catalog (item 4, 2026-09-27 round 7
+// review). productUnchangedSinceAgent's row hash only ever covers the
+// product row ITSELF; it can't see a reference like these, so an undo that
+// only checked the hash could restore a "pre-agent" state a service, a
+// restock request or a protocol has since built on top of.
+const DOWNSTREAM_ADOPTION_TABLES = [
+  { table: 'service_product_usage', why: 'a service now maps this product for its COGS usage (service_product_usage)' },
+  { table: 'service_products', why: 'a completed visit recorded applying this product (service_products)' },
+  { table: 'protocol_template_products', why: 'a protocol template now uses this product (protocol_template_products)' },
+  { table: 'lawn_protocol_products', why: 'a lawn protocol now uses this product (lawn_protocol_products)' },
+  // A restock request raised since the decision means the stock level the
+  // agent recorded no longer means what it meant then — reversing it would
+  // leave that request's own expectations pointed at the wrong number.
+  { table: 'product_restock_requests', why: 'a restock request was raised for this product since the agent\'s decision (product_restock_requests)' },
+];
+
+// Refuses BEFORE any reversal or restoration when an operational reference
+// to the product was added after the agent decided (line.agent_decided_at)
+// — see DOWNSTREAM_ADOPTION_TABLES above. Called from both the undo CLI's
+// dry run and its transaction (the transaction re-checks under the product
+// lock, same discipline as productUnchangedSinceAgent's own re-check).
+async function productDownstreamAdoptionSince(conn, line) {
+  if (!line.agent_decided_at) return { ok: false, why: 'the line has no recorded agent_decided_at' };
+  for (const { table, why } of DOWNSTREAM_ADOPTION_TABLES) {
+    const row = await conn(table).where({ product_id: line.product_id }).where('created_at', '>', line.agent_decided_at).first('id');
+    if (row) return { ok: false, why };
   }
   return { ok: true };
 }
@@ -1261,6 +1369,7 @@ module.exports = {
   runInventoryAgent,
   drainAgentQueue,
   productUnchangedSinceAgent,
+  productDownstreamAdoptionSince,
   // Exported for unit tests — see server/tests/inventory-agent.test.js.
   // These are pure (no I/O) except recordAttemptFailure, the one small
   // DB-touching unit worth testing without a full Postgres suite. No

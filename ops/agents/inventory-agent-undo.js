@@ -15,11 +15,13 @@
 //     original restock) — a product that was untracked (inventory_on_hand
 //     null) returns to null, not 0, and its unit reverts with it;
 //   - deletes the agent-created product_aliases row, if any;
+//   - retires the line's own "logged a purchase" bell (unread, dedupeKey
+//     purchase-receipt:<lineId>) in the SAME transaction as the reversal,
+//     the way auto-order-revoke.js retires its own bell — it's stale once
+//     the restock is undone;
 //   - NEVER deactivates a product, even one the agent itself created (2026-09-27
 //     review): once created, staff may have linked it somewhere this row's
-//     own hash can't see — e.g. service_product_usage via POST
-//     /api/admin/inventory/service-usage — and deactivating it would break
-//     that silently. When the product was agent-created, this prints an
+//     own hash can't see. When the product was agent-created, this prints an
 //     informational line pointing at Inventory → Products instead of
 //     touching the row;
 //   - marks the line 'agent_unsure' with agent_decision.undoneAt.
@@ -27,7 +29,14 @@
 // after the agent's own restock (usage, another restock, a manual count, an
 // edit): the row's version must still equal the one the agent recorded, and
 // stock must still equal the movement's stock_after. Reversing past a later
-// write would not cleanly restore the pre-agent state.
+// write would not cleanly restore the pre-agent state. ALSO refuses (item 4,
+// 2026-09-27 round 7 review) when an operational reference to the product —
+// service_product_usage, service_products, a protocol template/lawn
+// protocol product link, or a fresh product_restock_requests row — was
+// added after the agent's own agent_decided_at: the row hash above only
+// ever covers the products_catalog row itself, never a reference INTO it,
+// so downstream adoption needs its own check (productDownstreamAdoptionSince,
+// server/services/purchase-receipts/inventory-agent.js).
 //
 //   railway run --service Postgres node ops/agents/inventory-agent-undo.js --line=<id|8-char-prefix>            # dry run
 //   railway run --service Postgres node ops/agents/inventory-agent-undo.js --line=<id|8-char-prefix> --execute  # apply
@@ -64,7 +73,7 @@ if (require.main === module) {
 
 const path = require('path');
 const { adjustStock } = require(path.join(__dirname, '..', '..', 'server', 'services', 'inventory-operations'));
-const { productUnchangedSinceAgent } = require(path.join(__dirname, '..', '..', 'server', 'services', 'purchase-receipts', 'inventory-agent'));
+const { productUnchangedSinceAgent, productDownstreamAdoptionSince } = require(path.join(__dirname, '..', '..', 'server', 'services', 'purchase-receipts', 'inventory-agent'));
 
 function arg(name, argv) {
   const hit = argv.find((a) => a.startsWith(`--${name}=`));
@@ -128,6 +137,17 @@ async function undoLine(conn, { lineArg, execute = false, log = console.log }) {
   if (!unchanged.ok) {
     throw usageError(`Refusing: ${unchanged.why}. Reversing now would not cleanly restore the pre-agent count; fix the stock by hand.`, 1);
   }
+  // Checked BEFORE any reversal or restoration (the row hash above only ever
+  // covers the product row itself, never a reference INTO it): staff may
+  // have built on this product since the agent's decision — a service now
+  // using it for COGS, a completed visit applying it, a protocol adopting
+  // it, or a fresh restock request — and undoing past that would leave that
+  // reference pointed at a state that no longer makes sense (2026-09-27
+  // review, item 4).
+  const downstream = await productDownstreamAdoptionSince(conn, line);
+  if (!downstream.ok) {
+    throw usageError(`Refusing: ${downstream.why}. Reversing now would not account for it; fix the stock by hand instead.`, 1);
+  }
 
   const product = await conn('products_catalog').where({ id: line.product_id }).first();
   const alias = line.agent_created_alias_id ? await conn('product_aliases').where({ id: line.agent_created_alias_id }).first() : null;
@@ -146,6 +166,7 @@ async function undoLine(conn, { lineArg, execute = false, log = console.log }) {
   // Never deactivated (2026-09-27 review) — staff may have linked this row
   // somewhere the undo can't see since the agent created it.
   if (isAgentCreatedProduct) log(`  Product "${product?.name}" was created by the agent; if it shouldn't exist, deactivate it in Inventory → Products.`);
+  log('  retire the line\'s "logged a purchase" bell (mark it read)');
   log('  set the line\'s status to agent_unsure, stamping agent_decision.undoneAt');
   if (!execute) {
     log('\nDry run — pass --execute to apply.');
@@ -160,6 +181,8 @@ async function undoLine(conn, { lineArg, execute = false, log = console.log }) {
     await trx('products_catalog').where({ id: line.product_id }).forUpdate().first('id');
     const stillUnchanged = await productUnchangedSinceAgent(trx, line, movement);
     if (!stillUnchanged.ok) throw new Error(`Refusing to reverse: ${stillUnchanged.why}.`);
+    const stillNoDownstream = await productDownstreamAdoptionSince(trx, line);
+    if (!stillNoDownstream.ok) throw new Error(`Refusing to reverse: ${stillNoDownstream.why}.`);
 
     await adjustStock(line.product_id, { movementType: 'correction', quantity: -Number(line.received_qty), unit: line.received_unit }, {
       source: 'inventory_agent_undo', extraMetadata: { undoOfLineId: line.id, undoOfMovementId: movement.id }, trx,
@@ -184,6 +207,11 @@ async function undoLine(conn, { lineArg, execute = false, log = console.log }) {
     }
 
     if (alias) await trx('product_aliases').where({ id: alias.id }).del();
+
+    // The line's own "logged a purchase" bell is now stale — reversed, not
+    // still true — so retire it in the SAME transaction as the reversal,
+    // the same way auto-order-revoke.js retires its own bell.
+    await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`purchase-receipt:${line.id}`]).whereNull('read_at').update({ read_at: new Date() });
 
     await trx('purchase_receipt_lines').where({ id: line.id }).update({
       status: 'agent_unsure',

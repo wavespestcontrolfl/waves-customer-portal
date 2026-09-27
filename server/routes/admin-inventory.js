@@ -2802,9 +2802,16 @@ router.post('/aliases', async (req, res, next) => {
   try {
     const { productId, aliasName, vendorId } = req.body;
     if (!productId || !aliasName) return res.status(400).json({ error: 'productId and aliasName required' });
-    await db('product_aliases').insert({
-      product_id: productId, alias_name: aliasName, vendor_id: vendorId || null,
-    }).onConflict(['alias_name', 'vendor_id']).ignore();
+    // Serialized against the inventory agent's own createAgentAlias under the
+    // SAME catalog-create lock (item 2, 2026-09-27 round 7 review) — the two
+    // writers never insert the same alias side by side, and `(alias_name,
+    // vendor_id)` uniqueness alone can't catch a collision when either row
+    // carries a NULL vendor_id.
+    const result = await inventoryOperations.createProductAlias({ productId, aliasName, vendorId });
+    if (!result.success) {
+      const other = await db('products_catalog').where({ id: result.conflict.product_id }).first('name');
+      return res.status(409).json({ error: `"${aliasName}" is already an alias of ${other?.name || 'another product'}` });
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
