@@ -11,6 +11,7 @@ const {
 } = require('../services/service-report/visit-summary-narrative');
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
 const { calculatePestPressureScore, hasTechnicianZeroEvidence } = require('../services/pest-pressure/calculate');
+const { extractTechnicianRating } = require('../services/pest-pressure/components/technician-rating');
 const { DEFAULT_CONFIG } = require('../services/pest-pressure/config');
 const { sanitizeRecap } = require('../services/completion-recap');
 const { appointmentClaimProblems } = require('../services/service-report/next-visit-claims');
@@ -246,6 +247,8 @@ test.each([
   ['The next visit is scheduled for Oct 2. Keep pets off treated surfaces until dry.', 'Keep pets off treated surfaces until dry.'],
   ['We treated the perimeter. Your next visit is scheduled for Oct 2. - Waves', 'We treated the perimeter.'],
   ['We treated the perimeter. Your next visit is scheduled for Oct 2, 1–3 PM.', 'We treated the perimeter.'],
+  ['We treated the perimeter. Your next visit is scheduled for Oct 2, 10 to 12 PM.', 'We treated the perimeter.'],
+  ['We treated the perimeter. Your next visit is scheduled for Oct 2, 11 to 1 p.m.', 'We treated the perimeter.'],
   ['We sealed a 1.5-foot gap, and your next appointment is booked for Sep 24 at 1 p.m.', 'We sealed a 1.5-foot gap.'],
   [sanitizeRecap('We sealed a gap, and your next appointment is booked for Sep 24 at 1 p.m.'), 'We sealed a gap.'],
   [sanitizeRecap('We treated the perimeter, and your next appointment is booked for Sep 24'), 'We treated the perimeter.'],
@@ -473,7 +476,7 @@ test('zero pressure uses deterministic assessed-area wording instead of model ab
     pestPressure: { enabled: true, displayScore: 0, label: 'None', trend: null },
     pestPressureEvidence: {
       zeroInspectionSupported: hasTechnicianZeroEvidence({
-        technicianRating: { value: 0, weight: 30, present: true },
+        technicianActivityRating: { value: 0, present: true },
       }),
     },
   });
@@ -558,6 +561,36 @@ test('customer-only zero score does not become a technician inspection claim', a
   expect(deterministicSummary(technicianFacts)).toContain(
     'No visible pest activity was noted in the areas assessed today.',
   );
+});
+
+test('a completed record with no findings cannot establish an inspected absence', async () => {
+  const knex = (table) => ({ where: () => (table === 'service_records'
+    ? { first: async () => ({ status: 'completed' }) }
+    : { select: async () => [] }) });
+  const extracted = await extractTechnicianRating({ knex, serviceRecordId: 'synthetic-completed-record' });
+  expect(extracted).toMatchObject({ value: 0, present: true, findingCount: 0 });
+  const score = calculatePestPressureScore({ technicianRating: extracted.value }, DEFAULT_CONFIG);
+  expect(score.displayedScore).toBe(0);
+  const args = input({
+    findings: [],
+    pestPressure: { enabled: true, displayScore: score.displayedScore, label: score.label.name },
+    pestPressureEvidence: { zeroInspectionSupported: hasTechnicianZeroEvidence(score.componentScores) },
+    nextAppointment: null,
+  });
+  const facts = groundingFacts(args);
+  expect(facts.pressure.zeroInspectionSupported).toBe(false);
+  expect(deterministicSummary(facts)).not.toMatch(/visible pest activity|areas assessed/);
+  const callModel = jest.fn();
+  await expect(applyVisitSummaryNarrative(args, { callModel })).resolves.toBe(deterministicSummary(facts));
+  expect(callModel).not.toHaveBeenCalled();
+
+  const explicit = groundingFacts({ ...args, findings: [{ category: 'no_activity', title: 'No activity observed' }] });
+  expect(explicit.pressure.zeroInspectionSupported).toBe(true);
+  expect(deterministicSummary(explicit)).toContain('No visible pest activity was noted in the areas assessed today.');
+});
+
+test.each([null, undefined, '', false, '0'])('a malformed direct rating %j cannot establish an inspected absence', (value) => {
+  expect(hasTechnicianZeroEvidence({ technicianActivityRating: { value, present: true } })).toBe(false);
 });
 
 test('appointment guard ignores grounded work numbers, aftercare times, and unrelated dates', async () => {

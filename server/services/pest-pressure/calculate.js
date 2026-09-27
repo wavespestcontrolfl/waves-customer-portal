@@ -53,9 +53,10 @@ function scoreSourceFromComponents(componentScores) {
 }
 
 function hasTechnicianZeroEvidence(componentScores) {
-  const parsed = parseComponentScores(componentScores);
-  return [parsed?.[DIRECT_COMPONENT_KEY], parsed?.technicianRating]
-    .some((component) => component?.present === true && Number(component.value) === 0);
+  // The legacy blended technician component also becomes zero when a completed
+  // record has no findings. Only a direct recorded rating proves inspection.
+  const component = parseComponentScores(componentScores)?.[DIRECT_COMPONENT_KEY];
+  return component?.present === true && component.value === 0;
 }
 
 function clamp(value, min, max) {
