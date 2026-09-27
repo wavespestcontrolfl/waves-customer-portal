@@ -758,6 +758,13 @@ async function dispatchClaimedCall(conn, call, now) {
     await recordDecision(conn, call, { status: 'pending', lead_id: leadId, send_at, original_send_at: entry.original_send_at || entry.send_at }, { logActivity: false });
     return { sent: false, skipped: 'outside_send_window', deferred: true };
   }
+  // Checked BEFORE ever minting or sending, not only after a retryable
+  // failure (codex r3 P1): an overnight deferral or an outage can carry a
+  // retry past original_send_at + 24h while the row is still 'pending' at
+  // dispatch time. Judging the deadline only after a send attempt means a
+  // provider that happens to succeed on that overdue attempt would still
+  // text a stale follow-up and record it as a normal send.
+  if (pastRetryDeadline(entry, now)) return skip('send_retry_timeout');
   const lead = await conn('leads').where({ id: leadId }).whereNull('deleted_at').first();
   const reason = await dispatchIneligibleReason({ conn, call, lead, leadId, now });
   if (reason) return skip(reason);

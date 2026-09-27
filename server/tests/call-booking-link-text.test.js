@@ -984,14 +984,36 @@ describe('dispatchClaimedCall', () => {
     expect(sendAt.getTime()).toBeLessThan(NOW.getTime() + 60 * 60 * 1000); // well under an hour out
   });
 
-  test('a retryable outcome past 24h from the ORIGINAL send_at gives up with a reason, not another requeue', async () => {
-    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, retryable: true, code: 'CONSENT_LOOKUP_FAILED' });
+  // codex r3 P1: the deadline must be judged BEFORE ever minting/sending,
+  // not only after a retryable failure — otherwise an overdue attempt that
+  // happens to succeed still texts a stale follow-up and records it as an
+  // ordinary send.
+  test('an overdue retry (past the 24h deadline) never calls the sender, even though it would succeed', async () => {
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_would_succeed', deliveryOutcome: 'accepted' });
+    const originalSendAt = new Date(NOW.getTime() - 25 * 60 * 60 * 1000).toISOString();
+    const overdue = {
+      ...CALL,
+      metadata: { ...CALL.metadata, call_booking_link_text: { status: 'claimed', lead_id: 'lead-1', send_at: originalSendAt, original_send_at: originalSendAt } },
+    };
+    const conn = makeDb();
+    const result = await dispatchClaimedCall(conn, overdue, NOW);
+    expect(result.sent).toBe(false);
+    expect(result.skipped).toBe('send_retry_timeout');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(buildLeadConsultationSmsLine).not.toHaveBeenCalled();
+  });
+
+  test('a row past 24h from the ORIGINAL send_at gives up with a reason, not another requeue or a send attempt', async () => {
+    // The deadline is judged BEFORE ever sending (see the overdue-retry
+    // test above), so what sendCustomerMessage would have returned is
+    // irrelevant here — it must never be called at all.
     const staleEntry = { status: 'claimed', lead_id: 'lead-1', send_at: new Date(NOW.getTime() - 25 * 60 * 60 * 1000).toISOString() };
     const stale = { ...CALL, metadata: { ...CALL.metadata, call_booking_link_text: staleEntry } };
     const conn = makeDb();
     const result = await dispatchClaimedCall(conn, stale, NOW);
-    expect(result.skipped).toBe('CONSENT_LOOKUP_FAILED');
+    expect(result.skipped).toBe('send_retry_timeout');
     expect(result.deferred).toBeUndefined();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   // codex r2 P1: each retry re-queues with a NEW send_at (the next attempt
@@ -1022,7 +1044,8 @@ describe('dispatchClaimedCall', () => {
     const conn2 = makeDb();
     const result2 = await dispatchClaimedCall(conn2, call2, laterNow);
     expect(result2.deferred).toBeUndefined();
-    expect(result2.skipped).toBe('PROVIDER_FAILURE');
+    expect(result2.skipped).toBe('send_retry_timeout'); // caught by the pre-send deadline check, never reaches the sender again
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1); // only round 1's attempt — round 2 never re-sent
   });
 
   // codex r2 P1: the OTHER two pending-requeue writers (the call_not_ready
@@ -1060,6 +1083,7 @@ describe('dispatchClaimedCall', () => {
     const conn3 = makeDb();
     const result3 = await dispatchClaimedCall(conn3, call3, nextMorning);
     expect(result3.deferred).toBeUndefined();
-    expect(result3.skipped).toBe('PROVIDER_FAILURE');
+    expect(result3.skipped).toBe('send_retry_timeout'); // caught by the pre-send deadline check
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1); // only round 1 ever reached the sender
   });
 });
