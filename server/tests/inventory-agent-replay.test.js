@@ -10,7 +10,7 @@
  * script does anything else) is for.
  */
 const {
-  assertReadOnly, parseSince, parseLimit, lineKey, dedupe, inQueueOrder, emptyProposals, recordProposal, catalogWithProposals, replayLine,
+  assertReadOnly, parseSince, parseLimit, lineKey, dedupe, inQueueOrder, tableOnlyLines, emptyProposals, recordProposal, catalogWithProposals, replayLine,
 } = require('../../ops/agents/inventory-agent-replay');
 const { classifyItem } = require('../services/purchase-receipts/receipt-processor');
 
@@ -188,6 +188,29 @@ describe('dedupe', () => {
   });
 });
 
+// Codex round 9: recorded rows the email collectors can't rebuild.
+describe('tableOnlyLines', () => {
+  const since = new Date('2026-09-01T00:00:00Z');
+  const row = (extra) => ({
+    vendor: 'amazon', order_number: 'o', shipment_key: 'S', line_no: 1, status: 'logged', email_id: 'e', created_at: '2026-09-02T00:00:00Z',
+    raw_title: 't', quantity: '1', ...extra,
+  });
+  const keyOf = (r) => lineKey({ vendor: r.vendor, orderNumber: r.order_number, shipmentKey: r.shipment_key, lineNo: r.line_no });
+
+  test('a rebuilt row is left to its email; an undelivered hold always comes along', () => {
+    const rebuilt = row({});
+    const hold = row({ line_no: 2, status: 'no_delivery_email' });
+    const out = tableOnlyLines([rebuilt, hold], new Set([keyOf(rebuilt), keyOf(hold)]), since);
+    expect(out.map((l) => [l.lineNo, l.report])).toEqual([[2, 'no_delivery_email']]);
+  });
+
+  test('a deleted-email row in the window is reported; a pre-window row only feeds the rules', () => {
+    const orphan = row({ email_id: null, status: 'agent_pending' });
+    const old = row({ line_no: 2, status: 'no_items', created_at: '2026-08-01T00:00:00Z' });
+    expect(tableOnlyLines([orphan, old], new Set(), since).map((l) => l.report)).toEqual(['email_deleted', null]);
+  });
+});
+
 // Codex round 6: explicit 'false' — dotenv (loaded as server modules are
 // required) only fills in variables that are absent.
 test('the telemetry gates stay set to false once the server modules have loaded', () => {
@@ -219,6 +242,20 @@ describe('replayLine hand-offs', () => {
     expect((await replayLine(null, siteOne('store', 1), s)).status).toBe('unreadable');
     expect((await replayLine(null, siteOne('billing', 2), s)).status).toBe('other_invoice_copy');
     expect((await replayLine(null, siteOne('store', 2), s)).status).toBe('handed_to_person');
+  });
+
+  // Codex round 9: a hand-off recorded before --since still stops a later
+  // email for that shipment — the live check reads the whole table.
+  test('a pre-window hand-off stops a later email silently', async () => {
+    const s = state();
+    expect(await replayLine(null, line('e1', { recordedStatus: 'no_items', report: null }), s)).toBeNull();
+    expect((await replayLine(null, line('e2', { forcedStatus: 'no_items' }), s)).status).toBe('handed_to_person');
+  });
+
+  test('a recorded line whose email was deleted is reported as held for a person', async () => {
+    const s = state();
+    const row = await replayLine(null, line(null, { recordedStatus: 'agent_pending', report: 'email_deleted' }), s);
+    expect(row).toMatchObject({ status: 'email_deleted', text: expect.stringContaining('holds it for a person') });
   });
 
   test('an undelivered-shipment hold hands off a later email for that shipment only', async () => {

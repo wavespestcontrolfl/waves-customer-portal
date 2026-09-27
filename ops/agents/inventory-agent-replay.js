@@ -92,7 +92,7 @@ function parseLimit(raw) {
 }
 
 const server = (relative) => path.join(__dirname, '..', '..', 'server', relative);
-const { classifyItem, lineDisposition, handedOffBy } = require(server('services/purchase-receipts/receipt-processor'));
+const { classifyItem, lineDisposition, handedOffBy, AGENT_HANDOFF_STATUSES } = require(server('services/purchase-receipts/receipt-processor'));
 const { loadMatchCatalog } = require(server('services/purchase-receipts/product-matcher'));
 const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require(server('services/purchase-receipts/amazon-delivery-parser'));
 const siteOne = require(server('services/purchase-receipts/siteone-invoices'));
@@ -179,13 +179,8 @@ function readOnlyConn() {
 // first recorded time of its vendor at or after its email arrived — the
 // sweep that scanned it — else its email's time. Within one sweep time,
 // email arrival order, then email, then line order.
-async function recordedTimes(conn, since) {
-  const rows = await conn('purchase_receipt_lines').where('created_at', '>=', since)
-    .select('vendor', 'order_number', 'shipment_key', 'line_no', 'created_at');
-  return new Map(rows.map((row) => [
-    lineKey({ vendor: row.vendor, orderNumber: row.order_number, shipmentKey: row.shipment_key, lineNo: row.line_no }),
-    { vendor: row.vendor, at: new Date(row.created_at).getTime() },
-  ]));
+function recordedTimes(rows) {
+  return new Map(rows.map((row) => [rowKey(row), { vendor: row.vendor, at: new Date(row.created_at).getTime() }]));
 }
 
 function inQueueOrder(lines, recorded) {
@@ -251,21 +246,40 @@ async function siteOneLines(since) {
   return { lines, failures };
 }
 
-// Lines the live undelivered-shipment pass (undelivered-shipments.js)
-// recorded from an authenticated Shipped email whose Delivered email never
-// came: each is held for a person as 'no_delivery_email' and hands its
-// shipment to a person for good, so none ever reaches the agent. Read from
-// what the live lane actually recorded rather than re-deriving its timing
-// rules, and placed in the timeline at the moment it was recorded, so a
-// later email for that shipment is handed off exactly as it was live.
-async function undeliveredLines(conn, since) {
-  const rows = await conn('purchase_receipt_lines').where({ status: 'no_delivery_email' }).where('created_at', '>=', since)
-    .select('vendor', 'order_number', 'shipment_key', 'line_no', 'raw_title', 'quantity', 'email_id', 'created_at');
-  return rows.map((row) => ({
-    vendor: row.vendor, orderNumber: row.order_number, shipmentKey: row.shipment_key, lineNo: row.line_no,
-    email: { id: row.email_id, received_at: row.created_at },
-    item: { title: row.raw_title, quantity: Number(row.quantity) }, recordedStatus: 'no_delivery_email',
-  }));
+// Every row the live lane has recorded, all time: the queue order
+// (recordedTimes) and the rows the collectors above can't rebuild both come
+// from it.
+function recordedRows(conn) {
+  return conn('purchase_receipt_lines')
+    .select('vendor', 'order_number', 'shipment_key', 'line_no', 'status', 'email_id', 'created_at', 'raw_title', 'quantity');
+}
+
+function rowKey(row) {
+  return lineKey({ vendor: row.vendor, orderNumber: row.order_number, shipmentKey: row.shipment_key, lineNo: row.line_no });
+}
+
+// Recorded rows the collectors don't rebuild, placed on the timeline at the
+// time they were recorded so the live hand-off and invoice-copy rules see
+// them exactly as live (the live checks read the whole table, not a window):
+//   - an undelivered-shipment hold (undelivered-shipments.js, from a Shipped
+//     email): always, even when a later Delivered email rebuilds the same
+//     line — the recorded hold owns that line (see dedupe);
+//   - a row whose email was deleted (email_id is ON DELETE SET NULL): the
+//     live agent can't check it for duplicates, so it holds it for a person;
+//   - any other row outside the window (before --since): silent, there only
+//     so a hand-off recorded before the window still stops a later email.
+// Rows recorded inside the window are reported (holds and deleted-email
+// rows); the rest only feed the rules.
+function tableOnlyLines(rows, collectedKeys, since) {
+  return rows.filter((row) => row.status === 'no_delivery_email' || !collectedKeys.has(rowKey(row))).map((row) => {
+    const inWindow = new Date(row.created_at) >= since;
+    const report = !inWindow ? null : (!row.email_id && 'email_deleted') || (row.status === 'no_delivery_email' && row.status) || null;
+    return {
+      vendor: row.vendor, orderNumber: row.order_number, shipmentKey: row.shipment_key, lineNo: row.line_no,
+      email: { id: row.email_id, received_at: row.created_at },
+      item: { title: row.raw_title, quantity: Number(row.quantity) }, recordedStatus: row.status, report,
+    };
+  });
 }
 
 // The live lane's own purchase-line identity — purchase_receipt_lines'
@@ -362,7 +376,7 @@ function settledRow(state, line, status, text = '') {
 // The agent's answer for one line it would take: a reused one when the same
 // question was already asked, '--limit reached' past the cap, or a real
 // decideForTitle call against the saved catalog.
-async function agentProposal(conn, line, found, state) {
+async function agentProposal(conn, line, found, state, { recordEffects = true } = {}) {
   const siteOneFields = line.vendor === 'siteone' ? await siteOneLineFields(conn, { email_id: line.email.id, line_no: line.lineNo }) : null;
   const question = JSON.stringify([line.vendor, line.item.title, line.item.quantity, siteOneFields]);
   const earlier = state.decided.get(question);
@@ -384,7 +398,7 @@ async function agentProposal(conn, line, found, state) {
     state.llmFailures += 1;
     return text;
   }
-  recordProposal(state.proposals, { outcome, found, title: line.item.title });
+  if (recordEffects) recordProposal(state.proposals, { outcome, found, title: line.item.title });
   state.decided.set(question, text);
   return text;
 }
@@ -422,7 +436,10 @@ function recordLine(state, line, status) {
 async function replayLine(conn, line, state) {
   if (line.recordedStatus) {
     recordLine(state, line, line.recordedStatus);
-    return settledRow(state, line, line.recordedStatus);
+    if (!line.report) return null;
+    const heldForPerson = [...AGENT_HANDOFF_STATUSES, 'agent_pending'].includes(line.recordedStatus);
+    return settledRow(state, line, line.report, line.report === 'email_deleted'
+      ? `recorded as ${line.recordedStatus}; its email is gone${heldForPerson ? ' — the live agent holds it for a person' : ''}` : '');
   }
   if (!line.shipmentKey) return settledRow(state, line, 'no_shipment_key');
   // sweep.js siteOneInvoiceLines: the store and billing copies of one
@@ -443,7 +460,9 @@ async function replayLine(conn, line, state) {
   }
   state.handedToAgent += 1;
   const dependent = await coveredByEarlierProposal(conn, line, state);
-  const proposal = await agentProposal(conn, line, found, state);
+  // A dependent line's proposal happens only if the earlier change does NOT
+  // survive, so its own change never joins the all-survive view.
+  const proposal = await agentProposal(conn, line, found, state, { recordEffects: !dependent });
   if (!dependent) return { line, status: `agent (${found.status})`, text: proposal };
   state.dependsOnEarlier += 1;
   return {
@@ -489,16 +508,15 @@ async function main() {
   await assertReadOnly(sharedDb);
   const conn = readOnlyConn();
   try {
-    const [amazon, siteOneRead, undelivered, recorded] = await Promise.all([
-      amazonLines(conn, since), siteOneLines(since), undeliveredLines(conn, since), recordedTimes(conn, since),
-    ]);
+    const [amazon, siteOneRead, tableRows] = await Promise.all([amazonLines(conn, since), siteOneLines(since), recordedRows(conn)]);
+    const tableOnly = tableOnlyLines(tableRows, new Set([...amazon, ...siteOneRead.lines].map(lineKey)), since);
     // In the live queue's order (see recordedTimes): hand-offs and proposed
     // catalog changes apply to what comes after, and --limit caps the same
     // lines the live agent would reach first.
-    const lines = dedupe(inQueueOrder([...amazon, ...siteOneRead.lines, ...undelivered], recorded));
-    console.log(`${lines.length} distinct purchase line(s) since ${since.toISOString()} `
-      + `(${amazon.length} Amazon, ${siteOneRead.lines.length} SiteOne, `
-      + `${undelivered.length} undelivered-shipment line(s) the live lane held for a person, before dedupe).`);
+    const lines = dedupe(inQueueOrder([...amazon, ...siteOneRead.lines, ...tableOnly], recordedTimes(tableRows)));
+    console.log(`Since ${since.toISOString()}: ${amazon.length} Amazon and ${siteOneRead.lines.length} SiteOne line(s) rebuilt from their emails, `
+      + `${tableOnly.filter((line) => line.report).length} recorded line(s) with no email to rebuild from `
+      + '(undelivered-shipment holds, deleted emails), before dedupe.');
 
     // One paid call per distinct question: `decided` maps each asked
     // question (title, quantity, vendor, invoice evidence) to its answer.
@@ -507,7 +525,10 @@ async function main() {
       decided: new Map(), recorded: new Map(), invoiceOwner: new Map(), proposals: emptyProposals(), dependsOnEarlier: 0,
     };
     const rows = [];
-    for (const line of lines) rows.push(await replayLine(conn, line, state));
+    for (const line of lines) {
+      const row = await replayLine(conn, line, state);
+      if (row) rows.push(row);
+    }
     printReport(rows, state, siteOneRead.failures);
   } finally {
     await conn.destroy();
@@ -527,5 +548,5 @@ if (require.main === module) {
 }
 
 module.exports = {
-  assertReadOnly, parseSince, parseLimit, lineKey, dedupe, inQueueOrder, emptyProposals, recordProposal, catalogWithProposals, replayLine,
+  assertReadOnly, parseSince, parseLimit, lineKey, dedupe, inQueueOrder, tableOnlyLines, emptyProposals, recordProposal, catalogWithProposals, replayLine,
 };
