@@ -4078,6 +4078,10 @@ function initScheduledJobs() {
             scheduled_sms_log_id: msg.id,
             customer_id: msg.customer_id,
           };
+          const replayRegistry = require('./messaging/deferred-replay-registry');
+          const replayHandoffMeta = { ...claimMeta,
+            customer_id: msg.customer_id || claimMeta.customer_id || null,
+            to_phone: msg.to_phone || null };
           const replayInput = {
             to: toPhone,
             body: msg.message_body,
@@ -4087,10 +4091,13 @@ function initScheduledJobs() {
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
-            withSmsHandoff: require('./messaging/deferred-replay-registry')
-              .deferredSmsHandoff(claimMeta.entry_point, { ...claimMeta,
-                customer_id: msg.customer_id || claimMeta.customer_id || null,
-                to_phone: msg.to_phone || null }),
+            withSmsHandoff: replayRegistry.deferredSmsHandoff(claimMeta.entry_point, replayHandoffMeta),
+            // A queued invoice notice holds the same invoice lock as the
+            // immediate send: the Text/App provider handoff and the Email
+            // leg's check under the Email authority's lock (registry
+            // invoice_send_deferred). Undefined for every other entry point.
+            withProviderHandoff: replayRegistry.deferredProviderHandoff(claimMeta.entry_point, replayHandoffMeta),
+            billingEmailPreSendCheck: replayRegistry.deferredBillingEmailPreSendCheck(claimMeta.entry_point, replayHandoffMeta),
             // Send-window operator provenance: only rows an operator
             // actually composed/scheduled keep the operator exemption — the
             // composer dispatches at the exact minute the operator picked,
