@@ -206,6 +206,46 @@ test.each([
   if (released) expect(releaseChain.update).toHaveBeenCalledWith({ balance_reminder_sent_at: null });
 });
 
+test.each([
+  ['sms', 'payer resolve failed', ['inv-9']],
+  ['email', 'candidate bound hit', []],
+])('an incomplete %s balance snapshot (%s) skips before the claim', async (incompleteChannel, reason, eligibleInvoiceIds) => {
+  const { claimChain } = armOneVisit();
+  collectionsChannelVerdict.mockImplementation(async ({ channel }) => ({
+    permitted: true,
+    eligibleInvoiceIds: channel === incompleteChannel ? eligibleInvoiceIds : ['inv-9'],
+    ...(channel === incompleteChannel ? { balanceIncomplete: reason } : {}),
+  }));
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(result).toMatchObject({ sent: 0, skipped: 1 });
+  expect(claimChain.update).not.toHaveBeenCalled();
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+  expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();
+  expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+});
+
+test('late dues do not authorize a reminder from an incomplete empty invoice snapshot', async () => {
+  const claimChain = chain({ result: 1 });
+  require('../services/billing-lane').resolveBillingLane.mockReturnValueOnce({ mode: 'monthly_membership' });
+  require('../services/billing-lane').monthlyDuesCollected.mockResolvedValueOnce(false);
+  setDbQueues({
+    sms_templates: [chain({ first: { is_active: true } })],
+    scheduled_services: [chain({ result: [{ ...VISIT, monthly_rate: '69.00', billing_day: 1 }] }), claimChain],
+    invoices: [chain({ result: [] })],
+    activity_log: [chain({ result: [] })],
+  });
+  collectionsChannelVerdict.mockResolvedValue({
+    permitted: true, eligibleInvoiceIds: [], balanceIncomplete: 'payer resolve failed',
+  });
+  await expect(runSweep({ now: new Date('2026-08-14T15:00:00Z') }))
+    .resolves.toMatchObject({ sent: 0, skipped: 1 });
+  expect(collectionsChannelVerdict).toHaveBeenCalledTimes(2);
+  expect(collectionsChannelVerdict).toHaveBeenCalledWith(expect.objectContaining({ offLedgerBalanceCents: 6900 }));
+  expect(claimChain.update).not.toHaveBeenCalled();
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+  expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();
+});
+
 test('sms allowed + email denied ⇒ SMS only, hasEmailLeg declared false, one sms ledger row recorded before the send', async () => {
   armOneVisit();
   permitChannels({ sms: true, email: false });

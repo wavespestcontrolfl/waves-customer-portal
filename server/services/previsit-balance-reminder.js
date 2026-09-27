@@ -233,7 +233,11 @@ async function prepareVisitReminder(visit, { now, todayEt }) {
   };
   const smsVerdict = await collectionsChannelVerdict({ ...consult, channel: 'sms' });
   const emailVerdict = await collectionsChannelVerdict({ ...consult, channel: 'email' });
-  if (!smsVerdict.permitted && !emailVerdict.permitted) return null;
+  // The first policy snapshots must both be complete before quoting an
+  // aggregate. A transient read leaves the appointment unclaimed for retry.
+  const snapshots = [smsVerdict, emailVerdict];
+  if (snapshots.some((snapshot) => snapshot.balanceIncomplete)
+    || snapshots.every((snapshot) => !snapshot.permitted)) return null;
   // Preserve the live sweep's channel policy selection for the shared quote.
   const eligibleIds = smsVerdict.permitted && smsVerdict.eligibleInvoiceIds !== null
     ? smsVerdict.eligibleInvoiceIds

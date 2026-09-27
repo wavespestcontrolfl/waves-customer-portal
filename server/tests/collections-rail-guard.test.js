@@ -113,11 +113,32 @@ describe('collectionsChannelVerdict', () => {
       .toEqual({ permitted: false, eligibleInvoiceIds: ['inv-1'] });
   });
 
+  test('gate on: preserves incomplete balance evidence without changing channel permission', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValueOnce({
+      allowed: true,
+      eligibleInvoiceIds: ['inv-1'],
+      denialReasons: [],
+      balanceIncomplete: 'payer resolve failed',
+    });
+    expect(await collectionsChannelVerdict({
+      customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder',
+    })).toEqual({
+      permitted: true,
+      eligibleInvoiceIds: ['inv-1'],
+      balanceIncomplete: 'payer resolve failed',
+    });
+  });
+
   test('gate on: a consult failure denies with an EMPTY set (nothing quotable)', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     ContactPolicy.evaluate.mockRejectedValueOnce(new Error('db down'));
     expect(await collectionsChannelVerdict({ customerId: 'cust-1', channel: 'sms', purpose: 'balance_reminder' }))
-      .toEqual({ permitted: false, eligibleInvoiceIds: [] });
+      .toEqual({
+        permitted: false,
+        eligibleInvoiceIds: [],
+        balanceIncomplete: 'policy evaluation failed',
+      });
   });
 });
 
