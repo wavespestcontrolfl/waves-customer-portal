@@ -272,9 +272,16 @@ describe('enrichBillingLaneWithWalletGap wiring (source guards)', () => {
   // for the reserved row's own attached-invoice prediction), or the
   // schedule preview and the (sibling-aware) Charge Now mint resolver can
   // disagree.
-  test('also asks the sibling-covered predicate for an unpriced fee-fallback invoice/auto_charge prediction, but not for the reserved row\'s own attached invoice', () => {
+  //
+  // Codex pre-push P1 (round 2): 'prepaid' belongs in the same list — the
+  // SAME lingering fee predicts 'prepaid' instead of 'invoice' when the
+  // customer also fully prepaid it, and that shape has the identical
+  // preview-vs-mint divergence risk (a checkout extra on top of the
+  // uncorrected grossAmount previews a different total than the
+  // sibling-aware mint resolver settles).
+  test('also asks the sibling-covered predicate for an unpriced fee-fallback invoice/auto_charge/prepaid prediction, but not for the reserved row\'s own attached invoice', () => {
     expect(fn).toContain("const hasOwnPrice = svc?.estimated_price != null && Number(svc.estimated_price) > 0;");
-    expect(fn).toContain("const feeFallbackPrediction = !hasOwnPrice\n    && ['invoice', 'auto_charge'].includes(billingLane?.prediction?.kind)\n    && billingLane?.prediction?.source !== 'attached_invoice';");
+    expect(fn).toContain("const feeFallbackPrediction = !hasOwnPrice\n    && ['invoice', 'auto_charge', 'prepaid'].includes(billingLane?.prediction?.kind)\n    && billingLane?.prediction?.source !== 'attached_invoice';");
     expect(fn).toContain('if (((moneyGapReason && UNBILLED_MONEY_GAP_REASONS.has(moneyGapReason)) || feeFallbackPrediction) && svc?.source_estimate_id) {');
   });
 

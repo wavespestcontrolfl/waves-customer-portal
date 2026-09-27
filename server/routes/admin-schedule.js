@@ -5213,9 +5213,21 @@ async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, comple
   // re-checked right before minting). Excludes the RESERVED row's own
   // attached-invoice prediction (that visit genuinely bills the combined
   // total; it is not the one being asked "is a sibling covering YOU").
+  //
+  // 'prepaid' belongs in this list too (codex pre-push P1, round 2): the
+  // SAME lingering per_application fee can predict 'prepaid' instead of
+  // 'invoice' when the customer also fully prepaid it (fee $100, prepaid
+  // $100) — predictCompletionBilling's ordinary, non-sibling-aware branch
+  // has no idea this row is sibling-covered, so it still returns
+  // grossAmount: 100 for the checkout sheet to add extras on top of. The
+  // Charge Now mint resolver (resolveScheduledServiceCharge) asks the
+  // sibling question unconditionally and would use a $0 base instead —
+  // previewing $40 due on a $40 extra while the mint credits the SAME
+  // prepaid pot against it and settles at $0 due is exactly the
+  // preview-vs-actual divergence this lookup exists to prevent.
   const hasOwnPrice = svc?.estimated_price != null && Number(svc.estimated_price) > 0;
   const feeFallbackPrediction = !hasOwnPrice
-    && ['invoice', 'auto_charge'].includes(billingLane?.prediction?.kind)
+    && ['invoice', 'auto_charge', 'prepaid'].includes(billingLane?.prediction?.kind)
     && billingLane?.prediction?.source !== 'attached_invoice';
   if (((moneyGapReason && UNBILLED_MONEY_GAP_REASONS.has(moneyGapReason)) || feeFallbackPrediction) && svc?.source_estimate_id) {
     try {
