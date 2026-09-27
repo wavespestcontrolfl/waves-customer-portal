@@ -38,6 +38,12 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 jest.mock('../services/twilio', () => ({
   findOutboundMessageSince: jest.fn(async () => ({ unavailable: true })),
 }));
+// The owner's holds run for real against this schema; the wrapper only lets
+// a test make one check unreadable.
+jest.mock('../services/messaging/auto-text-holds', () => {
+  const actual = jest.requireActual('../services/messaging/auto-text-holds');
+  return { ...actual, autoTextHoldReason: jest.fn((...args) => actual.autoTextHoldReason(...args)) };
+});
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(async (key, vars) => `Hi there, it's Waves. Sorry we missed your call. Text us here with what you need, or call back anytime${vars.callback_clause}.`),
 }));
@@ -46,6 +52,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const TwilioService = require('../services/twilio');
+const { autoTextHoldReason } = require('../services/messaging/auto-text-holds');
 const {
   textBackIfMissed, sweepMissedCallTextBacks, CLAIM,
   _private: { reconcileOrphanedClaims },
@@ -74,7 +81,7 @@ jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('missed-call text-back on PostgreSQL', () => {
   let database;
   const schema = `missed_call_text_${randomUUID().replaceAll('-', '')}`;
-  const tables = ['call_log', 'customers', 'sms_log', 'missed_call_text_claims', 'voicemail_sms_claims', 'blocked_numbers', 'blocked_call_attempts'];
+  const tables = ['call_log', 'customers', 'sms_log', 'missed_call_text_claims', 'voicemail_sms_claims', 'blocked_numbers', 'blocked_call_attempts', 'leads', 'estimates'];
   // 2026-09-08T15:00Z = 11:00 ET (EDT) — inside the 8am–8pm send window.
   const NOW = Date.parse('2026-09-08T15:00:00Z');
   let nowSpy;
@@ -382,6 +389,52 @@ jest.setTimeout(30000);
     await database('call_log').insert(row);
     expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'already_sent_to_phone' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  describe('the owner\'s holds (messaging/auto-text-holds.js, shared with the voicemail quote-link text)', () => {
+    test('a quote or estimate already on file: skipped, nothing claimed', async () => {
+      await database('estimates').insert({ id: randomUUID(), customer_phone: PHONE, status: 'sent', sent_at: new Date(NOW - 24 * 60 * 60 * 1000) });
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'quote_on_file' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(await claimRow()).toBeUndefined();
+      expect((await stored(row)).metadata.missed_call_text_outcome).toBe('skipped:quote_on_file');
+    });
+
+    test('a text either way in the 7 days before the call (never contact "since" the call) holds it', async () => {
+      await database('sms_log').insert({
+        direction: 'inbound', from_phone: PHONE, to_phone: '+19412975749', message_body: 'hi', status: 'received',
+        created_at: new Date(NOW - 2 * 24 * 60 * 60 * 1000),
+      });
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'recent_conversation' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('a hold that appears after the early check (an earlier call re-read as do-not-contact) stops the send at the boundary, before any claim', async () => {
+      sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, {
+        before: () => database('call_log').insert(call(2 * 24 * 60, {
+          status: 'completed', answered_by: 'human', ai_extraction_enriched: JSON.stringify({ consent: { do_not_contact_request: true } }),
+        })),
+      }));
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'asked_not_to_be_contacted' });
+      expect(await claimRow()).toBeUndefined();
+      expect((await stored(row)).metadata.missed_call_text_outcome).toBe('skipped:asked_not_to_be_contacted');
+    });
+
+    test('an unreadable hold check fails closed: nothing sent, the call left unsettled for a retry', async () => {
+      autoTextHoldReason.mockRejectedValueOnce(Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }));
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'error' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect((await stored(row)).metadata.missed_call_text_settled_at).toBeUndefined();
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+    });
   });
 
   describe('provider boundary (providerPreSendCheck) — rechecked immediately before the handoff', () => {

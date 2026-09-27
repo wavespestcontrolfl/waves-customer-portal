@@ -56,11 +56,13 @@ and the row carries no settlement time of its own. Nor is a combined balance cha
 paid several invoices at once: a partial refund of one is parked for the office, never
 recorded on its rows. Account credit, third-party payers, refunds and disputes are never
 money landing, nor is a payment while a refund of it is in flight (a partial refund is
-shown beside the payment it reduces). A payment never
-answers a request for a refund, a dispute or a change of how the customer pays. Only
-the request itself counts: a clause beside it that declines or narrates ("don't refund
-it", "I set up autopay on Friday") does not shut money out, while such a term inside the
-request does, however it is negated ("you did not refund me"). Money tied to another
+shown beside the payment it reduces). Whether a payment can answer a request is judged
+once, when the text is read: the extraction marks each request that a payment arriving
+would answer ("did my payment go through?"). Money going back to the customer however
+it is worded (a refund, reversal, reimbursement or chargeback), a disputed charge, a
+change of how the customer pays, a billing explanation or a receipt is never marked, and
+an unmarked request is never answered by a payment; the completion check repeats the
+rule when it reads the evidence. Money tied to another
 property never answers a question about this one, and money tied to no property answers
 one only when that is the only property the customer has ever had. A staff "received"
 text never closes it. The model must cite the payment, which shows how it was paid (card
