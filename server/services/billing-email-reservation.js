@@ -183,10 +183,9 @@ async function repairAcceptedBillingEmailReservations(rows, database = db) {
       if (accepted) {
         const stamped = await markBillingEmailReservationDelivered(message, database);
         if (stamped) repaired.add(String(candidate.id));
-        if (!stamped) {
-          // The outer Email scan can race a retry/requote transition. If its
-          // accepted snapshot lost the current-attempt fence, classify this
-          // pass from the ledger state written by the winner.
+        else {
+          // A provider retry can replace the accepted attempt after the scan.
+          // Classify this pass from the reservation written by the winner.
           const current = await database('collections_contact_ledger')
             .where({ id: candidate.id }).first('metadata');
           candidate.metadata = current ? metadataOf(current) : candidate.metadata;
