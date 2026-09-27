@@ -22,6 +22,7 @@ import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { pestDefaultMixSelections } from '../../lib/pest-default-mix';
+import { shouldResetCompletionIdempotencyKey } from '../../lib/completion-idempotency';
 import { UiSurface, Button, Field, Input, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -213,6 +214,10 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
       await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
       setDone({ summary: `${activeProducts.map((p) => p.name).join(', ')} · ${targets.join(', ')}` });
     } catch (err) {
+      // A definitive rejection gets a fresh key so the corrected resubmit
+      // isn't refused as idempotency_key_mismatch; an uncertain outcome
+      // (network, 5xx) keeps it so a same-payload retry can replay/resume.
+      if (shouldResetCompletionIdempotencyKey(err)) idempotencyKeyRef.current = genIdempotencyKey();
       setError(err?.message || 'Completion failed');
       setSubmitting(false);
       submitInFlight.current = false;

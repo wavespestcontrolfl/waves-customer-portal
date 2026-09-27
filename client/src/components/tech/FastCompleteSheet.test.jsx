@@ -139,6 +139,42 @@ describe('FastCompleteSheet', () => {
     expect(onCompleted).toHaveBeenCalled();
   });
 
+  test.each([
+    ['a definitive rejection (422) gets a fresh key for the corrected resubmit', 422, true],
+    ['an uncertain failure (503) keeps the key so a retry can replay or resume', 503, false],
+  ])('%s', async (_name, status, expectFreshKey) => {
+    const request = makeRequest();
+    let failures = 0;
+    const base = request.getMockImplementation();
+    request.mockImplementation(async (path, options) => {
+      if (path.endsWith('/complete') && failures === 0) {
+        failures += 1;
+        request.calls.push({ path, options });
+        throw Object.assign(new Error('Completion failed'), { status });
+      }
+      return base(path, options);
+    });
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
+
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+    expect(await screen.findByText('Completion failed')).toBeTruthy();
+
+    // The tech corrects the visit and submits again.
+    fireEvent.click(screen.getByRole('button', { name: 'Roaches' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+    await waitFor(() => {
+      expect(request.calls.filter((c) => c.path.endsWith('/complete'))).toHaveLength(2);
+    });
+    const [first, second] = request.calls
+      .filter((c) => c.path.endsWith('/complete'))
+      .map((c) => JSON.parse(c.options.body).idempotencyKey);
+    if (expectFreshKey) expect(second).not.toBe(first);
+    else expect(second).toBe(first);
+  });
+
   test('an added product blocks Complete until its amount is entered; edited amounts and units are submitted', async () => {
     const request = makeRequest();
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);

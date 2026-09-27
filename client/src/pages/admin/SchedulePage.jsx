@@ -131,6 +131,7 @@ import {
 import ServiceScore from "../../components/payGrowth/ServiceScore";
 import { request as payGrowthRequest } from "../../components/payGrowth/common";
 import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
+import { shouldResetCompletionIdempotencyKey } from "../../lib/completion-idempotency";
 // Round 14 P2 (:2494): sentinel <option> value for the row's own stored appointment discount.
 const STORED_APPOINTMENT_DISCOUNT_OPTION = "__stored_appointment_discount";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
@@ -897,12 +898,9 @@ export function createCompletionIdempotencyKey(serviceId) {
   return `complete_${serviceId}_${randomPart}`;
 }
 
-export function shouldResetCompletionIdempotencyKey(error) {
-  const status = Number(error?.status);
-  if (!Number.isFinite(status) || status < 400 || status >= 500) return false;
-  if (status !== 409) return true;
-  return ["lawn_assessment_stale", "completion_pricing_changed"].includes(error?.code);
-}
+// Moved to lib/completion-idempotency (shared with the tech Fast Complete
+// sheet); re-exported so this module's named export stays in place.
+export { shouldResetCompletionIdempotencyKey };
 
 // completion_side_effects_running means the completion COMMITTED (the claim
 // only returns it for an attempt that already has a service_record) and the

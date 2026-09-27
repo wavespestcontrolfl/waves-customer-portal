@@ -150,6 +150,7 @@ async function techRequest(path, options = {}) {
   if (!res.ok) {
     const error = new Error(data?.error || `Request failed (${res.status})`);
     error.status = res.status;
+    error.code = data?.code;
     throw error;
   }
   return data;
