@@ -46,7 +46,9 @@ const NON_MIX_SERVICE_RE =
 // "one-time pest control" is a SEPARATE, narrower addition (owner
 // 2026-09-26): the admin-created One-Time Pest Control Service catalog
 // row now gets the same mix, without loosening the bare "Pest Control
-// Service" exclusion above (still no product-line naming to key off).
+// Service" LABEL exclusion above (still no product-line naming to key
+// off a bare name) — isPestDefaultMixVisit below covers the common bare-
+// label case separately, by the row's stable catalog key instead.
 const RECURRING_GENERAL_PEST_RE =
   /general pest|quarterly|bi-?monthly|\bmonthly\b|semi-?annual|recurring pest|one[-\s]?time\s+pest\s+control/i;
 
@@ -61,7 +63,26 @@ export function isPestDefaultMixVisit(service) {
   if (NON_MIX_SERVICE_RE.test(s)) return false;
   const isReservice =
     service?.isCallback === true || /re-?service|callback/.test(s);
-  return isReservice || RECURRING_GENERAL_PEST_RE.test(s);
+  if (isReservice || RECURRING_GENERAL_PEST_RE.test(s)) return true;
+  // The stable catalog key, not the label (Codex r3 P2, PR #5049): an
+  // admin-created One-Time Pest Control Service job is often scheduled
+  // under the bare "Pest Control Service" label (admin-schedule.js's
+  // EDIT_FALLBACK_SERVICES scheduler fallback + legacy rows) — the label
+  // test above deliberately keeps excluding that bare name, since it
+  // carries no product-line naming to key off. The catalog KEY is
+  // unambiguous, so it gets the mix regardless of label; every specialty
+  // exclusion above (NON_MIX_SERVICE_RE, checked first against the label)
+  // still wins, and a specialty visit never carries this key anyway — each
+  // has its own distinct one (tick_control, bee_wasp_removal, …). Checked
+  // across every field a caller's dispatch-shaped service object might
+  // carry it under.
+  const key = String(
+    service?.completionProfile?.serviceKey
+      || service?.serviceKey
+      || service?.service_key_snapshot
+      || "",
+  ).toLowerCase();
+  return key === "one_time_pest_control";
 }
 
 // Resolve the mix against the loaded catalog: first row matching each

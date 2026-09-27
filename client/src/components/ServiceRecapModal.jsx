@@ -214,6 +214,17 @@ export default function ServiceRecapModal({
         // (reopen/resend must preserve what was applied) and fails
         // closed on a failed record lookup, same as the recorded-
         // products path above. Everything stays deselectable/editable.
+        // Codex r3 P1, PR #5049 (checked for this surface too, no fix
+        // needed here): CompletionPanel's own pest-mix seed can survive a
+        // switch to inspection_only/customer_declined because it exposes
+        // a visitOutcome selector the tech can change mid-form. This recap
+        // lane has no such selector — POST /pest-recap always represents a
+        // performed visit — and the seed above only fires with NO existing
+        // record; a visit already recorded as non-performed skips this
+        // block entirely and falls into the recorded-products branch above
+        // (which pre-selects only what was actually recorded, possibly
+        // nothing). There is no state transition here for a seeded
+        // default to survive.
         if (
           !data?.existingRecord &&
           !data?.existingRecordLoadFailed &&

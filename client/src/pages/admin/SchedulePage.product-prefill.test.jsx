@@ -770,6 +770,39 @@ describe("default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29)
     );
   });
 
+  it("recognizes the bare one-time label by its stable catalog key (Codex r3 P2, PR #5049)", () => {
+    // Admin-created one-time jobs are often scheduled under the bare
+    // "Pest Control Service" label (admin-schedule.js's
+    // EDIT_FALLBACK_SERVICES scheduler fallback + legacy rows) — the
+    // label test alone (above) deliberately keeps excluding that bare
+    // name, so the key is what must carry it, checked across every field
+    // a caller's dispatch-shaped service object might carry it under.
+    expect(isPestDefaultMixVisit({
+      serviceType: "Pest Control Service",
+      completionProfile: { serviceKey: "one_time_pest_control" },
+    })).toBe(true);
+    expect(isPestDefaultMixVisit({
+      serviceType: "Pest Control Service",
+      serviceKey: "one_time_pest_control",
+    })).toBe(true);
+    expect(isPestDefaultMixVisit({
+      serviceType: "Pest Control Service",
+      service_key_snapshot: "one_time_pest_control",
+    })).toBe(true);
+    // A specialty visit stays off even with a bare-ish label AND a
+    // non-matching key — the mix only ever fires for THIS one key.
+    expect(isPestDefaultMixVisit({
+      serviceType: "Pest Control Service",
+      completionProfile: { serviceKey: "tick_control" },
+    })).toBe(false);
+    // Specialty label exclusions (checked first, against the label) still
+    // win even over a stray/incorrect one_time_pest_control key.
+    expect(isPestDefaultMixVisit({
+      serviceType: "Mosquito Control (Monthly)",
+      completionProfile: { serviceKey: "one_time_pest_control" },
+    })).toBe(false);
+  });
+
   it("resolves Taurus SC, Atticus Talak 7.9 F, and the LESCO 90/10 surfactant with the house totals", () => {
     const selections = pestDefaultMixSelections(CATALOG);
     expect(selections.map((s) => [s.product.name, s.totalAmount])).toEqual([
