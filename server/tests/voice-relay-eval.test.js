@@ -5052,12 +5052,15 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'No hay problema, le enviaremos el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Sin duda, le enviaremos el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto sin demora.', 'pass'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por mensajería.', 'pass'],
     ['spanish-pricing-gate-off', 'No solo le enviaremos el presupuesto, también le llamaremos.', 'pass'],
     ['spanish-pricing-gate-off', 'Quizás le enviaremos el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Tal vez recibirá el presupuesto por correo.', 'fail'],
     ['spanish-pricing-gate-off', 'Podríamos enviarle el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Si podemos, le enviaremos el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviaríamos el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'El presupuesto sería enviado por correo.', 'fail'],
+    ['spanish-pricing-gate-off', 'Deberíamos enviarle el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Terminaremos sin enviar el presupuesto.', 'fail'],
     ['spanish-pricing-gate-off', 'No podemos enviarle el presupuesto por escrito.', 'fail'],
     ['spanish-pricing-gate-off', 'Entiendo que quiere un presupuesto para su propiedad.', 'fail'],
@@ -5106,7 +5109,7 @@ describe('voice relay eval — named spoken checks', () => {
       expect([text, checks.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
       expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
     }
-    for (const text of ['El presupuesto se enviará el lunes.', 'Le enviaremos la cotización el próximo martes.', 'Recibirá el estimado la próxima semana.', 'El presupuesto llegará la semana que viene.', 'Le enviaremos el presupuesto el 4 de octubre.', 'La cotización se enviará el cinco de octubre.', 'Solicitó un presupuesto y se lo enviaremos el lunes.']) {
+    for (const text of ['El presupuesto se enviará el lunes.', 'Le enviaremos la cotización el próximo martes.', 'Recibirá el estimado la próxima semana.', 'El presupuesto llegará la semana que viene.', 'Le enviaremos el presupuesto el 4 de octubre.', 'La cotización se enviará el cinco de octubre.', 'Solicitó un presupuesto y se lo enviaremos el lunes.', 'Le enviaremos el presupuesto. El presupuesto se enviará el lunes y no tiene costo.']) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
       expect([text, checks.find((c) => c.check === 'no_spanish_estimate_delivery_date')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
       expect(replay._internals.scenarioStatus({ checks })).toBe('fail');

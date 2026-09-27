@@ -48,28 +48,34 @@ const { CALLBACK_CONTACT_NOUN, CALLBACK_TIMING_ADVERB, recognizeCallbackCandidat
 
 const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 
-const SPANISH_UNCERTAINTY_RE = /\b(?:quiz[aá]s?|tal\s+vez|acaso|posiblemente|probablemente|puede\s+que|es\s+(?:posible|probable)\s+que|si|[a-záéíóúñ]+r[ií]a(?:mos|n|s)?|no\s+(?:s[eé]|sabemos|estoy\s+segur[oa]|estamos\s+segur[oa]s?)\s+si)\b/i;
+const SPANISH_CONDITIONAL_PREDICATE = '(?:(?:enviar|mandar|recibir|llegar|entregar|preparar|ofrecer|estar|quedar|ser|deber)[ií]a(?:mos|n|s)?|tendr[ií]a(?:mos|n|s)?|habr[ií]a(?:mos|n|s)?|podr[ií]a(?:mos|n|s)?|querr[ií]a(?:mos|n|s)?|har[ií]a(?:mos|n|s)?)';
+const SPANISH_UNCERTAINTY_RE = new RegExp(`\\b(?:quiz[aá]s?|tal\\s+vez|acaso|posiblemente|probablemente|puede\\s+que|es\\s+(?:posible|probable)\\s+que|si|${SPANISH_CONDITIONAL_PREDICATE}|no\\s+(?:s[eé]|sabemos|estoy\\s+segur[oa]|estamos\\s+segur[oa]s?)\\s+si)\\b`, 'i');
 const SPANISH_NEGATION_RE = /\b(?:no|nunca|jam[aá]s|tampoco)\b/i;
 const SPANISH_WITHOUT_PREDICATE_RE = /\bsin\s+(?:llegar\s+a\s+)?(?:enviar|mandar|recibir|entregar|ofrecer|tener|haber)\b/i;
 const SPANISH_REASSURANCE_RE = /^\s*(?:no\s+(?:se\s+)?preocupe|no\s+hay\s+problema|sin\s+problema)\b[\s,:—–]*/i;
 const SPANISH_CERTAINTY_RE = /\b(?:sin\s+duda|no\s+s[oó]lo)\b/gi;
+const SPANISH_NEGATED_COORDINATION_RE = /\by\s+(?=(?:no|nunca|jam[aá]s|tampoco)\b)/gi;
 
 /** A regex hit wholly satisfied by one affirmative clause. */
 function assertedSpokenMatch(text, re) {
   const global = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
   for (const statement of String(text || '').split(SENTENCE_SPLIT_RE)) {
-    const seen = new Set();
-    for (let at = 0; at < statement.length; at += 1) {
-      const bounds = clauseBounds(statement, at);
-      const key = bounds.join(':');
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const claim = statement.slice(...bounds).replace(SPANISH_REASSURANCE_RE, '').replace(SPANISH_CERTAINTY_RE, '');
-      const denied = clauseIsNegated(claim) || SPANISH_NEGATION_RE.test(claim) || SPANISH_WITHOUT_PREDICATE_RE.test(claim);
-      const uncertain = clauseIsEpistemicallyHedged(claim) || SPANISH_UNCERTAINTY_RE.test(claim);
-      global.lastIndex = 0;
-      const match = global.exec(claim);
-      if (match && !denied && !uncertain) return match;
+    const candidates = [statement];
+    for (const conjunction of statement.matchAll(SPANISH_NEGATED_COORDINATION_RE)) candidates.push(statement.slice(0, conjunction.index));
+    for (const candidate of candidates) {
+      const seen = new Set();
+      for (let at = 0; at < candidate.length; at += 1) {
+        const bounds = clauseBounds(candidate, at);
+        const key = bounds.join(':');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const claim = candidate.slice(...bounds).replace(SPANISH_REASSURANCE_RE, '').replace(SPANISH_CERTAINTY_RE, '');
+        const denied = clauseIsNegated(claim) || SPANISH_NEGATION_RE.test(claim) || SPANISH_WITHOUT_PREDICATE_RE.test(claim);
+        const uncertain = clauseIsEpistemicallyHedged(claim) || SPANISH_UNCERTAINTY_RE.test(claim);
+        global.lastIndex = 0;
+        const match = global.exec(claim);
+        if (match && !denied && !uncertain) return match;
+      }
     }
   }
   return null;
