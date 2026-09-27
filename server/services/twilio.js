@@ -1369,6 +1369,21 @@ const TwilioService = {
           await (trx || db)("sms_log").insert(buildSmsLogRow());
         } catch (logErr) {
           logger.error(`SMS log failed: ${logErr.message}`);
+          // codex #5018 round-3 P1: on a HELD trx, this failed INSERT
+          // leaves Postgres's transaction aborted — its later COMMIT does
+          // not error, it silently performs a ROLLBACK instead (standard
+          // Postgres protocol behavior for a COMMIT issued on an aborted
+          // transaction), so swallowing this error here would let the
+          // caller's own `conn.transaction(...)` resolve as if it had
+          // succeeded. That would skip the withSmsHandoff catch's own
+          // accepted-send recovery entirely (it only runs when
+          // withSmsHandoff's promise actually REJECTS), losing the sms_log
+          // row with no recovery attempt at all. Rethrow so the caller's
+          // transaction genuinely rolls back and rejects, landing in that
+          // recovery path. A bare `dispatch()` call (no trx) has no
+          // transaction to abort — this insert's own failure is already
+          // the final word there, so it stays swallowed, unchanged.
+          if (trx) throw logErr;
         }
       };
       if (typeof options.withSmsHandoff === 'function') {

@@ -307,6 +307,55 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     } finally { require('../models/db').mockReset(); }
   });
 
+  // codex #5018 round-3 P1: catching the in-transaction insert's OWN
+  // failure and swallowing it (the pre-fix shape) would leave a real
+  // Postgres transaction ABORTED, whose later COMMIT does not error — it
+  // silently performs a ROLLBACK instead (standard Postgres protocol
+  // behavior for a COMMIT on an aborted transaction) — so the caller's own
+  // `conn.transaction(...)` would resolve as if it had succeeded and the
+  // withSmsHandoff catch's accepted-send recovery above would never run at
+  // all. dispatch()'s own insert failure must rethrow when a trx is held,
+  // so the caller's transaction genuinely rejects and that recovery fires;
+  // a bare (no-trx) dispatch() call has no transaction to abort and keeps
+  // swallowing its own log failure unchanged, proven by the SAME
+  // `trx` / no-`trx` distinction the caller-supplied-trx test above pins.
+  test('a genuine in-transaction sms_log insert failure propagates and still triggers the base-connection recovery', async () => {
+    const insertError = Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
+    const trxInsert = jest.fn(async () => { throw insertError; });
+    const trx = jest.fn((_table) => ({ insert: trxInsert }));
+    const baseInserted = [];
+    require('../models/db').mockImplementation((table) => {
+      if (table !== 'sms_log') throw new Error(`unexpected table: ${table}`);
+      return {
+        where: () => ({ first: async () => undefined }),
+        insert: async (row) => { baseInserted.push(row); },
+      };
+    });
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', {
+        messageType: 'manual', fromNumber: FROM,
+        // No explicit throw of its own — the propagation must come from
+        // dispatch()'s own rethrow, not from anything this wrapper adds.
+        withSmsHandoff: async (dispatch) => dispatch(trx),
+      });
+      expect(result.success).toBe(true);
+      expect(trxInsert).toHaveBeenCalledTimes(1);
+      expect(baseInserted).toHaveLength(1);
+      expect(baseInserted[0]).toMatchObject({ twilio_sid: 'SM_ok', status: 'sent' });
+    } finally { require('../models/db').mockReset(); }
+  });
+
+  test('a bare dispatch() call with no trx still swallows its own sms_log insert failure (nothing to abort)', async () => {
+    require('../models/db').mockImplementation((table) => {
+      if (table !== 'sms_log') throw new Error(`unexpected table: ${table}`);
+      return { insert: async () => { throw new Error('insert failed'); } };
+    });
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM });
+      expect(result.success).toBe(true);
+    } finally { require('../models/db').mockReset(); }
+  });
+
   test.each([
     ['stamps human_authored on the sms_log row for a composer-typed body', { humanAuthored: true }, true],
     ['leaves human_authored off for an automated or unchanged-draft manual send', { humanAuthored: false }, false],
@@ -389,9 +438,15 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
       const result = await TwilioService.sendSMS('(941) 555-0123', 'Thanks — visit https://example.com', {
         messageType: 'estimate_service_details', fromNumber: FROM,
         notificationEventKey: 'payment-expiry:pm-1:9:2026:expired',
+        // codex #5018 round-3 P1: dispatch()'s own sms_log insert now
+        // rethrows a failure when `trx` is truthy, so `trx` must be a
+        // genuinely callable stand-in here (matching every other trx mock
+        // in this file) — a bare `{ held: true }` marker (not a function)
+        // would itself throw when called as `trx('sms_log')`, which is
+        // exactly the kind of failure that rethrow now correctly surfaces.
         withSmsHandoff: async dispatch => {
           events.push(['handoff']);
-          await dispatch({ held: true });
+          await dispatch(jest.fn(() => ({ insert: jest.fn(async () => {}) })));
           events.push(['handoff-done']);
           return { ok: true };
         },
