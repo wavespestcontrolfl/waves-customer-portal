@@ -516,11 +516,12 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
         });
       if (!relinked) return null;
       // A promise kept by a booking for its promised slot was matched through
-      // the call's previous customer: when the customer changes it reopens,
-      // in this transaction, for the next fulfillment refresh to re-judge.
-      const promisesReopened = String(customerId || '') !== String(call.customer_id || '')
-        ? await require('../services/call-commitments').reopenSlotBookingProofs(trx, call.id)
-        : 0;
+      // the call's customer: every relink reopens it, in this transaction,
+      // for the next fulfillment refresh to re-judge. Unconditional — the
+      // `call` snapshot above predates this transaction, so a concurrent
+      // relink could make "unchanged" wrong; a same-customer save just
+      // reopens a proof the next refresh restores.
+      const promisesReopened = await require('../services/call-commitments').reopenSlotBookingProofs(trx, call.id);
       let leadsUnlinked = 0;
       if (!customerId && call.twilio_call_sid) {
         leadsUnlinked = await trx('leads').where({ twilio_call_sid: call.twilio_call_sid }).update({ twilio_call_sid: null, updated_at: new Date() });

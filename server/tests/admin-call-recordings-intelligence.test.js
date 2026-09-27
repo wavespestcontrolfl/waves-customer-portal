@@ -476,24 +476,20 @@ describe('PUT /calls/:id/customer', () => {
     expect(JSON.stringify(timeline.wheres)).toContain(CALL_ID);
     expect(require('../services/conversations').syncVoiceMessageForCall).toHaveBeenCalledWith(SID);
   });
-  test('a customer change reopens promises kept through the old customer\'s booking, in the relink transaction; a save to the same customer does not (codex #5081 r1 P2)', async () => {
+  test('every relink reopens promises kept through the call\'s customer, inside the relink transaction — even one whose snapshot says the customer is unchanged (codex #5081 r1 P2, pre-push audit P1)', async () => {
     const { reopenSlotBookingProofs } = require('../services/call-commitments');
-    reopenSlotBookingProofs.mockResolvedValueOnce(1);
-    mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
-    await withServer(async (base) => {
-      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
-      expect(res.status).toBe(200);
-      expect((await res.json()).promises_reopened).toBe(1);
-    });
-    expect(db.transaction).toHaveBeenCalledTimes(1);
-    expect(reopenSlotBookingProofs).toHaveBeenCalledWith(db, CALL_ID);
-    reopenSlotBookingProofs.mockClear();
-    mockDb([{ id: CALL_ID, customer_id: CUSTOMER_ID, twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
-    await withServer(async (base) => {
-      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
-      expect(res.status).toBe(200);
-    });
-    expect(reopenSlotBookingProofs).not.toHaveBeenCalled();
+    for (const previous of ['old-customer', CUSTOMER_ID]) {
+      reopenSlotBookingProofs.mockClear();
+      reopenSlotBookingProofs.mockResolvedValueOnce(1);
+      mockDb([{ id: CALL_ID, customer_id: previous, twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
+      await withServer(async (base) => {
+        const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
+        expect(res.status).toBe(200);
+        expect((await res.json()).promises_reopened).toBe(1);
+      });
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+      expect(reopenSlotBookingProofs).toHaveBeenCalledWith(db, CALL_ID);
+    }
   });
 
   test('an unlink removes the call\'s derived timeline entry and reports a failed thread re-home instead of hiding it', async () => {
@@ -626,6 +622,7 @@ describe('PUT /calls/:id/customer', () => {
       expect((await res.json()).reason).toBe('already_processing');
     });
     expect(require('../services/conversations').syncVoiceMessageForCall).not.toHaveBeenCalled();
+    expect(require('../services/call-commitments').reopenSlotBookingProofs).not.toHaveBeenCalled();
   });
 
   test('validates the target customer under its row lock INSIDE the relink transaction, customers before call_log (codex #3736 gh-r6 P2)', async () => {
