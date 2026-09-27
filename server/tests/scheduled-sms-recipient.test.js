@@ -324,7 +324,7 @@ describe('classifyDepositReplayFallback — channel-flip email handoff outcomes'
   test('a deterministically undeliverable email lets the queued TEXT proceed — it is the only receipt left', () => {
     // Mirrors the immediate path\'s undeliverable-email SMS fallback
     // (codex P2 on 6b73a479).
-    for (const reason of ['email_opted_out', 'no_recipient_email', 'sendgrid_not_configured', 'no_received_deposit', 'estimate_not_found', 'no_estimate_ref']) {
+    for (const reason of ['no_recipient_email', 'sendgrid_not_configured', 'no_received_deposit', 'estimate_not_found', 'no_estimate_ref']) {
       expect(classifyDepositReplayFallback({ sent: false, reason })).toBe('sms_fallback');
     }
   });
