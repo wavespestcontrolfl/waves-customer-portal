@@ -91,7 +91,7 @@ const { loadMatchCatalog } = require(server('services/purchase-receipts/product-
 const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require(server('services/purchase-receipts/amazon-delivery-parser'));
 const siteOne = require(server('services/purchase-receipts/siteone-invoices'));
 const { amazonEmailLines, siteOneInvoiceLines, authenticated } = require(server('services/purchase-receipts/sweep'));
-const { decideForTitle, loadAllowedCategories, loadActiveCatalog, siteOneLineFields } = require(server('services/purchase-receipts/inventory-agent'));
+const { decideForTitle, loadAllowedCategories, siteOneLineFields } = require(server('services/purchase-receipts/inventory-agent'));
 const { parseETDateTime, etDateString } = require(server('utils/datetime-et'));
 const { dispatchWithFallback } = require(server('services/llm/call'));
 // The shared pool: the sweep's own SiteOne builders read through it, and
@@ -281,7 +281,7 @@ function recordProposal(proposals, { outcome, found, title }) {
     productId = `proposed-product-${proposals.products.length + 1}`;
     proposals.products.push({
       id: productId, name: decision.newProduct.name, category: decision.newProduct.category,
-      container_size: decision.newProduct.containerSize || null, active: true,
+      container_size: decision.newProduct.containerSize || null, inventory_unit: decision.newProduct.inventoryUnit || null, active: true,
     });
   } else if (decision.kind === 'existing' && decision.product) {
     productId = decision.product.id;
@@ -299,14 +299,6 @@ function catalogWithProposals({ aliasRows, products }, proposals) {
   const byId = new Map(allProducts.map((row) => [row.id, row]));
   const proposedAliases = proposals.aliases.filter((a) => byId.has(a.productId)).map((a) => ({ ...byId.get(a.productId), alias_name: a.aliasName }));
   return { aliasRows: [...aliasRows.map(sized), ...proposedAliases], products: allProducts };
-}
-
-// The agent's own catalog view (loadActiveCatalog) with the proposed
-// products and aliases added, so its duplicate-name checks see them.
-function agentCatalogWithProposals({ activeProducts, activeProductAliases }, proposals) {
-  const aliases = { ...activeProductAliases };
-  for (const alias of proposals.aliases) aliases[alias.productId] = [...(aliases[alias.productId] || []), alias.aliasName];
-  return { activeProducts: [...activeProducts, ...proposals.products.map(({ id, name }) => ({ id, name }))], activeProductAliases: aliases };
 }
 
 // decideForTitle answers one of three ways: the model couldn't be reached,
@@ -336,15 +328,17 @@ async function agentProposal(conn, line, found, state) {
   if (earlier) return `${earlier} (same as an earlier line)`;
   if (state.llmCalls >= state.limit) return '(skipped — --limit reached)';
   // Categories load once, as the live runner loads them once per run; the
-  // active catalog reloads before every decision, as the live runner
-  // reloads it per line — staff can add a product or alias while this
-  // replay waits on the model.
+  // catalog reloads before every decision, as the live runner reloads it
+  // per line — staff can add a product or alias while this replay waits on
+  // the model — with the earlier proposals layered on, and every read of
+  // the decision (classification, candidates, aliases, duplicate names)
+  // uses that one snapshot.
   if (!state.allowedCategories) state.allowedCategories = await loadAllowedCategories(conn);
-  const catalog = agentCatalogWithProposals(await loadActiveCatalog(conn), state.proposals);
+  const catalogSnapshot = catalogWithProposals(await loadMatchCatalog(conn), state.proposals);
   state.llmCalls += 1;
   const outcome = await decideForTitle(conn, dispatchWithFallback, {
     rawTitle: line.item.title, quantity: line.item.quantity, vendor: line.vendor, siteOneFields,
-  }, { allowedCategories: state.allowedCategories, ...catalog });
+  }, { allowedCategories: state.allowedCategories, catalogSnapshot });
   const text = outcomeSummary(outcome);
   // A failed call is never reused: the next identical line asks again.
   if (outcome.llmFailed) {
@@ -406,8 +400,7 @@ function printReport(rows, state, siteOneFailures) {
   console.log(`${state.handedToAgent} line(s) the agent would take; ${state.llmCalls} real LLM decision(s) (--limit=${state.limit}).`);
   console.log('Proposals are what the agent would PROPOSE; the live apply step can still hold one under its own checks '
     + '(a nearby manual restock or count, the catalog changing underneath, an application unit already in use).');
-  console.log('Later lines are matched against the catalog plus the changes earlier proposals would make; the model itself '
-    + 'is shown the saved catalog, with proposed products counted only in its duplicate-name check.');
+  console.log('Each line is matched and decided against the catalog plus the changes earlier proposals would make.');
   // An incomplete replay never passes for a complete one: each gap is
   // listed and the run exits 1.
   if (state.llmFailures) {

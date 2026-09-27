@@ -727,9 +727,15 @@ function titleTokens(text) {
 // Up to `limit` active catalog products ranked by name-token overlap with
 // the title, with `mustInclude` (the deterministic matcher's own match, for
 // a needs_size/size_mismatch line) always present and first.
+const CANDIDATE_COLUMNS = ['id', 'name', 'category', 'container_size', 'inventory_unit'];
+
 async function candidateProducts(conn, rawTitle, mustInclude, limit = CANDIDATE_LIMIT) {
+  const products = await conn('products_catalog').where({ active: true }).select(CANDIDATE_COLUMNS);
+  return rankCandidates(products, rawTitle, mustInclude, limit);
+}
+
+function rankCandidates(products, rawTitle, mustInclude, limit = CANDIDATE_LIMIT) {
   const tokens = new Set(titleTokens(rawTitle));
-  const products = await conn('products_catalog').where({ active: true }).select('id', 'name', 'category', 'container_size', 'inventory_unit');
   const scored = products
     .filter((p) => !mustInclude || p.id !== mustInclude.id)
     .map((product) => ({ product, score: titleTokens(product.name).filter((t) => tokens.has(t)).length }))
@@ -761,6 +767,28 @@ async function loadActiveCatalog(conn) {
   const activeProducts = await conn('products_catalog').where({ active: true }).select('id', 'name');
   const activeProductAliases = await candidateAliases(conn, activeProducts.map((p) => p.id));
   return { activeProducts, activeProductAliases };
+}
+
+// The same three reads (candidates, their aliases, the active catalog) from
+// a product-matcher loadMatchCatalog snapshot instead of the database — the
+// read-only replay's catalog plus the changes it has proposed so far, so
+// every step of a replayed decision sees one catalog state.
+function snapshotReads(snapshot) {
+  const aliasesOf = (productIds) => {
+    const wanted = new Set(productIds);
+    const byProduct = {};
+    for (const row of snapshot.aliasRows) if (wanted.has(row.id)) (byProduct[row.id] ||= []).push(row.alias_name);
+    return byProduct;
+  };
+  const products = snapshot.products.map((p) => Object.fromEntries(CANDIDATE_COLUMNS.map((f) => [f, p[f] ?? null])));
+  return {
+    candidates: (rawTitle, mustInclude) => rankCandidates(products, rawTitle, mustInclude),
+    aliasesOf,
+    activeCatalog: () => ({
+      activeProducts: products.map(({ id, name }) => ({ id, name })),
+      activeProductAliases: aliasesOf(products.map((p) => p.id)),
+    }),
+  };
 }
 
 async function loadAllowedCategories(conn) {
@@ -1642,13 +1670,20 @@ async function postIfDeterministic(conn, line, email, notifyAdmin) {
  * processOneLine to post it through the same locked rules path instead
  * (postLineThroughRules), never trusting a model answer for a title the
  * rules can already resolve.
+ *
+ * `catalogSnapshot` (optional; the read-only replay only): a product-matcher
+ * loadMatchCatalog snapshot every read of this decision uses instead of the
+ * database — classification, candidates, aliases and the active catalog —
+ * and then activeProducts/activeProductAliases are ignored.
  */
-async function decideForTitle(conn, dispatch, { rawTitle, quantity, vendor, siteOneFields }, { allowedCategories, activeProducts, activeProductAliases }) {
-  const reClassified = await classifyItem({ title: rawTitle, quantity }, conn);
+async function decideForTitle(conn, dispatch, { rawTitle, quantity, vendor, siteOneFields }, { allowedCategories, activeProducts: liveProducts, activeProductAliases: liveAliases, catalogSnapshot = null }) {
+  const snapshot = catalogSnapshot ? snapshotReads(catalogSnapshot) : null;
+  const { activeProducts, activeProductAliases } = snapshot ? snapshot.activeCatalog() : { activeProducts: liveProducts, activeProductAliases: liveAliases };
+  const reClassified = await classifyItem({ title: rawTitle, quantity }, conn, catalogSnapshot);
   if (reClassified.status === 'logged') return { rulesResolve: true, reClassified };
   const matchedProduct = reClassified.product || null;
-  const candidates = await candidateProducts(conn, rawTitle, matchedProduct);
-  const aliasesByProduct = await candidateAliases(conn, candidates.map((c) => c.id));
+  const candidates = snapshot ? snapshot.candidates(rawTitle, matchedProduct) : await candidateProducts(conn, rawTitle, matchedProduct);
+  const aliasesByProduct = snapshot ? snapshot.aliasesOf(candidates.map((c) => c.id)) : await candidateAliases(conn, candidates.map((c) => c.id));
 
   const userMessage = buildUserMessage({
     rawTitle, quantity, vendor, status: reClassified.status, matchedProduct, siteOneFields, candidates, aliasesByProduct, allowedCategories,

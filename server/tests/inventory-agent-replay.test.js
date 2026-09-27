@@ -13,6 +13,7 @@ const {
   assertReadOnly, parseSince, parseLimit, lineKey, emptyProposals, recordProposal, catalogWithProposals, replayLine,
 } = require('../../ops/agents/inventory-agent-replay');
 const { classifyItem } = require('../services/purchase-receipts/receipt-processor');
+const { decideForTitle } = require('../services/purchase-receipts/inventory-agent');
 
 function mockDb(behavior) {
   return { raw: jest.fn(behavior) };
@@ -135,6 +136,40 @@ describe('catalogWithProposals', () => {
     recordProposal(proposals, { outcome: { decision: { kind: 'unsure', status: 'agent_unsure' } }, found: { productId: null }, title: 'x' });
     recordProposal(proposals, { outcome: { llmFailed: true }, found: { productId: null }, title: 'x' });
     expect(proposals).toEqual(emptyProposals());
+  });
+});
+
+// 2026-09-27 pre-push P1: the agent's own reads (its re-classification,
+// candidates, aliases) use the same snapshot, so a proposed container size
+// is never proposed again by a later line's decision.
+describe('decideForTitle on a catalog snapshot', () => {
+  const sizedTaurus = () => {
+    const proposals = emptyProposals();
+    recordProposal(proposals, {
+      outcome: { decision: { status: 'logged', kind: 'existing', product: { id: 'p-taurus' }, setContainerSize: '78 fl oz' } },
+      found: { status: 'needs_size', productId: 'p-taurus' },
+      title: 'Taurus SC Termiticide 78 oz',
+    });
+    return catalogWithProposals({
+      products: [{ id: 'p-taurus', name: 'Taurus SC', category: 'insecticide', container_size: null, inventory_unit: 'fl_oz', active: true }],
+      aliasRows: [],
+    }, proposals);
+  };
+  const ask = (title, dispatch) => decideForTitle(null, dispatch, { rawTitle: title, quantity: 1, vendor: 'amazon', siteOneFields: null }, {
+    allowedCategories: new Set(['insecticide']), catalogSnapshot: sizedTaurus(),
+  });
+
+  test('a title the proposed size now covers resolves by the rules, with no model call', async () => {
+    const dispatch = jest.fn();
+    expect(await ask('Taurus SC 78 oz', dispatch)).toMatchObject({ rulesResolve: true });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('a different size is judged against the proposed size, never a blank container', async () => {
+    const dispatch = jest.fn(async () => ({ ok: false, reason: 'test' }));
+    const outcome = await ask('Taurus SC 96 oz', dispatch);
+    expect(outcome.reClassified).toMatchObject({ status: 'size_mismatch', product: { container_size: '78 fl oz' } });
+    expect(JSON.stringify(dispatch.mock.calls[0])).toContain('78 fl oz');
   });
 });
 
