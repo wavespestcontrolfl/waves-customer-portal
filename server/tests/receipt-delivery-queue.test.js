@@ -210,14 +210,24 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
       prefs: { payment_receipt: true, payment_receipt_channels: ['sms'] },
     });
     InvoiceService.sendReceipt.mockResolvedValue({ sent: false, reason: 'channel_email_only' });
+    // The routed receipt's authority read sees the Text-only choice.
+    sendReceiptEmail.mockResolvedValue({
+      ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected',
+    });
 
     const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
 
     expect(result.ok).toBe(false);
+    // The email leg is the routed receipt: the authority reads the choice and
+    // refuses; nothing is sent, and the race is retried.
+    expect(sendReceiptEmail).toHaveBeenCalledTimes(1);
+    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', {
+      idempotencyKey: 'receipt_email_auto:inv1',
+      billingDeliveryCategory: 'payment_receipt',
+    });
     expect(jobsTable.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'retry_scheduled', last_error: 'Receipt delivery preferences changed between channel checks',
     }));
-    expect(sendReceiptEmail).not.toHaveBeenCalled();
     expect(invoicesTable.update).not.toHaveBeenCalled();
   });
 
@@ -277,20 +287,30 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     expect(invoicesTable.update).toHaveBeenCalledWith({ receipt_sent_at: 'NOW' });
   });
 
-  test('portal-wide email opt-out (email_enabled=false) skips the receipt email as an expected skip', async () => {
-    // The transactional_required stream bypasses suppression groups, so the
-    // queue must honor the opt-out itself, like the deposit/no-show legs
-    // (codex P1 on d040aa76). The SMS leg carries the receipt.
+  test.each([
+    ['the portal-wide email switch', { ok: false, error: 'email_opted_out' }],
+    ['an explicit receipt choice without Email', {
+      ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected',
+    }],
+  ])('%s, read by the shared billing email authority inside sendReceiptEmail, is an expected skip', async (_label, emailResult) => {
+    // The queue no longer reads the switch or the channel choice itself: the
+    // routed receipt reads them through the shared billing email authority
+    // (owner ruling 2026-09-27) and reports the same expected skips. The SMS
+    // leg carries the receipt.
     primeDb({
       invoice: { id: 'inv1', customer_id: 'c1', payer_id: null, invoice_number: 'WPC-1', receipt_sent_at: null },
-      prefs: { payment_receipt: true, email_enabled: false },
+      prefs: { payment_receipt: true, email_enabled: false, payment_receipt_channels: ['sms'] },
     });
     InvoiceService.sendReceipt.mockResolvedValue({ sent: true });
+    sendReceiptEmail.mockResolvedValue(emailResult);
 
     const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
 
     expect(result.ok).toBe(true);
-    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', {
+      idempotencyKey: 'receipt_email_auto:inv1',
+      billingDeliveryCategory: 'payment_receipt',
+    });
     expect(jobsTable.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }));
   });
 

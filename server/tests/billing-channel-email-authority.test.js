@@ -81,7 +81,10 @@ function input(overrides = {}) {
 // dispatch off to the authority under its locks. Tests assert on the
 // resulting `state` (boundary block / handoff semantics) and `outcome`
 // rather than a template-send result, since sending is the adapter's job.
-async function runAuthority(overrides = {}, { preSendCheck, dispatch = jest.fn(async () => {}), templateKey } = {}) {
+async function runAuthority(overrides = {}, { preSendCheck, dispatch = jest.fn(async (database, providerBoundaryCheck) => {
+  const verdict = await providerBoundaryCheck({ database });
+  return verdict.ok === true ? { messageId: 'provider-1' } : null;
+}), templateKey } = {}) {
   const requestInput = input(overrides);
   const context = await loadBillingEmailContext(requestInput);
   if (context.error) return { context, outcome: { ok: false }, state: null, dispatch };
@@ -146,13 +149,13 @@ describe('billing channel email authority', () => {
     expect(context.error).toBeUndefined();
     expect(context.recipientEmail).toBe('casey@example.com');
     expect(outcome).toEqual({ ok: true });
-    expect(dispatch).toHaveBeenCalledWith(mockDb);
+    expect(dispatch).toHaveBeenCalledWith(mockDb, expect.any(Function));
   });
 
   test('passes the authority transaction to provider preparation', async () => {
     const { outcome, dispatch } = await runAuthority();
     expect(outcome.ok).toBe(true);
-    expect(dispatch).toHaveBeenCalledWith(mockDb);
+    expect(dispatch).toHaveBeenCalledWith(mockDb, expect.any(Function));
     expect(mockLoadSuppressionState).toHaveBeenCalledWith(
       expect.objectContaining({ channel: 'email', to: null }), expect.any(Object), mockDb,
     );
@@ -348,9 +351,10 @@ describe('billing channel email authority', () => {
       expect(invoiceLocked).toBe(false);
       phoneLocked = true;
     });
-    const dispatch = jest.fn(async () => {
+    const dispatch = jest.fn(async (database, providerBoundaryCheck) => {
       expect(commsLocked).toBe(true);
       expect(invoiceLocked).toBe(true);
+      expect(await providerBoundaryCheck({ database })).toEqual({ ok: true });
     });
 
     const { outcome, state } = await runAuthority({ invoiceId: 'inv-1' }, { dispatch });
@@ -364,7 +368,7 @@ describe('billing channel email authority', () => {
     expect(invoiceLocked).toBe(false);
   });
 
-  test('threads the SAME locked transaction into the pre-send check as the invoice/recipient locks (codex r2 P1)', async () => {
+  test('threads the same locked transaction into both producer checks', async () => {
     const lockedTrx = jest.fn((table) => defaultDbImplementation(table));
     mockWithCustomerCommsLock.mockImplementationOnce(async (database, customerId, callback) => {
       expect(database).toBe(mockDb);
@@ -377,7 +381,10 @@ describe('billing channel email authority', () => {
     });
     const { outcome } = await runAuthority({}, { preSendCheck });
     expect(outcome.ok).toBe(true);
-    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email', database: lockedTrx });
+    expect(preSendCheck.mock.calls).toEqual([
+      [{ channel: 'email', database: lockedTrx, providerBoundary: false }],
+      [{ channel: 'email', database: lockedTrx, providerBoundary: true }],
+    ]);
   });
 
   test('blocks when invoice ownership changes before provider dispatch', async () => {
@@ -426,23 +433,64 @@ describe('billing channel email authority', () => {
     expect(state.boundaryBlock).toMatchObject({ blocked: true, code: 'EMAIL_RECIPIENT_CHANGED' });
   });
 
-  test('invokes the pre-send check for the email channel before dispatch, threading the locked transaction (codex r2 P1)', async () => {
+  test('checks producer authority before preparation and again at the provider boundary', async () => {
     const preSendCheck = jest.fn(async () => ({ ok: true }));
     const { outcome } = await runAuthority({}, { preSendCheck });
     expect(outcome.ok).toBe(true);
-    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email', database: mockDb });
+    expect(preSendCheck.mock.calls).toEqual([
+      [{ channel: 'email', database: mockDb, providerBoundary: false }],
+      [{ channel: 'email', database: mockDb, providerBoundary: true }],
+    ]);
   });
 
-  test('blocks dispatch when the pre-send check fails', async () => {
+  test('blocks the provider request when the pre-send check fails', async () => {
     const preSendCheck = jest.fn(async () => ({
       ok: false, code: 'PORTAL_HOLD', reason: 'Portal hold active', retryable: true,
     }));
-    const dispatch = jest.fn(async () => {});
+    const dispatch = jest.fn(async (database, providerBoundaryCheck) => {
+      await providerBoundaryCheck({ database });
+    });
     const { outcome, state } = await runAuthority({}, { preSendCheck, dispatch });
     expect(outcome.ok).toBe(false);
     expect(state.boundaryBlock).toMatchObject({
       blocked: true, code: 'PORTAL_HOLD', reason: 'Portal hold active', retryable: true,
     });
     expect(dispatch).not.toHaveBeenCalled();
+    expect(state.handoffStarted).toBe(false);
+  });
+
+  test('preserves a final caller-authority refusal when dispatch reports it as a throw', async () => {
+    const preSendCheck = jest.fn()
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({
+        ok: false, code: 'AUTHORITY_CHANGED', reason: 'Authority changed', retryable: false,
+      });
+    const dispatch = jest.fn(async (database, providerBoundaryCheck) => {
+      const verdict = await providerBoundaryCheck({ database });
+      throw Object.assign(new Error(verdict.reason), {
+        code: verdict.code,
+        retryable: verdict.retryable,
+        providerBoundaryBlocked: true,
+      });
+    });
+
+    const { outcome, state } = await runAuthority({}, { preSendCheck, dispatch });
+
+    expect(outcome).toEqual({ ok: false });
+    expect(state.boundaryBlock).toMatchObject({
+      code: 'AUTHORITY_CHANGED', reason: 'Authority changed', deliveryOutcome: 'not_sent',
+    });
+    expect(state.handoffStarted).toBe(false);
+  });
+
+  test('propagates a marker acknowledgement loss before the final check to dispatch recovery', async () => {
+    const markerError = Object.assign(new Error('marker acknowledgement lost'), { code: 'ECONNRESET' });
+    const preSendCheck = jest.fn(async () => ({ ok: true }));
+    const dispatch = jest.fn(async () => { throw markerError; });
+
+    await expect(runAuthority({}, { preSendCheck, dispatch })).rejects.toBe(markerError);
+
+    expect(dispatch).toHaveBeenCalledWith(mockDb, expect.any(Function));
+    expect(preSendCheck).toHaveBeenCalledTimes(1);
   });
 });

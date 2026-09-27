@@ -319,7 +319,10 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
     .whereRaw("btrim(address_line1) <> ''")
     .modify((q) => {
       if (excluded.length) q.whereNotIn('id', excluded);
-      if (reviewOn) review.excludeReviewedAddresses(q);
+      if (reviewOn) {
+        review.excludeReviewedAddresses(q);
+        review.excludeMatchingPrimaryPins(q);
+      }
     })
     .orderBy('created_at', 'desc')
     .limit(limit)
