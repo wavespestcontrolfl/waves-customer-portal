@@ -197,11 +197,28 @@ const REPORT_REVERSE_EXPLICIT_NUMERIC_CREDENTIAL_RE = new RegExp(
   'gi',
 );
 
+function isExplicitDeviceWorkMeasurement(value, match) {
+  if (!/^(?:keypad|lock\s?box)\b/i.test(match[0])) return false;
+  const digitIndex = match[0].search(/\d/);
+  if (digitIndex < 0) return false;
+  const beforeDigits = match[0].slice(0, digitIndex);
+  const measurementTail = match[0].slice(digitIndex)
+    + value.slice(match.index + match[0].length);
+  return REPORT_PAST_ACCESS_WORK_ACTION_RE.test(beforeDigits)
+    && !/\b(?:code|pin|combo|combination|passcode|password|passphrase)\b/i.test(beforeDigits)
+    && !/\b(?:use|using|enter(?:s|ed|ing)?|typ(?:e|es|ed|ing)|press(?:es|ed|ing)?|input(?:s|ted|ting)?|open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?)\b/i.test(beforeDigits)
+    && REPORT_MEASUREMENT_AT_START_RE.test(measurementTail);
+}
+
 function containsExplicitNumericCredential(text) {
   const value = String(text || '');
   for (const pattern of [REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE, REPORT_REVERSE_EXPLICIT_NUMERIC_CREDENTIAL_RE]) {
     for (const match of value.matchAll(pattern)) {
       const digitCount = match[1].replace(/\D/g, '').length;
+      // A keypad or lockbox mention can precede unrelated treatment work.
+      // Preserve a unit-backed quantity governed by that work unless a code
+      // noun or access action explicitly reconnects the number to the device.
+      if (isExplicitDeviceWorkMeasurement(value, match)) continue;
       if (digitCount >= 2 && digitCount <= 8) return true;
     }
   }
@@ -217,6 +234,10 @@ const REPORT_MEASUREMENT_UNIT_TEXT = String.raw`(?:feet|foot|ft|inch(?:es)?|yard
 const REPORT_MEASUREMENT_QUANTITY_RE = new RegExp(
   String.raw`\b(?:\d+(?:\.\d+)?(?:\s*[-–—]\s*\d+(?:\.\d+)?)?|\d(?:[\s-]+\d){2,7})\s*${REPORT_MEASUREMENT_UNIT_TEXT}(?=\s|[.,;:!?)]|$)`,
   'gi',
+);
+const REPORT_MEASUREMENT_AT_START_RE = new RegExp(
+  String.raw`^(?:\d+(?:\.\d+)?(?:\s*[-–—]\s*\d+(?:\.\d+)?)?|\d(?:[\s-]+\d){2,7})\s*${REPORT_MEASUREMENT_UNIT_TEXT}\b`,
+  'i',
 );
 const REPORT_MEASUREMENT_AFTER_NUMBER_RE = new RegExp(String.raw`^\s*${REPORT_MEASUREMENT_UNIT_TEXT}\b`, 'i');
 const REPORT_AS_LINKED_MEASUREMENT_CREDENTIAL_RE = new RegExp(

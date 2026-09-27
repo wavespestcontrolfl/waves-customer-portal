@@ -166,6 +166,9 @@ const CREDENTIAL_CASES = {
     'Opened gate and inspected 100 bait stations, then entered 8842 at the keypad',
     'Opened rear gate and checked 120 traps, then used code 2468 at the keypad',
     'Opened gate and serviced 100 bait stations, then unlocked the side door with 8842',
+    'Inspected the keypad and entered 2468 ml for access',
+    'Inspected the keypad and treated the surrounding 100 square feet, then entered 8842 at the keypad',
+    'Serviced the lockbox and applied 100 ml, then typed 8842 at the keypad',
   ],
 };
 
@@ -247,6 +250,9 @@ const LEGITIMATE_CASES = {
     'Opened gate and treated 100 stations',
     'Opened gate and applied 100 product units',
     'Opened gate and found 100 empty traps',
+    'Inspected the keypad and treated the surrounding 100 square feet',
+    'Inspected the keypad and treated 100 square feet',
+    'Serviced the lockbox and applied 100 ml around the mounting plate',
   ],
 };
 
