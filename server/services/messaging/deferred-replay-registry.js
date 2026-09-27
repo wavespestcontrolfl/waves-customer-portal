@@ -917,17 +917,18 @@ const REGISTRY = {
     },
   },
   voicemail_lead_sms_deferred: {
-    async recheck(meta) {
+    async recheck(meta, { conn = db } = {}) {
       // The quote link is a speed play for a fresh voicemail — a lead
       // deleted, converted, or already contacted overnight makes the 8 AM
       // bearer link stale (and possibly wrong-audience).
       try {
-        if (!meta.lead_id) return { eligible: true };
-        const lead = await db('leads').where({ id: meta.lead_id }).whereNull('deleted_at').first('id', 'status');
-        if (!lead) return { eligible: false, reason: 'lead-deleted' };
-        const status = String(lead.status || '').toLowerCase();
-        if (status && !['new', 'pending', 'started'].includes(status)) {
-          return { eligible: false, reason: `lead-${status}` };
+        if (meta.lead_id) {
+          const lead = await conn('leads').where({ id: meta.lead_id }).whereNull('deleted_at').first('id', 'status');
+          if (!lead) return { eligible: false, reason: 'lead-deleted' };
+          const status = String(lead.status || '').toLowerCase();
+          if (status && !['new', 'pending', 'started'].includes(status)) {
+            return { eligible: false, reason: `lead-${status}` };
+          }
         }
         // The same holds the immediate send ran (messaging/auto-text-holds.js):
         // a quote sent, a lead assigned, a do-not-contact or not-a-prospect
@@ -936,7 +937,9 @@ const REGISTRY = {
           const { autoTextHoldReason } = require('./auto-text-holds');
           const hold = await autoTextHoldReason(meta.voicemail_phone, {
             callAt: meta.call_created_at ? new Date(meta.call_created_at) : undefined,
+            originCallId: meta.call_log_id || null,
             excludeMessageTypes: ['voicemail_quote_link'],
+            dbi: conn,
           });
           if (hold) return { eligible: false, reason: hold };
         }
@@ -944,6 +947,22 @@ const REGISTRY = {
       } catch (err) {
         return failClosed('voicemail-text-back', meta.lead_id, err);
       }
+    },
+    // The same recheck at the provider handoff: the executor runs recheck
+    // early, then its own recipient and policy work, so a hold that lands
+    // during those awaits (a text, a lead assigned, an estimate sent, a
+    // do-not-contact correction) still stops the queued text here,
+    // immediately before the provider request. Same shape as the
+    // recruiting and visit-summary handoffs; a refusal is terminal, so
+    // onTerminal releases both claims.
+    async smsHandoff(meta, dispatch) {
+      return db.transaction(async (trx) => {
+        const again = await REGISTRY.voicemail_lead_sms_deferred.recheck(meta, { conn: trx });
+        if (!again || again.eligible === false) {
+          return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'VOICEMAIL_TEXT_STALE_AT_HANDOFF', reason: (again && again.reason) || 'ineligible' };
+        }
+        return dispatch(trx);
+      });
     },
     async finalize(meta) {
       // Claim settlement (lead stamp 'sent' + phone-claim outcome 'sent') —

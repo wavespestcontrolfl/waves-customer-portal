@@ -163,15 +163,20 @@ async function clearLeadClaim(leadId) {
 }
 
 // The shared hold check's options for this voicemail (the early check and
-// the recheck at the handoff): its own call opens the recent-conversation
-// window, and the lane's own texts are its one-shot's business, not a
-// conversation.
+// the recheck at the provider boundary): its own call opens the
+// recent-conversation window and is read by id (the text may go to a spoken
+// callback number that call's row does not carry), and the lane's own texts
+// are its one-shot's business, not a conversation.
 function holdOptions(call) {
   return {
     callAt: call.created_at ? new Date(call.created_at) : new Date(),
+    originCallId: call.id || null,
     excludeMessageTypes: [MESSAGE_TYPE],
   };
 }
+
+// The provider-boundary hold refusal's code, read back off the send result.
+const HELD_AT_BOUNDARY = 'VOICEMAIL_TEXT_HELD';
 
 async function sendVoicemailQuoteLink({ leadId, extracted = {}, call = {}, phone: rawPhone, doNotContactRequested = false } = {}) {
   if (!isEnabled('voicemailLeadSms')) {
@@ -365,23 +370,22 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
     return { sent: false, skipped: 'template_disabled' };
   }
 
-  // Recheck the holds at the handoff: the claims, the landline lookup, the
-  // short link and the render all awaited since the first check, and a text
-  // exchanged, a lead assigned or an estimate sent meanwhile still stops
-  // it. A late hold never consumed the one-shot — release both claims.
-  let lateHold;
-  try {
-    lateHold = await autoTextHoldReason(phone, holdOptions(call));
-  } catch (e) {
-    logger.warn(`[voicemail-sms] handoff hold recheck failed — releasing claims (fail closed): ${e.message}`);
-    lateHold = 'hold_check_failed';
-  }
-  if (lateHold) {
-    await clearLeadClaim(leadId);
-    await releasePhoneClaim(phone);
-    logger.info(`[voicemail-sms] Text-back held at the handoff for lead ${leadId}: ${lateHold}`);
-    return { sent: false, skipped: lateHold };
-  }
+  // Recheck the holds at the provider boundary — Twilio runs this after
+  // every other await, immediately before its request: the claims, the
+  // landline lookup, the short link, the render and the pipeline's own
+  // checks all awaited since the first check, and a text exchanged, a lead
+  // assigned or an estimate sent meanwhile still stops it. Which hold fired
+  // is kept here; an unreadable check fails closed.
+  const boundary = { hold: null };
+  const providerPreSendCheck = async ({ dbi } = {}) => {
+    try {
+      boundary.hold = await autoTextHoldReason(phone, { ...holdOptions(call), ...(dbi ? { dbi } : {}) });
+    } catch (e) {
+      logger.warn(`[voicemail-sms] boundary hold recheck failed — holding the text (fail closed): ${e.message}`);
+      boundary.hold = 'hold_check_failed';
+    }
+    return boundary.hold ? { ok: false, code: HELD_AT_BOUNDARY, reason: boundary.hold } : { ok: true };
+  };
 
   const result = await sendCustomerMessage({
     to: phone,
@@ -393,11 +397,20 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
     identityTrustLevel: 'phone_provided_unverified',
     consentBasis: { status: 'transactional_allowed', source: 'voicemail_text_back' },
     entryPoint: 'voicemail_lead_sms',
+    providerPreSendCheck,
     metadata: {
       original_message_type: MESSAGE_TYPE,
       call_sid: call.twilio_call_sid || null,
     },
   });
+
+  // A hold at the boundary never consumed the one-shot — release both claims.
+  if (!result.sent && result.code === HELD_AT_BOUNDARY) {
+    await clearLeadClaim(leadId);
+    await releasePhoneClaim(phone);
+    logger.info(`[voicemail-sms] Text-back held at the provider boundary for lead ${leadId}: ${boundary.hold}`);
+    return { sent: false, skipped: boundary.hold || 'held' };
+  }
 
   if (result.sent && !isRealProviderSend(result)) {
     // Upstream suppression sentinel (SMS gate off, template disabled, owner
@@ -443,8 +456,10 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
           // row's to_phone column — this copy just reaches the hooks.
           voicemail_phone: phone,
           call_sid: call.twilio_call_sid || null,
-          // The originating call's time, for the replay's hold recheck: it
-          // opens the recent-conversation window.
+          // The originating call, for the replay's hold recheck: read by id
+          // (the text may go to a spoken callback number its row does not
+          // carry), and its time opens the recent-conversation window.
+          call_log_id: call.id || null,
           call_created_at: call.created_at || null,
           original_block_code: result.code || null,
           // The scheduled-SMS cron replays this row through sendCustomerMessage,

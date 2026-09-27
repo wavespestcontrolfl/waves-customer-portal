@@ -158,6 +158,23 @@ jest.setTimeout(30000);
     });
   });
 
+  describe('the call setting the text off is read by id — its text can go to a spoken callback number its row does not carry', () => {
+    const fromCallerId = (extra) => priorCall({ from_phone: '+19415550188', ...extra });
+
+    test('its do-not-contact request holds the text', async () => {
+      const id = randomUUID();
+      await fromCallerId({ id, ai_extraction_enriched: JSON.stringify({ consent: { do_not_contact_request: true } }) });
+      expect(await hold()).toBeNull(); // by number alone it is invisible
+      expect(await hold({ originCallId: id })).toBe('asked_not_to_be_contacted');
+    });
+
+    test('its valid V2 vendor or job-applicant nature holds it too', async () => {
+      const id = randomUUID();
+      await fromCallerId({ id, v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ call_nature: 'job_applicant' }) });
+      expect(await hold({ originCallId: id })).toBe('not_a_prospect');
+    });
+  });
+
   describe('recent_conversation', () => {
     test('a text either way that went through in the 7 days before the call', async () => {
       await text({ direction: 'inbound', from_phone: PHONE, to_phone: '+19412975749', twilio_sid: null, status: 'received' });

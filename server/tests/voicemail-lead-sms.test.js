@@ -201,29 +201,49 @@ describe('voicemail lead text-back gates', () => {
       },
     );
 
-    test('the hold check runs for this number from this voicemail\'s time — every call with it read, this one included — ignoring the lane\'s own texts', async () => {
+    test('the hold check runs for this number from this voicemail\'s time — its own call read by id, whatever number it came from — ignoring the lane\'s own texts', async () => {
       const at = new Date('2026-09-26T15:00:00Z');
       await sendVoicemailQuoteLink(args({ call: { id: 'call-9', twilio_call_sid: 'CA-test-1', created_at: at } }));
-      expect(autoTextHoldReason).toHaveBeenCalledWith(PHONE, { callAt: at, excludeMessageTypes: [MESSAGE_TYPE] });
+      expect(autoTextHoldReason).toHaveBeenCalledWith(PHONE, { callAt: at, originCallId: 'call-9', excludeMessageTypes: [MESSAGE_TYPE] });
     });
 
-    test('a hold that appears while the claims, lookup and render run is caught at the handoff — both claims released', async () => {
+    // sendCustomerMessage stand-in that runs the lane's providerPreSendCheck
+    // where Twilio does (after every other await, right before its request)
+    // and maps a refusal the way the real pipeline does.
+    const throughProviderBoundary = () => sendCustomerMessage.mockImplementationOnce(async (input) => {
+      const verdict = await input.providerPreSendCheck({ channel: 'sms', dbi: 'handoff-conn' });
+      if (!verdict || verdict.ok !== true) {
+        return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: verdict?.code, reason: verdict?.reason };
+      }
+      return { sent: true, providerMessageId: 'SM0123456789abcdef0123456789abcdef' };
+    });
+
+    test('a hold that appears while the claims, lookup, render and pipeline run is caught at the provider boundary — both claims released', async () => {
+      throughProviderBoundary();
       autoTextHoldReason.mockResolvedValueOnce(null).mockResolvedValueOnce('recent_conversation');
       const result = await sendVoicemailQuoteLink(args());
       expect(result).toEqual({ sent: false, skipped: 'recent_conversation' });
       expect(autoTextHoldReason).toHaveBeenCalledTimes(2);
-      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      // The boundary recheck reads on the connection Twilio hands it.
+      expect(autoTextHoldReason).toHaveBeenLastCalledWith(PHONE, expect.objectContaining({ dbi: 'handoff-conn' }));
+      expect(phoneClaimReleased()).toBe(true);
+      expect(leadClaimCleared()).toBe(true);
+      expect(stampsFor()).not.toContain('sent');
+    });
+
+    test('an unreadable provider-boundary recheck fails CLOSED and releases both claims', async () => {
+      throughProviderBoundary();
+      autoTextHoldReason.mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('db down'));
+      const result = await sendVoicemailQuoteLink(args());
+      expect(result).toEqual({ sent: false, skipped: 'hold_check_failed' });
       expect(phoneClaimReleased()).toBe(true);
       expect(leadClaimCleared()).toBe(true);
     });
 
-    test('an unreadable handoff recheck fails CLOSED and releases both claims', async () => {
-      autoTextHoldReason.mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('db down'));
-      const result = await sendVoicemailQuoteLink(args());
-      expect(result).toEqual({ sent: false, skipped: 'hold_check_failed' });
-      expect(sendCustomerMessage).not.toHaveBeenCalled();
-      expect(phoneClaimReleased()).toBe(true);
-      expect(leadClaimCleared()).toBe(true);
+    test('no hold at the provider boundary: the text goes out', async () => {
+      throughProviderBoundary();
+      expect(await sendVoicemailQuoteLink(args())).toEqual({ sent: true });
+      expect(autoTextHoldReason).toHaveBeenCalledTimes(2);
     });
 
     test('an unreadable hold check fails CLOSED', async () => {
@@ -431,7 +451,9 @@ describe('voicemail lead text-back send outcomes', () => {
     const meta = JSON.parse(queued.payload.metadata);
     expect(meta.consent_basis).toEqual(expect.objectContaining({ status: 'transactional_allowed' }));
     expect(meta.lead_id).toBe(LEAD_ID);
-    // The replay re-runs the holds from the originating call's time.
+    // The replay re-runs the holds against the originating call (read by
+    // id) from its time.
+    expect(meta.call_log_id).toBe('call-7');
     expect(new Date(meta.call_created_at)).toEqual(callAt);
     expect(stampsFor()).toContain('scheduled');
     expect(phoneClaimOutcomes()).toContain('scheduled');

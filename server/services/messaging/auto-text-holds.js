@@ -19,6 +19,9 @@
  *                               the text off included, showed a salesperson,
  *                               vendor, robocall, wrong number or job
  *                               applicant
+ * The call setting the text off is read by its id as well as by number: a
+ * voicemail can be texted at a spoken callback number its own row does not
+ * carry (call-recording-processor.js resolveCallContactPhone).
  *   recent_conversation       — texted with us, either way, from 7 days
  *                               before this call up to now (so a deferred
  *                               send replayed later still sees a text that
@@ -68,25 +71,27 @@ function deliveredTexts(dbi = db) {
         .where((st) => st.whereNull('status').orWhereNotIn('status', UNSENT_STATUSES))));
 }
 
-// Every call with this number, either direction, the one setting the text
-// off included (a reprocess after a deferral can re-judge it) — never a
-// Sandy sandbox test call, whose extraction says nothing about the real
-// caller.
-function callsWith(dbi, digits) {
+// Every call with this number, either direction, plus the call setting the
+// text off by its id (a reprocess after a deferral can re-judge it, and its
+// text may go to a number its row does not carry) — never a Sandy sandbox
+// test call, whose extraction says nothing about the real caller.
+function callsWith(dbi, digits, originCallId) {
   return dbi('call_log')
     .modify((q) => whereNotSandboxCall(q))
-    .where((q) => q.whereRaw(...matches('from_phone', digits)).orWhereRaw(...matches('to_phone', digits)));
+    .where((q) => q.whereRaw(...matches('from_phone', digits)).orWhereRaw(...matches('to_phone', digits))
+      .modify((either) => { if (originCallId) either.orWhere('id', originCallId); }));
 }
 
 /**
  * @param {string} phone                        the number about to be texted
  * @param {object} [opts]
  * @param {Date}   [opts.callAt]                when the call that sets the text off came in (window start = 7 days before it)
+ * @param {string} [opts.originCallId]          that call's id — read whatever number it came from
  * @param {string[]} [opts.excludeMessageTypes] the lane's own sms_log types (its one-shot, not a conversation)
  * @returns {Promise<string|null>} a hold reason, or null when the text may go
  */
 async function autoTextHoldReason(phone, {
-  callAt = new Date(), excludeMessageTypes = [], dbi = db,
+  callAt = new Date(), originCallId = null, excludeMessageTypes = [], dbi = db,
 } = {}) {
   const digits = phoneDigits(phone);
   if (!digits) return null;
@@ -113,7 +118,7 @@ async function autoTextHoldReason(phone, {
   // field (a call processed with V2 off, unavailable or schema-failed). Read
   // from ANY stored extraction, valid or not, and from the call setting this
   // text off too: an opt-out is honoured wherever it was heard.
-  const doNotContact = await callsWith(dbi, digits)
+  const doNotContact = await callsWith(dbi, digits, originCallId)
     .where((q) => q.whereRaw("ai_extraction_enriched->'consent'->>'do_not_contact_request' = 'true'")
       .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"do_not_contact_request"\\s*:\\s*true'`))
     .first('id');
@@ -128,7 +133,7 @@ async function autoTextHoldReason(phone, {
   // cleared of spam (a property manager, a referral partner) still holds:
   // the automated quote link is for a homeowner, and the lead and the
   // office's callback are untouched.
-  const notAProspect = await callsWith(dbi, digits)
+  const notAProspect = await callsWith(dbi, digits, originCallId)
     .where((q) => q
       .where((v2) => v2.where('v2_extraction_status', 'valid')
         .whereRaw("ai_extraction_enriched->>'call_nature' = ANY(?)", [NOT_A_PROSPECT_NATURES]))

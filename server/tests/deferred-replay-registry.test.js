@@ -251,7 +251,7 @@ describe('deferred-replay registry', () => {
   describe('voicemail quote-link replay re-runs the auto-text holds', () => {
     const { autoTextHoldReason } = require('../services/messaging/auto-text-holds');
     const meta = {
-      lead_id: 'lead-1', voicemail_phone: '+19415550101', call_created_at: '2026-09-26T23:30:00.000Z',
+      lead_id: 'lead-1', voicemail_phone: '+19415550101', call_log_id: 'call-7', call_created_at: '2026-09-26T23:30:00.000Z',
     };
 
     test('a hold that appeared since the voicemail stops the queued text', async () => {
@@ -259,7 +259,7 @@ describe('deferred-replay registry', () => {
       autoTextHoldReason.mockResolvedValueOnce('quote_on_file');
       expect(await recheckDeferredReplay('voicemail_lead_sms_deferred', meta)).toEqual({ eligible: false, reason: 'quote_on_file' });
       expect(autoTextHoldReason).toHaveBeenCalledWith('+19415550101', {
-        callAt: new Date('2026-09-26T23:30:00.000Z'), excludeMessageTypes: ['voicemail_quote_link'],
+        callAt: new Date('2026-09-26T23:30:00.000Z'), originCallId: 'call-7', excludeMessageTypes: ['voicemail_quote_link'], dbi: db,
       });
     });
 
@@ -272,6 +272,42 @@ describe('deferred-replay registry', () => {
       db.mockReturnValueOnce(firstChain({ id: 'lead-1', status: 'new' }));
       autoTextHoldReason.mockRejectedValueOnce(new Error('db down'));
       expect(await recheckDeferredReplay('voicemail_lead_sms_deferred', meta)).toMatchObject({ eligible: false, retryable: true });
+    });
+
+    describe('rechecked again at the provider handoff (the executor\'s early recheck runs before its own awaits)', () => {
+      const { deferredSmsHandoff } = require('../services/messaging/deferred-replay-registry');
+      const handoffTrx = () => {
+        const trx = jest.fn(() => firstChain({ id: 'lead-1', status: 'new' }));
+        db.transaction = jest.fn(async (fn) => fn(trx));
+        return trx;
+      };
+
+      test('a hold that lands after the early recheck stops the queued text before dispatch; the reads run on the handoff transaction', async () => {
+        const trx = handoffTrx();
+        autoTextHoldReason.mockResolvedValueOnce('lead_assigned');
+        const dispatch = jest.fn();
+        await expect(deferredSmsHandoff('voicemail_lead_sms_deferred', meta)(dispatch)).resolves.toMatchObject({
+          sent: false, blocked: true, code: 'VOICEMAIL_TEXT_STALE_AT_HANDOFF', reason: 'lead_assigned',
+        });
+        expect(dispatch).not.toHaveBeenCalled();
+        expect(trx).toHaveBeenCalledWith('leads');
+        expect(autoTextHoldReason).toHaveBeenCalledWith('+19415550101', expect.objectContaining({ originCallId: 'call-7', dbi: trx }));
+      });
+
+      test('no hold at the handoff dispatches on the handoff transaction', async () => {
+        const trx = handoffTrx();
+        const dispatch = jest.fn(async () => ({ sent: true }));
+        await expect(deferredSmsHandoff('voicemail_lead_sms_deferred', meta)(dispatch)).resolves.toEqual({ sent: true });
+        expect(dispatch).toHaveBeenCalledWith(trx);
+      });
+
+      test('an unreadable hold check at the handoff refuses the send (fail closed)', async () => {
+        handoffTrx();
+        autoTextHoldReason.mockRejectedValueOnce(new Error('db down'));
+        const dispatch = jest.fn();
+        await expect(deferredSmsHandoff('voicemail_lead_sms_deferred', meta)(dispatch)).resolves.toMatchObject({ sent: false, blocked: true });
+        expect(dispatch).not.toHaveBeenCalled();
+      });
     });
   });
 
