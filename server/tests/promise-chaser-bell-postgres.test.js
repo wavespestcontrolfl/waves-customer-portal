@@ -17,7 +17,7 @@ jest.mock('../services/notification-triggers', () => ({ triggerNotification: jes
 const { triggerNotification } = require('../services/notification-triggers');
 const logger = require('../services/logger');
 const { gates } = require('../config/feature-gates');
-const { etDateString, formatETDate, formatETTime } = require('../utils/datetime-et');
+const { etDateString, formatETDate, formatETTime, etParts } = require('../utils/datetime-et');
 const {
   sweepPromiseChasers, ringForCall,
 } = require('../services/promise-chaser-bell');
@@ -1079,6 +1079,43 @@ const OUR_NUMBER = '+19415550100';
       const reopenedAt = new Date(now - 100 * 60000);
       await mockConn('call_commitments').where({ id: commitment.id })
         .update({ human_state: 'confirmed', reviewed_at: reopenedAt, updated_at: reopenedAt });
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+    });
+
+    test('a schedule_visit reopened AFTER a matching-slot booking is not read as kept by that stale booking — the renewal floor must carry into the exact-slot match too, not just `since` (Codex #5019 r13 P1)', async () => {
+      const customerId = randomUUID();
+      await mockConn('customers').insert({ id: customerId, phone: PHONE });
+      const earlier = callRow(240, { customer_id: customerId });
+      // The stated slot: 24h from now — far enough ahead that evidenceFrom
+      // (the stated due_at) is later than promisedAt (the call's own end),
+      // which is what makes appointmentSlot return non-null at all.
+      const slotAt = new Date(now + 24 * 60 * 60000);
+      const commitment = commitmentRow(earlier.id, {
+        kind: 'schedule_visit', description: 'Come out tomorrow afternoon',
+        due_at: slotAt, due_basis: 'stated', due_type: 'floor',
+      });
+      await mockConn('call_log').insert(earlier);
+      await mockConn('call_commitments').insert(commitment);
+
+      // A booking for the EXACT promised slot — made BEFORE the reopen
+      // below. Stale evidence for the ORIGINAL obligation.
+      const { hour, minute } = etParts(slotAt);
+      await mockConn('scheduled_services').insert({
+        id: randomUUID(), customer_id: customerId, source_call_log_id: null,
+        scheduled_date: etDateString(slotAt), window_start: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`,
+        service_type: 'pest_control', status: 'confirmed',
+        created_at: new Date(now - 200 * 60000), updated_at: new Date(now - 200 * 60000),
+      });
+
+      // Staff reopen the promise AFTER that booking.
+      const reopenedAt = new Date(now - 100 * 60000);
+      await mockConn('call_commitments').where({ id: commitment.id })
+        .update({ human_state: 'confirmed', reviewed_at: reopenedAt, updated_at: reopenedAt });
+
+      const back = callRow(0, { customer_id: customerId });
+      await mockConn('call_log').insert(back);
 
       expect(await sweepPromiseChasers()).toBe(1);
       expect(triggerNotification).toHaveBeenCalledTimes(1);

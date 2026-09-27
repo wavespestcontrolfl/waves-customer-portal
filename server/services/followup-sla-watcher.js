@@ -231,21 +231,35 @@ async function followedUpIds(conn, rows) {
   // row no contact to match on (never a match between two unusable values).
   // A renewal floor (below) now applies to every alertable SLA kind, not
   // only callbacks (Codex #5019 r11/r12 P2/P1) — including schedule_visit,
-  // which also carries its own appointment slot. The two serve different
-  // matching paths (`since` vs the exact-slot booking check below) and
-  // don't conflict: a renewed schedule_visit's `since` still advances to
-  // the renewal instant either way.
+  // which also carries its own appointment slot. The two matching paths
+  // (`since`, and the exact-slot booking check below) each carry the
+  // renewal forward in their own terms — `since` directly, `slotFloor`
+  // below — so a schedule_visit reopened after an earlier matching-slot
+  // booking is never read as already kept by that stale booking (Codex
+  // #5019 r13 P1: the exact-slot path used to ignore the renewal floor
+  // entirely, checking only against the ORIGINAL promisedAt).
   const scoped = (rows || []).map((r) => {
     const base = evidenceFrom(r);
     const floor = renewed.get(String(r.id));
     const since = floor && (!base || floor.getTime() > base.getTime()) ? floor : base;
-    return { r, since, slot: appointmentSlot(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)) };
+    const promised = promisedAt(r);
+    // The exact-slot booking match counts from the call's end — or a
+    // renewal, whichever is LATER — never from evidenceFrom's own
+    // separately-stated floor ("send it after the inspection"): booking
+    // the promised slot IS the fulfillment, regardless of any other
+    // stated floor time, but a booking from before staff reopened the
+    // promise is not fulfillment for the reopened one. appointmentSlot
+    // itself never returns non-null without a valid promisedAt, so
+    // `slot` implies `promised` is set whenever this value is read.
+    const slotFloor = floor && promised && floor.getTime() > promised.getTime() ? floor : promised;
+    return { r, since, slotFloor, slot: appointmentSlot(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)) };
   }).filter((x) => x.since && (x.r.customer_id || x.phone));
   const done = new Set();
   if (!scoped.length) return done;
   const floor = new Date(Math.min(...scoped.map((x) => x.since.getTime())));
-  // A booking for a scheduling promise's own slot counts from the call's end.
-  const bookedFloor = new Date(Math.min(...scoped.map((x) => (x.slot ? promisedAt(x.r) : x.since).getTime())));
+  // A booking for a scheduling promise's own slot counts from the call's
+  // end, or its renewal (slotFloor, above), whichever is later.
+  const bookedFloor = new Date(Math.min(...scoped.map((x) => (x.slot ? x.slotFloor : x.since).getTime())));
   const customerIds = [...new Set(scoped.filter((x) => x.r.customer_id).map((x) => x.r.customer_id))];
   // Numbers match however they were written (9415550123, +19415550123,
   // (941) 555-0123) — call-commitments' phoneWhere rule, batched.
@@ -321,7 +335,7 @@ async function followedUpIds(conn, rows) {
   const visitFor = (v, x) => (x.r.customer_id ? String(v.customer_id) === String(x.r.customer_id)
     : (customersByPhone.get(x.phone) || []).includes(String(v.customer_id)));
   const booked = (v, x) => after(v, x.since)
-    || (!!x.slot && !!v.scheduled_date && !!v.window_start && after(v, promisedAt(x.r))
+    || (!!x.slot && !!v.scheduled_date && !!v.window_start && after(v, x.slotFloor)
       && etCalendarDayOf(v.scheduled_date) === x.slot.day && minuteOfDay(v.window_start) === x.slot.minute);
   for (const x of scoped) {
     if (visits.some((v) => visitFor(v, x) && booked(v, x))
