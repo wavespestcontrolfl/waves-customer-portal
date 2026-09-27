@@ -689,6 +689,22 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
       ).ok).toBe(true);
     });
 
+    test('all numeric and named whitespace entities leave anchor labels empty', () => {
+      const invisible = 'See [&#9;](/termite/a/), [&#10;](/termite/b/), and [&Tab;](/termite/c/).';
+      const result = checkRelatedPostsLinked(
+        { body: invisible },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 0 so far/);
+
+      const broaderWhitespace = 'See [&#x2003;](/termite/a/), [&NewLine;](/termite/b/), and [&ZeroWidthSpace;](/termite/c/).';
+      expect(checkRelatedPostsLinked(
+        { body: broaderWhitespace },
+        { voice_constraints: { related_posts: relatedPosts } }
+      ).reason).toMatch(/linked 0 so far/);
+    });
+
     test('MDX expressions that render no text do not count as visible anchor labels', () => {
       const body = 'See [{null}](/termite/a/), [{false}](/termite/b/), and [{true}](/termite/c/).';
       const result = checkRelatedPostsLinked(

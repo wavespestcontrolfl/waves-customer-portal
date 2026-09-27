@@ -1936,9 +1936,48 @@ function isExactTagAt(text, start, name) {
 // {true}; Codex #3646 r36).
 // A child expression that renders NOTHING: an empty string or a boolean/
 // nullish literal, with optional comment trivia around it.
-const WHITESPACE_ENTITY_RE = /&(?:nbsp|ensp|emsp|thinsp|#0*(?:32|160|8194|8195|8201)|#x0*(?:20|a0|2002|2003|2009));?/gi;
+const INVISIBLE_NAMED_ENTITY_TEXT = Object.freeze({
+  tab: '\t',
+  newline: '\n',
+  nbsp: '\u00a0',
+  ensp: '\u2002',
+  emsp: '\u2003',
+  emsp13: '\u2004',
+  emsp14: '\u2005',
+  numsp: '\u2007',
+  puncsp: '\u2008',
+  thinsp: '\u2009',
+  hairsp: '\u200a',
+  verythinspace: '\u200a',
+  mediumspace: '\u205f',
+  thickspace: '\u205f\u200a',
+  negativemediumspace: '\u200b',
+  negativethickspace: '\u200b',
+  negativethinspace: '\u200b',
+  negativeverythinspace: '\u200b',
+  zerowidthspace: '\u200b',
+  nobreak: '\u2060',
+  applyfunction: '\u2061',
+  invisibletimes: '\u2062',
+  invisiblecomma: '\u2063',
+  shy: '\u00ad',
+  zwnj: '\u200c',
+  zwj: '\u200d',
+  lrm: '\u200e',
+  rlm: '\u200f',
+});
+const CHARACTER_REFERENCE_RE = /&(?:#(?:x([0-9a-f]+)|([0-9]+))|([a-z][a-z0-9]+));?/gi;
 function blankWhitespaceEntities(text) {
-  return String(text || '').replace(WHITESPACE_ENTITY_RE, ' ');
+  return String(text || '').replace(CHARACTER_REFERENCE_RE, (reference, hex, decimal, named) => {
+    let rendered = named ? INVISIBLE_NAMED_ENTITY_TEXT[named.toLowerCase()] : null;
+    if (!named) {
+      const codePoint = Number.parseInt(hex || decimal, hex ? 16 : 10);
+      if (Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff) {
+        try { rendered = String.fromCodePoint(codePoint); } catch { /* keep the reference */ }
+      }
+    }
+    return rendered && [...rendered].every((char) => /[\s\p{Cf}]/u.test(char)) ? ' ' : reference;
+  });
 }
 // An ARRAY whose slots are all non-rendering (or elided) renders nothing
 // either ({[]}, {[null]}, {[false, '']}; Codex #3646 r39).
@@ -1986,7 +2025,7 @@ function affiliateLinkVisibleText(masked, strView, start, attrs) {
         // fragment delimiters (<></>) render nothing either (Codex #508 r5/r6).
         // Whitespace character references (&nbsp; &#32; …) decode to
         // whitespace the anchor cannot show either (Codex #508 r8).
-        return blankNonRenderingExpressions(text.replace(/<>|<\/>/g, '')).replace(WHITESPACE_ENTITY_RE, ' ').trim();
+        return blankWhitespaceEntities(blankNonRenderingExpressions(text.replace(/<>|<\/>/g, ''))).trim();
       }
     } else {
       const a = tagAttrsAt(masked, t.index);
