@@ -302,6 +302,24 @@ describe("Job card Tank section rigs", () => {
     expect(mixCalls().at(-1)).toContain("gallons=1");
     expect(mixCalls().at(-1)).not.toContain("rig=");
   });
+
+  it("reads a small liquid dose off measuring spoons, never mL", async () => {
+    fetch.mockImplementation((url) => {
+      const parsed = new URL(url, "http://localhost");
+      if (parsed.pathname.endsWith("/protocols/job-card/products")) return reply({ products: [{ id: "p2", name: "Mainspring GNL", category: "insecticide" }] });
+      if (parsed.pathname.endsWith("/protocols/job-card/mix")) {
+        // Label range 4–8 fl oz / 100 gal dosed for the 4-gal FlowZone.
+        return reply({ enabled: true, amount: 0.16, amountMax: 0.32, unit: "fl_oz", gallons: 4, ratePerGallon: { lo: 0.04, hi: 0.08, unit: "fl_oz" }, rateVerified: true, rig: { equipmentSystemId: "sys-3", name: "FlowZone Typhoon 3.0 #1", tankCapacityGal: 4 }, sprayCheck: { verdict: "unknown", reason: "Judged on the visit day" } });
+      }
+      if (parsed.pathname.includes("/protocols/job-card/")) return reply(card);
+      return reply(fixture(url));
+    });
+    await act(async () => { render(<ProtocolPanel service={service} onClose={() => {}} />); });
+    fireEvent.change(await screen.findByPlaceholderText("Search a product to mix"), { target: { value: "main" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Mainspring GNL" }));
+    expect(await screen.findByText("1 tsp – 1¾ tsp")).toBeVisible();
+    expect(document.body.textContent).not.toMatch(/\bml\b/i);
+  });
 });
 
 describe("Pay & Growth gate", () => {
