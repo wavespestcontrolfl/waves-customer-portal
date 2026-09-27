@@ -286,9 +286,10 @@ describe('deferred-replay registry', () => {
         const trx = handoffTrx();
         autoTextHoldReason.mockResolvedValueOnce('lead_assigned');
         const dispatch = jest.fn();
-        await expect(deferredSmsHandoff('voicemail_lead_sms_deferred', meta)(dispatch)).resolves.toMatchObject({
-          sent: false, blocked: true, code: 'VOICEMAIL_TEXT_STALE_AT_HANDOFF', reason: 'lead_assigned',
-        });
+        const refused = await deferredSmsHandoff('voicemail_lead_sms_deferred', meta)(dispatch);
+        expect(refused).toMatchObject({ sent: false, blocked: true, code: 'VOICEMAIL_TEXT_STALE_AT_HANDOFF', reason: 'lead_assigned' });
+        // A confirmed hold is terminal (onTerminal releases the claims), never retried.
+        expect(refused.retryable).toBeUndefined();
         expect(dispatch).not.toHaveBeenCalled();
         expect(trx).toHaveBeenCalledWith('leads');
         expect(autoTextHoldReason).toHaveBeenCalledWith('+19415550101', expect.objectContaining({ originCallId: 'call-7', dbi: trx }));
@@ -301,11 +302,13 @@ describe('deferred-replay registry', () => {
         expect(dispatch).toHaveBeenCalledWith(trx);
       });
 
-      test('an unreadable hold check at the handoff refuses the send (fail closed)', async () => {
+      test('an unreadable hold check at the handoff holds the send and stays retryable — the executor retries it instead of dropping the text', async () => {
         handoffTrx();
         autoTextHoldReason.mockRejectedValueOnce(new Error('db down'));
         const dispatch = jest.fn();
-        await expect(deferredSmsHandoff('voicemail_lead_sms_deferred', meta)(dispatch)).resolves.toMatchObject({ sent: false, blocked: true });
+        await expect(deferredSmsHandoff('voicemail_lead_sms_deferred', meta)(dispatch)).resolves.toMatchObject({
+          sent: false, blocked: true, retryable: true, code: 'VOICEMAIL_TEXT_CHECK_FAILED_AT_HANDOFF',
+        });
         expect(dispatch).not.toHaveBeenCalled();
       });
     });

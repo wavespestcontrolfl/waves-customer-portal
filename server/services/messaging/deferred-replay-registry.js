@@ -953,13 +953,23 @@ const REGISTRY = {
     // during those awaits (a text, a lead assigned, an estimate sent, a
     // do-not-contact correction) still stops the queued text here,
     // immediately before the provider request. Same shape as the
-    // recruiting and visit-summary handoffs; a refusal is terminal, so
-    // onTerminal releases both claims.
+    // recruiting and visit-summary handoffs. A confirmed hold or stale lead
+    // is a terminal refusal (onTerminal releases both claims); a read that
+    // failed (recheck fails closed as retryable) stays retryable, so the
+    // executor puts the row back on its bounded retry rail instead.
     async smsHandoff(meta, dispatch) {
       return db.transaction(async (trx) => {
         const again = await REGISTRY.voicemail_lead_sms_deferred.recheck(meta, { conn: trx });
         if (!again || again.eligible === false) {
-          return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'VOICEMAIL_TEXT_STALE_AT_HANDOFF', reason: (again && again.reason) || 'ineligible' };
+          const retryable = again?.retryable === true;
+          return {
+            sent: false,
+            blocked: true,
+            deliveryOutcome: 'not_sent',
+            code: retryable ? 'VOICEMAIL_TEXT_CHECK_FAILED_AT_HANDOFF' : 'VOICEMAIL_TEXT_STALE_AT_HANDOFF',
+            reason: (again && again.reason) || 'ineligible',
+            ...(retryable ? { retryable: true } : {}),
+          };
         }
         return dispatch(trx);
       });
