@@ -1053,6 +1053,23 @@ const gates = {
   // reschedule flips status, and the SMS line renders empty again.
   reserviceStreamline: process.env.GATE_RESERVICE_STREAMLINE === 'true',
 
+  // Re-service picker one-tap pest chips (owner-approved 2026-09-26): the
+  // /reservice/:token picker's optional details box gets a row of one-tap
+  // pest chips (server/services/reservice-request.js — ants/roaches/spiders/
+  // wasps/other for pest, weeds/bugs in the lawn/brown patches/other for
+  // lawn) above the now-secondary "Anything else?" textarea, and GET's
+  // payload carries pestChoices for the customer's bookable lanes. Nested
+  // inside reserviceSelfServe — with that gate dark the whole route 404s
+  // before this one is ever read. Customer-facing surface, so opt-in in
+  // EVERY environment (fail-closed ==='true'). Kill switch: unset
+  // GATE_RESERVICE_PEST_CHIPS — GET drops pestChoices, POST ignores any
+  // posted `pests`, and the picker renders byte-identical to before this
+  // gate existed (the plain "What are you seeing?" textarea only). The
+  // customer_request/_source/_pests columns themselves (migration
+  // 20260927100000) are additive and are stamped from the details box
+  // regardless of this gate — only the pest-chip normalization is gated.
+  reservicePestChips: process.env.GATE_RESERVICE_PEST_CHIPS === 'true',
+
   // Re-service ranking demotion (owner ruling 2026-09-24: "prefer new
   // customers over existing — new-customer bookings get first pick of open
   // time; re-service/callback pickers rank after"). Nested inside
@@ -3042,6 +3059,18 @@ const gates = {
   // explicit offset, read by gateEnvTimestamp) set, independently of this
   // gate, or the lane does nothing (see sweep.js).
   purchaseReceiptRestock: gateEnvValue('GATE_PURCHASE_RECEIPT_RESTOCK'),
+  // Fast Complete for pest re-services (PR C): the tech portal opens a
+  // one-screen completion sheet for pest_re_service (free callback) visits
+  // instead of the full ServiceRecapModal. Read once at load and mirrored
+  // onto the schedule payload as `reserviceFastCompleteEnabled` per service
+  // (server/routes/admin-schedule.js, same pattern as `inspectionCredit`
+  // below) — so TechHomePage learns the gate state from the job payload it
+  // already fetches, no new endpoint. **Ships DARK: off unless exactly
+  // `true`.** Off = the tech portal routes pest re-services to
+  // ServiceRecapModal exactly as before. Kill switch: unset
+  // GATE_RESERVICE_FAST_COMPLETE.
+  reserviceFastComplete: process.env.GATE_RESERVICE_FAST_COMPLETE === 'true',
+
   // Inventory agent (server/services/purchase-receipts/inventory-agent.js):
   // an LLM-backed resolver for a purchase-receipt line the deterministic
   // classifier held as unmatched/needs_size/size_mismatch — every proposal

@@ -4131,6 +4131,10 @@ function initScheduledJobs() {
             // invoice_send_deferred). Undefined for every other entry point.
             withProviderHandoff: replayRegistry.deferredProviderHandoff(claimMeta.entry_point, replayHandoffMeta),
             billingEmailPreSendCheck: replayRegistry.deferredBillingEmailPreSendCheck(claimMeta.entry_point, replayHandoffMeta),
+            // An entry's own predicate at the true provider boundary
+            // (twilio.js runs it immediately before its request); undefined
+            // for entries that register none.
+            providerPreSendCheck: replayRegistry.deferredProviderPreSendCheck(claimMeta.entry_point, replayHandoffMeta),
             // Send-window operator provenance: only rows an operator
             // actually composed/scheduled keep the operator exemption — the
             // composer dispatches at the exact minute the operator picked,

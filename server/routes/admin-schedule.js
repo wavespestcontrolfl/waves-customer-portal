@@ -4915,6 +4915,11 @@ async function loadProjectCompletionContextByServiceId(services) {
       // default-true, and the tech could not clear the $75 promise from
       // the actual completion UI. Mirrors /admin/dispatch/:date.
       inspectionCreditAvailable: require('../config/feature-gates').isEnabled('inspectionCredit'),
+      // GATE_RESERVICE_FAST_COMPLETE (PR C) — TechHomePage reads this per
+      // service to decide whether a pest re-service opens the one-screen
+      // Fast Complete sheet instead of ServiceRecapModal. Same "ride the
+      // schedule payload, no new endpoint" pattern as inspectionCreditAvailable above.
+      reserviceFastCompleteEnabled: require('../config/feature-gates').isEnabled('reserviceFastComplete'),
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
@@ -5921,6 +5926,8 @@ router.get('/', async (req, res, next) => {
         // Dispatch V2 completes from this payload — the closeout promise
         // checkbox renders only on true (Codex #3178 r21 P1).
         inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
+        // GATE_RESERVICE_FAST_COMPLETE (PR C) — see loadProjectCompletionContextByServiceId.
+        reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
         // A resolver OUTAGE must reach the client's omit-the-field guard
         // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
         // hidden credit toggle falls through to a fabricated default
@@ -5933,6 +5940,10 @@ router.get('/', async (req, res, next) => {
         autopayEnabled: s.autopay_enabled !== false,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
         customerId: s.customer_id, customerPhone: s.customer_phone,
+        // The visit's premise (null = never stamped with a property). The tech
+        // Fast Complete sheet checks it against the live visit, so a stale row
+        // can't complete a visit since moved to another unit or property.
+        propertyId: s.property_id ?? null,
         address: [[s.address_line1, s.address_line2].filter(Boolean).join(" "), s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
         city: s.city,
         state: s.state,
@@ -6499,6 +6510,8 @@ router.get('/week', async (req, res, next) => {
           completionProfile: projectCompletionContext.completionProfile || null,
           // Same field as the day view above — both feed the V2 closeout.
           inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
+          // Same field as the day view above (PR C).
+          reserviceFastCompleteEnabled: projectCompletionContext.reserviceFastCompleteEnabled === true,
           // Resolver-outage marker — same contract as the day view (r34 P2).
           completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
@@ -22460,6 +22473,21 @@ function renderTypedGroupLines(sections) {
   return parts;
 }
 
+// Owner ruling 2026-09-26 (#5037): a derive-mapped activity indicator has
+// no gauge — its score comes from the findings field alone. Report copy must
+// follow the same rule as completion (complete-scheduled-service.js), or a
+// tab loaded before the gauge was removed could generate prose against an
+// obsolete pinned score that the saved record then contradicts (Codex r3).
+// Tech-set-only indicators keep the submitted 0-5 score.
+function copyActivityScore(type, values, submitted) {
+  const indicator = ActivityIndicators.getActivityIndicator(type);
+  if (indicator?.derive) {
+    const derived = ActivityIndicators.deriveActivityScore(type, values || {});
+    return derived ? derived.score : null;
+  }
+  return Number.isInteger(submitted) && submitted >= 0 && submitted <= 5 ? submitted : null;
+}
+
 function buildTypedFindingsPromptBlock({
   findingsType = null, values = null, nextStepChips = [], companionFindings = [],
   allowedCompanionTypes = [], activityScore = null,
@@ -22576,18 +22604,36 @@ router.post('/generate-report', async (req, res) => {
     // only here; the prompt block is assembled further down ONLY after the
     // appointment's completion profile confirms the findings type (same
     // profile-authority rule as the old draft route).
-    const typedActivityScoreNum = Number.isInteger(typedActivityScore)
-      && typedActivityScore >= 0 && typedActivityScore <= 5
-      ? typedActivityScore : null;
     const typedValuesRaw = structuredFindings && typeof structuredFindings === 'object'
       && structuredFindings.values && typeof structuredFindings.values === 'object'
       && !Array.isArray(structuredFindings.values)
       ? structuredFindings.values : null;
+    // Derive-mapped types score from their findings, never a submitted pin
+    // (copyActivityScore). The claimed type is what the profile later
+    // confirms, so deriving from it here keeps gate, prompt and fallback on
+    // the one score completion will store.
+    const typedActivityScoreNum = copyActivityScore(
+      structuredFindings && typeof structuredFindings === 'object' ? structuredFindings.type : null,
+      typedValuesRaw,
+      typedActivityScore,
+    );
     // Companion sections count independently of the primary — companion-only
     // profiles (findingsType null, e.g. lawn_tree_shrub_combo) record their
     // facts exclusively in companion forms. A manually tapped activity score
     // alone is substantive input, matching the primary rule (codex r3).
-    const companionEntries = Array.isArray(companionFindings) ? companionFindings : [];
+    // Same score rule per companion entry (copyActivityScore) — every later
+    // read (gate, prompt block, fallback) sees the authoritative score.
+    const companionEntries = (Array.isArray(companionFindings) ? companionFindings : [])
+      .map((entry) => (entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? {
+          ...entry,
+          activityScore: copyActivityScore(
+            entry.type,
+            entry.values && typeof entry.values === 'object' && !Array.isArray(entry.values) ? entry.values : {},
+            entry.activityScore,
+          ),
+        }
+        : entry));
     // Only fields that SURVIVE prompt rendering may open the gate — a
     // schema-internal calibration value (e.g. tree_shrub bed_sqft_serviced)
     // is dropped from the prompt, so counting it would let Generate replace
@@ -24643,6 +24689,7 @@ function blackoutDateString(value) {
 }
 
 router._test = {
+  copyActivityScore,
   // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — the split
   // writer's helpers, so the behavioural suite can drive each one against a
   // scripted connection (fallback auditor P1: source guards alone would
