@@ -191,6 +191,13 @@ describe('planRescheduleFromCall', () => {
     // ...unless the call brings up another of them, by date or by month.
     expect(plan('2026-09-24T12:00:00-04:00', `Caller: Not the December one.\nAgent: ${QUOTE}`).reason).toBe('ambiguous_visit');
     expect(plan('2026-09-24T12:00:00-04:00', `Caller: Keep December 24th as it is.\nAgent: ${QUOTE}`).reason).toBe('ambiguous_visit');
+    // A month and day without a year may be next year's: "March 24th" said in
+    // September brings up the March 2027 visit.
+    const march = visit({ id: 'march-visit', scheduled_date: '2027-03-24' });
+    hasAgentCommittedEvidence.mockReturnValueOnce(true);
+    expect(planRescheduleFromCall({ v2: v2(), customer: customer(), candidates: [visit(), march], now: NOW,
+      call: call({ transcription: `Caller: Move my March 24th visit to September 24th at noon.\nAgent: ${QUOTE}` }) }))
+      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'march-visit'] });
     // Once September is behind today, December 24 is the only upcoming visit.
     expect(plan('2026-12-17T12:00:00-05:00', 'Caller: Move it to December 17th.\nAgent: Okay.', new Date('2026-09-25T19:00:00Z')))
       .toMatchObject({ action: 'apply', visitId: 'dec-visit' });

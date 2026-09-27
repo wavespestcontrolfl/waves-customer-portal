@@ -2,9 +2,10 @@
  * Day references in a labelled call transcript ("Agent: ..." / "Caller: ..."
  * lines), used by the call reschedule applier's visit selection.
  *
- * A day mention carries every calendar date it could mean: a month and day,
- * today, tomorrow and the day after name one; a weekday or "next <weekday>"
- * names two (this week's and next week's), since ordinary speech uses both.
+ * A day mention carries every calendar date it could mean: today, tomorrow
+ * and the day after name one; a month and day names this year's and next
+ * year's; a weekday or "next <weekday>" names this week's and next week's,
+ * since ordinary speech uses both.
  * Mentions come back in the order they were spoken. Dates are ET calendar
  * days (server/utils/datetime-et.js), relative to when the call started.
  */
@@ -44,13 +45,19 @@ function dayAfterCall(started, days) {
   return etDateString(addETDays(started, days));
 }
 
-// A month and day in the call's year, or the next year's when that date is
-// more than ~10 months behind the call ("January 3rd" said in December).
-function monthDayDate(monthIdx, dayNum, started) {
+// A month and day without a year may mean this year's date or next year's
+// ("March 24th" said in September means next March): both are kept, and a
+// caller matches either.
+function monthDayDates(monthIdx, dayNum, started) {
   const { year } = etParts(started);
   const md = `${String(monthIdx + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-  return `${year}-${md}` < dayAfterCall(started, -300) ? `${year + 1}-${md}` : `${year}-${md}`;
+  return [`${year}-${md}`, `${year + 1}-${md}`];
 }
+
+// Mentions that name one day (a month and day in either year, today,
+// tomorrow, the day after), unlike a weekday, which could be this week's or
+// next week's.
+const EXACT_KINDS = new Set(['day_after_tomorrow', 'today', 'tomorrow', 'month_day']);
 
 /**
  * Day mentions in one turn, in spoken order: { candidates: Set<YYYY-MM-DD>,
@@ -73,7 +80,7 @@ function parseDayMentions(turnText, started) {
     else if (t === 'next' && WEEKDAY_NAMES.includes(t1)) hit = { dates: weekdayDates(t1), kind: 'next_weekday', len: 2 };
     else if (WEEKDAY_NAMES.includes(t)) hit = { dates: weekdayDates(t), kind: 'weekday', len: 1 };
     else if (MONTH_NAMES.includes(t) && DAY_OF_MONTH.test(t1 || '')) {
-      hit = { dates: [monthDayDate(MONTH_NAMES.indexOf(t), Number(DAY_OF_MONTH.exec(t1)[1]), started)], kind: 'month_day', len: 2 };
+      hit = { dates: monthDayDates(MONTH_NAMES.indexOf(t), Number(DAY_OF_MONTH.exec(t1)[1]), started), kind: 'month_day', len: 2 };
     }
     if (!hit) continue;
     mentions.push({ candidates: new Set(hit.dates), kind: hit.kind, pos: i, end: i + hit.len });
@@ -88,10 +95,11 @@ function callStart(callStartedAt) {
 }
 
 /**
- * The calendar dates (YYYY-MM-DD, ET) the call names EXACTLY, from either
- * speaker. Only single-date references count (a month and day, today,
- * tomorrow, the day after): a weekday names two dates and proves neither.
- * Empty for an unlabeled transcript or an unreadable call time.
+ * The calendar dates (YYYY-MM-DD, ET) the call names by day, from either
+ * speaker: a month and day (as this year's and next year's date), today,
+ * tomorrow, the day after. A weekday could be this week's or next week's and
+ * counts as neither. Empty for an unlabeled transcript or an unreadable call
+ * time.
  */
 function exactDatesNamed({ transcript, callStartedAt } = {}) {
   const started = callStart(callStartedAt);
@@ -100,7 +108,7 @@ function exactDatesNamed({ transcript, callStartedAt } = {}) {
   if (!started || !turns) return dates;
   for (const turn of turns) {
     for (const m of parseDayMentions(turn.raw, started)) {
-      if (m.candidates.size === 1) dates.add([...m.candidates][0]);
+      if (EXACT_KINDS.has(m.kind)) m.candidates.forEach((d) => dates.add(d));
     }
   }
   return dates;

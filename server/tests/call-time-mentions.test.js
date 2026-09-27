@@ -5,10 +5,10 @@ const { exactDatesNamed, parseDayMentions, monthsReferenced } = require('../serv
 const CALL_STARTED_AT = '2026-09-26T15:51:18Z';
 
 describe('exactDatesNamed', () => {
-  test('a month and day, today, tomorrow and the day after name one date each', () => {
+  test('today, tomorrow and the day after name one date; a month and day names it this year and next', () => {
     const transcript = 'Agent: You are on October 2nd.\nCaller: Could it be tomorrow, or the day after tomorrow?\nAgent: Today is full.';
     expect([...exactDatesNamed({ transcript, callStartedAt: CALL_STARTED_AT })].sort())
-      .toEqual(['2026-09-26', '2026-09-27', '2026-09-28', '2026-10-02']);
+      .toEqual(['2026-09-26', '2026-09-27', '2026-09-28', '2026-10-02', '2027-10-02']);
   });
 
   test('a weekday names two dates, so it names none exactly', () => {
