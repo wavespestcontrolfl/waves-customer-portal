@@ -289,6 +289,16 @@ describe('triggerNotification bell outcome', () => {
     expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
   });
 
+  // A second same-day callback on the SAME open promise dedupes to the
+  // committed bell — the promise-chaser bell's own dedupeKey — and must not
+  // re-buzz the phone either, even though it is a genuinely new call.
+  test('a same-day repeat promise-chaser callback reuses its committed bell and does not push again', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'committed-bell', deduped: true });
+    expect(await triggerNotification('promise_chaser', { commitmentId: 'fixture-commitment-1', phone: '+19415550199' },
+      { dedupeKey: 'waves-promise_chaser-fixture-commitment-1-2026-09-26' })).toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
   test('push-only SMS recovery retains its message tag and avoids renotification', async () => {
     db.mockImplementation(table => tableMock(table === 'technicians' ? [{ id: 'admin-1' }]
       : [{ admin_user_id: 'admin-1', bell_enabled: false, push_enabled: true }]));

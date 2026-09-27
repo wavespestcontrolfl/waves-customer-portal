@@ -1023,7 +1023,14 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       .filter((u) => (prefsByUser.get(u.id) || defaultPreference(trigger)).push_enabled !== false)
       .map((u) => u.id);
     let bellWritten = false;
-    let replayedSmsBell = false;
+    // A dedupe HIT on a trigger whose identity is the dedupeKey itself (not
+    // the bell row) means this event already delivered — the push must not
+    // repeat either. sms_reply: a concurrent lease winner reaching this
+    // dispatcher after the canonical send. promise_chaser: a second
+    // same-day callback on the SAME open promise (the dedupeKey is
+    // per-promise-per-day, so a repeat callback must not re-buzz the phone
+    // even though it is a genuinely new call).
+    let dedupedNoPush = false;
     let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
     // banners, some are bells"): the bell policy is evaluated ONCE per event,
@@ -1067,7 +1074,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }
           );
           if (created && !created.suppressed) bellWritten = true;
-          if (created?.deduped && triggerKey === 'sms_reply' && dedupeKey) replayedSmsBell = true;
+          if (created?.deduped && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser')) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);
@@ -1080,9 +1087,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     };
     if (shouldContinue && bellSuppressed && !bellWritten) stats.suppressed = true;
     onBell?.(bellWritten); // durable bell result is available before badge lookup or push
-    // A concurrent SMS lease winner can reach this dispatcher before the first
-    // bell commits. Its canonical dedupe result also prevents a second push.
-    if (replayedSmsBell) return { ...stats, deduped: true };
+    if (dedupedNoPush) return { ...stats, deduped: true };
     if (relayFailureCall && !bellWritten) return stats; // an unclaimed callback never dispatches a push
     // Every active admin turned BOTH channels off: that is deliberate
     // preference suppression, not a delivery failure — report it so

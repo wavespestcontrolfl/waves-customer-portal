@@ -55,12 +55,6 @@ function scheduleRecordingRecovery(callSid) {
       } catch (err) {
         logger.warn(`[call-status] repeat-caller bell failed for ${maskSid(callSid)}: ${err.message}`);
       }
-      // A lead calling back on an open promise rings the same way.
-      try {
-        await require('../services/promise-chaser-bell').ringPromiseChaserIfNeeded(callSid);
-      } catch (err) {
-        logger.warn(`[call-status] promise-chaser bell failed for ${maskSid(callSid)}: ${err.message}`);
-      }
     }, 3 * 60 * 1000);
   }, 2 * 60 * 1000);
 }
@@ -1359,6 +1353,13 @@ router.post('/voice', async (req, res) => {
     });
     // call_log now committed — don't release the claim on a later error.
     callLogged = true;
+
+    // The lead is calling in RIGHT NOW — check while the call is still
+    // ringing, not after it ends (the promise-chaser bell's alert says so).
+    // Fire-and-forget: never adds latency to the TwiML response below.
+    void require('../services/promise-chaser-bell').ringPromiseChaserIfNeeded(CallSid).catch((err) => {
+      logger.warn(`[voice] promise-chaser bell failed for ${maskSid(CallSid)}: ${err.message}`);
+    });
 
     // Dual-write to unified messages table. Recording + transcription
     // arrive in later webhooks and update this row via twilio_sid.

@@ -42,10 +42,14 @@ function describePromise(row) {
 }
 
 /**
- * Called from the same post-call hook as the repeat-caller bell, once this
- * call has reached a terminal status. Pure lookup + one notification send —
- * no claim/lease, since each call fires this at most once and the
- * dedupeKey below is what keeps a same-day repeat call from re-ringing.
+ * Called from the /voice webhook while the call is still ringing (first
+ * delivery only — Twilio's own idempotency claim keeps a redelivery from
+ * firing this twice), so the alert's "calling in now" is still true when
+ * staff read it — unlike the repeat-caller bell, which can afford to wait
+ * for the post-call grace since its own copy never claims immediacy. Pure
+ * lookup + one notification send — no claim/lease, since each call fires
+ * this at most once and the dedupeKey below is what keeps a same-day
+ * repeat call from re-ringing.
  */
 async function ringPromiseChaserIfNeeded(callSid) {
   if (!callSid || !isEnabled('promiseChaserBell') || !isEnabled('callCommitments')) return false;
