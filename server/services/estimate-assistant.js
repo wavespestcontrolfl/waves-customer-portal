@@ -457,7 +457,25 @@ function mergeOneTimeServiceRows(primaryRows = [], fallbackRows = []) {
     const labels = primaryLabelsByService.get(trenchingServiceIdentity(row));
     return !labels || labels.has(cleanText(row.label));
   });
-  return mergeServiceRows(primaryRows, unmatchedFallbackRows);
+  const primaryIdentityCounts = primaryRows.reduce((counts, row) => {
+    const key = `${trenchingServiceIdentity(row)}|${cleanText(row.label).toLowerCase()}`;
+    counts.set(key, (counts.get(key) || 0) + 1);
+    return counts;
+  }, new Map());
+  const duplicateIdentities = new Set([...primaryIdentityCounts]
+    .filter(([, count]) => count > 1).map(([key]) => key));
+  if (!duplicateIdentities.size) return mergeServiceRows(primaryRows, unmatchedFallbackRows);
+  const identityFor = (row) => `${trenchingServiceIdentity(row)}|${cleanText(row.label).toLowerCase()}`;
+  // Distinct priced jobs can legitimately share a customer-facing label. Their
+  // already-reconciled current terms must survive instead of being coalesced by
+  // the general label merger; ambiguous fallback rows cannot enrich either.
+  return [
+    ...primaryRows.filter((row) => duplicateIdentities.has(identityFor(row))),
+    ...mergeServiceRows(
+      primaryRows.filter((row) => !duplicateIdentities.has(identityFor(row))),
+      unmatchedFallbackRows.filter((row) => !duplicateIdentities.has(identityFor(row))),
+    ),
+  ];
 }
 
 function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {

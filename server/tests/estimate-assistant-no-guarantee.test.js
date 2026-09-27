@@ -382,6 +382,29 @@ describe('estimate assistant no-guarantee context', () => {
     }
   });
 
+  test('identical direct engine jobs keep their own decisions in context and scoped answers', () => {
+    const rows = [
+      { service: 'trenching', label: 'Termite Trenching', amount: 900,
+        warrantyTier: 'one_year_retreat', warrantyAdder: 0 },
+      { service: 'trenching', label: 'Termite Trenching', amount: 900,
+        warrantyTier: 'none', warrantyAdder: 0 },
+    ];
+    for (const directRows of [rows, [...rows].reverse()]) {
+      const context = buildEstimateAssistantContext({
+        estimate: { onetime_total: 1800 }, serviceMode: 'one_time', noGuaranteeClaims: true,
+        estData: {},
+        pricingBundle: { source: 'engine_invocation', snapshotHit: false,
+          anchorOneTimePrice: 1800, oneTimeBreakdown: { total: 1800, items: directRows } },
+      });
+      expect(context.oneTime.items).toHaveLength(2);
+      expect(context.oneTime.items.filter((row) => row.purchasedTerms
+        .includes('Annual inspection during the warranty period'))).toHaveLength(1);
+      expect(answerEstimateQuestionFallback('What guarantee does the trenching include?', context)).toBe(
+        'For Termite Trenching, this estimate includes this purchased service-specific term: Annual inspection during the warranty period. It applies only to that service and does not create an estimate-wide callback or money-back guarantee.',
+      );
+    }
+  });
+
   test.each([
     ['none', { warrantyTier: 'none', warrantyAdder: 0 }],
     ['null', { warrantyTier: null, warrantyAdder: null }],
