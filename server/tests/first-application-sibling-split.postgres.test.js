@@ -225,6 +225,108 @@ suite('first-application-sibling-split — periodic sweep', () => {
     expect(reopened.read_at).toBeNull();
   }));
 
+  // Real-data manual-split detection (pre-push P1 fix): the office's own
+  // instructed fix — giving the moved sibling its own live invoice linked
+  // to its own scheduled_service_id — must stop the alert on its own,
+  // without relying on any invoice title/notes text.
+  test('a manual split with both invoices still unpaid → no alert, and an existing alert is cleared', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await sweepOnce(trx, ids.estimateId);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
+
+    // Office completes the instructed manual split: the sibling visit gets
+    // its OWN live invoice, linked to its own scheduled_service_id — same
+    // linkage findFirstApplicationInvoiceForEstimateService uses elsewhere.
+    // Both invoices stay unpaid — ownership is the signal, not settlement.
+    const lawnInvoiceId = randomUUID();
+    await trx('invoices').insert({
+      id: lawnInvoiceId, customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
+      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      subtotal: 42, total: 42,
+    });
+
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('cleared');
+    expect(result.reason).toBe('split_completed');
+
+    const cleared = await readBell(trx, dedupeKey);
+    expect(cleared.read_at).not.toBeNull();
+    const metadata = typeof cleared.metadata === 'string' ? JSON.parse(cleared.metadata) : cleared.metadata;
+    expect(metadata.autoCleared).toBe(true);
+
+    // Neither original invoice's money moved — the sweep never touches it.
+    const [pest, sharedInvoice] = await Promise.all([
+      trx('scheduled_services').where({ id: ids.pestId }).first(),
+      trx('invoices').where({ id: ids.invoiceId }).first(),
+    ]);
+    expect(Number(pest.estimated_price)).toBe(153.60);
+    expect(Number(sharedInvoice.total)).toBe(153.60);
+  }));
+
+  test('a voided "split" invoice does not count — still alerts (void is not a real split)', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await sweepOnce(trx, ids.estimateId);
+
+    await trx('invoices').insert({
+      id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
+      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
+      status: 'void', title: 'Lawn Care', notes: 'Voided draft — never actually billed.',
+      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
+      subtotal: 42, total: 42,
+    });
+
+    const [result] = await sweepOnce(trx, ids.estimateId);
+    expect(result.action).toBe('alerted');
+    expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
+  }));
+
+  // Dismissal semantics (pre-push P1 fix): a dismissed alert must not
+  // reopen on the next tick unless the state materially changed.
+  test('dismissed alert + unchanged state → stays dismissed', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await sweepOnce(trx, ids.estimateId);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const firstBell = await readBell(trx, dedupeKey);
+    expect(firstBell.read_at).toBeNull();
+
+    // Office dismisses it while the divergence is still technically open —
+    // nothing about the dates or the invoice changes.
+    await trx('notifications').where({ id: firstBell.id }).update({ read_at: new Date() });
+
+    // Sweep again with NO change at all.
+    await sweepOnce(trx, ids.estimateId);
+
+    const stillDismissed = await readBell(trx, dedupeKey);
+    expect(stillDismissed.id).toBe(firstBell.id);
+    expect(stillDismissed.read_at).not.toBeNull();
+  }));
+
+  test('dismissed alert + a new date change → reopens', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await sweepOnce(trx, ids.estimateId);
+    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
+    const firstBell = await readBell(trx, dedupeKey);
+    expect(firstBell.read_at).toBeNull();
+
+    await trx('notifications').where({ id: firstBell.id }).update({ read_at: new Date() });
+
+    // The sibling moves AGAIN to a different date — same estimate, same
+    // diverging sibling id, but the dates tuple materially changed.
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-09' });
+    await sweepOnce(trx, ids.estimateId);
+
+    const reopened = await readBell(trx, dedupeKey);
+    expect(reopened.id).toBe(firstBell.id);
+    expect(reopened.read_at).toBeNull();
+  }));
+
   test('invoice text unrecognizable — never a sweep candidate, no alert', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx, { matchInvoiceText: false });
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });

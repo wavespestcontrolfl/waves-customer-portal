@@ -68,12 +68,41 @@
 // "resolve" mechanism notifications already support; there is no bespoke
 // clear route to build here.
 //
-// Race safety (Codex P2): the reopen-after-dismissal decision — reuse the
-// existing alert's dedupeVersion while it's still unread, mint a fresh one
-// if it was dismissed or never existed — takes the SAME advisory lock
-// notifyAdmin's own dedupe path takes, and holds it continuously (same
-// session, same transaction) through notifyAdmin's own write, so a
-// concurrent dismissal can never land between the decision and the write.
+// Race safety (Codex P2): the reopen-after-dismissal decision takes the
+// SAME advisory lock notifyAdmin's own dedupe path takes, and holds it
+// continuously (same session, same transaction) through notifyAdmin's own
+// write, so a concurrent dismissal can never land between the decision and
+// the write.
+//
+// Dedupe version (pre-push P1 fix): dedupeVersion is a DETERMINISTIC
+// fingerprint of the live state — anchor date, each unresolved diverging
+// sibling's own id+date, and the invoice's id+total (divergenceStateFingerprint)
+// — never a fresh timestamp minted just because the standing alert happens
+// to be dismissed. A dismissed alert whose fingerprint is unchanged on the
+// next tick stays dismissed (notifyAdmin's own versionChanged/content check
+// sees no difference); only a fingerprint change re-opens it. This is what
+// lets a dismissed alert stay dismissed across ticks instead of reopening
+// on every sweep merely because the group is still open.
+//
+// Manual-split resolution (pre-push P1 fix): once the office completes the
+// instructed manual split, the sweep must stop alerting for the resolved
+// sibling(s) without relying on invoice text. Signal chosen: a diverging
+// sibling counts as split off once it has picked up its OWN live
+// (non-void) invoice linked to its own scheduled_service_id
+// (has_own_live_invoice, computed in loadGroupMembers) — the same
+// invoices.scheduled_service_id linkage every other caller in this area
+// (findFirstApplicationInvoiceForEstimateService) uses to resolve a
+// visit's invoice, so a hand-split invoice is found the same way a minted
+// one would be. This is more robust than comparing the shared invoice's
+// line items/total against the per-visit split amounts
+// (reservedAcceptPerVisitSplit) — those amounts are derived only at
+// itemizeFirstApplication/closeout time (GATE_VISIT_CLOSEOUT-gated) and are
+// not a durable, always-available record to diff against for an arbitrary
+// group on an arbitrary sweep tick. evaluateGroupDivergence excludes any
+// diverging sibling with has_own_live_invoice from the alerted set; once
+// EVERY diverging sibling has its own invoice the group clears with reason
+// 'split_completed' (distinct from 'realigned', which means the dates
+// actually matched again).
 //
 // Durability: each candidate estimate group is evaluated in its OWN
 // transaction. A failure on one group is logged and left for the next
@@ -103,7 +132,9 @@ function isInvoiceSettled(status) {
 // settled fact a plain date move can't change) — deliberately NOT filtered
 // on estimated_price (Codex P1: a sibling that has picked up its own price
 // still shares the same combined charge on the invoice until someone
-// actually splits it).
+// actually splits it). Also deliberately NOT filtered on has_own_live_invoice
+// here — this is the RAW divergence (dates disagree); evaluateGroupDivergence
+// is the one that decides which of these still need an alert.
 function divergingSiblings(anchor, members) {
   const anchorDate = dateOnly(anchor.scheduled_date);
   return members.filter((m) => String(m.id) !== String(anchor.id)
@@ -112,9 +143,11 @@ function divergingSiblings(anchor, members) {
 }
 
 // The pure detection predicate: given the group's anchor row, every member
-// row, and the shared invoice's current status, decide whether to alert,
-// clear a standing alert, or do nothing. No DB access — the sweep and every
-// unit test call this the same way.
+// row (each optionally carrying has_own_live_invoice — loadGroupMembers
+// stamps this from a real invoices.scheduled_service_id lookup), and the
+// shared invoice's current status, decide whether to alert, clear a
+// standing alert, or do nothing. No DB access — the sweep and every unit
+// test call this the same way.
 function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
   if (!anchor || !Array.isArray(members) || members.length < 2) {
     return { action: 'clear', reason: 'no_group' };
@@ -126,11 +159,42 @@ function evaluateGroupDivergence({ anchor, members, invoiceStatus }) {
   if (!diverging.length) {
     return { action: 'clear', reason: 'realigned' };
   }
-  return { action: 'alert', reason: 'diverged', diverging };
+  // A diverging sibling that has already picked up its OWN live invoice
+  // (linked to its own scheduled_service_id) has been split off by hand —
+  // the office completed the instructed manual split for that visit, so it
+  // no longer needs an alert. Only the still-unresolved diverging siblings
+  // are reported/alerted on.
+  const unresolved = diverging.filter((m) => !m.has_own_live_invoice);
+  if (!unresolved.length) {
+    return { action: 'clear', reason: 'split_completed' };
+  }
+  return { action: 'alert', reason: 'diverged', diverging: unresolved };
+}
+
+// Deterministic fingerprint of the live divergence state — the anchor's own
+// date, each alerted sibling's own id+date (sorted, so member ORDER never
+// matters), and the shared invoice's id+total. Used as notifyAdmin's
+// dedupeVersion (pre-push P1 fix): NOT a fresh timestamp minted whenever the
+// standing alert happens to be dismissed — that would reopen a dismissed
+// alert on every sweep tick even with nothing materially different. Only a
+// changed fingerprint (a different dates tuple, or a different invoice id
+// or total) reopens a dismissed alert; an unchanged fingerprint stays
+// dismissed.
+function divergenceStateFingerprint({ anchor, diverging, invoiceId, invoiceTotal }) {
+  const anchorDate = dateOnly(anchor.scheduled_date);
+  const parts = diverging.map((d) => `${d.id}:${dateOnly(d.scheduled_date)}`).sort();
+  const total = invoiceTotal != null && Number.isFinite(Number(invoiceTotal)) ? Number(invoiceTotal).toFixed(2) : null;
+  return JSON.stringify({
+    anchorDate,
+    diverging: parts,
+    invoiceId: invoiceId != null ? String(invoiceId) : null,
+    invoiceTotal: total,
+  });
 }
 
 const CANDIDATE_COLUMNS = [
   'i.id as invoice_id', 'i.status as invoice_status', 'i.invoice_number', 'i.title', 'i.notes',
+  'i.total as invoice_total',
   'anchor.id as anchor_id', 'anchor.customer_id', 'anchor.source_estimate_id',
   'anchor.scheduled_date as anchor_scheduled_date', 'anchor.completed_at as anchor_completed_at',
 ];
@@ -196,12 +260,24 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
   return [...matched, ...staleRows];
 }
 
+// Every member of the estimate group, each stamped with has_own_live_invoice:
+// true when a LIVE (non-void) invoice is linked to that member's OWN
+// scheduled_service_id — the real-data signal that the office has already
+// hand-split that visit off the shared invoice (see the module header).
+// Cheap and bounded: one extra query keyed on this small group's own ids.
 async function loadGroupMembers(conn, { customerId, sourceEstimateId }) {
-  return conn('scheduled_services')
+  const members = await conn('scheduled_services')
     .where({ customer_id: customerId, source_estimate_id: sourceEstimateId })
     .whereNull('recurring_parent_id')
     .orderBy('id')
     .select('id', 'scheduled_date', 'completed_at');
+  if (!members.length) return members;
+  const ownInvoiceIds = await conn('invoices')
+    .whereIn('scheduled_service_id', members.map((m) => m.id))
+    .whereNot('status', 'void')
+    .pluck('scheduled_service_id');
+  const ownInvoiceSet = new Set(ownInvoiceIds.map(String));
+  return members.map((m) => ({ ...m, has_own_live_invoice: ownInvoiceSet.has(String(m.id)) }));
 }
 
 // Marks read (with an autoCleared stamp) every UNREAD standing alert for
@@ -229,17 +305,16 @@ async function raiseDivergenceAlert(conn, {
 }) {
   // Takes the SAME advisory lock notifyAdmin's own dedupe path takes, and
   // holds it (same connection/transaction) through notifyAdmin's write
-  // below — the reopen-after-dismissal read below and that write can never
+  // below — the fingerprint computed below and that write can never
   // straddle a concurrent dismissal (Codex P2).
   await conn.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
-  const existing = await conn('notifications').where({ recipient_type: 'admin' })
-    .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('read_at', 'metadata');
-  let dedupeVersion = new Date().toISOString();
-  if (existing && !existing.read_at) {
-    let meta = existing.metadata;
-    if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-    if (meta && typeof meta.dedupeVersion === 'string') dedupeVersion = meta.dedupeVersion;
-  }
+  // Deterministic — NOT a fresh timestamp (pre-push P1 fix): a dismissed
+  // alert whose fingerprint is unchanged on the next tick must stay
+  // dismissed, and only a materially different state (a different dates
+  // tuple, or a different invoice id/total) reopens it.
+  const dedupeVersion = divergenceStateFingerprint({
+    anchor, diverging, invoiceId: invoice?.invoice_id, invoiceTotal: invoice?.total,
+  });
   const anchorDate = dateOnly(anchor.scheduled_date);
   const detail = diverging.map((d) => `visit ${d.id} now on ${dateOnly(d.scheduled_date)} (was ${anchorDate})`).join('; ');
   const invoiceRef = invoice
@@ -275,6 +350,7 @@ async function evaluateCandidate(conn, candidate) {
   const {
     anchor_id: anchorId, customer_id: customerId, source_estimate_id: estimateId,
     invoice_id: invoiceId, invoice_status: invoiceStatus, invoice_number: invoiceNumber,
+    invoice_total: invoiceTotal,
     anchor_scheduled_date: anchorScheduledDate, anchor_completed_at: anchorCompletedAt,
   } = candidate;
   const members = await loadGroupMembers(conn, { customerId, sourceEstimateId: estimateId });
@@ -298,7 +374,7 @@ async function evaluateCandidate(conn, candidate) {
     anchor,
     diverging: verdict.diverging,
     customerId,
-    invoice: invoiceId ? { invoice_id: invoiceId, invoice_number: invoiceNumber } : null,
+    invoice: invoiceId ? { invoice_id: invoiceId, invoice_number: invoiceNumber, total: invoiceTotal } : null,
     dedupeKey,
   });
   return { estimateId, action: 'alerted', divergingSiblingIds: sortedIds };
@@ -338,6 +414,7 @@ module.exports = {
   isInvoiceSettled,
   divergingSiblings,
   evaluateGroupDivergence,
+  divergenceStateFingerprint,
   loadCandidates,
   loadGroupMembers,
   clearStandingAlerts,

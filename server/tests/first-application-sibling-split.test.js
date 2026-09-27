@@ -11,6 +11,7 @@
 const {
   evaluateGroupDivergence,
   divergingSiblings,
+  divergenceStateFingerprint,
   isInvoiceSettled,
   dateOnly,
   SETTLED_INVOICE_STATUSES,
@@ -108,6 +109,61 @@ describe('evaluateGroupDivergence', () => {
   test('no anchor at all → clear, never throws', () => {
     expect(evaluateGroupDivergence({ anchor: null, members: [], invoiceStatus: 'sent' }))
       .toEqual({ action: 'clear', reason: 'no_group' });
+  });
+
+  test('a diverging sibling that already has its OWN live invoice → clear, split_completed (manual split done)', () => {
+    const a = anchor();
+    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true });
+    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, b], invoiceStatus: 'draft' });
+    expect(verdict).toEqual({ action: 'clear', reason: 'split_completed' });
+  });
+
+  test('two diverging siblings, only one split off → alerts on the still-unresolved one only', () => {
+    const a = anchor();
+    const split = member('split-off', { scheduled_date: '2026-10-05', has_own_live_invoice: true });
+    const unresolved = member('still-needs-split', { scheduled_date: '2026-10-09' });
+    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, split, unresolved], invoiceStatus: 'draft' });
+    expect(verdict.action).toBe('alert');
+    expect(verdict.diverging.map((m) => m.id)).toEqual(['still-needs-split']);
+  });
+
+  test('a diverging sibling with no invoice yet (has_own_live_invoice false/undefined) still alerts', () => {
+    const a = anchor();
+    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: false });
+    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, b], invoiceStatus: 'draft' });
+    expect(verdict.action).toBe('alert');
+    expect(verdict.diverging.map((m) => m.id)).toEqual(['b']);
+  });
+});
+
+describe('divergenceStateFingerprint', () => {
+  const a = anchor();
+  const b = member('b', { scheduled_date: '2026-10-05' });
+
+  test('identical inputs → identical fingerprint (order of diverging members never matters)', () => {
+    const c = member('c', { scheduled_date: '2026-10-09' });
+    const fp1 = divergenceStateFingerprint({ anchor: a, diverging: [b, c], invoiceId: 'inv-1', invoiceTotal: 153.60 });
+    const fp2 = divergenceStateFingerprint({ anchor: a, diverging: [c, b], invoiceId: 'inv-1', invoiceTotal: '153.60' });
+    expect(fp1).toBe(fp2);
+  });
+
+  test('a different diverging date changes the fingerprint', () => {
+    const fp1 = divergenceStateFingerprint({ anchor: a, diverging: [b], invoiceId: 'inv-1', invoiceTotal: 100 });
+    const bMoved = member('b', { scheduled_date: '2026-10-09' });
+    const fp2 = divergenceStateFingerprint({ anchor: a, diverging: [bMoved], invoiceId: 'inv-1', invoiceTotal: 100 });
+    expect(fp1).not.toBe(fp2);
+  });
+
+  test('a different invoice id changes the fingerprint', () => {
+    const fp1 = divergenceStateFingerprint({ anchor: a, diverging: [b], invoiceId: 'inv-1', invoiceTotal: 100 });
+    const fp2 = divergenceStateFingerprint({ anchor: a, diverging: [b], invoiceId: 'inv-2', invoiceTotal: 100 });
+    expect(fp1).not.toBe(fp2);
+  });
+
+  test('a different invoice total changes the fingerprint', () => {
+    const fp1 = divergenceStateFingerprint({ anchor: a, diverging: [b], invoiceId: 'inv-1', invoiceTotal: 100 });
+    const fp2 = divergenceStateFingerprint({ anchor: a, diverging: [b], invoiceId: 'inv-1', invoiceTotal: 142.50 });
+    expect(fp1).not.toBe(fp2);
   });
 });
 
