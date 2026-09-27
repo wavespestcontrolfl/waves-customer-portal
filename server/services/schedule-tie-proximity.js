@@ -20,11 +20,11 @@
  *     start is more than TIE_WINDOW_MINUTES earlier, because it can only ever
  *     become a candidate once it IS the earliest remaining (or within the
  *     window of whatever is).
- *   - Among the candidates for a pick, geocoded stops are ranked by drive
- *     time from the previous stop in the built order (shortest first, ties
- *     broken by their original relative order — a stable sort); ungeocoded
- *     candidates always sort after every geocoded one, keeping their own
- *     relative order among themselves.
+ *   - When the previous stop has coordinates, geocoded candidates are ranked
+ *     by drive time from it (shortest first, ties broken by their original
+ *     relative order — a stable sort); ungeocoded candidates sort after them.
+ *     When the previous stop is ungeocoded, proximity is unknowable and the
+ *     candidates keep their existing relative order until a point is known.
  *   - "Previous stop" is the stop just placed in the OUTPUT order (planned,
  *     not actual completion). The first pick of the day measures from
  *     `origin` (HQ by default).
@@ -103,10 +103,9 @@ function orderStopsByTieProximity(stops, { origin = HQ } = {}) {
 
     const candidates = remaining.filter((e) => e.startMin <= anchor + TIE_WINDOW_MINUTES);
     const geocodedCandidates = candidates.filter((e) => e.coords);
-    const ungeocodedCandidates = candidates.filter((e) => !e.coords);
 
     let next;
-    if (geocodedCandidates.length > 0) {
+    if (previous && geocodedCandidates.length > 0) {
       next = geocodedCandidates.reduce((best, e) => {
         const drive = driveMinutesBetween(previous, e.coords);
         const bestDrive = driveMinutesBetween(previous, best.coords);
@@ -114,12 +113,15 @@ function orderStopsByTieProximity(stops, { origin = HQ } = {}) {
         return drive < bestDrive ? e : best;
       }, geocodedCandidates[0]);
     } else {
-      next = ungeocodedCandidates[0];
+      // The immediately previous stop has no usable point, so proximity is
+      // unknowable. Preserve the candidates' existing order rather than
+      // ranking from an older stop (or reusing HQ after the first pick).
+      next = candidates[0];
     }
 
     remaining.splice(remaining.indexOf(next), 1);
     picked.push(next);
-    if (next.coords) previous = next.coords;
+    previous = next.coords;
   }
 
   return [...picked, ...untimed].map((e, i) => ({ ...e.stop, displayOrder: i }));

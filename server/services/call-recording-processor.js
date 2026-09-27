@@ -31,6 +31,7 @@ const { isLikelyE164 } = require('../utils/phone');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
+const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
 
@@ -897,6 +898,20 @@ function maskSid(sid) {
   const value = String(sid);
   if (value.length <= 8) return `${value.slice(0, 2)}...`;
   return `${value.slice(0, 2)}...${value.slice(-6)}`;
+}
+
+const LAST_NAME_ADVISORY_INSERT_ERROR_CODE = 'CALL_LAST_NAME_ADVISORY_INSERT_FAILED';
+
+// Knex can embed bound customer fields and the failing SQL in its error
+// message/stack. Replace the rejection at this insert's boundary so both the
+// best-effort logger and the transaction failure path receive only fixed text
+// plus an allowlisted machine token. A fresh Error deliberately drops the
+// original cause and stack while still rejecting under the comms fence.
+function sanitizeLastNameAdvisoryInsertError(err) {
+  const sanitized = new Error('last-name advisory insert failed');
+  sanitized.code = LAST_NAME_ADVISORY_INSERT_ERROR_CODE;
+  sanitized.errorToken = safeErrorToken(err?.code) || safeErrorToken(err?.name) || 'error';
+  return sanitized;
 }
 
 async function updateUnifiedVoiceMessage(call, patch = {}) {
@@ -5742,7 +5757,6 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
 
   const missing = [];
   if (!String(merged.firstName || '').trim()) missing.push('first_name');
-  if (!String(merged.lastName || '').trim()) missing.push('last_name');
   if (!hasUsablePhone(merged.phone)) missing.push('phone');
   if (!String(merged.streetAddress || '').trim()) missing.push('street_address');
   if (!String(merged.city || '').trim()) missing.push('city');
@@ -5755,9 +5769,21 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   // site files. A stored/extracted email that fails EMAIL_RE also lands here
   // (garbled capture ≈ no capture). PERSISTED-OR-REVIEW above still governs
   // WHICH emails count when one exists.
+  //
+  // Last name is ADVISORY too (owner ruling 2026-09-26: "this is stupid,
+  // that the client has to have his last name on file to book an appt when
+  // we spoke to him, and invited us to go for an assessment" — a real
+  // outbound call where staff confirmed a Waves Assessment with only a
+  // first name went unbooked). The separate `missing_last_name` triage flag
+  // (call-triage-flags.js, ADVISORY_TRIAGE_FLAGS) already files a
+  // `name_review` card for the office to collect the surname — this gate
+  // must not ALSO hold the booking for the same missing field.
   const advisory = [];
   if (!EMAIL_RE.test(String(merged.email || '').trim().toLowerCase())) {
     advisory.push('email');
+  }
+  if (!String(merged.lastName || '').trim()) {
+    advisory.push('last_name');
   }
 
   return { ok: missing.length === 0, missing, advisory, details: merged };
@@ -15343,7 +15369,36 @@ const CallRecordingProcessor = {
               }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore()
-              .catch((e) => logger.warn(`[call-proc] email-missing advisory insert failed for ${maskSid(callSid)}: ${e.message}`));
+              // Knex prefixes err.message with the SQL and its bound values
+              // (the extraction payload) — log only an allowlisted token.
+              .catch((e) => logger.warn(`[call-proc] email-missing advisory insert failed for ${maskSid(callSid)} (${safeErrorToken(e?.code) || safeErrorToken(e?.name) || 'error'})`));
+          }
+          // Last-name advisory (owner ruling 2026-09-26): the booking no
+          // longer holds on a missing surname, so the "get the full name"
+          // card must be filed HERE — the triage-flag path only raises
+          // missing_last_name for hot/warm leads with an extracted first
+          // name. Same partial unique index as the flag path, so a card that
+          // path already filed is not duplicated. The snapshot mirrors the
+          // flag path's heard_name_v1 so triage-auto-resolve's name_moot
+          // rule can close the card once staff add the surname (codex #4991
+          // r2). Also re-run under the comms fence below (a merge-undo can
+          // remove an inherited surname while the booking waits).
+          const fileLastNameAdvisoryCard = (conn) => conn('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'missing_last_name',
+              extraction: v2ApprovedExtraction || undefined,
+              severity: 'advisory',
+              extraPayload: {
+                heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null },
+              },
+            }))
+            .onConflict(conn.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .ignore()
+            .catch((err) => { throw sanitizeLastNameAdvisoryInsertError(err); });
+          if (customerValidation.advisory?.includes('last_name')) {
+            await fileLastNameAdvisoryCard(db)
+              .catch((err) => logger.warn(`[call-proc] last-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
           }
           // Email-less bookings in SHADOW/LEGACY mode still require a
           // positively validated address (codex round-7 P1). canAutoRoute's
@@ -15833,6 +15888,13 @@ const CallRecordingProcessor = {
                     : { ok: false, missing: ['customer_row'] };
                   if (!freshValidation.ok) {
                     throw new Error(`customer record changed while waiting on the comms fence (merge-undo in flight?) — missing ${freshValidation.missing.join(', ')}; booking held for office review`);
+                  }
+                  // The fresh row may have LOST an inherited surname the
+                  // pre-fence validation saw — file the advisory card in
+                  // this transaction so it commits with the booking
+                  // (codex #4991 r2).
+                  if (freshValidation.advisory?.includes('last_name')) {
+                    await fileLastNameAdvisoryCard(trx);
                   }
                   customer = freshCallCustomer;
                   // Call OWNERSHIP re-reads too (r40): a journaled
@@ -20610,6 +20672,7 @@ CallRecordingProcessor._test = {
   hasRealTwoWayConversation,
   outboundPriorContactCustomerId,
   speakerTurns,
+  sanitizeLastNameAdvisoryInsertError,
   legacyDisputeServiceIntent,
   backfillLinkedCustomerFromExtraction,
   prelinkedBackfillGate,

@@ -1547,7 +1547,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       return null;
     })();
     const buildingSizeMeasured = realFootprintSqFt != null;
-    const engineInput = {
+    let engineInput = {
       homeSqFt: sqft,
       // For COMMERCIAL, pass the resolved footprint explicitly (resolvePestFootprint
       // reads footprintSqFt BEFORE homeSqFt, so the synthetic confirm default can't
@@ -1946,6 +1946,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         engineInput.services = {};
       }
     }
+    // Service Library writes can land on a different Node process. Read the
+    // active catalog row in this request and pass the price into the engine;
+    // the process-local pricing singleton is only a fallback for paths that
+    // have no database boundary.
+    engineInput = await require('../services/pricing-engine/trusted-catalog-pricing')
+      .withTrustedCatalogPricing(engineInput, { database: db });
     const estimate = keyedQuoteOnRequest ? quoteOnRequestEstimate(keyedService, engineInput) : generateEstimate(engineInput);
     const manualQuoteLines = (estimate?.lineItems || []).filter((line) =>
       isManualQuoteLine(line)
