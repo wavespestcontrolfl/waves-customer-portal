@@ -1,6 +1,12 @@
 const { validDateOnly } = require('../utils/date-only');
 
+// A direct invoice notice's explicit Email leg (#4963): the immediate send,
+// and its queued replay (see replaySourceEntryPoint). The ONE definition:
+// messaging/invoice-send-replay-eligibility.js imports it, so a source that
+// stores an invoice-pinned context always gets the invoice re-check.
+const INVOICE_SEND_SOURCES = new Set(['invoice_send_via_sms', 'invoice_send_deferred']);
 const SOURCES = new Set([
+  ...INVOICE_SEND_SOURCES,
   'autopay_pre_charge_reminder',
   'autopay_card_expiry_warning',
   'payment_expiry_workflow',
@@ -56,6 +62,11 @@ function copyExpiry(context, out) {
 
 function complete(context) {
   const has = (...fields) => fields.every((field) => context[field] != null);
+  // No collections reservation backs a direct invoice notice: the invoice
+  // itself is the pin its provider retry re-checks.
+  if (INVOICE_SEND_SOURCES.has(context.source_entry_point)) {
+    return has('invoice_id') && context.category === 'invoice';
+  }
   if (context.source_entry_point === 'autopay_pre_charge_reminder') return has('charge_date');
   if (context.source_entry_point === 'autopay_card_expiry_warning') {
     return has('payment_method_id', 'expiry_month', 'expiry_year', 'expiry_stage')
@@ -85,6 +96,16 @@ function sanitizeBillingReplayContext(context) {
   return complete(out) ? out : null;
 }
 
+// The scheduled-SMS executor replays every queued row under the generic
+// scheduled_sms_cron entry point. Only a queued direct invoice notice maps
+// back to its producer; any other scheduled replay keeps the generic source,
+// which carries no replay contract, so it stores no context.
+function replaySourceEntryPoint(input) {
+  if (input?.entryPoint === 'scheduled_sms_cron'
+    && input?.metadata?.original_entry_point === 'invoice_send_deferred') return 'invoice_send_deferred';
+  return input?.entryPoint;
+}
+
 function buildBillingReplayContext(input, authorityContext, notificationEventKey) {
   const meta = input?.metadata || {};
   return sanitizeBillingReplayContext({
@@ -92,7 +113,7 @@ function buildBillingReplayContext(input, authorityContext, notificationEventKey
     customer_id: authorityContext?.customer?.id,
     invoice_id: authorityContext?.invoice?.id,
     category: authorityContext?.category,
-    source_entry_point: input?.entryPoint,
+    source_entry_point: replaySourceEntryPoint(input),
     notificationEventKey,
     collections_ledger_id: meta.collections_ledger_id,
     charge_date: meta.charge_date,
@@ -109,4 +130,4 @@ function buildBillingReplayContext(input, authorityContext, notificationEventKey
   });
 }
 
-module.exports = { buildBillingReplayContext, sanitizeBillingReplayContext };
+module.exports = { buildBillingReplayContext, sanitizeBillingReplayContext, INVOICE_SEND_SOURCES };

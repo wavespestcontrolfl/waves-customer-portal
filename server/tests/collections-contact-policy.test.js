@@ -277,6 +277,40 @@ describe('structural denials', () => {
     expect(result.denialReasons).toEqual([]);
   });
 
+  test('sms keeps its allowed decision but exposes a dropped-invoice snapshot as incomplete', async () => {
+    armAllowedBaseline();
+    openBalanceInvoices.mockImplementationOnce(async (id, opts) => {
+      opts.onResolveFailure(); // a second candidate could not be proven self-pay
+      return [invoiceRow()];
+    });
+    const result = await ContactPolicy.evaluate('cust-1', {
+      channel: 'sms', purpose: 'balance_reminder', now: WED_11AM_EDT,
+    });
+    expect(result).toMatchObject({
+      allowed: true,
+      eligibleInvoiceIds: ['inv-1'],
+      balanceIncomplete: 'payer resolve failed',
+    });
+    expect(result.denialReasons).toEqual([]);
+  });
+
+  test('a truncated empty invoice snapshot remains visible on an allowed dues-only verdict', async () => {
+    armAllowedBaseline({ invoices: [] });
+    openBalanceInvoices.mockImplementationOnce(async (id, opts) => {
+      opts.onTruncation();
+      return [];
+    });
+    const result = await ContactPolicy.evaluate('cust-1', {
+      channel: 'email', purpose: 'balance_reminder', offLedgerBalanceCents: 12800, now: WED_11AM_EDT,
+    });
+    expect(result).toMatchObject({
+      allowed: true,
+      eligibleInvoiceIds: [],
+      balanceIncomplete: 'candidate bound hit',
+    });
+    expect(result.denialReasons).toEqual([]);
+  });
+
   test('dues context is NOT a bypass: zero dues, voice channel, and late_payment purpose all still require an invoice', async () => {
     armAllowedBaseline({ invoices: [] });
     const zeroDues = await ContactPolicy.evaluate('cust-1', {
@@ -339,6 +373,7 @@ describe('structural denials', () => {
     const result = await evalVoice();
     expect(result.allowed).toBe(false);
     expect(result.denialReasons).toEqual(['policy_evaluation_error']);
+    expect(result.balanceIncomplete).toBe('policy evaluation failed');
   });
 
   test('FAIL CLOSED: an open-balance loader rejection is a denial', async () => {
@@ -357,7 +392,9 @@ describe('flag matrix — each flag vs each channel', () => {
     collection_hold: ALL,
     attorney_represented: ALL,
     bankruptcy: ALL,
-    wrong_number: ALL,
+    // A wrong number is a fact about the phone: never a stop on the payment
+    // email (owner ruling 2026-09-27).
+    wrong_number: ['sms', 'push', 'voice', 'manual_call'],
     do_not_call: ['voice', 'manual_call'],
     do_not_text: ['sms'],
     do_not_email: ['email'],
@@ -878,12 +915,20 @@ describe('canonical suppression list', () => {
     }
   });
 
-  test('STOP-style opt-outs and wrong_number deny EVERY channel (canonical HARD semantics, codex r3)', async () => {
-    for (const reason of ['opt_out_keyword', 'opt_out_natural_language', 'wrong_number']) {
-      for (const ch of ['voice', 'manual_call', 'sms', 'email', 'push']) {
+  // Owner ruling 2026-09-27: a STOP text and a wrong-number flag are facts
+  // about the phone, so they never stop a payment email; every other channel
+  // keeps the canonical HARD semantics (codex r3).
+  test('STOP-style opt-outs and wrong_number deny every channel except the payment email', async () => {
+    for (const reason of ['opt_out', 'opt_out_keyword', 'opt_out_natural_language', 'wrong_number']) {
+      for (const ch of ['voice', 'manual_call', 'sms', 'push']) {
         armWithSuppression(reason);
         const result = await ContactPolicy.evaluate('cust-1', { channel: ch, purpose: 'late_payment', now: WED_11AM_EDT });
         expect(result.denialReasons).toContain(`suppression_${reason}`);
+      }
+      for (const purpose of ['late_payment', 'balance_reminder']) {
+        armWithSuppression(reason);
+        const email = await ContactPolicy.evaluate('cust-1', { channel: 'email', purpose, now: WED_11AM_EDT });
+        expect(email.denialReasons).not.toContain(`suppression_${reason}`);
       }
     }
   });

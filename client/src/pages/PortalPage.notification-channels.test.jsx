@@ -150,11 +150,14 @@ it('prevents removing the final channel with mouse or keyboard activation', asyn
 });
 
 it.each([
-  ['Payment receipts', 'paymentConfirmationChannels', ['sms', 'push'], 'App', { paymentConfirmationSms: false }],
-  ['Invoices', 'invoiceChannels', ['email', 'sms'], 'Text', { emailEnabled: false }],
-])('keeps the last usable channel in %s when another selected channel is unavailable', async (group, key, channels, usable, overrides) => {
+  ['Payment receipts', 'paymentConfirmationChannels', ['sms', 'push'], 'App', { paymentConfirmationSms: false }, customer],
+  // Owner ruling 2026-09-26: the portal-wide email switch no longer makes
+  // Email unavailable (hasBillingEmail no longer reads it) — only a missing
+  // address does, so Email is made unavailable here by clearing it instead.
+  ['Invoices', 'invoiceChannels', ['email', 'sms'], 'Text', {}, { ...customer, email: '' }],
+])('keeps the last usable channel in %s when another selected channel is unavailable', async (group, key, channels, usable, overrides, renderCustomer) => {
   prefs = { ...prefs, smsEnabled: true, emailEnabled: true, [key]: channels, ...overrides };
-  render(<BillingTab customer={customer} />);
+  render(<BillingTab customer={renderCustomer} />);
   await screen.findByRole('group', { name: group });
   const lastUsable = billingChannel(group, usable);
   expect(lastUsable).toBeDisabled();

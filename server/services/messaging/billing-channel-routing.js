@@ -81,10 +81,20 @@ function billingNotificationEventKey(input) {
 // notice. SUPPRESSION_LOOKUP_FAILED is the same kind of schedulable hold for
 // an explicit Email/App leg whose suppression state could not be read, and
 // BILLING_EMAIL_PREPARATION_HOLD for a retryable Email refusal before the
-// provider handoff (billing-channel-email.js).
+// provider handoff, or a definite SendGrid rejection after it
+// (billing-channel-email.js). BILLING_TEXT_DEDUPE_UNAVAILABLE
+// is the same kind of schedulable hold for an explicit Text leg whose dedupe
+// state (the advisory-lock check, or the prior-accepted-send lookup) could
+// not be read. BILLING_TEXT_LEG_IN_FLIGHT is the Text leg's own
+// concurrency guard: a genuinely concurrent replay on the exact same
+// customer+notice found either the non-blocking claim lock already taken
+// or a fresh, unexpired claim row — never sent, so the caller retries
+// shortly rather than racing the attempt already in flight (messaging/
+// billing-text-leg-dedupe.js).
 const REPLAY_HOLD_CODES = Object.freeze([
   'QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY',
   'BILLING_PREFERENCES_CHANGED', 'SUPPRESSION_LOOKUP_FAILED', 'BILLING_EMAIL_PREPARATION_HOLD',
+  'BILLING_TEXT_DEDUPE_UNAVAILABLE', 'BILLING_TEXT_LEG_IN_FLIGHT',
 ]);
 
 function isReplayHold(result) {

@@ -50,12 +50,31 @@ postgres('billing email recipient locks (PostgreSQL)', () => {
     admin = knex({ client: 'pg', connection, pool: { min: 0, max: 1 } });
     await admin.schema.createSchema(schema);
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 5 } });
-    for (const table of ['customers', 'notification_prefs']) {
-      await mockPg.raw('CREATE TABLE ?? (LIKE ?? INCLUDING ALL)', [table, `public.${table}`]);
-    }
-    if (!(await mockPg.schema.hasColumn('notification_prefs', 'billing_channels'))) {
-      await mockPg.schema.alterTable('notification_prefs', (table) => table.specificType('billing_channels', 'text[]'));
-    }
+    // Keep the disposable proof independent of public-schema migrations: it
+    // needs only the columns exercised by recipient authority/suppression.
+    await mockPg.schema.createTable('customers', (table) => {
+      table.uuid('id').primary();
+      table.uuid('account_id');
+      table.boolean('is_primary_profile');
+      table.string('first_name');
+      table.string('last_name');
+      table.boolean('active');
+      table.string('phone');
+      table.string('email');
+      table.timestamp('deleted_at', { useTz: true });
+    });
+    await mockPg.schema.createTable('notification_prefs', (table) => {
+      table.uuid('customer_id').primary();
+      table.boolean('email_enabled');
+      table.specificType('billing_channels', 'text[]');
+      table.string('billing_email');
+    });
+    await mockPg.schema.createTable('messaging_suppression', (table) => {
+      table.string('phone').primary();
+      table.string('reason');
+      table.boolean('active');
+      table.timestamp('created_at', { useTz: true });
+    });
     await mockPg('customers').insert({
       id: customerId, account_id: customerId, is_primary_profile: true,
       first_name: 'QA', last_name: 'Fixture', active: true,
@@ -92,7 +111,8 @@ postgres('billing email recipient locks (PostgreSQL)', () => {
     const dispatching = dispatchUnderBillingEmailAuthority({
       input,
       recipientEmail: context.recipientEmail,
-      dispatch: async () => {
+      dispatch: async (database, providerBoundaryCheck) => {
+        expect(await providerBoundaryCheck({ database })).toEqual({ ok: true });
         enterDispatch();
         await dispatchRelease;
       },
@@ -114,6 +134,11 @@ postgres('billing email recipient locks (PostgreSQL)', () => {
       await expect(mockPg.transaction(async (trx) => {
         await trx.raw("SET LOCAL lock_timeout = '100ms'");
         await lockCustomerEmail(trx, 'qa-billing@example.invalid');
+      })).rejects.toMatchObject({ code: '55P03' });
+      // A STOP / manual DNC for the customer's phone waits for the handoff.
+      await expect(mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '100ms'");
+        await require('../utils/customer-comms-lock').lockSmsPhone(trx, '+19415550100');
       })).rejects.toMatchObject({ code: '55P03' });
     } catch (err) {
       lockProofError = err;

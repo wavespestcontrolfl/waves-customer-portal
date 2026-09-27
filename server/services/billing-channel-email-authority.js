@@ -1,17 +1,23 @@
 // Provider-boundary authority for billing notification email. This module
 // owns everything a billing email send must prove true immediately before
 // (and again immediately at) the provider handoff: category/customer/prefs
-// validation, the portal-wide opt-out, the explicit Email channel selection,
-// invoice ownership, recipient resolution, and the locked recheck that runs
-// the moment before dispatch. Callers (the billing-channel-email adapter and
-// its tests) go through `loadBillingEmailContext` to prepare a send and
-// `dispatchUnderBillingEmailAuthority` to run one under the required locks.
+// validation, the Email channel choice, invoice ownership, recipient
+// resolution, and the locked recheck that runs the moment before dispatch.
+// The portal-wide email switch (notification_prefs.email_enabled) is not
+// one of them: payment emails cannot be turned off (owner ruling
+// 2026-09-26); texts still honor STOP. Callers (the billing-channel-email adapter, the
+// provider-retry replay, and every billing email sender moved onto it, owner
+// ruling 2026-09-27) go through `loadBillingEmailContext` to prepare a send
+// and `dispatchUnderBillingEmailAuthority` to run one under the required
+// locks.
 const db = require('../models/db');
 const EmailTemplateLibrary = require('./email-template-library');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
-const { withCustomerCommsLock, lockCustomerEmail } = require('../utils/customer-comms-lock');
+const { withCustomerCommsLock, lockCustomerEmail, lockSmsPhone } = require('../utils/customer-comms-lock');
+const { toE164 } = require('../utils/phone');
 const { preferenceChangeHold } = require('./messaging/billing-channel-routing');
+const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
 
 const CATEGORY_LABELS = Object.freeze({
   invoice: 'Invoice update',
@@ -74,11 +80,13 @@ async function readContextRows(input, database, lockRecipients, lockedInvoice) {
 
 async function contextBlock(input, category, { customer, prefs, invoice }, database) {
   if (!customer || customer.deleted_at) return { error: blocked('CUSTOMER_NOT_FOUND', 'Customer is unavailable') };
-  if (!prefs) return { error: blocked('BILLING_PREFS_UNAVAILABLE', 'Billing delivery preferences are unavailable', { retryable: true }) };
-  if (prefs.email_enabled === false) {
-    return { error: blocked('BILLING_EMAIL_DISABLED', 'Email notifications are disabled for this customer') };
-  }
-  if (billingChannelAllowed(prefs, category, 'email') !== true) {
+  // Only an explicit billing channel choice without Email refuses. A
+  // customer who never chose (no explicit selection for this category, or no
+  // notification_prefs row at all) keeps Email: the rule every billing email
+  // sender follows, which this authority now serves too (owner ruling
+  // 2026-09-27). The routed Email leg only exists once Email was chosen, so
+  // it never reaches this with no choice.
+  if (billingChannelAllowed(prefs || {}, category, 'email') === false) {
     // This fires both on the FIRST read (loadBillingEmailContext at the top
     // of sendBillingChannelEmail) and on the LOCKED recheck immediately
     // before the provider handoff (verifyAndDispatch below). Only the
@@ -90,9 +98,8 @@ async function contextBlock(input, category, { customer, prefs, invoice }, datab
     // terminal drop. A first-read refusal (the customer never selected
     // Email at all) is retried the exact same way and simply reproduces the
     // same terminal-looking decision each time, so returning the schedulable
-    // shape here costs nothing. Kept distinct from BILLING_EMAIL_DISABLED (a
-    // portal-wide opt-out, not a channel-selection race) and the ownership
-    // refusals above, which stay terminal.
+    // shape here costs nothing. Kept distinct from the ownership refusals
+    // below, which stay terminal.
     return {
       error: {
         sent: false, provider: 'email', providerMessageId: null, blocked: true,
@@ -106,7 +113,8 @@ async function contextBlock(input, category, { customer, prefs, invoice }, datab
     }
     const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, database)();
     if (ownership.ok !== true) {
-      return { error: blocked(ownership.code || 'INVOICE_NOT_SELF_PAY', ownership.reason || 'Invoice is not eligible for customer delivery') };
+      return { error: blocked(ownership.code || 'INVOICE_NOT_SELF_PAY', ownership.reason || 'Invoice is not eligible for customer delivery',
+        { retryable: ownership.code === 'INVOICE_UNREADABLE' }) };
     }
   }
   return null;
@@ -121,7 +129,7 @@ async function loadBillingEmailContext(input, database = db, { lockRecipients = 
   const invalid = await contextBlock(input, category, rows, database);
   if (invalid) return invalid;
 
-  const [recipient] = getInvoiceEmailRecipients(rows.customer, rows.prefs).filter((entry) => isEmailLike(entry.email));
+  const [recipient] = getInvoiceEmailRecipients(rows.customer, rows.prefs || {}).filter((entry) => isEmailLike(entry.email));
   if (!recipient?.email) return { error: blocked('NO_EMAIL_RECIPIENT', 'No billing email recipient is available') };
   return {
     category,
@@ -132,11 +140,11 @@ async function loadBillingEmailContext(input, database = db, { lockRecipients = 
   };
 }
 
-async function preSendBlock(preSendCheck, database) {
+async function preSendBlock(preSendCheck, database, providerBoundary = false) {
   if (typeof preSendCheck !== 'function') return null;
   let verdict;
   try {
-    verdict = await preSendCheck({ channel: 'email', database });
+    verdict = await preSendCheck({ channel: 'email', database, providerBoundary });
   } catch (err) {
     verdict = { ok: false, code: err.code, reason: err.message, retryable: err.retryable };
   }
@@ -148,9 +156,25 @@ async function preSendBlock(preSendCheck, database) {
   );
 }
 
-async function suppressionBlock(trx, recipientEmail, category) {
+async function suppressionBlock(trx, recipientEmail, category, customer, templateKey, emailSuppression) {
   await lockCustomerEmail(trx, recipientEmail);
-  const loaded = await EmailTemplateLibrary.loadTemplateByKey(billingEmailTemplateKey(category), trx);
+  const suppressionInput = {
+    channel: 'email', to: clean(customer?.phone) || null,
+    metadata: { billingDeliveryLeg: true },
+  };
+  const suppressionState = await loadSuppressionState(suppressionInput, {}, trx);
+  if (!suppressionInput.to) suppressionState.suppressionLoaded = true;
+  const messagingSuppression = await checkSuppression(suppressionInput, null, suppressionState);
+  if (!messagingSuppression.ok) {
+    return blocked(messagingSuppression.code, messagingSuppression.reason,
+      { retryable: messagingSuppression.retryable === true });
+  }
+  // A sender outside the email template library (an automation step) names
+  // its own suppression-group check, run here under the recipient lock.
+  if (emailSuppression) return emailSuppression(trx, recipientEmail);
+  // The template this send actually uses: its suppression group decides the
+  // recheck. A generic billing notice defaults by category.
+  const loaded = await EmailTemplateLibrary.loadTemplateByKey(templateKey || billingEmailTemplateKey(category), trx);
   if (!loaded?.template) {
     return blocked('BILLING_EMAIL_RECHECK_FAILED', 'Billing email template is unavailable', { retryable: true });
   }
@@ -167,35 +191,71 @@ async function suppressionBlock(trx, recipientEmail, category) {
   return blocked('EMAIL_SUPPRESSED', `Suppressed: ${detail || 'active suppression'}`);
 }
 
-async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendCheck, dispatch, state }) {
+async function verifyAndDispatch({
+  input, trx, invoice, phone, recipientEmail, authorityRecipientEmail,
+  templateKey, emailSuppression, preSendCheck, dispatch, state,
+}) {
   const fresh = await loadBillingEmailContext(input, trx, { lockRecipients: true, invoice });
   if (fresh.error) state.boundaryBlock = fresh.error;
-  else if (fresh.recipientEmail !== recipientEmail) {
+  else if (toE164(clean(fresh.customer.phone)) !== phone) {
+    state.boundaryBlock = blocked('BILLING_EMAIL_RECHECK_FAILED',
+      'Billing contact changed before delivery', { retryable: true });
+  }
+  else if (fresh.recipientEmail !== authorityRecipientEmail) {
     state.boundaryBlock = blocked(
       'EMAIL_RECIPIENT_CHANGED',
       'Billing email recipient changed before delivery',
       { retryable: true },
     );
-  } else state.boundaryBlock = await preSendBlock(preSendCheck, trx);
-  if (!state.boundaryBlock) state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category);
+  }
+  if (!state.boundaryBlock) state.boundaryBlock = await preSendBlock(preSendCheck, trx);
+  if (!state.boundaryBlock) {
+    state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category, fresh.customer,
+      templateKey, emailSuppression);
+  }
   if (state.boundaryBlock) return { ok: false };
 
-  state.handoffStarted = true;
-  await dispatch(trx);
+  // Keep the caller's last authority check after every asynchronous provider
+  // preparation step. Once it passes, sendOne reaches fetch without another
+  // await while this transaction and its locks remain held.
+  const providerBoundaryCheck = async ({ database } = {}) => {
+    state.boundaryBlock = await preSendBlock(preSendCheck, database || trx, true);
+    if (state.boundaryBlock) {
+      const refusal = new Error(state.boundaryBlock.reason);
+      refusal.code = state.boundaryBlock.code;
+      refusal.retryable = state.boundaryBlock.retryable;
+      refusal.providerBoundaryBlocked = true;
+      throw refusal;
+    }
+    state.handoffStarted = true;
+    return { ok: true };
+  };
+  state.providerPreparationStarted = true;
+  await dispatch(trx, providerBoundaryCheck);
+  if (state.boundaryBlock) return { ok: false };
   state.providerAccepted = true;
   return { ok: true };
 }
 
-async function dispatchUnderBillingEmailAuthority({ input, recipientEmail, preSendCheck, dispatch, state }) {
+async function dispatchUnderBillingEmailAuthority({
+  input, recipientEmail, authorityRecipientEmail = recipientEmail,
+  templateKey = null, emailSuppression = null, preSendCheck, dispatch, state,
+}) {
   try {
-    const verifiedDispatch = (trx, invoice) => verifyAndDispatch({
-      input, trx, invoice, recipientEmail, preSendCheck, dispatch, state,
-    });
-    const outcome = await withCustomerCommsLock(db, input.customerId, (trx) => (
-      input.invoiceId
+    const outcome = await withCustomerCommsLock(db, input.customerId, async (trx) => {
+      // Suppression writers take phone before recipient rows. Resolve it
+      // without a row lock, then verify it again under the customer lock.
+      const customer = await trx('customers').where({ id: input.customerId }).first('phone');
+      const phone = toE164(clean(customer?.phone));
+      if (phone) await lockSmsPhone(trx, phone);
+      const verifiedDispatch = (database, invoice) => verifyAndDispatch({
+        input, trx: database, invoice, phone, recipientEmail, authorityRecipientEmail,
+        templateKey, emailSuppression, preSendCheck, dispatch, state,
+      });
+      return input.invoiceId
         ? require('./estimate-deposits').withInvoiceDepositSettlement(input.invoiceId, verifiedDispatch, trx)
-        : verifiedDispatch(trx, null)
-    ));
+        : verifiedDispatch(trx, null);
+    });
     if (!outcome && input.invoiceId) {
       state.boundaryBlock = blocked('INVOICE_CUSTOMER_MISMATCH', 'Invoice does not belong to this customer');
       return { ok: false };
@@ -204,7 +264,16 @@ async function dispatchUnderBillingEmailAuthority({ input, recipientEmail, preSe
   } catch (err) {
     if (state.providerAccepted) return { ok: true };
     if (state.handoffStarted) throw err;
-    state.boundaryBlock = blocked('BILLING_EMAIL_RECHECK_FAILED', err.message, { retryable: true });
+    // A final-boundary veto is a definite refusal. Preserve the caller's
+    // decision even when a direct dispatch represents it as a tagged throw.
+    if (state.boundaryBlock) return { ok: false };
+    // Provider preparation owns marker and link-guard failures. Propagate
+    // them so a marker write whose acknowledgement was lost can be recovered
+    // against either pending or started without assuming a request occurred.
+    if (state.providerPreparationStarted) throw err;
+    // Query errors can contain recipient bindings; callers persist this reason.
+    state.boundaryBlock = blocked('BILLING_EMAIL_RECHECK_FAILED',
+      'Billing email authority could not be verified', { retryable: true });
     return { ok: false };
   }
 }

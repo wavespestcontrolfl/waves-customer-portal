@@ -72,7 +72,9 @@ async function runSelfAudit(depsIn = {}) {
   if (!deps.createMessage) {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return { skipped: 'no_anthropic_client' };
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: MODEL_TIMEOUT_MS, maxRetries: 1 });
-    deps.createMessage = (params) => createDeepMessage(client, { laneId: 'call_self_audit', ...params });
+    // effort: 'medium' — a bounded per-call yes/no/field-diff audit, not deep
+    // reasoning; caps Opus 5.5 spend on a short structured verdict.
+    deps.createMessage = (params) => createDeepMessage(client, { laneId: 'call_self_audit', effort: 'medium', ...params });
   }
 
   // Both directions are sampled (owner directive 2026-09-26: every

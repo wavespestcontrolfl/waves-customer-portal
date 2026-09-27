@@ -19,7 +19,7 @@ const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplici
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES, LOGGED_MOVE_SQL, PAYMENT_WITNESS_KINDS, paymentEvidenceRow } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -488,7 +488,13 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
         // by a property that became the sole one later (Codex #4816 r20).
         sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyId,
           property_ambiguous: !propertyId,
-          customer_id: customer.id, source_at: message.created_at },
+          customer_id: customer.id, source_at: message.created_at,
+          // Whether money landing can answer this ask at all: the
+          // extraction's own judgement (answered_by_payment; a refund or a
+          // payment-method change never is, however worded). Payment
+          // admissibility and the event page read it, since an ask's words
+          // never change after intake (Codex #4996 r6).
+          ...(PAYMENT_WITNESS_KINDS.includes(item.kind) ? { money_answerable: item.answered_by_payment === true } : {}) },
       };
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
     // The existing notifier writes only through trx. Preview rolls this back
@@ -718,7 +724,32 @@ const UNSEEN_FLOOR = `GREATEST(${SOURCE_AT}, COALESCE(${EVENT_SEEN_AT}, ${SOURCE
 // The floor and the tick bound sit in every branch, so each scan starts from
 // the row's watermark rather than the customer's whole visit history.
 const unseen = (column) => `${column} <= ? AND ${column} > ${UNSEEN_FLOOR}`;
-const UNSEEN_VISIT_ACTIVITY = `(SELECT MAX(a.at) FROM (
+// Visit activity, and money landing (R2): a payments row that can be
+// evidence (paymentEvidenceRow, the payment legs' own test) or a received
+// estimate deposit. Without the money branches a payment-only ask waited for
+// its cursor page — a full rotation under backlog (Codex #4996 r1). Money
+// wakes only the kinds that can cite it, and only through a row a leg reads:
+// a callback or report row it cannot answer must not take a slot from a
+// settlement question (r4), nor may a fee or a refund in flight (r9). A
+// payment or deposit counts from when its row last changed, not its
+// settlement stamp: a late webhook records a settlement from hours or days
+// ago (stripe-webhook.js), which the watermark has long passed.
+const PAYMENT_CHANGED_AT = "GREATEST(pm.updated_at, COALESCE((pm.metadata->>'settled_event_at')::timestamptz, pm.created_at))";
+// Read against the event page's candidate row, like RETRY_AFTER_SQL and
+// SOURCE_AT: `cc` is the open call_commitments row and `s` its source
+// sms_log row (openRows in refreshSmsCommitments). An ask money can answer
+// carries the extraction's stamp; one without it never wakes on money, as
+// money never answers it.
+const MONEY_KIND = `cc.kind IN (${PAYMENT_WITNESS_KINDS.map((v) => `'${v}'`).join(', ')})
+  AND cc.sms_context->>'money_answerable' = 'true'`;
+// Whose estimate a deposit is on: the customer's own, or an unowned one a
+// lead of theirs names. A superset of whereEstimateCustomerOwnership (which
+// also drops estimates another lead claims) is enough to trigger a check;
+// the evidence read applies the exact rule.
+const ESTIMATE_MAY_BELONG = `(e.customer_id = s.customer_id OR (e.customer_id IS NULL AND (
+    e.id IN (SELECT l.estimate_id FROM leads l WHERE l.deleted_at IS NULL AND l.customer_id = s.customer_id)
+    OR e.estimate_data ->> 'lead_id' IN (SELECT l.id::text FROM leads l WHERE l.deleted_at IS NULL AND l.customer_id = s.customer_id))))`;
+const UNSEEN_EVENT_ACTIVITY = `(SELECT MAX(a.at) FROM (
     SELECT v.created_at AS at FROM scheduled_services v WHERE v.customer_id = s.customer_id AND ${unseen('v.created_at')}
     UNION ALL SELECT v.completed_at FROM scheduled_services v WHERE v.customer_id = s.customer_id AND ${unseen('v.completed_at')}
     UNION ALL SELECT h.transitioned_at FROM job_status_history h JOIN scheduled_services v ON v.id = h.job_id
@@ -727,6 +758,11 @@ const UNSEEN_VISIT_ACTIVITY = `(SELECT MAX(a.at) FROM (
     UNION ALL SELECT r.created_at FROM reschedule_log r JOIN scheduled_services v ON v.id = r.scheduled_service_id
       WHERE v.customer_id = s.customer_id AND ${unseen('r.created_at')}
         AND ${LOGGED_MOVE_SQL('r')}
+    UNION ALL SELECT ${PAYMENT_CHANGED_AT} FROM payments pm WHERE ${MONEY_KIND} AND pm.customer_id = s.customer_id
+        AND ${paymentEvidenceRow('pm')} AND ${unseen(PAYMENT_CHANGED_AT)}
+    UNION ALL SELECT GREATEST(ed.updated_at, ed.received_at) FROM estimate_deposits ed JOIN estimates e ON e.id = ed.estimate_id
+      WHERE ${MONEY_KIND} AND ed.status IN ('received', 'credited') AND ${unseen('GREATEST(ed.updated_at, ed.received_at)')}
+        AND ${ESTIMATE_MAY_BELONG}
   ) a)`;
 
 // Match merge and intake: customer, source, then commitment. A relink, an
@@ -870,9 +906,10 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     return { cursorKey, rows };
   };
   // A third page, ahead of the cursors: any open row (due, undated or
-  // future) with unseen visit activity, so an event is checked on the next
-  // tick wherever the cursors stand (Codex #4816 r15–r17).
-  const tickBound = Array(4).fill(now);
+  // future) with unseen event activity (visit or payment), so an event is
+  // checked on the next tick wherever the cursors stand (Codex #4816
+  // r15–r17; Codex round 1 P2, #4996: payment activity joined the scan).
+  const tickBound = Array(6).fill(now);
   // A row waiting out a provider/schema failure's retry_after cannot make
   // progress on the same evidence (verify returns the stored failure until
   // then), so it yields its slot rather than pinning the page through an
@@ -881,7 +918,14 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   // the row back at once (Codex #4816 r21).
   // Least recently stamped first, so a re-scan inside the commit grace never
   // holds back a row whose event has not been seen at all.
-  const eventRows = await openRows().whereRaw(`${UNSEEN_VISIT_ACTIVITY} IS NOT NULL`, tickBound)
+  // The unseen-activity scan runs ONCE per candidate row (a LATERAL join)
+  // and is reused by the filter, the backoff override and the watermark,
+  // instead of being re-evaluated in each. OFFSET 0 is the optimization
+  // fence: without it Postgres flattens the one-column subquery and inlines
+  // the scan back into every reference.
+  const eventRows = await openRows()
+    .joinRaw(`CROSS JOIN LATERAL (SELECT ${UNSEEN_EVENT_ACTIVITY} AS unseen_at OFFSET 0) ev`, tickBound)
+    .whereNotNull('ev.unseen_at')
     // A stored failure reached for another owner (sms_context.customer_id is
     // rewritten with every persisted verdict) says nothing about the current
     // owner's evidence: a merge or undo lifts the backoff (Codex #4816 r32).
@@ -890,13 +934,13 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
       // Newer than what the failed attempt read: the same commit-grace cap
       // as the watermark, so a visit write that began before that attempt
       // but committed after it still counts (Codex #4816 r30).
-      .orWhereRaw(`${UNSEEN_VISIT_ACTIVITY} > COALESCE((cc.sms_context->>'event_attempted_through')::timestamptz,
-        ${RETRY_AFTER_SQL} - make_interval(secs => ?))`, [...tickBound, PROVIDER_RETRY_MS / 1000]))
+      .orWhereRaw(`ev.unseen_at > COALESCE((cc.sms_context->>'event_attempted_through')::timestamptz,
+        ${RETRY_AFTER_SQL} - make_interval(secs => ?))`, [PROVIDER_RETRY_MS / 1000]))
     // A deferred row keeps its event but moves behind rows not yet tried, so
     // repeated deferrals cannot hold the page prefix (Codex #4816 r28).
     .orderByRaw(`GREATEST(${EVENT_SEEN_AT}, (cc.sms_context->>'event_attempted_at')::timestamptz) ASC NULLS FIRST, cc.id`).limit(PAGE)
-    .select('cc.*', 's.customer_id as event_customer_id', conn.raw(`LEAST(${UNSEEN_VISIT_ACTIVITY}, ?::timestamptz)::text AS event_seen_through`,
-      [...tickBound, new Date(now.getTime() - EVENT_COMMIT_GRACE_MS)]));
+    .select('cc.*', 's.customer_id as event_customer_id', conn.raw('LEAST(ev.unseen_at, ?::timestamptz)::text AS event_seen_through',
+      [new Date(now.getTime() - EVENT_COMMIT_GRACE_MS)]));
   const seenThrough = new Map(eventRows.map(({ id, event_seen_through: at, event_customer_id: customerId }) => [id, { at, customerId }]));
   const pages = [
     await page('sms_operations.fulfillment_cursor', (q) => q.where((w) => w.whereNull('cc.due_at').orWhere('cc.due_at', '<=', now))),

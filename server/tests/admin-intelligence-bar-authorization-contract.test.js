@@ -19,6 +19,10 @@ const mockResolveCommsCustomer = jest.fn();
 const mockLoadReviewRecipient = jest.fn();
 const mockResolveTechnician = jest.fn();
 const mockResolveTechnicianById = jest.fn();
+// The create_appointment price + billing verdict (ADMIN-BUG-R12, owner
+// 2026-09-27): unpriced and billable by default, so these proposals reach
+// their card; the priced and refusal cases set their own.
+const mockIbBookingProposal = jest.fn(async () => ({ price: null, source: null, serviceId: null, serviceName: null }));
 const mockResolveLeadForUpdate = jest.fn();
 const mockPreviewBulkLeadUpdate = jest.fn();
 
@@ -61,6 +65,7 @@ jest.mock('../services/intelligence-bar/tools', () => ({
   executeTool: (...args) => mockExecuteTool(...args),
   resolveTechnicianByName: (...args) => mockResolveTechnician(...args),
   resolveActiveTechnicianById: (...args) => mockResolveTechnicianById(...args),
+  ibBookingProposal: (...args) => mockIbBookingProposal(...args),
 }));
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
