@@ -368,6 +368,10 @@ describe('multi-product aftercare keeps compatible catalog constraints (codex PR
     'Water within 24 hours unless it rains.',
     'Water for 20 minutes when the soil becomes dry.',
     'Water for 20 minutes as needed.',
+    'If no rain occurs within 24 hours, water in with 0.25 inches.',
+    'When the soil is dry, water for 20 minutes.',
+    'Unless rain occurs within 24 hours, water in with 0.25 in.',
+    'As needed, water for 20 minutes.',
   ])('conditional product instructions remain visible without plan credit: %s', (irrigationNotes) => {
     for (const required of [true, false, null]) {
       const aftercare = buildAftercare([{ product: { irrigation_required: required, irrigation_notes: irrigationNotes } }]);

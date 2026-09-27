@@ -471,6 +471,8 @@ function isCompleteWaterInInstruction(note) {
   return positiveWaterAction && amountOrTiming;
 }
 
+const CONDITIONAL_WATERING_RE = /\b(?:if|unless|when|whenever|provided\s+that|depending\s+on|as\s+(?:needed|required|necessary))\b/i;
+
 function recordedWateringInstructions(note) {
   // Circular placeholder sentences provide no direction. A separate explicit
   // restriction still belongs in aftercare, including its recorded duration.
@@ -487,6 +489,9 @@ function recordedWateringInstructions(note) {
     // `in.` is a supported measurement unit, not a sentence boundary. Keep
     // the following timing/condition attached to the amount it qualifies.
     if (match[0][0] === '.' && /\b\d+(?:\.\d+)?\s*in\.$/i.test(candidate)) continue;
+    // A leading condition governs the action after its comma or conjunction.
+    // Keep that scope intact so it cannot become unconditional watering credit.
+    if (!/^[.!?;]/.test(match[0]) && CONDITIONAL_WATERING_RE.test(candidate)) continue;
     clauses.push(candidate.trim());
     start = match.index + match[0].length;
   }
@@ -539,7 +544,7 @@ function buildAftercare(applications) {
   ).length > 1;
   const conditionalDirections = wateringClauses.some((note) => (
     isActionableWateringInstruction(note)
-      && /\b(?:if|unless|when|whenever|provided\s+that|depending\s+on|as\s+(?:needed|required|necessary))\b/i.test(note)
+      && CONDITIONAL_WATERING_RE.test(note)
   ));
   const recordedInstructions = displayableProductNotes.join(' ');
   const preservedRecordedInstructions = recordedInstructions ? `${recordedInstructions} ` : '';
