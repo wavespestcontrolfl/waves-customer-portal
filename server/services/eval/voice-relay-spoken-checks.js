@@ -319,7 +319,7 @@ const HOUR_WORDS_ES = 'una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once
 // "a. m."/"p. m." with a space is the standard written Spanish form; the
 // space is only allowed after a dot, so a bare "a m" ("a mí") never reads
 // as a meridiem. The lookahead is accent-aware for the same reason.
-const MERIDIEM = '(?:(?:a(?:\\.\\s?)?m\\.?|p(?:\\.\\s?)?m\\.?|o[\\x27\\u2019]?clock|in the (?:morning|afternoon|evening)|(?:de|por) la (?:mañana|tarde|noche))(?![a-záéíóúñü]))';
+const MERIDIEM = '(?:(?:a(?:\\.\\s?)?m\\.?|p(?:\\.\\s?)?m\\.?|o[\\x27\\u2019]?clock|in the (?:morning|afternoon|evening)|(?:de|por) la (?:mañana|madrugada|tarde|noche))(?![a-záéíóúñü]))';
 const RANGE = '(?:to|and|-|\\u2013|until|till|through|thru|a|y|hasta)';
 // An hour-looking number that is a count or a code, not a time.
 const NOT_A_TIME = '(?:of|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|options?|times?|things?|people|percent|%|points?|visits?|treatments?|applications?|services?|technicians?|techs?|team members?|calls?|attempts?|tries|try|stops?|steps?|more|other|last|final|extra|additional|quick|go\\b|glance|place|stage|level|address|numbers?|reasons?|questions?|rooms?|bedrooms?|bathrooms?|units?|pets?|[\\d:/-])';
@@ -360,7 +360,7 @@ const twelveHour = (h) => Number(h) % 12 || 12;
 const hourAlt = (h) => `(?:(?:las?\\s+)?${twelveHour(h)}|${HOUR_WORD_MAP[twelveHour(h) - 1]}|${HOUR_ARTICLE_ES[twelveHour(h)]}|${HOUR_WORD_MAP_ES[twelveHour(h) - 1]})`;
 const meridiemOfHour = (h) => (Number(h) < 12 ? 'am' : 'pm');
 // The part of day a spoken meridiem names; "o'clock" names none.
-const meridiemOf = (s) => { const t = String(s || '').toLowerCase(); return /^a(?:\.\s?)?m|morning|mañana/.test(t) ? 'am' : /^p(?:\.\s?)?m|afternoon|evening|tarde|noche/.test(t) ? 'pm' : null; };
+const meridiemOf = (s) => { const t = String(s || '').toLowerCase(); return /^a(?:\.\s?)?m|morning|mañana|madrugada/.test(t) ? 'am' : /^p(?:\.\s?)?m|afternoon|evening|tarde|noche/.test(t) ? 'pm' : null; };
 
 // A range endpoint hour for the "between X and Y" shape below only: digits,
 // an English hour word, or a bare Spanish hour word ("dos", "cuatro") — the
@@ -507,7 +507,7 @@ const NOT_A_BARE_HOUR_H2 = `(?!\\s*(?::[0-5]\\d(?<!:00)\\b|y\\s+(?:media|cuarto|
  * and so does either endpoint carrying its own minute modifier ("1 to 3:30",
  * "one to three fifteen", "de una a tres y media").
  */
-const GROUNDED_WINDOW_MARKER = '__grounded_window__';
+const GROUNDED_TIME_MARKER = '__grounded_time__';
 function windowStripper(allowWindow) {
   if (!Array.isArray(allowWindow) || allowWindow.length !== 2) return null;
   const [h1, h2] = allowWindow.map(hourAlt);
@@ -516,7 +516,7 @@ function windowStripper(allowWindow) {
   return (text) => text.replace(re, (match, first, last) => {
     // A part of day spoken once covers both ends: "1 to 3 PM".
     const spoken = [meridiemOf(first) || meridiemOf(last), meridiemOf(last) || meridiemOf(first)];
-    return spoken.every((m, i) => !m || m === expected[i]) ? ` ${GROUNDED_WINDOW_MARKER} ` : match;
+    return spoken.every((m, i) => !m || m === expected[i]) ? ` ${GROUNDED_TIME_MARKER} ` : match;
   });
 }
 
@@ -544,9 +544,10 @@ function returnedVisitSlots(record, before) {
 
 const RETURNED_PERIOD_RE = /^(?:next week|this week|la (?:próxima|proxima) semana)$/i;
 const RETURNED_MERIDIEM = Object.freeze({
-  am: '(?:a(?:\\.\\s?)?m\\.?|o[\\x27\\u2019]?clock|in the morning|(?:de|por) la mañana)',
+  am: '(?:a(?:\\.\\s?)?m\\.?|o[\\x27\\u2019]?clock|in the morning|(?:de|por) la (?:mañana|madrugada))',
   pm: '(?:p(?:\\.\\s?)?m\\.?|o[\\x27\\u2019]?clock|in the (?:afternoon|evening)|(?:de|por) la (?:tarde|noche))',
 });
+const FOLLOW_UP_DATE_RE = /\b(?:calls?|call(?:s|ed|ing)? back|follow(?:s|ed|ing)? up|contact(?:s|ed|ing)?|llamad[ao]s?|llamar|llamaremos|llamarán|llamaran|devolver(?:án|an|emos)? la llamada|seguimiento|contactar(?:án|an|emos)?)\b/i;
 
 function returnedSlotClock(hour, minute) {
   const minuteText = String(minute).padStart(2, '0');
@@ -562,11 +563,42 @@ function returnedSlotStripper(slots) {
     const weekdayEs = WEEKDAY_ES[weekday];
     const monthEs = MONTH_ES[month];
     const dayEs = `(?:${day}|${DAY_WORD_ES[day]})`;
-    const date = `(?:${weekday}(?:\\s+${month}\\s+${day}(?:st|nd|rd|th)?)?|${month}\\s+${day}(?:st|nd|rd|th)?|(?:el\\s+)?${weekdayEs}(?:\\s+${dayEs}\\s+de\\s+${monthEs})?|(?:el\\s+)?${dayEs}\\s+de\\s+${monthEs})`;
+    const date = `(?:${weekday}(?:\\s*,?\\s+${month}\\s+${day}(?:st|nd|rd|th)?)?|${month}\\s+${day}(?:st|nd|rd|th)?|(?:el\\s+)?${weekdayEs}(?:\\s*,?\\s+${dayEs}\\s+de\\s+${monthEs})?|(?:el\\s+)?${dayEs}\\s+de\\s+${monthEs})`;
     return new RegExp(`\\b${date}\\b\\s*,?\\s*(?:at\\s+|a\\s+)?${returnedSlotClock(hour, minute)}`, 'gi');
   });
-  return (text) => patterns.reduce((out, re) => out.replace(re, ` ${GROUNDED_WINDOW_MARKER} `), text);
+  return (text) => patterns.reduce((out, re) => out.replace(re, ` ${GROUNDED_TIME_MARKER} `), text);
 }
+
+// Relative dates have four legitimate sources. Keeping those sources in one
+// policy table makes their marker scope explicit: a broad returned period is
+// supported by an exact slot anywhere in the sentence, while a same-day ETA
+// label must remain in the clause containing its returned window.
+const RELATIVE_DATE_ALLOWANCES = Object.freeze([
+  {
+    name: 'returned slot period',
+    allows: (c) => c.returnedMode && c.sentenceHasGrounding && RETURNED_PERIOD_RE.test(c.relative),
+  },
+  {
+    name: 'returned window same-day label',
+    allows: (c) => c.clauseHasGrounding && c.allowedSameDayPhrases.has(c.relative.toLowerCase()),
+  },
+  {
+    name: 'attested existing visit today',
+    allows: (c) => BARE_TODAY_RE.test(c.relative) && c.grounded && c.afterTool === 'get_today_eta'
+      && SCHEDULE_PREDICATES.visit.test(c.clause) && !NEW_OR_CHANGED_VISIT_RE.test(c.clause)
+      && !clauseIsNegated(c.clause),
+  },
+  {
+    name: 'follow-up date',
+    allows: (c) => SAME_DAY_RE.test(c.relative) && FOLLOW_UP_DATE_RE.test(c.clause),
+  },
+]);
+const UNGROUNDED_DATE_CONTEXTS = Object.freeze([
+  { name: 'configured subject', applies: (c) => Boolean(c.subject) },
+  { name: 'beside returned slot', applies: (c) => c.returnedMode && c.sentenceHasGrounding },
+  { name: 'visit sentence', applies: (c) => SCHEDULE_PREDICATES.visit.test(c.sentence) },
+  { name: 'standalone date reply', applies: (c) => STANDALONE_DATE_RE.test(c.sentence) },
+]);
 
 /**
  * value: true (no time or date at all), { allowWindow: [13, 15] } (the window
@@ -614,60 +646,29 @@ function no_visit_time(value, record, { utterances }) {
       if (anywhere) return ['fail', `"${anywhere[0]}" spoken${grounded ? '' : ` before ${opts.afterTool} ever succeeded`}: "${clip(raw, 160)}"`];
       const relatives = [...sentence.matchAll(new RegExp(RELATIVE_DAY_RE.source, 'gi'))];
       for (const relative of relatives) {
-        const sameDay = SAME_DAY_RE.test(relative[0]);
         const clauseBefore = sentence.slice(0, relative.index).split(CLAUSE_SPLIT_RE).pop();
         // A fronted token leaves punctuation immediately after itself
         // ("Today, we'll call"). Remove that delimiter before splitting, or
         // split() returns an empty first item and discards the real clause.
         const clauseAfter = sentence.slice(relative.index + relative[0].length)
           .replace(/^\s*,\s*/, '').split(CLAUSE_SPLIT_RE)[0];
-        const sameDayClause = `${clauseBefore}${relative[0]}${clauseAfter}`;
-        // A returned arrival window may naturally be introduced as today's
-        // window. Bare today/hoy agrees automatically; a more specific part
-        // of day must agree with both ends of the returned window. The marker
-        // must be in THIS token's clause: a valid window in one clause cannot
-        // ground a separate "the visit is today" claim.
-        const labelsGroundedWindow = [
-          allowedSameDayPhrases.has(relative[0].toLowerCase()),
-          sameDayClause.includes(GROUNDED_WINDOW_MARKER),
-        ].every(Boolean);
-        // A broad phrase such as "next week" is also grounded when this
-        // same clause contains an exact date/time pair stripped from a
-        // successful slot lookup. A marker in another clause cannot excuse
-        // it, and any extra clock time is rejected above before this branch.
-        const labelsGroundedReturnedSlot = [
-          returnedMode,
-          RETURNED_PERIOD_RE.test(relative[0]),
-          sameDayClause.includes(GROUNDED_WINDOW_MARKER),
-        ].every(Boolean);
-        // A successful get_today_eta also attests that the EXISTING visit is
-        // today, independently of where its returned window appears in the
-        // reply: "Your technician is coming today. The window is 1 to 3."
-        // It does not attest a new/rebooked visit, another day, or a part of
-        // day (which still needs the actual window in this clause).
-        const labelsAttestedTodayVisit = [
-          BARE_TODAY_RE.test(relative[0]), grounded, opts.afterTool === 'get_today_eta',
-          SCHEDULE_PREDICATES.visit.test(sameDayClause), !NEW_OR_CHANGED_VISIT_RE.test(sameDayClause),
-          !clauseIsNegated(sameDayClause),
-        ].every(Boolean);
-        // "We'll call today to schedule the visit" dates the callback, not
-        // the visit. The cue must be in this token's own clause (before or
-        // after a fronted "Today,"), so it cannot excuse a later visit clause.
-        const datesFollowUp = [sameDay, /\b(?:calls?|call(?:s|ed|ing)? back|follow(?:s|ed|ing)? up|contact(?:s|ed|ing)?|llamad[ao]s?|llamar|llamaremos|llamarán|llamaran|devolver(?:án|an|emos)? la llamada|seguimiento|contactar(?:án|an|emos)?)\b/i.test(sameDayClause)].every(Boolean);
-        if ([labelsGroundedWindow, labelsGroundedReturnedSlot, labelsAttestedTodayVisit, datesFollowUp].some(Boolean)) continue;
-        const accompaniesReturnedSlot = [returnedMode, sameDayClause.includes(GROUNDED_WINDOW_MARKER)].every(Boolean);
-        if ([subject, accompaniesReturnedSlot, SCHEDULE_PREDICATES.visit.test(sentence), STANDALONE_DATE_RE.test(sentence)].some(Boolean)) return ['fail', `"${relative[0]}" spoken for a ${visitKind}: "${clip(raw, 160)}"`];
+        const relativeClause = `${clauseBefore}${relative[0]}${clauseAfter}`;
+        const sentenceHasGrounding = sentence.includes(GROUNDED_TIME_MARKER);
+        const relativeContext = {
+          relative: relative[0], clause: relativeClause, grounded, returnedMode,
+          afterTool: opts.afterTool, allowedSameDayPhrases, sentenceHasGrounding,
+          clauseHasGrounding: relativeClause.includes(GROUNDED_TIME_MARKER), subject, sentence,
+        };
+        if (RELATIVE_DATE_ALLOWANCES.some((rule) => rule.allows(relativeContext))) continue;
+        if (UNGROUNDED_DATE_CONTEXTS.some((rule) => rule.applies(relativeContext))) return ['fail', `"${relative[0]}" spoken for a ${visitKind}: "${clip(raw, 160)}"`];
       }
     }
   }
   const label = (w) => w.map((h) => `${twelveHour(h)} ${meridiemOfHour(h).toUpperCase()}`).join('–');
-  const details = [
-    [returnedMode, 'no date/time pair outside successful slot lookups'],
-    [opts.allowWindow, `no time outside the ${label(opts.allowWindow || [])} window`],
-    [opts.about, `no ${opts.about} time or date`],
-    [true, 'no time or date spoken'],
-  ];
-  return ['pass', details.find(([applies]) => applies)[1]];
+  if (returnedMode) return ['pass', 'no date/time pair outside successful slot lookups'];
+  if (opts.allowWindow) return ['pass', `no time outside the ${label(opts.allowWindow)} window`];
+  if (opts.about) return ['pass', `no ${opts.about} time or date`];
+  return ['pass', 'no time or date spoken'];
 }
 
 // ── Another account's details ──────────────────────────────────────────────

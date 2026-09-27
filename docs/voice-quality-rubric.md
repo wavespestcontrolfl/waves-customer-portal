@@ -116,9 +116,10 @@ than written per scenario as regexes:
   never "1 AM to 3 PM"); `{ allow: "returned" }` permits only exact date-and-time
   pairs from an earlier successful `find_slots` or `get_availability` answer. The date
   and whole clock value stay paired, including minutes and the part of day; additional
-  date claims in the same clause are checked independently. Spanish day numbers may be
-  spoken as words, and an equivalent 24-hour clock is accepted. An offer made before
-  the tool answer remains ungrounded;
+  date claims in the same sentence are checked independently. Spanish day numbers may be
+  spoken as words or set off with ordinary appositive commas, and an equivalent 24-hour
+  clock is accepted. Extra dates remain ungrounded across commas and conjunctions. An
+  offer made before the tool answer remains ungrounded;
   `{ about: "reopening" }` grades only
   clauses about the office reopening — including every "available" construction, since
   the office being available is its reopening — so a caller-stated appointment can be echoed.
