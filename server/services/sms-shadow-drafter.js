@@ -100,6 +100,26 @@ const PROMPT_VERSION = 'house_voice_v11';
 const REAL_ANSWERS_PROMPT_VERSION = 'house_voice_v12_real_answers';
 const SHADOW_STATUS = 'shadow';
 
+/**
+ * The prompt version a draft generated RIGHT NOW would stamp — PROMPT_VERSION
+ * with the gate off, REAL_ANSWERS_PROMPT_VERSION with it on. This module's own
+ * generateGroundedDraft already resolves this per draft off the ACTUAL
+ * buildSystemPromptWithProfile.realAnswersApplied result (never guessed from
+ * the gate alone, so a compose failure that fell back to the base prompt is
+ * never mis-stamped). Exported so OTHER "what counts as current" readers —
+ * sms-graduation's cohort-version default, sms-auto-send's gratitude
+ * expectedPromptVersion checks — can resolve the SAME effective version
+ * instead of the static PROMPT_VERSION constant, which stays v11 forever.
+ * While GATE_SMS_REAL_ANSWERS stays off (the default) this is identical to
+ * PROMPT_VERSION, so today's call sites are unaffected either way; the day
+ * the gate is turned on for real, those call sites need to switch to this
+ * (or an equivalent per-row check) or they will treat v12 draft rows as a
+ * version mismatch — see the PR's pre-push note.
+ */
+function currentPromptVersion() {
+  return gateEnvValue('GATE_SMS_REAL_ANSWERS') ? REAL_ANSWERS_PROMPT_VERSION : PROMPT_VERSION;
+}
+
 // Few-shot tunables. SHADOW_FEWSHOT=false disables corpus injection (v7 then
 // behaves like v6); count is bounded so the prompt can't balloon.
 const FEWSHOT_ENABLED = process.env.SHADOW_FEWSHOT !== 'false';
@@ -175,7 +195,13 @@ function realAnswersHandoffBullets(now) {
 // GATE_SMS_REAL_ANSWERS + a scheduling-related inbound + a known city; fully
 // fail-safe otherwise: no city, no scheduling intent, an error, or a timeout
 // all resolve to null (section omitted) — this must NEVER block drafting.
-// Never books or holds a slot.
+// Never books or holds a slot. Each slot's `start`/`end` is the internal
+// job-duration block AvailabilityEngine packs the route with, NOT the
+// customer-facing window — every other surface in this file quotes the
+// same 2-hour-from-start arrival window (owner directive; see the v8 note
+// above on UPCOMING SERVICES), so this renders `startTime24` through the
+// SAME canonical helper (arrivalWindowRange/formatSmsTimeRange) rather than
+// the raw slot end.
 const OPEN_TIMES_TIMEOUT_MS = 3000;
 const OPEN_TIMES_MAX_DAYS = 3;
 const OPEN_TIMES_MAX_SLOTS_PER_DAY = 3;
@@ -185,23 +211,26 @@ async function fetchOpenTimesBlock({ city, customerId, schedulingIntent } = {}) 
   let timer = null;
   try {
     const Availability = require('./availability');
+    const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('open-times timeout')), OPEN_TIMES_TIMEOUT_MS);
     });
     const result = await Promise.race([Availability.getAvailableSlots(city, null, { customerId }), timeout]);
-    const days = (result?.days || [])
-      .filter((d) => Array.isArray(d.slots) && d.slots.length)
-      .slice(0, OPEN_TIMES_MAX_DAYS);
-    if (!days.length) return null;
-    return days
-      .map((d) => {
-        const label = d.fullDate || [d.dayOfWeek, d.month, d.dayNum].filter(Boolean).join(' ');
-        const windows = d.slots.slice(0, OPEN_TIMES_MAX_SLOTS_PER_DAY)
-          .map((s) => `${s.start}–${s.end}`)
-          .join(', ');
-        return `- ${label}: ${windows}`;
-      })
-      .join('\n');
+    const lines = [];
+    for (const d of (result?.days || [])) {
+      const windows = (d.slots || [])
+        .map((s) => {
+          const range = arrivalWindowRange(s.startTime24);
+          return range ? formatSmsTimeRange(range) : null;
+        })
+        .filter(Boolean)
+        .slice(0, OPEN_TIMES_MAX_SLOTS_PER_DAY);
+      if (!windows.length) continue; // no slot on this day survived arrival-window formatting
+      const label = d.fullDate || [d.dayOfWeek, d.month, d.dayNum].filter(Boolean).join(' ');
+      lines.push(`- ${label}: ${windows.join(', ')}`);
+      if (lines.length >= OPEN_TIMES_MAX_DAYS) break;
+    }
+    return lines.length ? lines.join('\n') : null;
   } catch (err) {
     logger.warn(`[sms-shadow] open-times fetch failed (${err.message}); omitting OPEN TIMES section`);
     return null;
@@ -1456,6 +1485,7 @@ module.exports = {
   DRAFTER,
   PROMPT_VERSION,
   REAL_ANSWERS_PROMPT_VERSION,
+  currentPromptVersion,
   VERIFY_ENABLED,
   MAX_REVISIONS,
   SHADOW_STATUS,

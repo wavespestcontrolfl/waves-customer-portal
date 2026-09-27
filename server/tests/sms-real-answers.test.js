@@ -27,6 +27,7 @@ const {
   INTENDED_ACTION_TYPES,
   PROMPT_VERSION,
   REAL_ANSWERS_PROMPT_VERSION,
+  currentPromptVersion,
 } = require('../services/sms-shadow-drafter');
 
 const GATE = 'GATE_SMS_REAL_ANSWERS';
@@ -90,6 +91,11 @@ describe('GATE_SMS_REAL_ANSWERS off — byte-identical to v11', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v11');
     expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers');
     expect(REAL_ANSWERS_PROMPT_VERSION).not.toBe(PROMPT_VERSION);
+  });
+
+  test('currentPromptVersion() resolves to PROMPT_VERSION while the gate is off', () => {
+    clearGates();
+    expect(currentPromptVersion()).toBe(PROMPT_VERSION);
   });
 });
 
@@ -189,6 +195,10 @@ describe('GATE_SMS_REAL_ANSWERS on — the rewritten prompt', () => {
       'none', 'escalate', 'book_appointment', 'send_payment_link', 'send_portal_link', 'send_estimate_link',
     ]);
   });
+
+  test('currentPromptVersion() resolves to REAL_ANSWERS_PROMPT_VERSION while the gate is on', () => {
+    expect(currentPromptVersion()).toBe(REAL_ANSWERS_PROMPT_VERSION);
+  });
 });
 
 describe('followupSlaPhrase — the 1-business-hour SLA, computed off the ET clock', () => {
@@ -259,21 +269,25 @@ describe('fetchOpenTimesBlock — read-only AvailabilityEngine call, fully fail-
     expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 
-  test('gate on, scheduling intent, city present → renders a compact, capped block from real slots', async () => {
+  test('gate on, scheduling intent, city present → renders the 2-hour customer-facing arrival window, capped', async () => {
+    // Each slot's start/end is the internal job-duration block, never the
+    // customer-facing window (owner directive) — fetchOpenTimesBlock renders
+    // from startTime24 through the SAME arrivalWindowRange/formatSmsTimeRange
+    // helper every other surface in this file uses for UPCOMING SERVICES.
     process.env[GATE] = 'true';
     const getAvailableSlots = jest.fn(async () => ({
       zone: 'Venice Zone',
       days: [
         {
           date: '2026-09-29', fullDate: 'Tuesday, September 29', slots: [
-            { start: '9:00 AM', end: '10:00 AM' }, { start: '11:00 AM', end: '12:00 PM' },
-            { start: '2:00 PM', end: '3:00 PM' }, { start: '4:00 PM', end: '5:00 PM' },
+            { startTime24: '09:00', endTime24: '10:00' }, { startTime24: '11:00', endTime24: '12:00' },
+            { startTime24: '14:00', endTime24: '15:00' }, { startTime24: '16:00', endTime24: '17:00' },
           ],
         },
-        { date: '2026-09-30', fullDate: 'Wednesday, September 30', slots: [{ start: '9:00 AM', end: '10:00 AM' }] },
+        { date: '2026-09-30', fullDate: 'Wednesday, September 30', slots: [{ startTime24: '09:00', endTime24: '10:00' }] },
         { date: '2026-10-01', fullDate: 'Thursday, October 1', slots: [] }, // no real slots -> not offered
-        { date: '2026-10-02', fullDate: 'Friday, October 2', slots: [{ start: '9:00 AM', end: '10:00 AM' }] },
-        { date: '2026-10-03', fullDate: 'Saturday, October 3', slots: [{ start: '9:00 AM', end: '10:00 AM' }] },
+        { date: '2026-10-02', fullDate: 'Friday, October 2', slots: [{ startTime24: '09:00', endTime24: '10:00' }] },
+        { date: '2026-10-03', fullDate: 'Saturday, October 3', slots: [{ startTime24: '09:00', endTime24: '10:00' }] },
       ],
     }));
     jest.doMock('../services/availability', () => ({ getAvailableSlots }));
@@ -283,10 +297,26 @@ describe('fetchOpenTimesBlock — read-only AvailabilityEngine call, fully fail-
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-9' });
     const lines = result.split('\n');
     expect(lines).toHaveLength(3); // capped to 3 days that actually have openings
-    expect(lines[0]).toBe('- Tuesday, September 29: 9:00 AM–10:00 AM, 11:00 AM–12:00 PM, 2:00 PM–3:00 PM'); // capped to 3 slots/day
-    expect(lines[1]).toBe('- Wednesday, September 30: 9:00 AM–10:00 AM');
-    expect(lines[2]).toBe('- Friday, October 2: 9:00 AM–10:00 AM'); // Thursday (empty) skipped, never offered
+    // capped to 3 slots/day; each rendered as start -> start+2h, never the raw slot end
+    expect(lines[0]).toBe('- Tuesday, September 29: 9:00 AM - 11:00 AM, 11:00 AM - 1:00 PM, 2:00 PM - 4:00 PM');
+    expect(lines[1]).toBe('- Wednesday, September 30: 9:00 AM - 11:00 AM');
+    expect(lines[2]).toBe('- Friday, October 2: 9:00 AM - 11:00 AM'); // Thursday (empty) skipped, never offered
     expect(result).not.toContain('October 3'); // past the 3-day cap
+  });
+
+  test('a slot with no parseable startTime24 is dropped; a day left with none is skipped entirely', async () => {
+    process.env[GATE] = 'true';
+    const getAvailableSlots = jest.fn(async () => ({
+      zone: 'Venice Zone',
+      days: [
+        { date: '2026-09-29', fullDate: 'Tuesday, September 29', slots: [{ startTime24: 'garbage' }] },
+        { date: '2026-09-30', fullDate: 'Wednesday, September 30', slots: [{ startTime24: '09:00' }] },
+      ],
+    }));
+    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
+    const drafter = freshDrafter();
+    const result = await drafter.fetchOpenTimesBlock({ city: 'Venice', customerId: 'cust-9', schedulingIntent: true });
+    expect(result).toBe('- Wednesday, September 30: 9:00 AM - 11:00 AM');
   });
 
   test('an empty days list (no zone match / nothing open) → null', async () => {
@@ -383,7 +413,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     process.env[GATE] = 'true';
     const getAvailableSlots = jest.fn(async () => ({
       zone: 'Venice Zone',
-      days: [{ date: '2026-09-29', fullDate: 'Tuesday, September 29', slots: [{ start: '9:00 AM', end: '10:00 AM' }] }],
+      days: [{ date: '2026-09-29', fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }],
     }));
     mockDraftDeps({ getAvailableSlots });
     jest.resetModules();
@@ -402,7 +432,8 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
     expect(result.promptVersion).toBe('house_voice_v12_real_answers');
     expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
-    expect(result.factsBlock).toContain('Tuesday, September 29: 9:00 AM–10:00 AM');
+    // the 2-hour customer-facing arrival window, never the raw 1-hour slot
+    expect(result.factsBlock).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
   });
 
   test('a frozen presetFactsBlock (sealed-exam replay) never triggers a live OPEN TIMES fetch', async () => {
@@ -448,7 +479,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     });
     const getAvailableSlots = jest.fn(async () => ({
       zone: 'Venice Zone',
-      days: [{ date: '2026-09-29', fullDate: 'Tuesday, September 29', slots: [{ start: '9:00 AM', end: '10:00 AM' }] }],
+      days: [{ date: '2026-09-29', fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }],
     }));
 
     jest.doMock('../models/db', () => mockDb);
@@ -537,7 +568,7 @@ describe('draftShadowReply — customer.city flows to OPEN TIMES; prompt_version
     expect(insertedRows).toHaveLength(1);
     expect(insertedRows[0].prompt_version).toBe('house_voice_v12_real_answers');
     expect(insertedRows[0].facts_block).toContain('OPEN TIMES (real, bookable slots, ET');
-    expect(insertedRows[0].facts_block).toContain('Tuesday, September 29: 9:00 AM–10:00 AM');
+    expect(insertedRows[0].facts_block).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
   });
 
   test('gate on but not a scheduling-intent message: OPEN TIMES omitted, AvailabilityEngine never called', async () => {
