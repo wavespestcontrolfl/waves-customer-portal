@@ -228,7 +228,14 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
       const productNames = activeProducts.map((p) => p.name).join(', ');
       setDone({ summary: `${productNames} · ${targets.join(', ')}` });
     } catch (err) {
-      if (shouldResetCompletionIdempotencyKey(err)) {
+      if (err?.status === 409 && err?.code === 'service_already_completed') {
+        // Terminal, not uncertain: an earlier attempt (a lost response, or
+        // another device) already saved this visit, so every retry would
+        // get the same answer. Treat it as saved and let the tech move on.
+        pendingBodyRef.current = null;
+        setRetryPending(false);
+        setDone({ summary: 'This visit was already saved.' });
+      } else if (shouldResetCompletionIdempotencyKey(err)) {
         // A definitive rejection: the tech corrects the form and the
         // resubmit starts a new attempt under a fresh key.
         idempotencyKeyRef.current = genIdempotencyKey();

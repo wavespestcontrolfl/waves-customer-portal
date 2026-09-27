@@ -197,6 +197,30 @@ describe('FastCompleteSheet', () => {
     expect(await screen.findByText('Re-service complete')).toBeTruthy();
   });
 
+  test('a 409 service_already_completed is treated as saved, not retried', async () => {
+    const request = makeRequest();
+    const base = request.getMockImplementation();
+    request.mockImplementation(async (path, options) => {
+      if (path.endsWith('/complete')) {
+        request.calls.push({ path, options });
+        throw Object.assign(new Error('Service has already been completed.'), { status: 409, code: 'service_already_completed' });
+      }
+      return base(path, options);
+    });
+    const onCompleted = vi.fn();
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={onCompleted} />);
+
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+
+    expect(await screen.findByText('This visit was already saved.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Next stop' }));
+    expect(onCompleted).toHaveBeenCalled();
+  });
+
   test('an added product blocks Complete until its amount is entered; edited amounts and units are submitted', async () => {
     const request = makeRequest();
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
