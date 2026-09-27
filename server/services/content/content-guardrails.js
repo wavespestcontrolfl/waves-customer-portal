@@ -2546,6 +2546,98 @@ function tolerantStaticJson(text) {
   } catch (_) { return undefined; }
 }
 
+// Extract only statically authored props that the approved Astro blog
+// components render as reader-facing copy. Destinations, CSS/config props,
+// and dynamic expressions stay opaque. Prefix every value so prop text that
+// looks like Markdown cannot fabricate headings or list structure for a
+// downstream rendered-text check.
+const MDX_DISPLAY_SCALARS = Object.freeze({
+  appphone: ['caption'],
+  bottomlinebox: ['verdict', 'recommendation'],
+  honestrejection: ['audience', 'reason'],
+  inlinecta: ['headline', 'description', 'ctaLabel', 'phone', 'eyebrow'],
+  pestevidencegrid: ['title', 'caption'],
+  homezonemap: ['title', 'caption'],
+  seasonalpressurechart: ['title', 'caption', 'eyebrow', 'legendNormal', 'legendPeak', 'peakSummary'],
+  spideridboard: ['title', 'eyebrow', 'footnote', 'caption'],
+  comparisontable: ['caption'],
+});
+const MDX_DISPLAY_COLLECTIONS = Object.freeze({
+  pestevidencegrid: { items: ['label', 'note'] },
+  homezonemap: { zones: ['label', 'note'] },
+  seasonalpressurechart: { seasons: ['name', 'months', 'level', 'note'] },
+  spideridboard: { species: ['name', 'sciName', 'where', 'hunt', 'eggSac', 'source.label'] },
+});
+const MDX_DISPLAY_COMPONENT_NAMES = new Map([
+  ['AppPhone', 'appphone'],
+  ['BottomLineBox', 'bottomlinebox'],
+  ['HonestRejection', 'honestrejection'],
+  ['InlineCTA', 'inlinecta'],
+  ['PestEvidenceGrid', 'pestevidencegrid'],
+  ['HomeZoneMap', 'homezonemap'],
+  ['SeasonalPressureChart', 'seasonalpressurechart'],
+  ['SpiderIdBoard', 'spideridboard'],
+  ['ComparisonTable', 'comparisontable'],
+]);
+
+function staticJsxAttrValue(attr) {
+  if (attr.literal !== null) return attr.literal;
+  const scalar = staticStringOfExpr(attr.expr);
+  if (scalar !== null) return scalar;
+  if (!attr.expr || !/^\{[\s\S]*\}$/.test(attr.expr)) return undefined;
+  return tolerantStaticJson(attr.expr.slice(1, -1))?.value;
+}
+
+function nestedDisplayValue(row, path) {
+  return path.split('.').reduce((value, key) => (value && typeof value === 'object' ? value[key] : undefined), row);
+}
+
+function collectionDisplayValues(tagName, props) {
+  const values = [];
+  for (const [prop, fields] of Object.entries(MDX_DISPLAY_COLLECTIONS[tagName] || {})) {
+    const rows = props.get(prop);
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) values.push(...fields.map((field) => nestedDisplayValue(row, field)));
+  }
+  return values;
+}
+
+function comparisonDisplayValues(props) {
+  const columns = props.get('columns');
+  const rows = props.get('rows');
+  if (!Array.isArray(columns)) return [];
+  const values = [...columns];
+  const optionCount = Math.max(0, columns.length - 1);
+  if (!Array.isArray(rows)) return values;
+  for (const row of rows) values.push(row?.label, ...(Array.isArray(row?.values) ? row.values.slice(0, optionCount) : []));
+  return values;
+}
+
+function componentDisplayValues(tag) {
+  const props = new Map(eachJsxAttr(tag.attrs).map((attr) => [attr.name, staticJsxAttrValue(attr)]));
+  const values = (MDX_DISPLAY_SCALARS[tag.name] || []).map((prop) => props.get(prop));
+  values.push(...collectionDisplayValues(tag.name, props));
+  if (tag.name === 'comparisontable') values.push(...comparisonDisplayValues(props));
+  return values;
+}
+
+function projectMdxDisplayText(text) {
+  const source = String(text || '');
+  const expressionView = blankExpressions(source);
+  const values = [];
+  for (const tag of eachTag(expressionView)) {
+    if (tag.isClose) continue;
+    const opener = /^<([A-Za-z][\w-]*)/.exec(source.slice(tag.start, tag.end + 1));
+    const name = MDX_DISPLAY_COMPONENT_NAMES.get(opener?.[1]);
+    if (!name) continue;
+    const attrsStart = tag.start + opener[0].length;
+    values.push(...componentDisplayValues({ ...tag, name, attrs: source.slice(attrsStart, tag.end) }));
+  }
+  return values.filter((value) => typeof value === 'string' && value.trim())
+    .map((value) => `Component display text: ${value.replace(/\s+/g, ' ').trim()}`)
+    .join('\n');
+}
+
 function spiderSpeciesRowsValid(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return false;
   for (const r of rows) {
@@ -6611,6 +6703,7 @@ module.exports = {
   // certainty-only hidden-text blanker — the completion gate judges HTML
   // CTA anchors by their VISIBLE wording.
   blankDefinitelyHiddenContent,
+  projectMdxDisplayText,
   // quote-aware tag walker + balanced MDX-expression blanker — the ONE tag
   // scanner (astro-publisher's body-image scan masks with these, never a
   // parallel regex).
