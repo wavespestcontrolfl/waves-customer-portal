@@ -13,8 +13,10 @@
  * payment-receipt SMS (InvoiceService.sendReceipt) carries no appointmentId
  * of its own, so without this a property-scoped settlement question could
  * never be answered by an ordinary receipt (Codex round 1 P2, #4996). With
- * no visit at all, `estimateId` (a deposit receipt) stamps the estimate's
- * property alone (Codex #4996 r2).
+ * no visit at all, the estimate (a deposit receipt) stamps its property
+ * alone (Codex #4996 r2): `scopeEstimateId`, which send-customer-message.js
+ * keeps when its withheld-link rewrite clears the annual-offer guard's
+ * `estimateId` (r3), else a direct caller's `estimateId`.
  *
  * Never throws: a failed lookup stamps the visit without a property (or
  * nothing at all), which cannot vouch for a property-scoped promise, and the
@@ -22,7 +24,7 @@
  */
 const db = require('../../models/db');
 
-async function noticeScope(appointmentId, { invoiceId, estimateId, conn = db } = {}) {
+async function noticeScope(appointmentId, { invoiceId, estimateId, scopeEstimateId, conn = db } = {}) {
   let visitId = appointmentId || null;
   if (!visitId && invoiceId) {
     try {
@@ -31,7 +33,8 @@ async function noticeScope(appointmentId, { invoiceId, estimateId, conn = db } =
       visitId = null;
     }
   }
-  if (!visitId) return estimateId ? estimateScope(estimateId, conn) : {};
+  const estimate = scopeEstimateId || estimateId;
+  if (!visitId) return estimate ? estimateScope(estimate, conn) : {};
   let propertyId = null;
   try {
     propertyId = (await conn('scheduled_services').where({ id: visitId }).first('property_id'))?.property_id || null;

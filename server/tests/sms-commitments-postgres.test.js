@@ -2198,6 +2198,23 @@ postgres('SMS commitments on PostgreSQL', () => {
       .toEqual([70, 71, 72].map((seconds) => at(seconds).getTime()));
   });
 
+  test('Codex #4996 r3: a partial payment on an invoice still open is money landing, and reads as partial', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0961',
+      title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'sent' }).returning('id');
+    const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 50, status: 'paid', payment_date: etDateString(after),
+      metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: after }).returning('id');
+    const commitment = { kind: 'other', description: 'Did you get my $50?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const witness = evidence.records.find((r) => r.payment_source === 'invoice');
+    expect(witness).toMatchObject({ id: invoice.id, payment_id: payment.id,
+      text: `Partial payment of $50.00 toward invoice WPC-2026-0961 (Quarterly Pest Control) received ${etDateString(after)}` });
+    expect(witness).not.toHaveProperty('paid_in_full');
+    expect(admissibleWitness(witness, commitment)).toBe(true);
+    expect(evidence.records.filter((r) => r.payment_source === 'ledger')).toEqual([]);
+  });
+
   test('Codex #4996 r2 pre-push: a prepayment applied at completion is dated when the visit was prepaid — money prepaid before the question is not new, money prepaid after it is, and an unstamped visit is never evidence', async () => {
     const before = new Date(message.created_at.getTime() - 3600000);
     const after = new Date(message.created_at.getTime() + 1000);

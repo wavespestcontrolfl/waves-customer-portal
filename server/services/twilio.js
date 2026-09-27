@@ -1007,6 +1007,7 @@ const TwilioService = {
           notificationEventKey: options.notificationEventKey,
           invoiceId: options.invoiceId,
           estimateId: options.estimateId,
+          scopeEstimateId: options.scopeEstimateId,
           billingDeliveryCategory: options.billingDeliveryCategory,
           requestNotification: options.requestNotification,
           // Per-leg send-window gate inside the fan-out (round-4 P1).
@@ -1072,7 +1073,7 @@ const TwilioService = {
       // a property switch that commits while the send is in flight must not
       // re-scope an SMS already handed off (Codex #4816 r49/r50). Not inside
       // dispatch(): the provider call stays the handoff's last await.
-      const noticeScopeStamp = await require('./messaging/notice-scope').noticeScope(options.appointmentId, { invoiceId: options.invoiceId, estimateId: options.estimateId });
+      const noticeScopeStamp = await require('./messaging/notice-scope').noticeScope(options.appointmentId, { invoiceId: options.invoiceId, estimateId: options.estimateId, scopeEstimateId: options.scopeEstimateId });
       let message;
       let dispatchStarted = false;
       // Pre-push audit P2 (twilio.js:953, round 12): dispatch() takes an

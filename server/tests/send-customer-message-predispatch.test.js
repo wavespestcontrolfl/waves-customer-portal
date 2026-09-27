@@ -862,8 +862,9 @@ describe('annual-offer delivery guard at the provider handoff (delivery-guards s
     });
 
     expect(rewriteWithheldEstimateLinks).toHaveBeenCalledTimes(1);
+    // The estimate stays the notice's scope for its property stamp (Codex #4996 r3).
     expect(sendViaTwilio.mock.calls[0][0]).toMatchObject({
-      body: 'Reminder body', estimateId: null, estimateIds: [],
+      body: 'Reminder body', estimateId: null, estimateIds: [], scopeEstimateId: 'est-1',
     });
     expect(result.withheldLinksRewritten).toBeUndefined();
   });
@@ -925,7 +926,7 @@ describe('annual-offer delivery guard at the provider handoff (delivery-guards s
       text: expect.stringContaining('/estimate/withheld-token-retry'),
     }));
     expect(sendViaTwilio.mock.calls[0][0]).toMatchObject({
-      body: rewrittenBody, estimateId: null, estimateIds: [],
+      body: rewrittenBody, estimateId: null, estimateIds: [], scopeEstimateId: 'est-1',
     });
     expect(result).toMatchObject({ sent: true, withheldLinksRewritten: ['est-1'] });
   });

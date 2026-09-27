@@ -1079,7 +1079,8 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     await mockPg('estimates').insert({ id: estimateId, customer_id: property, property_id: homeId, status: 'accepted' });
     const routing = require('../services/messaging/push-channel-routing');
     const notice = { customerId: property, to: '+19415550101', body: 'Deposit received, thank you.', messageType: 'deposit_receipt',
-      explicitPushOnly: true, billingDeliveryCategory: 'payment_receipt', estimateId, notificationEventKey: `qa:${estimateId}:deposit` };
+      explicitPushOnly: true, billingDeliveryCategory: 'payment_receipt', estimateId: null, scopeEstimateId: estimateId,
+      notificationEventKey: `qa:${estimateId}:deposit` };
     expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
     const proof = (await mockPg('sms_log').where({ from_phone: 'push' }).first()).metadata;
     expect(proof).toMatchObject({ property_id: homeId });

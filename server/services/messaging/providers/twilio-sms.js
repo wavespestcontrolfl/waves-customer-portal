@@ -138,6 +138,10 @@ async function sendViaTwilio(input, {
       // content derivation over the final body covers the rest.
       estimateId: input.estimateId || null,
       estimateIds: Array.isArray(input.estimateIds) ? input.estimateIds : undefined,
+      // The estimate the notice is about, for its send-time property stamp
+      // only (messaging/notice-scope.js) — kept when the guard id above was
+      // cleared for a withheld-link rewrite (Codex #4996 r3).
+      scopeEstimateId: input.scopeEstimateId,
       // Round 8 P1: send-customer-message.js's own wrapper already rewrote
       // and cleared these above when this policy applies, so threading it
       // through here is a defense-in-depth no-op for wrapper-routed sends

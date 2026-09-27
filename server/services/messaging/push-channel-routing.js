@@ -479,7 +479,7 @@ async function repairPushProof({ appNotification, body, customerId, notification
   }
 }
 
-async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, estimateId, requestNotification, billingDeliveryCategory }) {
+async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, estimateId, scopeEstimateId, requestNotification, billingDeliveryCategory }) {
   let deliveryOutcome = 'not_sent';
   let acceptedResult = null;
   try {
@@ -490,7 +490,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     // stored notification, so a repaired proof restores the delivered scope
     // (Codex #4816 r49) — whether the send named the visit or it came from
     // the invoice or estimate the notice is about (Codex #4996 r2).
-    const proofScope = await require('./notice-scope').noticeScope(appointmentId, { invoiceId, estimateId });
+    const proofScope = await require('./notice-scope').noticeScope(appointmentId, { invoiceId, estimateId, scopeEstimateId });
     let appNotification = null;
     if (explicitPushOnly) {
       let presentation = pushPresentation(messageType);

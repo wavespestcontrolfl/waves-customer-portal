@@ -43,17 +43,18 @@ family-property account relationships remain outside this implementation. No aut
 scheduling, account changes, consent changes or money movement is included. Obligations
 left undated (customer-owned, or with an unresolved stated time) stay visible for manual
 work without timed overdue bells. A payment question ("did my payment go through?") is
-answered only by money landing after it: an invoice paid through its own settled payment
-(dated when the money settled, not when the invoice was stamped paid), a staff-recorded
-cash, check or Zelle payment, a customer-level card charge such as the monthly autopay,
-a received estimate deposit, or a delivered payment receipt (a text, an accepted App
-push, or an email to the customer's own address). Account credit, third-party payers,
-refunds and disputes are never money landing; a payment never answers a request to
-change how the customer pays, though a term the customer negates ("don't refund it") is
-not such a request; money tied to another property never answers a question about this
-one; and a staff "received" text never closes it. The model must cite the payment; the
-close locks it, and the invoice or estimate it depends on, and rechecks it. Staff
-payment notes never reach the model.
+answered only by money landing after it: a settled payment toward an invoice, in full or
+in part (dated when the money settled, not when the invoice was stamped paid, and a
+prepayment applied at completion by when it was prepaid), a staff-recorded cash, check
+or Zelle payment, a customer-level card charge such as the monthly autopay, a received
+estimate deposit, or a delivered payment receipt (a text, an accepted App push, or an
+email to the customer's own address). Account credit, third-party payers, refunds and
+disputes are never money landing; a payment never answers a request to change how the
+customer pays, though a term the customer negates ("don't refund it") is not such a
+request; money tied to another property never answers a question about this one; and a
+staff "received" text never closes it. The model must cite the payment; the close locks
+it, and the invoice or estimate it depends on, and rechecks it. Staff payment notes
+never reach the model.
 
 ## Verification
 

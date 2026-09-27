@@ -279,8 +279,10 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         // money settles the invoice for its visit, so the visit's property
         // is the payment's property even if the visit was later switched:
         // invoices carry no property of their own to snapshot.
+        // Settled in full or not: a partial payment (a prepayment covering
+        // part of the bill, an installment) leaves paid_at null but is still
+        // money landing on this invoice (Codex #4996 r3).
         conn('invoices as pinv').where({ 'pinv.customer_id': customerId }).whereNull('pinv.payer_id')
-          .whereNotNull('pinv.paid_at')
           .leftJoin('scheduled_services as pinv_visit', 'pinv_visit.id', 'pinv.scheduled_service_id')
           // The settling payment rides along in one LATERAL pick, so its id
           // (revalidation's lock target, rule 8), amount and settlement
@@ -301,7 +303,8 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .whereNotNull('best_payment.id')
           .orderBy('best_payment.settled_at', 'desc').limit(LIMIT + 1)
           .select('pinv.id', 'pinv.title', 'pinv.invoice_number', 'pinv_visit.property_id as property_id',
-            'best_payment.id as payment_id', 'best_payment.amount as payment_amount', 'best_payment.settled_at as settled_at'),
+            'best_payment.id as payment_id', 'best_payment.amount as payment_amount', 'best_payment.settled_at as settled_at',
+            conn.raw('pinv.paid_at IS NOT NULL as paid_in_full')),
         // Money tied to no invoice (rule 4): off-gateway prepayments staff
         // record (cash/check/Zelle/Venmo, admin-customers.js POST
         // /:id/credits), and customer-level Stripe charges such as the
@@ -383,9 +386,14 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
             'estimates.property_id as property_id'),
       ]).then(([invoicesPaid, ledger, paymentSms, deposits, invoiceReceiptEmails, depositReceiptEmails]) => {
         const legs = [
-          invoicesPaid.map((row) => ({ ...row, payment_source: 'invoice',
-            text: `Invoice ${row.invoice_number || row.id}${row.title ? ` (${row.title})` : ''} paid ${etDateString(new Date(row.settled_at))}`
-              + `${row.payment_amount != null ? ` — $${Number(row.payment_amount).toFixed(2)}` : ''}` })),
+          invoicesPaid.map(({ paid_in_full: paidInFull, ...row }) => {
+            const label = `${row.invoice_number || row.id}${row.title ? ` (${row.title})` : ''}`;
+            const amount = row.payment_amount != null ? `$${Number(row.payment_amount).toFixed(2)}` : null;
+            const day = etDateString(new Date(row.settled_at));
+            return { ...row, payment_source: 'invoice',
+              text: paidInFull ? `Invoice ${label} paid ${day}${amount ? ` — ${amount}` : ''}`
+                : `Partial payment${amount ? ` of ${amount}` : ''} toward invoice ${label} received ${day}` };
+          }),
           ledger.map(({ monthly_autopay: autopay, ...row }) => ({ ...row, payment_source: 'ledger', property_id: null,
             text: `Payment of $${Number(row.amount).toFixed(2)} recorded ${dateOnlyString(row.payment_date)}${row.method ? ` (${row.method})` : ''}${autopay ? ' (monthly autopay)' : ''}` })),
           paymentSms.map((row) => ({ ...row, payment_source: 'sms' })),

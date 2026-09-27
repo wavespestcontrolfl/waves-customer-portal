@@ -217,6 +217,9 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     // A deposit receipt names only its estimate: that estimate's property,
     // and no visit (Codex #4996 r2).
     ['stamps a deposit receipt with its estimate\'s property alone', { estimateId: 'estimate-7' }, undefined, 'prop-estimate'],
+    // send-customer-message clears the guard's estimateId for a receipt and
+    // keeps the estimate as scopeEstimateId (Codex #4996 r3).
+    ['stamps a rewritten deposit receipt from its scope estimate', { estimateId: null, scopeEstimateId: 'estimate-7' }, undefined, 'prop-estimate'],
     ['keeps an invoice\'s visit over an estimate', { invoiceId: 'invoice-9', estimateId: 'estimate-7' }, 'visit-9', 'prop-1'],
   ])('%s', async (_label, extra, expected, expectedProperty) => {
     const rows = [];
