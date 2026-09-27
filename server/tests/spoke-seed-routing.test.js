@@ -173,6 +173,20 @@ describe('astro-publisher: spoke domain + canonical routing', () => {
     expect(_internals.resolveSpokeTarget({ target_sites: ['sarasotaflpestcontrol.com', 'veniceflpestcontrol.com'] })).toBeNull();
     // falls back to the persisted operator_brief copy
     expect(_internals.resolveSpokeTarget({ voice_constraints: { operator_brief: { target_sites: ['veniceflpestcontrol.com'] } } })).toBe('veniceflpestcontrol.com');
+    // A related-post selection marker is persisted in voice_constraints and
+    // takes precedence over stale operator metadata after a brief reload.
+    expect(_internals.resolveSpokeTarget({
+      voice_constraints: {
+        related_posts_target_sites: ['wavespestcontrol.com'],
+        operator_brief: { target_sites: ['veniceflpestcontrol.com'] },
+      },
+    })).toBeNull();
+    expect(_internals.resolveSpokeTarget({
+      voice_constraints: {
+        related_posts_target_sites: ['sarasotaflpestcontrol.com'],
+        operator_brief: { target_sites: ['veniceflpestcontrol.com'] },
+      },
+    })).toBe('sarasotaflpestcontrol.com');
   });
 
   test('kill switch: a queued spoke target does NOT fan out when the network is disabled (publishes hub-only)', () => {

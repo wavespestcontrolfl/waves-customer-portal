@@ -654,11 +654,15 @@ describe('_loadRelatedPosts gating', () => {
       expect(frozen.target_sites).toEqual(['wavespestcontrol.com']);
       expect(frozen.voice_constraints.related_posts_target_sites).toEqual(['wavespestcontrol.com']);
 
-      // Re-enabling after composition cannot resurrect the stale queued
-      // spoke: the publisher resolves the frozen brief to the hub.
+      // Simulate the content_briefs JSONB round trip. target_sites has no
+      // column, so only voice_constraints survives a reload; re-enabling after
+      // composition still cannot resurrect the stale queued spoke.
+      const reloaded = {
+        voice_constraints: JSON.parse(JSON.stringify(frozen.voice_constraints)),
+      };
       process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
       const { resolveSpokeTarget: resolveFinalTarget } = require('../services/content-astro/spoke-routing');
-      expect(resolveFinalTarget(frozen)).toBeNull();
+      expect(resolveFinalTarget(reloaded)).toBeNull();
     } finally {
       spy.mockRestore();
       if (previous === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
