@@ -1958,11 +1958,14 @@ async function refreshFulfillment(conn, callLogId, call = null) {
 // pass (re)writes the call — it reopens here and the next refresh judges
 // it again. Untouched AI rows only — a human verdict stands. Returns the count.
 async function reopenSlotBookingProofs(conn, callLogId) {
-  return conn("call_commitments")
-    .where({ call_log_id: callLogId, status: "fulfilled" })
-    .whereNull("human_state")
-    .whereRaw("fulfillment ->> 'basis' = ?", [SLOT_BOOKING_BASIS])
-    .update({ status: "open", fulfillment: null, fulfilled_at: null, updated_at: new Date() });
+  const result = await conn.raw(
+    `UPDATE call_commitments
+        SET status = 'open', fulfillment = NULL, fulfilled_at = NULL, updated_at = NOW()
+      WHERE call_log_id = ? AND status = 'fulfilled' AND human_state IS NULL
+        AND fulfillment ->> 'basis' = ?`,
+    [callLogId, SLOT_BOOKING_BASIS],
+  );
+  return result?.rowCount || 0;
 }
 
 
