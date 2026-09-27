@@ -122,6 +122,53 @@ describe('billing reminder per-channel delivery progress', () => {
     ]));
   });
 
+  test('a persisted App bell settles its leg without inventing provider acceptance or retrying', async () => {
+    const send = jest.fn(async () => ({
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'not_sent',
+      code: 'APP_UNAVAILABLE',
+      bellPersisted: true,
+    }));
+
+    await expect(deliver(['push'], send, 'bell-only'))
+      .resolves.toMatchObject({
+        complete: true,
+        deliveredNow: ['push'],
+        results: {
+          push: expect.objectContaining({ sent: false, deliveryOutcome: 'not_sent', bellPersisted: true }),
+        },
+      });
+    await expect(deliver(['push'], send, 'bell-only'))
+      .resolves.toMatchObject({ complete: true, deliveredNow: [] });
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.markDelivered).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(rows[0].metadata).toMatchObject({ delivered: true });
+  });
+
+  test('an uncertain App outcome without a bell witness stays held', async () => {
+    const send = jest.fn(async () => ({
+      sent: false,
+      deliveryOutcome: 'uncertain',
+      code: 'APP_OUTCOME_UNCONFIRMED',
+    }));
+
+    await expect(deliver(['push'], send, 'uncertain-app'))
+      .resolves.toMatchObject({ complete: false, deliveredNow: [] });
+    await expect(deliver(['push'], send, 'uncertain-app'))
+      .resolves.toMatchObject({
+        complete: false,
+        deliveredNow: [],
+        results: { push: expect.objectContaining({ deliveryHeld: true }) },
+      });
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+  });
+
   test('accepted Text is not repeated while failed Email is retried', async () => {
     const send = jest.fn(async (channel) => {
       if (channel === 'email' && send.mock.calls.length === 1) return { sent: false, deliveryOutcome: 'not_sent', code: 'EMAIL_FAILED' };
