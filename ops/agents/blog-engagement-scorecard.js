@@ -256,7 +256,7 @@ function emptyDepth() {
  * blogPostLoads: reloads included, bfcache restores not), so both sides count
  * the same population; beacon counts are exact while Cloudflare loads are
  * sampled, so a small post's rates are still rough. Counts for posts
- * Cloudflare did not sample still reach the totals. `start`/`end` are the
+ * Cloudflare did not sample still reach the count totals, never the rates. `start`/`end` are the
  * window's Eastern days (`end` exclusive): a window that ends on or before
  * the first counted day has no coverage at all, never zeros, and one that
  * starts on or before it gets counts but no rates.
@@ -283,10 +283,19 @@ function addReadDepth(summary, depthRows, { start, end, loads } = {}) {
   const rate = (n, d) => (coverage === 'full' && d > 0 ? n / d : null);
   const postLoads = (p) => (loads ? loads.byPath.get(p.path) || 0 : p.views);
   const totalLoads = loads ? loads.total : summary.totals.blogViews;
+  // Rate numerators come only from posts that have loads in the denominator:
+  // a post Cloudflare did not sample keeps its counts in the totals but
+  // cannot lift the rates (codex r3).
+  const sampledPaths = loads ? new Set(loads.byPath.keys()) : new Set(summary.posts.map((p) => p.path));
+  const rated = emptyDepth();
+  for (const [path, d] of byPath) {
+    if (!sampledPaths.has(path)) continue;
+    for (const k of Object.keys(rated)) rated[k] += d[k];
+  }
   return {
     liveSince: READ_DEPTH_LIVE_SINCE,
     coverage,
-    totals: { ...totals, loads: totalLoads, halfRate: rate(totals.r50, totalLoads), nextRate: rate(totals.next, totalLoads) },
+    totals: { ...totals, loads: totalLoads, halfRate: rate(rated.r50, totalLoads), nextRate: rate(rated.next, totalLoads) },
     posts: summary.posts.map((p) => {
       const d = byPath.get(p.path) || emptyDepth();
       const n = postLoads(p);
@@ -313,7 +322,7 @@ function formatReadDepth(lines, readDepth, top) {
   }
   lines.push(`- Page loads reaching 25 / 50 / 75 / 100% of a post: ${t.r25} / ${t.r50} / ${t.r75} / ${t.r100}; reaching the keep-reading row: ${t.next} (loads, not people: a reload counts again)`);
   if (readDepth.coverage === 'full') {
-    lines.push(`- Half-read: ${pct(t.halfRate)} of ${t.loads} post loads; reached keep reading: ${pct(t.nextRate)} (Cloudflare samples, so rates are approximate)`);
+    lines.push(`- Half-read: ${pct(t.halfRate)} of ${t.loads} post loads; reached keep reading: ${pct(t.nextRate)} (over the posts Cloudflare sampled, so approximate)`);
   }
   lines.push('');
   lines.push(`| Post (top ${top} by views) | Loads | 25% | 50% | 75% | 100% | Keep reading | Half-read | Reached keep reading |`);

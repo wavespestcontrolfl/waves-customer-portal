@@ -219,9 +219,11 @@ describe('read depth', () => {
       path: '/pest-control/huntsman/', loads: 200, r25: 60, r50: 30, r75: 0, r100: 12, next: 9, halfRate: 0.15, nextRate: 0.045,
     });
     expect(rd.posts[1]).toMatchObject({ path: '/pest-control/bagworm/', loads: 40, r50: 4, halfRate: 0.1, nextRate: 0 });
-    // the unsampled post and nothing unknown reach the totals
+    // the unsampled post reaches the count totals (39 at 50%) but not the
+    // rates, whose denominator has none of its loads: (30 + 4) / 240
     expect(rd.totals).toMatchObject({ r25: 60, r50: 39, r75: 0, r100: 12, next: 9, loads: 240 });
-    expect(rd.totals.halfRate).toBeCloseTo(39 / 240);
+    expect(rd.totals.halfRate).toBeCloseTo(34 / 240);
+    expect(rd.totals.nextRate).toBeCloseTo(9 / 240);
   });
 
   test('coverage follows the window: none before counting began, partial across it, full after', () => {
@@ -255,7 +257,7 @@ describe('read depth', () => {
     expect(md).toContain('### Read depth (cookie-free counts, hub)');
     expect(md).not.toContain('Counting began');
     expect(md).toContain('Page loads reaching 25 / 50 / 75 / 100% of a post: 60 / 39 / 0 / 12; reaching the keep-reading row: 9 (loads, not people: a reload counts again)');
-    expect(md).toContain('Half-read: 16.3% of 240 post loads; reached keep reading: 3.8%');
+    expect(md).toContain('Half-read: 14.2% of 240 post loads; reached keep reading: 3.8% (over the posts Cloudflare sampled, so approximate)');
     expect(md).toContain('| Post (top 1 by views) | Loads | 25% | 50% | 75% | 100% | Keep reading | Half-read | Reached keep reading |');
     expect(md).toContain('| /pest-control/huntsman/ | 200 | 60 | 30 | 0 | 12 | 9 | 15.0% | 4.5% |');
     expect(md).not.toContain('| /pest-control/bagworm/ | 40 |');
