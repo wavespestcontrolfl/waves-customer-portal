@@ -136,15 +136,20 @@ describe('predictCompletionBilling', () => {
 
   test('autopay lapsed but dues already collected this month → still predicted covered (matches completion)', () => {
     expect(predictCompletionBilling({ ...memberBase, autopayActive: false, duesCollectedThisMonth: true }))
-      .toEqual({ kind: 'covered_membership', amount: null, conflictStampedPrice: false });
+      .toEqual({ kind: 'covered_membership', amount: null, grossAmount: 33.33, conflictStampedPrice: false });
     expect(predictCompletionBilling({ ...memberBase, autopayActive: false, duesCollectedThisMonth: false }))
       .toEqual({ kind: 'invoice', amount: 33.33, grossAmount: 33.33, conflictStampedPrice: false });
   });
 
   test('membership recurring visit → covered, and a stamped price flags the conflict', () => {
-    expect(predictCompletionBilling(memberBase)).toEqual({ kind: 'covered_membership', amount: null, conflictStampedPrice: false });
+    expect(predictCompletionBilling(memberBase))
+      .toEqual({ kind: 'covered_membership', amount: null, grossAmount: 33.33, conflictStampedPrice: false });
+    // grossAmount is completionInvoiceAmount's OWN precedence — an explicit
+    // estimatedPrice wins over the monthly rate there too, matching Charge
+    // Now's resolver (which reads estimatedPrice first, same as every
+    // other consumer of that function).
     expect(predictCompletionBilling({ ...memberBase, estimatedPrice: 100 }))
-      .toEqual({ kind: 'covered_membership', amount: null, conflictStampedPrice: true });
+      .toEqual({ kind: 'covered_membership', amount: null, grossAmount: 100, conflictStampedPrice: true });
   });
 
   test('membership one-off priced visit → invoices the price', () => {
@@ -259,7 +264,7 @@ describe('predictCompletionBilling', () => {
 
   test('inferred membership (NULL mode, tier+rate) predicts coverage like the completion path', () => {
     expect(predictCompletionBilling({ ...memberBase, billingMode: null, estimatedPrice: 100 }))
-      .toEqual({ kind: 'covered_membership', amount: null, conflictStampedPrice: true });
+      .toEqual({ kind: 'covered_membership', amount: null, grossAmount: 100, conflictStampedPrice: true });
   });
 });
 

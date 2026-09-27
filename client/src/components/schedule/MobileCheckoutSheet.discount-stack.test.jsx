@@ -498,6 +498,34 @@ describe('MobileCheckoutSheet — blocking alert readability', () => {
 // shown either $100 (extra alone, the $80 base miscounted as covered with
 // no credit line) or the wrong net figure recomputed a second time.
 describe('MobileCheckoutSheet — unpriced-visit prediction gross base + extras', () => {
+  // Codex pre-push P1: resolveScheduledServiceCharge (the Charge Now mint
+  // endpoint's OWN resolver, admin-schedule.js) has no "dues cover it"
+  // concept at all — it always falls back to the customer's monthlyRate for
+  // an unpriced monthly-membership visit regardless of covered_membership
+  // status, so a covered member who gets an ad hoc extra added at checkout
+  // still mints monthlyRate+extra, never the extra alone. predictCompletionBilling
+  // now surfaces that same monthlyRate as grossAmount on covered_membership
+  // too, so this sheet's preview can't understate what the mint actually bills.
+  it('stacks an extra service against the covered member\'s monthlyRate, not $0', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...SERVICE,
+          estimatedPrice: null,
+          billingLane: {
+            mode: 'monthly_membership',
+            source: 'explicit',
+            monthlyRate: 80,
+            prediction: { kind: 'covered_membership', amount: null, grossAmount: 80, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    addService();
+    expect(screen.getByRole('button', { name: 'Charge $180.00' })).toBeInTheDocument();
+  });
+
   it('stacks an extra service against the GROSS fee and credits the prepayment once', () => {
     render(
       <MobileCheckoutSheet

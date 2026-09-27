@@ -370,12 +370,20 @@ function predictCompletionBilling({
     monthlyRate,
     billingMode: billingMode || (lane === 'monthly_membership' ? 'monthly_membership' : null),
   });
-  if (covered) {
-    return { kind: 'covered_membership', amount: null, conflictStampedPrice: hasVisitPrice };
-  }
+  // Computed BEFORE the covered check (not just after it) so a covered
+  // visit's grossAmount is still the monthlyRate Charge Now's own resolver
+  // (resolveScheduledServiceCharge, admin-schedule.js) would use as ITS
+  // base — that resolver has no "dues cover it" concept at all, so a
+  // covered member who gets an ad hoc extra added at checkout still bills
+  // monthlyRate+extra on the mint, never just the extra alone (codex
+  // pre-push P1: previewing $0 base + extra understated what Charge Now
+  // actually mints for this customer).
   const amount = completionInvoiceAmount({
     estimatedPrice, isCallback, perApplicationBilling: false, perApplicationFee, monthlyRate, billingMode,
   });
+  if (covered) {
+    return { kind: 'covered_membership', amount: null, grossAmount: amount, conflictStampedPrice: hasVisitPrice };
+  }
   // The 2026-08-31 shape: self-pay lane, visit performed, and NO number
   // anywhere — no stamped visit price, no monthly rate. Nothing bills, and
   // nothing about the visit says it should be free.
