@@ -300,7 +300,12 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   expect(ungroundedClaims('See you on September 3.', facts)).toContain('ungrounded_date:September 3');
   expect(ungroundedClaims('Your next visit is Sep 3, arriving 8–10 AM.', facts))
     .toContain('ungrounded_date:Sep 3');
+  expect(ungroundedClaims('Your next visit is Sep. 3, arriving 8–10 AM.', facts))
+    .toContain('ungrounded_date:Sep. 3');
+  expect(ungroundedClaims('Your next visit is Sept. 3, arriving 8–10 AM.', facts))
+    .toContain('ungrounded_date:Sept. 3');
   expect(ungroundedClaims('Your next visit is Monday, Aug 3, arriving 8–10 AM.', facts)).toEqual([]);
+  expect(ungroundedClaims('Your next visit is Monday, Aug. 3, arriving 8–10 AM.', facts)).toEqual([]);
   // with no grounded next visit, any window/date mention rejects
   const noVisit = groundingFacts(input({ nextAppointment: null }));
   expect(ungroundedClaims('We will arrive 8–10 AM.', noVisit).some((p) => p.startsWith('ungrounded_window'))).toBe(true);
@@ -428,11 +433,52 @@ test('grounded relative care timing survives without authorizing a relative appo
     `${summary} Your next visit is tomorrow.`,
     facts,
   )).toContain('ungrounded_relative_date:tomorrow');
+  for (const appointmentCare of [
+    'We will visit tomorrow.',
+    'Your service is scheduled for tomorrow.',
+    'We will be there tomorrow.',
+  ]) {
+    const appointmentArgs = {
+      ...args,
+      recap: `${args.recap} ${appointmentCare}`,
+      typedReport: {
+        ...args.typedReport,
+        todaysResult: { ...args.typedReport.todaysResult, nextStep: appointmentCare },
+      },
+    };
+    const appointmentFacts = {
+      ...facts,
+      todaysResult: { ...facts.todaysResult, nextStep: appointmentCare },
+    };
+    const invalidSummary = summary.replace('Contact us tomorrow if activity returns.', appointmentCare);
+    expect(ungroundedClaims(
+      invalidSummary,
+      appointmentFacts,
+    )).toContain('ungrounded_relative_date:tomorrow');
+    const rejected = await applyRodentReportNarrative(appointmentArgs, {
+      callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: invalidSummary } }),
+    });
+    expect(rejected).not.toContain(appointmentCare);
+  }
   const out = await applyRodentReportNarrative(args, {
     callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
   });
   expect(out).toContain(summary);
   expect(out).toContain('Contact us tomorrow if activity returns.');
+
+  const dottedArgs = input();
+  dottedArgs.typedReport = {
+    ...dottedArgs.typedReport,
+    todaysResult: {
+      ...dottedArgs.typedReport.todaysResult,
+      nextStep: 'Contact us tomorrow if activity returns.',
+    },
+  };
+  const dottedSummary = summary.replace('Monday, August 3', 'Sep. 3');
+  const dottedOut = await applyRodentReportNarrative(dottedArgs, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: dottedSummary } }),
+  });
+  expect(dottedOut).not.toContain('Sep. 3');
 });
 
 test('banned copy, bad length, and withheld-name echoes fall back deterministically', async () => {

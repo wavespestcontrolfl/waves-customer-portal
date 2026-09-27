@@ -6,13 +6,13 @@ const CLOCK_HOUR_WORDS = 'one|two|three|four|five|six|seven|eight|nine|ten|eleve
 const EXACT_TIME_TEXT = String.raw`(?:\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}|(?:[01]?\d|2[0-3]):[0-5]\d|\b(?:noon|midnight)\b)`;
 const WINDOW_TEXT_RE = new RegExp(String.raw`(?<!\d)\d{1,2}(?::\d{2})?\s*(?:${MERIDIEM_TEXT})?\s*[–—-]\s*\d{1,2}(?::\d{2})?\s*${MERIDIEM_TEXT}(?![a-z])`, 'gi');
 const MONTH_NAMES = 'January|February|March|April|May|June|July|August|September|October|November|December';
-const MONTH_DATE_TEXT = 'Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?';
+const MONTH_DATE_TEXT = 'Jan(?:\\.|uary)?|Feb(?:\\.|ruary)?|Mar(?:\\.|ch)?|Apr(?:\\.|il)?|May\\.?|Jun(?:\\.|e)?|Jul(?:\\.|y)?|Aug(?:\\.|ust)?|Sep(?:\\.|t\\.?|tember)?|Oct(?:\\.|ober)?|Nov(?:\\.|ember)?|Dec(?:\\.|ember)?';
 const WEEKDAY_NAMES = 'Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday';
 const DATE_TEXT_RE = new RegExp(`\\b(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_DATE_TEXT})\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:\\s*,?\\s*(?:(?:in|of)\\s+)?\\(?(\\d{4}|[’']?\\d{2})(?![\\d:]|\\s*(?:${MERIDIEM_TEXT}|[–—-]))\\)?)?`, 'gi');
 const CLOCK_TIME_RE = new RegExp(String.raw`(?<![\d:])${EXACT_TIME_TEXT}(?![a-z\d:])`, 'gi');
 const WORD_CLOCK_TIME_RE = new RegExp(String.raw`\b(?:${CLOCK_HOUR_WORDS})(?:\s*${MERIDIEM_TEXT}|\s+o[’']clock)\b`, 'gi');
 const RELATIVE_APPOINTMENT_DATE_RE = new RegExp(`\\b(?:tomorrow|tonight|next\\s+(?:day|week|month)|(?:next|this)\\s+(?:${WEEKDAY_NAMES}))\\b`, 'gi');
-const APPOINTMENT_CARE_RE = /\b(?:next|upcoming)\s+(?:visit|appointment|service|follow[-\s]?up)\b|\b(?:arrival|appointment|visit)\s+(?:is|will\s+be|scheduled|booked|set)\b|\b(?:will|[’']ll)\s+(?:return|arrive|be\s+back|come\s+back|check\s+back|follow[-\s]+up)\b/i;
+const APPOINTMENT_CARE_RE = /\b(?:next|upcoming)\s+(?:visit|appointment|service|follow[-\s]?up)\b|\b(?:arrival|appointment|visit|service)\s+(?:is|will\s+be|scheduled|booked|set)\b|\b(?:will|[’']ll)\s+(?:visit|return|arrive|be\s+(?:back|there)|come\s+back|check\s+back|follow[-\s]+up)\b/i;
 
 function normalizeWindowText(value) {
   return String(value || '').replace(/\s*([ap])\.?m\.?(?![a-z])/gi, ' $1M')
