@@ -32,6 +32,13 @@ const OUR_NUMBER = '+19415550100';
   let database;
   const schema = `promise_chaser_${randomUUID().replaceAll('-', '')}`;
   const tables = ['call_log', 'call_commitments', 'scheduled_services', 'customers', 'notifications', 'blocked_numbers', 'blocked_call_attempts', 'audit_log'];
+  // system_settings is cloned separately, WITH its real primary key on
+  // `key` (LIKE ... INCLUDING ALL, unlike every other table's plain
+  // WITH NO DATA copy above) — persistedActivationBoundary's own
+  // onConflict('key') needs an actual unique constraint to target, and
+  // this keeps the activation row fully isolated to this suite's own
+  // schema: no writing to (or cleaning up) the real public.system_settings
+  // shared across every other suite and any real deployed environment.
   let now;
   const gateNames = ['promiseChaserBell', 'callCommitments'];
   const savedGates = Object.fromEntries(gateNames.map((key) => [key, gates[key]]));
@@ -40,17 +47,13 @@ const OUR_NUMBER = '+19415550100';
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema, 'public'], pool: { min: 0, max: 3 } });
     await database.raw('CREATE SCHEMA ??', [schema]);
     for (const table of tables) await database.raw('CREATE TABLE ??.?? AS SELECT * FROM public.?? WITH NO DATA', [schema, table, table]);
+    await database.raw('CREATE TABLE ??.system_settings (LIKE public.system_settings INCLUDING ALL)', [schema]);
     mockConn = database;
     gateNames.forEach((key) => { gates[key] = true; });
   });
   beforeEach(() => {
     now = Date.now();
     jest.clearAllMocks();
-    // The activation boundary is a real, shared system_settings row (its
-    // own onConflict('key') needs the table's REAL primary key, which a
-    // fresh clone WITH NO DATA would not carry — so, unlike every other
-    // table here, this suite deliberately never clones it and always falls
-    // through to public.system_settings, cleaned up per-test below).
     delete process.env.PROMISE_CHASER_ACTIVATED_AT;
     // triggerNotification is mocked wholesale (this suite never exercises
     // the real notification-triggers.js pipeline — that lives in its own
@@ -72,8 +75,7 @@ const OUR_NUMBER = '+19415550100';
   afterEach(async () => {
     jest.restoreAllMocks();
     delete process.env.PROMISE_CHASER_ACTIVATED_AT;
-    for (const table of tables) await database.raw('TRUNCATE TABLE ??.?? CASCADE', [schema, table]);
-    await database.raw('DELETE FROM public.system_settings WHERE key = ?', [ACTIVATION_KEY]);
+    for (const table of [...tables, 'system_settings']) await database.raw('TRUNCATE TABLE ??.?? CASCADE', [schema, table]);
     expect(logger.warn.mock.calls).toEqual([]);
   });
   afterAll(async () => {
