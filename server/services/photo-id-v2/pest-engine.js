@@ -935,8 +935,10 @@ function buildAnswer(ctx) {
   const shownCandidates = candidates.filter((candidate) => candidate.entry?.kind !== hiddenKind);
   const answerCandidates = shownCandidates.length ? shownCandidates : candidates;
   const top = shownCandidates[0];
-  let picked = climbedOrDisagreedAnswer(candidates, true, disagreementNode);
-  if (!disagreed) {
+  let picked;
+  if (disagreed) {
+    picked = climbedOrDisagreedAnswer(candidates, true, disagreementNode);
+  } else {
     picked = entryLevelAnswer(shownCandidates, top, blockPrettySure, shownKind)
       || climbedOrDisagreedAnswer(answerCandidates, false, null);
   }
@@ -994,7 +996,7 @@ const V2_TO_V1_SLUG = buildV2ToV1Map();
 // node, bees, also holds carpenter and bumble bees) or "aphid-scale"
 // (tiny plant pests also holds mites and thrips) — pre-push audit on
 // Codex #4916 r3.
-const V1_INHERITABLE = new Set(['mosquito', 'black-widow', 'flea', 'tick', 'rodent', 'whitefly', 'sod-webworm']);
+const V1_INHERITABLE = new Set(['mosquito', 'black-widow', 'flea', 'tick', 'rodent', 'whitefly', 'sod-webworm', 'millipede']);
 // Named entries a non-inheritable v1 slug still describes exactly.
 const V1_BY_ENTRY = new Map([['honey-bee-swarm', 'honey-bee'], ['honey-bee-wall-colony', 'honey-bee']]);
 
@@ -1012,10 +1014,6 @@ function v1IdentityFor(v2Slug) {
     if (v1 && V1_INHERITABLE.has(v1)) return { slug: v1, inherited: true };
   }
   return null;
-}
-
-function v1SlugFor(v2Slug) {
-  return v1IdentityFor(v2Slug)?.slug || null;
 }
 
 function categoryForV2Slug(slug) {
@@ -1055,6 +1053,9 @@ function mapToV1(built) {
   const namedEntry = v2Entry || { service: {} };
   const namedService = namedEntry.service || {};
   const inheritIdentityOnly = Boolean(v1Identity.inherited && v2Entry);
+  const namedServiceIdentity = inheritIdentityOnly
+    ? { serviceKey: namedService.key, serviceLabel: namedService.label }
+    : { serviceKey: null, serviceLabel: 'Pest Consultation' };
 
   const category = legacyItem.category || categoryForV2Slug(topEntrySlug);
   const wordingConfidence = { pretty_sure: 'high', likely: 'moderate' }[built.answer.wording] || 'low';
@@ -1078,8 +1079,7 @@ function mapToV1(built) {
     named: {
       safety: v1SafetyFallback(namedEntry),
       serviceLine: namedService.line,
-      serviceKey: namedService.key,
-      serviceLabel: namedService.label,
+      ...namedServiceIdentity,
       inspectionRequired: !!namedService.inspection_first,
       urgency: namedEntry.urgency,
     },
@@ -1113,7 +1113,7 @@ function mapToV1(built) {
     // candidate is a differential too — only the primary itself is
     // filtered out (Codex #4916 r2 P2).
     alternate_slugs: [...new Set(built.candidatesBlock
-      .map((c) => v1SlugFor(c.slug))
+      .map((c) => v1IdentityFor(c.slug)?.slug)
       .filter((v) => v && v !== v1Slug))],
   };
 
@@ -1482,6 +1482,6 @@ module.exports = {
   toImages,
   _test: {
     candidateContextFor, mergeVerify, combineEscalation, showsConflict, normalizeEvidenceKind,
-    V2_TO_V1_SLUG, v1SlugFor, pairBetween,
+    V2_TO_V1_SLUG, v1IdentityFor, pairBetween,
   },
 };

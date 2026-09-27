@@ -2,28 +2,28 @@
 // engine suite runs on a fixture). A named v2 species may only inherit a
 // v1 identity that is true of it (pre-push audit on Codex #4916 r3).
 const catalog = require('../services/species-catalog');
-const { buildAnswer, mapToV1, _test: { v1SlugFor } } = require('../services/photo-id-v2/pest-engine');
+const { buildAnswer, mapToV1, _test: { v1IdentityFor } } = require('../services/photo-id-v2/pest-engine');
 
-describe('v1SlugFor on the real catalog', () => {
+describe('v1IdentityFor on the real catalog', () => {
   test('exact legacy mappings resolve to themselves', () => {
-    expect(v1SlugFor('fire-ant')).toBe('fire-ant');
-    expect(v1SlugFor('american-cockroach')).toBe('american-roach');
+    expect(v1IdentityFor('fire-ant')).toEqual({ slug: 'fire-ant', inherited: false });
+    expect(v1IdentityFor('american-cockroach')).toEqual({ slug: 'american-roach', inherited: false });
   });
 
   test('a species inherits a generic v1 label that is true of its whole group', () => {
-    expect(v1SlugFor('aedes-mosquito')).toBe('mosquito');
-    expect(v1SlugFor('brown-widow')).toBe('black-widow');
+    expect(v1IdentityFor('aedes-mosquito')).toEqual({ slug: 'mosquito', inherited: true });
+    expect(v1IdentityFor('brown-widow')).toEqual({ slug: 'black-widow', inherited: true });
   });
 
   test('honey bee entries map to v1 honey-bee explicitly; other bees never borrow it', () => {
-    expect(v1SlugFor('honey-bee-wall-colony')).toBe('honey-bee');
-    expect(v1SlugFor('honey-bee-swarm')).toBe('honey-bee');
-    expect(v1SlugFor('carpenter-bee')).toBeNull();
+    expect(v1IdentityFor('honey-bee-wall-colony')).toEqual({ slug: 'honey-bee', inherited: false });
+    expect(v1IdentityFor('honey-bee-swarm')).toEqual({ slug: 'honey-bee', inherited: false });
+    expect(v1IdentityFor('carpenter-bee')).toBeNull();
   });
 
   test('unknown slugs stay unmatched', () => {
-    expect(v1SlugFor('not-a-species')).toBeNull();
-    expect(v1SlugFor(null)).toBeNull();
+    expect(v1IdentityFor('not-a-species')).toBeNull();
+    expect(v1IdentityFor(null)).toBeNull();
   });
 });
 
@@ -41,12 +41,27 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
   });
 
-  test.each(['american-dog-tick', 'lone-star-tick'])('%s inherits the tick identity without inheriting the legacy flea service', (slug) => {
+  test.each([
+    ['american-dog-tick', 'pest', 'General Pest Control', 'high'],
+    ['lone-star-tick', 'pest', 'General Pest Control', 'high'],
+    ['blacklegged-tick', 'pest', 'General Pest Control', 'moderate'],
+    ['brown-dog-tick', 'flea', 'Flea & Tick Treatment', 'high'],
+  ])('%s inherits the tick identity and preserves its authored service and urgency', (slug, key, label, urgency) => {
     const mapped = mapToV1(answerFor(slug));
-    expect(mapped).toMatchObject({ species_slug: 'tick', service_line: 'pest', urgency: 'high' });
+    expect(mapped).toMatchObject({ species_slug: 'tick', service_line: 'pest', urgency });
     expect(mapped.report_contract).toMatchObject({
       identification: { slug: 'tick', category: 'arachnid' },
-      urgency: 'high',
+      urgency,
+      service: { line: 'pest', key, label, inspection_required: false },
+    });
+  });
+
+  test.each(['millipede', 'greenhouse-millipede'])('%s inherits the generic millipede identity', (slug) => {
+    expect(v1IdentityFor(slug)).toEqual({ slug: 'millipede', inherited: true });
+    const mapped = mapToV1(answerFor(slug));
+    expect(mapped).toMatchObject({ species_slug: 'millipede', service_line: 'pest', urgency: 'low' });
+    expect(mapped.report_contract).toMatchObject({
+      identification: { slug: 'millipede', category: 'other' },
       service: { line: 'pest', key: 'pest', label: 'General Pest Control', inspection_required: false },
     });
   });
@@ -55,6 +70,12 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     const mapped = mapToV1(answerFor('fire-ant'));
     expect(mapped).toMatchObject({ species_slug: 'fire-ant', service_line: 'pest', urgency: 'high' });
     expect(mapped.report_contract.service).toMatchObject({ key: 'pest', label: 'General Pest Control' });
+  });
+
+  test('a named entry with no v1 identity retains the unmatched consultation service', () => {
+    const mapped = mapToV1(answerFor('carpenter-bee'));
+    expect(mapped.species_slug).toBeNull();
+    expect(mapped.report_contract.service).toMatchObject({ key: null, label: 'Pest Consultation' });
   });
 });
 
