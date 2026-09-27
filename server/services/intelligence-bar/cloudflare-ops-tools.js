@@ -193,4 +193,4 @@ async function executeCloudflareOpsTool(toolName, input = {}) {
   }
 }
 
-module.exports = { CLOUDFLARE_OPS_TOOLS, executeCloudflareOpsTool };
+module.exports = { CLOUDFLARE_OPS_TOOLS, executeCloudflareOpsTool, cfRequest };
