@@ -1748,14 +1748,70 @@ async function resolveFulfillment(conn, commitment, call) {
 // Direct proof marks an open AI row fulfilled. Association proof is stored
 // as a hint (status stays open, nothing is invented). Human-touched rows are
 // left to the human either way.
-// When a callback card's obligation was last (re)stated: a human-recorded
-// promise exists from the moment it was typed, and the card's audited
-// callback_edit / callback_reopen events restate it (the row's reviewed_at
-// is overwritten by every later action, so it cannot carry that history).
-// Null for anything that is not a reviewed callback card.
+// When a WAVES obligation was last (re)stated: a human-recorded promise
+// exists from the moment it was typed, and — for every alertable SLA kind
+// (callback via callback_edit/callback_reopen, every other one via
+// commitment_edit/commitment_reopen, Codex #5019 r17 structural fix) — its
+// OWN audited renewal events restate it (the row's human_state/reviewed_at
+// are overwritten by every later action, including an ordinary confirm, so
+// neither can carry that history on its own — see applyHumanUpdate's
+// writers for both event families). Null for anything that is not a
+// reviewed, party:'waves' SLA commitment.
+// True when a non-callback SLA promise's renewal boundary cannot be known:
+// a row from before renewal_trail existed, now 'confirmed', with no
+// commitment_edit / commitment_reopen event. The old path left a reopen, and
+// an edit followed by a confirm, looking exactly like a bare confirm, and no
+// record tells them apart (Codex #5019 r19 P0) — a caller that would act on
+// the boundary declines instead of guessing.
+async function renewalBoundaryUnknown(conn, commitment) {
+  if (!commitment || commitment.party !== 'waves' || commitment.kind === 'callback') return false;
+  if (commitment.renewal_trail === true || commitment.human_state !== 'confirmed') return false;
+  if (!require('./followup-sla-watcher').SLA_KINDS.includes(commitment.kind)) return false;
+  const event = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
+    .whereIn('action', ['commitment_edit', 'commitment_reopen']).first('id');
+  return !event;
+}
+
 async function obligationRenewedAt(conn, commitment) {
-  if (!commitment || commitment.kind !== 'callback' || commitment.party !== 'waves') return null;
+  if (!commitment || commitment.party !== 'waves') return null;
   if (!['confirmed', 'edited'].includes(commitment.human_state)) return null;
+  // Every OTHER alertable SLA kind (send_estimate, schedule_visit — Codex
+  // #5019 r11 P2), additive: callers outside this lane are unaffected,
+  // since none of them ever pass a non-callback row through this far
+  // (followup-sla-watcher's own renewedFloors keeps its pre-existing
+  // `kind !== 'callback'` guard before it ever calls this). A lazy require
+  // — not a top-level one — since followup-sla-watcher.js already requires
+  // this file; the module is fully initialized by the time this runs.
+  if (commitment.kind !== 'callback') {
+    if (!require('./followup-sla-watcher').SLA_KINDS.includes(commitment.kind)) return null;
+    // The durable commitment_edit/commitment_reopen event is the ONLY
+    // renewal boundary for these kinds (Codex #5019 r17, superseding r16's
+    // human_state === 'edited' rule — CLAUDE.md rule 19; the r16 code is
+    // removed, not kept alongside this). r16 read the boundary off
+    // human_state, but applyHumanUpdate's 'confirm' CASE only ever
+    // preserves 'edited' for kind === 'callback' — for these kinds a later
+    // ORDINARY confirm always resets human_state to 'confirmed' regardless
+    // of a genuine prior edit, which silently erased a human_state-based
+    // boundary the moment anyone confirmed the row afterward. A durable
+    // audit_log event, once written, is unaffected by anything a later
+    // confirm does to the row — exactly the same shape callback already
+    // uses below, just under its own action names so nothing reading the
+    // callback events changes.
+    const events = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
+      .whereIn('action', ['commitment_edit', 'commitment_reopen']).select('created_at', 'metadata');
+    const meta = (e) => { try { return typeof e.metadata === 'string' ? JSON.parse(e.metadata) : (e.metadata || {}); } catch { return {}; } };
+    const times = [commitment.source === 'human' ? commitment.created_at : null, ...events.map((e) => meta(e).renewed_at || e.created_at)];
+    // A row edited before these events existed (renewal_trail NULL) has
+    // none: while none exists at all, a legacy 'edited' row's reviewed_at is
+    // the only boundary on record (at worst later than the edit, never
+    // earlier) — the same legacy rule the callback branch below applies to
+    // a pre-card edit (Codex #5019 r18 P0). A newer row's edit that wrote no
+    // event restated nothing, so it is no boundary; once any event exists,
+    // reviewed_at may have been advanced by an ordinary confirm.
+    if (commitment.renewal_trail !== true && commitment.human_state === 'edited' && !events.length) times.push(commitment.reviewed_at);
+    const ms = times.filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
+    return ms.length ? new Date(Math.max(...ms)) : null;
+  }
   const events = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
     .whereIn('action', ['callback_edit', 'callback_reopen']).select('action', 'created_at', 'metadata');
   const meta = (e) => { try { return typeof e.metadata === 'string' ? JSON.parse(e.metadata) : (e.metadata || {}); } catch { return {}; } };
@@ -1962,10 +2018,15 @@ function selectOverdue(rows, { now = new Date() } = {}) {
   return (rows || []).filter((r) => isOverdue(r, now));
 }
 
-// The customer / lead scope of a commitments read, over the `cl` call_log
-// alias. Shared by the queue query and callback preparation so a filtered
-// read prepares exactly the rows it returns.
-function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSid = null } = {}) {
+// The customer / lead / phone scope of a commitments read, over the `cl`
+// call_log alias. Shared by the queue query and callback preparation so a
+// filtered read prepares exactly the rows it returns.
+// `phone`: matches the CONTACT number of the promise's own call — the
+// dialed number on an outbound call, the caller ID on an inbound one (the
+// same rule contactPhoneOf applies) — for a caller with no customerId/leadId
+// yet (the promise-chaser bell's own case: a lead calling back before any
+// link exists).
+function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSid = null, phone = null } = {}) {
   if (customerId) builder.where('cl.customer_id', customerId);
   if (leadId) {
     builder.where(function leadScope() {
@@ -1976,6 +2037,9 @@ function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSi
       if (leadSid) this.orWhere('cl.twilio_call_sid', leadSid);
     });
   }
+  // The contact number of the promise's own call (dialed number outbound,
+  // caller ID inbound), matched by this file's own phoneWhere digits rule.
+  if (phone) phoneWhere(builder, "CASE WHEN cl.direction LIKE 'outbound%' THEN cl.to_phone ELSE cl.from_phone END", phone);
   return builder;
 }
 
@@ -1983,7 +2047,7 @@ function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSi
 // callback cards (deadline, default owner, audit row) as they read; every
 // other caller — the Intelligence Bar's read-only tool, the integrations
 // worker — gets a pure read and sees whatever those paths persisted.
-async function listOpenCommitments(conn, { party = null, kind = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null } = {}) {
+async function listOpenCommitments(conn, { party = null, kind = null, kinds = null, customerId = null, leadId = null, phone = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date(), activeSince = null } = {}) {
   let leadSid = null;
   if (leadId) {
     // No local catch: a failed lookup must reach the route's error handler
@@ -2005,8 +2069,15 @@ async function listOpenCommitments(conn, { party = null, kind = null, customerId
     .whereRaw(`NOT ${staleAiRowSql('cc')}`)
     .modify((b) => {
       if (party === 'waves' || party === 'customer') b.where('cc.party', party);
-      if (kind) b.where('cc.kind', kind);
-      scopeCommitmentRows(b, { customerId, leadId, leadSid });
+      // Additive: kinds (a list) pushes a multi-kind filter into the QUERY
+      // itself, page and limit both — a caller scanning for one of several
+      // kinds on a shared/long-lived number must not have those rows
+      // crowded out of every LIMIT-bounded page by unrelated kinds it will
+      // only discard client-side anyway (Codex #5019 r10 P2). kind (single)
+      // is unchanged for every existing caller.
+      const kindFilter = kinds && kinds.length ? kinds : (kind ? [kind] : null);
+      if (kindFilter) b.whereIn('cc.kind', kindFilter);
+      scopeCommitmentRows(b, { customerId, leadId, leadSid, phone });
       if (!includeHints) b.whereNull('cc.fulfillment');
       // activeSince (the follow-up pager): only promises made, dated or
       // snoozed since then — a large historical backlog must not page
@@ -2409,6 +2480,29 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
     await require('./audit-log').recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy || null,
       action: `callback_${action}`, resource_type: 'call_commitment', resource_id: id,
       metadata: { via: 'ledger', renewed_at: new Date().toISOString(), ...renewal }, critical: true, trx: conn });
+  } else if (before && before.party === 'waves' && before.kind !== 'callback'
+    && require('./followup-sla-watcher').SLA_KINDS.includes(before.kind)
+    && (action === 'reopen' || (action === 'edit' && editRestatesRow(before, { description, due_at })))) {
+    // The durable renewal event for every OTHER alertable SLA kind
+    // (send_estimate, schedule_visit), mirroring callback's own
+    // callback_edit/callback_reopen trail above — structural fix for Codex
+    // #5019 r17, superseding r16's human_state-based rule (CLAUDE.md rule
+    // 19: the r16 guard in obligationRenewedAt is removed, not kept
+    // alongside this). r16 read the boundary off human_state === 'edited',
+    // but applyHumanUpdate's own 'confirm' CASE above only ever preserves
+    // 'edited' for kind === 'callback' — for these kinds a later ORDINARY
+    // confirm always resets human_state to 'confirmed' regardless of a
+    // genuine prior edit, silently erasing a human_state-based boundary.
+    // A durable audit_log event, once written, is unaffected by anything a
+    // later confirm does to the row — a distinct action name
+    // (commitment_edit / commitment_reopen, never callback_*) so nothing
+    // reading the callback events changes. A bare confirm never reaches
+    // this branch at all (`before` is populated only for reopen/edit,
+    // above), and a non-substantive edit (wording/due_at unchanged) writes
+    // nothing, since nothing about the obligation was actually restated.
+    await require('./audit-log').recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy || null,
+      action: `commitment_${action}`, resource_type: 'call_commitment', resource_id: id,
+      metadata: { via: 'ledger', renewed_at: new Date().toISOString() }, critical: true, trx: conn });
   } else if (before && before.kind === 'send_reschedule_link' && before.party === 'waves' && action === 'reopen') {
     // The inverse of a dismiss is not a no-op for this kind: an explicit
     // office verdict is one of only two things allowed to move the
@@ -2653,6 +2747,8 @@ module.exports = {
   editRestatesRow,
   callbackEditEventMetadata,
   addHumanCommitment,
+  obligationRenewedAt,
+  renewalBoundaryUnknown,
   buildCallOutcomes,
   OVERDUE_IMPLICIT_DAYS,
   PROMPT_KINDS,

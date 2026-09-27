@@ -1,3 +1,4 @@
+const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
 /**
  * Per-Invoice Follow-up Sequence Engine
  *
@@ -1139,7 +1140,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       } catch (err) {
         result = err.providerOutcome || { deliveryOutcome: 'uncertain', deferred: true };
       }
-      if (result?.deliveryOutcome === 'accepted') {
+      if (billingLegDeliveryState(channel, result || {})) {
         smsSent = true;
         if (channel === 'push') appSent = true; else actualSmsSent = true;
         if (typeof ContactLedger.markDelivered === 'function'

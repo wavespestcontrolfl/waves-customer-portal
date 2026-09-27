@@ -63,6 +63,12 @@ it('offers App on both reminder rows and saves each existing channel field', asy
 it('scopes the visit App shortcut away from billing without enabling a muted category or text/email', async () => {
   prefs.serviceReminder72h = false;
   render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);
+  await screen.findByText('Connected to your Waves app.');
+  expect(screen.queryByRole('button', { name: 'Use app for visit updates' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('switch', { name: 'App notifications for my account' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Manage app notification settings' }));
+  expect(api.updateNotificationPrefs).not.toHaveBeenCalled();
+  expect(screen.getByRole('switch', { name: 'App notifications for my account' })).toBeVisible();
   const shortcut = await screen.findByRole('button', { name: 'Use app for visit updates' });
   await waitFor(() => expect(shortcut).toBeEnabled());
   fireEvent.click(shortcut);
@@ -243,6 +249,7 @@ it('requires a fresh connected app before selecting App for reminders', async ()
   api.getCustomerPushStatus.mockResolvedValue({ available: true, enabled: true, registered: true, fresh: false });
   render(<ScheduleTab customer={customer} onRequestVisit={() => {}} />);
   await screen.findByText(/Open the app to refresh its connection/);
+  expect(screen.getByRole('switch', { name: 'App notifications for my account' })).toBeVisible();
   expect(within(reminder72()).getByRole('option', { name: 'App', exact: true })).toBeDisabled();
   expect(within(reminder24()).getByRole('option', { name: 'App', exact: true })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Use app for visit updates' })).toBeDisabled();
