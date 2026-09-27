@@ -132,6 +132,9 @@ describe('custom action credential screening', () => {
     'Opened rear gate on 9/27/2026 with code 2468',
     'Use unit2468 at the rear gate',
     'USE 24-0-11-BEFORE AT THE REAR GATE',
+    'Opened rear gate using unit2468',
+    'The gate opens with unit2468',
+    'Use unit2468 to open the rear gate',
   ])('rejects recorded access credentials: %s', (action) => {
     expect(customerCopyViolations(action)).toContain('access_code');
   });
@@ -177,6 +180,7 @@ describe('custom action credential screening', () => {
     'APPLIED LESCO 24-0-11 BEFORE OPENING THE REAR GATE',
     'APPLIED LESCO 24-0-11 AFTER OPENING THE REAR GATE',
     'APPLIED LESCO 24-0-11 WHILE OPENING THE REAR GATE',
+    'Using 100 ml at the rear gate before opening it, we treated the hinge area',
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
   });
@@ -212,6 +216,9 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Opened rear gate on 9/27/2026 with code 2468',
     'Use unit2468 at the rear gate',
     'USE 24-0-11-BEFORE AT THE REAR GATE',
+    'Opened rear gate using unit2468',
+    'The gate opens with unit2468',
+    'Use unit2468 to open the rear gate',
   ])('does not publish disguised access instructions: %s', (instruction) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${instruction}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toBeNull();
@@ -250,6 +257,7 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'APPLIED LESCO 24-0-11 BEFORE OPENING THE REAR GATE',
     'APPLIED LESCO 24-0-11 AFTER OPENING THE REAR GATE',
     'APPLIED LESCO 24-0-11 WHILE OPENING THE REAR GATE',
+    'Using 100 ml at the rear gate before opening it, we treated the hinge area',
   ])('publishes bounded material, date, unit-id, and fertilizer details: %s', (action) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${action}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toContain(action);

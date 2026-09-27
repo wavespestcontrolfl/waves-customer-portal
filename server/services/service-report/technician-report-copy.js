@@ -345,11 +345,12 @@ function accessCodeDetectionText(text) {
     const digits = token.replace(/\D/g, '');
     const credentialShape = /[A-Za-z#*]/.test(token) || /[\s–—-]/.test(token);
     if (!credentialShape || digits.length < 3 || digits.length > 8) return match;
-    // A labeled property/unit id is not an access token. Keep the label in the
-    // detection text so normalization cannot collapse "treated unit 2468" to
-    // the false shorthand "gate 2468". Explicit code/PIN nouns were already
-    // screened on the original text above.
-    if (/(?:^|\s)unit\s*\d/i.test(token)) return match;
+    // A labeled property/unit id governed by treatment or inspection work is
+    // not an access token. Keep that whole relationship intact so
+    // normalization cannot collapse "treated unit 2468" to "gate 2468".
+    // Access relationships such as "using unit2468" must still normalize and
+    // reach the credential checks below.
+    if (/\b(?:treat(?:ed|ing)?|servic(?:ed|ing)?|inspect(?:ed|ing)?)\s+unit\s*\d/i.test(token)) return match;
     const compactDevice = token.match(/^(?:(rear|side|front|back|main|north|south|east|west)[\s–—-]*)?(gate|door|garage|entry|keypad|lockbox|alarm)(?=[\d#*\s–—-]|$)/i);
     if (compactDevice) {
       const direction = compactDevice[1] ? `${compactDevice[1]} ` : '';
@@ -372,7 +373,7 @@ const REPORT_DIRECT_ACCESS_CODE_RES = [
   new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b(?:\s+(?!(?:appl(?:y|ied|ying)|treat(?:s|ed|ing)?|broadcast(?:ed|ing)?|spread(?:ing)?|distribut(?:e|ed|ing))\b)[a-z][a-z'’\-]*){1,5}\s+(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b`, 'i'),
   new RegExp(String.raw`\b\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:(?:to|for)\s+)?(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,20}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b`, 'i'),
   new RegExp(String.raw`\b(?:enter|entering|type|typing|press|pressing|punch(?:ing)?|input(?:ting)?|try|trying)\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b`, 'i'),
-  new RegExp(String.raw`\b(?:use|using)\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,20}\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b`, 'i'),
+  new RegExp(String.raw`\b(?:use|using)\s+\d{3,8}\b\s+(?:${REPORT_MEASUREMENT_UNIT_TEXT}\s+)?(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s+(?:to|for)\s+(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b`, 'i'),
   /\b(?:use|using|enter|entering|type|typing|press|pressing|input(?:ting)?|try|trying)\s+unit\s*\d{3,8}\b[^\n.!?]{0,12}\b(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b/i,
   /\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,20}\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,
 ];
