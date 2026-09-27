@@ -9,12 +9,13 @@
 // (Taurus SC, Talstar P, surfactant — lib/pest-default-mix.js): which of
 // those went down, their amounts and rates, pests targeted, where, how, and
 // the activity seen when the server keeps a tech rating. Any other product
-// goes through the full form, which owns per-product method/unit rules for
-// the whole catalog. Then it submits the FULL
+// goes through the full completion screen, which owns per-product
+// method/unit rules for the whole catalog. Then it submits the FULL
 // completion endpoint (POST /admin/dispatch/:id/complete →
 // completeScheduledService), NOT /pest-recap: the full path records
-// per-product method, targets, amounts, rates and areas. "Full form" reaches
-// today's ServiceRecapModal before any attempt may have reached the server.
+// per-product method, targets, amounts, rates and areas. "Full form" (and
+// "+ Other product") opens the full completion screen — the Dispatch
+// CompletionPanel — before any attempt may have reached the server.
 //
 // The layout is compact (three/four-across choice rows, the note behind a
 // tap) so the choices fit a typical phone screen; the Complete button is
@@ -78,7 +79,7 @@ function blockedReasonFor(context, service) {
     && dayOf(service.routedScheduledDate) !== dayOf(visit.scheduledDate);
   if (movedCustomer || movedDay) return 'This visit changed since your schedule loaded. Close and reopen it from the schedule.';
   if (visit.serviceKey !== 'pest_re_service') return 'This visit is no longer a pest re-service. Use the full form.';
-  if (CLOSED_STATUSES.has(String(visit.status || ''))) return `This visit is already ${visit.status}. Use the full form to edit it.`;
+  if (CLOSED_STATUSES.has(String(visit.status || ''))) return `This visit is already ${visit.status}. Close and reopen it from the schedule.`;
   if (context?.eligible !== true) return 'This visit needs the full form.';
   return '';
 }
@@ -365,11 +366,13 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
 
   // Dismissing a saved sheet refreshes the schedule like "Next stop" does,
   // so a missed socket update can't leave the visit showing as open.
+  // A sheet blocked on a stale or changed visit asks the parent to refresh,
+  // so reopening routes from the live schedule, not the same old row.
   const close = useCallback(() => {
     if (submitting) return;
     if (done) onCompleted?.();
-    else onClose?.();
-  }, [submitting, done, onClose, onCompleted]);
+    else onClose?.(ctx.blockedReason ? { refresh: true } : undefined);
+  }, [submitting, done, ctx.blockedReason, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved, or refused
   // for good; the recap modal (Full form) can't resume a /complete attempt,
@@ -529,8 +532,8 @@ function ProductsSection({ rows, method, editAmounts, locked, onToggleEdit, onTo
           className={!row.active ? 'tech-visit-product--off' : undefined}
         />
       ))}
-      {/* Any product beyond the house mix completes through the full form,
-          which applies the catalog's per-product method and unit rules. */}
+      {/* Any product beyond the house mix completes through the full
+          completion screen, which records its method, amount and area. */}
       <Chip disabled={locked} label="+ Other product" onClick={onOtherProduct} />
     </ChoiceSection>
     {editAmounts && rows.filter((row) => row.active).map((row) => (

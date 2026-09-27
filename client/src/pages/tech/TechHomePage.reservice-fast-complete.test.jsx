@@ -21,7 +21,14 @@ vi.mock('../../components/tech/TechServicePhotosModal', () => ({ default: () => 
 vi.mock('../../components/tech/TechTreatmentZoneModal', () => ({ default: () => null }));
 vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }));
 vi.mock('../../components/ServiceRecapModal', () => ({ default: ({ service }) => <div>Existing recap form for {service.id}</div> }));
-vi.mock('../../components/tech/FastCompleteSheet', () => ({ default: ({ service }) => <div>Fast Complete sheet for {service.id}</div> }));
+vi.mock('../../components/tech/FastCompleteSheet', () => ({
+  default: ({ service, onFullForm }) => (
+    <div>
+      Fast Complete sheet for {service.id}
+      <button type="button" onClick={onFullForm}>Sheet full form</button>
+    </div>
+  ),
+}));
 import TechHomePage from './TechHomePage';
 
 const row = (id, overrides = {}) => ({
@@ -99,4 +106,15 @@ it('keeps a completed re-service on the recap editor even with the gate on', asy
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   expect(await screen.findByText('Existing recap form for svc-completed')).toBeInTheDocument();
   expect(screen.queryByText(/Fast Complete sheet/)).not.toBeInTheDocument();
+});
+
+it('sends the sheet\'s full-form escape to the full completion screen, not the recap modal', async () => {
+  const assign = vi.fn();
+  vi.stubGlobal('location', { ...window.location, assign });
+  rows = [row('svc-escape', { reserviceFastCompleteEnabled: true })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Sheet full form' }));
+  expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-escape');
+  expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
 });

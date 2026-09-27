@@ -1131,12 +1131,21 @@ export default function TechHomePage({ section = 'today' }) {
             routedScheduledDate: fastCompleteService.scheduledDate || fastCompleteService.scheduled_date || null,
           }}
           request={techRequest}
-          onClose={() => setFastCompleteService(null)}
+          onClose={(options) => {
+            setFastCompleteService(null);
+            // A sheet blocked on a stale row asks for a refresh, so reopening
+            // routes from the live schedule instead of the same old row.
+            if (options?.refresh) fetchSchedule();
+          }}
           onCompleted={() => { setFastCompleteService(null); fetchSchedule(); }}
+          // "Full form" and "+ Other product" go to the full completion screen
+          // (the Dispatch CompletionPanel deep link typed jobs already use): it
+          // loads the live visit and records every product's method, amount,
+          // targets and area, which the recap modal's /pest-recap path cannot.
           onFullForm={() => {
             const raw = fastCompleteService;
             setFastCompleteService(null);
-            setRecapService(raw);
+            openTypedCompletion(raw);
           }}
         />
       )}

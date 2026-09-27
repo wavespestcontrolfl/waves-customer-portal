@@ -406,12 +406,16 @@ describe('FastCompleteSheet', () => {
     expect(onFullForm).toHaveBeenCalled();
   });
 
-  test('a schedule row that went stale (another customer) is not completed here', async () => {
+  test('a schedule row that went stale (another customer) is not completed here, and closing asks for a refresh', async () => {
     const request = makeRequest();
-    render(<FastCompleteSheet service={{ ...SERVICE, routedCustomerId: 'cust-other' }} request={request} onClose={() => {}} />);
+    const onClose = vi.fn();
+    render(<FastCompleteSheet service={{ ...SERVICE, routedCustomerId: 'cust-other' }} request={request} onClose={onClose} />);
 
     expect(await screen.findByText('This visit changed since your schedule loaded. Close and reopen it from the schedule.')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Complete re-service' })).toBeNull();
+    // Reopening must route from the live schedule, not the same stale row.
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledWith({ refresh: true });
   });
 
   test('a visit the server no longer allows on the short form is sent to the full form', async () => {
