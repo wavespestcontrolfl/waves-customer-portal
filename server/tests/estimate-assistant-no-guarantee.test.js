@@ -570,6 +570,25 @@ describe('estimate assistant no-guarantee context', () => {
       .toMatch(/borate treatment applied to bare wood/i);
   });
 
+  test('an estimate with termite work states no other service\'s plan terms, as the page does', () => {
+    // AGENTS.md estimate truth scope: with termite work on the estimate, no
+    // service states callback, money-back, satisfaction or no-contract terms;
+    // the page strips the same clauses from row details.
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 55 },
+      pricingBundle: { frequencies: [{ key: 'monthly', monthly: 55, included: [
+        { service: 'rodent_bait', label: 'Rodent Bait Stations',
+          detail: 'Station service. Satisfaction guaranteed for the initial treatment only.' },
+        { service: 'termite_bait', label: 'Termite Bait Monitoring' },
+      ] }] },
+      noGuaranteeClaims: true,
+    });
+    const answer = answerEstimateQuestionFallback('Is satisfaction guaranteed on the rodent stations?', context);
+    expect(answer).not.toMatch(/satisfaction guaranteed/i);
+    expect(answer).toContain('Termite Service: No guarantee.');
+    expect(answer).toMatch(/do not see an estimate-wide callback or money-back guarantee/i);
+  });
+
   test('a hand-built context lists each row under its own name', () => {
     const bond = 'Purchased termite bond: 5-year term with re-treatment coverage.';
     const rows = [

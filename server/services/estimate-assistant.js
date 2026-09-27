@@ -1575,14 +1575,15 @@ function writtenSatisfactionClause(detail) {
       && !/\b(?:no|not|never|without|excluded|isn't|is not|doesn't|does not)\b/i.test(part)) || null;
 }
 
-// Each service's own terms on an estimate without estimate-wide terms. Owner
-// ruling 2026-09-27: each service carries its own guarantee terms, and the
-// assistant never guesses from the wording of a question which service is
-// meant. A termite row states its purchased terms (a selected bond, a
-// purchased trenching warranty), a pre-slab job its warranty option, or else
-// "No guarantee."; any other row states only
-// the satisfaction clause written in its own detail. The model context and the
-// fallback answer read this one list.
+// The per-service terms list for an estimate without estimate-wide terms
+// (AGENTS.md estimate truth scope, owner 2026-09-26/27). The assistant never
+// guesses from the wording of a question which service is meant; every
+// guarantee question gets this one list. A termite row states its purchased
+// terms (a selected bond, a purchased trenching warranty), a pre-slab job its
+// warranty option, or else "No guarantee.". Any other row states the
+// satisfaction clause written in its own detail, which rowWithSummary has
+// already removed on an estimate with termite work, as the page does. The
+// model context and the fallback answer read this one list.
 function serviceTermsFromRows(rowGroups = [], oneTimeRows = []) {
   const oneTimeIdentities = new Set(oneTimeRows.map(trenchingServiceIdentity));
   const seen = new Set();
