@@ -3,7 +3,7 @@
 // INVOICE_SEND_SOURCES). No collections reservation backs these, so no
 // collections policy applies either; the retry re-runs the invoice send's own
 // delivery checks instead.
-const INVOICE_SEND_SOURCES = new Set(['invoice_send_via_sms', 'invoice_send_deferred']);
+const { INVOICE_SEND_SOURCES } = require('../billing-email-replay-context');
 
 function refused(reason, retryable = false) {
   return { eligible: false, reason, retryable };

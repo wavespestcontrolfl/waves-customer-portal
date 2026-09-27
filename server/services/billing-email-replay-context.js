@@ -1,9 +1,9 @@
 const { validDateOnly } = require('../utils/date-only');
 
 // A direct invoice notice's explicit Email leg (#4963): the immediate send,
-// and its queued replay (see replaySourceEntryPoint). Mirrored in
-// messaging/billing-email-replay-eligibility.js, which re-runs the invoice
-// delivery checks for these sources.
+// and its queued replay (see replaySourceEntryPoint). The ONE definition:
+// messaging/invoice-send-replay-eligibility.js imports it, so a source that
+// stores an invoice-pinned context always gets the invoice re-check.
 const INVOICE_SEND_SOURCES = new Set(['invoice_send_via_sms', 'invoice_send_deferred']);
 const SOURCES = new Set([
   ...INVOICE_SEND_SOURCES,
@@ -130,4 +130,4 @@ function buildBillingReplayContext(input, authorityContext, notificationEventKey
   });
 }
 
-module.exports = { buildBillingReplayContext, sanitizeBillingReplayContext };
+module.exports = { buildBillingReplayContext, sanitizeBillingReplayContext, INVOICE_SEND_SOURCES };
