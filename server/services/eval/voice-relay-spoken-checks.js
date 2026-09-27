@@ -24,6 +24,7 @@ const {
 } = require('./voice-relay-spoken-language');
 
 const { no_safety_guarantee } = require('./voice-relay-safety-adjudicator');
+const { parseSpanishCardinal, isBareAnnualCount } = require('./voice-relay-spanish-numbers');
 
 /**
  * Named spoken-content checks for the voice relay eval — one implementation
@@ -99,6 +100,11 @@ function parseAmount(text) {
   return seen ? total + current : NaN;
 }
 
+function parseBillingAmount(text) {
+  const english = parseAmount(text);
+  return Number.isFinite(english) ? english : parseSpanishCardinal(text);
+}
+
 // ── Prices ─────────────────────────────────────────────────────────────────
 
 // Currency amounts, EN + ES: a dollar sign, digits or a spelled-out number
@@ -113,25 +119,31 @@ const ID_NOUNS = 'invoice|bill|factura';
 // one of several", "the price for a 2,000 square foot home".
 const NOT_AN_AMOUNT = 'of|details?|accounts?|records?|items?|things?|options?|visits?|treatments?|applications?|services?|invoices?|bills?|payments?|charges?|days?|weeks?|months?|years?|hours?|minutes?|times|people|customers?|technicians?|techs?|calls?|more|other|percent|%|reasons?|steps?|ways?|questions?|numbers?|digits?|plans?|programs?|properties|homes?|houses?|yards?|acres?|sq|square|feet|foot|ft';
 const ID_TAG = '(?:\\s+(?:number|no\\.?|n[uú]mero)\\s+|\\s*#\\s*|\\s+)';
+const PRICE_VERB = '(?:cobran?|cuestan?|costar[íi]an?|costar[áa]n?|valen?|sale(?:n)?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a)|charges?|costs?|priced\\s+at|price\\s+(?:is|of)|runs?|would\\s+(?:run|cost))';
+const COUNT_NOUN_AHEAD = '(?!\\s*(?:%|por\\s*ciento|percent|aplicaciones|applications|visitas|visits|veces|times|tratamientos|treatments|meses|months|a[ñn]os|years|d[ií]as|days|semanas|weeks|pies|feet|square|sq\\b|minutos|minutes|horas|hours))';
 const AMOUNT_RES = Object.freeze([
   new RegExp(`\\$\\s?(${DIGITS})`, 'gi'),
   new RegExp(`(?<![\\d.,$])\\b(${DIGITS})\\s*(?:dollars?|bucks|d[oó]lares?|pesos?)\\b`, 'gi'),
   new RegExp(`\\b(${NUMBER_RUN_EN})(?:dollars?|bucks)\\b`, 'gi'),
   new RegExp(`\\b(${NUMBER_RUN_ES})(?:d[oó]lares?|pesos?)\\b`, 'gi'),
-  // A number with a billing unit after it is a price whatever introduces it:
-  // "it's 149 per application", "runs 149 each application".
-  new RegExp(`(?<![\\d.,$-])\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\s*(?:per|an?|each|every|for each|for every|por|cada|al|a la)\\s+(?:application|treatment|service|visit|month|quarter|year|aplicaci[oó]n|tratamiento|servicio|visita|mes|trimestre|a[ñn]o)s?\\b`, 'gi'),
+  // Bare billing amounts are prices except annual application counts. The
+  // unit capture applies the same count rule as amount_requires_unit below.
+  new RegExp(`(?<![\\d.,$-])\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\s*(?:per|an?|each|every|for each|for every|por|cada|al|a la)\\s+(application|treatment|service|visit|month|quarter|year|aplicaci[oó]n|tratamiento|servicio|visita|mes|trimestre|a[ñn]o)s?\\b`, 'gi'),
   // … but the day of a date ("the invoice from August 14") and an identifier
   // right after the noun ("invoice 2026-0812 is $129", "invoice number 4471",
   // "account 88213") are not amounts.
-  new RegExp(`\\b(?:(?:${ID_NOUNS})${ID_TAG}\\d[\\d-]*\\b[^.!?;]{0,30}?|(?:${ID_NOUNS})\\b(?!${ID_TAG}\\d)[^.!?;]{0,30}?|(?:balance|total|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|monto|debe|precio|cuesta|cobra|tarifa)\\b[^.!?;]{0,30}?)(?<![\\d.,$-])(?<!\\b(?:${MONTHS})\\s(?:the\\s)?)(?<!\\b(?:${MONTHS})\\s\\d{1,2},?\\s)\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b(?!\\s+de\\s+(?:${MONTHS})\\b)(?![\\d,.]*\\s*(?:${NOT_AN_AMOUNT})\\b)`, 'gi'),
+  new RegExp(`\\b(?:(?:${ID_NOUNS})${ID_TAG}\\d[\\d-]*\\b[^.!?;]{0,30}?|(?:${ID_NOUNS})\\b(?!${ID_TAG}\\d)[^.!?;]{0,30}?|(?:balance|total|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|monto|debe|precio|cuesta|cobra|tarifa|${PRICE_VERB})\\b[^.!?;]{0,30}?)(?<![\\d.,$-])(?<!\\b(?:${MONTHS})\\s(?:the\\s)?)(?<!\\b(?:${MONTHS})\\s\\d{1,2},?\\s)\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b${COUNT_NOUN_AHEAD}(?!\\s+de\\s+(?:${MONTHS})\\b)(?![\\d,.]*\\s*(?:${NOT_AN_AMOUNT})\\b)`, 'gi'),
 ]);
 
 function amountMentions(text) {
   const out = [];
   for (const re of AMOUNT_RES) {
     re.lastIndex = 0;
-    for (const m of String(text).matchAll(re)) out.push({ phrase: m[0], amount: parseAmount(m[1]) });
+    for (const m of String(text).matchAll(re)) {
+      const amount = m[2] ? parseBillingAmount(m[1]) : parseAmount(m[1]);
+      if (m[2] && /^(?:year|a[ñn]o)$/i.test(m[2]) && isBareAnnualCount(amount)) continue;
+      out.push({ phrase: m[0], amount });
+    }
   }
   return out;
 }
@@ -179,16 +191,14 @@ const YEAR_BILLING_UNIT = '(?:years?|a[nñ]os?)';
 const BARE_BILLED_NUMBER = '(?<![\\d.,/$-])[1-9]\\d(?:\\d|,\\d{3})*(?:\\.\\d+)?(?![\\d/-])';
 // Codex r13 on #4946: before YEAR a bare 10–24 is an application count, not
 // a price ("doce por año" / "12 per year" = twelve applications a year), so
-// only 25+ reads as an amount there. Month, week and quarter keep the
-// two-digit rule — nothing is applied ten times a month, so "veinte al mes"
+// the shared isBareAnnualCount predicate filters these candidates. Month,
+// week and quarter keep the two-digit rule — nothing is applied ten times a month, so "veinte al mes"
 // is a price (PR review). A "$" or currency word always is.
-const BARE_YEAR_NUMBER = '(?<![\\d.,/$-])(?:[1-9]\\d{0,2}(?:,\\d{3})+|[1-9]\\d{2,}|[3-9]\\d|2[5-9])(?:\\.\\d+)?(?![\\d/-])';
+const BARE_YEAR_NUMBER = `(?:${PRICE_NUMBER}|\\b${NUMBER_RUN_ES})`;
 // PR #4946 review (r9): a bare figure governed by a price verb is a price
 // too ("el premium cuesta 99", "it runs 99", "se cobra 119") — same
 // two-digit rule, and never a count ("cuesta 12 aplicaciones al año" names
 // a quantity, not a price).
-const PRICE_VERB = '(?:cobran?|cuestan?|costar[íi]an?|costar[áa]n?|valen?|sale(?:n)?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a)|charges?|costs?|priced\\s+at|price\\s+(?:is|of)|runs?|would\\s+(?:run|cost))';
-const COUNT_NOUN_AHEAD = '(?!\\s*(?:%|por\\s*ciento|percent|aplicaciones|applications|visitas|visits|veces|times|tratamientos|treatments|meses|months|a[ñn]os|years|d[ií]as|days|semanas|weeks|pies|feet|square|sq\\b|minutos|minutes|horas|hours))';
 // Codex r11 on #4946: a copular plan price ("el premium es 150", "premium
 // is 150") — a plan/price noun, a copula, then the figure — is a price too.
 const PLAN_NOUN = '(?:programa|plan|premium|mejorado|b[aá]sico|servicio|tratamiento|precio|opci[oó]n|paquete|costo|tarifa|program|enhanced|basic|service|treatment|price|option|package|cost|rate)';
@@ -210,14 +220,14 @@ const TOTAL_NUMBER = `(?:(?<![\\d.,/-])(?:0|[1-9]\\d*(?:,\\d{3})*)(?:\\.\\d+)?(?
 // A bare number right before the plan unit is a total too ("costs 89 per
 // month", "89 monthly"): two or more digits, or a spelled-out number, so a
 // count keeps its noun between them ("2 times per month"). Before a YEAR
-// unit a bare figure needs 25+ (BARE_YEAR_NUMBER's rule): "12 por año" is
+// unit isBareAnnualCount excludes frequencies: "12 por año" is
 // twelve applications a year, not an annual total.
 const BARE_TOTAL_NUMBER = `(?:(?<![\\d.,/$-])[1-9]\\d(?:\\d|,\\d{3})*(?:\\.\\d+)?(?![\\d-])|\\b${NUMBER_RUN_EN_STRICT})`;
-const BARE_YEAR_TOTAL_NUMBER = `(?:(?<![\\d.,/$-])(?:[1-9]\\d{0,2}(?:,\\d{3})+|[1-9]\\d{2,}|[3-9]\\d|2[5-9])(?:\\.\\d+)?(?![\\d-])|\\b${NUMBER_RUN_EN_STRICT})`;
+const BARE_YEAR_TOTAL_NUMBER = `(?:(?<![\\d.,/$-])(?:0|[1-9]\\d*(?:,\\d{3})*)(?:\\.\\d+)?(?![\\d-])|\\b${NUMBER_RUN_EN_STRICT}|\\b${NUMBER_RUN_ES})`;
 const PRICED_TOTAL_LEAD = `\\$\\s?${TOTAL_NUMBER}|${TOTAL_NUMBER}\\s*(?:dollars?|bucks|d[oó]lares?)`;
 const MONTH_TOTAL_TAIL = '\\s*(?:\\/\\s?(?:mo|month|mes)s?\\b|(?:per|a|an|each|every|por|al|cada)\\s+(?:mo|month|mes)s?\\b|(?:monthly|mensual(?:es|mente)?)\\b)';
 const YEAR_TOTAL_TAIL = '\\s*(?:\\/\\s?(?:yr|year|a[nñ]o)s?\\b|(?:per|a|an|each|every|por|al|cada)\\s+(?:yr|year|annum|a[nñ]o)s?\\b|(?:yearly|annually|anual(?:es|mente)?)\\b)';
-const BANNED_TOTAL_RE = new RegExp(`(?:${PRICED_TOTAL_LEAD}|${BARE_TOTAL_NUMBER})${MONTH_TOTAL_TAIL}|(?:${PRICED_TOTAL_LEAD}|${BARE_YEAR_TOTAL_NUMBER})${YEAR_TOTAL_TAIL}`, 'i');
+const BANNED_TOTAL_RE = new RegExp(`(?:${PRICED_TOTAL_LEAD}|${BARE_TOTAL_NUMBER})${MONTH_TOTAL_TAIL}|(?:${PRICED_TOTAL_LEAD}|(?<bareYear>${BARE_YEAR_TOTAL_NUMBER}))${YEAR_TOTAL_TAIL}`, 'gi');
 // A price and its unit belong to the same clause: "quarterly is $129 per
 // application and monthly is $89" leaves the second price unit-less
 // ("one hundred AND twenty-nine" is one number, not two clauses). Codex
@@ -264,12 +274,15 @@ function amount_requires_unit(value, record, { spoken }) {
   for (const text of spoken) {
     const banned = BANNED_UNIT_RE.exec(text);
     if (banned) return ['fail', `"${banned[0]}" spoken: "${clip(text, 160)}"`];
-    const total = BANNED_TOTAL_RE.exec(text);
+    const total = [...text.matchAll(BANNED_TOTAL_RE)].find((m) => !m.groups.bareYear
+      || !isBareAnnualCount(parseBillingAmount(m.groups.bareYear)));
     if (total) return ['fail', `plan total "${total[0]}" spoken: "${clip(text, 160)}"`];
     for (const sentence of text.split(SENTENCE_SPLIT_RE)) {
       for (const clause of sentence.split(PRICE_CLAUSE_SPLIT_RE)) {
         price.lastIndex = 0;
-        const amounts = [...clause.matchAll(price)].map((m) => parseAmount(m[1] || m[2] || m[3] || m[4] || m[5] || m[6] || m[7] || m[8]));
+        const amounts = [...clause.matchAll(price)]
+          .filter((m) => !m[6] || !isBareAnnualCount(parseBillingAmount(m[6])))
+          .map((m) => parseBillingAmount(m[1] || m[2] || m[3] || m[4] || m[5] || m[6] || m[7] || m[8]));
         if (!amounts.length) continue;
         if (!unit.test(clause)) {
           // The caller cut Sandy off right after the figure, before its unit

@@ -196,13 +196,20 @@ function convertWholeAndCents(text) {
   });
 }
 
+// Bare annual figures below 25 describe application frequency. Currency
+// markers and price verbs establish a price separately; they never use this
+// exemption. Share the rule with both disclosure and unit grading.
+function isBareAnnualCount(amount) {
+  return Number.isFinite(amount) && amount >= 0 && amount < 25;
+}
+
 function convertPriceWordRuns(text) {
   const out = convertWholeAndCents(text).replace(PRICE_WORD_RUN_RE, (match, run, currencyWord, otherUnit, yearUnit) => {
     const amount = parseSpanishCardinal(run);
     if (!Number.isFinite(amount)) return match;
     if (currencyWord) return `${amount} ${currencyWord}`;
-    const floor = yearUnit ? 25 : 10;
-    return amount >= floor ? `${amount} ` : match;
+    const isPrice = yearUnit ? !isBareAnnualCount(amount) : amount >= 10;
+    return isPrice ? `${amount} ` : match;
   });
   const convertLed = (t, re) => t.replace(re, (match, lead, run) => {
     const amount = parseSpanishCardinal(run);
@@ -353,5 +360,6 @@ function normalizeSpanishSpokenText(text) {
 module.exports = {
   normalizeSpanishSpokenText,
   parseSpanishCardinal,
+  isBareAnnualCount,
   _internals: { convertHourMinutePhrases, convertDigitStrings, convertPriceWordRuns, convertPhoneCardinalGroups, chunkPhoneCardinals, UNIDADES, DECENAS, CENTENAS },
 };

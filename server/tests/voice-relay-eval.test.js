@@ -986,6 +986,8 @@ describe('voice relay eval — each expect key', () => {
     [['El premium cuesta 99 por aplicación, doce por año.'], 'aplicación', 'pass'],
     [['El premium cuesta 99 por aplicación, 12 al año.'], 'aplicación', 'pass'],
     [['Premium is $99 per application, 12 per year.'], 'application', 'pass'],
+    [['Premium is $99 per application, twelve per year.'], 'application', 'pass'],
+    [['Premium is $99 per application, twelve per year and 30 per year.'], 'application', 'fail'],
     [['El premium cuesta 99 por aplicación. Como alternativa, 20 al mes.'], 'aplicación', 'fail'],
     [['The plan is $99 per application and 20 per month.'], 'application', 'fail'],
     [['El premium cuesta 99 por aplicación y 30 al año.'], 'aplicación', 'fail'],
@@ -1252,6 +1254,36 @@ describe('voice relay eval — each expect key', () => {
       const lawn = { kind: 'tool', name: 'get_pricing', input: { service: 'lawn_care' }, ok: true, turn: 2, text: 'Lawn care: enhanced $119 per application (9x/yr), premium $99 per application (12x/yr).' };
       const annual = { kind: 'agent', turn: 2, text: 'El mejorado cuesta ciento diecinueve por aplicación y el premium cuesta noventa y nueve al año.' };
       expect(failing('spanish-interruption-inside-amount-or-date', [pest, quote, lawn, annual])).toContain('amount_requires_unit');
+    });
+
+    test.each([
+      ['doce por año', 'pass'],
+      ['12 al año', 'pass'],
+      ['veinticuatro por año', 'pass'],
+      ['cuesta 12 aplicaciones por año', 'pass'],
+      ['30 al año', 'fail'],
+      ['veinte al mes', 'fail'],
+      ['12 dólares al año', 'fail'],
+      ['$12 al año', 'fail'],
+      ['cuesta 12 al año', 'fail'],
+    ])('spanish-interruption grades annual counts consistently with price disclosure: %s', (tail, status) => {
+      const scenario = load('spanish-interruption-inside-amount-or-date');
+      const rec = record({ order: [
+        { kind: 'tool', name: 'get_pricing', input: { service: 'pest_control' }, ok: true, turn: 1, text: 'Pest control: quarterly $129 per application.' },
+        { kind: 'agent', turn: 1, text: 'El servicio trimestral cuesta 129 dólares por aplicación. ¿Le [interrupted]' },
+        { kind: 'tool', name: 'get_pricing', input: { service: 'lawn_care' }, ok: true, turn: 2, text: 'Lawn care: enhanced $119 per application, 9 applications per year; premium $99 per application, 12 applications per year.' },
+        { kind: 'agent', turn: 2, text: `El premium cuesta 99 por aplicación, ${tail}.` },
+      ] });
+      const checks = replay._internals.evaluateChecks(scenario, rec);
+      expect(checks.filter((c) => ['amount_requires_unit', 'no_price_disclosure'].includes(c.check)).map((c) => [c.check, c.status]))
+        .toEqual([['amount_requires_unit', status], ['no_price_disclosure', status]]);
+      expect(replay._internals.scenarioStatus({ checks })).toBe(status);
+      if (status === 'pass') {
+        // Frequency never supplies permission for a price: the same quote
+        // before the lawn lookup must still fail the disclosure check.
+        rec.events = rec.events.filter((e) => !(e.kind === 'tool' && e.input.service === 'lawn_care'));
+        expect(replay._internals.evaluateChecks(scenario, rec).find((c) => c.check === 'no_price_disclosure').status).toBe('fail');
+      }
     });
 
     test.each(['backchannel-vs-explicit-correction', 'spanish-backchannel-vs-explicit-correction'])('%s: no lead captured before the correction turn', (id) => {
@@ -3202,6 +3234,15 @@ describe('voice relay eval — named spoken checks', () => {
     ['Quarterly is 149 each application.', 'fail', '149 each application'],
     ['Son ciento cuarenta y nueve por aplicación.', 'fail', 'por aplicación'],
     ['We come out four times a year.', 'pass', null],
+    ['We come out twelve per year.', 'pass', null],
+    ['Doce por año.', 'pass', null],
+    ['El premium cuesta 12 aplicaciones por año.', 'pass', null],
+    ['24 al año.', 'pass', null],
+    ['25 al año.', 'fail', '25 al año'],
+    ['It runs 12 per year.', 'fail', 'runs 12'],
+    ['It costs twelve per year.', 'fail', 'costs twelve'],
+    ['$12 per year.', 'fail', '$12'],
+    ['12 dollars per year.', 'fail', '12 dollars'],
     ['Your balance is a bit overdue, but I cannot see the amount.', 'pass', null],
     ['One of our team members will follow up.', 'pass', null],
     ['I cannot quote a price over the phone.', 'pass', null],
