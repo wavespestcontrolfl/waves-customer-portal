@@ -275,36 +275,51 @@ function metadataPatch(conn, value) {
 // classifier uses for a different question. Reused verbatim rather than
 // reimplemented (CLAUDE.md rule 15).
 //
-// customerId is passed ONLY when it predates THIS call
-// (customerPredatesThisCall's own rule, already used elsewhere in this
-// file for the owner's existing-customer never-rule) — a customer_id this
-// call itself just minted (the legacy call-created-customer path) proves
-// nothing about PRIOR contact and would otherwise short-circuit
-// hasPriorContact's own customerId branch to an automatic true. phone is
-// the call's own contact number (resolveCallContactPhone(call, null), no
-// extracted-phone override) — the exact number this call actually used,
-// never a dictated callback the caller has not necessarily always held.
-// before is callStartedAt(call), NOT call.created_at (codex pre-push P1,
-// preserved from the original check): a post-call fallback row (status
-// callback / recording-status recovery — call-timeline.js's
+// customerId reuses outboundPriorContactCustomerId (call-recording-
+// processor.js) — the ALREADY-FIXED canonical resolver, never
+// customerPredatesThisCall (codex #5012 r2 P1: that helper only excludes a
+// customer THIS call's own legacy path minted; it has no comparison
+// against the customer ROW'S OWN created_at at all, so a customer linked to
+// this call but actually created concurrently with or after it — a web-form
+// signup, a different reprocess, an unrelated later signup on the same
+// number — would still short-circuit hasPriorContact's own customerId
+// branch to an automatic true, exactly the TCPA-implied-consent gap
+// outboundPriorContactCustomerId's own predatesCall() exists to close for
+// every OTHER caller of this same probe). A live (deleted_at IS NULL)
+// lookup of the linked customer's created_at is required to apply that
+// same timing check here — customerPredatesThisCall itself is still
+// correct and unchanged for its OWN, different purpose (the owner's
+// existing-customer never-rule in STAGING_CHECKS, which does not carry a
+// prior-CONTACT timing claim the way this outbound check does).
+//
+// phone is the call's own contact number (resolveCallContactPhone(call,
+// null), no extracted-phone override) — the exact number this call
+// actually used, never a dictated callback the caller has not necessarily
+// always held. before is callStartedAt(call), NOT call.created_at (codex
+// pre-push P1, preserved from the original check): a post-call fallback
+// row (status callback / recording-status recovery — call-timeline.js's
 // POST_CALL_ROW_SOURCES) stamps created_at AFTER the call ends, while
 // callStartedAt backs the call's own length out of it — comparing against
 // the later created_at would read evidence recorded DURING this same call
 // as having preceded it.
-async function outboundPriorContactMissing(call) {
+async function outboundPriorContactMissing(conn, call) {
   if (!String(call?.direction || '').startsWith('outbound')) return false;
   const { hasPriorContact } = require('./outbound-call-reason');
-  const { resolveCallContactPhone } = require('./call-recording-processor');
+  const { resolveCallContactPhone, outboundPriorContactCustomerId } = require('./call-recording-processor');
+  const before = callStartedAt(call) || new Date(call.created_at);
+  const callCustomerCreatedAt = call.customer_id
+    ? (await conn('customers').where({ id: call.customer_id }).whereNull('deleted_at').first('created_at').catch(() => null))?.created_at || null
+    : null;
   const has = await hasPriorContact({
-    customerId: customerPredatesThisCall(call) ? call.customer_id : null,
+    customerId: outboundPriorContactCustomerId({ call, callMeta: parseMetadata(call), callCustomerCreatedAt, before }),
     phone: resolveCallContactPhone(call, null),
-    before: callStartedAt(call) || new Date(call.created_at),
+    before,
   });
   return !has;
 }
 
-async function outboundStagingReason(call) {
-  return (await outboundPriorContactMissing(call)) ? 'outbound_without_prior_contact' : null;
+async function outboundStagingReason(conn, call) {
+  return (await outboundPriorContactMissing(conn, call)) ? 'outbound_without_prior_contact' : null;
 }
 
 // This lane deliberately does NOT use call-commitments.js's callEndedAt for
@@ -627,7 +642,7 @@ async function stageOne(conn, call, now, boundary = null) {
   }
   const leadId = linkage.leadId;
   const extraction = extractionOf(call);
-  const reason = stagingIneligibleReason(call, extraction, leadId) || (await outboundStagingReason(call));
+  const reason = stagingIneligibleReason(call, extraction, leadId) || (await outboundStagingReason(conn, call));
   if (reason) {
     await claimMetadata(conn, call.id, { status: 'skipped', reason, staged_at });
     return 'skipped';
@@ -767,7 +782,7 @@ const DISPATCH_CHECKS = [
   ({ lead }) => (lead.estimate_id ? 'estimate_linked' : null),
   ({ lead }) => (lead.is_commercial === true ? 'commercial_lead' : null),
   ({ lead }) => (!lead.phone || !isUsPhone(lead.phone) ? 'lead_phone_unusable' : null),
-  async ({ call }) => ((await outboundPriorContactMissing(call)) ? 'outbound_without_prior_contact' : null),
+  async ({ conn, call }) => ((await outboundPriorContactMissing(conn, call)) ? 'outbound_without_prior_contact' : null),
   async ({ conn, call, lead }) => {
     const callStart = callStartedAt(call) || new Date(call.created_at);
     return (await bookedSinceCall(conn, lead.customer_id, callStart)) ? 'booked_since_call' : null;

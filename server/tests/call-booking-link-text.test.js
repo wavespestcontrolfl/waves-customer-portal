@@ -743,12 +743,22 @@ describe('stage', () => {
 describe('outboundPriorContactMissing / outboundStagingReason', () => {
   const callEnd = new Date('2026-09-26T18:00:00Z');
 
+  // A call with no customer_id never touches conn at all (the customers
+  // lookup is inside `if (call.customer_id)`) — throwing proves that.
+  function throwingConn() {
+    return jest.fn(() => { throw new Error('conn must not be queried without a customer_id'); });
+  }
+  function customerLookupConn(customerRow) {
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), first: jest.fn(async () => customerRow) };
+    return jest.fn(() => chain);
+  }
+
   beforeEach(() => { hasPriorContact.mockReset(); });
 
   test('an inbound call never needs prior-contact evidence — hasPriorContact is never called', async () => {
-    expect(await outboundPriorContactMissing({ direction: 'inbound', created_at: callEnd })).toBe(false);
+    expect(await outboundPriorContactMissing(throwingConn(), { direction: 'inbound', created_at: callEnd })).toBe(false);
     expect(hasPriorContact).not.toHaveBeenCalled();
-    const reason = await outboundStagingReason({ direction: 'inbound', created_at: callEnd });
+    const reason = await outboundStagingReason(throwingConn(), { direction: 'inbound', created_at: callEnd });
     expect(reason).toBeNull();
     expect(hasPriorContact).not.toHaveBeenCalled();
   });
@@ -756,31 +766,62 @@ describe('outboundPriorContactMissing / outboundStagingReason', () => {
   test('an outbound call with prior inbound contact proceeds (hasPriorContact resolves true)', async () => {
     hasPriorContact.mockResolvedValue(true);
     const call = { direction: 'outbound', created_at: callEnd, to_phone: '+19415550100' };
-    expect(await outboundPriorContactMissing(call)).toBe(false);
-    expect(await outboundStagingReason(call)).toBeNull();
+    expect(await outboundPriorContactMissing(throwingConn(), call)).toBe(false);
+    expect(await outboundStagingReason(throwingConn(), call)).toBeNull();
   });
 
   test('an outbound call to a manual/cold lead (no prior contact at all) is skipped', async () => {
     hasPriorContact.mockResolvedValue(false);
     const call = { direction: 'outbound', created_at: callEnd, to_phone: '+19415550100' };
-    expect(await outboundPriorContactMissing(call)).toBe(true);
-    expect(await outboundStagingReason(call)).toBe('outbound_without_prior_contact');
+    expect(await outboundPriorContactMissing(throwingConn(), call)).toBe(true);
+    expect(await outboundStagingReason(throwingConn(), call)).toBe('outbound_without_prior_contact');
   });
 
-  test('hasPriorContact is called with the dialed contact number, and a customerId only when it predates this call', async () => {
+  // codex r7 P1: customerId now goes through outboundPriorContactCustomerId
+  // (call-recording-processor.js, promoted to a real export) — the
+  // ALREADY-FIXED canonical resolver — never customerPredatesThisCall,
+  // which has no comparison against the customer ROW'S OWN created_at at
+  // all. A customer linked to this call whose OWN row postdates the call
+  // (a concurrent web-form signup, a different reprocess, an unrelated
+  // later signup on the same number) must NOT count as prior contact just
+  // because this call itself didn't mint it.
+  test('a customer_id that predates this call (both by provenance AND its own created_at) is passed to hasPriorContact', async () => {
     hasPriorContact.mockResolvedValue(true);
     const predating = { direction: 'outbound', created_at: callEnd, to_phone: '+19415550100', customer_id: 'cust-old', metadata: {} };
-    await outboundPriorContactMissing(predating);
+    const conn = customerLookupConn({ created_at: new Date('2026-09-01T00:00:00Z') }); // well before callEnd
+    await outboundPriorContactMissing(conn, predating);
     expect(hasPriorContact).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-old', phone: '+19415550100' }));
+  });
 
-    hasPriorContact.mockClear();
+  test('a customer_id THIS call itself minted is never passed, regardless of the customer row\'s own created_at', async () => {
+    hasPriorContact.mockResolvedValue(true);
     // The legacy call-created-customer path stamps BOTH customer_id and
     // metadata.created_customer_id in the same transaction — this call
     // itself just minted 'cust-new', so it proves nothing about PRIOR
     // contact and must never be passed to hasPriorContact's own automatic
     // customerId-true branch.
     const mintedNow = { direction: 'outbound', created_at: callEnd, to_phone: '+19415550100', customer_id: 'cust-new', metadata: { created_customer_id: 'cust-new' } };
-    await outboundPriorContactMissing(mintedNow);
+    const conn = customerLookupConn({ created_at: new Date('2026-09-01T00:00:00Z') }); // predates the call, but excluded anyway
+    await outboundPriorContactMissing(conn, mintedNow);
+    expect(hasPriorContact).toHaveBeenCalledWith(expect.objectContaining({ customerId: null }));
+  });
+
+  // codex r7 P1's own core regression: a customer linked to this call but
+  // whose OWN row was created AFTER the call started must not count either,
+  // even though it was never created BY this call.
+  test('a customer_id NOT minted by this call, but whose own row postdates the call, is still excluded', async () => {
+    hasPriorContact.mockResolvedValue(true);
+    const call = { direction: 'outbound', created_at: callEnd, to_phone: '+19415550100', customer_id: 'cust-later', metadata: {} };
+    const conn = customerLookupConn({ created_at: new Date(callEnd.getTime() + 60 * 1000) }); // created a minute AFTER the call started
+    await outboundPriorContactMissing(conn, call);
+    expect(hasPriorContact).toHaveBeenCalledWith(expect.objectContaining({ customerId: null }));
+  });
+
+  test('a live-customer lookup failure fails closed (no customerId), never throws', async () => {
+    hasPriorContact.mockResolvedValue(false);
+    const call = { direction: 'outbound', created_at: callEnd, to_phone: '+19415550100', customer_id: 'cust-broken', metadata: {} };
+    const conn = jest.fn(() => ({ where: () => ({ whereNull: () => ({ first: async () => { throw new Error('db down'); } }) }) }));
+    await expect(outboundPriorContactMissing(conn, call)).resolves.toBe(true);
     expect(hasPriorContact).toHaveBeenCalledWith(expect.objectContaining({ customerId: null }));
   });
 
@@ -797,7 +838,7 @@ describe('outboundPriorContactMissing / outboundStagingReason', () => {
       direction: 'outbound', created_at, duration_seconds, to_phone: '+19415550100',
       metadata: { source: 'status_callback', inserted_on_status: 'completed' }, // terminal ⇒ post-call row
     };
-    await outboundPriorContactMissing(call);
+    await outboundPriorContactMissing(throwingConn(), call);
     const [[arg]] = hasPriorContact.mock.calls;
     expect(arg.before.getTime()).toBe(created_at.getTime() - duration_seconds * 1000); // NOT created_at itself
   });
