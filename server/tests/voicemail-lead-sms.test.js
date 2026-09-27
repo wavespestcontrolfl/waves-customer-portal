@@ -173,6 +173,17 @@ describe('voicemail lead text-back gates', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('a prior quote-link row proven never sent (the replay blocked it, or staff cancelled it) does not use up the one text — its claims were released so a later voicemail re-arms', async () => {
+    expect(await sendVoicemailQuoteLink(args())).toEqual({ sent: true });
+    const history = db.mock.results[db.mock.calls.findIndex(([table]) => table === 'sms_log')].value;
+    const statusFilter = history.where.mock.calls.map(([arg]) => arg).find((arg) => typeof arg === 'function');
+    const q = { whereNull: jest.fn(() => q), orWhereNotIn: jest.fn(() => q) };
+    statusFilter(q);
+    // Unknown status still counts; only blocked/cancelled rows are proven unsent.
+    expect(q.whereNull).toHaveBeenCalledWith('status');
+    expect(q.orWhereNotIn).toHaveBeenCalledWith('status', ['blocked', 'cancelled', 'canceled']);
+  });
+
   test('dedupe read failure fails CLOSED — never risk a duplicate automated text', async () => {
     state.firstResults.sms_log = [new Error('db down')];
     const result = await sendVoicemailQuoteLink(args());
