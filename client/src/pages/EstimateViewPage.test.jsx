@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import { setGlassDefault } from '../lib/estimate-glass-copy';
+import WavesShell from '../components/brand/WavesShell';
 import EstimateViewPage, { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 vi.mock('react-router-dom', () => ({ useParams: () => ({ token: 'mixed-termite-token' }) }));
@@ -497,7 +498,7 @@ describe('mixed-estimate approval microcopy', () => {
       }),
     })));
 
-    render(<EstimateViewPage />);
+    render(<WavesShell><EstimateViewPage /></WavesShell>);
 
     await waitFor(() => {
       expect(screen.getByText('Termite Trenching')).toBeInTheDocument();
@@ -505,6 +506,60 @@ describe('mixed-estimate approval microcopy', () => {
     expect(screen.getByText('Licensed & insured · No pressure — approve when you’re ready')).toBeInTheDocument();
     expect(screen.queryByText(/Satisfaction guaranteed/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/money-back guarantee/i)).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
+      expect(screen.getByText(/Written estimate scope and terms apply/i)).toBeInTheDocument();
+    });
+  });
+
+  it('retains the standard footer guarantee for an ordinary recurring estimate', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        glassDefault: false,
+        estimate: {
+          customerFirstName: 'Casey',
+          address: '1 Recurring Service Way',
+          serviceCategory: 'pest_control',
+          acceptance: { mode: 'standard_slot_pick' },
+          defaultServiceMode: 'recurring',
+          isOneTimeOnly: false,
+          showOneTimeOption: false,
+          billByInvoice: false,
+          membership: null,
+          intelligence: null,
+          noGuaranteeClaims: false,
+        },
+        pricing: {
+          services: [{
+            key: 'pest_control',
+            label: 'Pest Control',
+            isRecurring: true,
+            isPest: true,
+            frequencies: [{
+              key: 'standard', label: 'Standard', monthly: 50, annual: 600,
+              included: [{ key: 'service', label: 'Recurring service' }], addOns: [],
+            }],
+            copy: { priceWording: {} },
+          }],
+          askChips: [],
+          defaultServiceMode: 'recurring',
+          renderFlags: {},
+        },
+        cta: {
+          canAccept: true,
+          terminalState: null,
+          quoteRequired: false,
+          reviewBeforeBooking: false,
+        },
+      }),
+    })));
+
+    render(<WavesShell><EstimateViewPage /></WavesShell>);
+
+    expect(await screen.findByText(/Backed by the Waves Guarantee/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Written estimate scope and terms apply/i)).not.toBeInTheDocument();
   });
 
   it('strips a stale guaranteed one-time hero after the service-specific overlay', async () => {

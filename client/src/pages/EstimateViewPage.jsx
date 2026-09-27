@@ -62,6 +62,7 @@ import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import useIsMobile from '../hooks/useIsMobile';
 import DocumentActionBar from '../components/DocumentActionBar';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
+import { setEstimateTrustFooterNoGuarantee } from '../components/brand/TrustFooter';
 
 // Payment Element renders inside Stripe's iframe, so the glass theme can't
 // restyle it via CSS — when the theme is mounted the modals pass brand-tuned
@@ -5410,6 +5411,11 @@ function EstimateViewPageInner({ websiteMode = false }) {
   // slugs) need the identical torn-paint guarantee.
   useCommercialGlassActive();
   const [data, setData] = useState(null);
+  const estimateNoGuaranteeClaims = data?.estimate?.noGuaranteeClaims === true;
+  useEffect(() => {
+    setEstimateTrustFooterNoGuarantee(estimateNoGuaranteeClaims);
+  }, [estimateNoGuaranteeClaims]);
+  useEffect(() => () => setEstimateTrustFooterNoGuarantee(false), []);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [loadError, setLoadError] = useState(false);
