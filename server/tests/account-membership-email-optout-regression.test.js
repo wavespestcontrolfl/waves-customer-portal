@@ -17,14 +17,19 @@ jest.mock('../services/email-template-library', () => ({
   })),
 }));
 jest.mock('../services/request-app-notifications', () => ({ send: jest.fn(async () => ({})) }));
+// The lock's transaction reads through the same table-queue db mock.
+jest.mock('../utils/customer-comms-lock', () => ({
+  withCustomerCommsLock: jest.fn(async (database, _customerId, fn) => fn(database)),
+}));
 
 const db = require('../models/db');
 const EmailTemplates = require('../services/email-template-library');
+const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const AccountMembershipEmail = require('../services/account-membership-email');
 
 function chain({ result = [], first } = {}) {
   const q = {};
-  ['where', 'whereIn', 'whereNotNull', 'whereNotIn', 'whereNull', 'select', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereIn', 'whereNotNull', 'whereNotIn', 'whereNull', 'select', 'orderBy', 'forUpdate'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.insert = jest.fn(() => q);
   q.update = jest.fn(() => q);
   q.first = jest.fn(async () => first);
@@ -124,5 +129,139 @@ describe('account-membership-email distinguishes a transient prefs failure from 
     // uses and that downstream callers treat as final.
     expect(result).toMatchObject({ ok: false, sent: false, transient: true, reason: 'prefs_unavailable' });
     expect(result.skipped).not.toBe(true);
+  });
+});
+
+// Owner ruling 2026-09-26: payment emails cannot be turned off. A billing.*
+// notice sent through this family's sendTemplate ignores the portal-wide
+// email switch that still silences membership.* / account.* mail above.
+// Where billing goes stays the customer's choice: an explicit billing channel
+// selection without Email means no pre-visit balance email, and the choice
+// and the billing recipient are rechecked at the provider handoff.
+describe('billing notices ignore the portal-wide email switch', () => {
+  let dispatched;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    dispatched = false;
+    // The library runs the caller's handoff the way runProviderHandoff does:
+    // dispatch inside it sends; a refusal or a throw before dispatch aborts
+    // the queued attempt.
+    EmailTemplates.sendTemplate.mockImplementation(async ({ withProviderHandoff }) => {
+      try {
+        await withProviderHandoff(async () => { dispatched = true; });
+      } catch { /* a throw before dispatch aborts */ }
+      return dispatched
+        ? { sent: true, message: { provider_message_id: 'sg-123', status: 'sent', sent_at: '2026-09-22T12:00:00.000Z' } }
+        : { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+    });
+  });
+
+  // First notification_prefs read = the recipient resolver, second = the
+  // locked re-read at the provider handoff. Third customers read = the
+  // handoff's locked recipient row. An Error stands in for a failed read.
+  const prefsRead = (prefs) => {
+    if (!(prefs instanceof Error)) return chain({ first: prefs });
+    const q = chain();
+    q.first = jest.fn(async () => { throw prefs; });
+    return q;
+  };
+  function previsitDb(prefs, handoffPrefs = prefs, handoffCustomer = customer()) {
+    const handoff = { customers: chain({ first: handoffCustomer }), prefs: prefsRead(handoffPrefs) };
+    const queues = {
+      customers: [chain({ first: customer() }), chain({ first: customer() }), handoff.customers],
+      customer_interactions: [chain(), chain(), chain()],
+      notification_prefs: [prefsRead(prefs), handoff.prefs],
+    };
+    db.mockImplementation((table) => {
+      const q = queues[table];
+      if (!q || !q.length) throw new Error(`Unexpected db table ${table}`);
+      return q.shift();
+    });
+    return handoff;
+  }
+
+  const sendPrevisit = () => AccountMembershipEmail.sendPrevisitBalanceReminder({
+    customerId: 'cust-1',
+    amount: '$129.00',
+    serviceType: 'Pest Control',
+    visitDate: 'Tuesday, October 6',
+    billingUrl: 'https://portal.example/pay',
+    idempotencyKey: 'previsit:cust-1:2026-10-06',
+  });
+
+  test.each([
+    { customer_id: 'cust-1', email_enabled: false },
+    { customer_id: 'cust-1', email_enabled: false, billing_channels: ['email', 'sms'] },
+  ])('billing.previsit_balance is emailed with the email switch off: %j', async (prefs) => {
+    const handoff = previsitDb(prefs);
+    const result = await sendPrevisit();
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'billing.previsit_balance' }));
+    expect(withCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
+    // Both recipient rows are locked through dispatch, customer first (the
+    // billing-channel email authority's order).
+    expect(handoff.customers.forUpdate).toHaveBeenCalled();
+    expect(handoff.prefs.forUpdate).toHaveBeenCalled();
+    expect(handoff.customers.forUpdate.mock.invocationCallOrder[0])
+      .toBeLessThan(handoff.prefs.forUpdate.mock.invocationCallOrder[0]);
+    expect(dispatched).toBe(true);
+    expect(result).toMatchObject({ ok: true, messageId: 'sg-123' });
+  });
+
+  test.each([
+    { customer_id: 'cust-1', email_enabled: false, billing_channels: ['sms'] },
+    { customer_id: 'cust-1', email_enabled: true, billing_channels: ['push'] },
+  ])('a billing channel choice without Email gets no pre-visit balance email: %j', async (prefs) => {
+    previsitDb(prefs);
+    await expect(AccountMembershipEmail.resolvePrevisitBalanceEmailRecipient('cust-1'))
+      .resolves.toEqual({ recipient: null, reason: 'billing_email_not_selected' });
+    previsitDb(prefs);
+    const result = await sendPrevisit();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: false, skipped: true, reason: 'billing_email_not_selected' });
+  });
+
+  test('an unreadable billing channel choice fails closed as a retryable no-send', async () => {
+    previsitDb(new Error('db down'));
+    await expect(AccountMembershipEmail.resolvePrevisitBalanceEmailRecipient('cust-1'))
+      .resolves.toEqual({ recipient: null, reason: 'prefs_unavailable', transient: true });
+    previsitDb(new Error('db down'));
+    const result = await sendPrevisit();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: false, sent: false, transient: true, reason: 'prefs_unavailable' });
+  });
+
+  test('a Text-only change saved after the recipient was resolved stops the email at the provider handoff', async () => {
+    previsitDb(
+      { customer_id: 'cust-1', billing_channels: ['email', 'sms'] },
+      { customer_id: 'cust-1', billing_channels: ['sms'] },
+    );
+    const result = await sendPrevisit();
+    expect(withCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
+    expect(dispatched).toBe(false);
+    expect(result).toEqual({ ok: false, skipped: true, reason: 'billing_email_not_selected' });
+  });
+
+  test('a billing address saved after the recipient was resolved stops the email at the handoff, retryably', async () => {
+    const prefs = { customer_id: 'cust-1', billing_channels: ['email', 'sms'] };
+    previsitDb(prefs, prefs, customer({ email: 'new-billing@example.com' }));
+    const result = await sendPrevisit();
+    expect(dispatched).toBe(false);
+    expect(result).toEqual({ ok: false, sent: false, transient: true, reason: 'billing_recipient_changed' });
+  });
+
+  test('a customer deleted after the recipient was resolved gets no email', async () => {
+    const prefs = { customer_id: 'cust-1', billing_channels: ['email'] };
+    previsitDb(prefs, prefs, customer({ deleted_at: '2026-09-26T12:00:00.000Z' }));
+    const result = await sendPrevisit();
+    expect(dispatched).toBe(false);
+    expect(result).toEqual({ ok: false, skipped: true, reason: 'customer_not_found' });
+  });
+
+  test('an unreadable choice at the handoff fails closed as a retryable no-send', async () => {
+    previsitDb({ customer_id: 'cust-1', billing_channels: ['email'] }, new Error('db down'));
+    const result = await sendPrevisit();
+    expect(dispatched).toBe(false);
+    expect(result).toEqual({ ok: false, sent: false, transient: true, reason: 'billing_email_recheck_failed' });
   });
 });
