@@ -9349,8 +9349,20 @@ const CallRecordingProcessor = {
     let outboundReturnMessagesEligible = false;
     if (isOutboundCall(call) && isEnabled('callOutboundReturnMessages')) {
       try {
+        // ACTUAL call-creation provenance, not the mere presence of
+        // call.customer_id (codex pre-push P1): a cold outbound call whose
+        // FIRST pass minted a customer stamps created_customer_id into
+        // call_log.metadata (Step 3's creation branch, above) — a
+        // reprocess of that SAME call must not then read its own creation
+        // as "an existing customer" prior-contact evidence, or one cold
+        // call qualifies itself on retry. Same pattern the newsletter
+        // rebuild guard above uses for the identical provenance question.
+        let callMeta = call.metadata;
+        if (typeof callMeta === 'string') { try { callMeta = JSON.parse(callMeta); } catch { callMeta = {}; } }
+        const customerPredatesThisCall = !!call.customer_id
+          && String(callMeta?.created_customer_id || '') !== String(call.customer_id);
         outboundReturnMessagesEligible = await require('./outbound-call-reason').hasPriorContact({
-          customerId: call.customer_id || null,
+          customerId: customerPredatesThisCall ? call.customer_id : null,
           phone: contactPhone,
           before: call.created_at || new Date(),
         });
