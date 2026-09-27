@@ -393,6 +393,12 @@ describe('rescheduleAgreementEvidence', () => {
     expect(evidence('Agent: Would Thursday at two work?\nCaller: That would be so much better.\nAgent: We will see you Thursday at two.').ok).toBe(true);
   });
 
+  test('a relative day after the agreed slot is a correction', () => {
+    for (const said of ['Please move it a week later.', 'Make it next week.', 'Actually, another day would be better.']) {
+      expect(evidence(`Caller: Can we do Thursday at two?\nAgent: We will see you Thursday at two.\nCaller: ${said}\nAgent: I will do that.`).ok).toBe(false);
+    }
+  });
+
   test('a number counting something is not a clock time, and the call\'s own weekday can be today', () => {
     expect(evidence(['Caller: Can we move it to Thursday?', 'Agent: We will see you Thursday.', 'Caller: I need service at two properties.',
       'Agent: We will do that.'].join('\n')).ok).toBe(false);

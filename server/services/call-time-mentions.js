@@ -351,6 +351,12 @@ function offeredWithAnotherHour(toks, pos, end) {
     || (HOUR_ALTERNATIVES.has(toks[prev]) && isHour(toks[skip(prev - 1, -1)]));
 }
 
+// A day said relative to the slot or the calendar ("a week later", "next
+// week", "another day") is another time too.
+const RELATIVE_DAY_PHRASES = [
+  'next week', 'week later', 'weeks later', 'following week', 'week after', 'next month', 'month later', 'another day',
+  'different day', 'later that week', 'later in the week', 'earlier in the week', 'next weekend', 'the weekend', 'day later', 'days later',
+];
 // The hours of the day a part-of-day word covers.
 const DAY_PARTS = { morning: [7, 11], afternoon: [12, 17], evening: [17, 21] };
 // "One" is a time only right after these ("make that one", "switch it to
@@ -360,11 +366,12 @@ const ONE_LEADS = new Set(['that', 'it', 'to']);
 // Does this text, read beside the mentions parsed from it, talk about a
 // time other than `hour24` — an hour no marker makes a clock time ("make that
 // three", read as business hours), a part of the day that does not hold it,
-// a month or other time word? The same hour said again unmarked ("we'll
-// switch it to two") is not another time, and a number running into a unit
-// of time is a length.
+// a day relative to the slot ("a week later"), a month or other time word?
+// The same hour said again unmarked ("we'll switch it to two") is not another
+// time, and a number running into a unit of time is a length.
 function talksOtherTime(ns, hour24) {
   const toks = ns.split(' ');
+  if (RELATIVE_DAY_PHRASES.some((phrase) => ` ${ns} `.includes(` ${phrase} `))) return true;
   return toks.some((tok, i) => {
     const one = tok === 'one' && ONE_LEADS.has(toks[i - 1]);
     if (!one && !TIME_WORDS.has(tok) && !/^(?:[1-9]|1[0-2])$/.test(tok)) return false;
