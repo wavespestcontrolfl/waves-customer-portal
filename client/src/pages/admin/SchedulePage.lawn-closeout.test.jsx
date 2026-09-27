@@ -128,6 +128,27 @@ it.each([false, true])('clears and optionally re-adds an action after Generate: 
   expect(body.technicianNotes.includes(label)).toBe(readd);
 });
 
+it.each(['Protocol', 'Protocol optional', 'Action'])('removes an edited generated-note [%s] marker with its detached action', async (tag) => {
+  const label = 'Inspected the recorded lawn service areas.';
+  completionActions = integrityActionList({ label, scope: 'exterior', treatmentApplied: false });
+  mountIntegrity();
+
+  const select = await screen.findByLabelText('Add protocol action');
+  await screen.findByRole('option', { name: label });
+  fireEvent.change(select, { target: { value: 'integrity-action' } });
+  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  await waitFor(() => expect(notes.value).toContain('WHAT WE DID'));
+  fireEvent.change(notes, { target: { value: `Reviewed generated prose.\n[${tag}] ${label}` } });
+  fireEvent.click(await screen.findByRole('button', { name: `Remove protocol item: ${label}` }));
+  expect(notes.value).toBe('Reviewed generated prose.');
+
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).not.toContain(label);
+  expect(submit.mock.calls[0][1].technicianNotes).not.toContain(label);
+});
+
 it.each([
   ['spray application', {}, 1],
   ['no-dry-down application', { dryDown: false }, 0],
@@ -176,32 +197,12 @@ it.each([
     serviceId: service.id, savedAt: Date.now(), notes: `${actions.map((label) => `[Protocol] ${label}`).join('\n')}\n${extraMarker}`,
     selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
     selectedProtocolActionLabels: actions,
-    actionScopeByLabel: Object.fromEntries(actions.map((label) => [label, { completionChoice: true }])),
   }));
   mount();
   fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   expect(alert).toHaveBeenCalledWith(expect.stringContaining(message));
   expect(submit).not.toHaveBeenCalled();
-});
-
-it.each([false, true])('preserves a restored choice when its choice list is unavailable: generated=%s', async (generated) => {
-  const action = 'Custom documented lawn work.';
-  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
-    serviceId: service.id,
-    savedAt: Date.now(),
-    notes: generated ? 'WHAT WE DID:\nDocumented this visit.' : `[Protocol] ${action}`,
-    preGenerationNotes: `[Protocol] ${action}`,
-    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
-    selectedProtocolActionLabels: [action],
-    actionScopeByLabel: { [action]: { completionChoice: true } },
-    chipLinesDetached: generated,
-  }));
-  mount();
-  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
-  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
-  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
-  expect(submit.mock.calls[0][1].protocolActionsCompleted).toEqual([action]);
 });
 
 it('keeps saved scope for a visible restored catalog action', async () => {
