@@ -280,7 +280,11 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
     const callId = await insertCall(mockPg, {
       created_at: callCreatedAt, updated_at: callCreatedAt,
-      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+      // created_customer_id matches the lead's customer_id: this call itself
+      // created/owns that customer, so the new existing_customer check (fix
+      // #2, codex #5018 r10) exempts it and lets the booked_since_call check
+      // below be the one this test actually exercises.
+      metadata: { lead_id: leadId, created_customer_id: customerId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
     });
     await mockPg('scheduled_services').insert({
       id: randomUUID(), customer_id: customerId, scheduled_date: '2027-01-20', service_type: 'Pest Control', status: 'pending',
@@ -411,5 +415,32 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(recoverableRow.metadata.call_booking_link_text.status).toBe('pending'); // recovered, never starved
     const stillClaimedAfterSecond = await mockPg('call_log').whereRaw("metadata->'call_booking_link_text'->>'status' = 'claimed'").count('* as n').first();
     expect(Number(stillClaimedAfterSecond.n)).toBe(0);
+  });
+
+  // codex #5018 r10 P2: the candidate SELECT bounds created_at to
+  // QUEUE_SCAN_LOOKBACK_MS via a real WHERE, not just a JS-level
+  // assertion — an "ancient" claimed row (older than any row could
+  // LEGITIMATELY still be) is excluded from the scan outright, while a
+  // genuinely stale (but recent) one is still found and recovered.
+  test('the real created_at bound excludes an ancient claimed row from the scan while still recovering a recent stale one', async () => {
+    const leadId = await insertLead(mockPg);
+    const staleClaimedAt = new Date(NOW.getTime() - callBookingLinkText.STALE_CLAIM_MS - 5 * 60 * 1000);
+    const originalSendAt = new Date(NOW.getTime() - 2 * 60 * 60 * 1000).toISOString();
+    const ancientCreatedAt = new Date(NOW.getTime() - callBookingLinkText.QUEUE_SCAN_LOOKBACK_MS - 24 * 60 * 60 * 1000); // a day past the bound
+    const ancientCallId = await insertCall(mockPg, {
+      created_at: ancientCreatedAt, updated_at: ancientCreatedAt,
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at: originalSendAt, original_send_at: originalSendAt, claimed_at: staleClaimedAt.toISOString() } },
+    });
+    const recentCallId = await insertCall(mockPg, {
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at: originalSendAt, original_send_at: originalSendAt, claimed_at: staleClaimedAt.toISOString() } },
+    });
+
+    const recovered = await callBookingLinkText.recoverStaleClaims(mockPg, NOW);
+    expect(recovered).toBe(1); // only the recent row — the ancient one is outside the scan's own bound
+
+    const ancientRow = await mockPg('call_log').where({ id: ancientCallId }).first('metadata');
+    expect(ancientRow.metadata.call_booking_link_text.status).toBe('claimed'); // untouched — never even scanned
+    const recentRow = await mockPg('call_log').where({ id: recentCallId }).first('metadata');
+    expect(recentRow.metadata.call_booking_link_text.status).toBe('pending'); // recovered normally
   });
 });

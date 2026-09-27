@@ -59,6 +59,7 @@ const {
   sweep,
   STAGING_GRACE_MINUTES,
   STAGING_STALE_MS,
+  QUEUE_SCAN_LOOKBACK_MS,
 } = require('../services/call-booking-link-text');
 
 // ── computeSendAt — 2h delay, 6pm ET cutoff → 8am ET next morning ─────────
@@ -322,6 +323,12 @@ describe('stagingIneligibleReason', () => {
     ['a property manager calling', { caller: { relationship_to_property: 'property_manager' } }, 'third_party_caller'],
     ['a realtor calling', { caller: { relationship_to_property: 'real_estate_agent' } }, 'third_party_caller'],
     ['a lender calling', { caller: { relationship_to_property: 'lender' } }, 'third_party_caller'],
+    // codex #5018 r10 P1: a home_buyer (schema 1.15.0) is under contract,
+    // not the owner yet — the owner's WDO-buyer authorization is narrow
+    // (a confirmed booking on the call) and this lane never reaches an
+    // already-booked call, so any home_buyer that reaches this check is
+    // never that authorized case.
+    ['a home buyer (under contract, not the owner yet) calling', { caller: { relationship_to_property: 'home_buyer' } }, 'third_party_caller'],
     ['a commercial property', { property: { property_type: 'commercial' } }, 'not_residential'],
     ['an HOA common area', { property: { property_type: 'hoa_common_area' } }, 'not_residential'],
     ['a priced one-time job (preventative)', { service_request: { service_intent: 'preventative_one_time' } }, 'service_intent_not_onsite'],
@@ -388,6 +395,35 @@ test('gate off: sweep never touches the database', async () => {
   expect(result).toEqual({ staged: 0, ineligible: 0, sent: 0, dispatchSkipped: 0 });
   expect(db).not.toHaveBeenCalled();
   isEnabled.mockReturnValue(true);
+});
+
+// codex #5018 r10 P2: sweep()'s own due-row query bounds created_at the
+// same way recoverStaleClaims' own SELECT does — see QUEUE_SCAN_LOOKBACK_MS's
+// own doc comment. stage()'s own call_log query issues its OWN, SMALLER
+// (STAGING_LOOKBACK_DAYS-only) created_at bound first — this test simply
+// asserts the LARGER, distinct QUEUE_SCAN_LOOKBACK_MS bound appears
+// somewhere among every call_log where() call this sweep tick issues,
+// which only the due-query (and recoverStaleClaims' own, tested separately
+// above) ever apply.
+test('sweep\'s own due-row query bounds created_at to QUEUE_SCAN_LOOKBACK_MS', async () => {
+  const now = new Date('2026-09-26T18:00:00Z');
+  const wheres = [];
+  const conn = jest.fn(() => {
+    const chain = {};
+    ['whereRaw', 'whereNull', 'orderBy', 'limit'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+    chain.where = jest.fn((...args) => { wheres.push(args); return chain; });
+    chain.select = jest.fn(async () => []);
+    // activationBoundary's own system_settings read/insert, reached via
+    // stage() before the due-query this test cares about ever runs —
+    // pinned to the epoch so pre_activation never trips.
+    chain.first = jest.fn(async () => ({ value: '1970-01-01T00:00:00.000Z' }));
+    chain.insert = jest.fn(() => ({ onConflict: jest.fn(() => ({ ignore: jest.fn(async () => {}) })) }));
+    return chain;
+  });
+  conn.raw = jest.fn();
+  await sweep(conn, { now });
+  const bound = wheres.find(([col, op, value]) => col === 'created_at' && op === '>=' && now.getTime() - value.getTime() === QUEUE_SCAN_LOOKBACK_MS);
+  expect(bound).toBeTruthy();
 });
 
 // ── activationBoundary / persistedActivationBoundary ──────────────────────
@@ -998,6 +1034,27 @@ describe('neverSendRecheck', () => {
     await expect(check({ dbi: dbi({ lead: { ...OPEN, estimate_id: 'est-1' } }) })).resolves.toEqual({ ok: false, code: 'estimate_linked' });
   });
 
+  // codex #5018 r10 P2: re-checked on the freshest possible read, the same
+  // reason every other check on this hook exists — a manual merge into an
+  // existing customer can land in the gap between dispatchIneligibleReason's
+  // own earlier check and the actual provider request.
+  test('a lead newly linked to an existing customer blocks the send', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    await expect(check({ dbi: dbi({ lead: { ...OPEN, customer_id: 'cust-existing' } }) })).resolves.toEqual({ ok: false, code: 'existing_customer' });
+  });
+
+  test('a lead linked to a customer THIS call itself created (created_customer_id exception) still passes', async () => {
+    const callWithOwnCustomer = { ...CALL_FOR_RECHECK, metadata: { created_customer_id: 'cust-new' } };
+    const check = neverSendRecheck(callWithOwnCustomer, 'lead-1', DESTINATION);
+    await expect(check({ dbi: dbi({ lead: { ...OPEN, customer_id: 'cust-new' } }) })).resolves.toEqual({ ok: true });
+  });
+
+  // codex #5018 r10 P2: a commercial correction can land in the same gap.
+  test('a lead corrected to commercial since dispatch blocks the send', async () => {
+    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    await expect(check({ dbi: dbi({ lead: { ...OPEN, is_commercial: true } }) })).resolves.toEqual({ ok: false, code: 'commercial_lead' });
+  });
+
   // codex r6 P1: staff correcting the phone in the gap between
   // dispatchClaimedCall's own earlier phone_changed_before_send check and
   // this hook (the actual last check before messages.create()) would
@@ -1019,7 +1076,12 @@ describe('neverSendRecheck', () => {
   });
 
   test('booked since the call started blocks the send', async () => {
-    const check = neverSendRecheck(CALL_FOR_RECHECK, 'lead-1', DESTINATION);
+    // metadata.created_customer_id matches the lead's customer_id — THIS
+    // call's own legacy path minted it, isolating this test from the new
+    // existing_customer check (codex #5018 r10 P2) so it still exercises
+    // booked_since_call specifically.
+    const callWithOwnCustomer = { ...CALL_FOR_RECHECK, metadata: { created_customer_id: 'cust-1' } };
+    const check = neverSendRecheck(callWithOwnCustomer, 'lead-1', DESTINATION);
     const conn = dbi({ lead: { ...OPEN, customer_id: 'cust-1' }, bookedSince: { id: 'visit-1' } });
     await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'booked_since_call' });
   });
@@ -1174,6 +1236,25 @@ describe('dispatchClaimedCall', () => {
     expect(result.skipped).toBe('commercial_lead');
   });
 
+  // codex #5018 r10 P2: a lead can be open (no customer_id) at STAGING
+  // time and get linked to an existing customer afterward — a manual
+  // merge, a different call, or this same call's own later reprocessing —
+  // before DISPATCH ever runs. Re-checked fresh here, never trusted from
+  // the staged decision.
+  test('a lead newly linked to an existing customer since staging blocks the send', async () => {
+    const conn = makeDb({ lead: { ...OPEN_LEAD, customer_id: 'cust-existing' } });
+    const result = await dispatchClaimedCall(conn, CALL, NOW);
+    expect(result.skipped).toBe('existing_customer');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a lead linked to a customer THIS call itself created (created_customer_id exception) still sends', async () => {
+    const callWithOwnCustomer = { ...CALL, metadata: { ...CALL.metadata, created_customer_id: 'cust-new' } };
+    const conn = makeDb({ lead: { ...OPEN_LEAD, customer_id: 'cust-new' } });
+    const result = await dispatchClaimedCall(conn, callWithOwnCustomer, NOW);
+    expect(result.sent).toBe(true);
+  });
+
   test('a cold outbound call (no prior inbound contact) blocks the send', async () => {
     hasPriorContact.mockResolvedValue(false);
     const outboundCall = { ...CALL, direction: 'outbound' };
@@ -1192,14 +1273,20 @@ describe('dispatchClaimedCall', () => {
   });
 
   test('booked since the call (any time after call end) blocks the send', async () => {
+    // metadata.created_customer_id matches the lead's customer_id — isolates
+    // this test from the new existing_customer check (codex #5018 r10 P2).
+    const callWithOwnCustomer = { ...CALL, metadata: { ...CALL.metadata, created_customer_id: 'cust-1' } };
     const conn = makeDb({ lead: { ...OPEN_LEAD, customer_id: 'cust-1' }, bookedSince: { id: 'visit-1' } });
-    const result = await dispatchClaimedCall(conn, CALL, NOW);
+    const result = await dispatchClaimedCall(conn, callWithOwnCustomer, NOW);
     expect(result.skipped).toBe('booked_since_call');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('a visit created during the call (after it started, before it ended) is caught as booked since the call', async () => {
-    const callDuring = { ...CALL, direction: 'inbound', created_at: new Date('2026-09-26T15:00:00Z'), duration_seconds: 300 }; // 15:00–15:05
+    const callDuring = {
+      ...CALL, direction: 'inbound', created_at: new Date('2026-09-26T15:00:00Z'), duration_seconds: 300, // 15:00–15:05
+      metadata: { ...CALL.metadata, created_customer_id: 'cust-1' },
+    };
     const visitCreatedAt = new Date('2026-09-26T15:02:00Z'); // mid-call
     const conn = makeDb({ lead: { ...OPEN_LEAD, customer_id: 'cust-1' }, visitCreatedAt });
     const result = await dispatchClaimedCall(conn, callDuring, NOW);
@@ -1215,7 +1302,10 @@ describe('dispatchClaimedCall', () => {
   // conversation falls BEFORE the bogus future bound and escapes
   // detection, texting a link to someone who already booked.
   test('a visit created after the real call end, but long before callEndedAt\'s bogus future reading, is still caught', async () => {
-    const recovered = { ...CALL, direction: 'inbound', created_at: new Date('2026-09-26T15:00:00Z'), duration_seconds: 999999999 };
+    const recovered = {
+      ...CALL, direction: 'inbound', created_at: new Date('2026-09-26T15:00:00Z'), duration_seconds: 999999999,
+      metadata: { ...CALL.metadata, created_customer_id: 'cust-1' },
+    };
     const visitCreatedAt = new Date('2026-09-26T15:10:00Z'); // minutes after the real call, decades before callEndedAt's reading
     const conn = makeDb({ lead: { ...OPEN_LEAD, customer_id: 'cust-1' }, visitCreatedAt });
     const result = await dispatchClaimedCall(conn, recovered, NOW);
@@ -1271,6 +1361,45 @@ describe('dispatchClaimedCall', () => {
     const result = await dispatchClaimedCall(conn, stuck, NOW);
     expect(result.skipped).toBe('call_not_ready_timeout');
     expect(result.deferred).toBeUndefined();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  // codex #5018 r10 P2: sendReadiness used to measure this timeout from
+  // entry.send_at, not original_send_at — send_at itself ADVANCES on every
+  // retry deferral (the next attempt time), so a row that kept getting
+  // deferred just under the 24h line would never time out, no matter how
+  // long it had genuinely been stuck (unlike pastRetryDeadline, which
+  // already measured from the fixed original_send_at). Here send_at was
+  // advanced to just 1h ago by an earlier retry, but the TRUE original
+  // send_at is 25h old — past NOT_READY_GIVE_UP_MS — so this must still
+  // time out.
+  test('a row whose send_at was advanced by a retry still times out 24h after the ORIGINAL send time, not the advanced one', async () => {
+    const conn = makeDb();
+    const advancedButRecentSendAt = new Date(NOW.getTime() - 1 * 60 * 60 * 1000).toISOString(); // only 1h old
+    const trueOriginalSendAt = new Date(NOW.getTime() - 25 * 60 * 60 * 1000).toISOString(); // 25h old — past the 24h bound
+    const staleEntry = { status: 'claimed', lead_id: 'lead-1', send_at: advancedButRecentSendAt, original_send_at: trueOriginalSendAt };
+    const stuck = { ...CALL, processing_token: 'tok-1', metadata: { ...CALL.metadata, call_booking_link_text: staleEntry } };
+    const result = await dispatchClaimedCall(conn, stuck, NOW);
+    expect(result.skipped).toBe('call_not_ready_timeout');
+    expect(result.deferred).toBeUndefined();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a row whose ORIGINAL send time is still within 24h keeps waiting, even though send_at itself is older (a clock skew edge case)', async () => {
+    const conn = makeDb();
+    // Deliberately inverted from the ordinary case, to isolate that this
+    // reads original_send_at and not merely "the older of the two":
+    // original_send_at is recent, so this must still be 'wait', never a
+    // timeout.
+    const entry = {
+      status: 'claimed', lead_id: 'lead-1',
+      send_at: new Date(NOW.getTime() - 25 * 60 * 60 * 1000).toISOString(),
+      original_send_at: new Date(NOW.getTime() - 1 * 60 * 60 * 1000).toISOString(),
+    };
+    const stuck = { ...CALL, processing_token: 'tok-1', metadata: { ...CALL.metadata, call_booking_link_text: entry } };
+    const result = await dispatchClaimedCall(conn, stuck, NOW);
+    expect(result.skipped).toBe('call_not_ready');
+    expect(result.deferred).toBe(true);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
@@ -1693,6 +1822,24 @@ describe('recoverStaleClaims', () => {
     conn.raw = jest.fn((sql, bindings) => { conn.raw.captured = conn.raw.captured || []; conn.raw.captured.push(bindings); return 'RAW'; });
     return conn;
   }
+
+  // codex #5018 r10 P2: the SELECT scans call_log via a metadata->>'status'
+  // JSON expression with no index of its own — bounding created_at (which
+  // IS indexed) keeps the scan itself small as history grows, rather than
+  // adding a migration for a JSON-path index.
+  test('the candidate SELECT bounds created_at to QUEUE_SCAN_LOOKBACK_MS', async () => {
+    const wheres = [];
+    const chain = {};
+    ['whereRaw', 'orderBy', 'limit'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+    chain.where = jest.fn((...args) => { wheres.push(args); return chain; });
+    chain.select = jest.fn(async () => []);
+    const conn = jest.fn(() => chain);
+    conn.raw = jest.fn();
+    await recoverStaleClaims(conn, NOW);
+    const bound = wheres.find(([col, op]) => col === 'created_at' && op === '>=');
+    expect(bound).toBeTruthy();
+    expect(NOW.getTime() - bound[2].getTime()).toBe(QUEUE_SCAN_LOOKBACK_MS);
+  });
 
   test('a stale claimed row with no handoff is requeued and counted', async () => {
     const row = {

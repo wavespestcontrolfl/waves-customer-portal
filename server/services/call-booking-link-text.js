@@ -125,6 +125,28 @@ const NOT_READY_GIVE_UP_MS = 24 * 60 * 60 * 1000;
 // next sweep tries again — short, since the 5-minute cron will pick it up
 // on one of its next several ticks either way.
 const RETRY_BACKOFF_MS = 30 * 60 * 1000;
+// Bounds sweep()'s own due-row query and recoverStaleClaims' own SELECT
+// (codex #5018 r10 P2): both scan call_log through a metadata->>'status'
+// JSON expression with no index of its own, so without a created_at bound
+// each scan grows with the table's ENTIRE history rather than just this
+// lane's own live rows. Rather than adding a migration for a JSON-path
+// index, both bound created_at instead — indexed since this lane's own
+// earliest migration (server/models/migrations/20260401000039_ai_assistant.js:
+// `t.index('created_at')`), so the scan itself stays small as history
+// grows. The bound is the maximum lifetime a row can LEGITIMATELY still be
+// 'pending' or 'claimed': STAGING_LOOKBACK_DAYS (staging never considers
+// an older call in the first place) + NOT_READY_GIVE_UP_MS (a 'pending'
+// row this far past its own ORIGINAL send_at is given up on by
+// sendReadiness/pastRetryDeadline; a 'claimed' row is moved out of
+// 'claimed' well inside this window, via STALE_CLAIM_MS) + a one-day
+// margin for the ordinary 2h/8am-ET initial delay and cron-tick
+// granularity. A row moved to 'ambiguous' status (recoverAbandonedClaim)
+// is invisible to EITHER query's own status filter regardless of
+// created_at, so this bound never risks skipping one that still needs
+// examining — only a genuinely stuck 'pending'/'claimed' row, which by
+// construction cannot legitimately be this old, would ever fall outside
+// it.
+const QUEUE_SCAN_LOOKBACK_MS = (STAGING_LOOKBACK_DAYS * 24 * 60 * 60 * 1000) + NOT_READY_GIVE_UP_MS + (24 * 60 * 60 * 1000);
 
 // Mirrors reschedule-link-promises.js's activationBoundary pattern: the
 // first live sweep anywhere fixes an instant in system_settings (or an
@@ -153,8 +175,20 @@ const MIN_CONVERSATION_SECONDS = 30;
 // 'unknown' (relationship never stated) is treated as ungrounded-but-not-a-
 // third-party, since most residential callers never explicitly say "I own
 // this house."
+//
+// 'home_buyer' (schema 1.15.0, codex #5006 P1): a buyer under contract, not
+// the owner yet. The owner ruling that authorized this relationship
+// (call-agent rulebook, "WDO buyers") scopes it narrowly — a buyer ordering
+// their OWN WDO inspection with a CONFIRMED time agreed on the call — and
+// this lane already never reaches a call with a confirmed booking
+// (STAGING_CHECKS' own already_booked_on_call / disposition_booked
+// entries below fire first for that exact shape). Any home_buyer call that
+// reaches THIS check is therefore never the WDO-buyer case the owner
+// authorized — send-the-buyer-a-booking-link would text a free-consultation
+// link to someone who does not yet own the property, which the ruling
+// never covers. Fails closed, same as the property_manager/lender group.
 const THIRD_PARTY_RELATIONSHIPS = new Set([
-  'property_manager', 'real_estate_agent', 'lender', 'hoa_board_member', 'employee', 'other',
+  'property_manager', 'real_estate_agent', 'lender', 'hoa_board_member', 'employee', 'other', 'home_buyer',
 ]);
 
 const RESIDENTIAL_PROPERTY_TYPES = new Set([
@@ -246,6 +280,25 @@ function customerPredatesThisCall(call) {
   if (!call.customer_id) return false;
   const createdId = parseMetadata(call).created_customer_id;
   return String(createdId || '') !== String(call.customer_id);
+}
+
+// The dispatch-time twin of customerPredatesThisCall, for the LEAD's own
+// customer_id rather than the call's (codex #5018 r10 P2): a lead can be
+// open (no customer_id) at STAGING time and get linked to an existing
+// customer afterward — a manual merge in the admin Leads page, a different
+// call resolving the same person, or this same call's own later
+// reprocessing pass — before DISPATCH ever runs. The owner's never-rule is
+// "not an existing customer," and that is now true of this lead regardless
+// of what it looked like when staged; trusting the staged decision here
+// would text a free-consultation link to someone who has since become a
+// real customer. Same created_customer_id exception as
+// customerPredatesThisCall: a lead linked to the customer THIS call's own
+// legacy call-created-customer path just minted is a new lead who happens
+// to already have a customer row, not someone "already active."
+function leadLinkedToExistingCustomer(call, lead) {
+  if (!lead?.customer_id) return false;
+  const createdId = parseMetadata(call).created_customer_id;
+  return String(createdId || '') !== String(lead.customer_id);
 }
 
 function extractionOf(call) {
@@ -783,6 +836,7 @@ const DISPATCH_CHECKS = [
   ({ lead }) => (!lead ? 'lead_not_found' : null),
   ({ lead }) => (!isOpenLeadRow(lead) ? 'lead_no_longer_open' : null),
   ({ lead }) => (lead.estimate_id ? 'estimate_linked' : null),
+  ({ call, lead }) => (leadLinkedToExistingCustomer(call, lead) ? 'existing_customer' : null),
   ({ lead }) => (lead.is_commercial === true ? 'commercial_lead' : null),
   ({ lead }) => (!lead.phone || !isUsPhone(lead.phone) ? 'lead_phone_unusable' : null),
   async ({ conn, call }) => ((await outboundPriorContactMissing(conn, call)) ? 'outbound_without_prior_contact' : null),
@@ -873,6 +927,13 @@ function neverSendRecheck(call, leadId, destinationPhone) {
       const lead = await dbi('leads').where({ id: leadId }).whereNull('deleted_at').first();
       if (!lead || !isOpenLeadRow(lead)) return { ok: false, code: 'lead_no_longer_open' };
       if (lead.estimate_id) return { ok: false, code: 'estimate_linked' };
+      // Re-verified on the freshest possible read, same reason as every
+      // other check on this hook (codex #5018 r10 P2): dispatchIneligibleReason's
+      // own check ran moments earlier, and either fact can change in the
+      // gap between there and the actual provider request — a manual
+      // merge into an existing customer, or a commercial flag correction.
+      if (leadLinkedToExistingCustomer(call, lead)) return { ok: false, code: 'existing_customer' };
+      if (lead.is_commercial === true) return { ok: false, code: 'commercial_lead' };
       // Re-verifies the SAME fact dispatchClaimedCall's own earlier
       // phone_changed_before_send check made, on the freshest possible read
       // (codex r6 P1): that earlier check compared built.phone against
@@ -935,7 +996,14 @@ function neverSendRecheck(call, leadId, destinationPhone) {
 // when the row is ready to judge.
 function sendReadiness(call, entry, now) {
   if (call.processing_token || call.v2_extraction_status == null) {
-    const dueAt = entry.send_at ? new Date(entry.send_at) : null;
+    // original_send_at, NOT entry.send_at (codex #5018 r10 P2): a retry
+    // deferral advances send_at itself (the NEXT attempt time), so measuring
+    // this timeout against that same, repeatedly-advancing field would let
+    // consecutive reprocess stalls push the give-up out indefinitely —
+    // exactly the bug pastRetryDeadline's own anchor already avoids for the
+    // send-retry case. Same fixed anchor, same NOT_READY_GIVE_UP_MS bound.
+    const anchor = entry.original_send_at || entry.send_at;
+    const dueAt = anchor ? new Date(anchor) : null;
     const overdue = dueAt && !Number.isNaN(dueAt.getTime()) && now.getTime() - dueAt.getTime() > NOT_READY_GIVE_UP_MS;
     return overdue ? 'call_not_ready_timeout' : 'wait';
   }
@@ -1191,6 +1259,7 @@ const STALE_CLAIM_MS = 15 * 60 * 1000;
 async function recoverStaleClaims(conn, now) {
   const cutoff = new Date(now.getTime() - STALE_CLAIM_MS);
   const stale = await conn('call_log')
+    .where('created_at', '>=', new Date(now.getTime() - QUEUE_SCAN_LOOKBACK_MS))
     .whereRaw("metadata->:key->>'status' = 'claimed'", { key: METADATA_KEY })
     .whereRaw("(metadata->:key->>'claimed_at')::timestamptz <= :cutoff", { key: METADATA_KEY, cutoff })
     .orderBy('created_at', 'asc').limit(DISPATCH_BATCH).select('id');
@@ -1212,6 +1281,7 @@ async function sweep(conn = db, { now = new Date() } = {}) {
   if (!isEnabled(GATE)) return { staged: 0, ineligible: 0, sent: 0, dispatchSkipped: 0 };
   const { staged, ineligible } = await stage(conn, { now });
   const due = await conn('call_log')
+    .where('created_at', '>=', new Date(now.getTime() - QUEUE_SCAN_LOOKBACK_MS))
     .whereRaw("metadata->:key->>'status' = 'pending'", { key: METADATA_KEY })
     .whereRaw("(metadata->:key->>'send_at')::timestamptz <= :now", { key: METADATA_KEY, now })
     .orderBy('created_at', 'asc').limit(DISPATCH_BATCH).select('id');
@@ -1259,6 +1329,7 @@ module.exports = {
   STAGING_LOOKBACK_DAYS,
   STAGING_GRACE_MINUTES,
   STAGING_STALE_MS,
+  QUEUE_SCAN_LOOKBACK_MS,
   MIN_CONVERSATION_SECONDS,
   computeSendAt,
   callEndFor,
