@@ -148,6 +148,15 @@ describe('notification trigger push tags', () => {
     expect(built.link).toBe('/admin/kb');
   });
 
+  test('KB audit trigger names where a generated entry is fixed', () => {
+    const built = TRIGGER_REGISTRY.kb_audit_flagged.build({
+      count: 1,
+      entries: [{ title: 'Sample SC', summary: 'Formulation missing.', fixLabel: 'Products catalog' }],
+    });
+
+    expect(built.body).toBe('Sample SC (fix in Products catalog): Formulation missing.');
+  });
+
   test('legacy internal admin SMS redirects have a generic notification trigger', () => {
     const built = TRIGGER_REGISTRY.internal_admin_alert.build({
       title: 'Tax Deadline Alert',

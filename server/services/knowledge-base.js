@@ -64,6 +64,84 @@ async function uniqueSlug(base) {
 }
 
 // ══════════════════════════════════════════════════════════════
+// AI AUDIT HELPERS
+// ══════════════════════════════════════════════════════════════
+// Auto-sync entries are rebuilt from live data on every sync, so a finding on
+// one is fixed at its source, never in the KB row (the next sync would
+// overwrite the edit). Those rows stay searchable; the finding routes to the
+// source's admin screen instead of hiding the entry.
+function auditSourceFor(entry) {
+  if (!entry || entry.source !== 'auto-sync') return null;
+  const slug = cleanText(entry.slug);
+  if (slug.startsWith('product-')) return { fixIn: 'products_catalog', label: 'Products catalog', link: '/admin/inventory?tab=products' };
+  if (slug.startsWith('cogs-')) return { fixIn: 'service_product_usage', label: 'Service product usage', link: '/admin/inventory?tab=products' };
+  if (slug.startsWith('pricing-')) return { fixIn: 'pricing_config', label: 'Pricing config', link: '/admin/pricing-logic' };
+  return { fixIn: 'protocols', label: 'Protocols', link: '/admin/service-library?tab=protocols' };
+}
+
+function todayInEastern(now = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+}
+
+function buildAuditPrompt(entry, now = new Date()) {
+  const source = auditSourceFor(entry);
+  return `You are auditing a knowledge base entry for a pest control & lawn care company (Waves Pest Control) in Southwest Florida. Review this entry for accuracy.
+
+Today's date: ${todayInEastern(now)}. Timestamps on or before today are not errors — judge the content, not when it was verified.
+${source ? `This entry is generated from the ${source.label} data; a finding means that source record needs fixing.
+` : ''}
+ENTRY:
+Title: ${entry.title}
+Category: ${entry.category}
+Content:
+${entry.content}
+
+Respond ONLY with a JSON object (no markdown fences):
+{
+  "status": "pass" | "flag" | "update-needed",
+  "confidence": "high" | "medium" | "low",
+  "issues": ["list of specific concerns if any"],
+  "summary": "one-line assessment"
+}
+
+Flag if: outdated regulations, incorrect chemical rates, expired certifications, wrong pricing logic, stale API references, or anything a SWFL pest/lawn pro would catch as wrong. Only call a label rate or active-ingredient percentage wrong when you are sure of the label value, and state that value; if you are unsure, say "verify against label" and do not flag for that alone. If it looks solid, pass it.`;
+}
+
+const AUDIT_CONFIDENCE = new Set(['high', 'medium', 'low']);
+
+// Decide what one AI verdict does to its entry. A flagged verdict never
+// stamps last_verified_at (a flag is not a verification) and never hides a
+// generated row; a pass restores an entry the audit had hidden.
+function planAuditOutcome(entry, parsed, now = new Date()) {
+  const flagged = parsed.status === 'flag' || parsed.status === 'update-needed';
+  const source = auditSourceFor(entry);
+  const updates = {};
+  if (flagged) {
+    if (!source) updates.status = 'flagged';
+  } else {
+    updates.last_verified_at = now;
+    updates.verified_by = 'ai-cron';
+    if (AUDIT_CONFIDENCE.has(parsed.confidence)) updates.confidence = parsed.confidence;
+    if (entry.status === 'flagged') updates.status = 'active';
+  }
+  const findings = source && flagged
+    ? { ...parsed, fix_in: source.fixIn, fix_link: source.link }
+    : parsed;
+  return { auditResult: flagged ? 'flagged' : 'passed', updates, findings, source };
+}
+
+// True when an entry's current flag came from the AI audit (not a person), so
+// a content change — the fix — should put it back in search.
+async function flagIsFromAIAudit(entryId) {
+  const latest = await db('knowledge_base_audits')
+    .where({ kb_entry_id: entryId })
+    .whereIn('audit_type', ['ai-review', 'manual-flag'])
+    .orderBy('created_at', 'desc')
+    .first();
+  return !!latest && latest.audit_type === 'ai-review';
+}
+
+// ══════════════════════════════════════════════════════════════
 // CORE CRUD
 // ══════════════════════════════════════════════════════════════
 const KnowledgeBaseService = {
@@ -96,6 +174,13 @@ const KnowledgeBaseService = {
       if (updates[key] !== undefined) {
         data[key] = (key === 'tags' || key === 'metadata')
           ? JSON.stringify(updates[key]) : updates[key];
+      }
+    }
+    if (data.content !== undefined && updates.status === undefined) {
+      const current = await db('knowledge_base').where({ id }).first();
+      if (current && current.status === 'flagged' && current.content !== data.content
+        && await flagIsFromAIAudit(id)) {
+        data.status = 'active';
       }
     }
     const [entry] = await db('knowledge_base').where({ id }).update(data).returning('*');
@@ -178,7 +263,9 @@ const KnowledgeBaseService = {
 
   // ── Verify (mark as reviewed) ──
   async verify(id, verifiedBy = 'waves') {
-    return this.update(id, { last_verified_at: new Date(), verified_by: verifiedBy, confidence: 'high' });
+    // A person verifying the entry is the review a flag asks for — it returns
+    // to search.
+    return this.update(id, { last_verified_at: new Date(), verified_by: verifiedBy, confidence: 'high', status: 'active' });
   },
 
   // ── Flag ──
@@ -197,22 +284,37 @@ const KnowledgeBaseService = {
   // ══════════════════════════════════════════════════════════════
   // AI AUDIT — "Question Your Assumptions" cron
   // ══════════════════════════════════════════════════════════════
-  async runAIAudit({ maxEntries = 10, forceAll = false } = {}) {
+  async runAIAudit({ maxEntries = 10, forceAll = false, flaggedOnly = false } = {}) {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       logger.warn('[kb] ANTHROPIC_API_KEY not set — skipping AI audit');
       return { audited: 0, flagged: 0, results: [] };
     }
 
-    // Get entries that need review: stale, low confidence, or unverified
-    let query = db('knowledge_base').where({ status: 'active' });
-    if (!forceAll) {
-      query = query.where(function () {
-        this.where('confidence', '!=', 'high')
-          .orWhere('last_verified_at', '<', db.raw("NOW() - INTERVAL '30 days'"))
-          .orWhereNull('last_verified_at');
-      });
+    // Get entries that need review: stale, low confidence, or unverified.
+    // flaggedOnly re-reviews entries an earlier audit hid. Rotation is by the
+    // last AI review, not last_verified_at — a flag no longer stamps that, so
+    // ordering on it would re-pick the same rows every week.
+    let query = db('knowledge_base')
+      .select('knowledge_base.*', db.raw(
+        '(SELECT MAX(a.created_at) FROM knowledge_base_audits a WHERE a.kb_entry_id = knowledge_base.id AND a.audit_type = ?) AS last_ai_review_at',
+        ['ai-review'],
+      ));
+    if (flaggedOnly) {
+      query = query.where({ status: 'flagged' });
+    } else {
+      query = query.where({ status: 'active' });
+      if (!forceAll) {
+        query = query.where(function () {
+          this.where('confidence', '!=', 'high')
+            .orWhere('last_verified_at', '<', db.raw("NOW() - INTERVAL '30 days'"))
+            .orWhereNull('last_verified_at');
+        });
+      }
     }
-    const entries = await query.orderBy('last_verified_at', 'asc').limit(maxEntries);
+    const entries = await query
+      .orderByRaw('last_ai_review_at ASC NULLS FIRST')
+      .orderBy('last_verified_at', 'asc')
+      .limit(maxEntries);
 
     if (!entries.length) {
       logger.info('[kb] AI audit: nothing to review');
@@ -231,24 +333,7 @@ const KnowledgeBaseService = {
           max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the visible answer
           messages: [{
             role: 'user',
-            content: `You are auditing a knowledge base entry for a pest control & lawn care company (Waves Pest Control) in Southwest Florida. Review this entry for accuracy.
-
-ENTRY:
-Title: ${entry.title}
-Category: ${entry.category}
-Last verified: ${entry.last_verified_at || 'never'}
-Content:
-${entry.content}
-
-Respond ONLY with a JSON object (no markdown fences):
-{
-  "status": "pass" | "flag" | "update-needed",
-  "confidence": "high" | "medium" | "low",
-  "issues": ["list of specific concerns if any"],
-  "summary": "one-line assessment"
-}
-
-Flag if: outdated regulations, incorrect chemical rates, expired certifications, wrong pricing logic, stale API references, or anything a SWFL pest/lawn pro would catch as wrong. If it looks solid, pass it.`,
+            content: buildAuditPrompt(entry),
           }],
         });
 
@@ -260,24 +345,27 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
           parsed = { status: 'pass', confidence: 'medium', issues: [], summary: 'Could not parse AI response' };
         }
 
-        const auditResult = parsed.status === 'flag' || parsed.status === 'update-needed' ? 'flagged' : 'passed';
+        const { auditResult, updates, findings, source } = planAuditOutcome(entry, parsed);
         if (auditResult === 'flagged') flagged++;
 
         await db('knowledge_base_audits').insert({
           kb_entry_id: entry.id,
           audit_type: 'ai-review',
-          findings: JSON.stringify(parsed),
+          findings: JSON.stringify(findings),
           result: auditResult,
           audited_by: 'ai-cron',
         });
 
-        // Update entry confidence and potentially flag it
-        const updates = { last_verified_at: new Date(), verified_by: 'ai-cron' };
-        if (parsed.confidence) updates.confidence = parsed.confidence;
-        if (auditResult === 'flagged') updates.status = 'flagged';
-        await db('knowledge_base').where({ id: entry.id }).update(updates);
+        if (Object.keys(updates).length) {
+          await db('knowledge_base').where({ id: entry.id }).update(updates);
+        }
 
-        results.push({ id: entry.id, title: entry.title, ...parsed });
+        results.push({
+          id: entry.id,
+          title: entry.title,
+          ...parsed,
+          ...(source && auditResult === 'flagged' ? { fixIn: source.fixIn, fixLabel: source.label, fixLink: source.link } : {}),
+        });
         logger.info(`[kb] AI audit: ${entry.title} → ${auditResult}`);
       } catch (err) {
         logger.error(`[kb] AI audit failed for "${entry.title}": ${err.message}`);
@@ -530,6 +618,9 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
             category: safeCategory,
             tags: tagJson,
             last_verified_at: new Date(), verified_by: 'auto-sync', updated_at: new Date(),
+            // The source changed — that is the fix an AI flag asked for.
+            ...(existing.status === 'flagged' && existing.content !== safeContent
+              && await flagIsFromAIAudit(existing.id) ? { status: 'active' } : {}),
           });
           updated++;
         } else { skipped++; }
@@ -713,3 +804,4 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
 };
 
 module.exports = KnowledgeBaseService;
+module.exports._internals = { auditSourceFor, buildAuditPrompt, planAuditOutcome, todayInEastern };

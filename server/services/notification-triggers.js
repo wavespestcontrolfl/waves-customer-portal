@@ -846,7 +846,9 @@ const TRIGGER_REGISTRY = {
       const visible = entries.slice(0, 4).map((entry) => {
         const title = entry.title || 'Untitled entry';
         const summary = entry.summary || 'Needs review';
-        return `${title}: ${String(summary).slice(0, 180)}`;
+        // Generated entries are fixed at their source; say where.
+        const where = entry.fixLabel ? ` (fix in ${entry.fixLabel})` : '';
+        return `${title}${where}: ${String(summary).slice(0, 180)}`;
       });
       if (count > visible.length) visible.push(`${count - visible.length} more flagged entr${count - visible.length === 1 ? 'y' : 'ies'}`);
       return {

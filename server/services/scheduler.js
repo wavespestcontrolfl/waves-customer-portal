@@ -6289,7 +6289,7 @@ function initScheduledJobs() {
         try {
           const flaggedEntries = result.results
             .filter(r => r.status === 'flag' || r.status === 'update-needed')
-            .map(r => ({ id: r.id, title: r.title, summary: r.summary, status: r.status }));
+            .map(r => ({ id: r.id, title: r.title, summary: r.summary, status: r.status, fixLabel: r.fixLabel, fixLink: r.fixLink }));
           const { triggerNotification } = require('./notification-triggers');
           await triggerNotification('kb_audit_flagged', {
             count: result.flagged,
