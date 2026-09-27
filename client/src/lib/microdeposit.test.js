@@ -85,7 +85,7 @@ describe('microdepositSavedPhrases', () => {
   test('the verify link is singular for one deposit and neutral when the type is unknown (Codex r1)', () => {
     expect(microdepositSavedPhrases('descriptor_code')).toMatchObject({ linkLabel: 'Enter the code here', arrival: 'once it arrives' });
     expect(microdepositSavedPhrases(null).linkLabel).not.toMatch(/deposits/);
-    expect(microdepositSavedPhrases(null).arrival).toBe('once it arrives');
+    expect(microdepositSavedPhrases(null).arrival).toBe('when the deposit information appears');
     // The step itself stays number-neutral when there may be two deposits (Codex r4).
     expect(microdepositSavedPhrases(null).confirmStep).toBe('verify your account');
     // A saved bank row doesn't know Stripe's type: its button stays neutral (Codex r3).
@@ -98,6 +98,8 @@ describe('microdepositSavedPhrases', () => {
       const p = microdepositSavedPhrases(type);
       expect(p.deposits).toBe('a small deposit (or two)');
       expect(p.deposits).not.toMatch(/^two/);
+      expect(p.arrival).toBe('when the deposit information appears');
+      expect(p.arrival).not.toMatch(/\bit\b|\bthey\b/);
     }
   });
 });

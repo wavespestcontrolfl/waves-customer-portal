@@ -48,7 +48,7 @@ export function microdepositSavedPhrases(microdepositType) {
     deposits: 'a small deposit (or two)',
     confirmStep: 'verify your account',
     linkLabel: 'Verify your account here',
-    arrival: 'once it arrives',
+    arrival: 'when the deposit information appears',
     actionLabel: 'Verify your account',
   };
 }

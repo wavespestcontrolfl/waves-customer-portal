@@ -4357,7 +4357,7 @@ function ReviewBeforeBookingCard({ reason }) {
       </div>
       <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
         {isTrenching
-          ? 'Your price is set from the measured treatment path. Because trenching drills concrete, lays a chemical soil barrier, and carries a retreat warranty, a Waves specialist confirms the plan with you — access, exact footage, product, and warranty — then schedules your visit, so it can’t be self-booked online.'
+          ? 'Your price is set from the measured treatment path. A Waves specialist confirms the treatment plan, access, exact footage, and product with you before scheduling your visit, so it can’t be self-booked online.'
           : 'A Waves specialist reviews this quote with you and schedules your visit — it can’t be self-booked online.'}
       </div>
       <a href={`tel:${WAVES_PHONE_TEL}`} style={estimateCallCtaStyle}>
