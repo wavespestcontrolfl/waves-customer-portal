@@ -53,13 +53,20 @@ async function collectionsChannelVerdict({
     });
   } catch (err) {
     logger.warn(`[${logTag}] collections policy consult failed for customer ${customerId}: ${err.message} — denying`);
-    return { permitted: false, eligibleInvoiceIds: [] };
+    return {
+      permitted: false,
+      eligibleInvoiceIds: [],
+      balanceIncomplete: 'policy evaluation failed',
+    };
   }
+  const incomplete = verdict.balanceIncomplete
+    ? { balanceIncomplete: verdict.balanceIncomplete }
+    : {};
   if (!verdict.allowed) {
     logger.info(`[${logTag}] collections policy denied ${channel} for customer ${customerId}: ${verdict.denialReasons.join(', ')}`);
-    return { permitted: false, eligibleInvoiceIds: verdict.eligibleInvoiceIds || [] };
+    return { permitted: false, eligibleInvoiceIds: verdict.eligibleInvoiceIds || [], ...incomplete };
   }
-  return { permitted: true, eligibleInvoiceIds: verdict.eligibleInvoiceIds || [] };
+  return { permitted: true, eligibleInvoiceIds: verdict.eligibleInvoiceIds || [], ...incomplete };
 }
 
 function includesQuotedInvoices(eligibleInvoiceIds, invoiceId, invoiceIds) {
