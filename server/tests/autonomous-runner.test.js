@@ -1759,11 +1759,13 @@ function loadRunnerWith({
   contentGuardrails = undefined,
   comparisonTableGate = undefined,
   claimsLedgerValidator = undefined,
-  dbTransaction = null,
+  dbQuery = null,
+  dbClient = null,
 }) {
   queue.skip ||= jest.fn().mockResolvedValue(true);
   jest.resetModules();
-  const dbMock = jest.fn(() => {
+  const dbMock = jest.fn((...args) => {
+    if (dbQuery) return dbQuery(...args);
     const returning = jest.fn().mockResolvedValue([{ id: 'run_1' }]);
     const ignore = jest.fn(() => ({ returning }));
     const onConflict = jest.fn(() => ({ ignore }));
@@ -1771,7 +1773,7 @@ function loadRunnerWith({
       insert: jest.fn(() => ({ returning, onConflict })),
     };
   });
-  if (dbTransaction) dbMock.transaction = jest.fn(dbTransaction);
+  if (dbClient) dbMock.client = dbClient;
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
   // The runner fires the owner email-approval notification via setImmediate
@@ -2474,6 +2476,33 @@ describe('runNext general shadow behavior', () => {
 });
 
 describe('runNext post-publish bookkeeping', () => {
+  function pageEditLockHarness(lockedRow, { unlockThrows = false } = {}) {
+    const events = [];
+    const conn = {
+      query: jest.fn(async (sql) => {
+        events.push(sql.includes('unlock') ? 'unlock' : 'lock');
+        if (unlockThrows && sql.includes('unlock')) throw new Error('connection reset');
+        return { rows: [] };
+      }),
+    };
+    const client = {
+      acquireConnection: jest.fn(async () => conn),
+      releaseConnection: jest.fn(async () => { events.push('release'); }),
+      destroyRawConnection: jest.fn(async () => { events.push('destroy'); }),
+    };
+    const first = jest.fn(async () => lockedRow);
+    const query = jest.fn(() => {
+      const q = {
+        connection: jest.fn(() => q),
+        where: jest.fn(() => q),
+        whereNull: jest.fn(() => q),
+        first,
+      };
+      return q;
+    });
+    return { client, conn, events, first, query };
+  }
+
   test('rechecks citability page ownership before publisher side effects', async () => {
     const publisher = { publishRefresh: jest.fn() };
     const queue = {
@@ -2488,27 +2517,19 @@ describe('runNext post-publish bookkeeping', () => {
         pageEditSuperseded: (row) => Boolean(row?.signal_metadata?.page_edit_superseded),
       },
     };
-    const trx = jest.fn(() => {
-      const q = {
-        where: jest.fn(() => q),
-        whereNull: jest.fn(() => q),
-        forUpdate: jest.fn(() => q),
-        first: jest.fn().mockResolvedValue({
-          bucket: 'citability_backfill',
-          status: 'claimed',
-          claim_id: 'claim-a',
-          claimed_at: new Date('2026-09-26T13:00:00Z'),
-          signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
-        }),
-      };
-      return q;
+    const lock = pageEditLockHarness({
+      bucket: 'citability_backfill',
+      status: 'claimed',
+      claim_id: 'claim-a',
+      claimed_at: new Date('2026-09-26T13:00:00Z'),
+      signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
     });
-    trx.raw = jest.fn().mockResolvedValue({});
     const runner = loadRunnerWith({
       queue,
       briefBuilder: {},
       publisher,
-      dbTransaction: (callback) => callback(trx),
+      dbQuery: lock.query,
+      dbClient: lock.client,
     });
 
     await expect(runner._publishAndDistribute(
@@ -2520,7 +2541,8 @@ describe('runNext post-publish bookkeeping', () => {
         queue_claimed_at: new Date('2026-09-26T13:00:00Z'),
       },
     )).rejects.toMatchObject({ code: 'PAGE_EDIT_SUPERSEDED' });
-    expect(trx.raw).toHaveBeenCalledWith("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+    expect(lock.conn.query).toHaveBeenCalledWith('SELECT pg_advisory_lock(hashtext($1))', ['opportunity_page_edit']);
+    expect(lock.events).toEqual(['lock', 'unlock', 'release']);
     expect(publisher.publishRefresh).not.toHaveBeenCalled();
   });
 
@@ -2532,22 +2554,13 @@ describe('runNext post-publish bookkeeping', () => {
       }),
       _internals: { pageEditSuperseded: () => false },
     };
-    const first = jest.fn().mockResolvedValue(null);
-    const trx = jest.fn(() => {
-      const q = {
-        where: jest.fn(() => q),
-        whereNull: jest.fn(() => q),
-        forUpdate: jest.fn(() => q),
-        first,
-      };
-      return q;
-    });
-    trx.raw = jest.fn().mockResolvedValue({});
+    const lock = pageEditLockHarness(null);
     const runner = loadRunnerWith({
       queue,
       briefBuilder: {},
       publisher,
-      dbTransaction: (callback) => callback(trx),
+      dbQuery: lock.query,
+      dbClient: lock.client,
     });
 
     await expect(runner._publishAndDistribute(
@@ -2559,35 +2572,30 @@ describe('runNext post-publish bookkeeping', () => {
         queue_claimed_at: new Date('2026-09-26T12:00:00Z'),
       },
     )).rejects.toMatchObject({ code: 'PAGE_EDIT_OWNERSHIP_LOST' });
-    expect(first).toHaveBeenCalledWith('bucket', 'signal_metadata', 'status', 'claim_id', 'claimed_at');
+    expect(lock.first).toHaveBeenCalledWith('bucket', 'signal_metadata', 'status', 'claim_id', 'claimed_at');
     expect(publisher.publishRefresh).not.toHaveBeenCalled();
   });
 
-  test('accepts the preserved claim id with the fresh approval claim timestamp', async () => {
+  test('holds the session lock through publishing and does not lose a successful publish to unlock failure', async () => {
     const approvalClaimedAt = new Date('2026-09-26T14:00:00Z');
-    const publisher = { publishRefresh: jest.fn().mockResolvedValue({ status: 'no_changes' }) };
+    const lock = pageEditLockHarness({
+      bucket: 'citability_backfill', status: 'claimed', claim_id: 'claim-approval',
+      claimed_at: approvalClaimedAt, signal_metadata: {},
+    }, { unlockThrows: true });
+    const publisher = {
+      publishRefresh: jest.fn(async () => {
+        lock.events.push('publish');
+        return { status: 'no_changes' };
+      }),
+    };
     const queue = {
       getById: jest.fn().mockResolvedValue({
         id: 'opp_backfill_approval', bucket: 'citability_backfill', status: 'claimed', signal_metadata: {},
       }),
       _internals: { pageEditSuperseded: () => false },
     };
-    const wheres = [];
-    const trx = jest.fn(() => {
-      const q = {
-        where: jest.fn((...args) => { wheres.push(args); return q; }),
-        whereNull: jest.fn(() => q),
-        forUpdate: jest.fn(() => q),
-        first: jest.fn().mockResolvedValue({
-          bucket: 'citability_backfill', status: 'claimed', claim_id: 'claim-approval',
-          claimed_at: approvalClaimedAt, signal_metadata: {},
-        }),
-      };
-      return q;
-    });
-    trx.raw = jest.fn().mockResolvedValue({});
     const runner = loadRunnerWith({
-      queue, briefBuilder: {}, publisher, dbTransaction: (callback) => callback(trx),
+      queue, briefBuilder: {}, publisher, dbQuery: lock.query, dbClient: lock.client,
     });
 
     await expect(runner._publishAndDistribute(
@@ -2599,12 +2607,10 @@ describe('runNext post-publish bookkeeping', () => {
         queue_claimed_at: approvalClaimedAt,
       },
     )).resolves.toMatchObject({ publish_status: 'no_changes' });
-    expect(wheres).toEqual(expect.arrayContaining([
-      ['status', 'claimed'],
-      ['claim_id', 'claim-approval'],
-      ['claimed_at', approvalClaimedAt],
-    ]));
     expect(publisher.publishRefresh).toHaveBeenCalledTimes(1);
+    expect(lock.events).toEqual(['lock', 'publish', 'unlock', 'destroy']);
+    expect(lock.client.releaseConnection).not.toHaveBeenCalled();
+    expect(lock.client.destroyRawConnection).toHaveBeenCalledWith(lock.conn);
   });
 
   // These tests exercise publish/queue bookkeeping, not blog dedup. Blog

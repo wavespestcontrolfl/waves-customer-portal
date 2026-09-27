@@ -1578,6 +1578,46 @@ class AutonomousRunner {
     }
   }
 
+  /**
+   * Hold the shared page-edit lock across an external publisher call without
+   * keeping a database transaction open. A successful GitHub branch/commit/PR
+   * must not be converted into an ordinary retry by a later COMMIT failure.
+   * This lock fails closed: proceeding without page ownership proof could
+   * publish over an ordinary edit.
+   */
+  async _withPageEditLock(fn) {
+    let lockConn = null;
+    let acquired = false;
+    let safeToRelease = true;
+    try {
+      lockConn = await db.client.acquireConnection();
+      await lockConn.query("SELECT pg_advisory_lock(hashtext($1))", ['opportunity_page_edit']);
+      acquired = true;
+      return await fn(lockConn);
+    } catch (err) {
+      if (!acquired) {
+        const unavailable = new Error(`Page-edit ownership lock unavailable: ${err.message}`);
+        unavailable.code = 'PAGE_EDIT_OWNERSHIP_LOST';
+        throw unavailable;
+      }
+      throw err;
+    } finally {
+      if (lockConn && acquired) {
+        try { await lockConn.query("SELECT pg_advisory_unlock(hashtext($1))", ['opportunity_page_edit']); }
+        catch (err) {
+          safeToRelease = false;
+          logger.warn(`[autonomous-runner] page-edit advisory unlock failed (${err.message}); destroying the locked session`);
+        }
+      }
+      if (lockConn) {
+        try {
+          if (safeToRelease) await db.client.releaseConnection(lockConn);
+          else await db.client.destroyRawConnection(lockConn);
+        } catch { /* pool reaps */ }
+      }
+    }
+  }
+
   async _runDailyInner({ limit = null, actionType = null } = {}) {
     const batchLimit = dailyBatchLimit(limit);
     // A single transient failure (e.g. a flaky agent dispatch) used to abort
@@ -3619,18 +3659,16 @@ class AutonomousRunner {
       // wins while the lane is open, producers re-read the active reservation
       // after the lock and yield to it.
       const r = latestOpportunity?.bucket === 'citability_backfill'
-        ? await db.transaction(async (trx) => {
-          await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
-          let ownership = trx('opportunity_queue')
+        ? await this._withPageEditLock(async (lockConn) => {
+          let ownership = db('opportunity_queue')
+            .connection(lockConn)
             .where('id', run.opportunity_id)
             .where('status', 'claimed')
             .where('claimed_at', run.queue_claimed_at);
           ownership = run.queue_claim_id == null
             ? ownership.whereNull('claim_id')
             : ownership.where('claim_id', run.queue_claim_id);
-          const locked = await ownership
-            .forUpdate()
-            .first('bucket', 'signal_metadata', 'status', 'claim_id', 'claimed_at');
+          const locked = await ownership.first('bucket', 'signal_metadata', 'status', 'claim_id', 'claimed_at');
           const { pageEditSuperseded } = require('./opportunity-queue')._internals;
           if (!locked || locked.bucket !== 'citability_backfill') {
             const err = new Error('Citability backfill lost its queue claim before the publisher boundary');

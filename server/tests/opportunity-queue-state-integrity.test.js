@@ -506,6 +506,7 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
         where: jest.fn((a, b) => { if (a === 'id') id = b; return q; }),
         whereIn: jest.fn(() => q),
         whereNotNull: jest.fn(() => q),
+        whereRaw: jest.fn(() => q),
         forUpdate: jest.fn(() => q),
         select: jest.fn(async () => rows),
         update: jest.fn(async (patch) => {
@@ -536,6 +537,9 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
       evidence: 'claimed',
       page_edit_superseded: { ordinary_dedupe_key: 'refresh-audit:ordinary' },
     });
+    const selectQuery = trx.mock.results[0].value;
+    expect(selectQuery.whereRaw).toHaveBeenNthCalledWith(1, expect.stringContaining(":.*$"), ['wavespestcontrol.com']);
+    expect(selectQuery.whereRaw).toHaveBeenNthCalledWith(2, expect.stringContaining("COALESCE(NULLIF"), ['/blog/termite-guide']);
   });
 });
 describe('defer() — cap/gate-retry deferral back to pending (exceptions-only review queue)', () => {

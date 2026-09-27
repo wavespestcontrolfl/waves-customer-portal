@@ -118,10 +118,18 @@ function pageEditSuperseded(rowOrMetadata) {
 async function supersedeCitabilityBackfillsForPage(trx, { pageUrl, ordinaryDedupeKey, now = new Date() }) {
   const identity = pageEditRouteIdentity(pageUrl);
   if (!identity) return 0;
+  const boundary = identity.indexOf('::');
+  const host = identity.slice(0, boundary);
+  const path = identity.slice(boundary + 2);
   const candidates = await trx('opportunity_queue')
     .where({ bucket: 'citability_backfill' })
     .whereIn('status', ['pending', 'claimed', 'pending_review'])
     .whereNotNull('page_url')
+    // Narrow before FOR UPDATE: an ordinary edit should lock only backfills
+    // for its own canonical host/path, never the entire active backfill lane.
+    .whereRaw(`CASE WHEN page_url LIKE '/%' THEN 'wavespestcontrol.com'
+      ELSE regexp_replace(regexp_replace(split_part(split_part(lower(page_url), '//', 2), '/', 1), '^www[.]', ''), ':.*$', '') END = ?`, [host])
+    .whereRaw(`COALESCE(NULLIF(regexp_replace(regexp_replace(split_part(page_url, chr(63), 1), '^[a-z]+://[^/]+', ''), '/+$', ''), ''), '/') = ?`, [path])
     .forUpdate()
     .select('id', 'page_url', 'status', 'signal_metadata');
   const matched = candidates.filter((row) => pageEditRouteIdentity(row.page_url) === identity);

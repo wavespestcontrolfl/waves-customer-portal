@@ -75,6 +75,23 @@ describe('autonomous-review-queue read model helpers', () => {
     expect(b.can_approve_trust_build).toBe(true);
   });
 
+  test('a superseded citability review exposes no decision that can revive or publish it', () => {
+    const actions = reviewActions({
+      opportunity: {
+        status: 'pending_review',
+        bucket: 'citability_backfill',
+        signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'refresh:replacement' } },
+      },
+      run: { outcome: 'completed_pending_review', shadow_mode: false, skip_reason: 'trust_build_1_of_3' },
+    });
+    expect(actions).toEqual({
+      can_requeue: false,
+      can_dismiss: false,
+      can_approve_trust_build: false,
+      can_approve_named_competitor: false,
+    });
+  });
+
   test('parses JSON columns with fallback', () => {
     expect(parseJsonMaybe('{"ok":true}', {})).toEqual({ ok: true });
     expect(parseJsonMaybe('{bad json', { ok: false })).toEqual({ ok: false });
@@ -370,5 +387,24 @@ describe('decision transactions re-select the current run (Codex #3024 r19)', ()
     const { oppUpdates, run } = mockReplacedRun({ decision: 'dismiss' });
     await expect(run()).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/newer run replaced/) });
     expect(oppUpdates.find((u) => u.status === 'skipped')).toBeFalsy();
+  });
+
+  test('rejects a superseded citability requeue before any transaction can revive it', async () => {
+    const chain = {
+      where: jest.fn(function () { return this; }),
+      orderBy: jest.fn(function () { return this; }),
+      first: jest.fn().mockResolvedValue({
+        id: 'opp-1',
+        status: 'pending_review',
+        bucket: 'citability_backfill',
+        signal_metadata: JSON.stringify({ page_edit_superseded: { ordinary_dedupe_key: 'refresh:replacement' } }),
+      }),
+    };
+    db.mockImplementation(() => chain);
+    db.transaction = jest.fn();
+
+    await expect(decideReviewItem('opp-1', { decision: 'requeue', reviewer: 'owner' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/superseded/) });
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 });

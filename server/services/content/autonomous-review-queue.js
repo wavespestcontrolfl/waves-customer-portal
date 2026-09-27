@@ -130,6 +130,7 @@ async function lockCurrentRun(trx, opportunityId, run, expectedRunId) {
     err.isOperational = true;
     throw err;
   }
+  assertPageEditNotSuperseded(lockedOpp);
   const current = await trx('autonomous_runs')
     .where('opportunity_id', opportunityId)
     .orderBy('claimed_at', 'desc')
@@ -160,6 +161,7 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
     err.isOperational = true;
     throw err;
   }
+  assertPageEditNotSuperseded(opportunity);
 
   const run = await db('autonomous_runs')
     .where('opportunity_id', opportunityId)
@@ -446,13 +448,27 @@ function buildReviewItem({ opportunity, brief, run, remediation = null, includeD
 }
 
 function reviewActions({ opportunity, run }) {
-  const pendingReview = opportunity?.status === 'pending_review' && (run?.action_type || opportunity?.action_type) !== 'new_supporting_blog';
+  const superseded = pageEditSuperseded(opportunity);
+  const pendingReview = !superseded && opportunity?.status === 'pending_review' && (run?.action_type || opportunity?.action_type) !== 'new_supporting_blog';
   return {
     can_requeue: pendingReview,
     can_dismiss: pendingReview,
     can_approve_trust_build: pendingReview && isTrustBuildRun(run),
     can_approve_named_competitor: pendingReview && isNamedCompetitorReviewRun(run),
   };
+}
+
+function pageEditSuperseded(opportunity) {
+  if (opportunity?.bucket !== 'citability_backfill') return false;
+  return require('./opportunity-queue')._internals.pageEditSuperseded(opportunity);
+}
+
+function assertPageEditNotSuperseded(opportunity) {
+  if (!pageEditSuperseded(opportunity)) return;
+  const err = new Error('This citability backfill was superseded by an ordinary page edit; review decisions are disabled while its PR is retired');
+  err.statusCode = 409;
+  err.isOperational = true;
+  throw err;
 }
 
 function isTrustBuildRun(run) {

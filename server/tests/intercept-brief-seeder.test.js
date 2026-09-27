@@ -10,6 +10,7 @@
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn();
+  fn.transaction = jest.fn();
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -18,13 +19,17 @@ const db = require('../models/db');
 const seeder = require('../services/content/intercept-brief-seeder');
 const { route } = require('../services/content/decision-router');
 const queue = require('../services/content/opportunity-queue');
+const refreshAudit = require('../services/seo/refresh-audit');
 const qualityInternals = require('../services/content/content-quality-gate')._internals;
 
 const {
   scoreForBrief, serviceForBrief, dedupeKeyFor, availableAtFor, rowForBrief,
 } = seeder._internals;
 
-afterEach(() => jest.clearAllMocks());
+afterEach(() => {
+  jest.restoreAllMocks();
+  jest.clearAllMocks();
+});
 
 // ── manifest + row shaping ───────────────────────────────────────────
 
@@ -110,17 +115,31 @@ describe('intercept manifest → opportunity rows', () => {
 // ── seedAll idempotency ─────────────────────────────────────────────
 
 describe('seedAll', () => {
+  function mockSeedDatabase({ inflight = null, a0Status = 'pending' } = {}) {
+    db.raw.mockImplementation(async (sql, bindings) => {
+      if (!/INSERT INTO opportunity_queue/.test(sql)) return { rows: [] };
+      return {
+        rowCount: 1,
+        rows: [{ status: bindings[13] === 'intercept:v1:A0' ? a0Status : 'pending' }],
+      };
+    });
+    db.transaction.mockImplementation(async (callback) => callback(db));
+    jest.spyOn(refreshAudit, 'findInflightPageEdit').mockResolvedValue(inflight);
+    jest.spyOn(queue._internals, 'supersedeCitabilityBackfillsForPage').mockResolvedValue(0);
+  }
+
   test('upserts every brief via ON CONFLICT (dedupe_key) DO UPDATE — re-runs cannot duplicate', async () => {
-    db.raw.mockResolvedValue({ rowCount: 1 });
+    mockSeedDatabase();
 
     const first = await seeder.seedAll({});
     const second = await seeder.seedAll({});
 
     expect(first.count).toBe(13);
     expect(second.count).toBe(13);
-    expect(db.raw).toHaveBeenCalledTimes(26);
+    const inserts = db.raw.mock.calls.filter(([sql]) => /INSERT INTO opportunity_queue/.test(sql));
+    expect(inserts).toHaveLength(26);
 
-    const [sql, bindings] = db.raw.mock.calls[0];
+    const [sql, bindings] = inserts[0];
     expect(sql).toMatch(/INSERT INTO opportunity_queue/);
     expect(sql).toMatch(/ON CONFLICT \(dedupe_key\) DO UPDATE/);
     // Claimed / done / pending_review rows are never reset by a re-seed.
@@ -135,10 +154,42 @@ describe('seedAll', () => {
     expect(bindings).toContain('intercept:v1:A0');
 
     // Same dedupe keys on both runs — idempotent by construction.
-    const keysRun1 = db.raw.mock.calls.slice(0, 13).map((c) => c[1][13]);
-    const keysRun2 = db.raw.mock.calls.slice(13).map((c) => c[1][13]);
+    const keysRun1 = inserts.slice(0, 13).map((c) => c[1][13]);
+    const keysRun2 = inserts.slice(13).map((c) => c[1][13]);
     expect(keysRun1).toEqual(keysRun2);
     expect(new Set(keysRun1).size).toBe(13);
+    expect(db.transaction).toHaveBeenCalledTimes(2);
+    expect(db.raw.mock.calls.filter(([rawSql]) => /pg_advisory_xact_lock/.test(rawSql))).toHaveLength(2);
+    expect(queue._internals.supersedeCitabilityBackfillsForPage).toHaveBeenCalledTimes(2);
+  });
+
+  test('the A0 refresh yields to a different active page editor under the shared lock', async () => {
+    mockSeedDatabase({
+      inflight: { dedupe_key: 'refresh-audit:replacement', status: 'claimed', page_url: '/pest-control/in-wall-pest-control/' },
+    });
+
+    const result = await seeder.seedAll({});
+
+    expect(result.count).toBe(12);
+    const insertedKeys = db.raw.mock.calls
+      .filter(([sql]) => /INSERT INTO opportunity_queue/.test(sql))
+      .map(([, bindings]) => bindings[13]);
+    expect(insertedKeys).not.toContain('intercept:v1:A0');
+    expect(queue._internals.supersedeCitabilityBackfillsForPage).not.toHaveBeenCalled();
+  });
+
+  test('an existing active A0 reservation supersedes citability work on reseed too', async () => {
+    mockSeedDatabase({
+      inflight: { dedupe_key: 'intercept:v1:A0', status: 'claimed', page_url: '/pest-control/in-wall-pest-control/' },
+      a0Status: 'claimed',
+    });
+
+    await seeder.seedAll({});
+
+    expect(queue._internals.supersedeCitabilityBackfillsForPage).toHaveBeenCalledWith(db, {
+      pageUrl: 'https://www.wavespestcontrol.com/pest-control/in-wall-pest-control/',
+      ordinaryDedupeKey: 'intercept:v1:A0',
+    });
   });
 
   test('dry-run writes nothing', async () => {
