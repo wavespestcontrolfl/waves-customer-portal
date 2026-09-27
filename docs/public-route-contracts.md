@@ -1477,6 +1477,11 @@ Thus disabled itemization retained for document rendering can suppress
 guarantees in the document without changing the current page's policy or
 prices. Generic promise suppression does not remove a row's explicitly
 purchased warranty scope, which still requires that row's sold-tier metadata.
+Projected one-time-choice rows retain verified `warrantyTier` and
+`warrantyAdder` from the same raw row used to resolve their copy. Explicit
+current row decisions remain authoritative, and ambiguous repeated service
+keys cannot borrow another row's warranty. The server and browser use the
+shared purchased-warranty evidence rule and the existing authored copy pack.
 Ask Waves also requires separate recurring-terms eligibility: rodent,
 commercial, bundle, and unknown scope never inherit residential callbacks,
 money-back, or no-contract terms merely because the page permits a

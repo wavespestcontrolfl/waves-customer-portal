@@ -39,6 +39,7 @@ function acceptBookingGateToken(estimate) {
 }
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { GUARANTEE_COPY, resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
+const { hasPurchasedTrenchingWarranty } = require('../../shared/estimate-purchased-warranty.cjs');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
@@ -23589,14 +23590,19 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // add-on as scope-less. Resolve each row against its authoritative raw
   // counterpart (same service key, label-matched when the key repeats):
   // the raw row supplies the sold-scope flags, the aligned row keeps its
-  // own label/amount (codex #3823 r9 P1). The contract row itself is
-  // unchanged — only the resolver input is enriched.
+  // own label/amount (codex #3823 r9 P1). Proven purchased-warranty evidence
+  // also reaches the contract row so the browser's saved-copy filter uses
+  // the same evidence as the server resolver.
   const rawRowFor = (row) => {
     const service = String(row?.service || '').toLowerCase();
     if (!service) return null;
     const candidates = rawContractRows.filter((raw) => String(raw?.service || '').toLowerCase() === service);
     if (!candidates.length) return null;
-    return candidates.find((raw) => String(raw.label || '') === String(row.label || '')) || candidates[0];
+    if (candidates.length === 1) return candidates[0];
+    const sameLabel = candidates.filter((raw) => String(raw.label || '') === String(row.label || ''));
+    if (sameLabel.length === 1) return sameLabel[0];
+    const sameAmount = sameLabel.filter((raw) => raw.amount === row.amount);
+    return sameAmount.length === 1 ? sameAmount[0] : null;
   };
   const contractPayload = basePayload.oneTimeBreakdown && Array.isArray(basePayload.oneTimeBreakdown.items)
     ? {
@@ -23607,11 +23613,19 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
           const labeled = basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel)
             .map((row) => noGuaranteeClaims && GUARANTEE_COPY.test(row.detail || '') ? { ...row, detail: null } : row);
           if (!rowCopyAllowed) return labeled;
-          const copies = resolveOneTimeRowCopies(labeled.map((row) => {
+          const copyInputs = labeled.map((row) => {
             const raw = rawRowFor(row);
             return raw ? { ...raw, ...row } : row;
-          }), { noGuaranteeClaims });
-          return labeled.map((row, i) => (copies[i] ? { ...row, copy: copies[i] } : row));
+          });
+          const copies = resolveOneTimeRowCopies(copyInputs, { noGuaranteeClaims });
+          return labeled.map((row, i) => (copies[i] ? {
+            ...row,
+            ...(hasPurchasedTrenchingWarranty(copyInputs[i]) ? {
+              warrantyTier: copyInputs[i].warrantyTier,
+              warrantyAdder: Number(copyInputs[i].warrantyAdder),
+            } : {}),
+            copy: copies[i],
+          } : row));
         })(),
       },
     }

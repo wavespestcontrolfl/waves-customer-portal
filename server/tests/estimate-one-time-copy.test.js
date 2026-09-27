@@ -606,6 +606,44 @@ describe('server-rendered page', () => {
   });
 
   test.each([
+    ['included tier', { warrantyTier: 'one_year_retreat', warrantyAdder: 0 }, {}, true],
+    ['paid tier', { warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }, {}, true],
+    ['explicit current none', { warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }, { warrantyTier: 'none', warrantyAdder: 0 }, false],
+    ['missing purchase evidence', { warrantyTier: 'three_year_repair_retreat' }, {}, false],
+  ])('aligned trenching rows retain the same verified warranty evidence as their resolved copy: %s', (_label, rawScope, currentScope, purchased) => {
+    const row = { service: 'trenching', label: 'Termite Trenching', amount: 900, ...rawScope };
+    const projected = { service: row.service, label: row.label, amount: row.amount, detail: 'Measured treatment path', ...currentScope };
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [projected] } },
+      { status: 'sent', show_one_time_option: true }, authoredTermiteData(row),
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(returned.amount).toBe(900);
+    expect(hasPurchasedTrenchingWarranty(returned)).toBe(purchased);
+    expect(returned.copy.includes.includes('Annual inspection during the warranty period')).toBe(purchased);
+    if (purchased) expect(returned).toMatchObject(rawScope);
+  });
+
+  test.each([
+    ['unmatched label', 'Front foundation', 'Rear foundation', 900, false],
+    ['same label and price', 'Other foundation', 'Other foundation', 900, false],
+    ['same label with distinct prices', 'Other foundation', 'Other foundation', 600, true],
+  ])('a projected row borrows warranty scope only from an unambiguous raw row: %s', (_case, firstLabel, secondLabel, secondAmount, purchased) => {
+    const rows = [
+      { service: 'trenching', label: firstLabel, amount: 900, detail: 'Front treatment area', warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 },
+      { service: 'trenching', label: secondLabel, amount: secondAmount, detail: 'Rear treatment area', warrantyTier: 'none', warrantyAdder: 0 },
+    ];
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [{ service: 'trenching', label: 'Other foundation', amount: 900 }] } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      { result: { recurring: { services: [] }, oneTime: { items: rows } } },
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(hasPurchasedTrenchingWarranty(returned)).toBe(purchased);
+    expect(returned.copy.includes.includes('Annual inspection during the warranty period')).toBe(purchased);
+  });
+
+  test.each([
     ['Rain re-spray guarantee', false],
     ['Rain re-spray within 48 hours', false],
     ['Free re-service between visits', false],
