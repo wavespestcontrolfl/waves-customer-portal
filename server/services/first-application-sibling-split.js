@@ -225,13 +225,23 @@ async function openBillingReview(trx, invoice, moved, diverging) {
 // (admin-invoices.js) so an auto-cleared review's bell doesn't sit unread
 // forever once there is nothing left to review. Best-effort: a failure
 // here must never block the actual hold release.
+// Runs in its own savepoint off the caller's trx, exactly like
+// raiseBillingReviewAlert above — a plain try/catch around a failing
+// statement does NOT recover a Postgres transaction (the first failing
+// statement aborts the whole transaction it ran in, and every later
+// statement on that connection, including the caller's own COMMIT, fails
+// until something rolls it back). Without the savepoint, a failure here
+// would silently roll back the invoice UPDATE that just cleared the review
+// too (Claude fallback-auditor P1, this branch's own fourth push) — the
+// caller would report 'review_auto_cleared' for a clear that never
+// actually persisted.
 async function resolveBillingReviewAlert(trx, invoiceId) {
   try {
-    await trx('notifications')
+    await trx.transaction((nested) => nested('notifications')
       .where({ recipient_type: 'admin', category: 'billing' })
       .whereRaw("metadata->>'dedupeKey' = ?", [`first_application_billing_review:${invoiceId}`])
       .whereNull('read_at')
-      .update({ read_at: new Date() });
+      .update({ read_at: new Date() }));
   } catch (e) {
     logger.warn(`[first-application-sibling-split] billing-review bell resolve failed for invoice ${invoiceId} (non-blocking): ${e.message}`);
   }
