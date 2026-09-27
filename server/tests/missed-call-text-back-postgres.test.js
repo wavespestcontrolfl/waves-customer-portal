@@ -442,12 +442,44 @@ jest.setTimeout(30000);
       }).returning('id');
       const row = call(READY_MINUTES_AGO);
       await database('call_log').insert(row);
-      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'pending', reason: 'claim_in_flight' });
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'pending', reason: 'send_in_flight' });
       expect(sendCustomerMessage).not.toHaveBeenCalled();
 
       // Its send failed: the provider layer deletes the reservation, the lane releases its claim.
       await database('sms_log').where({ id: reservationId }).del();
       await require('../services/voicemail-lead-sms')._deferredClaims.releasePhoneClaim(PHONE);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+    });
+
+    test('another automated text mid-handoff at the boundary holds this send; once it lands, the call settles as contacted', async () => {
+      let otherId;
+      sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, {
+        before: async () => {
+          [{ id: otherId }] = await database('sms_log').insert({
+            direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE, message_body: 'scheduled worker text',
+            status: 'sending', message_type: 'estimate_followup', created_at: new Date(NOW),
+          }).returning('id');
+        },
+      }));
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'error', reason: 'MISSED_CALL_SEND_IN_FLIGHT' });
+      expect(await claimRow()).toBeUndefined();
+      expect((await stored(row)).metadata.missed_call_text_settled_at).toBeUndefined();
+
+      await database('sms_log').where({ id: otherId }).update({ status: 'sent', twilio_sid: 'SMother000000000000000000000000000' });
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'already_contacted' });
+    });
+
+    test('another automated text mid-handoff that then fails (its row deleted) lets this call be texted', async () => {
+      const [{ id: otherId }] = await database('sms_log').insert({
+        direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE, message_body: 'scheduled worker text',
+        status: 'sending', message_type: 'estimate_followup', created_at: new Date(NOW),
+      }).returning('id');
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'pending', reason: 'send_in_flight' });
+      await database('sms_log').where({ id: otherId }).del();
       expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
     });
 
