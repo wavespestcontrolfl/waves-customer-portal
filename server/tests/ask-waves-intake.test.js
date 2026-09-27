@@ -2206,6 +2206,7 @@ describe('looksLikeEmergency', () => {
     'After the ants swarmed, my son got scared and ate the bait',
     'We sprayed the ants and then inhaled the fumes',
     'My child, who saw ants, choked on the bait',
+    'The ants scattered and my son panicked and choked on the bait',
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
