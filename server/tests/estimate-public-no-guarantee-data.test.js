@@ -136,6 +136,24 @@ describe('GET /:token/data — noGuaranteeClaims', () => {
     expect(body.estimate.noGuaranteeClaims).toBe(true);
   });
 
+  test('a disabled retained termite proposal does not suppress the current pest-plan guarantees', async () => {
+    const base = estimateRow();
+    const body = await dataFor(estimateRow({
+      id: 'est-revised-pest', token: 'revisedpestplantoken', onetime_total: 0,
+      estimate_data: {
+        ...base.estimate_data,
+        result: { ...base.estimate_data.result, oneTime: { items: [], membershipFee: 0 } },
+        proposal: {
+          enabled: false,
+          buildings: [{ lineItems: [{ description: 'Termite Trenching', frequency: 'one_time', unitPrice: 1200 }] }],
+          programs: [{ name: 'Termite Bait Program' }],
+          correctiveWork: [{ label: 'Pre-Slab Termiticide Treatment' }],
+        },
+      },
+    }));
+    expect(body.estimate).not.toHaveProperty('noGuaranteeClaims');
+  });
+
   test('termite bait monitoring is flagged', async () => {
     const base = estimateRow();
     const body = await dataFor(estimateRow({

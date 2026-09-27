@@ -98,7 +98,21 @@ describe('serviceMixMakesNoGuaranteeClaim', () => {
     expect(serviceMixMakesNoGuaranteeClaim(guaranteeRecurringRows(estData), guaranteeProposalRows(estData))).toBe(true);
     const pestOnly = { ...estData, proposal: { ...estData.proposal, buildings: [{ name: 'Building A', lineItems: [{ description: 'Monthly Pest Control' }] }] } };
     expect(serviceMixMakesNoGuaranteeClaim(guaranteeRecurringRows(pestOnly), guaranteeProposalRows(pestOnly))).toBe(false);
-    expect(guaranteeProposalRows({ proposal: { programs: [{ name: 'Termite Bait Program' }] } })).toEqual([{ name: 'Termite Bait Program', service: null }]);
+    expect(guaranteeProposalRows({ proposal: { enabled: true, programs: [{ name: 'Termite Bait Program' }] } })).toEqual([{ name: 'Termite Bait Program', service: null }]);
+  });
+
+  test.each([false, undefined])('a stale proposal with enabled=%s cannot remove current pest-plan guarantees', (enabled) => {
+    const estData = {
+      result: { recurring: { services: PEST }, oneTime: { items: [] } },
+      proposal: {
+        enabled,
+        buildings: [{ lineItems: [{ description: 'Termite Trenching' }] }],
+        programs: [{ name: 'Termite Bait Program' }],
+        correctiveWork: [{ label: 'Pre-Slab Termiticide Treatment' }],
+      },
+    };
+    expect(guaranteeProposalRows(estData)).toEqual([]);
+    expect(estimateMakesNoGuaranteeClaim(estData)).toBe(false);
   });
 
   test('authored corrective work participates in the same fail-closed guarantee decision', () => {

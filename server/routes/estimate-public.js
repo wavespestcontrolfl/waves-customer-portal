@@ -4952,7 +4952,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               payAfterBody: 'Approve now; after you confirm, we send the invoice so you can pay before service.',
               noPaymentCopy: 'No payment is charged on this page. You pay on service day; no card or deposit now.',
               bookingTitle: 'Review your termite trenching quote with Waves',
-              bookingSubhead: 'Waves confirms your treatment path — access, exact footage, product, and warranty — then schedules your visit. You pay on service day; no card or deposit now.',
+              bookingSubhead: 'Waves confirms your treatment path — access, exact footage, product, and written service terms — then schedules your visit. You pay on service day; no card or deposit now.',
               payPrefHeading: 'Choose how you want to pay',
               payPrefCardTitle: 'Pay per application',
               payPrefCardSub: 'Invoice is sent automatically after confirmation.',
@@ -6663,7 +6663,7 @@ ${shellTopBar()}
   <section class="card booking-card" id="trenching-review-card">
     <h2 id="booking-title">${escapeHtml(pageCopy.bookingTitle)}</h2>
     <p class="card-sub">${escapeHtml(pageCopy.bookingSubhead)}</p>
-    <p class="card-sub" style="font-style:italic">This price is set from the measured treatment path. Because trenching drills concrete, lays a chemical soil barrier, and carries a retreat warranty, a Waves specialist confirms the plan with you before your visit is scheduled &mdash; so it can't be self-booked online.</p>
+    <p class="card-sub" style="font-style:italic">Your price is set from the measured treatment path. A Waves specialist confirms the treatment plan, access, exact footage, and product with you before scheduling your visit, so it can&rsquo;t be self-booked online.</p>
     <a href="tel:${COMPANY.phoneRaw}" class="cta" style="max-width:360px;margin:16px auto 0;display:block;text-align:center;text-decoration:none">Call Waves to confirm &mdash; ${escapeHtml(COMPANY.phone)}</a>
     <p class="card-sub" style="margin-top:12px">Prefer we reach out? We'll follow up to confirm your treatment path and schedule your visit. You pay on service day.</p>
   </section>
@@ -6818,7 +6818,7 @@ ${shellTopBar()}
   </div>` : trenchingReviewBeforeBooking ? `
   <div class="final">
     <h2>Waves will confirm &amp; schedule your trenching</h2>
-    <p>Your price is set from the measured treatment path. Before we dispatch a crew, a Waves specialist confirms access, exact footage, product, and warranty &mdash; then schedules your visit and sends your invoice. You pay on service day; no card or deposit now.</p>
+    <p>Your price is set from the measured treatment path. Before we dispatch a crew, a Waves specialist confirms access, exact footage, product, and written service terms &mdash; then schedules your visit and sends your invoice. You pay on service day; no card or deposit now.</p>
     <a href="tel:${COMPANY.phoneRaw}" class="cta" style="display:inline-block;max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B;text-decoration:none">Call ${COMPANY.phone}</a>
     <div style="margin-top:20px;font-size:14px">
       Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#fff;font-weight:700">${COMPANY.phone}</a>
@@ -19951,7 +19951,9 @@ function guaranteeRecurringRows(estData) {
 // names. Codex #4982 r4.
 function guaranteeProposalRows(estData) {
   const proposal = estData?.proposal && typeof estData.proposal === 'object' ? estData.proposal : null;
-  if (!proposal) return [];
+  // Revision history can retain disabled proposals. Only the active proposal
+  // contributes customer-visible scope, matching the public proposal view.
+  if (proposal?.enabled !== true) return [];
   const list = (v) => (Array.isArray(v) ? v : []);
   const asRow = (row) => ({
     name: row?.description || row?.name || row?.title || row?.label || '',

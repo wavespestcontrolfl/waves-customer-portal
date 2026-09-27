@@ -3405,6 +3405,9 @@ describe('public estimate one-time breakdown', () => {
     // Review card renders in place of the self-book slot picker.
     expect(html).toContain('id="trenching-review-card"');
     expect(html).toContain('Review your termite trenching quote with Waves');
+    const reviewCard = html.match(/<section[^>]*id="trenching-review-card"[\s\S]*?<\/section>/)?.[0];
+    expect(reviewCard).toContain('confirms the treatment plan, access, exact footage, and product');
+    expect(reviewCard).not.toMatch(/warrant|guarantee|callback/i);
     // No self-book affordances: no slot-picker booking card, no "Pick a time and book".
     expect(html).not.toContain('id="booking-card"');
     expect(html).not.toContain('class="cta pick-time-cta"');
