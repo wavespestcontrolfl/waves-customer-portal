@@ -366,8 +366,8 @@
       "scientific": "Solenopsis",
       "rank": "genus",
       "next_photo": {
-        "ask": "A close-up from above of the largest workers from the mound, next to a coin.",
-        "why": "Major-worker head shape and node count separate red imported fire ants from tropical fire ants."
+        "ask": "Use camera zoom from a safe distance only if you can photograph the activity without approaching or disturbing the mound. Do not place objects near the ants.",
+        "why": "Mound shape and activity help us compare ant groups while keeping you clear of stinging workers."
       }
     },
     {
@@ -591,6 +591,12 @@
       "group": "beetles",
       "label": "Lady Beetles",
       "generic": "a lady beetle",
+      "aliases": [
+        "ladybug",
+        "ladybugs",
+        "ladybird beetle",
+        "ladybird beetles"
+      ],
       "scientific": "Coccinellidae",
       "rank": "family",
       "next_photo": {

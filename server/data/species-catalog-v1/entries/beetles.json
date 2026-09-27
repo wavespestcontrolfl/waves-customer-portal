@@ -343,17 +343,16 @@
     "kind": "organism",
     "common_name": "Native Lady Beetles",
     "aka": [
-      "Ladybug",
-      "Ladybird Beetle"
+      "Native Ladybug",
+      "Native Ladybird Beetle"
     ],
     "aliases": [
-      "lady beetle",
-      "lady beetles",
-      "ladybug",
-      "ladybugs",
-      "ladybird beetle",
-      "ladybird beetles",
-      "coccinellidae"
+      "native lady beetle",
+      "native lady beetles",
+      "native ladybug",
+      "native ladybugs",
+      "native ladybird beetle",
+      "native ladybird beetles"
     ],
     "scientific_name": "Coccinellidae",
     "rank": "family",
@@ -448,7 +447,7 @@
     ],
     "review": {
       "status": "draft",
-      "notes": "Entry covers Florida's many native lady beetle species collectively (rank family); appearance varies a lot by species, so traits describe the general pattern rather than one look."
+      "notes": "Entry covers Florida's many native lady beetle species collectively (rank family); appearance varies a lot by species, so traits describe the general pattern rather than one look. Generic ladybug/ladybird names resolve to the shared lady-beetles subgroup; this entry requires a native qualifier."
     },
     "role": "beneficial",
     "risk": "low",

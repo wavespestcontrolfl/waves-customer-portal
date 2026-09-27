@@ -1280,13 +1280,25 @@ async function identifyPestV2(photos = []) {
     verifiedCandidates = mergeVerify(candidatesFromCall1, verifyResult);
   }
 
+  // A high-confidence sign cannot suppress a second provider when this
+  // leg says the photo shows an organism (or vice versa). Apply the same
+  // evidence-kind rule used by the final answer to every escalation trigger.
+  const initialHiddenKind = candidatesJson?.shows === 'sign' ? 'organism'
+    : candidatesJson?.shows === 'organism' ? 'sign' : null;
+  const matchesShownKind = candidate => !initialHiddenKind || candidate.entry?.kind !== initialHiddenKind;
+  const triggerCandidates = verifiedCandidates.filter(matchesShownKind);
+  const triggerCatalogCandidates = catalogCandidates1.filter(matchesShownKind);
+  const triggerJson = candidatesJson ? {
+    ...candidatesJson,
+    candidates: sanitizedCandidatesOf(candidatesJson).filter(candidate => matchesShownKind(resolveCandidate(candidate))),
+  } : null;
   const geminiMissed = !candidatesJson
-    || (catalogCandidates1.length > 0 && !verifyCoversAllCandidates(verifyResult, catalogCandidates1));
-  const contradicted = catalogCandidates1.length > 0 && detectSelfContradiction(candidatesJson, verifiedCandidates);
-  const lookAlikeClose = consequentialLookAlikeClose(verifiedCandidates);
+    || (triggerCatalogCandidates.length > 0 && !verifyCoversAllCandidates(verifyResult, triggerCatalogCandidates));
+  const contradicted = triggerCatalogCandidates.length > 0 && detectSelfContradiction(triggerJson, triggerCandidates);
+  const lookAlikeClose = consequentialLookAlikeClose(triggerCandidates);
   // Only a candidate that resolves to a catalog node can vouch for the
   // read; an unresolvable name's confidence must not suppress escalation.
-  const verifiedTop = dedupeCandidates(verifiedCandidates.filter((c) => candidateNodeId(c)))[0] || null;
+  const verifiedTop = dedupeCandidates(triggerCandidates.filter((c) => candidateNodeId(c)))[0] || null;
   const topConfidenceForTrigger = verifiedTop ? verifiedTop.confidence : 0;
 
   const escalationReasons = [];

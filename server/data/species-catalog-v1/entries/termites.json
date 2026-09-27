@@ -549,14 +549,12 @@
     "season_basis": "swarming",
     "verification": [],
     "aka": [
-      "alates",
       "winged termites"
     ],
     "aliases": [
       "termite swarmers",
       "termite swarmer",
-      "flying termites",
-      "alates"
+      "flying termites"
     ],
     "scientific_name": "Isoptera (winged reproductives)",
     "rank": "group",
@@ -651,8 +649,8 @@
       "https://ask.ifas.ufl.edu/publication/IN537"
     ],
     "review": {
-      "status": "owner_approved",
-      "notes": "Peak months checked against three UF/IFAS EDIS species pages: native subterranean termites swarm Reticulitermes hageni (early Dec-early Feb), R. flavipes (Jan-Apr) and R. virginicus (Feb-late May) per IN369; Formosan subterranean termite swarms April-June, peak May, per IN278; drywood termite (Cryptotermes cavifrons) swarms year-round with peak March-May per IN537. Combined, this supports a Jan-June peak window rather than a single exact figure -- this entry deliberately stays a blended, multi-species estimate (as its own copy and tech_notes already say), not a claim that one set of months is exact for every species swarming in SWFL."
+      "status": "draft",
+      "notes": "Peak months checked against three UF/IFAS EDIS species pages: native subterranean termites swarm Reticulitermes hageni (early Dec-early Feb), R. flavipes (Jan-Apr) and R. virginicus (Feb-late May) per IN369; Formosan subterranean termite swarms April-June, peak May, per IN278; drywood termite (Cryptotermes cavifrons) swarms year-round with peak March-May per IN537. Combined, this supports a Jan-June peak window rather than a single exact figure -- this entry deliberately stays a blended, multi-species estimate (as its own copy and tech_notes already say), not a claim that one set of months is exact for every species swarming in SWFL. Returned to draft after removing generic alate aliases, which can mean winged ants or termites; owner re-approval is required."
     }
   },
   {

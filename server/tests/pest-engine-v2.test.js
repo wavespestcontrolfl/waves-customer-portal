@@ -728,6 +728,29 @@ describe('identifyPestV2 — escalation triggers', () => {
     expect(result.v2.candidates.map((candidate) => candidate.slug)).not.toContain('roof-rat');
   });
 
+  test.each([
+    ['organism', 'roof-rat', 'fire-ant'],
+    ['sign', 'fire-ant', 'roof-rat'],
+  ])('a high-confidence wrong-kind candidate cannot suppress %s escalation', async (shows, hiddenSlug, visibleSlug) => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([
+        { slug: hiddenSlug, confidence: 0.95 }, { slug: visibleSlug, confidence: 0.60 },
+      ], undefined, shows))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [
+        { slug: hiddenSlug, confidence: 0.95, traits_visible: [1], traits_not_visible: [] },
+        { slug: visibleSlug, confidence: 0.60, traits_visible: [1], traits_not_visible: [] },
+      ] } })
+      .mockResolvedValueOnce({ ok: true, json: {
+        quality: { usable: true, issue: 'none' }, shows,
+        candidates: [{ slug: visibleSlug, confidence: 0.85, traits_visible: [1], traits_not_visible: [] }],
+      } });
+    const result = await identifyPestV2([PHOTO]);
+    expect(dispatch).toHaveBeenCalledTimes(3);
+    expect(result.internal.escalation_reasons).toContain('low_confidence');
+    expect(result.internal.disagreed).toBe(false);
+    expect(result.v2.candidates.map(candidate => candidate.slug)).not.toContain(hiddenSlug);
+  });
+
   test('agreement carries the WINNING side\'s own trait evidence, not Gemini\'s stale/empty verify — Codex round-0 P1 (PR-2b wiring round 2)', async () => {
     dispatch
       .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }]))

@@ -412,13 +412,20 @@ function buildNameIndices() {
   const TAXON = /^[A-Z][a-z]+( [a-z]+)?$/;
   for (const g of CATALOG.groups.values()) {
     nodePairs.push([g.label, g.id], [g.id, g.id]);
+    for (const alias of g.aliases || []) nodePairs.push([alias, g.id]);
     if (generic(g.generic)) nodePairs.push([generic(g.generic), g.id]);
   }
   for (const sg of CATALOG.subgroups.values()) {
     nodePairs.push([sg.label, sg.id], [sg.id, sg.id]);
+    for (const alias of sg.aliases || []) nodePairs.push([alias, sg.id]);
     if (generic(sg.generic)) nodePairs.push([generic(sg.generic), sg.id]);
     for (const part of String(sg.scientific || '').split('/')) {
-      if (TAXON.test(part.trim())) nodePairs.push([part.trim(), sg.id]);
+      if (TAXON.test(part.trim())) {
+        nodePairs.push([part.trim(), sg.id]);
+        // An entry belonging to this same named family/genus must not
+        // claim the whole taxon (for example, native vs Asian lady beetles).
+        scientificPairs.push([part.trim(), sg.id]);
+      }
     }
   }
   return {

@@ -11,9 +11,9 @@
  * regressions (including the "walkingstick"/"antenna" false-positive class
  * the live engine's matcher already guards against).
  *
- * This file has NO runtime caller dependency — it only exercises
- * `../services/species-catalog` (pure data + loader) and, read-only, the
- * existing `PEST_LIBRARY` export from `../services/pest-identification`.
+ * Exercises the data/loader and the existing PEST_LIBRARY read-only, plus
+ * one synchronous engine fallback regression against the actual catalog.
+ * No model providers are called.
  */
 
 const catalog = require('../services/species-catalog');
@@ -425,6 +425,18 @@ describe('resolveName regressions', () => {
     expect(catalog.resolveName('hunting billbug')).toMatchObject({ node: { slug: 'hunting-billbug' } });
   });
 
+  test.each(['ladybug', 'ladybugs', 'ladybird beetle', 'lady beetle', 'Coccinellidae'])('generic %s names the shared lady-beetle family', (name) => {
+    expect(catalog.resolveName(name)).toMatchObject({ node: { level: 'subgroup', id: 'lady-beetles' } });
+    expect(catalog.resolveName('native ladybug')).toMatchObject({ node: { slug: 'lady-beetle' } });
+    expect(catalog.resolveName('Asian ladybug')).toMatchObject({ node: { slug: 'asian-lady-beetle' } });
+  });
+
+  test.each(['alate', 'alates'])('generic %s does not claim an ant or termite identification', (name) => {
+    expect(catalog.resolveName(name)).toBeNull();
+    expect(catalog.resolveName('termite swarmers')).toMatchObject({ node: { slug: 'termite-swarmers' } });
+    expect(catalog.getEntry('termite-swarmers').review.status).toBe('draft');
+  });
+
   test('never a false substring match (the "walkingstick"/"antenna" class)', () => {
     expect(catalog.resolveName('walkingstick')).toBeNull();
     expect(catalog.resolveName('antenna')).toBeNull();
@@ -608,6 +620,17 @@ describe('loader API surface', () => {
     const np = catalog.nextPhoto('ants');
     expect(np.ask.length).toBeGreaterThan(0);
     expect(np.why.length).toBeGreaterThan(0);
+  });
+
+  test('the actual draft fire-ant fallback keeps customers away from the mound', () => {
+    const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
+    expect(catalog.getEntry('fire-ant').review.status).toBe('draft');
+    const candidate = { ...resolveCandidate({ slug: 'fire-ant', confidence: 0.95 }), checked: true, verified: true };
+    const built = buildAnswer({ candidates: [candidate], qualityUsable: true, currentMonth: 6 });
+    expect(built.answer).toMatchObject({ level: 'subgroup', node_id: 'fire-ants' });
+    expect(built.nextPhoto.ask).toMatch(/safe distance/);
+    expect(built.nextPhoto.ask).not.toMatch(/next to a coin|close-up|collect|pick up/i);
+    expect(built.nextPhoto.photo_can_confirm).toBe(true);
   });
 
   test('nextPhoto falls back to the first look-alike photo for an entry, with its rationale (Codex r3 P1)', () => {
