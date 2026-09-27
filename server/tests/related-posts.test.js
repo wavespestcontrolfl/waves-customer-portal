@@ -326,6 +326,13 @@ describe('candidateFromRegistryRow', () => {
     )).toEqual([]);
   });
 
+  test('rejects a spoke-configured row when only its relative hub URL was checked', () => {
+    expect(candidateFromRegistryRow({
+      ...liveAstroOnly,
+      metadata: { frontmatter: { domains: ['sarasotaflpestcontrol.com'] } },
+    })).toBeNull();
+  });
+
   test.each([
     ['not Astro-only', { reconciliation_status: 'matched' }],
     ['not live', { live_status: 'missing' }],

@@ -266,17 +266,23 @@ function registryRowLivePath(row) {
   return normalizePathForCompare(rawPath);
 }
 
-function registryRowLiveKeys(row) {
-  const path = registryRowLivePath(row);
-  if (!path) return [];
+function registryRowVerifiedSites(row) {
   const safeRow = row || {};
   const metadata = parseJsonObject(safeRow.metadata);
   const frontmatter = parseJsonObject(metadata.frontmatter);
-  const rawPath = [safeRow.canonical_url_normalized, safeRow.live_url, safeRow.canonical_url].find(Boolean);
+  const rawPath = [safeRow.live_url, safeRow.canonical_url, safeRow.canonical_url_normalized].find(Boolean);
+  const checkedSites = normalizeSpokeSites([rawPath]);
+  const actualSites = checkedSites.length ? checkedSites : HUB_SITE_KEYS;
   const configuredSites = normalizeSpokeSites(frontmatter.domains);
-  const pathSites = normalizeSpokeSites([rawPath]);
-  const sites = configuredSites.length ? configuredSites : (pathSites.length ? pathSites : HUB_SITE_KEYS);
-  return sites.map((site) => `${site}|${path}`);
+  return configuredSites.length
+    ? actualSites.filter((site) => configuredSites.includes(site))
+    : [...actualSites];
+}
+
+function registryRowLiveKeys(row) {
+  const path = registryRowLivePath(row);
+  if (!path) return [];
+  return registryRowVerifiedSites(row).map((site) => `${site}|${path}`);
 }
 
 function candidateLiveKeys(candidate) {
@@ -297,9 +303,8 @@ function candidateFromRegistryRow(row) {
   const frontmatter = parseJsonObject(metadata.frontmatter);
   const path = registryRowLivePath(safeRow);
   if (!path || safeRow.reconciliation_status !== 'astro_only') return null;
-  const rawPath = [safeRow.canonical_url_normalized, safeRow.live_url, safeRow.canonical_url].find(Boolean);
-  const pathSites = normalizeSpokeSites([rawPath]);
-  const configuredSites = normalizeSpokeSites(frontmatter.domains);
+  const verifiedSites = registryRowVerifiedSites(safeRow);
+  if (!verifiedSites.length) return null;
   return {
     id: safeRow.id,
     title: safeRow.title || frontmatter.title || null,
@@ -308,7 +313,7 @@ function candidateFromRegistryRow(row) {
     city: safeRow.target_city || null,
     service: safeRow.target_service || null,
     category: safeRow.category || frontmatter.category || null,
-    targetSites: configuredSites.length ? configuredSites : (pathSites.length ? pathSites : [...HUB_SITE_KEYS]),
+    targetSites: verifiedSites,
     workflowStatus: 'published',
     astroStatus: 'live',
     pathVerified: true,
