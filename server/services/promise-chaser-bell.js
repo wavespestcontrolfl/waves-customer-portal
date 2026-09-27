@@ -359,6 +359,16 @@ async function ringForCall(call, now = new Date()) {
   // computes the identical key.
   const dedupeKey = `promise_chaser:${promise.id}:${renewedAt ? renewedAt.getTime() : 0}:${etDateString(new Date(call.created_at))}`;
 
+  // A bell this callback already has for a DIFFERENT identity — another
+  // promise that has since been kept, or an older version of this one — is
+  // stale now that this promise is the one owed (Codex #5019 r21 P2).
+  await db('notifications').where({ recipient_type: 'admin', category: 'missed_call' }).whereNull('read_at')
+    .whereRaw("metadata->>'triggerKey' = 'promise_chaser'")
+    .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(call.id)])
+    .whereRaw("metadata->>'dedupeKey' IS DISTINCT FROM ?", [dedupeKey])
+    .update({ read_at: new Date() })
+    .catch((err) => logger.warn(`[promise-chaser-bell] failed to retire a superseded bell for call ${call.id}: ${err.message}`));
+
   // The canonical "already delivered" check missed-call-bell.js and
   // repeat-caller-bell.js both use before an atomic-claim reclaim — a
   // durable notifications row, never per-admin bell/push preferences: a

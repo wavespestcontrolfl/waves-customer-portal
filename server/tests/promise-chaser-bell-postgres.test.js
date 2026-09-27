@@ -874,6 +874,26 @@ const OUR_NUMBER = '+19415550100';
       expect(bell.read_at).not.toBeNull();
     });
 
+    test('a bell for a promise since kept is retired when the same callback now rings for a second open promise (Codex #5019 r21 P2)', async () => {
+      const earlierA = callRow(300);
+      const earlierB = callRow(240);
+      const kept = commitmentRow(earlierA.id);
+      const stillOwed = commitmentRow(earlierB.id, { kind: 'send_estimate', description: 'Send the quote' });
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlierA, earlierB, back]);
+      await mockConn('call_commitments').insert([kept, stillOwed]);
+      const staleId = randomUUID();
+      await mockConn('notifications').insert({
+        id: staleId, recipient_type: 'admin', category: 'missed_call', title: 'fixture',
+        metadata: { triggerKey: 'promise_chaser', dedupeKey: `promise_chaser:${kept.id}:0:x`, payload: { callLogId: back.id, commitmentId: kept.id } },
+      });
+      await mockConn('call_commitments').where({ id: kept.id }).update({ status: 'fulfilled' });
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification.mock.calls[0][1].commitmentId).toBe(stillOwed.id);
+      expect((await mockConn('notifications').where({ id: staleId }).first()).read_at).not.toBeNull();
+    });
+
     test('an unverifiable lookup never retires a bell', async () => {
       const earlier = callRow(240);
       const commitment = commitmentRow(earlier.id);
