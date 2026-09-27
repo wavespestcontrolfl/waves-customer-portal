@@ -72,6 +72,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     'There is no chance of rain tomorrow, so we can treat.',
     'There is a chance of mild irritation, so follow the label.',
     "The spray won't do a thing to termites; they need a soil treatment.",
+    'Termites are unable to harm your home once treated.',
+    'Ants are incapable of crossing the barrier once it is applied.',
   ])('leaves compliant replies untouched: %s', (reply) => {
     expect(scrubUnsafeClaims({ ...base, reply }).reply).toBe(reply);
   });
@@ -255,6 +257,10 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ["This treatment won't do a thing to your pets.", ''],
     ["This product won't do anything to children.", ''],
     ['The spray does nothing to your pets.', ''],
+    ['This treatment is unable to harm pets.', ''],
+    ['This pesticide is incapable of causing harm to pets.', ''],
+    ['The spray is not capable of hurting children.', ''],
+    ['Este producto es incapaz de dañar a sus mascotas.', ''],
     ['This pesticide is not considered hazardous to children.', ''],
     ['The product is not classified as toxic to pets.', ''],
     ['The treatment is not regarded as dangerous for dogs.', ''],
@@ -443,6 +449,8 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Puede volver a entrar ahora.', '¿Cuándo puedo volver a entrar?'],
     ['You can go back inside.', 'What should I do after the treatment?'],
     ['Go ahead and let the kids play outside.', 'What should I do after the treatment?'],
+    ['Come back once 30 minutes have elapsed.', 'What should I do after the treatment?'],
+    ['Please come back inside after an hour.', 'What should I do after the treatment?'],
   ])('flags: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
   });
@@ -474,6 +482,8 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['You can go back inside once everything is dry.', 'What should I do after the treatment?'],
     ['You can get your price by tapping Get my price.', 'What should I do after the treatment?'],
     ['We can go inside to treat the kitchen.', 'What should I do after the treatment?'],
+    ["We'll come back in two weeks for a follow-up treatment.", 'What should I do after the treatment?'],
+    ['Come back to this chat anytime with questions.', 'What should I do after the treatment?'],
   ])('leaves alone: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });
@@ -727,6 +737,12 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     expect(out.reply).toContain('1-800-222-1222');
   });
 
+  test('a visitor asking for Poison Control gets the Poison Control line', () => {
+    const out = normalizeIntakeResult({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, 'openai', 'I need Poison Control');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('1-800-222-1222');
+  });
+
   test.each(['Your child seems fine.', 'Your child appears to be okay.', 'He looks alright.', 'Su hijo parece estar bien.'])('an apparent-wellness reply after an ingestion gets the emergency script: %s', (reply) => {
     const out = normalizeIntakeResult({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, 'openai', 'My child swallowed pesticide');
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
@@ -737,6 +753,9 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     'My cat got sprayed with insecticide',
     'My rabbit touched rat poison',
     'My dog threw up after the treatment',
+    'My cow swallowed pesticide',
+    'My sheep ate rat poison',
+    'Mi vaca comió veneno',
   ])('an exposed pet gets the veterinary script: %s', (context) => {
     const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, context);
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
@@ -2149,6 +2168,11 @@ describe('looksLikeEmergency', () => {
     'The boy swallowed poison',
     'A woman inhaled poison fumes',
     "My neighbor's little boy drank the weed killer",
+    'My child choked on poison',
+    'My son is choking on the bait',
+    'I need Poison Control',
+    'I called poison control',
+    'Necesito el control de envenenamientos',
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
@@ -2250,6 +2274,8 @@ describe('looksLikeEmergency', () => {
     'The bait was swallowed whole by the rats',
     'I think a raccoon ate the bait',
     'My son says the rats ate the bait',
+    "I don't need poison control, just an ant treatment",
+    'The ants choked on the bait',
     'The rats were poisoned by spray',
     'The roaches were poisoned by the product',
     'The ants got poisoned by chemicals',
