@@ -599,6 +599,13 @@ const gates = {
   // load value, so a flip needs no redeploy.
   discountStacking: process.env.GATE_DISCOUNT_STACKING === 'true',
 
+  // Voice relay (Sandy) on an OpenAI model — benchmark/sandbox only. This map
+  // entry is for logGateStatus only; the canonical CALL-TIME reader is
+  // voiceRelayOpenaiLive() below (strict 'true', same convention as
+  // GATE_DISCOUNT_STACKING) — every caller (relay-conversation.js's session
+  // allowlist, the eval harness, the benchmark runner) must use that.
+  voiceRelayOpenai: process.env.GATE_VOICE_RELAY_OPENAI === 'true',
+
   // Collective series moves on every staff surface (owner rulings 2026-07-30
   // + 2026-08-28): with the gate on, ANY date move of a cadence visit that
   // reaches SmartRebooker.reschedule — dispatch drag, the Edit appointment
@@ -2955,6 +2962,32 @@ const gates = {
   // scoring/candidate/apply behavior, byte for byte. Kill switch: unset
   // GATE_AUTO_DISPATCH_SHARED_MODEL.
   autoDispatchSharedModel: gateEnvValue('GATE_AUTO_DISPATCH_SHARED_MODEL'),
+
+  // FLEXIBLE-TIER day moves for existing recurring visits (owner-approved
+  // 2026-09-25/26, capacity-picker-scope-20260925.md §11: "this is costing
+  // us the most money"). Runs INSIDE the auto-dispatch pass, in place of the
+  // ROUTE-TIERS days-out ladder (mutually exclusive — this gate wins if both
+  // are somehow on): every Flexible-tier visit (a series' 2nd+ occurrence —
+  // eligibility.js's existing recurring-child-only checks already exclude a
+  // series' first visit and one-time/first-time customers, the Fixed tier)
+  // may re-time SAME DAY or move up to ±5 days, clamped so it can never
+  // cross the series' adjacent occurrence (COALESCE(
+  // date_exception_cadence_date, scheduled_date) among the parent's
+  // children — auto-dispatch/flex-tier.js's loadSeriesNeighbors), until 73
+  // hours before the visit (tighter than route-tiers' own 72.25h reminder-
+  // claimable band, so it fully covers it) — the 72-hour reminder itself
+  // still carries the FINAL window (appointment-reminders.js reads the
+  // synced row at send time; the scheduled_services_sync_reminder DB
+  // trigger keeps it in lockstep with every scheduled_date/window_start
+  // write, auto-dispatch's included). Still no customer comms — apply.js's
+  // rebooker call is unchanged. **Ships DARK: off unless exactly
+  // `1`/`true`/`on`**, read at CALL time via gateEnvValue (same rationale as
+  // GATE_ROUTE_TIERS — it moves the dates auto-dispatch may write, so the
+  // flip is a deliberate act in every environment, never an ambient dev
+  // default). OFF = whatever GATE_ROUTE_TIERS/legacy-lock behavior applies,
+  // byte for byte. Kill switch: unset GATE_AUTO_DISPATCH_FLEX_TIER.
+  autoDispatchFlexTier: gateEnvValue('GATE_AUTO_DISPATCH_FLEX_TIER'),
+
   // Amazon "Delivered" email → auto-restock (server/services/purchase-receipts).
   // Ships DARK: off unless set (gateEnvValue), read at call time by both the
   // post-email-sync hook and the ~15-minute scheduler sweep — a flip needs no
@@ -2992,6 +3025,19 @@ function gateEnvValue(envName) {
 // flip until the process restarts).
 function discountStackingLive() {
   return process.env.GATE_DISCOUNT_STACKING === 'true';
+}
+
+// GATE_VOICE_RELAY_OPENAI read at CALL time — the one reader every entry
+// point into a non-Anthropic voice-relay session model must use: the session
+// allowlist (relay-conversation.js's resolveSessionModel/isAllowedOverride
+// Model), the eval harness (voice-relay-replay.js), and the benchmark runner
+// (run-voice-relay-benchmark.js), so a candidate OpenAI model is accepted
+// consistently across inbound, sandbox and eval alike. Unset (the production
+// default) or any spelling other than exactly 'true' keeps every non-
+// Anthropic override rejected — the existing reject → fallback → warn-once →
+// stamped model_fallback_reason path applies unchanged.
+function voiceRelayOpenaiLive() {
+  return process.env.GATE_VOICE_RELAY_OPENAI === 'true';
 }
 
 // GATE_CUSTOMER_INTEL_AI read at CALL time — the ONE reader for every entry
@@ -3141,5 +3187,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, commercialSuiteSizingLive, autoDispatchSharedModelLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, commercialSuiteSizingLive, autoDispatchSharedModelLive };
 // gates 1775330914
