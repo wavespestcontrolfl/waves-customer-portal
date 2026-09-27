@@ -1199,6 +1199,7 @@ const OWN_COMPANY_RE = /^(?:the\s+)?Waves\b/i;
 const GENERIC_SOURCE_HEAD_RE = /\b(?:authorities|authority|experts?|officials?|professionals?|research|researchers?|scientists?|specialists?|studies|study)\s*$/i;
 const SPECIFIC_SOURCE_ORG_RE = /\b(?:Service|Laboratory|Department|Agency|Institute|University|Extension|District|Center|Centre|Commission|Council|Office|Association|Society|Foundation|Administration|Bureau|Authority|Program)\b/i;
 const CREDENTIALED_PERSON_RE = /^(?:Dr|Prof|Professor)\.?\s+[A-Z][\w.'’-]+(?:\s+[A-Z][\w.'’-]+)+$/;
+const NAMED_PUBLICATION_RE = /^(?:Nature|Science|Consumer Reports|Scientific American|Journal of(?:\s+[A-Z][\w&.'’-]*){1,6}|(?:[A-Z][\w&.'’-]*\s+){0,5}(?:Journal|Review|Times|Tribune|Post|Herald|Magazine))$/;
 
 function genericAttributedSource(source) {
   return GENERIC_SOURCE_HEAD_RE.test(String(source || '').trim());
@@ -1207,9 +1208,11 @@ function genericAttributedSource(source) {
 function hasAttributedSource(body) {
   for (const m of String(body || '').matchAll(ATTRIBUTED_SOURCE_RE)) {
     const source = m[1].trim();
+    const withoutArticle = source.replace(/^the\s+/i, '');
     if (!OWN_COMPANY_RE.test(source)
       && !genericAttributedSource(source)
-      && (SPECIFIC_SOURCE_ORG_RE.test(source) || CREDENTIALED_PERSON_RE.test(source))) return true;
+      && (SPECIFIC_SOURCE_ORG_RE.test(source) || CREDENTIALED_PERSON_RE.test(source)
+        || NAMED_PUBLICATION_RE.test(withoutArticle))) return true;
   }
   for (const m of String(body || '').matchAll(DIRECT_INSTITUTION_SOURCE_RE)) {
     const source = m[1].trim();
@@ -1223,8 +1226,9 @@ function hasAttributedSource(body) {
 // as plain text to the attribution matchers (Codex P2, 2026-09-26).
 function visibleInlineText(body) {
   return String(body || '')
-    .replace(/!\[[^\]\n]*\]\([^)\n]*\)/g, ' ')
-    .replace(/\[([^\]\n]+)\]\([^)\n]*\)/g, '$1')
+    .replace(/^[ \t]{0,3}\[[^\]\n]+\]:[^\n]*(?:\n|$)/gm, ' ')
+    .replace(/!\[[^\]\n]*\](?:\([^)\n]*\)|\[[^\]\n]*\])/g, ' ')
+    .replace(/\[([^\]\n]+)\](?:\([^)\n]*\)|\[[^\]\n]*\])/g, '$1')
     .replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, '$1')
     .replace(/(\*\*|__|\*|_)(?=\S)([^*_\n]+?)\1/g, '$2');
 }
@@ -1252,7 +1256,7 @@ function countConcreteSpecifics(body) {
   // Remove complete dollar literals before scanning. Otherwise a
   // comma-formatted price such as "$1,200 per year" can be entered midway
   // at "200 per year" and masquerade as a non-price measurement.
-  const text = String(body || '').replace(/\$\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:-|–|—|to)\s*\$?\s*\d[\d,]*(?:\.\d+)?)?/g, ' ');
+  const text = visibleInlineText(body).replace(/\$\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:-|–|—|to)\s*\$?\s*\d[\d,]*(?:\.\d+)?)?/g, ' ');
   return (text.match(CONCRETE_SPECIFIC_RE) || []).length
     + (text.match(CALENDAR_WINDOW_RE) || []).length;
 }
@@ -1320,12 +1324,12 @@ function howToChooseSectionCriteria(body) {
   const lines = String(body || '').split(/\r?\n/);
   let best = -1;
   for (let i = 0; i < lines.length; i += 1) {
-    if (!/^##\s+\S/.test(lines[i]) || !HOW_TO_CHOOSE_HEADING_RE.test(lines[i])) continue;
+    if (!/^ {0,3}##\s+\S/.test(lines[i]) || !HOW_TO_CHOOSE_HEADING_RE.test(lines[i])) continue;
     // Top-level criteria only: the first list item fixes the criterion
     // indent; deeper (nested explanation) bullets never count (Codex r7 P2).
     let items = 0;
     let topIndent = null;
-    for (let j = i + 1; j < lines.length && !/^#{1,2}\s/.test(lines[j]); j += 1) {
+    for (let j = i + 1; j < lines.length && !/^ {0,3}#{1,2}\s/.test(lines[j]); j += 1) {
       const m = lines[j].match(/^(\s*)[-*+]\s+(\S.*)$/);
       if (!m) continue;
       const indent = m[1].replace(/\t/g, '    ').length;

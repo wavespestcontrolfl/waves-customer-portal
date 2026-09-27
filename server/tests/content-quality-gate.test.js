@@ -1545,7 +1545,7 @@ describe('citability nudges (weight-0, signal-only)', () => {
 describe('citability backfill completion (Codex r6 P2s)', () => {
   const {
     checkCitabilityBackfillGapsCleared, checkCitabilityHowToChoose, checkCitabilityNamedSources,
-    checkImprovementOverPrior, PAGE_TYPE_CHECKS,
+    checkImprovementOverPrior, countConcreteSpecifics, PAGE_TYPE_CHECKS,
   } = require('../services/content/content-quality-gate')._internals;
   const backfill = (gaps) => ({ gsc_signal: { bucket: 'citability_backfill', citability_gaps: gaps } });
   const prior = { previousVersion: { body: 'Experts say ants trail after rain. Water deeply.' } };
@@ -1640,6 +1640,24 @@ describe('citability backfill completion (Codex r6 P2s)', () => {
     expect(checkCitabilityHowToChoose({
       body: '<ComparisonTable columns={["A","B"]} rows={[]} />\n{false && <>## How to choose\n- If A → B\n- If C → D\n- If E → F</>}',
     })).toEqual({ ok: false, reason: 'no_how_to_choose_section' });
+  });
+  test('counts only visible Markdown measurements', () => {
+    expect(countConcreteSpecifics('[Read the guide](https://example.com/recheck-in-14-days)')).toBe(0);
+    expect(PAGE_TYPE_CHECKS.refresh.find((c) => c.name === 'citability_concrete_specifics').evaluate({
+      body: '[Read the guide](https://example.com/recheck-in-14-days)\n[guide]: https://example.com/recheck-in-21-days\n![chart](https://example.com/30-days.png)\nDuring summer',
+    }).ok).toBe(false);
+  });
+  test('accepts named publications but keeps generic research filler out', () => {
+    for (const source of ['the Journal of Medical Entomology', 'Nature', 'Consumer Reports']) {
+      expect(checkCitabilityNamedSources({ body: `According to ${source}, mosquito activity changes.` }).ok).toBe(true);
+    }
+    expect(checkCitabilityNamedSources({ body: 'According to Trusted Industry Research, mosquito activity changes.' }).ok).toBe(false);
+  });
+  test('recognizes CommonMark-indented decision headings and stops at the next indented H2', () => {
+    const table = '<ComparisonTable columns={["Factor","A"]} rows={[]} />\n';
+    expect(checkCitabilityHowToChoose({ body: `${table}  ## How to choose\n- If A → choose A\n- When B → use B\n- For C → call C` }).ok).toBe(true);
+    expect(checkCitabilityHowToChoose({ body: `${table}  ## How to choose\n- If A → choose A\n  ## Another section\n- When B → use B\n- For C → call C` }))
+      .toEqual({ ok: false, reason: 'how_to_choose_has_1_criteria_need_3+' });
   });
   test('planned structures stay binding even when the draft removes the choice framing', () => {
     const reframed = { title: 'Ghost Ant Treatments', body: '## Treatment overview\nPlain prose.' };

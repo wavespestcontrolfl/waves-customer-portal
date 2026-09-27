@@ -807,6 +807,13 @@ class ContentBriefBuilder {
         : {},
       gsc_signal: {
         bucket: opportunity.bucket,
+        // The scanner's selected gaps are the backfill's provenance and
+        // completion contract. Carry them through the persisted brief so the
+        // evidence exemption and hard gap-clearance check see the same plan.
+        citability_gaps: opportunity.bucket === 'citability_backfill'
+          && Array.isArray(opportunity.signal_metadata?.citability_gaps)
+          ? opportunity.signal_metadata.citability_gaps
+          : null,
         // True competitor-intercept marker: category/spoke seeds share the
         // operator_intercept bucket, so downstream price policy needs this
         // to tell them apart after the content_briefs round-trip.

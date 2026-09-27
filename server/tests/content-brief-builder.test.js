@@ -973,6 +973,21 @@ describe('_composeBrief gsc_signal impressions fallback (seasonal_rising fix 202
   });
 });
 
+describe('_composeBrief citability backfill provenance', () => {
+  test('carries the scanner gap plan into the composed and persisted gsc signal', () => {
+    const gaps = ['named_sources', 'comparison'];
+    const brief = new ContentBriefBuilder()._composeBrief({
+      opportunity: {
+        id: 'opp-citability', bucket: 'citability_backfill', page_url: '/blog/ants/',
+        query: null, city: null, service: 'pest', signal_metadata: { citability_gaps: gaps },
+      },
+      signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+      decision: { page_type: 'refresh', action_type: 'refresh_existing_page' },
+    });
+    expect(brief.gsc_signal).toMatchObject({ bucket: 'citability_backfill', citability_gaps: gaps });
+  });
+});
+
 // ── listicle_family gate-off leak guard (Codex r3 on #3255) ──────────
 
 describe('_composeBrief listicle_family rows keep the overlay even with listicleBriefs off', () => {
