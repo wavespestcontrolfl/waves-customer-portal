@@ -1926,52 +1926,63 @@ class AutonomousRunner {
    * a repeat offender is discarded, not published and not parked.
    */
   async _gateFailRetryOrSkip(queue, opp, run, t0, finalize, { claimToken, skipReason, notes, blocking }) {
-    const alreadyRetried = !!opp.signal_metadata?.gate_retry;
-    if (!alreadyRetried) {
-      let recorded = false;
-      try {
-        recorded = await this._recordGateRetry(opp, skipReason, blocking, claimToken);
-      } catch (err) {
-        logger.warn(`[autonomous-runner] gate-retry record failed for ${opp.id}: ${err.message}`);
-      }
-      if (recorded) {
-        const finalized = await finalize(run, t0, {
-          outcome: 'deferred_gate_retry',
-          skip_reason: skipReason,
-          reviewer_notes: `${notes} — deferred for one autonomous redraft with these findings fed back to the writer.`,
-        });
-        await this._deferClaimOrThrow(queue, opp.id, new Date(), { claimToken });
-        return finalized;
-      }
-      // Couldn't persist the feedback marker: a defer would retry blind and
-      // could loop. Fall through to the terminal skip instead.
-    }
-    const finalized = await finalize(run, t0, {
-      outcome: 'skipped_gate_fail',
-      skip_reason: skipReason,
-      reviewer_notes: alreadyRetried
-        ? `${notes} — redraft with gate feedback failed the gate again; skipped (exceptions-only review queue).`
-        : `${notes} — could not record retry feedback; skipped (exceptions-only review queue).`,
+    const findings = (blocking || []).map((finding) => ({
+      severity: finding.severity,
+      code: finding.code,
+      message: String(finding.message || '').slice(0, 300),
+    }));
+    return this._boundedRetryOrSkip(queue, opp, run, t0, finalize, {
+      claimToken,
+      skipReason,
+      notes,
+      marker: 'gate_retry',
+      retryAt: new Date(),
+      retryData: { findings },
+      deferredOutcome: 'deferred_gate_retry',
+      deferredNote: 'deferred for one autonomous redraft with these findings fed back to the writer.',
+      exhaustedNote: 'redraft with gate feedback failed the gate again; skipped (exceptions-only review queue).',
+      unrecordedNote: 'could not record retry feedback; skipped (exceptions-only review queue).',
     });
-    await this._skipClaimOrThrow(queue, opp.id, skipReason, { claimToken });
-    return finalized;
   }
 
   async _infrastructureRetryOrSkip(queue, opp, run, t0, finalize, { claimToken, skipReason, notes }) {
-    const alreadyRetried = Boolean(opp.signal_metadata?.infrastructure_retry);
+    const retryAt = new Date(Date.now() + INFRASTRUCTURE_RETRY_BACKOFF_MS);
+    return this._boundedRetryOrSkip(queue, opp, run, t0, finalize, {
+      claimToken,
+      skipReason,
+      notes,
+      marker: 'infrastructure_retry',
+      retryAt,
+      retryData: { retry_after: retryAt.toISOString() },
+      deferredOutcome: 'deferred_infrastructure_retry',
+      deferredNote: 'deferred for one autonomous retry after infrastructure recovery.',
+      exhaustedNote: 'infrastructure failed again after the bounded retry; skipped.',
+      unrecordedNote: 'could not record the bounded infrastructure retry; skipped.',
+    });
+  }
+
+  async _boundedRetryOrSkip(queue, opp, run, t0, finalize, config) {
+    const {
+      claimToken, skipReason, notes, marker, retryAt, retryData,
+      deferredOutcome, deferredNote, exhaustedNote, unrecordedNote,
+    } = config;
+    const alreadyRetried = Boolean(opp.signal_metadata?.[marker]);
     if (!alreadyRetried) {
-      const retryAt = new Date(Date.now() + INFRASTRUCTURE_RETRY_BACKOFF_MS);
       let recorded = false;
       try {
-        recorded = await this._recordInfrastructureRetry(opp, skipReason, retryAt, claimToken);
+        recorded = await this._recordRetryMarker(opp, marker, {
+          at: new Date().toISOString(),
+          skip_reason: skipReason,
+          ...retryData,
+        }, claimToken);
       } catch (err) {
-        logger.warn(`[autonomous-runner] infrastructure-retry record failed for ${opp.id}: ${err.message}`);
+        logger.warn(`[autonomous-runner] ${marker.replace(/_/g, '-')} record failed for ${opp.id}: ${err.message}`);
       }
       if (recorded) {
         const finalized = await finalize(run, t0, {
-          outcome: 'deferred_infrastructure_retry',
+          outcome: deferredOutcome,
           skip_reason: skipReason,
-          reviewer_notes: `${notes} — deferred for one autonomous retry after infrastructure recovery.`,
+          reviewer_notes: `${notes} — ${deferredNote}`,
         });
         await this._deferClaimOrThrow(queue, opp.id, retryAt, { claimToken });
         return finalized;
@@ -1980,57 +1991,30 @@ class AutonomousRunner {
     const finalized = await finalize(run, t0, {
       outcome: 'skipped_gate_fail',
       skip_reason: skipReason,
-      reviewer_notes: alreadyRetried
-        ? `${notes} — infrastructure failed again after the bounded retry; skipped.`
-        : `${notes} — could not record the bounded infrastructure retry; skipped.`,
+      reviewer_notes: `${notes} — ${alreadyRetried ? exhaustedNote : unrecordedNote}`,
     });
     await this._skipClaimOrThrow(queue, opp.id, skipReason, { claimToken });
     return finalized;
   }
 
-  async _recordInfrastructureRetry(opp, skipReason, retryAt, claimToken) {
-    const retry = {
-      at: new Date().toISOString(),
-      retry_after: retryAt.toISOString(),
-      skip_reason: skipReason,
-    };
+  /** Persist one allowed retry marker atomically against the active claim. */
+  async _recordRetryMarker(opp, marker, retry, claimToken) {
+    if (!['gate_retry', 'infrastructure_retry'].includes(marker)) {
+      throw new Error(`unsupported_retry_marker:${marker}`);
+    }
     const updated = await db('opportunity_queue')
       .where('id', opp.id)
       .where('status', 'claimed')
       .where('claimed_at', claimToken)
       .whereRaw("NOT jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')")
-      .whereRaw("NOT jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'infrastructure_retry')")
+      .whereRaw("NOT jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), ?)", [marker])
       .update({
         signal_metadata: db.raw(
-          "jsonb_set(COALESCE(signal_metadata, '{}'::jsonb), '{infrastructure_retry}', ?::jsonb, true)",
-          [JSON.stringify(retry)]
+          'jsonb_set(COALESCE(signal_metadata, \'{}\'::jsonb), ARRAY[?]::text[], ?::jsonb, true)',
+          [marker, JSON.stringify(retry)]
         ),
         updated_at: new Date(),
       });
-    return updated > 0;
-  }
-
-  /**
-   * Persist the blocking gate findings onto the opportunity so the redraft's
-   * brief can feed them back to the writer. Returns true only when the row
-   * was actually written. Guarded to the active claim so a stale worker
-   * can't stamp feedback over another attempt.
-   */
-  async _recordGateRetry(opp, skipReason, blocking, claimToken) {
-    const findings = (blocking || []).map((f) => ({
-      severity: f.severity,
-      code: f.code,
-      message: String(f.message || '').slice(0, 300),
-    }));
-    const meta = {
-      ...(opp.signal_metadata || {}),
-      gate_retry: { at: new Date().toISOString(), skip_reason: skipReason, findings },
-    };
-    const updated = await db('opportunity_queue')
-      .where('id', opp.id)
-      .where('status', 'claimed')
-      .where('claimed_at', claimToken)
-      .update({ signal_metadata: JSON.stringify(meta), updated_at: new Date() });
     return updated > 0;
   }
 

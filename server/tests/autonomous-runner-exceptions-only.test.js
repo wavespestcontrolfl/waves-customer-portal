@@ -186,7 +186,9 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
     expect(queue.skip).not.toHaveBeenCalled();
     const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');
     expect(retryWrite).toBeTruthy();
-    expect(String(retryWrite.patch.signal_metadata)).toContain('HARDCODED_PRICE');
+    expect(retryWrite.patch.signal_metadata.bindings[0]).toBe('gate_retry');
+    expect(JSON.parse(retryWrite.patch.signal_metadata.bindings[1]).findings)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ code: 'HARDCODED_PRICE' })]));
   });
 
   test('aggregate quality-gate MISS (no infra error) also gets the redraft-then-skip disposition', async () => {
@@ -213,7 +215,9 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
     expect(queue.defer).toHaveBeenCalledWith('opp_agg', expect.any(Date), { claimToken: claimedAt });
     expect(queue.pendingReview).not.toHaveBeenCalled();
     const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');
-    expect(String(retryWrite.patch.signal_metadata)).toContain('QUALITY_GATE');
+    expect(retryWrite.patch.signal_metadata.bindings[0]).toBe('gate_retry');
+    expect(JSON.parse(retryWrite.patch.signal_metadata.bindings[1]).findings)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ code: 'QUALITY_GATE' })]));
   });
 
   test('an unattended blog delays one infrastructure retry, then skips without a writer directive', async () => {
@@ -241,13 +245,13 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
     const retryWrite = first.dbMock._updates.find((u) => u.table === 'opportunity_queue');
     expect(retryWrite.wheres).toEqual(expect.arrayContaining([
       ['raw', expect.stringContaining('page_edit_superseded')],
-      ['raw', expect.stringContaining('infrastructure_retry')],
+      ['raw', expect.stringContaining('jsonb_exists'), ['infrastructure_retry']],
     ]));
-    expect(retryWrite.patch.signal_metadata.__raw).toContain("'{infrastructure_retry}'");
-    expect(JSON.parse(retryWrite.patch.signal_metadata.bindings[0])).toMatchObject({
+    expect(retryWrite.patch.signal_metadata.__raw).toContain('ARRAY[?]::text[]');
+    expect(retryWrite.patch.signal_metadata.bindings[0]).toBe('infrastructure_retry');
+    expect(JSON.parse(retryWrite.patch.signal_metadata.bindings[1])).toMatchObject({
       retry_after: retryAt.toISOString(), skip_reason: 'gate_infrastructure_error',
     });
-    expect(retryWrite.patch.signal_metadata.__raw).not.toContain('gate_retry');
 
     const secondQueue = makeQueue({
       id: 'opp_infra_second', action_type: 'new_supporting_blog', claimed_at: claimedAt,
