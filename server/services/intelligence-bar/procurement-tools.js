@@ -1320,12 +1320,38 @@ async function productsNamedIn(rawText) {
 // target_relationship_mismatch), or null (no grounding found; the caller
 // keeps its original clarification refusal, which also covers "named 2+
 // products"). Called only where the grammar found no target at all.
-async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq = null } = {}) {
+// The fallback's words must ask for the tool's own operation. adjust_stock
+// adds stock that is on hand, so it needs a receipt word and no ordering
+// word: "We ordered Taurus SC" never adds stock before it arrives.
+// create_restock_request orders more, so it needs an ordering word and no
+// receipt word: "We received Taurus SC" never opens a request.
+const RECEIPT_WORDS = new Set(['bought', 'buy', 'purchase', 'purchased', 'picked', 'received', 'receive', 'restocked',
+  'delivered', 'arrived', 'came', 'add', 'added', 'adding', 'put', 'got', 'log', 'logged', 'record', 'recorded']);
+const ORDER_WORDS = new Set(['order', 'ordered', 'reorder', 'reordered', 'restock']);
+// A receipt phrase grounds only a restock: a count correction or a write-off
+// from the same words is never inferred.
+function operationMatches(toolName, texts, preview) {
+  const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
+  const words = texts.flatMap((text) => normalizeForMatch(text).split(' '));
+  const receipt = words.some((word) => RECEIPT_WORDS.has(word));
+  const order = words.some((word) => ORDER_WORDS.has(word));
+  if (toolName === 'adjust_stock') {
+    return receipt && !order && (preview.movement_type == null || preview.movement_type === 'restock');
+  }
+  if (toolName === 'create_restock_request') return order && !receipt;
+  return false;
+}
+
+async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq = null, toolName = null } = {}) {
   if (!preview?.product?.id) return null;
-  const decide = (named) => {
+  // `texts` are the operator's words the grounding rests on (this prompt,
+  // plus the prior turn that named the product): they must also ask for the
+  // same operation as the tool (operationMatches).
+  const decide = (named, texts) => {
     if (named.size !== 1) return null; // 0 = nothing to ground on; 2+ = ambiguous, refuse
     const [id] = named;
-    return id === preview.product.id ? { productId: id } : { mismatch: true };
+    if (id !== preview.product.id) return { mismatch: true };
+    return operationMatches(toolName, texts, preview) ? { productId: id } : null;
   };
   // Naming comes from the operator's FULL raw text via the closed-vocabulary
   // residual rule (productsNamedIn) — never targetClause, which also strips
@@ -1339,7 +1365,7 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { 
   // A qualifier conflict ("Taurus 20% SC" against a "Taurus 10% SC" catalog
   // row) never grounds, on this text or any other — never fall back either.
   if (current.conflict) return null;
-  const fromCurrent = decide(current.named);
+  const fromCurrent = decide(current.named, [prompt]);
   if (fromCurrent) return fromCurrent;
   if (current.named.size > 0) return null; // current prompt named something (ambiguous) — never fall back
   if (!isBareFollowUp(prompt)) return null;
@@ -1362,7 +1388,7 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { 
     const turnResult = await productsNamedIn(turn);
     if (turnResult.conflict) return null; // a conflict on any prior turn refuses outright
     if (turnResult.named.size > 1) return null; // that turn alone is ambiguous — refuse, don't guess
-    if (turnResult.named.size === 1) return decide(turnResult.named);
+    if (turnResult.named.size === 1) return decide(turnResult.named, [prompt, turn]);
     // Named nothing. Only a bare reply ("yes", "1 bottle") has no opinion
     // and may be skipped; any other turn ("Actually use Unlisted Chemical
     // instead") may be a correction this catalog can't read, so the scan
@@ -1435,7 +1461,7 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   // can read: this is the one place the free-phrasing fallback runs (and,
   // for a bare follow-up like "1 bottle", recent operator turns).
   if (!selected) {
-    const fallback = await resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq: threadSeq });
+    const fallback = await resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq: threadSeq, toolName });
     if (fallback?.productId) return { productId: fallback.productId };
     if (fallback?.mismatch) return { ...unavailable, code: 'target_relationship_mismatch' };
     return unavailable;

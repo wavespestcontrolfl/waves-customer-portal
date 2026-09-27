@@ -261,39 +261,18 @@ function sanitizeQueryImages(images) {
 // image taint does.
 // The persisted user turn of a task continuation. The original request is
 // already in the thread and in the client's history from the first reply.
-const CONTINUATION_TURN = 'Continue the saved request using its recorded step outcomes.';
+// The persisted user turn of a task continuation is defined with the thread
+// store (IbThreads.CONTINUATION_TURN), which also keeps it out of prior-turn
+// grounding.
+const { CONTINUATION_TURN } = IbThreads;
 
-// Phantom-card guard (see the finalResponse assembly below): text claiming
-// THIS reply carries a confirmation card. "below"/"this reply" language is
-// what ties the claim to the current turn's own output.
+// Phantom-card guard (see the finalResponse assembly below): text that
+// claims a confirmation card. When the turn created no pending action, the
+// reply gets a notice. It is not narrowed to "new" cards: a claim that also
+// mentions a prior card ("a new card to replace the previous card") is
+// still a claim, and the notice's wording is true either way.
 const CARD_CLAIM_RE = /\bcard below\b|\bconfirm(?:ation)? card\b|\bclick confirm\b|\bconfirm(?:ation)? on the card\b/i;
-// A reply can truthfully mention an EARLIER card (already sent, still open
-// from a prior turn) without this turn creating a new one — never flag that.
-// Narrow to phrases that explicitly identify a PRIOR card (Codex round-2 P2:
-// the old "already ... card" trigger let "I've already prepared the
-// confirmation card below." — a genuine new-card claim — slip through on
-// the word "already" alone, which says nothing about WHICH card). Explicit
-// prior-card language only: "(earlier|previous|prior|last|old|existing|
-// original) card", "card (I|you) (sent|showed|prepared|made) (earlier|
-// before)", or "card (from|in) (my|the) (earlier|previous|last) (message|
-// reply)".
-const EARLIER_CARD_REFERENCE_RE = /\b(?:earlier|previous|prior|last|old|existing|original)\s+(?:confirmation\s+)?card\b|\bcard\b\s+(?:i|you)\s+(?:sent|showed|prepared|made)\s+(?:earlier|before)\b|\bcard\b\s+(?:from|in)\s+(?:my|the)\s+(?:earlier|previous|last)\s+(?:message|reply)\b/i;
-// Evaluated per SENTENCE, not over the whole reply: "The earlier card
-// expired. I've prepared a new confirmation card below." must still flag —
-// the earlier-card exclusion in one sentence must never cover a genuine new
-// claim in another. A sentence naming "below" is always a CURRENT-card
-// claim regardless — the earlier-card exclusion never applies to it, even
-// when the same sentence also happens to mention an earlier one.
-// Clauses, not just sentences: "The earlier card expired; I've prepared a new
-// confirmation card." holds two claims, and the earlier-card exclusion may
-// only cover the clause that names the earlier card.
-function splitIntoClauses(text) {
-  return String(text).split(/[.!?;,\n]+|\b(?:and|but|so)\b/i).map((clause) => clause.trim()).filter(Boolean);
-}
-function claimsCardWithoutEarlierReference(text) {
-  return splitIntoClauses(text).some((clause) => CARD_CLAIM_RE.test(clause)
-    && (/\bbelow\b/i.test(clause) || !EARLIER_CARD_REFERENCE_RE.test(clause)));
-}
+const PHANTOM_CARD_NOTICE = "This reply didn't create a confirmation card. If you want a change, ask again and say exactly what to change.";
 
 function hasImageTaintedHistory(conversationHistory) {
   if (!Array.isArray(conversationHistory)) return false;
@@ -2616,16 +2595,14 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // Phantom-card guard (2026-09-25 production case): the model can write
     // "awaiting your Confirm on the card below" in plain prose with no tool
     // call at all, so THIS turn creates no pending action and no card ever
-    // renders. Deterministic and truthful either way — it only compares what
-    // this reply claims against what this turn actually produced, so a reply
-    // that merely references an EARLIER card (already sent, still open from a
-    // prior turn) is left alone (checked per sentence — see
-    // claimsCardWithoutEarlierReference). Appended here, before analytics
-    // logging and thread persistence, so the logged/persisted text matches
-    // what the operator sees. The notice is tool-agnostic (not every write
-    // tool has "a product and amount") — it never names a specific field.
-    if (!pendingProposals.length && claimsCardWithoutEarlierReference(finalResponse)) {
-      finalResponse += '\n\nNo confirmation card was created for this reply, so nothing will change. Ask again and say exactly what to change.';
+    // renders. Deterministic: it compares what this reply claims with what
+    // this turn produced, and the notice stays true when the reply is really
+    // pointing at an earlier card (this reply created none). Appended here,
+    // before analytics logging and thread persistence, so the logged and
+    // persisted text match what the operator sees. The notice is
+    // tool-agnostic: it never names a specific field.
+    if (!pendingProposals.length && CARD_CLAIM_RE.test(finalResponse)) {
+      finalResponse += `\n\n${PHANTOM_CARD_NOTICE}`;
     }
 
     // Log the query for analytics. tool_calls stores names + field keys only;

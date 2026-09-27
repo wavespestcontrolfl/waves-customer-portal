@@ -583,6 +583,31 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     expect(confirmed).toEqual({ productId: ALPINE.id });
   });
 
+  describe('the words must ask for the tool\'s own operation', () => {
+    test.each([
+      ['adjust_stock', 'We ordered Taurus SC', {}],
+      ['adjust_stock', 'We bought Taurus SC', { movement_type: 'correction' }],
+      ['create_restock_request', 'We received Taurus SC, 2 jugs', {}],
+    ])('%s refuses "%s"', async (toolName, prompt, extra) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      const result = await resolveInventoryWriteTarget({
+        toolName, prompt, preview: { product: { id: TAURUS.id, name: TAURUS.name }, ...extra },
+      });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test.each([
+      ['adjust_stock', 'We bought Taurus SC', { movement_type: 'restock' }],
+      ['create_restock_request', 'We ordered 2 jugs of Taurus SC', {}],
+    ])('%s grounds "%s"', async (toolName, prompt, extra) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      const result = await resolveInventoryWriteTarget({
+        toolName, prompt, preview: { product: { id: TAURUS.id, name: TAURUS.name }, ...extra },
+      });
+      expect(result).toEqual({ productId: TAURUS.id });
+    });
+  });
+
   test('a follow-up naming nothing ("1 bottle") grounds off a recent prior OPERATOR turn', async () => {
     setGroundingDb({ products: [TAURUS, ALPINE] });
     IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
@@ -912,7 +937,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         setGroundingDb({ products: [TAURUS, ALPINE] });
         const result = await resolveInventoryWriteTarget({
           toolName: 'adjust_stock',
-          prompt: 'Taurus SC 78 ounces',
+          prompt: 'We bought Taurus SC 78 ounces',
           preview: { product: { id: TAURUS.id, name: TAURUS.name } },
         });
         expect(result).toEqual({ productId: TAURUS.id });
@@ -932,7 +957,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     test.each([
       'Please Taurus SC, add 12 oz',
       'Add some Taurus SC',
-      'Get me Taurus SC, 78 oz',
+      'Add me Taurus SC, 78 oz',
     ])('ordinary words before the name are never read as a formulation code (%s)', async (prompt) => {
       setGroundingDb({ products: [TAURUS, ALPINE] });
       const result = await resolveInventoryWriteTarget({
@@ -1186,7 +1211,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         setGroundingDb({ products: [ARMADA_50, ALPINE] });
         const result = await resolveInventoryWriteTarget({
           toolName: 'adjust_stock',
-          prompt: 'Armada 50 WDG, 2 lb',
+          prompt: 'We bought Armada 50 WDG, 2 lb',
           preview: { product: { id: ARMADA_50.id, name: ARMADA_50.name } },
         });
         expect(result).toEqual({ productId: ARMADA_50.id });

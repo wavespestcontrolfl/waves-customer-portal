@@ -111,12 +111,12 @@ async function postQuery(baseUrl, body) {
   return { status: res.status, body: await res.json() };
 }
 
-const NOTICE = 'No confirmation card was created for this reply';
+const NOTICE = "This reply didn't create a confirmation card";
 // Tool-agnostic (finding 3): the notice never names a specific tool's own
 // fields (the old wording's "product and amount" example didn't fit every
 // write tool), so it reads the same regardless of which tool's card was
 // claimed.
-const FULL_NOTICE = 'No confirmation card was created for this reply, so nothing will change. Ask again and say exactly what to change.';
+const FULL_NOTICE = "This reply didn't create a confirmation card. If you want a change, ask again and say exactly what to change.";
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -160,21 +160,20 @@ test('a reply with ordinary text and no card claim is untouched', async () => {
   });
 });
 
-test('a reply that only references an EARLIER, already-sent card is left alone', async () => {
-  scriptModelTurns([[{ type: 'text', text: 'Please use the earlier confirmation card to proceed.' }]]);
+// Any card claim in a turn that created no pending action gets the notice,
+// including one that points at an earlier card: the notice only says this
+// reply created none, which is true either way (Codex round-4 P2: no
+// "earlier card" exception can tell which card a claim describes).
+test.each([
+  'Please use the earlier confirmation card to proceed.',
+  'Please use the confirmation card I sent earlier.',
+  "I've prepared a new confirmation card to replace the previous card.",
+])('a card claim in a turn with no pending action gets the notice (%s)', async (text) => {
+  scriptModelTurns([[{ type: 'text', text }]]);
   await withServer(async (baseUrl) => {
     const { status, body } = await postQuery(baseUrl, { prompt: 'anything', context: 'customers' });
     expect(status).toBe(200);
-    expect(body.response).not.toContain(NOTICE);
-  });
-});
-
-test('"card I sent earlier" is also a genuine prior-card reference and is left alone', async () => {
-  scriptModelTurns([[{ type: 'text', text: 'Please use the confirmation card I sent earlier.' }]]);
-  await withServer(async (baseUrl) => {
-    const { status, body } = await postQuery(baseUrl, { prompt: 'anything', context: 'customers' });
-    expect(status).toBe(200);
-    expect(body.response).not.toContain(NOTICE);
+    expect(body.response).toContain(NOTICE);
   });
 });
 

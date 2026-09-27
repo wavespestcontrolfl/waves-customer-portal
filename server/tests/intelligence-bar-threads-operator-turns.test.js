@@ -98,6 +98,18 @@ describe('IbThreads.recentOperatorTurns', () => {
     expect(result).toEqual(['We bought Alpine WSG']);
   });
 
+  test('a synthetic continuation turn is skipped so the operator\'s real turn behind it comes back', async () => {
+    const IbThreads = withThreadsModule({
+      threads: [{ id: THREAD_ID, admin_actor_id: ACTOR }],
+      turns: [
+        { thread_id: THREAD_ID, seq: 1, role: 'user', content: 'We bought Alpine WSG', created_at: minutesAgo(5) },
+        { thread_id: THREAD_ID, seq: 2, role: 'user', content: 'Continue the saved request using its recorded step outcomes.', created_at: minutesAgo(2) },
+      ],
+    });
+    const result = await IbThreads.recentOperatorTurns(ACTOR, THREAD_ID, { limit: 3, maxAgeMinutes: 30 });
+    expect(result).toEqual(['We bought Alpine WSG']);
+  });
+
   test('an assistant-only mention never comes back, even when it is the most recent turn', async () => {
     const IbThreads = withThreadsModule({
       threads: [{ id: THREAD_ID, admin_actor_id: ACTOR }],
