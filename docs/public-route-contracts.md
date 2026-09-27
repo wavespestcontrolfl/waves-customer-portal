@@ -2142,7 +2142,12 @@ a raw `resolveServiceAddress` — a directly supplied out-of-area address
 422s `{ error: 'out_of_area', county, waitlist_ticket }` or 503s
 `{ error: 'service_area_unavailable' }` instead of returning slot
 availability for a location that could never survive the commit handler's
-own area check. `resolveServiceAddress` has no callers anywhere in this file outside
+own area check. A linked customer's durable `needs_details`, `needs_pin`, or
+`outside_area` review quarantines that saved address from automatic geocoding:
+GET reports `needs_address: true`, and a commit that tries to reuse the same
+saved address answers 422 `{ error: 'address_unresolved' }`. A supplied address
+that is affirmatively a different property can still proceed through the usual
+validation and area checks. `resolveServiceAddress` has no callers anywhere in this file outside
 `finalizeBookingLocation`'s own body, and `checkServiceArea` has none outside
 `serviceAreaFailure` — reached from `finalizeBookingLocation` and from the
 commit route's own recheck of a verified lead's adopted property (the one

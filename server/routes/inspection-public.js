@@ -329,12 +329,15 @@ async function loadTrustedCustomer(dbConn, lead, token) {
   // A verified lead link wins over provenance naming ANOTHER account (Codex
   // #4737 r7 P2 — staff relinked the lead); provenance naming the linked
   // customer's own account (an additional property booked here) wins.
+  let selected;
   if (linked && prospect) {
     const sameAccount = prospect.id === linked.id
       || (Boolean(linked.account_id) && prospect.account_id === linked.account_id);
-    return sameAccount ? prospect : linked;
+    selected = sameAccount ? prospect : linked;
+  } else {
+    selected = linked || prospect;
   }
-  return linked || prospect;
+  return require('../services/customer-geocode-review').reviewedCustomerLocation(selected, dbConn);
 }
 
 // A provenance customer_id can go stale when customer-dedupe.js merges that
@@ -466,6 +469,9 @@ async function loadCustomer(dbConn, customerId) {
 // while holding it, never allowed, so an actual difference here fails
 // closed instead (see the commit handler's phase 1).
 const STORED_ADDRESS_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude'];
+const sameCoordinates = (left, right) => ['latitude', 'longitude'].every(
+  field => left?.[field] != null && right?.[field] != null && Number(left[field]) === Number(right[field])
+);
 
 // The booking window mirrors reservice-public's — the config-driven range
 // the /book funnel and reschedule page also use.
@@ -535,6 +541,9 @@ async function resolveServiceAddress(lead, custRow, suppliedAddress) {
   }
   const stored = storedCoordsResolution(custRow);
   if (stored) return stored;
+  if (custRow?.geocode_review_blocked) {
+    return { location: null, address: null, source: null, unresolved: true };
+  }
   let anyAddressText = false;
   for (const { address, source } of storedAddressCandidates(lead, custRow)) {
     anyAddressText = true;
@@ -1138,6 +1147,27 @@ function profileMatchesAddress(row, address, location) {
   return coordsClose({ lat: row.latitude, lng: row.longitude }, location);
 }
 
+// A review quarantine may be bypassed only for a supplied address that is
+// affirmatively another property. Missing ZIP/locality/unit data is not a
+// difference: treating an incomplete copy of the reviewed address as a new
+// property would let it receive fresh provider coordinates in a sibling
+// profile. Both sides must provide a comparable value before it can prove a
+// conflict.
+function profileAffirmativelyDiffers(row, address) {
+  const { streetKey, normalizeZip, unitKey, streetEmbeddedUnitKey } = require('../services/customer-properties');
+  const unitOf = (line1, line2) => unitKey(line2 || '') || streetEmbeddedUnitKey(line1);
+  const premiseDiffers = [
+    [streetKey(row.address_line1), streetKey(address?.line1)],
+    [unitOf(row.address_line1, row.address_line2), unitOf(address?.line1, address?.line2)],
+  ].some(([stored, supplied]) => stored && supplied && stored !== supplied);
+  if (premiseDiffers) return true;
+  const zip = normalizeZip(row.zip);
+  const suppliedZip = normalizeZip(address?.zip);
+  // The ordinary profile matcher treats matching ZIPs as the same property,
+  // regardless of postal-city aliases. The quarantine boundary must agree.
+  return Boolean(zip && suppliedZip && zip !== suppliedZip);
+}
+
 // The ONE place an unlinked lead gets attached to a customer record. Resolves
 // ensureCustomerAccount exactly once (it can WRITE — attaching a legacy
 // row's account, or minting a fresh customer_accounts row — so it must never
@@ -1395,9 +1425,13 @@ async function reuseMatchedProfile(trx, freshLead, matched, resolved) {
   // resolveEligibility's own docblock.
   const eligibility = await resolveEligibility(trx, freshLead, matched, { includeRescheduleUrl: false });
   if (eligibility.state !== 'ok') return { eligibility };
-  if (matched.latitude != null && matched.longitude != null) {
-    return { customer: matched, location: { lat: parseFloat(matched.latitude), lng: parseFloat(matched.longitude) } };
+  const review = require('../services/customer-geocode-review');
+  const reviewed = await review.reviewedCustomerLocation(matched, trx);
+  const rawMatchesReviewed = sameCoordinates(matched, reviewed);
+  if (reviewed.latitude != null && reviewed.longitude != null && rawMatchesReviewed) {
+    return { customer: reviewed, location: { lat: parseFloat(reviewed.latitude), lng: parseFloat(reviewed.longitude) } };
   }
+  if (reviewed.geocode_review_blocked) return { locationFailure: 'address_unresolved' };
   // A legacy profile with no stored coordinates gets the validated ones
   // (Codex #4737 r3 P1): createSelfBooking reloads the customer's own
   // coordinates for its commit-time travel check. The customer-comms fence
@@ -1411,18 +1445,41 @@ async function reuseMatchedProfile(trx, freshLead, matched, resolved) {
     logger.warn(`[inspection-public] comms fence busy for ${matched.id}; coordinates not persisted`);
     return { customer: matched, location: resolved.location };
   }
-  // Re-read under the fence (Codex #4737 r9 pre-push P1): an address edit
-  // that committed between matching and this lock must not receive the old
-  // address's coordinates — a changed (or archived) profile is a retry.
-  const fresh = await trx('customers').where({ id: matched.id }).whereNull('deleted_at')
-    .first('id', 'account_id', ...STORED_ADDRESS_FIELDS);
-  const unchanged = fresh
-    && String(fresh.account_id || '') === String(matched.account_id || '')
-    && STORED_ADDRESS_FIELDS.every((f) => (fresh[f] ?? null) === (matched[f] ?? null));
-  if (!unchanged) return { locationFailure: 'address_unresolved' };
-  const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
-  await trx('customers').where({ id: matched.id }).update({ ...after, updated_at: new Date() });
-  return { customer: { ...matched, ...after }, location: resolved.location };
+  try {
+    const fenced = await review.withCustomerReviewWriteFence(matched.id, trx, async (fencedTrx) => {
+      // Re-read after both the customer and primary property are locked. A
+      // concurrent address edit or geocode decision must win rather than
+      // receiving the provider result computed before this transaction.
+      const fresh = await fencedTrx('customers').where({ id: matched.id }).whereNull('deleted_at')
+        .first('id', 'account_id', ...STORED_ADDRESS_FIELDS);
+      const unchanged = fresh
+        && String(fresh.account_id || '') === String(matched.account_id || '')
+        && STORED_ADDRESS_FIELDS.every((f) => (fresh[f] ?? null) === (matched[f] ?? null));
+      if (!unchanged) return { locationFailure: 'address_unresolved' };
+      const freshReviewed = await review.reviewedCustomerLocation(fresh, fencedTrx);
+      if (freshReviewed.geocode_review_blocked) return { locationFailure: 'address_unresolved' };
+      if (freshReviewed.latitude != null && freshReviewed.longitude != null) {
+        const coordinates = {
+          latitude: Number(freshReviewed.latitude),
+          longitude: Number(freshReviewed.longitude),
+        };
+        if (Number(fresh.latitude) !== coordinates.latitude || Number(fresh.longitude) !== coordinates.longitude) {
+          await fencedTrx('customers').where({ id: matched.id }).update({ ...coordinates, updated_at: new Date() });
+        }
+        return {
+          customer: { ...matched, ...freshReviewed, ...coordinates },
+          location: { lat: coordinates.latitude, lng: coordinates.longitude },
+        };
+      }
+      const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
+      await fencedTrx('customers').where({ id: matched.id }).update({ ...after, updated_at: new Date() });
+      return { customer: { ...matched, ...after }, location: resolved.location };
+    }, { lockWhenDisabled: true, wait: false });
+    return fenced || { locationFailure: 'address_unresolved' };
+  } catch (error) {
+    if (error?.code === '55P03') return { locationFailure: 'address_unresolved' };
+    throw error;
+  }
 }
 
 router.get('/:token', async (req, res, next) => {
@@ -1654,17 +1711,19 @@ async function correctableInPlace(trx, freshLead, profile) {
 // The linked-customer half of phase 1 (split out of provisionCommitCustomer).
 // Runs under its locks; returns { custRow, location } or a terminal
 // { locationFailure } / { eligibility }.
-async function provisionLinkedCustomer(trx, { freshLead, freshCustRow, custRow, resolved, verified }) {
+async function provisionLinkedCustomer(trx, {
+  freshLead, freshCustRow, storedCustRow, custRow, resolved, verified,
+}) {
   let provisioned = freshCustRow;
-  const location = resolved.location;
+  let location = resolved.location;
   // Compare the fresh row's stored-address fields against the
   // PRE-LOCK custRow snapshot `resolved` was actually computed
   // against (Codex pre-push P1, 2026-09-24) — never re-resolve here,
   // which would mean a geocode/county network call while holding the
   // lock. Identical → the pre-lock resolution still describes this
   // exact row, safe to reuse outright, no new work needed.
-  const addressUnchanged = STORED_ADDRESS_FIELDS.every(
-    (f) => (freshCustRow[f] ?? null) === (custRow?.[f] ?? null)
+  const addressUnchanged = STORED_ADDRESS_FIELDS.slice(0, 5).every(
+    (f) => (storedCustRow?.[f] ?? null) === (custRow?.[f] ?? null)
   );
   if (!addressUnchanged) {
     // Another commit changed this row's stored address between the
@@ -1676,6 +1735,14 @@ async function provisionLinkedCustomer(trx, { freshLead, freshCustRow, custRow, 
     return { locationFailure: 'address_unresolved' };
   }
   provisioned = freshCustRow;
+  const explicitDifferentAddress = [
+    resolved.source === 'supplied',
+    Boolean(storedCustRow.address_line1),
+    profileAffirmativelyDiffers(storedCustRow, resolved.address),
+  ].every(Boolean);
+  if (freshCustRow.geocode_review_blocked && !explicitDifferentAddress) {
+    return { locationFailure: 'address_unresolved' };
+  }
   // A supplied address that is NOT the linked profile's own address is
   // ANOTHER property of the account (Codex #4737 r6 P1) — it reuses that
   // account's matching profile or becomes a new one; the linked profile is
@@ -1696,7 +1763,15 @@ async function provisionLinkedCustomer(trx, { freshLead, freshCustRow, custRow, 
     if (other.locationFailure) return { locationFailure: other.locationFailure };
     return { custRow: other.customer, location: other.location || resolved.location };
   }
-  if (resolved.source !== 'customer') {
+  const reviewedLocation = freshCustRow.latitude != null && freshCustRow.longitude != null
+    ? { lat: Number(freshCustRow.latitude), lng: Number(freshCustRow.longitude) }
+    : null;
+  const retainReviewedLocation = [
+    Boolean(reviewedLocation),
+    Boolean(storedCustRow.address_line1),
+    profileMatchesAddress(storedCustRow, resolved.address, resolved.location),
+  ].every(Boolean);
+  if (resolved.source !== 'customer' && !retainReviewedLocation) {
     // The pre-lock resolution did NOT come from this row's own
     // stored address (it was empty, or the stored one failed to
     // geocode and a lead/supplied fallback won) — write the
@@ -1724,10 +1799,16 @@ async function provisionLinkedCustomer(trx, { freshLead, freshCustRow, custRow, 
   // coordinates it lacked are persisted (local audit P1) —
   // createSelfBooking reloads the row for its commit-time travel check,
   // which must never run locationless.
-  else if (freshCustRow.latitude == null || freshCustRow.longitude == null) {
-    const after = { latitude: resolved.location.lat, longitude: resolved.location.lng };
-    await trx('customers').where({ id: freshCustRow.id }).update({ ...after, updated_at: new Date() });
+  else {
+    const after = retainReviewedLocation
+      ? { latitude: reviewedLocation.lat, longitude: reviewedLocation.lng }
+      : { latitude: resolved.location.lat, longitude: resolved.location.lng };
+    const mirrorMatches = sameCoordinates(storedCustRow, after);
+    if (!mirrorMatches) {
+      await trx('customers').where({ id: freshCustRow.id }).update({ ...after, updated_at: new Date() });
+    }
     provisioned = { ...freshCustRow, ...after };
+    location = { lat: after.latitude, lng: after.longitude };
   }
   return { custRow: provisioned, location };
 }
@@ -1748,9 +1829,10 @@ async function provisionCommitCustomer({ lead, custRow, resolved, verified }) {
     // The customer's address can then neither change under the comparison
     // and write-back below nor slip past booking.js's own fenced
     // expectedLocation check.
+    let storedCustRow = null;
     if (custRow?.id) {
       await lockCustomerComms(trx, custRow.id);
-      await trx('customers').where({ id: custRow.id }).forNoKeyUpdate().first('id');
+      storedCustRow = await trx('customers').where({ id: custRow.id }).forNoKeyUpdate().first();
     }
     // Row-locked: admin-leads' conversion/booking locks and updates the same
     // lead row — FOR UPDATE makes this read wait for it and see its
@@ -1803,7 +1885,9 @@ async function provisionCommitCustomer({ lead, custRow, resolved, verified }) {
         await trx('leads').where({ id: lead.id }).update({ customer_id: provisioned.id, updated_at: new Date() });
       }
     } else {
-      const linked = await provisionLinkedCustomer(trx, { freshLead, freshCustRow, custRow, resolved, verified });
+      const linked = await provisionLinkedCustomer(trx, {
+        freshLead, freshCustRow, storedCustRow, custRow, resolved, verified,
+      });
       if (!linked.custRow) return linked;
       provisioned = linked.custRow;
       location = linked.location;
