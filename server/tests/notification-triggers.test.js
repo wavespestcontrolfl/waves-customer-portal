@@ -162,18 +162,12 @@ describe('notification trigger push tags', () => {
     });
   });
 
-  test('promise-chaser copy says "calling in now" live, and states when they called on a durable retry', () => {
-    const live = TRIGGER_REGISTRY.promise_chaser.build({
-      name: 'Fixture Lead', what: 'callback', when: 'Sep 26, 2:00 PM',
+  test('promise-chaser copy always states when the caller called — dispatched only by the durable sweep, after the call already ended', () => {
+    const built = TRIGGER_REGISTRY.promise_chaser.build({
+      name: 'Fixture Lead', what: 'callback', when: 'Sep 26, 2:00 PM', calledAtLabel: '4:15 PM',
     });
-    expect(live.body).toBe('Fixture Lead is calling in now. We still owe them a callback promised Sep 26, 2:00 PM.');
-
-    const retry = TRIGGER_REGISTRY.promise_chaser.build({
-      name: 'Fixture Lead', what: 'callback', when: 'Sep 26, 2:00 PM',
-      liveCall: false, calledAtLabel: 'Sep 26, 4:15 PM',
-    });
-    expect(retry.body).toBe('Fixture Lead called Sep 26, 4:15 PM. We still owe them a callback promised Sep 26, 2:00 PM.');
-    expect(retry.body).not.toContain('calling in now');
+    expect(built.body).toBe('Fixture Lead called at 4:15 PM. We still owe them a callback promised Sep 26, 2:00 PM.');
+    expect(built.body).not.toContain('calling in now');
   });
 
   test('bundle quote trigger distinguishes inquiry from self-applied bundle', () => {

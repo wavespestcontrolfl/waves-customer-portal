@@ -13,6 +13,11 @@ const { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms } = req
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+// Required eagerly (mirroring #5018's own boot-time activation-boundary
+// pattern) so promise-chaser-bell's own MODULE_LOAD_AT is captured at
+// process boot, not lazily on this file's first cron tick — up to 2
+// minutes later, and non-deterministic relative to a Railway restart.
+const promiseChaserBell = require('./promise-chaser-bell');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
 const SCHEDULED_SMS_STALE_CLAIM_MS = 30 * 60 * 1000;
@@ -4762,10 +4767,14 @@ function initScheduledJobs() {
     const results = await Promise.allSettled([
       Promise.resolve().then(() => require('./missed-call-bell').sweepMissedCalls()),
       Promise.resolve().then(() => require('./repeat-caller-bell').sweepRepeatCallers()),
-      // Retries any promise-chaser claim a prior attempt left 'pending'
-      // (a thrown lookup, a notification insert/push failure, a process
-      // restart) — same durable-retry slot as the two sweeps above.
-      Promise.resolve().then(() => require('./promise-chaser-bell').sweepPromiseChasers()),
+      // The promise-chaser bell's ONE path — a stateless, idempotent sweep
+      // (see the file's own docstring): no claim, no lease, nothing ever
+      // written to call_log. Same durable-retry slot as the two above.
+      // promiseChaserBell (required eagerly, below the requires at the top
+      // of this file — mirroring #5018's own boot-time pattern) is what
+      // captures its own MODULE_LOAD_AT at process boot, not at this
+      // tick's own first fire.
+      Promise.resolve().then(() => promiseChaserBell.sweepPromiseChasers()),
     ]);
     results.forEach((result, index) => {
       if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller', 'promise-chaser'][index]} sweep failed: ${result.reason.message}`);

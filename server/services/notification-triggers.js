@@ -436,16 +436,13 @@ const TRIGGER_REGISTRY = {
     allowContactDetails: true,
     build: (p) => {
       const who = p.name || p.phone || 'A lead';
-      // liveCall (the two /voice call sites): the caller is still on the
-      // line, so "is calling in now" is true. A durable retry (the sweep,
-      // viaSweep) lands after the call has already ended — its copy says
-      // when they called instead, never a false "now".
-      const calledClause = p.liveCall === false
-        ? `${who} called${p.calledAtLabel ? ` ${p.calledAtLabel}` : ''}.`
-        : `${who} is calling in now.`;
+      // Dispatched only by the durable sweep now (no more live /voice call
+      // site) — the call has always already ended by the time this fires,
+      // so the copy always states when they called, never "is calling in
+      // now".
       return {
         title: `Calling back — still owe them a ${p.what || 'follow-up'}`,
-        body: `${calledClause} We still owe them a ${p.what || 'follow-up'} promised ${p.when || 'earlier'}.`,
+        body: `${who} called at ${p.calledAtLabel || 'earlier'}. We still owe them a ${p.what || 'follow-up'} promised ${p.when || 'earlier'}.`,
         link: '/admin/communications#tab=calls',
       };
     },

@@ -55,6 +55,14 @@ function scheduleRecordingRecovery(callSid) {
       } catch (err) {
         logger.warn(`[call-status] repeat-caller bell failed for ${maskSid(callSid)}: ${err.message}`);
       }
+      // An UNKNOWN caller (no customer on file) who waited 25s+ and left no
+      // voicemail gets a text-back from the line they called — same grace,
+      // own try/catch so a failure here never blocks the bells above.
+      try {
+        await require('../services/missed-call-text-back').textBackIfMissed(callSid);
+      } catch (err) {
+        logger.warn(`[call-status] missed-call text-back failed for ${maskSid(callSid)}: ${err.message}`);
+      }
     }, 3 * 60 * 1000);
   }, 2 * 60 * 1000);
 }
@@ -1326,13 +1334,6 @@ router.post('/voice', async (req, res) => {
         ...(screenDecision !== 'none'
           ? { preconnect_screen: screenDecision === 'gate' ? 'gated' : 'would_gate' }
           : {}),
-        // Promise-chaser's own durability marker, embedded ATOMICALLY with
-        // this same row (null when the gate is off or the phone is
-        // unusable — see pendingClaimFragment) so a crash right after this
-        // commits still leaves a claim the sweep can find, and a row
-        // created while the gate is dark never carries one no matter how
-        // much later it flips on.
-        ...(require('../services/promise-chaser-bell').pendingClaimFragment(toE164(From)) || {}),
       });
     await db.transaction(async (trx) => {
       // Same per-SID advisory lock as /call-status and /recording-status.
@@ -1360,21 +1361,6 @@ router.post('/voice', async (req, res) => {
     });
     // call_log now committed — don't release the claim on a later error.
     callLogged = true;
-
-    // The lead is calling in RIGHT NOW — check while the call is still
-    // ringing, not after it ends (the promise-chaser bell's alert says so).
-    // Fire-and-forget: never adds latency to the TwiML response below.
-    // Deferred when this call is about to be pre-connect-screened
-    // (screenDecision === 'gate'): the caller has not proven human yet, and
-    // may never press a key — firing now could ring "calling in now" about
-    // someone who falls straight to voicemail. The screenReentry 'passed'
-    // branch below fires it once they clear the screen; 'failed' marks it
-    // skipped without ever attempting a ring.
-    if (screenDecision !== 'gate') {
-      void require('../services/promise-chaser-bell').ringPromiseChaserIfNeeded(CallSid).catch((err) => {
-        logger.warn(`[voice] promise-chaser bell failed for ${maskSid(CallSid)}: ${err.message}`);
-      });
-    }
 
     // Dual-write to unified messages table. Recording + transcription
     // arrive in later webhooks and update this row via twilio_sid.
@@ -1433,12 +1419,6 @@ router.post('/voice', async (req, res) => {
         logger.warn(`[preconnect-screen] failed-outcome update skipped for ${maskSid(CallSid)}: ${err.message}`);
       });
       logger.info(`[preconnect-screen] no key from ${maskPhone(From)} (${maskSid(CallSid)}) — routing to Waves voicemail`);
-      // Never reached staff — the promise-chaser bell must never say
-      // "calling in now" (or anything) about a caller who fell to
-      // voicemail. Terminal mark, no ring ever attempted.
-      void require('../services/promise-chaser-bell').markScreenFailed(CallSid).catch((err) => {
-        logger.warn(`[voice] promise-chaser screen-failed mark failed for ${maskSid(CallSid)}: ${err.message}`);
-      });
       const failTwiml = new VoiceResponse();
       failTwiml.play(greetingUrl);
       appendVoicemailRecording(failTwiml);
@@ -1448,12 +1428,6 @@ router.post('/voice', async (req, res) => {
       // Any keypress proves a human; continue into the normal flow below.
       await stampPreconnectScreen(CallSid, 'passed');
       logger.info(`[preconnect-screen] caller ${maskPhone(From)} passed (${maskSid(CallSid)}) — continuing normal routing`);
-      // Deferred from the first-delivery block above because the screen was
-      // still outstanding — the caller just proved human, still on the
-      // line, so "calling in now" is still true.
-      void require('../services/promise-chaser-bell').ringPromiseChaserIfNeeded(CallSid).catch((err) => {
-        logger.warn(`[voice] promise-chaser bell failed for ${maskSid(CallSid)}: ${err.message}`);
-      });
     } else if (screenDecision === 'gate') {
       logger.info(`[preconnect-screen] challenging unknown B-attestation caller ${maskPhone(From)} (${maskSid(CallSid)})`);
       return res.type('text/xml').send(buildPreconnectChallengeTwiML());
