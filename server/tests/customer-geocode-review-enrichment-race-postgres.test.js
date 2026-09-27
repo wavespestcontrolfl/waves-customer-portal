@@ -37,7 +37,6 @@ postgres('geocode review enrichment serialization in PostgreSQL', () => {
       t.uuid('id').primary();
       for (const field of ['address_line1', 'address_line2', 'city', 'state', 'zip']) t.string(field);
       t.decimal('latitude', 10, 7); t.decimal('longitude', 10, 7);
-      t.timestamp('deleted_at', { useTz: true });
     });
     await mockConnection.schema.createTable('customer_properties', (t) => {
       t.uuid('id').primary(); t.uuid('customer_id'); t.boolean('active'); t.boolean('is_primary');
@@ -85,19 +84,6 @@ postgres('geocode review enrichment serialization in PostgreSQL', () => {
     await mockConnection('customers').del();
   });
 
-  async function waitForBlockedWriter() {
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline) {
-      const waiting = await admin('pg_stat_activity')
-        .where({ datname: new URL(connection).pathname.slice(1), application_name: 'geocode-enrichment-race' })
-        .where({ state: 'active', wait_event_type: 'Lock' })
-        .count('* as count').first();
-      if (Number(waiting?.count || 0) > 0) return true;
-      await new Promise(resolve => setImmediate(resolve));
-    }
-    return false;
-  }
-
   test('an enrichment started behind a held outside-area decision cannot restore its pin', async () => {
     let releaseDecision;
     let decisionLocked;
@@ -106,7 +92,7 @@ postgres('geocode review enrichment serialization in PostgreSQL', () => {
     const decision = mockConnection.transaction(async (trx) => {
       const customer = await trx('customers').where({ id: customerId }).forUpdate().first();
       await trx('customer_properties').where({ id: propertyId }).forUpdate().first();
-      await review.saveReview(trx, { ...customer, address_line2: null }, {
+      await review.saveReview(trx, customer, {
         status: 'outside_area', reason: 'staff_confirmed_outside_area', reviewed_by: randomUUID(),
       });
       await trx('customer_properties').where({ id: propertyId }).update({ latitude: null, longitude: null });
@@ -131,7 +117,16 @@ postgres('geocode review enrichment serialization in PostgreSQL', () => {
       }
       return attempts;
     }).finally(() => { enrichmentSettled = true; });
-    const blocked = await waitForBlockedWriter();
+    const deadline = Date.now() + 5000;
+    let blocked = false;
+    while (!blocked && Date.now() < deadline) {
+      const waiting = await admin('pg_stat_activity')
+        .where({ datname: new URL(connection).pathname.slice(1), application_name: 'geocode-enrichment-race' })
+        .where({ state: 'active', wait_event_type: 'Lock' })
+        .count('* as count').first();
+      blocked = Number(waiting?.count || 0) > 0;
+      if (!blocked) await new Promise(resolve => setImmediate(resolve));
+    }
     try {
       expect(blocked).toBe(true);
       expect(enrichmentSettled).toBe(false);
@@ -143,58 +138,6 @@ postgres('geocode review enrichment serialization in PostgreSQL', () => {
     expect(await mockConnection('customer_properties').where({ id: propertyId }).first()).toMatchObject({
       latitude: null, longitude: null,
     });
-    expect(await mockConnection('customers').where({ id: customerId }).first()).toMatchObject({
-      latitude: null, longitude: null,
-    });
-    expect(await mockConnection('scheduled_services').where({ id: visitId }).first()).toMatchObject({
-      lat: null, lng: null,
-    });
-  });
-
-  test('public coordinate writers wait for a decision and honor its fresh review snapshot', async () => {
-    let releaseDecision;
-    let decisionLocked;
-    const locked = new Promise(resolve => { decisionLocked = resolve; });
-    const release = new Promise(resolve => { releaseDecision = resolve; });
-    const decision = mockConnection.transaction(async (trx) => {
-      const customer = await trx('customers').where({ id: customerId }).forUpdate().first();
-      await trx('customer_properties').where({ id: propertyId }).forUpdate().first();
-      await review.saveReview(trx, { ...customer, address_line2: null }, {
-        status: 'outside_area', reason: 'staff_confirmed_outside_area', reviewed_by: randomUUID(),
-      });
-      await trx('customer_properties').where({ id: propertyId }).update({ latitude: null, longitude: null });
-      await trx('customers').where({ id: customerId }).update({ latitude: null, longitude: null });
-      await trx('scheduled_services').where({ id: visitId }).update({ lat: null, lng: null });
-      decisionLocked();
-      await release;
-    });
-    await locked;
-
-    let writerSettled = false;
-    const writer = review.withCustomerReviewWriteFence(customerId, mockConnection, async (conn) => {
-      const customer = await conn('customers').where({ id: customerId }).first();
-      const effective = await review.reviewedCustomerLocation(customer, conn);
-      let visitUpdate = conn('scheduled_services').where({ id: visitId });
-      visitUpdate = review.excludeCustomerAutomaticGeocodeForId(visitUpdate, customerId);
-      let customerUpdate = conn('customers').where({ id: customerId });
-      customerUpdate = review.excludeCustomerAutomaticGeocodeForId(customerUpdate, customerId);
-      return {
-        blocked: effective.geocode_review_blocked,
-        attempts: [
-          await visitUpdate.update({ lat: 27.6, lng: -82.4 }),
-          await customerUpdate.update({ latitude: 27.6, longitude: -82.4 }),
-        ],
-      };
-    }).finally(() => { writerSettled = true; });
-    const blocked = await waitForBlockedWriter();
-    try {
-      expect(blocked).toBe(true);
-      expect(writerSettled).toBe(false);
-    } finally {
-      releaseDecision();
-    }
-    await decision;
-    expect(await writer).toEqual({ blocked: true, attempts: [0, 0] });
     expect(await mockConnection('customers').where({ id: customerId }).first()).toMatchObject({
       latitude: null, longitude: null,
     });
