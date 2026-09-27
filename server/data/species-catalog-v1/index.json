@@ -84,6 +84,15 @@
       "next_photo": {
         "ask": "A close-up of the mud tubes, wings, or pellets, plus a wide shot of where on the structure you found it.",
         "why": "Location and the exact sign (tube vs. pellet vs. wing) point to which follow-up applies."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "termite",
+          "serviceKey": null,
+          "serviceLabel": "Termite Protection",
+          "inspectionRequired": true,
+          "urgency": "moderate"
+        }
       }
     },
     {
@@ -188,6 +197,13 @@
       "next_photo": {
         "ask": "Use zoom from a safe distance to show the insect or nest and its location. Do not approach, touch, or disturb the nest.",
         "why": "Nest shape and location separate paper wasps, yellowjackets, and bees, which are handled very differently."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true
+          }
+        }
       }
     },
     {
@@ -431,6 +447,18 @@
       "next_photo": {
         "ask": "A close-up of the mud tube broken open, plus a wide shot of where it climbs the foundation.",
         "why": "An active (moist, repaired) tube versus an old dry one changes how urgent the inspection is."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "structural_threat": true
+          },
+          "serviceLine": "termite",
+          "serviceKey": null,
+          "serviceLabel": "Termite Protection",
+          "inspectionRequired": true,
+          "urgency": "high"
+        }
       }
     },
     {
@@ -443,6 +471,18 @@
       "next_photo": {
         "ask": "A close-up of the pellet pile and the hole above it, next to a coin.",
         "why": "Pellet shape and the kick-out hole confirm drywood termites over carpenter-ant frass."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "structural_threat": true
+          },
+          "serviceLine": "termite",
+          "serviceKey": null,
+          "serviceLabel": "Termite Protection",
+          "inspectionRequired": true,
+          "urgency": "high"
+        }
       }
     },
     {
@@ -584,6 +624,13 @@
       "next_photo": {
         "ask": "From a safe distance, use camera zoom to show the waist and nest material (mud tube vs. burrow) without approaching or disturbing it.",
         "why": "Waist shape and nest type separate mud daubers from cicada killers and other solitary wasps."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true
+          }
+        }
       }
     },
     {
@@ -596,6 +643,13 @@
       "next_photo": {
         "ask": "From a safe distance, use zoom to photograph the bee's body and the occupied hole or gap without approaching or disturbing the activity.",
         "why": "A shiny black abdomen and a drilled hole point to carpenter bee; fuzzy and a wall gap points to honey bee."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true
+          }
+        }
       }
     },
     {

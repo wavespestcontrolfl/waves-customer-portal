@@ -44,6 +44,11 @@ neutral generic defaults. This keeps a generic result such as “a venomous
 snake” on the high-urgency wildlife referral path without naming an
 unapproved species. Mixed or lower-confidence results that stop above that
 node do not inherit its guidance.
+The subterranean and drywood termite subgroups retain structural-risk,
+high-urgency termite inspection contracts; an answer at the broader termite
+group keeps the shared termite service and moderate urgency without borrowing
+a narrower structural-risk claim. Wasp and bee fallbacks keep their shared
+stinging hazard without borrowing a species-specific treatment or referral.
 
 ## Files
 

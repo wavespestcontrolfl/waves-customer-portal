@@ -91,6 +91,75 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     expect(mapped.report_contract.identification).toMatchObject({ slug: null, category: 'arachnid' });
   });
 
+  test.each([
+    ['subterranean-termite', 'subterranean-termites'],
+    ['formosan-termite', 'subterranean-termites'],
+    ['asian-subterranean-termite', 'subterranean-termites'],
+    ['termite-mud-tubes', 'subterranean-termites'],
+    ['drywood-termite', 'drywood-termites'],
+    ['drywood-termite-frass', 'drywood-termites'],
+  ])('a draft %s retains its shared termite hazard and inspection contract', (slug, nodeId) => {
+    const built = answerFor(slug, { approved: false });
+    expect(built).toMatchObject({
+      answer: { level: 'subgroup', node_id: nodeId }, entry: null, topEntrySlug: null, referral: null,
+    });
+    expect(mapToV1(built)).toMatchObject({
+      species_slug: null, category: 'insect', service_line: 'termite', urgency: 'high',
+      report_contract: {
+        identification: { slug: null, contested: true },
+        safety: { stinging: false, venomous: false, disease_vector: false, structural_threat: true },
+        service: { line: 'termite', key: null, label: 'Termite Protection', inspection_required: true },
+      },
+    });
+  });
+
+  test('a mixed termite-family answer keeps only the broader shared termite contract', () => {
+    const built = buildAnswer({
+      candidates: [
+        { ...candidate('subterranean-termite', { approved: false }), confidence: 0.55 },
+        { ...candidate('drywood-termite', { approved: false }), confidence: 0.3 },
+      ],
+      disagreed: false, qualityUsable: true, qualityIssue: 'none', currentMonth: 6,
+    });
+    expect(built.answer).toMatchObject({ level: 'group', node_id: 'termites' });
+    expect(mapToV1(built)).toMatchObject({
+      species_slug: null, service_line: 'termite', urgency: 'moderate',
+      report_contract: { safety: { structural_threat: false }, service: { inspection_required: true } },
+    });
+  });
+
+  test.each(['low-confidence', 'mixed-insect'])('%s cannot borrow a termite contract', (kind) => {
+    const candidates = [{ ...candidate('subterranean-termite', { approved: false }), confidence: kind === 'low-confidence' ? 0.5 : 0.55 }];
+    if (kind === 'mixed-insect') candidates.push({ ...candidate('carpenter-ant', { approved: false }), confidence: 0.3 });
+    const built = buildAnswer({ candidates, disagreed: false, qualityUsable: true, qualityIssue: 'none', currentMonth: 6 });
+    expect(['unknown', 'category']).toContain(built.answer.level);
+    expect(mapToV1(built)).toMatchObject({
+      species_slug: null, service_line: 'pest', urgency: 'low',
+      report_contract: { safety: { structural_threat: false }, service: { key: null, label: 'Pest Consultation' } },
+    });
+  });
+
+  test('draft fallback results retain every hazard shared by all descendants of the selected node', () => {
+    const entries = catalog.listEntries();
+    const checkedNodes = new Set();
+    const safetyFields = { stinging: 'stings', venomous: 'venomous', disease_vector: 'disease_vector', structural_threat: 'structural' };
+    for (const entry of entries) {
+      const built = answerFor(entry.slug, { approved: false });
+      const nodeId = built.answer.node_id;
+      if (!nodeId || checkedNodes.has(nodeId)) continue;
+      checkedNodes.add(nodeId);
+      const descendants = entries.filter((item) => catalog.lineage(item.slug).some((node) => node.id === nodeId));
+      expect(descendants.length).toBeGreaterThan(0);
+      const mapped = mapToV1(built);
+      for (const [mappedFlag, authoredFlag] of Object.entries(safetyFields)) {
+        if (descendants.every((item) => item.safety[authoredFlag] === true)) {
+          expect({ nodeId, flag: mappedFlag, value: mapped.report_contract.safety[mappedFlag] })
+            .toEqual({ nodeId, flag: mappedFlag, value: true });
+        }
+      }
+    }
+  });
+
   test('a high-confidence draft bat climb keeps generic rabies and exclusion guidance', () => {
     const built = answerFor('brazilian-free-tailed-bat', { approved: false });
     expect(built).toMatchObject({

@@ -1480,6 +1480,31 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
     });
   });
 
+  test.each(['subterranean-termite', 'drywood-termite'])('gate on: a draft %s result preserves termite inspection and structural-risk data', async (slug) => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultFor(slug);
+    expect(engineResult.v2.entry).toBeNull();
+    expect(engineResult.v1).toMatchObject({
+      species_slug: null, service_line: 'termite', urgency: 'high',
+      report_contract: { safety: { structural_threat: true }, service: { inspection_required: true } },
+    });
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.next_step.kind).toBe('inspection');
+      expect(body.result.label).toBeNull();
+      const row = TABLES.pest_identifications[0];
+      expect(row).toMatchObject({ species_slug: null, service_line: 'termite', urgency: 'high' });
+      expect(JSON.parse(row.report_contract)).toMatchObject({
+        safety: { structural_threat: true },
+        service: { line: 'termite', key: null, label: 'Termite Protection', inspection_required: true },
+      });
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.next_step.kind).toBe('inspection');
+    });
+  });
+
   test('gate on: a referral beats inspection-first (honey bees and bats are both) — no in-person inspection offer under "we refer you"', async () => {
     mockGateState.photoIdV2 = true;
     // subterranean-termite is inspection-first (the test above); the
