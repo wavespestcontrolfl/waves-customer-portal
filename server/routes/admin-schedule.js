@@ -13594,7 +13594,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // trx (the "safely" wrapper) — a plain try/catch around a failing
         // statement does not recover a Postgres transaction; every later
         // statement on it, including this route's own COMMIT, would fail.
-        if (updates.scheduled_date !== undefined) {
+        //
+        // Compared against reminderBefore's PRE-UPDATE scheduled_date
+        // (fetched above, under this same gate) rather than firing on mere
+        // key presence (Claude fallback-auditor P1, this branch's own
+        // first push): an update-details save that resubmits scheduled_date
+        // unchanged must not take FOR UPDATE locks across every sibling in
+        // this estimate group and the linked invoice on every such
+        // request — only a genuine date change, matching the comparison
+        // every other date-changing writer in this file already makes
+        // (bulk-action's prevDate !== bulkTargetDate, rebooker's
+        // dateOnly(newDate) !== dateOnly(originalDate)).
+        if (updates.scheduled_date !== undefined && reminderBefore
+          && dateOnly(reminderBefore.scheduled_date) !== dateOnly(updates.scheduled_date)) {
           await require('../services/first-application-sibling-split')
             .flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, req.params.id, 'update-details save');
         }

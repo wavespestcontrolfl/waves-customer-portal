@@ -97,6 +97,36 @@ async function findLockedFirstApplicationInvoice(trx, moved, members) {
   return { invoice, invoiceRow };
 }
 
+// A stable fingerprint of exactly the columns the collection hold actually
+// protects — never `updated_at`, which is only a proxy other invoice-
+// mutating code paths are conventionally supposed to bump and nothing
+// enforces (Claude fallback-auditor P1, this branch's own first push): a
+// write that changed real money but forgot to touch updated_at would let
+// maybeAutoClearBillingReview treat a genuinely-edited, still-uncovered
+// invoice as "untouched" and silently release the hold. Comparing the
+// money fields themselves has no such gap — anything that actually changed
+// what the customer owes shows up here directly.
+function invoiceMoneyFingerprint(invoice) {
+  return JSON.stringify({
+    total: invoice?.total ?? null,
+    subtotal: invoice?.subtotal ?? null,
+    discount_amount: invoice?.discount_amount ?? null,
+    status: invoice?.status ?? null,
+    lineItems: parseLineItems(invoice?.line_items) || invoice?.line_items || null,
+  });
+}
+
+function parseLineItems(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 // Members that have diverged from the invoice-holding row's date and are
 // still relying on it (never priced their own share, never completed — a
 // completed row's billing outcome is already a settled fact this move
@@ -156,12 +186,11 @@ async function openBillingReview(trx, invoice, moved, diverging) {
     sourceEstimateId: moved.source_estimate_id,
     invoiceHolderScheduledServiceId: invoice.scheduled_service_id,
     divergingSiblingIds: diverging.map((d) => d.id),
-    // The invoice's own updated_at AT THE MOMENT this review opens — this
-    // write never touches updated_at itself (see below), so as long as
-    // nothing else edits the invoice, a later read still finds this exact
-    // value. That equality IS "the invoice was never touched", the trivial
-    // case a move back to the same date clears automatically.
-    invoiceUpdatedAtAtOpen: invoice.updated_at,
+    // The invoice's own money fields AT THE MOMENT this review opens (see
+    // invoiceMoneyFingerprint) — compared, not `updated_at`, to prove "the
+    // invoice was never touched" at auto-clear time. That equality is the
+    // trivial case a move back to the same date clears automatically.
+    invoiceMoneyFingerprintAtOpen: invoiceMoneyFingerprint(invoice),
   };
   const [opened] = await trx('invoices')
     .where({ id: invoice.id })
@@ -170,7 +199,6 @@ async function openBillingReview(trx, invoice, moved, diverging) {
       billing_review_opened_at: new Date(),
       billing_review_reason: 'sibling_date_diverged',
       billing_review_context: JSON.stringify(context),
-      // Deliberately NOT updated_at — see the comment above.
     })
     .returning('id');
   await raiseBillingReviewAlert(trx, invoice, moved, diverging);
@@ -178,10 +206,11 @@ async function openBillingReview(trx, invoice, moved, diverging) {
 }
 
 // The trivial auto-clear (owner ruling): the diverging members are back on
-// the invoice-holding row's date AND the invoice has not been touched since
-// the review opened (its updated_at still matches the snapshot taken at
-// open time). Anything else — dates realigned but the invoice WAS edited,
-// or dates still diverging — requires the office's own manual clear.
+// the invoice-holding row's date AND the invoice's own money (total,
+// subtotal, discount_amount, status, line items) has not changed since the
+// review opened. Anything else — dates realigned but the invoice WAS
+// edited, or dates still diverging — requires the office's own manual
+// clear.
 async function maybeAutoClearBillingReview(trx, invoice, moved) {
   if (!invoice.billing_review_opened_at) {
     return { action: 'skipped', reason: 'no_diverging_unpriced_sibling', invoiceId: invoice.id };
@@ -190,10 +219,8 @@ async function maybeAutoClearBillingReview(trx, invoice, moved) {
   if (typeof context === 'string') {
     try { context = JSON.parse(context); } catch { context = null; }
   }
-  const snapshot = context?.invoiceUpdatedAtAtOpen;
-  const untouched = snapshot != null
-    && invoice.updated_at != null
-    && new Date(snapshot).getTime() === new Date(invoice.updated_at).getTime();
+  const snapshot = context?.invoiceMoneyFingerprintAtOpen;
+  const untouched = typeof snapshot === 'string' && snapshot === invoiceMoneyFingerprint(invoice);
   if (!untouched) {
     return { action: 'skipped', reason: 'review_open_requires_manual_clear', invoiceId: invoice.id };
   }
