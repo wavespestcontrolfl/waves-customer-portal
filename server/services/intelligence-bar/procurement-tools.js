@@ -973,9 +973,10 @@ const UUID_RE_THREAD = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 // prompt) and a code this collision-prone is not worth the false positives.
 // "FL" is left out for the same reason: "fl oz" (fluid ounces) is the most
 // common unit phrase in these prompts, and "fl" sitting right next to a
-// match would otherwise misread as the FL code every time. Sorted
+// match would otherwise misread as the FL code every time. "ME" is left out
+// too: "get me Taurus SC" puts the word "me" right before the name. Sorted
 // longest-first so "WDG"/"WSG" are never shadowed by the shorter "WG".
-const FORMULATION_CODES = ['SC', 'SE', 'EC', 'EW', 'CS', 'ME', 'WG', 'WDG', 'WSG', 'WP', 'WSP',
+const FORMULATION_CODES = ['SC', 'SE', 'EC', 'EW', 'CS', 'WG', 'WDG', 'WSG', 'WP', 'WSP',
   'SG', 'SL', 'SP', 'DF', 'DG', 'GR', 'TC', 'RTU']
   .sort((a, b) => b.length - a.length);
 const FORMULATION_CODE_ALT = FORMULATION_CODES.join('|');
@@ -984,7 +985,9 @@ const FORMULATION_CODE_ALT = FORMULATION_CODES.join('|');
 // qualifiersFollowing/qualifiersPreceding). A bare number with no '%' is
 // never a concentration ("Taurus 78 ounces").
 const QUALIFIER_AFTER_RE = new RegExp(`^[\\s,\\-.]*(?:(\\d+(?:\\.\\d+)?)\\s*%|(${FORMULATION_CODE_ALT})\\b)`, 'i');
-const QUALIFIER_BEFORE_RE = new RegExp(`(?:(\\d+(?:\\.\\d+)?)\\s*%|(${FORMULATION_CODE_ALT})\\b)[\\s,\\-.]*$`, 'i');
+// Reading backward, a qualifier must also START on a word boundary: the
+// code "SE" must not be read out of "Please", nor "1.5%" out of "21.5%".
+const QUALIFIER_BEFORE_RE = new RegExp(`(?:(?<![\\d.])(\\d+(?:\\.\\d+)?)\\s*%|\\b(${FORMULATION_CODE_ALT})\\b)[\\s,\\-.]*$`, 'i');
 
 function escapeRegExpLiteral(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

@@ -819,5 +819,19 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       });
       expect(result).toMatchObject({ code: 'target_clarification_required' });
     });
+
+    test.each([
+      'Please Taurus SC, add 12 oz',
+      'Add some Taurus SC',
+      'Get me Taurus SC, 78 oz',
+    ])('ordinary words before the name are never read as a formulation code (%s)', async (prompt) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock',
+        prompt,
+        preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+      });
+      expect(result).toEqual({ productId: TAURUS.id });
+    });
   });
 });
