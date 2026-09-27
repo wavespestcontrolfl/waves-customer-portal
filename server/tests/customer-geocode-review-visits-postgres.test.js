@@ -49,6 +49,7 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
   afterAll(async () => database?.destroy());
 
   beforeEach(async () => {
+    frozenVisitVerdict.mockReset();
     frozenVisitVerdict.mockResolvedValue({ frozen: false, reason: null });
     trx = await database.transaction();
     const schema = `geocode_visits_${randomUUID().replaceAll('-', '')}`;

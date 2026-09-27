@@ -35,3 +35,18 @@ test('a primary link does not revive a review for an earlier primary address', (
     ...review, primary_address_matches_review: false,
   })).toBeNull();
 });
+
+test('a verified primary pin is not reused for a divergent frozen appointment stamp', () => {
+  expect(serviceReviewDecision(staleService, {
+    ...review, status: 'verified', latitude: 27.5, longitude: -82.5,
+  })).toBeNull();
+});
+
+test('a verified primary pin remains reusable for the reviewed appointment address', () => {
+  expect(serviceReviewDecision({
+    ...staleService,
+    service_address_line1: '100 Primary Way',
+  }, {
+    ...review, status: 'verified', latitude: 27.5, longitude: -82.5,
+  })).toEqual({ location: { lat: 27.5, lng: -82.5 }, permanent: false });
+});
