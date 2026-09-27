@@ -33,14 +33,30 @@ function reservationMatch(context) {
 // this best-effort writer. It never throws back into accepted-send handling:
 // a missed stamp leaves the reservation held for reminderProgress repair.
 async function markBillingEmailReservationDelivered(message, database = db) {
-  if (!hasAcceptedEvidence(message)) return false;
-  const context = replayContext(message);
-  if (!context) return false;
+  if (!message?.id || !hasAcceptedEvidence(message)) return false;
   try {
-    return await ContactLedger.markDelivered(
-      { id: context.collections_ledger_id },
-      { database, match: reservationMatch(context) },
-    );
+    const stampCurrentAttempt = async (trx) => {
+      const query = trx('email_messages').where({ id: message.id });
+      if (message.send_attempt_token == null) query.whereNull('send_attempt_token');
+      else query.where({ send_attempt_token: message.send_attempt_token });
+      const current = await query.forUpdate().first();
+      if (!current || !hasAcceptedEvidence(current)) return false;
+      const context = replayContext(current);
+      if (!context) return false;
+      const stamped = await ContactLedger.markDelivered(
+        { id: context.collections_ledger_id },
+        { database: trx, match: reservationMatch(context) },
+      );
+      // markDelivered is best-effort and converts its own SQL failure to
+      // false. Abort this surrounding savepoint as well before the outer
+      // catch returns false, so a webhook's parent transaction stays usable.
+      if (!stamped) throw new Error('accepted reservation was not stamped');
+      return true;
+    };
+    // A supplied webhook transaction gets a savepoint. If either the current
+    // attempt read or ledger write fails, catching below must not leave the
+    // caller's held transaction aborted.
+    return await database.transaction(stampCurrentAttempt);
   } catch (err) {
     logger.warn(`[billing-email-reservation] delivered stamp failed: ${err.message}`);
     return false;
@@ -103,7 +119,15 @@ async function repairAcceptedBillingEmailReservations(rows, database = db) {
       const candidate = context && byLedgerId.get(String(context.collections_ledger_id));
       if (!candidate) continue;
       if (accepted) {
-        if (await markBillingEmailReservationDelivered(message, database)) repaired.add(String(candidate.id));
+        const stamped = await markBillingEmailReservationDelivered(message, database);
+        if (stamped) repaired.add(String(candidate.id));
+        else {
+          // A provider retry can replace the accepted attempt after the scan.
+          // Classify this pass from the reservation written by the winner.
+          const current = await database('collections_contact_ledger')
+            .where({ id: candidate.id }).first('metadata');
+          candidate.metadata = current ? metadataOf(current) : candidate.metadata;
+        }
       } else if (await resolveBillingEmailReservationRefusal(message, database)) {
         candidate.metadata = { ...metadataOf(candidate), send_failed: true,
           resolved: true, resolution: 'email_terminal_refusal' };

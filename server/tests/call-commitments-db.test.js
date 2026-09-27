@@ -92,9 +92,9 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     const rows = await cc.listForCall(db, callId);
     const estimate = rows.find((r) => r.kind === 'send_estimate');
     const callback = rows.find((r) => r.kind === 'callback');
-    const edited = await cc.applyHumanUpdate(db, estimate.id, { action: 'edit', description: 'Email the ant treatment estimate to the caller', due_at: '2026-09-05T13:00:00Z', reviewedBy: 'tech-fixture' });
-    expect(edited).toMatchObject({ human_state: 'edited', description: 'Email the ant treatment estimate to the caller', reviewed_by: 'tech-fixture', due_basis: 'stated' });
-    const dismissed = await cc.applyHumanUpdate(db, callback.id, { action: 'dismiss', note: 'They said not to bother', reviewedBy: 'tech-fixture' });
+    const edited = await cc.applyHumanUpdate(db, estimate.id, { action: 'edit', description: 'Email the ant treatment estimate to the caller', due_at: '2026-09-05T13:00:00Z', reviewedBy: '00000000-0000-4000-8000-00000000fe01' });
+    expect(edited).toMatchObject({ human_state: 'edited', description: 'Email the ant treatment estimate to the caller', reviewed_by: '00000000-0000-4000-8000-00000000fe01', due_basis: 'stated' });
+    const dismissed = await cc.applyHumanUpdate(db, callback.id, { action: 'dismiss', note: 'They said not to bother', reviewedBy: '00000000-0000-4000-8000-00000000fe01' });
     expect(dismissed).toMatchObject({ human_state: 'dismissed', status: 'dismissed', human_note: 'They said not to bother' });
 
     // Reprocess (generation 2) with different AI wording for every row.
@@ -164,17 +164,17 @@ maybeDescribe('call_commitments (live Postgres)', () => {
 
   test('editing a KEPT commitment reopens it and clears the old proof; editing an open one just edits (codex gh-r13 P2)', async () => {
     const photos = await db('call_commitments').where({ call_log_id: callId, kind: 'send_photos' }).first();
-    const kept = await cc.applyHumanUpdate(db, photos.id, { action: 'fulfill', reviewedBy: 'tech-fixture' });
+    const kept = await cc.applyHumanUpdate(db, photos.id, { action: 'fulfill', reviewedBy: '00000000-0000-4000-8000-00000000fe01' });
     expect(kept.status).toBe('fulfilled');
-    const edited = await cc.applyHumanUpdate(db, photos.id, { action: 'edit', description: 'Text photos of the ant trail AND the kitchen', reviewedBy: 'tech-fixture' });
+    const edited = await cc.applyHumanUpdate(db, photos.id, { action: 'edit', description: 'Text photos of the ant trail AND the kitchen', reviewedBy: '00000000-0000-4000-8000-00000000fe01' });
     expect(edited).toMatchObject({ status: 'open', fulfillment: null, fulfilled_at: null, human_state: 'edited', description: 'Text photos of the ant trail AND the kitchen' });
-    const again = await cc.applyHumanUpdate(db, photos.id, { action: 'edit', due_at: '2026-09-06T13:00:00Z', reviewedBy: 'tech-fixture' });
+    const again = await cc.applyHumanUpdate(db, photos.id, { action: 'edit', due_at: '2026-09-06T13:00:00Z', reviewedBy: '00000000-0000-4000-8000-00000000fe01' });
     expect(again.status).toBe('open');
     expect(new Date(again.due_at).toISOString()).toBe('2026-09-06T13:00:00.000Z');
   });
 
   test('a human-added commitment is its own row, confirmed, with no AI provenance', async () => {
-    const row = await cc.addHumanCommitment(db, callId, { party: 'waves', kind: 'send_paperwork', description: 'Mail the WDO paperwork', reviewedBy: 'tech-fixture' });
+    const row = await cc.addHumanCommitment(db, callId, { party: 'waves', kind: 'send_paperwork', description: 'Mail the WDO paperwork', reviewedBy: '00000000-0000-4000-8000-00000000fe01' });
     expect(row).toMatchObject({ source: 'human', human_state: 'confirmed', status: 'open', kind: 'send_paperwork', confidence: null });
     expect(row.commitment_key).toMatch(/^waves:send_paperwork:[a-z0-9-]+:h[0-9a-f]{6}$/);
     // Strict pairing: a caller promise cannot be filed as a Waves one, and vice versa.
@@ -183,7 +183,7 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     await expect(cc.addHumanCommitment(db, callId, { party: 'waves', kind: 'teleport', description: 'x' })).rejects.toMatchObject({ status: 400 });
     // A retried or double-submitted request returns the same row, never a
     // uniqueness error.
-    const again = await cc.addHumanCommitment(db, callId, { party: 'waves', kind: 'send_paperwork', description: 'Mail the WDO paperwork', reviewedBy: 'tech-fixture' });
+    const again = await cc.addHumanCommitment(db, callId, { party: 'waves', kind: 'send_paperwork', description: 'Mail the WDO paperwork', reviewedBy: '00000000-0000-4000-8000-00000000fe01' });
     expect(again.id).toBe(row.id);
     expect(await db('call_commitments').where({ call_log_id: callId, kind: 'send_paperwork' })).toHaveLength(1);
   });

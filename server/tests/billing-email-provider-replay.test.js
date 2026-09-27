@@ -1,16 +1,12 @@
 jest.mock('../services/email-template-library', () => ({ readStoredBillingReplayContext: jest.fn() }));
 jest.mock('../services/billing-channel-email-authority', () => ({ dispatchUnderBillingEmailAuthority: jest.fn() }));
-jest.mock('../services/messaging/billing-email-replay-eligibility', () => ({
-  billingEmailReplayEligible: jest.fn(),
-  billingEmailReplayProducerRefusal: jest.fn(async () => null),
-}));
+jest.mock('../services/messaging/billing-email-replay-eligibility', () => ({ billingEmailReplayEligible: jest.fn() }));
 
 const EmailTemplateLibrary = require('../services/email-template-library');
 const { dispatchUnderBillingEmailAuthority } = require('../services/billing-channel-email-authority');
+const { billingEmailReplayEligible } = require('../services/messaging/billing-email-replay-eligibility');
 const {
-  billingEmailReplayEligible, billingEmailReplayProducerRefusal,
-} = require('../services/messaging/billing-email-replay-eligibility');
-const {
+  isBillingEmailTemplateRetry,
   isBillingEmailProviderReplay,
   runBillingEmailProviderReplayHandoff,
 } = require('../services/billing-email-provider-replay');
@@ -53,75 +49,165 @@ test('recognizes a stored replay contract only on the canonical billing template
   expect(isBillingEmailProviderReplay(message({ template_key: 'invoice.sent' }))).toBe(false);
 });
 
-test('a moved billing sender\'s row with a stored context replays under the shared check with its own template', async () => {
-  const lateContext = {
-    schema_version: 1, customer_id: 'cust-1', invoice_id: 'inv-1', category: 'billing',
-    source_entry_point: 'late_payment_email', notificationEventKey: 'late_payment:inv-1:30',
-    rendered_balance: '129.00',
-  };
-  const late = message({
-    template_key: 'billing_late_payment_30_day', trigger_event_id: 'late_payment:inv-1:30',
-    idempotency_key: 'late_payment_email:inv-1:30',
-    categories: JSON.stringify(['billing', 'late_payment', 'late_payment_30d']),
-    payload_snapshot: JSON.stringify({ first_name: 'Casey', __billing_replay_context: lateContext }),
+// #4843 gate checklist: a billing row whose producer stored no replay
+// contract (the monthly payment receipt, say) used to retry on the generic
+// path with only a suppression check. It now re-authorizes the identity the
+// billing Email adapter wrote on the row, through the same Email authority.
+function unregistered(overrides = {}) {
+  return message({
+    template_key: 'billing.receipt_notice',
+    trigger_event_id: 'billing:cust-1:monthly_billing_success:abc',
+    idempotency_key: 'billing_channel_email:billing:cust-1:monthly_billing_success:abc:email',
+    categories: JSON.stringify(['email_template', 'billing', 'payment_receipt']),
+    payload_snapshot: JSON.stringify({ notification_body: 'Payment received' }),
+    ...overrides,
   });
-  EmailTemplateLibrary.readStoredBillingReplayContext.mockReturnValue(lateContext);
-  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => { state.providerAccepted = true; });
+}
 
-  expect(isBillingEmailProviderReplay(late)).toBe(true);
-  expect(isBillingEmailProviderReplay(message({ template_key: 'billing_late_payment_30_day',
-    payload_snapshot: JSON.stringify({ first_name: 'Casey' }) }))).toBe(false);
-  await expect(runBillingEmailProviderReplayHandoff(late, jest.fn())).resolves.toEqual({ handled: true, allowed: true });
-  expect(dispatchUnderBillingEmailAuthority).toHaveBeenCalledWith(expect.objectContaining({
-    input: expect.objectContaining({ customerId: 'cust-1', invoiceId: 'inv-1',
-      metadata: expect.objectContaining({ billingDeliveryCategory: 'billing' }) }),
-    templateKey: 'billing_late_payment_30_day',
-  }));
+test('only the billing templates take the billing retry handoff', () => {
+  expect(isBillingEmailTemplateRetry(unregistered())).toBe(true);
+  expect(isBillingEmailTemplateRetry(message())).toBe(true);
+  expect(isBillingEmailTemplateRetry(message({ template_key: 'invoice.sent' }))).toBe(false);
 });
 
-test('a moved sender\'s own "no longer owed" answer settles the retry resendably before the shared check', async () => {
-  billingEmailReplayProducerRefusal.mockResolvedValueOnce({ eligible: false, reason: 'balance-changed', resendable: true });
-
-  await expect(runBillingEmailProviderReplayHandoff(message(), jest.fn())).resolves.toMatchObject({
-    handled: true, allowed: false, terminal: true, code: 'BILLING_REPLAY_RESENDABLE', reason: 'balance-changed',
-  });
-  expect(billingEmailReplayProducerRefusal).toHaveBeenCalledWith(context);
-  expect(dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
-});
-
-// A stop, a later step or a changed balance landing after the unlocked pass
-// still refuses: the sender's rules run again on the held connection at
-// every locked recheck, the provider boundary included.
-test('a moved sender\'s rules re-run on the held connection at the provider boundary', async () => {
-  const heldDatabase = jest.fn();
-  billingEmailReplayProducerRefusal
-    .mockResolvedValueOnce(null)
-    .mockResolvedValueOnce(null)
-    .mockResolvedValueOnce({ eligible: false, reason: 'sequence-advanced', resendable: true });
-  let boundary;
+test('a row with no stored contract re-authorizes its own customer notice through the Email authority', async () => {
+  // The receipt's own kill switch is read on the held transaction (left on).
+  const heldDatabase = jest.fn(() => ({ where: () => ({ first: async () => ({ payment_receipt: true }) }) }));
+  const dispatch = jest.fn(async () => {});
   dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    expect(options.input).toEqual({ customerId: 'cust-1', invoiceId: null, channel: 'email', metadata: {
+      billingDeliveryCategory: 'payment_receipt', notificationEventKey: 'billing:cust-1:monthly_billing_success:abc' } });
+    expect(options.recipientEmail).toBe('casey@example.com');
+    expect(options.templateKey).toBe('billing.receipt_notice');
     expect(await options.preSendCheck({ database: heldDatabase, providerBoundary: false })).toEqual({ ok: true });
-    boundary = await options.preSendCheck({ database: heldDatabase, providerBoundary: true });
-    options.state.boundaryBlock = boundary;
+    await options.dispatch(heldDatabase, async () => ({ ok: true }));
+    options.state.providerAccepted = true;
+  });
+  const row = unregistered();
+  expect(isBillingEmailProviderReplay(row)).toBe(false);
+  await expect(runBillingEmailProviderReplayHandoff(row, dispatch)).resolves.toEqual({ handled: true, allowed: true });
+  expect(dispatch).toHaveBeenCalledWith(heldDatabase, expect.any(Function));
+  // No stored contract: no producer eligibility to re-run.
+  expect(billingEmailReplayEligible).not.toHaveBeenCalled();
+  expect(EmailTemplateLibrary.readStoredBillingReplayContext).not.toHaveBeenCalled();
+});
+
+test('an authority refusal (the customer dropped Email since) stops the unregistered retry', async () => {
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    options.state.boundaryBlock = { code: 'BILLING_PREFERENCES_CHANGED', reason: 'Email is not selected for this billing category', retryable: false };
   });
   const dispatch = jest.fn();
-
-  await expect(runBillingEmailProviderReplayHandoff(message(), dispatch)).resolves.toMatchObject({
-    handled: true, allowed: false, terminal: true, code: 'BILLING_REPLAY_RESENDABLE', reason: 'sequence-advanced',
+  await expect(runBillingEmailProviderReplayHandoff(unregistered(), dispatch)).resolves.toMatchObject({
+    handled: true, allowed: false, code: 'BILLING_PREFERENCES_CHANGED',
   });
-  expect(boundary).toMatchObject({ ok: false, code: 'BILLING_REPLAY_RESENDABLE' });
-  expect(billingEmailReplayProducerRefusal.mock.calls).toEqual([
-    [context], [context, { database: heldDatabase }], [context, { database: heldDatabase }],
-  ]);
   expect(dispatch).not.toHaveBeenCalled();
 });
 
-test.each(['billing.notice', 'billing.receipt_notice'])('contextless %s retains the existing provider retry path', async (templateKey) => {
-  const legacy = message({ template_key: templateKey, payload_snapshot: JSON.stringify({ notification_body: 'Payment received' }) });
-  expect(isBillingEmailProviderReplay(legacy)).toBe(false);
-  await expect(runBillingEmailProviderReplayHandoff(legacy, jest.fn())).resolves.toEqual({ handled: false });
+test.each([
+  ['a non-customer recipient', { recipient_type: 'lead' }],
+  ['a notice key that differs from the idempotency key', { idempotency_key: 'billing_channel_email:other-key:email' }],
+  ['no notice key', { trigger_event_id: null }],
+  ['two notice categories', { categories: JSON.stringify(['billing', 'invoice', 'payment_receipt']) }],
+  ['no billing category', { categories: JSON.stringify(['email_template']) }],
+  ['a receipt template on a non-receipt category', { categories: JSON.stringify(['email_template', 'billing', 'invoice']) }],
+])('an unregistered row with %s is refused before the authority', async (_label, overrides) => {
+  const dispatch = jest.fn();
+  await expect(runBillingEmailProviderReplayHandoff(unregistered(overrides), dispatch)).resolves.toMatchObject({
+    handled: true, allowed: false, terminal: true, code: 'BILLING_RETRY_IDENTITY_INVALID',
+  });
   expect(dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
-  expect(EmailTemplateLibrary.readStoredBillingReplayContext).not.toHaveBeenCalled();
+  expect(dispatch).not.toHaveBeenCalled();
+});
+
+// Payment receipts sent before billing.receipt_notice existed (migration
+// 20260926000100) used billing.notice. Their retries keep working.
+test('a pre-migration receipt on billing.notice keeps its retry', async () => {
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    expect(options.input.metadata.billingDeliveryCategory).toBe('payment_receipt');
+    expect(options.templateKey).toBe('billing.notice');
+    options.state.providerAccepted = true;
+  });
+  await expect(runBillingEmailProviderReplayHandoff(unregistered({ template_key: 'billing.notice' }), jest.fn()))
+    .resolves.toEqual({ handled: true, allowed: true });
+});
+
+// A receipt still honors notification_prefs.payment_receipt, read on the
+// authority's held transaction, like the first send.
+describe('payment receipt kill switch on a retry', () => {
+  function prefsDatabase(row, { fails = false } = {}) {
+    const first = jest.fn(async () => { if (fails) throw new Error('prefs read failed'); return row; });
+    const where = jest.fn(() => ({ first }));
+    return Object.assign(jest.fn(() => ({ where })), { where, first });
+  }
+  async function preSendVerdict(database) {
+    let verdict;
+    dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+      verdict = await options.preSendCheck({ database, providerBoundary: false });
+      if (verdict.ok !== true) options.state.boundaryBlock = verdict;
+      else options.state.providerAccepted = true;
+    });
+    const outcome = await runBillingEmailProviderReplayHandoff(unregistered(), jest.fn());
+    return { verdict, outcome };
+  }
+
+  test('a customer who turned receipts off gets no retried receipt', async () => {
+    const database = prefsDatabase({ payment_receipt: false });
+    const { verdict, outcome } = await preSendVerdict(database);
+    expect(database).toHaveBeenCalledWith('notification_prefs');
+    expect(database.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
+    expect(verdict).toEqual({ ok: false, code: 'BILLING_REPLAY_INELIGIBLE', reason: 'receipt_opted_out', retryable: false });
+    expect(outcome).toMatchObject({ handled: true, allowed: false, terminal: true, reason: 'receipt_opted_out' });
+  });
+
+  test.each([[{ payment_receipt: true }], [{ payment_receipt: null }], [undefined]])('receipts left on (%j) still retry', async (row) => {
+    const { verdict, outcome } = await preSendVerdict(prefsDatabase(row));
+    expect(verdict).toEqual({ ok: true });
+    expect(outcome).toEqual({ handled: true, allowed: true });
+  });
+
+  test('an unreadable receipt setting holds the retry', async () => {
+    const { verdict } = await preSendVerdict(prefsDatabase(null, { fails: true }));
+    expect(verdict).toEqual({ ok: false, code: 'BILLING_REPLAY_INELIGIBLE', reason: 'receipt-prefs-unavailable', retryable: true });
+  });
+
+  test('an autopay notice honors the same switch, like its first send', async () => {
+    EmailTemplateLibrary.readStoredBillingReplayContext.mockReturnValue({
+      schema_version: 1, customer_id: 'cust-1', category: 'billing', source_entry_point: 'autopay_pre_charge_reminder',
+      notificationEventKey: 'precharge:cust-1:2030-06-10', charge_date: '2030-06-10',
+    });
+    const database = prefsDatabase({ payment_receipt: false });
+    let verdict;
+    dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+      verdict = await options.preSendCheck({ database, providerBoundary: false });
+      options.state.boundaryBlock = verdict;
+    });
+    await runBillingEmailProviderReplayHandoff(message(), jest.fn());
+    expect(verdict).toEqual({ ok: false, code: 'BILLING_REPLAY_INELIGIBLE', reason: 'receipt_opted_out', retryable: false });
+    // Refused before the producer's own eligibility runs.
+    expect(billingEmailReplayEligible).not.toHaveBeenCalled();
+  });
+
+  test('other categories never read the receipt setting', async () => {
+    const database = prefsDatabase({ payment_receipt: false });
+    dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+      expect(await options.preSendCheck({ database, providerBoundary: false })).toEqual({ ok: true });
+      options.state.providerAccepted = true;
+    });
+    await runBillingEmailProviderReplayHandoff(unregistered({
+      template_key: 'billing.notice', categories: JSON.stringify(['email_template', 'billing']),
+    }), jest.fn());
+    expect(database).not.toHaveBeenCalled();
+  });
+});
+
+test('a generic billing notice keeps its category', async () => {
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    expect(options.input.metadata.billingDeliveryCategory).toBe('billing');
+    options.state.providerAccepted = true;
+  });
+  await expect(runBillingEmailProviderReplayHandoff(unregistered({
+    template_key: 'billing.notice', categories: JSON.stringify(['email_template', 'billing', 'billing']),
+  }), jest.fn())).resolves.toEqual({ handled: true, allowed: true });
 });
 
 test.each([null, {}, 'bad-context'])('a present invalid contract %j cannot fall back to an unguarded replay', async (stored) => {

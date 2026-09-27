@@ -638,7 +638,7 @@ describe('invoice follow-up email sidecar', () => {
     await expect(InvoiceFollowUps.resumeSequence('inv-1')).resolves.toBeUndefined();
   });
 
-  test.each([false, true])('advances a no-phone sequence through selected App (%s) or legacy email', async (appSelected) => {
+  test.each([false, true, 'bell'])('advances a no-phone sequence through selected App (%s) or legacy email', async (appSelected) => {
     const prefs = { email_enabled: true, ...(appSelected ? { invoice_channels: ['push'] } : {}) };
     const emailInteraction = chain();
     const finalInteraction = chain();
@@ -662,6 +662,7 @@ describe('invoice follow-up email sidecar', () => {
       ],
     });
 
+    if (appSelected === 'bell') sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain', bellPersisted: true });
     await InvoiceFollowUps.runPending();
 
     if (appSelected) {

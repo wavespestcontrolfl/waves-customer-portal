@@ -81,7 +81,8 @@ function billingNotificationEventKey(input) {
 // notice. SUPPRESSION_LOOKUP_FAILED is the same kind of schedulable hold for
 // an explicit Email/App leg whose suppression state could not be read, and
 // BILLING_EMAIL_PREPARATION_HOLD for a retryable Email refusal before the
-// provider handoff (billing-channel-email.js). BILLING_TEXT_DEDUPE_UNAVAILABLE
+// provider handoff, or a definite SendGrid rejection after it
+// (billing-channel-email.js). BILLING_TEXT_DEDUPE_UNAVAILABLE
 // is the same kind of schedulable hold for an explicit Text leg whose dedupe
 // state (the advisory-lock check, or the prior-accepted-send lookup) could
 // not be read. BILLING_TEXT_LEG_IN_FLIGHT is the Text leg's own
@@ -97,6 +98,7 @@ const REPLAY_HOLD_CODES = Object.freeze([
 ]);
 
 function isReplayHold(result) {
+  if (result.bellPersisted === true) return false;
   return result.deferred === true && REPLAY_HOLD_CODES.includes(result.code);
 }
 
@@ -121,7 +123,15 @@ function preferenceChangeHold(overrides = {}) {
   };
 }
 
+// A guarded current bell reaches the customer even if native delivery fails.
+function billingLegDeliveryState(channel, result = {}) {
+  if (result.deliveryOutcome === 'accepted') return 'delivered';
+  if (channel === 'email' && result.ok === true && result.deliveryOutcome === undefined) return 'delivered';
+  return channel === 'push' && result.bellPersisted === true ? 'delivered' : null;
+}
+
 function needsRetry(result) {
+  if (result?.bellPersisted === true) return false;
   return result?.retryable || result?.deliveryOutcome === 'uncertain';
 }
 
@@ -135,8 +145,8 @@ function legFailure(channel, err) {
   const outcome = err.providerOutcome;
   return outcome?.deliveryOutcome === 'accepted'
     ? { ...outcome, sent: true, blocked: false, channel }
-    : { sent: false, blocked: false, channel, deliveryOutcome: outcome?.deliveryOutcome || 'not_sent',
-      code: 'BILLING_CHANNEL_FAILED', reason: err.message, retryable: true };
+    : { ...outcome, sent: false, blocked: false, channel, deliveryOutcome: outcome?.deliveryOutcome || 'not_sent',
+      code: 'BILLING_CHANNEL_FAILED', reason: outcome?.reason || outcome?.error || err.message, retryable: true };
 }
 
 // One leg through the complete guarded pipeline.
@@ -181,12 +191,13 @@ async function sendBillingLeg({ input, channel, channels, channelResults, catego
 // the caller retries it; otherwise the latest acceptance, then any retry.
 function billingDispatchOutcome(channelResults) {
   const results = Object.values(channelResults);
-  const accepted = [...results].reverse().find((result) => result.sent && result.deliveryOutcome === 'accepted');
+  const accepted = Object.entries(channelResults).reverse().find(([channel, result]) => billingLegDeliveryState(channel, result));
+  const delivered = accepted && { ...accepted[1], sent: true, blocked: false, deliveryOutcome: 'accepted', retryable: false, deferred: false };
   const retry = results.find(needsRetry);
   const textRetry = needsRetry(channelResults.sms) && channelResults.sms;
   const textAccepted = channelResults.sms?.sent && channelResults.sms.deliveryOutcome === 'accepted';
   const outcome = results.find(isReplayHold)
-    || (!textAccepted && (textRetry || retry)) || accepted || retry
+    || (!textAccepted && (textRetry || retry)) || delivered || retry
     || results[results.length - 1];
   return { ...outcome, channelResults };
 }
@@ -230,5 +241,5 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
 
 module.exports = {
   BILLING_MESSAGE_CATEGORIES, billingDeliveryCategory, isBillingDeliveryCandidate, usesBillingDeliveryPreferences,
-  billingNotificationEventKey, dispatchBillingChannels, REPLAY_HOLD_CODES, isReplayHold, preferenceChangeHold,
+  billingNotificationEventKey, dispatchBillingChannels, REPLAY_HOLD_CODES, isReplayHold, preferenceChangeHold, billingLegDeliveryState,
 };

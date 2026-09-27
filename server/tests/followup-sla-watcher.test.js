@@ -13,15 +13,24 @@ jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutLayers: j
 jest.mock('../services/voice-agent/relay-protocol', () => ({ whereNotSandboxCall: jest.fn((qb) => qb.whereRaw('not_sandbox')) }));
 jest.mock('../services/call-commitments', () => {
   const actual = jest.requireActual('../services/call-commitments');
-  return { ...actual, listOpenCommitments: jest.fn(), refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })), stillOpenIds: jest.fn(async (_conn, ids) => new Set(ids)) };
+  return {
+    ...actual,
+    listOpenCommitments: jest.fn(),
+    refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })),
+    stillOpenIds: jest.fn(async (_conn, ids) => new Set(ids)),
+    // Defaults to the real implementation; individual tests override with
+    // mockRejectedValueOnce to prove a failure propagates rather than
+    // silently reading as "no renewal".
+    obligationRenewedAt: jest.fn(actual.obligationRenewedAt),
+  };
 });
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const { isEnabled } = require('../config/feature-gates');
-const { listOpenCommitments, refreshFulfillment, stillOpenIds } = require('../services/call-commitments');
+const { listOpenCommitments, refreshFulfillment, stillOpenIds, obligationRenewedAt } = require('../services/call-commitments');
 const {
-  runFollowUpSlaWatcher, followUpDueAt, selectMissed, slaOwnedIds, pagerHealthy, lastScheduledTick, ROLLING_KEY,
+  runFollowUpSlaWatcher, followUpDueAt, selectMissed, slaOwnedIds, pagerHealthy, lastScheduledTick, followedUpIds, ROLLING_KEY,
 } = require('../services/followup-sla-watcher');
 
 // ET is UTC-4 in late September.
@@ -423,6 +432,39 @@ test('the tick reads the office closure calendar for the scan window', async () 
   await runFollowUpSlaWatcher({ now: NOW });
   const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
   expect(getBlackoutLayers).toHaveBeenCalled();
+});
+
+describe('followedUpIds — renewal-boundary propagation', () => {
+  test('a failed obligationRenewedAt lookup propagates rather than reading as "no renewal"', async () => {
+    obligationRenewedAt.mockRejectedValueOnce(new Error('synthetic audit_log lookup failure'));
+    const reopenedRow = {
+      id: 'fixture-reopened-1', kind: 'callback', party: 'waves', human_state: 'confirmed',
+      customer_id: 'fixture-customer-1', created_at: NOW, call_started_at: NOW, source: 'ai',
+    };
+    // Old evidence from BEFORE the reopen must never silently count as
+    // fulfillment when the renewal boundary itself couldn't be verified —
+    // every existing caller (the pager's own runInner, promise-chaser-bell)
+    // already treats a thrown followedUpIds as "unverified, hold for retry".
+    await expect(followedUpIds(db, [reopenedRow])).rejects.toThrow('synthetic audit_log lookup failure');
+  });
+
+  test('a row the pager itself would ever pass (no human_state) touches no renewal-boundary query at all', async () => {
+    // renewedFloors no longer short-circuits on kind/human_state itself
+    // (Codex #5019 r12 P1: obligationRenewedAt is the single source of
+    // truth for which rows it renews, so this file never duplicates —
+    // or drifts from — that decision), so it IS called for every row now.
+    // The real guarantee this test pins is unchanged: obligationRenewedAt's
+    // OWN human_state guard returns before ever touching audit_log, so a
+    // row the pager's own candidates always look like (no human_state)
+    // still causes zero DB work — `db` (the bare mock) is never invoked.
+    const untouchedRow = {
+      id: 'fixture-untouched-1', kind: 'callback', party: 'waves', human_state: null,
+      customer_id: null, created_at: NOW, call_started_at: NOW, source: 'ai', from_phone: null, to_phone: null, direction: 'inbound',
+    };
+    await followedUpIds(db, [untouchedRow]).catch(() => {}); // db is a bare mock; only proving the call pattern here
+    expect(obligationRenewedAt).toHaveBeenCalledTimes(1);
+    expect(db).not.toHaveBeenCalled();
+  });
 });
 
 describe('pagerHealthy — judged against the pager schedule', () => {

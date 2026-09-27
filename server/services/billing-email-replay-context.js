@@ -193,7 +193,11 @@ function buildBillingReplayContext(input, authorityContext, notificationEventKey
   });
 }
 
+function isBillingReplaySource(input) {
+  return SOURCES.has(boundedString(replaySourceEntryPoint(input), STRING_FIELDS.source_entry_point));
+}
+
 module.exports = {
-  buildBillingReplayContext, sanitizeBillingReplayContext, INVOICE_SEND_SOURCES,
+  buildBillingReplayContext, sanitizeBillingReplayContext, isBillingReplaySource, INVOICE_SEND_SOURCES,
   SENDER_BINDINGS, senderReplayTemplate, senderReplayBindsRow,
 };

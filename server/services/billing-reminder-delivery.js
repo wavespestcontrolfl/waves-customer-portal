@@ -1,5 +1,7 @@
 'use strict';
 
+const { billingLegDeliveryState } = require('./messaging/billing-channel-routing');
+
 const crypto = require('node:crypto');
 const db = require('../models/db');
 const ContactLedger = require('./collections/contact-ledger');
@@ -112,8 +114,7 @@ async function sendLeg(send, channel, entry) {
 // as delivered), or null while it stays pending. An uncertain outcome keeps
 // the reservation held; only a definite non-send becomes retryable.
 async function recordLegOutcome(entry, channel, result, results) {
-  const accepted = result?.deliveryOutcome === 'accepted'
-    || (channel === 'email' && result?.ok === true && result.deliveryOutcome === undefined);
+  const accepted = billingLegDeliveryState(channel, result || {});
   if (accepted) {
     if (await ContactLedger.markDelivered(entry)) return 'delivered';
     results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_ACCEPTANCE_UNSTAMPED' };
@@ -165,6 +166,14 @@ async function sendReminderChannels({
     invoiceIds: policyInvoiceIds ?? invoiceIds,
     detail: true,
   })));
+  // Partial debt evidence cannot authorize a leg or settle a restored waiver.
+  // Keep the entire pending episode retryable before any delivery mutation.
+  if (permitted.some((verdict) => verdict?.balanceIncomplete)) {
+    for (const channel of pending) {
+      results[channel] = { sent: false, deliveryHeld: true, retryable: true, code: 'COLLECTIONS_POLICY' };
+    }
+    return { complete: false, deliveredNow, results };
+  }
   const digest = crypto.createHash('sha256').update(`${customerId}:${eventKey}`).digest('hex');
   // Only a durable denial waives its leg; a spacing window keeps it owed.
   // A later allowance revokes the old waiver. Persist that deletion before

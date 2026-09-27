@@ -1230,59 +1230,17 @@ describe('email template library rendering', () => {
     expect(snapshot).toEqual({});
   });
 
-  describe('a moved billing sender binds its own row (owner ruling 2026-09-27)', () => {
-    const context = {
-      schema_version: 1, customer_id: 'cust-1', invoice_id: 'inv-1', category: 'billing',
-      source_entry_point: 'late_payment_email', notificationEventKey: 'late_payment:inv-1:30',
-      rendered_balance: '129.00',
-    };
+  test('keeps a fail-closed marker when a declared producer context is invalid', () => {
     const facts = {
-      templateKey: 'billing_late_payment_30_day', recipientType: 'customer', recipientId: 'cust-1',
-      triggerEventId: 'late_payment:inv-1:30', idempotencyKey: 'late_payment_email:inv-1:30',
-      categories: ['billing', 'late_payment', 'late_payment_30d'],
+      templateKey: 'billing.notice', recipientType: 'customer', recipientId: 'cust-1', triggerEventId: 'event-1',
+      idempotencyKey: 'billing_channel_email:different-event:email', categories: ['billing'],
     };
-
-    test('a late-payment email row stores its context', () => {
-      expect(EmailTemplates.payloadSnapshotForSend({ first_name: 'Taylor' }, context, facts))
-        .toEqual({ first_name: 'Taylor', __billing_replay_context: context });
-    });
-
-    test.each([
-      ['another template', { templateKey: 'billing.notice' }],
-      ['another invoice in the trigger', { triggerEventId: 'late_payment:inv-2:30', idempotencyKey: 'late_payment_email:inv-2:30' }],
-      ['a key that does not match the trigger', { idempotencyKey: 'late_payment_email:inv-1:60' }],
-      ['another recipient', { recipientId: 'cust-2' }],
-    ])('%s drops the context', (_label, overrides) => {
-      expect(EmailTemplates.payloadSnapshotForSend({}, context, { ...facts, ...overrides })).toEqual({});
-    });
-
-    test('an invoice follow-up email row stores its context under its own category tag', () => {
-      const followup = {
-        schema_version: 1, customer_id: 'cust-1', invoice_id: 'inv-1', category: 'invoice',
-        source_entry_point: 'invoice_followup_email', notificationEventKey: 'invoice_followup:inv-1:d7_reminder',
-        followup_sequence_id: 'seq-1', rendered_amount: '129.00',
-      };
-      const followupFacts = {
-        templateKey: 'invoice.followup_7_day', recipientType: 'customer', recipientId: 'cust-1',
-        triggerEventId: 'invoice_followup:inv-1:d7_reminder', idempotencyKey: 'invoice_followup_email:inv-1:d7_reminder',
-        categories: ['invoice_followup', 'd7_reminder'],
-      };
-      expect(EmailTemplates.payloadSnapshotForSend({}, followup, followupFacts))
-        .toEqual({ __billing_replay_context: followup });
-      expect(EmailTemplates.payloadSnapshotForSend({}, followup, { ...followupFacts, categories: ['d7_reminder'] }))
-        .toEqual({});
-      expect(EmailTemplates.payloadSnapshotForSend({}, { ...followup, rendered_amount: undefined }, followupFacts))
-        .toEqual({});
-    });
-
-    test('a stored late-payment context reads back from its row', () => {
-      expect(EmailTemplates.readStoredBillingReplayContext({
-        template_key: facts.templateKey, recipient_type: 'customer', recipient_id: 'cust-1',
-        trigger_event_id: facts.triggerEventId, idempotency_key: facts.idempotencyKey,
-        categories: JSON.stringify(facts.categories), recipient_email_snapshot: 'billing@example.com',
-        payload_snapshot: JSON.stringify({ __billing_replay_context: context }),
-      })).toEqual(context);
-    });
+    const snapshot = EmailTemplates.payloadSnapshotForSend(
+      { first_name: 'Taylor' }, null, facts, { replayDeclared: true },
+    );
+    expect(snapshot).toEqual({ first_name: 'Taylor', __billing_replay_context: null });
+    expect(EmailTemplates.payloadSnapshotForSend({ first_name: 'Taylor' }, null, facts))
+      .toEqual({ first_name: 'Taylor' });
   });
 
   test('a reclaimed send persists fresh rendered content and replay context from the same attempt', async () => {
