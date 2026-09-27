@@ -1435,6 +1435,19 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityNamedSources({ body: 'Per the Florida Forest Service, pine beetles spread in drought.' }).ok).toBe(true);
   });
 
+  test('named_sources: a heading that names an authority is a topic, not attribution (Codex P2)', () => {
+    for (const heading of ['## EPA data', '## NOAA research', '## UF/IFAS reports']) {
+      expect(checkCitabilityNamedSources({ body: `${heading}\nRain drives mosquito peaks.` }).ok).toBe(false);
+    }
+    expect(checkCitabilityNamedSources({ body: '## NOAA research\nNOAA data shows rain drives mosquito peaks.' }).ok).toBe(true);
+  });
+
+  test('named_sources: generic publication labels are not named sources (Codex P2)', () => {
+    for (const phrase of ['According to Trusted Industry Publication', 'Data from This Article', 'According to Our Pest Guide', 'According to Leading Websites']) {
+      expect(checkCitabilityNamedSources({ body: `${phrase}, ants are common.` }).ok).toBe(false);
+    }
+  });
+
   test('concrete_specifics counts numbers with units, ignores dollars, years, and bare counts', () => {
     expect(countConcreteSpecifics('Mow St. Augustine at 3.5–4 inches and water 1/2 inch per week; wait 10-14 days between applications.')).toBe(3);
     expect(countConcreteSpecifics('It costs $120 and we were founded in 2024; here are 3 ways.')).toBe(0);
@@ -1479,6 +1492,12 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## Bait or spray?\nText.' }).ok).toBe(false);
     const withTable = { ...noTable, body: '<ComparisonTable columns={["What to weigh","Misting","Barrier"]} rows={[]} />' };
     expect(checkCitabilityComparison(withTable).ok).toBe(true);
+  });
+
+  test('comparison: "which … should you choose" headings frame a choice (Codex P2)', () => {
+    const r = checkCitabilityComparison({ title: 'Termites in Venice', frontmatter: { post_type: 'diagnostic' }, body: '## Which termite treatment should you choose?\nText.' });
+    expect(r).toEqual({ ok: false, reason: 'choice_framed_without_ComparisonTable' });
+    expect(checkCitabilityComparison({ title: 'Termites in Venice', body: '## Which of these options is best for a slab home?\nText.' }).ok).toBe(false);
   });
 
   test('comparison + how_to_choose apply by post_type for decision / comparison / cost posts', () => {
@@ -1604,5 +1623,13 @@ describe('citability checks read rendered Markdown only (Codex r8 P2)', () => {
     const table = '<ComparisonTable columns={["a"]} rows={[]} />\n';
     expect(checkCitabilityHowToChoose({ body: `${table}\`\`\`md\n## How to choose\n- a\n- b\n- c\n\`\`\`` }).reason).toBe('no_how_to_choose_section');
     expect(checkCitabilityNamedSources({ body: '<!-- Per UF/IFAS, ants trail. -->\nAnts trail after rain.' }).ok).toBe(false);
+  });
+
+  test('definitely-hidden elements do not count; styled visible markup still does (Codex P2)', () => {
+    const table = '<ComparisonTable columns={[]} rows={[]} />';
+    expect(checkCitabilityNamedSources({ body: 'Ants trail. <div hidden>Per UF/IFAS, ants trail.</div>' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'Ants trail. <span style="display:none">Per UF/IFAS, ants trail.</span>' }).ok).toBe(false);
+    expect(checkCitabilityComparison({ title: 'Bait vs. Spray', body: `<div aria-hidden="true">\n${table}\n</div>` }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: '<div class="callout">Per UF/IFAS, ants trail after rain.</div>' }).ok).toBe(true);
   });
 });

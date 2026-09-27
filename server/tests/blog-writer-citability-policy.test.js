@@ -26,6 +26,10 @@ describe('writer-agent-config CITABILITY section', () => {
     for (const code of codes) expect(system).toContain(code);
   });
 
+  test('scopes the section to supporting blogs — the prompt is shared with city-service and customer-question pages (Codex P2)', () => {
+    expect(system).toMatch(/CITABILITY \(supporting-blog pages only/);
+  });
+
   test('keeps the no-quota and no-invented-source guardrails explicit', () => {
     expect(system).toMatch(/This is not a quota/);
     expect(system).toMatch(/There is NO quota for statistics/);

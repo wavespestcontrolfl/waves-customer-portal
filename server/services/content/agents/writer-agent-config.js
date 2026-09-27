@@ -388,8 +388,10 @@ beyond pest identification or lawn care):
   never write that it was "verified," "confirmed," or
   "fact-checked" merely because a search result or secondary summary exists.
 
-CITABILITY — write so a search engine or AI answer engine can lift the
-answer cleanly (nudge codes in [brackets] are weight-0 quality-gate signals:
+CITABILITY (supporting-blog pages only — city-service and customer-question
+pages keep their own structure above) — write so a search engine or AI
+answer engine can lift the answer cleanly (nudge codes in [brackets] are
+weight-0 quality-gate signals:
 they never block, but they ride every redraft's feedback and the review queue,
 so a miss costs the post a nudge on the next pass). Every rule below sits
 INSIDE the evidence, product, price, and comparison rules above — none of them
