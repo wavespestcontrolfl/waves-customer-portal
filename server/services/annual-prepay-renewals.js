@@ -3978,18 +3978,38 @@ async function recordParentRenewedIfEligible({ successorId, parentTermId }, conn
   return typeof conn.transaction === 'function' ? conn.transaction(work) : work(conn);
 }
 
-// Read under the gate: the renewal successor is live and its own renewal
-// invoice is settled and not revoked on the payments ledger (chokepoint A,
-// invoiceSettledNotRevoked). A dispute suspension demotes the successor to
-// payment_pending (suspendActiveTermsForDisputedInvoice) and reopens its
-// invoice, so the status and invoice checks refuse it. The marker ALONE is
-// not a refusal: on an ACTIVE row it is the won / re-paid recovery shape,
-// kept until finishDisputeRecoveryForTerm runs (after this stamp, by design
-// — see syncTermForInvoicePayment), and refusing it would drop the revival
-// branches' stamp.
+// The successor shapes whose own payment can prove the parent renewed:
+// live (ACTIVE_STATUSES), or — Codex #4971 r8 P2 — the PAID decided-lapse
+// shape (move 15: a pending successor whose NEXT renewal the customer
+// declined, then paid: 'cancelled' + renewal_decision 'cancel'). The
+// payment still proves THIS renewal happened. A refunded / voided decided
+// cancel has the same status and decision, so the invoice check (settled,
+// not revoked) is what tells them apart — never the shape alone. JS twin of
+// whereSuccessorShapeBacksRenewal.
+function successorShapeBacksRenewal(term) {
+  return ACTIVE_STATUSES.includes(term.status) || (term.status === 'cancelled' && term.renewal_decision === 'cancel');
+}
+
+function whereSuccessorShapeBacksRenewal(builder, alias) {
+  return builder.where(function successorShape() {
+    this.whereIn(`${alias}.status`, ACTIVE_STATUSES).orWhere(function paidDecidedLapse() {
+      this.where(`${alias}.status`, 'cancelled').where(`${alias}.renewal_decision`, 'cancel');
+    });
+  });
+}
+
+// Read under the gate: the renewal successor is in a shape above and its
+// own renewal invoice is settled and not revoked on the payments ledger
+// (chokepoint A, invoiceSettledNotRevoked). A dispute suspension demotes the
+// successor to payment_pending (suspendActiveTermsForDisputedInvoice) and
+// reopens its invoice, so the status and invoice checks refuse it. The
+// marker ALONE is not a refusal: on an ACTIVE row it is the won / re-paid
+// recovery shape, kept until finishDisputeRecoveryForTerm runs (after this
+// stamp, by design — see syncTermForInvoicePayment), and refusing it would
+// drop the revival branches' stamp.
 async function successorPaymentBacksRenewal(t, successorId, Charge) {
   const successor = await t('annual_prepay_terms').where({ id: successorId }).first();
-  if (!successor || !ACTIVE_STATUSES.includes(successor.status)) return false;
+  if (!successor || !successorShapeBacksRenewal(successor)) return false;
   if (!successor.prepay_invoice_id) return false;
   // Strict, unlike the parent's vacuous "no invoice = covered": the
   // successor's own payment is the whole reason to stamp, so a missing
@@ -4035,7 +4055,7 @@ async function reconcileParentRenewedStamps({ conn = db, limit = 200 } = {}) {
         .join('invoices as i', 'i.id', 's.prepay_invoice_id')
         .leftJoin('invoices as pi', 'pi.id', 'p.prepay_invoice_id')
         .whereNotNull('s.renewed_from_term_id')
-        .whereIn('s.status', ACTIVE_STATUSES)
+        .modify((q) => whereSuccessorShapeBacksRenewal(q, 's'))
         .whereIn('p.status', ACTIVE_STATUSES)
         .whereNull('p.renewal_decision')
         .where(function parentInvoiceSettled() {
@@ -4185,15 +4205,34 @@ async function cancelTermWithRestorations(termId, conn = db, { throwOnError = fa
 async function settleDecidedPendingTerms(decided, nextStatus, conn) {
   if (!decided.length || (nextStatus !== 'active' && nextStatus !== 'cancelled')) return [];
   const settled = [];
-  for (const { id } of decided) {
-    const [lapse] = await conn('annual_prepay_terms')
-      .where({ id, status: PAYMENT_PENDING_STATUS, renewal_decision: 'cancel' })
-      .update({ status: 'cancelled', updated_at: new Date() })
-      .returning('*');
+  for (const term of decided) {
+    const lapse = await settleDecidedPendingTerm(term, nextStatus, conn);
     if (!lapse) continue;
     settled.push(nextStatus === 'active' ? await followThroughPaidDecidedLapse(lapse, conn) : lapse);
   }
   return settled;
+}
+
+// One decided pending term's flip. Codex #4971 r8 P2: a renewal SUCCESSOR
+// paid in this shape still proves its parent renewed, so the paid flip
+// stamps the parent exactly like the activation branches — the renewal
+// gate (parent + successor keys) first when this is its own transaction,
+// and the stamp on the same transaction / savepoint as the flip. Anything
+// else (not paid, or not a successor) keeps its plain conditional update.
+async function settleDecidedPendingTerm(term, nextStatus, conn) {
+  const { id } = term;
+  const paidSuccessor = nextStatus === 'active' && Boolean(term.renewed_from_term_id);
+  const flip = async (t) => {
+    if (paidSuccessor && t !== conn) await acquireTermiteGateAtEntry(t, { termIds: renewalGateTermIds(term) });
+    const [lapse] = await t('annual_prepay_terms')
+      .where({ id, status: PAYMENT_PENDING_STATUS, renewal_decision: 'cancel' })
+      .update({ status: 'cancelled', updated_at: new Date() })
+      .returning('*');
+    if (lapse && paidSuccessor) await stampParentRenewedForSuccessor(lapse, 'decided pending->paid', t);
+    return lapse;
+  };
+  const ownTransaction = paidSuccessor && !conn.isTransaction && typeof conn.transaction === 'function';
+  return ownTransaction ? conn.transaction(flip) : flip(conn);
 }
 
 // Paid coverage live TODAY (billing's own test, dated) — the condition for

@@ -4,21 +4,35 @@ const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const { renderSmsTemplate } = require('../sms-template-renderer');
 
 // Counters that mean the termite renewal sweep did something worth a log
-// line; a quiet night (only candidatesScanned / reconcileNeverAttemptedScanned)
-// stays silent. The leg lives outside checkAndSend so that function's
+// line: EVERY action counter runTermiteAnnualRenewalSweep returns (Codex
+// #4971 r8 P2 — a night whose only work was recovery, a withdrawal, a
+// resolved charge outcome or a late-paid alert, logs too). The *Scanned
+// counters are not activity: a quiet night stays silent. A test pins this
+// list against the sweep's own counts object, so a new action counter can't
+// be missed. The leg lives outside checkAndSend so that function's
 // complexity stays at its baseline.
 const TERMITE_RENEWAL_ACTIVITY_KEYS = [
-  'minted', 'charged', 'failed', 'graceLapsed', 'noWitnessBelled', 'unanchoredBelled',
-  'staleOverdueBelled', 'lapseEffectsReconciled', 'reconcileNeverReachedStripeBelled',
-  'graceReconciliationDeferred', 'parentRenewedStamped', 'graceRetiredSettled',
+  'noWitnessBelled', 'unanchoredBelled', 'staleOverdueBelled',
+  'minted', 'charged', 'failed', 'skipped',
+  'graceLapsed', 'graceReconciliationDeferred', 'graceRetiredSettled',
+  'lapseEffectsReconciled', 'reconcileSkipped', 'reconcileNeverReachedStripeBelled',
+  'reconcilePendingOutcomeResolved', 'latePaidBelled', 'withdrawn', 'parentRenewedStamped',
 ];
+
+// Every numeric counter the sweep returned, scanned and action alike.
+function termiteRenewalSummary(counts) {
+  return Object.entries(counts)
+    .filter(([, value]) => typeof value === 'number')
+    .map(([key, value]) => `${key}=${value}`)
+    .join(', ');
+}
 
 async function runTermiteRenewalChargeLeg() {
   try {
     const { runTermiteAnnualRenewalSweep } = require('../termite-annual-renewal-charge');
     const renewalCharge = await runTermiteAnnualRenewalSweep();
     if (!TERMITE_RENEWAL_ACTIVITY_KEYS.some((key) => renewalCharge[key])) return;
-    logger.info(`Termite annual renewal charge: ${renewalCharge.candidatesScanned} scanned, ${renewalCharge.minted} minted, ${renewalCharge.charged} charged, ${renewalCharge.failed} failed, ${renewalCharge.graceLapsed} grace-lapsed, ${renewalCharge.graceRetiredSettled} grace-retired (already settled), ${renewalCharge.graceReconciliationDeferred} grace-deferred (charge reconciliation pending), ${renewalCharge.noWitnessBelled} no-witness bells, ${renewalCharge.unanchoredBelled} unanchored bells, ${renewalCharge.staleOverdueBelled} stale-overdue bells, ${renewalCharge.lapseEffectsReconciled} lapse-effects reconciled, ${renewalCharge.reconcileNeverAttemptedScanned} never-attempted scanned, ${renewalCharge.reconcileNeverReachedStripeBelled} never-reached-Stripe bells, ${renewalCharge.parentRenewedStamped} parent-renewed backstop stamps`);
+    logger.info(`Termite annual renewal charge: ${termiteRenewalSummary(renewalCharge)}`);
   } catch (err) {
     logger.error(`Termite annual renewal charge sweep failed: ${err.message}`);
   }
@@ -183,3 +197,4 @@ class RenewalReminder {
 }
 
 module.exports = new RenewalReminder();
+module.exports._private = { TERMITE_RENEWAL_ACTIVITY_KEYS, runTermiteRenewalChargeLeg };

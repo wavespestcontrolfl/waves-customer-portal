@@ -6713,6 +6713,10 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
     ['on an invoice that is no longer paid', PAID_SUCCESSOR, { invoices: [query({ first: { status: 'open' } })] }, [TERMS, TERMS, 'invoices']],
     ['on a missing invoice row (no evidence, never vacuous)', PAID_SUCCESSOR, { invoices: [query({ first: undefined })] }, [TERMS, TERMS, 'invoices']],
     ['with no linked invoice', { ...PAID_SUCCESSOR, prepay_invoice_id: null }, {}, [TERMS, TERMS]],
+    // Codex #4971 r8 P2: the decided-lapse shape backs the renewal only
+    // while its invoice is settled — a refunded decided cancel never does.
+    ['in the decided-lapse shape, refunded on the ledger', { ...PAID_SUCCESSOR, status: 'cancelled', renewal_decision: 'cancel' }, paidEvidence(undefined, { id: 'pay-refunded' }), [TERMS, TERMS, 'invoices', 'payments']],
+    ['cancelled without a decision (a void / refund cancel)', { ...PAID_SUCCESSOR, status: 'cancelled', renewal_decision: null }, {}, [TERMS, TERMS]],
   ])('a successor %s under the gate → no renew stamp, the parent is never read', async (_label, successor, evidence, tables) => {
     const parentQ = query({ first: LIVE_PARENT });
     const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
@@ -6727,6 +6731,18 @@ describe('stampParentRenewedForSuccessor (move 16) — the parent-renewed hook',
     expect(successorQ.where).toHaveBeenCalledWith({ id: 'succ-term' });
     expect(parentQ.first).not.toHaveBeenCalled();
     expect(recordDecisionQ.update).not.toHaveBeenCalled();
+  });
+
+  test('a PAID decided-lapse successor (declined while pending, then paid: cancelled + cancel) still stamps the parent', async () => {
+    const recordDecisionQ = query({ returning: [{ id: 'parent-term', status: 'renewed', renewal_decision: 'renew' }] });
+    setDbQueues({
+      annual_prepay_terms: [...stampPrelude({ ...PAID_SUCCESSOR, status: 'cancelled', renewal_decision: 'cancel' }), recordDecisionQ, recordDecisionQ],
+      ...paidEvidence(),
+    });
+
+    await _private.stampParentRenewedForSuccessor({ id: 'succ-term', renewed_from_term_id: 'parent-term' }, 'test');
+
+    expect(recordDecisionQ.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'renewed', renewal_decision: 'renew' }));
   });
 
   test('an ACTIVE successor still carrying the dispute marker (won / re-paid recovery, cleared after this stamp) with a paid invoice still stamps', async () => {

@@ -720,6 +720,65 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       expect(mockNotifyAdmin).not.toHaveBeenCalled();
     });
 
+    // Codex #4971 r8 P1: a parent already stamped renewed/renew is not
+    // authority on its own — its invoice must still be settled. Revoked
+    // (fully refunded) BEFORE the successor paid → the backstop rings; the
+    // inline hook (onRenewalSuccessorPaid) is simply never run here, the
+    // shape it leaves when it fails.
+    const DAY = 86400000;
+    async function renewedParent({ decidedDaysAgo, refundedAt }) {
+      const parentInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - 400 * DAY), stripe_payment_intent_id: `pi_parent_${randomUUID().slice(0, 8)}` });
+      const parent = await insertParent({
+        prepay_invoice_id: parentInvoice.id, status: 'renewed', renewal_decision: 'renew',
+        renewal_decision_at: new Date(Date.now() - decidedDaysAgo * DAY), updated_at: new Date(Date.now() - decidedDaysAgo * DAY),
+      });
+      await db('payments').insert({ status: 'refunded', refund_status: 'full', stripe_payment_intent_id: parentInvoice.stripe_payment_intent_id, updated_at: refundedAt });
+      return parent;
+    }
+
+    test('a RENEWED parent whose invoice was fully refunded, then the successor paid: leg 7e rings once', async () => {
+      const parent = await renewedParent({ decidedDaysAgo: 30, refundedAt: new Date(Date.now() - 10 * MIN) });
+      const successor = await insertSuccessor(parent, await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - 5 * MIN) }), { status: 'active' });
+
+      const counts = { latePaidScanned: 0, latePaidBelled: 0 };
+      await Charge._private.bellLatePaidRenewals({ conn: db, limit: 50, counts });
+      await Charge._private.bellLatePaidRenewals({ conn: db, limit: 50, counts: { latePaidScanned: 0, latePaidBelled: 0 } });
+
+      expect(counts).toEqual({ latePaidScanned: 1, latePaidBelled: 1 });
+      expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+      expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringContaining('refund it or honor it'), expect.objectContaining({
+        dedupeKey: `termite-renewal-charge:${successor.id}:paid_after_parent_ended`,
+      }));
+      expect(await parentRow(parent.id)).toEqual({ status: 'renewed', renewal_decision: 'renew' });
+    });
+
+    test.each([
+      // Stamped renewed by the October payment, refunded in March.
+      ['stamped by the payment', 149, 150],
+      // A staff renew recorded BEFORE the October payment: the renew
+      // decision dates no change, so it never makes that payment "late".
+      ['a staff renew recorded before the payment', 160, 150],
+    ])('a RENEWED parent (%s) refunded months AFTER the renewal was paid stays silent', async (_label, decidedDaysAgo, paidDaysAgo) => {
+      const parent = await renewedParent({ decidedDaysAgo, refundedAt: new Date(Date.now() - 10 * DAY) });
+      const successor = await insertSuccessor(parent, await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - paidDaysAgo * DAY) }), { status: 'active' });
+
+      const counts = { latePaidScanned: 0, latePaidBelled: 0 };
+      await Charge._private.bellLatePaidRenewals({ conn: db, limit: 50, counts });
+      expect(counts.latePaidScanned).toBe(0);
+      expect(await Charge._private.bellLatePaidRenewal(await db('annual_prepay_terms').where({ id: successor.id }).first(), db)).toBe('not_owed');
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    });
+
+    test('a RENEWED parent whose invoice is still settled is never a candidate', async () => {
+      const parentInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - 400 * DAY) });
+      const parent = await insertParent({ prepay_invoice_id: parentInvoice.id, status: 'renewed', renewal_decision: 'renew', renewal_decision_at: new Date(Date.now() - 30 * DAY) });
+      await insertSuccessor(parent, await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - 5 * MIN) }), { status: 'active' });
+      const counts = { latePaidScanned: 0, latePaidBelled: 0 };
+      await Charge._private.bellLatePaidRenewals({ conn: db, limit: 50, counts });
+      expect(counts.latePaidScanned).toBe(0);
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    });
+
     test('a normal renewal (no refund) still stamps the parent renewed', async () => {
       const parentInvoice = await insertInvoice({ status: 'paid', paid_at: new Date(Date.now() - 400 * 86400000) });
       const parent = await insertParent({ prepay_invoice_id: parentInvoice.id });

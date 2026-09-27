@@ -677,6 +677,82 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect([...(await Renewals.getPaymentPendingCustomerIds(fx.today))]).not.toContain(fx.customerId);
   });
 
+  // Codex #4971 r8 P2: a renewal SUCCESSOR declined (its NEXT renewal) while
+  // its own renewal invoice is still unpaid, then paid, settles to the paid
+  // decided-lapse shape (move 15) — and that payment still proves the PARENT
+  // renewed, so the parent takes its 'renewed' stamp as the activation
+  // branches give it. A voided (never paid) decided successor does not, and
+  // neither does the backstop.
+  async function declinedPendingSuccessor(db) {
+    // The invoice evidence columns the renewal checks read (chokepoint A).
+    await db.raw('ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sent_at timestamptz, ADD COLUMN IF NOT EXISTS sms_sent_at timestamptz, ADD COLUMN IF NOT EXISTS email_sent_at timestamptz, ADD COLUMN IF NOT EXISTS stripe_charge_id text');
+    const fx = await paidInstalledTerm(db);
+    const termStart = addMonths(fx.today, -2); // paidInstalledTerm's own term_start
+    const [parentInvoice] = await db('invoices').insert({
+      customer_id: fx.customerId, status: 'paid', paid_at: new Date(Date.now() - 400 * 86400000), stripe_payment_intent_id: `pi_${randomUUID()}`,
+    }).returning('*');
+    const [parent] = await db('annual_prepay_terms').insert({
+      customer_id: fx.customerId, prepay_invoice_id: parentInvoice.id, prepay_amount: 450,
+      term_start: addMonths(termStart, -12), term_end: dayOffset(termStart, -1),
+      status: 'active', annual_plan_version: 'v3', installation_anchored_at: new Date(),
+    }).returning('*');
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'sent', paid_at: null });
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ status: 'payment_pending', renewed_from_term_id: parent.id });
+    return { ...fx, parent };
+  }
+  const parentRow = (db, id) => db('annual_prepay_terms').where({ id }).first('status', 'renewal_decision');
+  // What the portal decline records on an unpaid term (move 15: the
+  // decision, no status change) — the decline itself has its own tests above.
+  const declineWhileUnpaid = (db, fx) => db('annual_prepay_terms').where({ id: fx.term.id })
+    .update({ renewal_decision: 'cancel', renewal_decision_at: new Date(), cancel_disposition: 'end_at_term' });
+
+  test('a renewal successor declined while unpaid, then paid: a paid decided lapse, and the PARENT is stamped renewed', async () => {
+    const { db, Renewals } = await load();
+    const fx = await declinedPendingSuccessor(db);
+    await declineWhileUnpaid(db, fx);
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'active', renewal_decision: null });
+
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+    const synced = await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+
+    expect(synced.map((t) => t.status)).toEqual(['cancelled']);
+    expect(await db('annual_prepay_terms').where({ id: fx.term.id }).first('status', 'renewal_decision'))
+      .toEqual({ status: 'cancelled', renewal_decision: 'cancel' });
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'renewed', renewal_decision: 'renew' });
+  });
+
+  test('the backstop stamps the parent behind a paid decided-lapse successor whose inline stamp was lost', async () => {
+    const { db, Renewals } = await load();
+    const fx = await declinedPendingSuccessor(db);
+    // The shape the paid sync leaves, without its stamp (lost to an error).
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ status: 'cancelled', renewal_decision: 'cancel' });
+
+    expect(await Renewals.reconcileParentRenewedStamps({ conn: db })).toEqual({ scanned: 1, stamped: 1 });
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'renewed', renewal_decision: 'renew' });
+  });
+
+  test.each([
+    ['voided', { status: 'void', paid_at: null }, null],
+    ['refunded in full on the ledger', { status: 'paid', paid_at: new Date() }, 'refunded'],
+  ])('a declined successor whose renewal invoice was %s: never stamps the parent, inline or by the backstop', async (_label, invoicePatch, ledger) => {
+    const { db, Renewals } = await load();
+    const fx = await declinedPendingSuccessor(db);
+    await declineWhileUnpaid(db, fx);
+    await db('invoices').where({ id: fx.invoice.id }).update(invoicePatch);
+    if (ledger) {
+      await db('payments').insert({ status: ledger, refund_status: 'full', stripe_payment_intent_id: fx.invoice.stripe_payment_intent_id });
+    }
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+    // The ledger-refunded case: the sync (paid-looking invoice) settles it
+    // to the decided lapse; either way the successor ends cancelled/cancel.
+    expect(await db('annual_prepay_terms').where({ id: fx.term.id }).first('status', 'renewal_decision'))
+      .toEqual({ status: 'cancelled', renewal_decision: 'cancel' });
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'active', renewal_decision: null });
+    expect(await Renewals.reconcileParentRenewedStamps({ conn: db })).toEqual({ scanned: 0, stamped: 0 });
+    expect(await parentRow(db, fx.parent.id)).toEqual({ status: 'active', renewal_decision: null });
+  });
+
   // Codex #4940 r10 P1: a staff correction to term_end AFTER the due-time
   // task was raised (and while it is still open).
   test('term_end corrected LATER after the task was raised: re-raised at the new date, the old open row retired', async () => {

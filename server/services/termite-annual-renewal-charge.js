@@ -1291,7 +1291,11 @@ async function bellLatePaidRenewalUnderGate(original, conn) {
 // 'refunded') before the separate term-cancel sync moves the term, so a
 // successor that settled in that gap was dated "paid before the change" and
 // its refund-or-honor alert suppressed. The earliest of:
-//   - the parent's decision time (renewal_decision_at);
+//   - the parent's decision time (renewal_decision_at), ONLY for a decision
+//     other than 'renew': Codex #4971 r8 P1 — a renew decision (a staff
+//     renew, or the automatic stamp) authorizes the renewal, so it dates
+//     no change; a renewed parent whose invoice is later revoked is dated
+//     by that revocation, below;
 //   - its dispute suspension (dispute_suspended_at);
 //   - its last row update (updated_at — an upper bound on a status change),
 //     ONLY while the term row itself no longer authorizes the renewal (a
@@ -1309,7 +1313,7 @@ async function bellLatePaidRenewalUnderGate(original, conn) {
 function parentChangedAtSql(p = 'p', pi = 'pi') {
   const ts = (alias, column) => `(to_jsonb(${alias}) ->> '${column}')::timestamptz`;
   return `LEAST(
-    ${p}.renewal_decision_at,
+    CASE WHEN ${p}.renewal_decision IS DISTINCT FROM 'renew' THEN ${p}.renewal_decision_at END,
     ${ts(p, 'dispute_suspended_at')},
     CASE WHEN NOT (${p}.status IN ('active', 'renewal_pending') OR (${p}.status = 'renewed' AND ${p}.renewal_decision = 'renew')) THEN ${p}.updated_at END,
     CASE WHEN lower(coalesce(${pi}.status, '')) IN ('void', 'cancelled', 'canceled', 'refunded') THEN ${ts(pi, 'updated_at')} END,
@@ -1346,8 +1350,19 @@ async function bellLatePaidRenewals({ conn = db, limit = 200, counts }) {
         .whereNotNull('t.annual_plan_version')
         .where('t.status', 'active')
         .whereNull('t.renewal_late_paid_belled_at')
-        .where(function parentNotRenewed() {
-          this.whereNot('p.status', 'renewed').orWhereRaw("p.renewal_decision is distinct from 'renew'");
+        // The parent no longer authorizes the renewal. Codex #4971 r8 P1: a
+        // parent's 'renewed' / 'renew' stamp alone is not that authority —
+        // resolveParentEligibility (the per-row rule) also needs its own
+        // invoice settled and not revoked, so a renewed parent whose invoice
+        // was later voided or fully refunded is a candidate too. Its
+        // revocation dates the change (parentChangedAtSql, below), so a
+        // renewal paid BEFORE that revocation is still never selected.
+        .where(function parentNoLongerAuthorizes() {
+          this.whereNot('p.status', 'renewed')
+            .orWhereRaw("p.renewal_decision is distinct from 'renew'")
+            .orWhere(function renewedButRevoked() {
+              this.whereNotNull('pi.id').whereNot(function settled() { whereInvoiceSettledNotRevoked(this, 'pi'); });
+            });
         })
         // Paid AFTER the parent changed (twin of paidAfterParentChanged) —
         // an old legitimate renewal behind a later refund or dispute is
