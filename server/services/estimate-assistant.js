@@ -1640,11 +1640,15 @@ function serviceTermsFromRows(rowGroups = [], oneTimeRows = []) {
 }
 
 // An estimate without estimate-wide terms: termite or unclassifiable work
-// (noGuaranteeClaims), or a recurring plan whose services don't share one
-// recurring-terms lane.
+// (noGuaranteeClaims), a recurring plan whose services don't share one
+// recurring-terms lane, or a one-time job with no one-time terms of its own
+// (only one-time pest carries the callback period).
 function withoutEstimateWideTerms(context = {}) {
-  return context.guarantees?.noGuaranteeClaims === true
-    || (context.serviceMode !== 'one_time' && context.guarantees?.recurringTermsEligible !== true);
+  const guarantees = context.guarantees || {};
+  if (guarantees.noGuaranteeClaims === true) return true;
+  return context.serviceMode === 'one_time'
+    ? !guarantees.oneTime
+    : guarantees.recurringTermsEligible !== true;
 }
 
 // A guarantee question on such an estimate, including recurrence wording

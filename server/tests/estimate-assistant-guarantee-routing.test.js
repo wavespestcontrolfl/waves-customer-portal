@@ -72,6 +72,39 @@ describe('Ask Waves routes guarantee questions before the live models', () => {
     expect(served).toEqual({ answer: 'The plan monitors bait stations around your home.', source: 'openai' });
   });
 
+  test('a one-time non-pest job has no terms of its own: guarded the same way', async () => {
+    const args = {
+      database: null,
+      estimate: { id: 'synthetic-estimate', status: 'sent', onetime_total: 200 },
+      pricingBundle: { anchorOneTimePrice: 200, oneTimeBreakdown: { items: [
+        { service: 'rodent_trapping', label: 'Rodent Trapping', amount: 200 },
+      ] } },
+      serviceMode: 'one_time',
+    };
+    const routed = await answerEstimateQuestion({ ...args, question: 'Is there a callback if they come back?' });
+    expect(routed.source).toBe('fallback');
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(routed.answer).not.toMatch(/30-day callback/i);
+
+    dispatch.mockResolvedValue({ ok: true, text: 'Yes, this includes a 30-day callback period.' });
+    const guarded = await answerEstimateQuestion({ ...args, question: 'Tell me about the trapping' });
+    expect(guarded.source).toBe('fallback');
+    expect(guarded.answer).not.toMatch(/30-day callback/i);
+  });
+
+  test('a one-time pest job keeps its callback period and its model path', async () => {
+    const result = await answerEstimateQuestion({
+      database: null,
+      question: 'Tell me about the treatment',
+      estimate: { id: 'synthetic-estimate', status: 'sent', onetime_total: 150 },
+      pricingBundle: { anchorOneTimePrice: 150, oneTimeBreakdown: { items: [
+        { service: 'one_time_pest', label: 'One-Time Pest Control', amount: 150 },
+      ] } },
+      serviceMode: 'one_time',
+    });
+    expect(result.source).toBe('openai');
+  });
+
   test('an ordinary pest plan still reaches the live model', async () => {
     const result = await answerEstimateQuestion({
       database: null,
