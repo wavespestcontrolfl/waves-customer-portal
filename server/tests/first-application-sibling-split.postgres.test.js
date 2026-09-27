@@ -349,6 +349,112 @@ suite('first-application-sibling-split — same-trip resplit on date change', ()
     expect(state.lineItems.find((li) => li.client_id === `scheduled_${ids.pestId}_primary`).amount).toBe(97.2);
   }));
 
+  test('an active payment plan on the invoice declines the resplit — its total_balance is frozen at the combined amount', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('payment_plans').insert({
+      customer_id: ids.customerId, invoice_id: ids.invoiceId,
+      total_balance: 153.60, payment_amount: 76.80, payment_frequency: 'monthly',
+      plan_start_date: '2026-10-01', next_payment_date: '2026-11-01', status: 'active',
+    });
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const result = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('declined');
+    expect(result.reason).toBe('active_payment_plan');
+    const state = await readState(trx, ids);
+    // No money moved — collecting the plan's frozen balance AND a separate
+    // sibling charge would double-bill.
+    expect(state.lawn.estimated_price).toBeNull();
+    expect(Number(state.pest.estimated_price)).toBe(153.6);
+    expect(Number(state.invoice.total)).toBe(153.6);
+  }));
+
+  test('a CANCELLED payment plan on the invoice does not block the resplit — only an active one freezes the balance', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('payment_plans').insert({
+      customer_id: ids.customerId, invoice_id: ids.invoiceId,
+      total_balance: 153.60, payment_amount: 76.80, payment_frequency: 'monthly',
+      plan_start_date: '2026-10-01', next_payment_date: '2026-11-01', status: 'cancelled', cancelled_at: new Date(),
+    });
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const result = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('split');
+  }));
+
+  test('a document-level discount (invoice.discount_amount > 0, no backing line item) declines the resplit — the amount cannot be reconstructed from line items alone', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    // InvoiceService.create's discountIds manual picks persist
+    // invoices.discount_amount without ever adding a negative line — the
+    // module's own hasNegativeAdjustmentLine check (proven above) cannot see
+    // this class of discount at all.
+    await trx('invoices').where({ id: ids.invoiceId }).update({ discount_amount: 15.36, total: 138.24 });
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const result = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('declined');
+    expect(result.reason).toBe('document_level_discount_present');
+    const state = await readState(trx, ids);
+    expect(state.lawn.estimated_price).toBeNull();
+    expect(Number(state.pest.estimated_price)).toBe(153.6);
+    expect(Number(state.invoice.total)).toBe(138.24);
+  }));
+
+  test('a discount already backed by its own negative line item is unaffected by the document-level-discount check', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    // Same discount_amount as the previous case, but THIS time it is backed
+    // by a real negative line — hasNegativeAdjustmentLine (not the new
+    // document-level check) is what declines this one, proving the two
+    // checks don't double-report or conflict.
+    const withDiscount = [
+      { description: 'First service application', quantity: 1, unit_price: 153.60, amount: 153.60 },
+      { description: 'Referral credit', quantity: 1, unit_price: -15.36, amount: -15.36 },
+    ];
+    await trx('invoices').where({ id: ids.invoiceId }).update({
+      line_items: JSON.stringify(withDiscount), discount_amount: 15.36, total: 138.24,
+    });
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const result = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('declined');
+    expect(result.reason).toBe('discount_or_credit_present');
+  }));
+
+  test('a declined split raises a durable billing-review notification the office will see, deduped per invoice', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    const withFee = [
+      { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99, amount: 99 },
+      { description: 'First service application', quantity: 1, unit_price: 153.60, amount: 153.60 },
+    ];
+    await trx('invoices').where({ id: ids.invoiceId }).update({ line_items: JSON.stringify(withFee), total: 252.60 });
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+
+    const first = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(first.action).toBe('declined');
+
+    const alerts = await trx('notifications')
+      .where({ recipient_type: 'admin', category: 'billing' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`first_application_split_declined:${ids.invoiceId}`]);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0].body).toMatch(/full combined amount/i);
+    expect(alerts[0].link).toBe(`/admin/invoices?invoice=${ids.invoiceId}`);
+
+    // Moving the sibling again (still declined, same invoice/reason) must
+    // not crowd the billing feed with a second identical bell.
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-03' });
+    const second = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(second.action).toBe('declined');
+    const alertsAfter = await trx('notifications')
+      .where({ recipient_type: 'admin', category: 'billing' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`first_application_split_declined:${ids.invoiceId}`]);
+    expect(alertsAfter.length).toBe(1);
+  }));
+
+  test('a successful split raises NO billing-review alert — only a decline needs office attention', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const result = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('split');
+    const alerts = await trx('notifications').where({ recipient_type: 'admin', category: 'billing' });
+    expect(alerts.length).toBe(0);
+  }));
+
   test('a non-anchor (recurring child) row moving is a no-op — only top-of-series rows are resplit candidates', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     const childId = randomUUID();
