@@ -133,6 +133,21 @@ describeOrSkip('KB AI audit on PostgreSQL', () => {
     expect(out.results.map((r) => r.id)).not.toContain(mirror.id);
   });
 
+  test('any writer that changes an AI-hidden entry returns it; a person\'s flag stays', async () => {
+    const aiHidden = await entry('DirectWriter');
+    mockVerdicts.set(aiHidden.title, { status: 'flag', summary: 'x' });
+    await KB.runAIAudit({ ids: [aiHidden.id], maxEntries: 1 });
+    expect((await reload(aiHidden.id)).status).toBe('flagged');
+    // A direct write, as the wiki compiler and WikiQA file-back do.
+    await db('knowledge_base').where({ id: aiHidden.id }).update({ content: 'rewritten' });
+    expect((await reload(aiHidden.id)).status).toBe('active');
+
+    const personHidden = await entry('DirectWriterManual');
+    await KB.flag(personHidden.id, 'hold');
+    await db('knowledge_base').where({ id: personHidden.id }).update({ content: 'rewritten' });
+    expect((await reload(personHidden.id)).status).toBe('flagged');
+  });
+
   test('an unparsed verdict changes nothing', async () => {
     const row = await entry('Unparsed');
     mockVerdicts.set(row.title, { status: 'looks fine' });

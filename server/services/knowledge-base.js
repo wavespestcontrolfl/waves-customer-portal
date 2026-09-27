@@ -75,6 +75,7 @@ async function uniqueSlug(base) {
 // their status, so the audit never hides or restores them.
 function auditSourceFor(entry) {
   if (entry && entry.source === 'wiki-sync') return { fixIn: 'agronomic_wiki', label: 'Agronomic wiki', link: '/admin/knowledge' };
+  if (entry && entry.source === 'protocol-sync') return { fixIn: 'protocols', label: 'Protocols', link: '/admin/service-library?tab=protocols' };
   if (!entry || entry.source !== 'auto-sync') return null;
   const slug = cleanText(entry.slug);
   if (slug.startsWith('product-')) return { fixIn: 'products_catalog', label: 'Products catalog', link: '/admin/inventory?tab=products' };
@@ -199,22 +200,18 @@ const KnowledgeBaseService = {
     return db.transaction(async (trx) => {
       const current = await trx('knowledge_base').where({ id }).forUpdate().first();
       if (!current) return undefined;
-      // An edit that changes the content of an entry the AI audit hid is the
-      // fix — it returns to search.
-      if (data.content !== undefined && updates.status === undefined
-        && current.status === 'flagged' && current.content !== data.content
-        && await flagIsFromAIAudit(current, trx)) {
-        data.status = 'active';
-      }
+      // An edit that changes an AI-hidden entry's content returns it to
+      // search — the kb_restore_ai_flag_on_content_change trigger does that
+      // for every writer.
       // A person's Verify is the review a flag asks for. It never overrides
       // a wiki mirror's trust gate or a non-flag status like archived.
       if (updates.restoreFlag && updates.status === undefined
         && current.status === 'flagged' && current.source !== 'wiki-sync') {
         data.status = 'active';
       }
-      const [entry] = await trx('knowledge_base').where({ id }).update(data).returning('*');
       // A person's flag records its owner in the same transaction — an
-      // explicit Flag always, an editor status change when it hides the entry.
+      // explicit Flag always, an editor status change when it hides the entry
+      // — and before the row write, so the content trigger sees it.
       if (updates.flagReason !== undefined || (data.status === 'flagged' && current.status !== 'flagged')) {
         await trx('knowledge_base_audits').insert({
           kb_entry_id: id,
@@ -224,6 +221,7 @@ const KnowledgeBaseService = {
           audited_by: 'waves',
         });
       }
+      const [entry] = await trx('knowledge_base').where({ id }).update(data).returning('*');
       return entry;
     });
   },
@@ -663,24 +661,16 @@ const KnowledgeBaseService = {
         const tagJson = JSON.stringify(safeTags);
         const existingTagJson = JSON.stringify(normalizeTags(existing.tags));
         if (existing.content !== safeContent || existing.title !== safeTitle || existing.path !== safePath || existing.category !== safeCategory || existingTagJson !== tagJson) {
-          // One transaction: the content change and the restore it earns land
-          // together, so a crash between them can't strand a fixed entry
-          // hidden (the next sync would see the content as unchanged).
-          await db.transaction(async (trx) => {
-            const row = await trx('knowledge_base').where({ id: existing.id }).forUpdate().first();
-            // The source changed — that is the fix an AI flag asked for.
-            const restore = row && row.status === 'flagged' && row.content !== safeContent
-              && await flagIsFromAIAudit(row, trx);
-            await trx('knowledge_base').where({ id: existing.id }).update({
-              slug: safeSlug,
-              path: safePath,
-              content: safeContent,
-              title: safeTitle,
-              category: safeCategory,
-              tags: tagJson,
-              last_verified_at: new Date(), verified_by: 'auto-sync', updated_at: new Date(),
-              ...(restore ? { status: 'active' } : {}),
-            });
+          // A content change returns an AI-hidden entry to search
+          // (kb_restore_ai_flag_on_content_change trigger).
+          await db('knowledge_base').where({ id: existing.id }).update({
+            slug: safeSlug,
+            path: safePath,
+            content: safeContent,
+            title: safeTitle,
+            category: safeCategory,
+            tags: tagJson,
+            last_verified_at: new Date(), verified_by: 'auto-sync', updated_at: new Date(),
           });
           updated++;
         } else { skipped++; }

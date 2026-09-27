@@ -46,6 +46,7 @@ describe('KB AI audit', () => {
     expect(auditSourceFor({ source: 'wiki-sync', slug: 'anything' })).toMatchObject({ fixIn: 'agronomic_wiki', link: '/admin/knowledge' });
     expect(auditSourceFor({ source: 'auto-sync', slug: 'pricing-engine-current' })).toMatchObject({ fixIn: 'pricing_config' });
     expect(auditSourceFor({ source: 'auto-sync', slug: 'protocol-mosquito' })).toMatchObject({ fixIn: 'protocols' });
+    expect(auditSourceFor({ source: 'protocol-sync', slug: 'lawn-protocol-x' })).toMatchObject({ fixIn: 'protocols', link: '/admin/service-library?tab=protocols' });
     expect(auditSourceFor(manualEntry)).toBeNull();
   });
 
