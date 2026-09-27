@@ -15,10 +15,13 @@
 //     original restock) — a product that was untracked (inventory_on_hand
 //     null) returns to null, not 0, and its unit reverts with it;
 //   - deletes the agent-created product_aliases row, if any;
-//   - deactivates the agent-CREATED catalog product (never an existing one
-//     the agent merely restocked), but ONLY when, after the reversal, it
-//     carries no other movement, no vendor_pricing row, and no
-//     product_aliases row besides the agent's own (already deleted above);
+//   - NEVER deactivates a product, even one the agent itself created (2026-09-27
+//     review): once created, staff may have linked it somewhere this row's
+//     own hash can't see — e.g. service_product_usage via POST
+//     /api/admin/inventory/service-usage — and deactivating it would break
+//     that silently. When the product was agent-created, this prints an
+//     informational line pointing at Inventory → Products instead of
+//     touching the row;
 //   - marks the line 'agent_unsure' with agent_decision.undoneAt.
 // Refuses — dry run or --execute — when anything wrote the product row
 // after the agent's own restock (usage, another restock, a manual count, an
@@ -39,6 +42,26 @@
 // `require.main === module` at the bottom touches argv/env/process.exit; a
 // thrown Error's `.exitCode` is what that block turns into the real exit
 // code, so the two paths (CLI, test) share the exact same validation.
+//
+// DATABASE_URL, for the CLI path only: server/models/db.js opens its knex
+// pool the moment it's `require`d, and that pool keeps whatever URL was set
+// at that instant no matter what a later reassignment does. Setting
+// DATABASE_URL from DATABASE_PUBLIC_URL inside main() — AFTER the requires
+// below had already pulled db.js in via inventory-operations/inventory-agent
+// — left the pool pinned to Railway's own internal DATABASE_URL, unreachable
+// from `railway run`'s outside-the-service-network shell (2026-09-27
+// review). So this runs before any of those requires, and only when this
+// file is the CLI entry point (require.main === module) — a test importing
+// {undoLine, findLine} mocks ../models/db before requiring this file, so it
+// never reaches this branch.
+if (require.main === module) {
+  if (!process.env.DATABASE_PUBLIC_URL) {
+    console.error('DATABASE_PUBLIC_URL is not set — run via: railway run --service Postgres node ops/agents/inventory-agent-undo.js --line=<id>');
+    process.exit(2);
+  }
+  process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
+}
+
 const path = require('path');
 const { adjustStock } = require(path.join(__dirname, '..', '..', 'server', 'services', 'inventory-operations'));
 const { productUnchangedSinceAgent } = require(path.join(__dirname, '..', '..', 'server', 'services', 'purchase-receipts', 'inventory-agent'));
@@ -53,11 +76,18 @@ function usageError(message, exitCode = 2) {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// A prefix must be EXACTLY the first-8-characters the "logged" bell prints
+// (see inventory-agent.js's applyDecision) — never a shorter or longer run of
+// hex, which would either match far too broadly or just be typo'd input.
+const PREFIX_RE = /^[0-9a-f]{8}$/i;
+const USAGE = 'Usage: --line=<purchase_receipt_lines.id or its first 8 characters> [--execute]';
 
-// Exact id, or a prefix (the same first-8-characters the "logged" bell
-// prints — see inventory-agent.js's applyDecision).
+// Exact id, or an exactly-8-hex-character prefix. Anything else is refused
+// before any query — the LIKE below is only ever run against a full UUID or
+// that fixed-width prefix, both safe.
 async function findLine(conn, lineArg) {
   if (UUID_RE.test(lineArg)) return conn('purchase_receipt_lines').where({ id: lineArg }).first();
+  if (!PREFIX_RE.test(lineArg)) throw usageError(`"${lineArg}" is not a full id or an 8-character id prefix.\n${USAGE}`);
   const matches = await conn('purchase_receipt_lines').whereRaw('id::text LIKE ?', [`${lineArg.toLowerCase()}%`]);
   if (matches.length > 1) {
     throw usageError(`"${lineArg}" matches ${matches.length} lines — be more specific:\n`
@@ -66,38 +96,31 @@ async function findLine(conn, lineArg) {
   return matches[0] || null;
 }
 
-// Movements on this product other than `excludeIds`.
-async function otherMovements(conn, productId, excludeIds) {
-  return conn('product_inventory_movements').where({ product_id: productId }).whereNotIn('id', excludeIds);
-}
-
-// Vendor pricing rows on this product — a person priced it since the agent
-// created it, so it's no longer purely the agent's own throwaway row.
-async function vendorPricingRows(conn, productId) {
-  return conn('vendor_pricing').where({ product_id: productId }).select('id');
-}
-
-// product_aliases rows on this product OTHER than the agent's own (which is
-// already deleted by the time this runs — see undoLine()). Any survivor
-// means a person (or another line) linked another title to it since.
-async function otherAliases(conn, productId) {
-  return conn('product_aliases').where({ product_id: productId }).select('id');
-}
+// Every reason a line can't be undone at all — one ordered table of checks
+// sharing the same shape (a guard against the found `line`, its message)
+// instead of four separate ifs that all just throw the same usage error.
+const UNDOABLE_GUARDS = [
+  { fails: (line) => !line, message: (line, lineArg) => `No purchase_receipt_lines row matches "${lineArg}".` },
+  {
+    fails: (line) => !line.agent_decision,
+    message: (line) => `Line ${line.id} was never decided by the inventory agent (agent_decision is null) — nothing to undo.`,
+  },
+  {
+    fails: (line) => line.status !== 'logged',
+    message: (line) => `Line ${line.id} is "${line.status}", not "logged" — nothing was moved, nothing to reverse.`,
+  },
+  {
+    fails: (line) => !line.movement_id || !line.product_id,
+    message: (line) => `Line ${line.id} has no movement/product recorded — nothing to reverse.`,
+  },
+];
 
 // Every validation + the dry-run description + (when execute) the actual
 // transaction. `log` defaults to console.log; a test can pass a spy.
 async function undoLine(conn, { lineArg, execute = false, log = console.log }) {
   const line = await findLine(conn, lineArg);
-  if (!line) throw usageError(`No purchase_receipt_lines row matches "${lineArg}".`);
-  if (!line.agent_decision) {
-    throw usageError(`Line ${line.id} was never decided by the inventory agent (agent_decision is null) — nothing to undo.`);
-  }
-  if (line.status !== 'logged') {
-    throw usageError(`Line ${line.id} is "${line.status}", not "logged" — nothing was moved, nothing to reverse.`);
-  }
-  if (!line.movement_id || !line.product_id) {
-    throw usageError(`Line ${line.id} has no movement/product recorded — nothing to reverse.`);
-  }
+  const guard = UNDOABLE_GUARDS.find((g) => g.fails(line));
+  if (guard) throw usageError(guard.message(line, lineArg));
 
   const movement = await conn('product_inventory_movements').where({ id: line.movement_id }).first();
   if (!movement) throw usageError(`Movement ${line.movement_id} referenced by the line no longer exists.`);
@@ -110,7 +133,8 @@ async function undoLine(conn, { lineArg, execute = false, log = console.log }) {
   const alias = line.agent_created_alias_id ? await conn('product_aliases').where({ id: line.agent_created_alias_id }).first() : null;
   const isAgentCreatedProduct = Boolean(line.agent_created_product_id) && line.agent_created_product_id === line.product_id;
   // Only ever set for an 'existing'-decision restock (never a new_product
-  // create — that row is deactivated instead, below).
+  // create — that row is never touched beyond the stock reversal; see
+  // isAgentCreatedProduct below).
   const originalFields = line.agent_decision?.originalProductFields || null;
 
   log(`Line ${line.id} ("${line.raw_title}"):`);
@@ -119,7 +143,9 @@ async function undoLine(conn, { lineArg, execute = false, log = console.log }) {
     log(`  restore "${product?.name}"'s container_size/inventory_unit/inventory_on_hand/default_unit to what they were before the agent's restock`);
   }
   if (alias) log(`  delete product_aliases row ${alias.id} ("${alias.alias_name}")`);
-  if (isAgentCreatedProduct) log(`  deactivate "${product?.name}" (agent-created) IF it carries no other movement, vendor pricing, or alias after this undo`);
+  // Never deactivated (2026-09-27 review) — staff may have linked this row
+  // somewhere the undo can't see since the agent created it.
+  if (isAgentCreatedProduct) log(`  Product "${product?.name}" was created by the agent; if it shouldn't exist, deactivate it in Inventory → Products.`);
   log('  set the line\'s status to agent_unsure, stamping agent_decision.undoneAt');
   if (!execute) {
     log('\nDry run — pass --execute to apply.');
@@ -135,7 +161,7 @@ async function undoLine(conn, { lineArg, execute = false, log = console.log }) {
     const stillUnchanged = await productUnchangedSinceAgent(trx, line, movement);
     if (!stillUnchanged.ok) throw new Error(`Refusing to reverse: ${stillUnchanged.why}.`);
 
-    const reversal = await adjustStock(line.product_id, { movementType: 'correction', quantity: -Number(line.received_qty), unit: line.received_unit }, {
+    await adjustStock(line.product_id, { movementType: 'correction', quantity: -Number(line.received_qty), unit: line.received_unit }, {
       source: 'inventory_agent_undo', extraMetadata: { undoOfLineId: line.id, undoOfMovementId: movement.id }, trx,
     });
 
@@ -159,19 +185,6 @@ async function undoLine(conn, { lineArg, execute = false, log = console.log }) {
 
     if (alias) await trx('product_aliases').where({ id: alias.id }).del();
 
-    if (isAgentCreatedProduct) {
-      // Deactivate only while the row is still, in every visible way, the
-      // agent's own throwaway create: no movement besides the one just
-      // reversed, no vendor pricing a person entered, and (with the agent's
-      // own alias already gone above) no alias linking any OTHER title to it.
-      const stillHasMovements = await otherMovements(trx, line.product_id, [movement.id, reversal.movement.id]);
-      const stillHasVendorPricing = await vendorPricingRows(trx, line.product_id);
-      const stillHasOtherAliases = await otherAliases(trx, line.product_id);
-      if (stillHasMovements.length === 0 && stillHasVendorPricing.length === 0 && stillHasOtherAliases.length === 0) {
-        await trx('products_catalog').where({ id: line.product_id }).update({ active: false, updated_at: new Date() });
-      }
-    }
-
     await trx('purchase_receipt_lines').where({ id: line.id }).update({
       status: 'agent_unsure',
       agent_decision: { ...(line.agent_decision || {}), undoneAt: new Date().toISOString() },
@@ -183,17 +196,15 @@ async function undoLine(conn, { lineArg, execute = false, log = console.log }) {
 }
 
 async function main() {
-  if (!process.env.DATABASE_PUBLIC_URL) {
-    console.error('DATABASE_PUBLIC_URL is not set — run via: railway run --service Postgres node ops/agents/inventory-agent-undo.js --line=<id>');
-    process.exitCode = 2;
-    return;
-  }
-  process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
+  // DATABASE_URL is already set from DATABASE_PUBLIC_URL by the module-top
+  // block above (it must happen before db.js is ever required — see the
+  // comment there); this require is the first thing that actually opens the
+  // pool.
   const db = require(path.join(__dirname, '..', '..', 'server', 'models', 'db'));
   const execute = process.argv.includes('--execute');
   const lineArg = arg('line', process.argv);
   if (!lineArg) {
-    console.error('Usage: --line=<purchase_receipt_lines.id or its first 8 characters> [--execute]');
+    console.error(USAGE);
     process.exitCode = 2;
     return;
   }

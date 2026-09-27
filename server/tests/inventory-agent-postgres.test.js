@@ -435,6 +435,57 @@ jest.setTimeout(30000);
     expect(restored.default_unit).toBe('oz');
   });
 
+  test('undo of an agent-created product\'s line reverses stock and deletes the alias but NEVER deactivates the product — an informational line points at Inventory instead (review item 2)', async () => {
+    const line = await pendingLine({ raw_title: 'Bifen XTS Insecticide 96 oz' });
+    const decision = {
+      kind: 'new_product', reason: 'not in the catalog', product_id: null,
+      new_product: { name: 'Bifen XTS', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    await run({ ok: true, json: decision });
+    const created = await mockConn('products_catalog').where({ name: 'Bifen XTS' }).first();
+    expect(created.active).toBe(true);
+    expect(await stockOf(created.id)).toBe(192); // 2 ordered x 96 oz
+    const savedLine = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(savedLine.agent_created_product_id).toBe(created.id);
+    expect(await mockConn('product_aliases').where({ product_id: created.id })).toHaveLength(1);
+
+    const logged = [];
+    const outcome = await undoLine(mockConn, { lineArg: savedLine.id, execute: true, log: (msg) => logged.push(msg) });
+    expect(outcome).toEqual({ executed: true });
+
+    const afterUndo = await mockConn('products_catalog').where({ id: created.id }).first();
+    expect(afterUndo.active).toBe(true); // never deactivated, even though the agent created it
+    expect(await stockOf(created.id)).toBe(0); // the restock reversed
+    expect(await mockConn('product_aliases').where({ product_id: created.id })).toHaveLength(0); // alias still deleted
+    const undoneLine = await mockConn('purchase_receipt_lines').where({ id: savedLine.id }).first();
+    expect(undoneLine.status).toBe('agent_unsure');
+
+    expect(logged.some((l) => l.includes('was created by the agent') && l.includes('Inventory'))).toBe(true);
+  });
+
+  test('undo refuses a --line argument that is neither a full id nor an EXACT 8-character prefix, before any query (review item 3)', async () => {
+    await expect(undoLine(mockConn, { lineArg: 'abc', execute: false, log: () => {} }))
+      .rejects.toThrow(/not a full id or an 8-character id prefix/);
+    await expect(undoLine(mockConn, { lineArg: 'abcdefabcdefg', execute: false, log: () => {} })) // 9 hex chars
+      .rejects.toThrow(/not a full id or an 8-character id prefix/);
+    await expect(undoLine(mockConn, { lineArg: 'not-hex!', execute: false, log: () => {} }))
+      .rejects.toThrow(/not a full id or an 8-character id prefix/);
+  });
+
+  test('undo still accepts an exact 8-character hex prefix of the line id (review item 3)', async () => {
+    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 1, shipment_key: 'ship-prefix' });
+    const decision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: taurus.id, new_product: null,
+      reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    await run({ ok: true, json: decision });
+    const savedLine = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    const prefix = savedLine.id.slice(0, 8);
+    const outcome = await undoLine(mockConn, { lineArg: prefix, execute: false, log: () => {} });
+    expect(outcome).toEqual({ executed: false }); // resolved via the LIKE prefix match, dry run never writes
+  });
+
   test('undo dry-runs by default and refuses when the product changed since the agent\'s restock', async () => {
     const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-undo-refuse' });
     const decision = {
