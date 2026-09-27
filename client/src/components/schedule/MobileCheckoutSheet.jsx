@@ -275,6 +275,15 @@ export default function MobileCheckoutSheet({
   // instead of falling back to a preview that fails after tender pick.
   const processingVisitInvoice = !payerBilled && !inv?.payerBilled && inv && inv.processing ? inv : null;
   const invoicePreview = openVisitInvoice || processingVisitInvoice;
+  // codex round-2 P1: priceNeedsRefresh guards the UNPRICED-PREDICTION base
+  // (`price`, computed above from billingLane.prediction) — it must NOT
+  // apply once an invoice is already attached to this visit, because the
+  // attached-invoice preview below drives totalBeforePrepaid from
+  // invoicePreview.amountDue instead, never from `price`. The attached-
+  // invoice prediction shape (predictionFromAttachedInvoice, admin-schedule.js)
+  // legitimately never carries grossAmount — that's not a legacy/stale
+  // payload, so it must not be refused as one.
+  const priceRefreshBlocksCharge = priceNeedsRefresh && !invoicePreview;
   // amountDue (total − credit_applied), never the gross — the charge paths
   // collect the amount due. And when the recorded prepayment was already
   // consumed by this invoice (prepaidApplied), its total is already net, so
@@ -297,11 +306,11 @@ export default function MobileCheckoutSheet({
   // mint its invoice (the endpoint applies the prepaid credit → paid receipt), so
   // it must stay enabled even though `total` nets to $0.
   //
-  // priceNeedsRefresh refuses the WHOLE mint, not just the base — same
-  // principle as the server round-2 fix: an unconfirmed/unsafe base must
-  // never be diluted by stacking an extra on top of it and calling the sum
-  // safe (codex round-2 P2).
-  const nothingToCharge = priceNeedsRefresh || totalBeforePrepaid <= 0 || !!processingVisitInvoice;
+  // priceRefreshBlocksCharge refuses the WHOLE mint, not just the base —
+  // same principle as the server round-2 fix: an unconfirmed/unsafe base
+  // must never be diluted by stacking an extra on top of it and calling
+  // the sum safe (codex round-2 P2).
+  const nothingToCharge = priceRefreshBlocksCharge || totalBeforePrepaid <= 0 || !!processingVisitInvoice;
 
   // One-line card-on-file note for the tech. Shows the first non-expired
   // method (server orders default first); if every method is expired, says
@@ -520,7 +529,7 @@ export default function MobileCheckoutSheet({
             ? 'Opening payment…'
             : processingVisitInvoice
               ? 'Payment processing — nothing to collect'
-              : priceNeedsRefresh
+              : priceRefreshBlocksCharge
                 ? 'Price needs a refresh — reopen this visit'
                 : nothingToCharge
                 ? 'No charge — complete from job'

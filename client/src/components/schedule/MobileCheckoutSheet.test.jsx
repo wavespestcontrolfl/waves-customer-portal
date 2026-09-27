@@ -331,4 +331,39 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
     expect(screen.queryByRole('button', { name: 'Charge $40.00' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /price needs a refresh/i })).toBeDisabled();
   });
+
+  // Codex round-2 P1 (on the P2 fix above): predictionFromAttachedInvoice
+  // (admin-schedule.js) never carries grossAmount for an attached invoice —
+  // that's a legitimate, CURRENT payload shape, not a legacy/stale one.
+  // Once an invoice is attached, totalBeforePrepaid comes from
+  // invoicePreview.amountDue, never from the unpriced-prediction `price` at
+  // all — so the missing-grossAmount refresh guard must not fire here; it
+  // would otherwise disable checkout indefinitely for every unpriced,
+  // partially-prepaid visit that already has an open attached invoice.
+  it('does not block checkout on the missing-grossAmount guard when an attached invoice already drives the total', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          ...ATTACHED_INVOICE_FIELDS,
+          waveguardTier: null,
+          estimatedPrice: null,
+          prepaidAmount: 60,
+          prepaidMethod: 'cash',
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            // No grossAmount — same shape predictionFromAttachedInvoice
+            // always produces, never a stale/legacy payload.
+            prediction: { kind: 'invoice', amount: 40, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /price needs a refresh/i })).not.toBeInTheDocument();
+    // $214 invoice total, $60 prepaid credited once.
+    expect(screen.getByRole('button', { name: 'Charge $154.00' })).toBeInTheDocument();
+  });
 });
