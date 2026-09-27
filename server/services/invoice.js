@@ -2942,6 +2942,79 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
   });
 }
 
+// Codex #4971 r5 P1 — the Bill-To fence, extended to termite renewal
+// invoices. A combined-visit invoice re-judges its live owner at claim time
+// (claimPacketInvoiceForSend); a termite annual-plan RENEWAL invoice is the
+// other self-pay bill minted ahead of delivery, with no completion packet,
+// so its claim re-resolves the CUSTOMER DEFAULT payer (the same resolver and
+// shape as stripe.js's PAYER_BILLED_GUARD) under the same held rows: the
+// customer row FOR SHARE (every payer_id writer takes it FOR UPDATE) and the
+// payer it names FOR SHARE (the activation writer takes it FOR UPDATE). A
+// payer that committed first is seen here and refuses the send (payer_billed
+// — nothing claimed, nothing sent); a payer write that comes after waits for
+// the claim, then finds the invoice in flight (packetInvoiceSendInFlight) and
+// refuses with invoice_send_in_flight. A worker-preclaimed send that finds a
+// payer leaves the queue as a draft stamped for that payer, like a withdrawn
+// combined-visit send, so it is never retried to the homeowner.
+async function claimBillToFencedSend(invoiceId, pre, options) {
+  if (!pre || pre.payer_id) return null;
+  if (pre.visit_completion_packet_id) return claimPacketInvoiceForSend(invoiceId, pre.visit_completion_packet_id, options);
+  const renewal = await termiteRenewalTermForInvoice(invoiceId, pre.annual_prepay_term_id);
+  return renewal ? claimRenewalInvoiceForSend(invoiceId, renewal.customer_id, options) : null;
+}
+
+// The renewal SUCCESSOR term an invoice is the prepay invoice of, or null.
+// Keyed on the invoice's own annual_prepay_term_id link — written strictly
+// by the renewal mint (termite-annual-renewal-charge.js mintRenewalSuccessor)
+// — so an invoice with no term link costs no lookup at all.
+async function termiteRenewalTermForInvoice(invoiceId, termId, database = db) {
+  if (!termId) return null;
+  return database("annual_prepay_terms").where({ id: termId, prepay_invoice_id: invoiceId })
+    .whereNotNull("renewed_from_term_id").whereNotNull("annual_plan_version").first("id", "customer_id");
+}
+
+async function claimRenewalInvoiceForSend(invoiceId, customerId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, adoptsQueuedInvoiceSend = false } = {}) {
+  return db.transaction(async (trx) => {
+    const payerId = await customerDefaultPayerLocked(customerId, trx);
+    if (!payerId) {
+      return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, database: trx }) };
+    }
+    if (allowClaimed && claimToken) {
+      await trx("invoices").where({ id: invoiceId, status: "sending", send_claim_token: claimToken }).update({
+        status: "draft", send_claim_token: null, scheduled_send_at: null, scheduled_send_error: `payer_billed:${payerId}`, updated_at: new Date(),
+      });
+    }
+    return { payerBilled: true, payerId };
+  });
+}
+
+async function customerDefaultPayerLocked(customerId, trx) {
+  const customer = await trx("customers").where({ id: customerId }).forShare().first("id", "payer_id");
+  if (customer?.payer_id) await trx("payers").where({ id: customer.payer_id }).forShare().first("id");
+  const resolved = await require("./payer").resolveForInvoice({ database: trx, customerId, throwOnError: true });
+  return resolved?.payerId || null;
+}
+
+// Codex #4971 r5 P1 (c): a pay link that rides OUTSIDE the invoice send —
+// the termite renewal's "your payment didn't go through" text — hands off
+// under the SAME claim: the invoice is claimed through the Bill-To fence
+// above (so it reads as in flight to every payer writer while the provider
+// has it), the handoff runs, and the claim is restored to the invoice's
+// prior status. A payer-billed invoice refuses ({ ok: false, code:
+// 'payer_billed' }) and nothing is handed off.
+async function withPayLinkSendClaim(invoiceId, handoff) {
+  const pre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id", "annual_prepay_term_id");
+  if (!pre || pre.payer_id || pre.payer_statement_id) return { ok: false, code: "payer_billed" };
+  const fenced = await claimBillToFencedSend(invoiceId, pre, {});
+  if (fenced?.payerBilled) return { ok: false, code: "payer_billed" };
+  const claim = fenced ? fenced.claim : await claimInvoiceForSend(invoiceId, {});
+  try {
+    return await handoff(claim.invoice);
+  } finally {
+    await restoreSendClaim(invoiceId, claim.previousStatus, claim.claimed, claim.consumedQueuedSendRows || [], db, claim.invoice.send_claim_token);
+  }
+}
+
 // A combined-visit invoice settled entirely by account credit is paid without
 // a payment webhook or a manual payment: the packet's requested review is
 // enrolled from the coverage path itself (best-effort; the recovery sweep
@@ -4890,9 +4963,9 @@ const InvoiceService = {
     let pre = null;
     try {
       if (!allowClaimed) {
-        pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id");
-        const packetClaim = pre?.visit_completion_packet_id && !pre.payer_id
-          ? await claimPacketInvoiceForSend(invoiceId, pre.visit_completion_packet_id, { firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend }) : null;
+        pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id", "annual_prepay_term_id");
+        // A termite renewal invoice takes the same fence (claimBillToFencedSend).
+        const packetClaim = await claimBillToFencedSend(invoiceId, pre, { firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend });
         if (packetClaim?.payerBilled) {
           return { sent: false, reason: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed" };
         }
@@ -5503,7 +5576,7 @@ const InvoiceService = {
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
     // status to 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
-    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id");
+    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id", "annual_prepay_term_id");
     if (accrualPre?.payer_statement_id) {
       return { ok: false, error: "Invoice is billed on the payer’s monthly statement; not sent individually.", sms: { ok: false }, email: { ok: false } };
     }
@@ -5516,23 +5589,22 @@ const InvoiceService = {
     // (it runs the SAME packet ownership fence first on its own, so a live
     // payer withdrawal still always wins over a zero-due settlement) and
     // this wrapper maps its descriptor to its own result shape.
+    // A termite renewal invoice takes the same fence (claimBillToFencedSend).
     let packetClaim = null;
-    if (accrualPre?.visit_completion_packet_id && !accrualPre.payer_id) {
-      try {
-        packetClaim = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true });
-      } catch (err) {
-        const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce);
-        if (zeroDueResult) return zeroDueResult;
-        // The scheduled-send worker already fenced and claimed this send; a
-        // transient failure of the re-judge here left no provider request
-        // behind, so the invoice goes back to its queue slot instead of
-        // sitting in 'sending' until stale-claim recovery strands it.
-        if (!allowClaimed) throw err;
-        await restoreSendClaim(invoiceId, "scheduled", true, [], db, claimToken);
-        logger.warn(`[invoice] Bill-To re-judge failed for ${invoiceId} — send left queued: ${err.message}`);
-        return { ok: false, error: `Bill-To check failed: ${err.message}`, code: "bill_to_fence_failed",
-          sms: { ok: false, code: "bill_to_fence_failed" }, email: { ok: false, code: "bill_to_fence_failed" } };
-      }
+    try {
+      packetClaim = await claimBillToFencedSend(invoiceId, accrualPre, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true });
+    } catch (err) {
+      const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce);
+      if (zeroDueResult) return zeroDueResult;
+      // The scheduled-send worker already fenced and claimed this send; a
+      // transient failure of the re-judge here left no provider request
+      // behind, so the invoice goes back to its queue slot instead of
+      // sitting in 'sending' until stale-claim recovery strands it.
+      if (!allowClaimed) throw err;
+      await restoreSendClaim(invoiceId, "scheduled", true, [], db, claimToken);
+      logger.warn(`[invoice] Bill-To re-judge failed for ${invoiceId} — send left queued: ${err.message}`);
+      return { ok: false, error: `Bill-To check failed: ${err.message}`, code: "bill_to_fence_failed",
+        sms: { ok: false, code: "bill_to_fence_failed" }, email: { ok: false, code: "bill_to_fence_failed" } };
     }
     if (packetClaim?.payerBilled) {
       return { ok: false, error: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed",
@@ -10409,3 +10481,4 @@ module.exports.claimInvoiceForSend = claimInvoiceForSend;
 // (invoice-claim-ownership-postgres.test.js) so a genuine restore failure can
 // be asserted against real schema without driving the whole send twice.
 module.exports.restoreSendClaim = restoreSendClaim;
+module.exports.withPayLinkSendClaim = withPayLinkSendClaim;

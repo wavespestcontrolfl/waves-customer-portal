@@ -63,7 +63,10 @@ async function createScratchDb() {
     customer_id uuid,
     status text,
     total numeric(10,2),
-    tax_amount numeric(10,2) DEFAULT 0
+    tax_amount numeric(10,2) DEFAULT 0,
+    -- The renewal invoice's link to its term, written by the mint (Codex
+    -- #4971 r5 P1: the invoice send's Bill-To fence keys on it).
+    annual_prepay_term_id uuid
   )`);
   return { db, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };
 }
@@ -134,6 +137,9 @@ describeOrSkip('mintRenewalSuccessor — DB-level idempotency anchor, real Postg
     expect(result.minted).toBe(true);
     const successors = await db('annual_prepay_terms').where({ renewed_from_term_id: parentId });
     expect(successors.length).toBe(1);
+    // Codex #4971 r5 P1: the renewal invoice carries its term link (the
+    // invoice send's Bill-To fence keys on it).
+    expect((await db('invoices').where({ id: successors[0].prepay_invoice_id }).first('annual_prepay_term_id')).annual_prepay_term_id).toBe(successors[0].id);
   });
 
   test('the successor-exists recheck: a second call for the SAME parent returns the existing row, minted:false, and creates nothing new', async () => {

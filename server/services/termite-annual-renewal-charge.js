@@ -875,6 +875,12 @@ async function mintRenewalSuccessor(parentTermId, conn = db, today = etDateStrin
       conn: trx,
     });
     if (!successor?.id) throw new Error(`renewal successor mint returned no term for parent ${parent.id}`);
+    // Codex #4971 r5 P1: the renewal invoice's link to its term is what the
+    // invoice send's Bill-To fence keys on (invoice.js claimBillToFencedSend
+    // re-resolves the customer default payer for a renewal invoice). The
+    // term sync that writes it is best-effort, so the mint writes it itself,
+    // strictly — a renewal bill never exists without the link.
+    await trx('invoices').where({ id: invoice.id }).update({ annual_prepay_term_id: successor.id });
 
     // P2-1: the PARENT's renewal decision is deliberately NOT recorded
     // here. Minting only PROPOSES a renewal — the successor is unpaid, and
@@ -1856,6 +1862,11 @@ async function ringRenewalBell(successor, kind, reason) {
   }
 }
 
+// Codex #4971 r5 P1: this is now the EARLY EXIT only — the authoritative
+// payer check runs at the invoice claim (invoice.js claimBillToFencedSend,
+// under held customer / payer rows). Kept because it routes a payer-billed
+// renewal to the staff "route it to the payer" bell before anything is
+// claimed, and fails closed (payer_unverifiable) when the lookup errors.
 // Codex #4971 pre-push P0 ("preserve payer refusals") — the one homeowner
 // pay-link payer check. A payer can be assigned AFTER the mint, and these
 // renewal invoices carry no completion-packet marker, so InvoiceService's
@@ -1995,10 +2006,25 @@ async function sendRenewalChargeFailedNotice(successor, conn = db) {
   return outcome;
 }
 
+// Codex #4971 r5 P1 (c): the text carries the homeowner pay URL, so it
+// hands off under the invoice's own Bill-To send claim
+// (invoice.js withPayLinkSendClaim — the same fence the renewal invoice
+// send takes): the customer default payer is re-resolved under the held
+// customer / payer rows, and while the provider has the text the invoice
+// reads as in flight to every payer writer. Not a second mechanism: the
+// claim, the lock set and the in-flight test are the invoice send's own.
 async function composeAndSendChargeFailedNotice(successor) {
   const customer = await db('customers').where({ id: successor.customer_id }).first();
   if (!customer?.phone) return { sent: false, reason: 'no_phone' };
-  const invoice = await db('invoices').where({ id: successor.prepay_invoice_id }).first('token');
+  const handed = await require('./invoice').withPayLinkSendClaim(
+    successor.prepay_invoice_id,
+    (invoice) => sendChargeFailedText(successor, customer, invoice),
+  );
+  if (handed?.code === 'payer_billed') return { sent: false, reason: 'payer_billed' };
+  return handed;
+}
+
+async function sendChargeFailedText(successor, customer, invoice) {
   const { publicPortalUrl } = require('../utils/portal-url');
   const payUrl = invoice?.token ? `${publicPortalUrl()}/pay/${invoice.token}` : null;
   if (!payUrl) return { sent: false, reason: 'no_pay_url' };

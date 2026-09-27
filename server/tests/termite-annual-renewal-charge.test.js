@@ -177,6 +177,7 @@ describe('termite annual renewal charge', () => {
 
   function makeMintTrx({ parent, existingSuccessor = undefined, peek, stillDue } = {}) {
     const parentUpdate = jest.fn().mockResolvedValue(1);
+    const invoiceLink = jest.fn().mockResolvedValue(1);
     // Codex #4971 pre-push P0: the mint re-runs the scan's own "renewal due"
     // predicate (whereRenewalCandidate) against the LOCKED parent row. This
     // stand-in answers it from the parent's own fields the way the SQL
@@ -198,7 +199,9 @@ describe('termite annual renewal charge', () => {
         // shape) mints normally; a test exercising the refund race passes
         // its OWN parent without a prepay_invoice_id, or overrides this
         // via a fresh makeMintTrx if it ever needs the unpaid shape.
-        return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue({ status: 'paid', paid_at: new Date('2025-09-01T00:00:00Z') }) }) };
+        // Codex #4971 r5 P1: the mint also writes the renewal invoice's link
+        // to its successor term (invoiceLink) — the Bill-To fence keys on it.
+        return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue({ status: 'paid', paid_at: new Date('2025-09-01T00:00:00Z') }), update: invoiceLink }) };
       }
       if (table === 'payments') {
         return { whereRaw: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(undefined) }) };
@@ -223,7 +226,7 @@ describe('termite annual renewal charge', () => {
         }),
       };
     });
-    return { trx, parentUpdate, duePredicate };
+    return { trx, parentUpdate, duePredicate, invoiceLink };
   }
 
   function baseParent(overrides = {}) {
@@ -524,7 +527,7 @@ describe('termite annual renewal charge', () => {
     test('mints the successor for exactly parent.prepay_amount, term_end inclusive -> next-day start + 12mo end, and does NOT stamp the parent (P2-1)', async () => {
       mockCommon();
       const parent = baseParent();
-      const { trx, parentUpdate } = makeMintTrx({ parent });
+      const { trx, parentUpdate, invoiceLink } = makeMintTrx({ parent });
       const conn = { transaction: jest.fn(async (cb) => cb(trx)) };
       const { invoiceCreate, createTermForAnnualPrepay, lockAndAssertNoAnnualPrepayOverlap } = mockMintDeps();
 
@@ -559,6 +562,8 @@ describe('termite annual renewal charge', () => {
         renewalChargeConsentAt: parent.renewal_charge_consent_at,
       }));
       // P2-1: mint never writes to the parent row at all.
+      // Codex #4971 r5 P1: the renewal invoice is linked to its term, strictly.
+      expect(invoiceLink).toHaveBeenCalledWith({ annual_prepay_term_id: 'succ-term-1' });
       expect(parentUpdate).not.toHaveBeenCalled();
     });
 
@@ -1062,7 +1067,9 @@ describe('termite annual renewal charge', () => {
       mockCommon();
       mockGraceHelpers({ graceDays: 30 });
       const sendViaSMSAndEmail = jest.fn(async () => ({ ok: true }));
-      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      // The charge-failed text hands off under the invoice's Bill-To send claim (Codex #4971 r5 P1).
+      const withPayLinkSendClaim = jest.fn(async (_invoiceId, handoff) => handoff({ token: 'tok-1' }));
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail, withPayLinkSendClaim }));
       const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
       jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
       jest.doMock('../services/recurring-card-on-file', () => ({
@@ -1103,9 +1110,11 @@ describe('termite annual renewal charge', () => {
         dedupeKey: 'termite-renewal-charge:succ-term-1:declined',
       }));
       expect(sendViaSMSAndEmail).toHaveBeenCalledTimes(1);
-      // Genuine decline -> the customer SMS actually fires.
+      // Genuine decline -> the customer SMS actually fires, handed off under
+      // the renewal invoice's own Bill-To send claim (Codex #4971 r5 P1).
       await Promise.resolve();
-      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ purpose: 'payment_failure' }));
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ purpose: 'payment_failure', body: 'rendered body' }));
+      expect(withPayLinkSendClaim).toHaveBeenCalledWith('succ-invoice-1', expect.any(Function));
 
       // A later call against the SAME successor, once already attempted,
       // never re-attempts — the fresh re-read inside resolveChargeEligibility
@@ -3704,7 +3713,9 @@ describe('termite annual renewal charge', () => {
     test('a genuine decline whose pay link failed stays owed; 7c delivers it and marks it done — the customer notice is never re-sent', async () => {
       mockCommon();
       const sendViaSMSAndEmail = jest.fn().mockResolvedValueOnce({ ok: false, error: 'provider down' }).mockResolvedValue({ ok: true });
-      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      // The charge-failed text hands off under the invoice's Bill-To send claim (Codex #4971 r5 P1).
+      const withPayLinkSendClaim = jest.fn(async (_invoiceId, handoff) => handoff({ token: 'tok-1' }));
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail, withPayLinkSendClaim }));
       jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
       const sendCustomerMessage = jest.fn(async () => ({ sent: true }));
       jest.doMock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage }));
