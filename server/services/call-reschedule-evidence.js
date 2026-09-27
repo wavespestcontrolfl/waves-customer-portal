@@ -101,6 +101,7 @@ const REFUSAL_MARKERS = [
   ' keep my original ', ' keep the original ', ' original appointment ', ' original time ', ' original day ',
   ' changed my mind ', ' change my mind ', ' on second thought ', ' leave it as is ', ' keep it as is ',
   ' leave it where it is ', ' keep it where it is ', ' instead ',
+  ' cancel it ', ' cancel the appointment ', ' cancel my appointment ', ' cancel the visit ', ' cancel my visit ',
 ];
 
 // The agent's affirming close: a commitment, the agent taking the slot on
@@ -183,16 +184,19 @@ function hasNegation(ns) {
 }
 // Is a slot word ({ pos, end }, turn-level) negated in its clause: by any
 // negation after the clause's last slot word, `slotEnd` ("Thursday at two
-// isn't good"), by "no" right against it, or by "not"/"can't" before it that
-// no commitment to the slot overrides ("not Friday, we will see you
-// Thursday" commits after the "not"). A correction between the day and the
-// hour ("Thursday at 11, no, make it noon") is before the hour, not after.
-function negatesSlotWord(clause, word, slotEnd) {
+// isn't good"), by "no" right against it, or by "not"/"can't" before it —
+// unless that negation turned down another time and a commitment to the
+// slot follows it ("not Friday, we will see you Thursday"), never when it
+// governs the commitment itself ("I cannot promise we will see you
+// Thursday"). A correction between the day and the hour ("Thursday at 11,
+// no, make it noon") is before the hour, not after.
+function negatesSlotWord(clause, word, slotEnd, hour24) {
   if (hasNegation(clause.toks.slice(slotEnd - clause.start).join(' '))) return true;
   const before = withoutCourtesy(clause.toks.slice(0, word.pos - clause.start));
   if (NO_WORDS.has(before[before.length - 1])) return true;
   const lastNegation = before.findLastIndex((tok) => NEGATING_WORDS.has(tok));
-  return lastNegation >= 0 && !hasAnyMarker(before.slice(lastNegation + 1).join(' '), COMMITMENT_MARKERS);
+  const rest = before.slice(lastNegation + 1).join(' ');
+  return lastNegation >= 0 && !(hasAnyMarker(rest, COMMITMENT_MARKERS) && talksOtherTime(rest, hour24));
 }
 
 // A question that asks nothing about the slot ("anything else?").
@@ -445,8 +449,8 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
   // and so does a caller question after the commitment.
   const laterTurns = turns.slice(anchorIdx + 1).map((t, k) => (!t.agent && answersClosingQuestion(turns, anchorIdx + 1 + k)
     ? t.ns.replace(/^(?:no|nope|nah)\b/, '') : t.ns));
-  if (negatesSlotWord(dayClause, dayWord, slotEndIn(dayClause, dayWord, hourWord))
-    || negatesSlotWord(hourClause, hourWord, slotEndIn(hourClause, hourWord, dayWord))
+  if (negatesSlotWord(dayClause, dayWord, slotEndIn(dayClause, dayWord, hourWord), slot.hour24)
+    || negatesSlotWord(hourClause, hourWord, slotEndIn(hourClause, hourWord, dayWord), slot.hour24)
     || [slotClauses[2], ...callerMeanwhile, ...laterTurns].some((ns) => hasNegation(ns) || talksOtherTime(ns, slot.hour24)) || callerReopensSlot(turns, affirmIdx)) {
     return failAt('slot_refused', affirmIdx);
   }
