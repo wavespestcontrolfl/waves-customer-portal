@@ -60,6 +60,17 @@ function makeTrx({ replayedInvoice = undefined, lockedSvcRow, sourceEstimateId =
     q.where = jest.fn(() => q);
     q.whereNot = jest.fn(() => q);
     q.whereNotIn = jest.fn(() => q);
+    // codex pre-push P0 (round 10): a priced svc linked to an estimate now
+    // also runs siblingCoverageRecheckInTrx's PRICED counterpart
+    // (pricedSiblingCoverageVerdict) under this same transaction — its own
+    // `.whereIn(status, [...])` / `.whereNull` / `.join` / `.noWait` calls
+    // need to resolve here too. Every existing test in this file wants "no
+    // voided first-application invoice, no unrecognized sibling invoice"
+    // (the ordinary case), so `.first()` stays `undefined` regardless.
+    q.whereIn = jest.fn(() => q);
+    q.whereNull = jest.fn(() => q);
+    q.join = jest.fn(() => q);
+    q.noWait = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
     q.forUpdate = jest.fn(() => q);
     q.first = jest.fn(async () => {
@@ -302,6 +313,17 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
         const q = {};
         q.where = jest.fn(() => q);
         q.whereNot = jest.fn(() => q);
+        q.whereNotIn = jest.fn(() => q);
+        q.whereNull = jest.fn(() => q);
+        // codex pre-push P0 (round 10): this priced svc (estimated_price:
+        // 100, source_estimate_id set) now ALSO runs
+        // pricedSiblingCoverageVerdict's own `.whereIn(status, [...])`
+        // query — resolves to "no voided first-application invoice" here,
+        // same as every other query on this stub.
+        q.whereIn = jest.fn(() => q);
+        q.join = jest.fn(() => q);
+        q.forUpdate = jest.fn(() => q);
+        q.noWait = jest.fn(() => q);
         q.orderBy = jest.fn(() => q);
         q.first = jest.fn(async () => undefined); // no existing invoice
         return q;

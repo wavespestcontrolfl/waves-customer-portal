@@ -44,7 +44,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoverageForSchedule, siblingInvoiceCoverageVerdict, isSiblingCoverageEligibleVisit, isPricedSiblingCoverageEligibleVisit, pricedSiblingCoverageVerdict, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -15745,6 +15745,31 @@ async function resolveScheduledServiceCharge({
             : 'Could not confirm whether this visit’s combined-trip invoice already covers it — refresh and try again.'),
       };
     }
+  } else if (isPricedSiblingCoverageEligibleVisit({
+    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback, serviceType,
+  }) && svc && dbConn) {
+    // Owner ruling — symmetric, minimal, narrow + fail closed (billing-lane.js
+    // isPricedSiblingCoverageEligibleVisit's own header): a PRICED visit is
+    // otherwise entirely exempt from the sibling-coverage question above —
+    // right for the ordinary case, but blind to the reserved row's own
+    // recognized first-application invoice having been voided while its
+    // unpriced sibling was separately charged in the meantime. Same 409
+    // refusal shape as the unpriced branch; 'none' falls through unchanged.
+    let pricedVerdict;
+    try {
+      pricedVerdict = await pricedSiblingCoverageVerdict(svc, dbConn);
+    } catch {
+      pricedVerdict = { status: 'error' };
+    }
+    if (pricedVerdict.status !== 'none') {
+      return {
+        refused: true,
+        reason: pricedVerdict.status === 'error' ? 'sibling_lookup_failed' : 'sibling_invoice_needs_review',
+        message: pricedVerdict.status === 'error'
+          ? 'Could not confirm whether this visit’s combined-trip invoice already covers it — refresh and try again.'
+          : 'This visit’s combined-trip invoice needs manual review before charging — handle it from Customer 360, or refresh and try again.',
+      };
+    }
   }
   return completionInvoiceAmount({
     estimatedPrice,
@@ -15777,9 +15802,17 @@ function siblingCoverageRecheckInTrx(svc) {
   const primaryLinePrice = svc?.primary_line_price ?? null;
   const hasOwnPrice = (svc?.estimated_price != null && Number(svc.estimated_price) > 0)
     || hasAuthoritativeZeroPrice(svc?.estimated_price, primaryLinePrice);
-  if (!isSiblingCoverageEligibleVisit({
-    sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type,
-  })) return null;
+  const shape = { sourceEstimateId: svc?.source_estimate_id, hasOwnPrice, isCallback: !!svc?.is_callback, serviceType: svc?.service_type };
+  const unpricedEligible = isSiblingCoverageEligibleVisit(shape);
+  // Owner ruling — symmetric, minimal fix: gate the priced row's OWN entry
+  // into this recheck by isPricedSiblingCoverageEligibleVisit alone, never
+  // by loosening isSiblingCoverageEligibleVisit itself — the two eligibility
+  // gates and their verdicts stay fully separate (billing-lane.js
+  // isPricedSiblingCoverageEligibleVisit's own header). Mutually exclusive
+  // with unpricedEligible (hasOwnPrice can't be both), so exactly one recheck
+  // ever runs.
+  const pricedEligible = !unpricedEligible && isPricedSiblingCoverageEligibleVisit(shape);
+  if (!unpricedEligible && !pricedEligible) return null;
   return async (trx) => {
     let recheck;
     try {
@@ -15794,7 +15827,9 @@ function siblingCoverageRecheckInTrx(svc) {
       // `{ status: 'error' }` below, same as any other lookup failure,
       // and refuses this mint with a retryable 409 rather than risking
       // either a hung transaction or a double mint.
-      recheck = await siblingInvoiceCoverageVerdict(svc, trx, { lockRows: true, noWait: true });
+      recheck = unpricedEligible
+        ? await siblingInvoiceCoverageVerdict(svc, trx, { lockRows: true, noWait: true })
+        : await pricedSiblingCoverageVerdict(svc, trx, { lockRows: true, noWait: true });
     } catch {
       recheck = { status: 'error' };
     }
