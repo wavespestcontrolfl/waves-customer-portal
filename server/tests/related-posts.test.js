@@ -218,6 +218,50 @@ describe('candidateFromRow', () => {
     expect(c.workflowStatus).toBe('published');
     expect(c.pathVerified).toBe(true);
     expect(c.astroStatus).toBe('live');
+    expect(c.targetSites).toEqual(['wavespestcontrol.com']);
+  });
+
+  test('derives domain eligibility from the verified live URL, never stale target_sites', () => {
+    const c = candidateFromRow({
+      id: 'spoke-stale',
+      title: 'Hub Post',
+      status: 'published',
+      astro_status: 'live',
+      astro_live_url: '/termite/hub-post/',
+      target_sites: ['sarasotaflpestcontrol.com'],
+    });
+    expect(c.targetSites).toEqual(['wavespestcontrol.com']);
+    expect(rankRelatedPosts(
+      { service: 'termite', domains: ['sarasotaflpestcontrol.com'] },
+      [{ ...c, service: 'termite' }]
+    )).toEqual([]);
+  });
+
+  test.each([
+    ['https://www.wavespestcontrol.com/termite/hub-post/', 'wavespestcontrol.com'],
+    ['https://www.sarasotaflpestcontrol.com/termite/spoke-post/', 'sarasotaflpestcontrol.com'],
+  ])('derives the fleet domain from an absolute live URL (%s)', (astroLiveUrl, domain) => {
+    const c = candidateFromRow({
+      id: domain,
+      title: 'Verified Post',
+      status: 'published',
+      astro_status: 'live',
+      astro_live_url: astroLiveUrl,
+      target_sites: ['veniceflpestcontrol.com'],
+    });
+    expect(c.targetSites).toEqual([domain]);
+    expect(c.pathVerified).toBe(true);
+  });
+
+  test('rejects a verified URL outside the known content fleet', () => {
+    const c = candidateFromRow({
+      id: 'off-fleet',
+      title: 'External Post',
+      status: 'published',
+      astro_status: 'live',
+      astro_live_url: 'https://example.com/termite/post/',
+    });
+    expect(c.pathVerified).toBe(false);
   });
 
   test('falls back to a slug-derived GUESS when astro_live_url is absent (legacy row) — and marks it NOT verified', () => {

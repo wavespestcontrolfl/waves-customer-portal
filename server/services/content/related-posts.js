@@ -214,6 +214,8 @@ function rankRelatedPosts(target = {}, candidates = [], { limit = RELATED_POSTS_
 
 function candidateFromRow(row) {
   const item = dbBlogRowToItem(row);
+  const publishedSites = normalizeSpokeSites([row.astro_live_url]);
+  const liveUrlIsAbsolute = /^https?:\/\//i.test(String(row.astro_live_url || ''));
   return {
     id: row.id,
     title: item.title,
@@ -222,7 +224,11 @@ function candidateFromRow(row) {
     city: item.target_city,
     service: item.target_service,
     category: item.category,
-    targetSites: row.target_sites,
+    // Blog publication pins domains independently of the historical
+    // blog_posts.target_sites value. Use the verified live URL's host; a
+    // relative Astro URL is a hub route. This prevents a stale/null DB field
+    // from advertising a hub-only post as available on every spoke.
+    targetSites: publishedSites.length ? publishedSites : [...HUB_SITE_KEYS],
     workflowStatus: item.workflow_status,
     astroStatus: row.astro_status || null,
     // dbBlogRowToItem's canonical_url falls back to a bare /{slug}/ guess
@@ -233,7 +239,7 @@ function candidateFromRow(row) {
     // related-post link is a NEW allowance the gate will accept unchecked,
     // so it may only ever point at the pipeline-CONFIRMED URL, never a
     // guess — pathVerified gates that at the call site below.
-    pathVerified: Boolean(row.astro_live_url),
+    pathVerified: Boolean(row.astro_live_url) && (!liveUrlIsAbsolute || publishedSites.length > 0),
   };
 }
 
