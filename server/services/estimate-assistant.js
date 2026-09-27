@@ -23,7 +23,7 @@ const { normalizeBondTermService } = require('./estimate-converter');
 
 // Neutral categories may retain their own satisfaction wording, but cannot
 // inherit residential membership promises from saved service prose.
-const { RECURRING_TERMS_COPY, PLAN_TERMS_COPY } = require('../../shared/estimate-copy-claims.cjs');
+const { RECURRING_TERMS_COPY, PLAN_TERMS_COPY, withoutClaimParts } = require('../../shared/estimate-copy-claims.cjs');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -865,10 +865,7 @@ function buildEstimateAssistantContext({
   const rowWithSummary = (row) => {
     const claimPattern = noGuaranteeClaims ? PLAN_TERMS_COPY
       : (guarantees.recurringTermsEligible ? null : RECURRING_TERMS_COPY);
-    const detail = claimPattern
-      ? cleanText(row.detail).split(/(?<=[.!?;])\s+/)
-        .filter((clause) => !claimPattern.test(clause)).join(' ') || null
-      : row.detail;
+    const detail = claimPattern ? withoutClaimParts(cleanText(row.detail), claimPattern) : row.detail;
     const safeRow = quoteRequired
       ? {
           ...row,
@@ -1641,6 +1638,17 @@ function serviceTermsFromRows(rowGroups = [], oneTimeRows = []) {
   });
 }
 
+// A guarantee question on an estimate without estimate-wide terms. Only the
+// deterministic per-service answer takes it: the fallback answers it first,
+// and answerEstimateQuestion routes it there before the live models, so no
+// model picks which service a question means.
+const GUARANTEE_QUESTION_PATTERN = /\b(guarantees?|callbacks?|re-?treat\w*|money[- ]?back|satisfaction|risk[- ]?free|bond|warrant\w*|annual inspection)\b/i;
+function answersWithServiceTerms(question, context = {}) {
+  const neutralRecurringTerms = context.serviceMode !== 'one_time' && context.guarantees?.recurringTermsEligible !== true;
+  return (context.guarantees?.noGuaranteeClaims === true || neutralRecurringTerms)
+    && GUARANTEE_QUESTION_PATTERN.test(cleanText(question));
+}
+
 // The guarantee answer for an estimate without estimate-wide terms: the same
 // answer whatever the question's wording, listing each service's own terms.
 function serviceTermsAnswer(context = {}, phone, noGuaranteeAnswer) {
@@ -1669,8 +1677,7 @@ function answerEstimateQuestionFallback(question, context = {}) {
   // 2026-09-27). This answer states no price and offers no booking, so the
   // shortcuts' own guards still hold.
   const neutralRecurringTerms = context.serviceMode !== 'one_time' && context.guarantees?.recurringTermsEligible !== true;
-  if ((context.guarantees?.noGuaranteeClaims === true || neutralRecurringTerms)
-    && /\b(guarantees?|callbacks?|re-?treat\w*|money[- ]?back|satisfaction|risk[- ]?free|bond|warrant\w*|annual inspection)\b/.test(q)) {
+  if (answersWithServiceTerms(q, context)) {
     return serviceTermsAnswer(context, phone, noGuaranteeAnswer);
   }
 
@@ -1894,6 +1901,16 @@ async function answerEstimateQuestion({
   }
 
   if (context.billing?.quoteRequired) {
+    return {
+      answer: answerEstimateQuestionFallback(cleanQuestion, context),
+      source: 'fallback',
+    };
+  }
+
+  // Guarantee questions on an estimate without estimate-wide terms get the
+  // deterministic per-service answer, never a model's reading of which
+  // service the question means (owner ruling 2026-09-27).
+  if (answersWithServiceTerms(cleanQuestion, context)) {
     return {
       answer: answerEstimateQuestionFallback(cleanQuestion, context),
       source: 'fallback',

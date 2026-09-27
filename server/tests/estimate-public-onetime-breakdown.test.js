@@ -4602,6 +4602,30 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toMatch(/re-service requests are included|no long.term contract|cancel anytime/i);
   });
 
+  test.each([
+    ['extended', true, 'Extended 5-yr warranty'],
+    ['basic', false, 'Basic 1-yr warranty'],
+  ])('the legacy page keeps a pre-slab %s row scope under the no-guarantee policy', (_tier, extended, label) => {
+    const html = renderPage('preslab-legacy-token', {
+      status: 'sent', customerName: 'Pat Customer', address: '123 Main St',
+      monthlyTotal: 0, annualTotal: 0, onetimeTotal: 950, noGuaranteeClaims: true,
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { items: [{
+          service: 'pre_slab_termiticide', name: 'Pre-Slab Termiticide Treatment', price: 950,
+          detail: `1,850 sf | Termidor SC | 12 oz | ${label}`,
+          warrantyExtendedSelected: extended,
+          warrantyStatus: extended ? 'Extended 5-year warranty' : 'No extended warranty selected',
+        }], specItems: [] },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('1,850 sf | Termidor SC | 12 oz');
+    if (extended) expect(html).toContain('Extended 5-yr warranty');
+    else expect(html).not.toContain('Basic 1-yr warranty');
+  });
+
   test('server-rendered recurring estimates surface cancel/refund/guarantee terms', () => {
     const html = renderPage('terms-token', {
       status: 'sent',

@@ -188,6 +188,36 @@ describe('GET /:token/data — noGuaranteeClaims', () => {
     expect(body.estimate).not.toHaveProperty('noGuaranteeClaims');
   });
 
+  test.each([
+    ['extended', true, 'Extended 5-yr warranty', '1,850 sf | Termidor SC | 12 oz | Extended 5-yr warranty'],
+    ['basic', false, 'Basic 1-yr warranty', '1,850 sf | Termidor SC | 12 oz'],
+  ])('a pre-slab %s row keeps its scope, and only a selected extended warranty survives', async (_tier, extended, label, expected) => {
+    // Owner ruling 2026-09-27: a selected pre-slab warranty is stated. The
+    // no-guarantee policy drops plan-terms parts of a row's detail, never
+    // the slab/product scope beside them.
+    const base = estimateRow();
+    const body = await dataFor(estimateRow({
+      id: `est-preslab-${_tier}`, token: `preslabwarranty${_tier}token`, onetime_total: 950,
+      estimate_data: {
+        ...base.estimate_data,
+        sendSnapshot: { pricingBundle: { ...base.estimate_data.sendSnapshot.pricingBundle, anchorOneTimePrice: 950 } },
+        result: {
+          ...base.estimate_data.result,
+          oneTime: { items: [{
+            service: 'pre_slab_termiticide', name: 'Pre-Slab Termiticide Treatment', price: 950,
+            detail: `1,850 sf | Termidor SC | 12 oz | ${label}`,
+            warrantyExtendedSelected: extended,
+            warrantyStatus: extended ? 'Extended 5-year warranty' : 'No extended warranty selected',
+          }], membershipFee: 0 },
+        },
+      },
+    }));
+    expect(body.estimate.noGuaranteeClaims).toBe(true);
+    const row = (body.pricing.oneTimeBreakdown?.items || []).find((item) => /pre-?slab/i.test(item.label || ''));
+    expect(row).toBeTruthy();
+    expect(row.detail).toBe(expected);
+  });
+
   test('termite bait monitoring is flagged', async () => {
     const base = estimateRow();
     const body = await dataFor(estimateRow({

@@ -63,7 +63,7 @@ import useIsMobile from '../hooks/useIsMobile';
 import DocumentActionBar from '../components/DocumentActionBar';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
 import { useWavesShell } from '../components/brand/WavesShellContext';
-import { hasPurchasedTrenchingWarranty, PURCHASED_TRENCHING_WARRANTY_BULLET } from '@estimate-purchased-warranty';
+import { hasPurchasedTrenchingWarranty, preSlabSelectedWarrantyPart, PURCHASED_TRENCHING_WARRANTY_BULLET } from '@estimate-purchased-warranty';
 
 // Payment Element renders inside Stripe's iframe, so the glass theme can't
 // restyle it via CSS — when the theme is mounted the modals pass brand-tuned
@@ -2087,7 +2087,9 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
           const isIncluded = !isQuoteRequired && item.kind === 'included';
           const showPrepayWaiverNote = !isQuoteRequired && !isDiscount && !isIncluded && isPrepayWaivedRow(item);
           const quoteNote = isQuoteRequired ? quoteRequiredReasonNote(item, item.detail || '') : '';
-          const visibleDetail = noGuarantee && copyHasPlanTermsClaim(item.detail) ? null : item.detail;
+          const visibleDetail = noGuarantee && copyHasPlanTermsClaim(item.detail)
+            ? withoutPlanTermsClaims(item.detail, preSlabSelectedWarrantyPart(item))
+            : item.detail;
           return (
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{
               display: 'grid', gridTemplateColumns: '1fr auto', gap: 12,
@@ -4631,7 +4633,9 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee =
       <div style={{ display: 'grid', gap: 10 }}>
         {items.map((item, i) => {
           const amount = fmtMoney(Math.abs(Number(item.amount) || 0));
-          const visibleDetail = noGuarantee && copyHasPlanTermsClaim(item.detail) ? null : item.detail;
+          const visibleDetail = noGuarantee && copyHasPlanTermsClaim(item.detail)
+            ? withoutPlanTermsClaims(item.detail, preSlabSelectedWarrantyPart(item))
+            : item.detail;
           if (lead && isTermiteInstall(item)) {
             return (
               <div key={`${item.service || item.label || 'item'}-${i}`}>

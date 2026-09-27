@@ -198,9 +198,19 @@ function preSlabExtendedWarrantySelected(item = {}) {
   return raw.includes('extended 5') || raw.includes('5-year') || raw.includes('5yr');
 }
 
+// The detail part naming a pre-slab job's selected extended warranty
+// ("Extended 5-yr warranty"). It is verified purchased coverage and survives
+// the no-guarantee policy (owner ruling 2026-09-27). Any other row keeps
+// nothing.
+function preSlabSelectedWarrantyPart(item = {}) {
+  if (!isPreSlabTreatmentItem(item) || !preSlabExtendedWarrantySelected(item)) return () => false;
+  return (part) => /\bextended\b/i.test(part) && /\bwarrant/i.test(part);
+}
+
 module.exports = {
   isPreSlabTreatmentItem,
   preSlabExtendedWarrantySelected,
+  preSlabSelectedWarrantyPart,
   hasPurchasedTrenchingWarranty,
   matchingTrenchingWarrantyRow,
   rawOneTimeWarrantyEvidenceItems,

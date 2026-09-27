@@ -816,6 +816,21 @@ describe('OneTimeBreakdownCard', () => {
     expect(screen.queryByText('Annual inspection during the warranty period')).not.toBeInTheDocument();
   });
 
+  it.each([
+    ['selected extended', true, 'Extended 5-yr warranty', '1,850 sf | Termidor SC | 12 oz | Extended 5-yr warranty'],
+    ['basic', false, 'Basic 1-yr warranty', '1,850 sf | Termidor SC | 12 oz'],
+  ])('a pre-slab row keeps its scope under the no-guarantee policy, with a %s warranty', (_label, extended, warranty, expected) => {
+    // Owner ruling 2026-09-27: a selected pre-slab warranty is stated; the
+    // policy drops plan-terms parts of the detail, never the scope.
+    render(<OneTimeBreakdownCard noGuarantee breakdown={{ total: 950, items: [{
+      service: 'pre_slab_termiticide', label: 'Pre-Slab Termiticide Treatment', amount: 950,
+      detail: `1,850 sf | Termidor SC | 12 oz | ${warranty}`,
+      warrantyExtendedSelected: extended,
+      warrantyStatus: extended ? 'Extended 5-year warranty' : 'No extended warranty selected',
+    }] }} />);
+    expect(screen.getByText(expected)).toBeInTheDocument();
+  });
+
   it('a row without a copy pack renders exactly as before (no bullets, no outcome line)', () => {
     const { container } = render(<OneTimeBreakdownCard breakdown={{ total: 257, items: [
       { service: 'one_time_adjustment', label: 'Additional treatment area', amount: 257 },

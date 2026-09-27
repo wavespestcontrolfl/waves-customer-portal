@@ -40,12 +40,13 @@ function acceptBookingGateToken(estimate) {
 }
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
-const { PLAN_TERMS_COPY } = require('../../shared/estimate-copy-claims.cjs');
+const { PLAN_TERMS_COPY, withoutPlanTermsClaims } = require('../../shared/estimate-copy-claims.cjs');
 const {
   hasPurchasedTrenchingWarranty,
   isPreSlabTreatmentItem,
   matchingTrenchingWarrantyRow,
   preSlabExtendedWarrantySelected,
+  preSlabSelectedWarrantyPart,
   rawOneTimeWarrantyEvidenceItems,
   trenchingServiceIdentity,
   trenchingWarrantyDecision,
@@ -5809,7 +5810,11 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     const price = oneTimeItemAmount(it);
     const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
     const rawDetail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
-    const detail = noGuaranteeClaims && PLAN_TERMS_COPY.test(rawDetail || '') ? null : rawDetail;
+    // Plan-terms parts go and the scope stays; a pre-slab job keeps its
+    // selected extended warranty (owner ruling 2026-09-27).
+    const detail = noGuaranteeClaims && PLAN_TERMS_COPY.test(rawDetail || '')
+      ? withoutPlanTermsClaims(rawDetail, preSlabSelectedWarrantyPart(it))
+      : rawDetail;
     const priceCell = includedByServiceCredit ? 'Included' : fmtMoney(price);
     // What the visit involves — same outcome + bullet + terms shape the
     // React OneTimeBreakdownCard renders from item.copy (one pack, both paths).
@@ -23703,7 +23708,9 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
         ...basePayload.oneTimeBreakdown,
         items: (() => {
           const labeled = basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel)
-            .map((row) => noGuaranteeClaims && PLAN_TERMS_COPY.test(row.detail || '') ? { ...row, detail: null } : row);
+            .map((row) => (noGuaranteeClaims && PLAN_TERMS_COPY.test(row.detail || '')
+              ? { ...row, detail: withoutPlanTermsClaims(row.detail, preSlabSelectedWarrantyPart(row)) }
+              : row));
           if (!rowCopyAllowed) return labeled;
           const copyInputs = labeled.map((row) => {
             const raw = rawContractRowFor(row, rawContractRowGroups, labeled);
