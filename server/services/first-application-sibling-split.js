@@ -178,46 +178,108 @@ async function raiseBillingReviewAlert(trx, invoice, moved, diverging) {
   }
 }
 
-// First-write-wins (COALESCE-style, via whereNull on the write predicate) —
-// a review already open keeps its ORIGINAL opened_at and invoice snapshot;
-// only the admin bell's content refreshes with the latest diverging set.
+// A review already open keeps its ORIGINAL opened_at and money-fingerprint
+// snapshot — but divergingSiblingIds ACCUMULATES (union, never replaces):
+// the invoice-holding row's forUpdate lock (findLockedFirstApplicationInvoice)
+// means this read-modify-write can't race a concurrent open, so merging in
+// JS is safe without a second whereNull round trip. A later divergence (a
+// DIFFERENT sibling, or the invoice-holder itself moving again) must not
+// drop the FIRST sibling from the record — maybeAutoClearBillingReview
+// requires every one of them back on the invoice's date before it will
+// auto-clear.
 async function openBillingReview(trx, invoice, moved, diverging) {
+  let existingContext = invoice.billing_review_context;
+  if (typeof existingContext === 'string') {
+    try { existingContext = JSON.parse(existingContext); } catch { existingContext = null; }
+  }
+  const alreadyOpen = !!invoice.billing_review_opened_at;
+  const priorSiblingIds = Array.isArray(existingContext?.divergingSiblingIds) ? existingContext.divergingSiblingIds : [];
+  const mergedSiblingIds = [...new Set([...priorSiblingIds, ...diverging.map((d) => String(d.id))])];
   const context = {
     sourceEstimateId: moved.source_estimate_id,
     invoiceHolderScheduledServiceId: invoice.scheduled_service_id,
-    divergingSiblingIds: diverging.map((d) => d.id),
-    // The invoice's own money fields AT THE MOMENT this review opens (see
-    // invoiceMoneyFingerprint) — compared, not `updated_at`, to prove "the
-    // invoice was never touched" at auto-clear time. That equality is the
-    // trivial case a move back to the same date clears automatically.
-    invoiceMoneyFingerprintAtOpen: invoiceMoneyFingerprint(invoice),
+    divergingSiblingIds: mergedSiblingIds,
+    // The invoice's own money fields AT THE MOMENT this review FIRST opened
+    // (see invoiceMoneyFingerprint) — never restamped on a later
+    // divergence while already open, or an invoice edited in between would
+    // get a fresh, already-edited baseline and wrongly read as "untouched"
+    // going forward. Compared, not `updated_at`, to prove "the invoice was
+    // never touched" at auto-clear time.
+    invoiceMoneyFingerprintAtOpen: (alreadyOpen && typeof existingContext?.invoiceMoneyFingerprintAtOpen === 'string')
+      ? existingContext.invoiceMoneyFingerprintAtOpen
+      : invoiceMoneyFingerprint(invoice),
   };
-  const [opened] = await trx('invoices')
+  await trx('invoices')
     .where({ id: invoice.id })
-    .whereNull('billing_review_opened_at')
     .update({
-      billing_review_opened_at: new Date(),
-      billing_review_reason: 'sibling_date_diverged',
+      billing_review_opened_at: invoice.billing_review_opened_at || new Date(),
+      billing_review_reason: invoice.billing_review_reason || 'sibling_date_diverged',
       billing_review_context: JSON.stringify(context),
-    })
-    .returning('id');
+    });
   await raiseBillingReviewAlert(trx, invoice, moved, diverging);
-  return { action: 'review_opened', invoiceId: invoice.id, opened: !!opened };
+  return { action: 'review_opened', invoiceId: invoice.id, opened: !alreadyOpen };
 }
 
-// The trivial auto-clear (owner ruling): the diverging members are back on
-// the invoice-holding row's date AND the invoice's own money (total,
-// subtotal, discount_amount, status, line items) has not changed since the
-// review opened. Anything else — dates realigned but the invoice WAS
-// edited, or dates still diverging — requires the office's own manual
+// Resolves the standing admin bell this review's own open raised
+// (raiseBillingReviewAlert's dedupeKey) — mirrors the manual clear route
+// (admin-invoices.js) so an auto-cleared review's bell doesn't sit unread
+// forever once there is nothing left to review. Best-effort: a failure
+// here must never block the actual hold release.
+async function resolveBillingReviewAlert(trx, invoiceId) {
+  try {
+    await trx('notifications')
+      .where({ recipient_type: 'admin', category: 'billing' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`first_application_billing_review:${invoiceId}`])
+      .whereNull('read_at')
+      .update({ read_at: new Date() });
+  } catch (e) {
+    logger.warn(`[first-application-sibling-split] billing-review bell resolve failed for invoice ${invoiceId} (non-blocking): ${e.message}`);
+  }
+}
+
+// The trivial auto-clear (owner ruling): EVERY sibling this review recorded
+// as diverging at open time (billing_review_context.divergingSiblingIds) is
+// now back on the invoice-holding row's date, AND the invoice's own money
+// (total, subtotal, discount_amount, status, line items) has not changed
+// since the review opened. Anything else requires the office's own manual
 // clear.
-async function maybeAutoClearBillingReview(trx, invoice, moved) {
+//
+// Deliberately checks the RECORDED sibling ids against the invoice-holder's
+// CURRENT date directly — never divergingUnpricedSiblings's current
+// (empty) output (Claude fallback-auditor P0, this branch's own second
+// push): that filter also drops a sibling the office manually priced BY
+// HAND without moving its date back, or one that simply completed on its
+// still-diverged date. Either would make divergingUnpricedSiblings return
+// empty while the invoice-holder's invoice still carries the FULL combined
+// total — auto-clearing on that alone would resume automatic collection on
+// a still-double-billing invoice, exactly the gap this module exists to
+// hold. Only "genuinely back on the same date" clears automatically;
+// anything else (priced by hand, completed, still diverged) requires the
+// office's own manual clear via POST /admin/invoices/:id/billing-review/clear.
+async function maybeAutoClearBillingReview(trx, invoice, invoiceRow, members, moved) {
   if (!invoice.billing_review_opened_at) {
     return { action: 'skipped', reason: 'no_diverging_unpriced_sibling', invoiceId: invoice.id };
   }
   let context = invoice.billing_review_context;
   if (typeof context === 'string') {
     try { context = JSON.parse(context); } catch { context = null; }
+  }
+  const recordedSiblingIds = Array.isArray(context?.divergingSiblingIds) ? context.divergingSiblingIds : null;
+  // No usable record of who diverged (an old/foreign row, or unreadable
+  // context) — fail closed, same posture as every other unreadable-state
+  // branch in this module: require the manual clear rather than guess.
+  if (!recordedSiblingIds) {
+    return { action: 'skipped', reason: 'review_open_requires_manual_clear', invoiceId: invoice.id };
+  }
+  const invoiceDate = dateOnly(invoiceRow.scheduled_date);
+  const stillDiverged = recordedSiblingIds.some((id) => {
+    const member = members.find((m) => String(m.id) === String(id));
+    // A recorded sibling that no longer exists in this locked group (e.g.
+    // moved to a different estimate) can't be proven realigned — fail closed.
+    return !member || dateOnly(member.scheduled_date) !== invoiceDate;
+  });
+  if (stillDiverged) {
+    return { action: 'skipped', reason: 'review_open_requires_manual_clear', invoiceId: invoice.id };
   }
   const snapshot = context?.invoiceMoneyFingerprintAtOpen;
   const untouched = typeof snapshot === 'string' && snapshot === invoiceMoneyFingerprint(invoice);
@@ -230,6 +292,7 @@ async function maybeAutoClearBillingReview(trx, invoice, moved) {
     .update({ billing_review_opened_at: null, billing_review_reason: null, billing_review_context: null })
     .returning('id');
   if (cleared) {
+    await resolveBillingReviewAlert(trx, invoice.id);
     logger.info(`[first-application-sibling-split] estimate ${moved.source_estimate_id}: invoice ${invoice.id}'s billing review auto-cleared — the diverging visit(s) landed back on the invoice's date and the invoice was never touched`);
   }
   return { action: cleared ? 'review_auto_cleared' : 'skipped', invoiceId: invoice.id };
@@ -268,7 +331,7 @@ async function flagFirstApplicationInvoiceReviewOnDateChange(trx, scheduledServi
   if (diverging.length) {
     return openBillingReview(trx, invoice, moved, diverging);
   }
-  return maybeAutoClearBillingReview(trx, invoice, moved);
+  return maybeAutoClearBillingReview(trx, invoice, invoiceRow, members, moved);
 }
 
 /**

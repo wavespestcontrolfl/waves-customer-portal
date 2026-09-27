@@ -191,6 +191,69 @@ suite('first-application-sibling-split — same-trip billing review on date chan
     expect(() => assertInvoiceCollectible(invoice)).not.toThrow();
   }));
 
+  test('a sibling priced by hand WITHOUT its date moving back must NOT auto-clear — dates, not price/completion, decide the auto-clear', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+    expect((await readState(trx, ids)).invoice.billing_review_opened_at).toBeTruthy();
+
+    // The office prices the sibling by hand (one documented manual-
+    // resolution path) but never moves its date back AND never touches the
+    // invoice-holder's invoice — that invoice still carries the FULL
+    // combined total, so this sibling's own new price would double-bill
+    // once combined with the still-uncollapsed shared invoice. A date-
+    // changing write on some OTHER member of the group (simulated here by
+    // calling the entry point directly on the now-priced sibling) must
+    // still see this as unresolved, not auto-clear.
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ estimated_price: 56.40 });
+    const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('skipped');
+    expect(result.reason).toBe('review_open_requires_manual_clear');
+    expect((await readState(trx, ids)).invoice.billing_review_opened_at).toBeTruthy();
+  }));
+
+  test('a diverging sibling that simply completes on its still-diverged date must NOT auto-clear', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ completed_at: new Date() });
+    const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('skipped');
+    expect(result.reason).toBe('review_open_requires_manual_clear');
+    expect((await readState(trx, ids)).invoice.billing_review_opened_at).toBeTruthy();
+  }));
+
+  test('a later, DIFFERENT divergence on the same invoice never drops the first sibling from the record', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    // A third member of the same estimate-accept group, also unpriced.
+    const thirdId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: thirdId, customer_id: ids.customerId, source_estimate_id: ids.estimateId, scheduled_date: SAME_DATE,
+      service_type: 'Tree & Shrub', status: 'confirmed', is_recurring: true, estimated_price: null,
+    });
+
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+    let context = (await readState(trx, ids)).invoice.billing_review_context;
+    expect(context.divergingSiblingIds).toEqual([ids.lawnId]);
+
+    // The lawn sibling realigns, but the THIRD member now diverges instead
+    // — the record must carry BOTH, not just the latest one.
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: SAME_DATE });
+    await trx('scheduled_services').where({ id: thirdId }).update({ scheduled_date: '2026-10-03' });
+    const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, thirdId);
+    expect(result.action).toBe('review_opened');
+
+    context = (await readState(trx, ids)).invoice.billing_review_context;
+    expect(new Set(context.divergingSiblingIds)).toEqual(new Set([ids.lawnId, thirdId]));
+
+    // Only once BOTH are back does it clear.
+    await trx('scheduled_services').where({ id: thirdId }).update({ scheduled_date: SAME_DATE });
+    const cleared = await flagFirstApplicationInvoiceReviewOnDateChange(trx, thirdId);
+    expect(cleared.action).toBe('review_auto_cleared');
+  }));
+
   test('a move back to the same date auto-clears the review when the invoice was never touched', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
@@ -204,6 +267,22 @@ suite('first-application-sibling-split — same-trip billing review on date chan
     const state = await readState(trx, ids);
     expect(state.invoice.billing_review_opened_at).toBeNull();
     expect(state.invoice.billing_review_reason).toBeNull();
+  }));
+
+  test('auto-clear also resolves the standing admin bell — it never sits unread once there is nothing left to review', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+    const bellDedupeKey = `first_application_billing_review:${ids.invoiceId}`;
+    const bellBefore = await trx('notifications').where({ recipient_type: 'admin', category: 'billing' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [bellDedupeKey]).first();
+    expect(bellBefore.read_at).toBeNull();
+
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: SAME_DATE });
+    await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+
+    const bellAfter = await trx('notifications').where({ id: bellBefore.id }).first();
+    expect(bellAfter.read_at).toBeTruthy();
   }));
 
   test('a benign metadata edit (notes + updated_at, no money change) never blocks the auto-clear — the fingerprint is money-only, not updated_at', () => rollbackTest(async (trx) => {
