@@ -140,23 +140,27 @@ const COURTESY_CONDITIONS = [
   'if that s all right', 'if you don t mind', 'if it s okay', 'if it s ok', 'if you need anything', 'if you have any questions',
   'if you need to', 'if anything changes', 'if there s any issues', 'if there are any issues', 'if you have any issues',
 ];
-// A hedge, or a condition on the slot from either side ("if my husband
-// agrees, Thursday at two", "only if it doesn't rain").
-function hasHedgeMarker(ns) {
+// A condition that is not a courtesy ("if my husband agrees", "only if it
+// doesn't rain").
+function hasCondition(ns) {
   let p = padded(ns);
-  if (HEDGE_MARKERS.some((m) => p.includes(m))) return true;
   for (const phrase of COURTESY_CONDITIONS) p = p.split(padded(phrase)).join(' ');
   return CONDITION_WORDS.some((w) => p.includes(padded(w)));
+}
+// A hedge, or a condition on the slot from either side.
+function hasHedgeMarker(ns) {
+  const p = padded(ns);
+  return HEDGE_MARKERS.some((m) => p.includes(m)) || hasCondition(ns);
 }
 function hasAnyMarker(ns, markers) {
   const p = padded(ns);
   return markers.some((m) => p.includes(padded(m)));
 }
 // Does the agent's turn commit to the slot: a sentence with a commitment and
-// no condition on it ("We'll see you then. If you need anything, call us"
-// commits; "We'll see you then if a slot opens up" does not)?
+// no condition on it ("We'll see you then, and if you need anything, call
+// us" commits; "We'll see you then if a slot opens up" does not)?
 function commitsToSlot(turn) {
-  return sentenceSpans(turn.raw).some((sentence) => hasAnyMarker(sentence.ns, COMMITMENT_MARKERS) && !hasAnyMarker(sentence.ns, CONDITION_WORDS));
+  return sentenceSpans(turn.raw).some((sentence) => hasAnyMarker(sentence.ns, COMMITMENT_MARKERS) && !hasCondition(sentence.ns));
 }
 function hasRefusalMarker(ns) {
   const p = padded(ns);
@@ -182,8 +186,14 @@ function withoutCourtesy(toks) {
   }
   return p.split(' ').filter(Boolean);
 }
+// A comparative turns a time down like a negation ("That is too late").
+const COMPARATIVE_REFUSALS = [' too late ', ' too early ', ' too soon '];
+function withoutComparatives(ns) {
+  return COMPARATIVE_REFUSALS.reduce((p, c) => p.split(c).join(' '), padded(ns)).trim();
+}
 function hasNegation(ns) {
-  return withoutCourtesy(ns.split(' ')).some((tok) => NEGATING_WORDS.has(tok) || NO_WORDS.has(tok));
+  const toks = withoutCourtesy(ns.split(' '));
+  return toks.some((tok) => NEGATING_WORDS.has(tok) || NO_WORDS.has(tok)) || COMPARATIVE_REFUSALS.some((c) => padded(toks.join(' ')).includes(c));
 }
 // Is a slot word ({ pos, end }, turn-level) negated in its clause: by any
 // negation after the clause's last slot word, `slotEnd` ("Thursday at two
@@ -209,10 +219,11 @@ function isClosingQuestion(ns) {
 }
 
 // Day references right before the last one, with nothing between but these,
-// describe the same day ("October 8, Thursday", "Thursday the 8th") or offer
-// alternatives ("Monday or Thursday").
+// describe the same day ("October 8, Thursday", "Thursday the 8th"), offer
+// alternatives ("Monday or Thursday") or span a range ("Monday through
+// Thursday", "October 1 to October 8") — neither of which settles a day.
 const SAME_DAY_FILLER = new Set(['the', 'on']);
-const ALTERNATIVE_JOINERS = new Set(['or', 'and']);
+const ALTERNATIVE_JOINERS = new Set(['or', 'and', 'through', 'thru', 'till', 'until', 'to']);
 
 // Does the call's last day reference name the slot's date? It is read with
 // the references chained right before it: a weekday beside a date only
@@ -223,8 +234,11 @@ function lastDayNamesSlot(dayRefs, turns, slotDate) {
   const chain = [dayRefs[dayRefs.length - 1]];
   let alternatives = false;
   for (let k = dayRefs.length - 2; k >= 0 && dayRefs[k].turnIdx === chain[0].turnIdx; k -= 1) {
-    const between = turns[chain[0].turnIdx].ns.split(' ').slice(dayRefs[k].end, chain[0].pos);
+    const toks = turns[chain[0].turnIdx].ns.split(' ');
+    const between = toks.slice(dayRefs[k].end, chain[0].pos);
     if (!between.every((t) => SAME_DAY_FILLER.has(t) || ALTERNATIVE_JOINERS.has(t))) break;
+    // "From Friday to Thursday" moves the visit; it is not a range.
+    if (between.includes('to') && toks[dayRefs[k].pos - 1] === 'from') break;
     alternatives = alternatives || between.some((t) => ALTERNATIVE_JOINERS.has(t));
     chain.unshift(dayRefs[k]);
   }
@@ -298,24 +312,28 @@ function callerRepliesToSlot(turns, refs, slot, runStart, anchorIdx) {
   const talksAboutTime = (idx) => mentionsIn(idx).length > 0 || talksOtherTime(turns[idx].ns, slot.hour24);
   const onlySlot = (idx) => mentionsIn(idx).length > 0 && mentionsIn(idx).every((m) => namesSlot(m, slot))
     && !talksOtherTime(textBesideMentions(turns[idx], idx, refs), slot.hour24);
-  const replies = !turns[runStart].agent && runStart < anchorIdx
-    ? [textBesideMentions(turns[runStart], runStart, refs).replace(/^(?:no|nope|nah)\b/, '')] : [];
+  // Read beside the slot's mentions; a comparative in a turn that also names
+  // another time is about that time ("My 9 AM is too early; can we do two?").
+  const read = (idx) => {
+    const text = textBesideMentions(turns[idx], idx, refs);
+    return mentionsIn(idx).some((m) => !namesSlot(m, slot)) ? withoutComparatives(text) : text;
+  };
+  const replies = !turns[runStart].agent && runStart < anchorIdx ? [read(runStart).replace(/^(?:no|nope|nah)\b/, '')] : [];
   for (let idx = runStart + 1; idx <= anchorIdx; idx += 1) {
     let prev = idx - 1;
     while (prev >= 0 && !talksAboutTime(prev)) prev -= 1;
     if (turns[idx].agent || prev < 0 || !onlySlot(prev)) continue;
     const counters = mentionsIn(idx).length > 0 && !mentionsIn(idx).some((m) => namesSlot(m, slot));
-    replies.push(counters ? turns[idx].ns : textBesideMentions(turns[idx], idx, refs));
+    replies.push(counters ? turns[idx].ns : read(idx));
   }
   return replies;
 }
 
-// After the agent's commitment the caller only closes the call: a caller
-// question other than a closing one ("can we do three?") is still on the
+// After the agent's commitment the caller only closes the call: any caller
+// question ("can we do three?", "anything else available?") is still on the
 // slot.
 function callerReopensSlot(turns, affirmIdx) {
-  return turns.slice(affirmIdx + 1).some((t) => !t.agent
-    && sentenceSpans(t.raw).some((sentence) => sentence.question && !isClosingQuestion(sentence.ns)));
+  return turns.slice(affirmIdx + 1).some((t) => !t.agent && sentenceSpans(t.raw).some((sentence) => sentence.question));
 }
 
 // Words that start a new clause: "Friday doesn't work, BUT we'll see you

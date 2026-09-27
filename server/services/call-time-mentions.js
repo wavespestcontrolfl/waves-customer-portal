@@ -39,16 +39,19 @@ function joinMeridiem(s) {
     .replace(/\b([ap])\.\s?m\b\.?/gi, '$1m')
     .replace(/(\d)([ap]m)\b/gi, '$1 $2');
 }
-// A date written as numbers ("12/24", "12/24/26") reads as its month and day
-// ("december 24"), so it is a mention like any other. The year is dropped: a
-// month and day already stands for this year's and next year's date. A stray
-// match ("1/2 hour") can only add a mention, which only ever adds review.
+// A date written as numbers ("12/24", "12/24/27") reads as its month and day
+// ("december 24", "december 24 2027"), so it is a mention like any other; a
+// stated year is kept, so the mention names that year only. A fraction of a
+// unit ("1/2 hour") is a length, not a date.
 function spellNumericDates(s) {
-  return s.replace(/\b(\d{1,2})\/(\d{1,2})(?:\/\d{2,4})?\b/g, (whole, mo, d) => {
-    const month = Number(mo);
-    const day = Number(d);
-    return month >= 1 && month <= 12 && day >= 1 && day <= 31 ? `${MONTH_NAMES[month - 1]} ${day}` : whole;
-  });
+  return s.replace(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2}|\d{4}))?\b(?!\s*(?:hours?|hrs?|minutes?|mins?|miles?|inch(?:es)?|cups?|gallons?|ounces?|oz|pounds?|lbs?|acres?)\b)/gi,
+    (whole, mo, d, yr) => {
+      const month = Number(mo);
+      const day = Number(d);
+      if (month < 1 || month > 12 || day < 1 || day > 31) return whole;
+      const year = yr && yr.length === 2 ? `20${yr}` : yr;
+      return `${MONTH_NAMES[month - 1]} ${day}${year ? ` ${year}` : ''}`;
+    });
 }
 function normalize(s) {
   return spellNumericDates(joinMeridiem(s)).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -143,8 +146,13 @@ function parseDayMentions(turnText, started) {
   for (let i = 0; i < toks.length; i += 1) {
     const hit = DAY_FORMS.map((form) => form(toks, i, started)).find(Boolean);
     if (!hit) continue;
-    mentions.push({ candidates: new Set(hit.dates), kind: hit.kind, pos: i, end: i + hit.len, ...(hit.weekday != null ? { weekday: hit.weekday } : {}) });
-    i += hit.len - 1;
+    // A stated year after a month and day ("December 24th, 2027") names that
+    // year's date only.
+    const year = hit.kind === 'month_day' && /^20\d{2}$/.test(toks[i + hit.len] || '') ? toks[i + hit.len] : null;
+    const dates = year ? [`${year}${hit.dates[0].slice(4)}`] : hit.dates;
+    const end = i + hit.len + (year ? 1 : 0);
+    mentions.push({ candidates: new Set(dates), kind: hit.kind, pos: i, end, ...(hit.weekday != null ? { weekday: hit.weekday } : {}) });
+    i = end - 1;
   }
   return mentions;
 }
@@ -161,6 +169,9 @@ const DAY_PART_PERIODS = { morning: 'am', afternoon: 'pm', evening: 'pm', tonigh
 const MINUTE_WORDS = new Set(['fifteen', 'twenty', 'thirty', 'forty', 'fifty']);
 // Words right before a number that make it a clock time: "at two".
 const HOUR_LEADS = new Set(['at', 'around', 'about']);
+// Words right before an hour that make it a bound, not the hour: "before
+// noon", "by two", "after 2 pm", "until two".
+const RELATIVE_HOUR_LEADS = new Set(['before', 'by', 'after', 'until', 'till', 'til']);
 // "Two o'clock" normalizes to "two o clock" or "two oclock".
 const OCLOCK = new Set(['o', 'oclock']);
 // A number running into a unit of time is a length, not a clock time.
@@ -173,7 +184,7 @@ const CLOCK_TAIL = new Set(['am', 'pm', 'o', 'clock', 'oclock', '00']);
 // weekday, a month ("may" is also a verb), today, tomorrow.
 const TIME_WORDS = new Set([
   'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
-  'noon', 'midnight', 'am', 'pm', 'morning', 'afternoon', 'evening', 'today', 'tomorrow', ...WEEKDAY_NAMES,
+  'noon', 'midnight', 'morning', 'afternoon', 'evening', 'today', 'tomorrow', ...WEEKDAY_NAMES,
   ...MONTH_NAMES.filter((m) => m !== 'may'),
 ]);
 // Between two hours offered as alternatives ("at two or at four", "2 pm or 3").
@@ -288,14 +299,17 @@ function extractHourMentions(turnText) {
     const sentencePeriod = dayParts.size === 1 ? [...dayParts][0] : null;
     let rangeEnd = -1;
     for (let i = 0; i < toks.length; i += 1) {
-      // "Half past two", "quarter past noon": a fraction lead-in is off the hour.
-      const fraction = ['past', 'after', 'to'].includes(toks[i - 1]) && ['half', 'quarter'].includes(toks[i - 2]);
-      if (Object.hasOwn(NAMED_HOURS, toks[i])) mentions.push({ hour24: NAMED_HOURS[toks[i]], offHour: fraction, pos: offset + i, end: offset + i + 1 });
+      // "Half past two", "quarter past noon": a fraction lead-in is off the
+      // hour; "before noon", "by two", "after 2 pm", "until two" name no exact
+      // hour. Either way the mention never grounds an on-the-hour slot.
+      const inexact = (['past', 'after', 'to'].includes(toks[i - 1]) && ['half', 'quarter'].includes(toks[i - 2]))
+        || RELATIVE_HOUR_LEADS.has(toks[i - 1]);
+      if (Object.hasOwn(NAMED_HOURS, toks[i])) mentions.push({ hour24: NAMED_HOURS[toks[i]], offHour: inexact, pos: offset + i, end: offset + i + 1 });
       const n = hourNumber(toks[i]);
       if (n == null || i === rangeEnd) continue;
       const after = i + 1 + minuteTokensAfter(toks, i);
       rangeEnd = rangeEndAfter(toks, i, after);
-      const offHour = after > i + 1 || fraction;
+      const offHour = after > i + 1 || inexact;
       const period = periodAfter(toks, after) || sentencePeriod;
       const marked = offHour || rangeEnd > 0 || period || OCLOCK.has(toks[after]) || HOUR_LEADS.has(toks[i - 1]) || toks[i + 1] === 'ish';
       if (!marked || runsIntoDuration(toks, after)) continue;

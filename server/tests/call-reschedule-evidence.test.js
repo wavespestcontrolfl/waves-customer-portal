@@ -296,7 +296,10 @@ describe('rescheduleAgreementEvidence', () => {
     // Conservative by design: the caller repeating the slot after the
     // commitment makes it the last mention, with no commitment after it.
     expect(evidence(`${agreed}\nCaller: Thanks, Thursday at two is perfect.`).ok).toBe(false);
-    expect(evidence(`${agreed} Anything else?\nCaller: Is there anything else I need to do before then?`).ok).toBe(true);
+    // Any caller question after the commitment keeps the slot open, even one
+    // shaped like a closer ("Anything else available?").
+    expect(evidence(`${agreed} Anything else?\nCaller: Anything else available?`).ok).toBe(false);
+    expect(evidence(`${agreed} Anything else?\nCaller: Is there anything else I need to do before then?`).ok).toBe(false);
   });
 
   test('a range takes its am/pm from its end, and an am/pm on its start keeps it one range', () => {
@@ -345,6 +348,29 @@ describe('rescheduleAgreementEvidence', () => {
     expect(evidence(['Agent: You want to do Thursday at two?', 'Caller: Thursday at two, yes. I have an appointment at four, but Thursday at two.',
       'Agent: Yep, and we will be better about texting.', 'Caller: I understand, with the rain you might cancel.', 'Agent: That is on us.',
       'Caller: Yeah, okay.', 'Agent: All right, I will see you Thursday at two.'].join('\n')).ok).toBe(true);
+  });
+
+  // Codex #5071 round 2.
+  test('a comparative reply, a bound instead of an hour, or a range of days settles nothing', () => {
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: That is too late.\nAgent: We will see you Thursday at two.').ok).toBe(false);
+    for (const bound of ['before noon', 'by noon', 'after noon', 'until noon']) {
+      expect(evidence(`Caller: Can we move it?\nAgent: We will see you Thursday ${bound}.`, '2026-09-24T12:00:00-04:00').ok).toBe(false);
+    }
+    expect(evidence('Caller: Can we move it?\nAgent: We will see you sometime Monday through Thursday at two.').ok).toBe(false);
+    expect(evidence('Caller: Can we move it?\nAgent: We will see you October 1 to October 8 at two.', '2026-10-08T14:00:00-04:00').ok).toBe(false);
+    // A move from one day to another is not a range.
+    expect(evidence('Caller: Can we move it from Friday to Thursday at two?\nAgent: We will see you then.').ok).toBe(true);
+  });
+
+  test('a numeric date keeps its stated year, and a fraction of an hour is not a date', () => {
+    expect(evidence('Caller: Can we do 12/24/2027 at two?\nAgent: We will see you 12/24/2027 at two.', '2026-12-24T14:00:00-05:00').ok).toBe(false);
+    expect(rescheduleAgreementEvidence({ transcript: 'Caller: It takes 1/2 hour, right? Can you move it?\nAgent: We will move you at two.',
+      confirmedStartAt: '2027-01-02T14:00:00-05:00', callStartedAt: '2027-01-01T15:00:00Z' }).ok).toBe(false);
+  });
+
+  test('"I am" is not a time, and a courtesy "if" does not condition the commitment', () => {
+    expect(evidence('Caller: Can we move my visit?\nAgent: We will see you Thursday at two.\nCaller: I am good, thank you.').ok).toBe(true);
+    expect(evidence('Caller: Can we move my visit?\nAgent: We will see you Thursday at two, and if you need anything, call us.').ok).toBe(true);
   });
 
   test('an unlabeled transcript line fails closed rather than trusting turn order', () => {

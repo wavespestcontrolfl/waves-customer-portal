@@ -11,8 +11,10 @@ describe('parseDayMentions', () => {
       .toEqual([['2026-10-02', '2027-10-02'], ['2026-09-27'], ['2026-09-28'], ['2026-09-26']]);
   });
 
-  test('a date written as numbers is a month and day', () => {
-    expect(datesIn('Can we do 12/24 or 1/5/27?')).toEqual([['2026-12-24', '2027-12-24'], ['2026-01-05', '2027-01-05']]);
+  test('a date written as numbers is a month and day, of its stated year only; a fraction of a unit is not a date', () => {
+    expect(datesIn('Can we do 12/24 or 1/5/27?')).toEqual([['2026-12-24', '2027-12-24'], ['2027-01-05']]);
+    expect(datesIn('December 24th, 2027 works.')).toEqual([['2027-12-24']]);
+    expect(datesIn('It takes 1/2 hour.')).toEqual([]);
   });
 
   test('an abbreviated month with a day is a month and day; a word that only starts like one is not', () => {
