@@ -163,6 +163,9 @@ describe('generate-report provider fallback', () => {
     'Use 24-68-to at the side gate.',
     'Opened side gate with 2468ml.',
     'Use 2468ft to open the gate.',
+    'Applied Lesco and opened rear gate with 24-0-11.',
+    'Applied Lesco, then opened rear gate with 24-0-11.',
+    'Broadcast granular before unlocking rear gate with 24-0-11.',
   ])('retries a shaped response carrying a disguised access credential: %s', async (instruction) => {
     const unsafe = {
       ok: true,
@@ -176,6 +179,21 @@ describe('generate-report provider fallback', () => {
 
     expect(result).toMatchObject({ ok: true, provider: 'openai', report: cleanReport });
     expect(openai.call).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([
+    'Applied Lesco 24-0-11 near the rear gate.',
+    'Broadcast granular 24-0-11 near the rear gate.',
+  ])('accepts a shaped response with a qualified fertilizer analysis: %s', async (action) => {
+    const qualifiedReport = `WHAT WE DID\n\n${action}\n\nWHAT WE FOUND\n\nActivity was low.`;
+    const openai = provider('openai', [{ ok: true, text: qualifiedReport }]);
+
+    const result = await generateReportCopyWithFallback({
+      systemPrompt: 'system', userMessage: 'visit', providers: [openai, provider('anthropic', [])],
+    });
+
+    expect(result).toMatchObject({ ok: true, provider: 'openai', report: qualifiedReport });
+    expect(openai.call).toHaveBeenCalledTimes(1);
   });
 
   test('fails cleanly only after both providers are unavailable', async () => {
@@ -252,12 +270,21 @@ describe('deterministic report fallback', () => {
         'Rear gate A2B-XY-24-0-11-ZZ fertilizer',
         'Rear gate ab 24-0-11 fertilizer',
         'Rear gate 24-0-11-AB fertilizer',
+        'Applied Lesco and opened rear gate with 24-0-11',
+        'Applied Lesco, then opened rear gate with 24-0-11',
+        'Broadcast granular before unlocking rear gate with 24-0-11',
         'Applied 24-0-11 near the rear gate',
+        'Applied Lesco 24-0-11 near the rear gate',
+        'Broadcast granular 24-0-11 near the rear gate',
       ],
     });
 
     expect(report).toContain('Swept exterior cobwebs');
     expect(report).toContain('Applied 24-0-11 near the rear gate');
+    expect(report).toContain('Applied Lesco 24-0-11 near the rear gate');
+    expect(report).toContain('Broadcast granular 24-0-11 near the rear gate');
+    expect(report).not.toContain('opened rear gate with 24-0-11');
+    expect(report).not.toContain('unlocking rear gate with 24-0-11');
     expect(report).not.toMatch(/4417|2468|\[redacted\]|gate code/i);
     expect(reportCopyRejection(report)).toBeNull();
   });
@@ -603,6 +630,11 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('Inspected the rear gate 120–150 feet from the lanai.')).toBeNull();
     expect(reportCopyRejection('Opened rear gate, applied 24-68ml around hinges.')).toBeNull();
     expect(reportCopyRejection('Applied 24-0-11 near the rear gate.')).toBeNull();
+    expect(reportCopyRejection('Applied Lesco 24-0-11 near the rear gate.')).toBeNull();
+    expect(reportCopyRejection('Broadcast granular 24-0-11 near the rear gate.')).toBeNull();
+    expect(reportCopyRejection('Applied Lesco and opened rear gate with 24-0-11.')).toBe('access_code');
+    expect(reportCopyRejection('Applied Lesco, then opened rear gate with 24-0-11.')).toBe('access_code');
+    expect(reportCopyRejection('Broadcast granular before unlocking rear gate with 24-0-11.')).toBe('access_code');
     expect(reportCopyRejection('Near the rear gate, 24-0-11 fertilizer was applied.')).toBeNull();
     expect(reportCopyRejection('The gate code is 24-0-11 fertilizer.')).toBe('access_code');
     // alphabetic / quoted credentials after a code noun reject too (r34)

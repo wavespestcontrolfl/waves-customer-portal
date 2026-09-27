@@ -111,6 +111,9 @@ describe('custom action credential screening', () => {
     'Rear gate A2B-XY-24-0-11-ZZ fertilizer',
     'Rear gate ab 24-0-11 fertilizer',
     'Rear gate 24-0-11-AB fertilizer',
+    'Applied Lesco and opened rear gate with 24-0-11',
+    'Applied Lesco, then opened rear gate with 24-0-11',
+    'Broadcast granular before unlocking rear gate with 24-0-11',
   ])('rejects recorded access credentials: %s', (action) => {
     expect(customerCopyViolations(action)).toContain('access_code');
   });
@@ -140,6 +143,9 @@ describe('custom action credential screening', () => {
     '24-0-11 fertilizer was applied near the rear gate',
     'Opened rear gate, applied 24-0-11 fertilizer',
     'Applied 24-0-11 fertilizer after opening the rear gate',
+    'Applied Lesco 24-0-11 near the rear gate',
+    'Broadcast granular 24-0-11 near the rear gate',
+    'Spread slow-release granular 24-0-11 near the rear gate',
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
   });
@@ -169,6 +175,15 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     expect(parsed.whatWeDid).toMatch(/^A full exterior perimeter application/);
     expect(parsed.whatWeFound).toMatch(/^Ant activity was concentrated/);
     expect(parsed.body).toBe(AI_BODY);
+    expect(parsed.violations).toEqual([]);
+  });
+
+  test.each([
+    'Applied Lesco 24-0-11 near the rear gate',
+    'Broadcast granular 24-0-11 near the rear gate',
+  ])('publishes a qualified fertilizer analysis in reviewed report copy: %s', (action) => {
+    const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${action}.\nWHAT WE FOUND\nLight activity near the lanai.`);
+    expect(parsed.body).toContain(action);
     expect(parsed.violations).toEqual([]);
   });
 

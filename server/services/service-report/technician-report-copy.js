@@ -231,8 +231,14 @@ const REPORT_FERTILIZER_ANALYSIS_RE = /\b\d{1,2}(?:\.\d+)?\s*[-–—]\s*\d{1,2}
 const REPORT_FERTILIZER_NOUN = String.raw`(?:fertili[sz]er|plant\s+food|nutrient(?:\s+blend)?|n\s*[-–—]\s*p\s*[-–—]\s*k|npk|analysis)`;
 const REPORT_FERTILIZER_NOUN_BEFORE_RE = new RegExp(String.raw`\b${REPORT_FERTILIZER_NOUN}\b\s*(?::|=)?\s*$`, 'i');
 const REPORT_FERTILIZER_NOUN_AFTER_RE = new RegExp(String.raw`^\s*(?:${REPORT_FERTILIZER_NOUN})\b`, 'i');
+// Product names and formulation descriptors may sit between an application
+// verb and the N-P-K analysis ("Applied Lesco 24-0-11", "Broadcast granular
+// 24-0-11"). Admit a small, word-shaped qualifier span while refusing access
+// verbs, device nouns, credential linkers, and clause transitions. That keeps
+// "Applied product, then opened the gate with 24-0-11" on the credential path.
+const REPORT_APPLICATION_QUALIFIER_WORD = String.raw`(?!(?:and|then|before|after|with|using|used|via|to|for|at|on|into|near|by|open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?|gate|door|garage|entry|keypad|lockbox|lock|alarm|code|pin|combo|combination|passcode|password|passphrase)\b)[a-z][a-z0-9&+'’./-]*`;
 const REPORT_APPLICATION_BEFORE_RE = new RegExp(
-  String.raw`\b(?:appl(?:y|ied|ying|ication(?:\s+of)?)|broadcast(?:ed|ing)?|spread(?:ing)?|distribut(?:e|ed|ing))\b\s+(?:(?:an?|the)\s+)?(?:${REPORT_FERTILIZER_NOUN}\s+)?$`,
+  String.raw`\b(?:appl(?:y|ied|ying|ication(?:\s+of)?)|broadcast(?:ed|ing)?|spread(?:ing)?|distribut(?:e|ed|ing))\b\s+(?:(?:an?|the)\s+)?(?:${REPORT_APPLICATION_QUALIFIER_WORD}\s+){0,4}(?:${REPORT_FERTILIZER_NOUN}\s+)?$`,
   'i',
 );
 const REPORT_APPLICATION_AFTER_RE = /^\s*(?:was\s+|were\s+)?(?:applied|broadcast|spread|distributed)\b/i;
