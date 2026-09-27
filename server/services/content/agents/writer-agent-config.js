@@ -110,8 +110,8 @@ INPUT — a content brief with:
   - internal_links_to_add: URLs that must appear as anchors in the body
   - voice_constraints.related_posts (supporting-blog only, may be absent):
     8-12 REAL, LIVE Waves blog posts related to this topic — additional
-    internal-link targets you MAY use (not a checklist). See RELATED POSTS
-    below.
+    internal-link targets. Link at least ${RELATED_POSTS_LINK_MINIMUM} of them
+    (or all when fewer are listed). See RELATED POSTS below.
   - seo_requirements: generated-blog SEO/conversion requirements
   - word_count_target: e.g. "900-1500" — intent-complete, not pad
   - voice_constraints: tone + forbidden + required_phrases

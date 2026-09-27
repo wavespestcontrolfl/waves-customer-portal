@@ -1976,7 +1976,8 @@ function blankWhitespaceEntities(text) {
         try { rendered = String.fromCodePoint(codePoint); } catch { /* keep the reference */ }
       }
     }
-    return rendered && [...rendered].every((char) => /[\s\p{Cf}]/u.test(char)) ? ' ' : reference;
+    if (!rendered) return reference;
+    return named && ![...rendered].every((char) => /[\s\p{Cf}]/u.test(char)) ? reference : rendered;
   });
 }
 // An ARRAY whose slots are all non-rendering (or elided) renders nothing
@@ -1999,7 +2000,10 @@ function blankNonRenderingExpressions(text) {
 function visibleRenderedInlineText(text) {
   const hiddenBlanked = blankDefinitelyHiddenContent(String(text || ''));
   const rendered = blankWhitespaceEntities(blankExpressions(blankTags(hiddenBlanked)))
-    .replace(/\p{Cf}/gu, ' ')
+    // Marks need a visible base glyph; format/control/separator code points
+    // render no anchor text. Strip the full family after numeric character
+    // references are decoded, including variation selectors such as FE0F.
+    .replace(/[\p{M}\p{C}\p{Zl}\p{Zp}]/gu, ' ')
     .replace(/[*_~`]+/g, ' ')
     .trim();
   return /[\p{L}\p{N}\p{P}\p{S}]/u.test(rendered) ? rendered : '';
@@ -3489,6 +3493,46 @@ const SAFE_MDX_COMPONENTS = Object.freeze([
 ]);
 
 const SAFE_MDX_COMPONENT_SET = new Set(SAFE_MDX_COMPONENTS);
+const SLOTLESS_MDX_COMPONENT_NAMES = new Map(
+  SAFE_MDX_COMPONENTS.filter((name) => name !== 'AffiliateLink')
+    .map((name) => [name.toLowerCase(), name])
+);
+
+// Every safe component except AffiliateLink renders from props and exposes no
+// slot. Markdown placed between an opening and closing tag is therefore not
+// reader-visible. Blank those child ranges before any rendered-link scan.
+function blankSlotlessComponentChildren(text) {
+  const source = String(text || '');
+  const chars = source.split('');
+  const stacks = new Map();
+  for (const tag of eachTag(source)) {
+    const componentName = SLOTLESS_MDX_COMPONENT_NAMES.get(tag.name);
+    if (!componentName) continue;
+    // MDX component names are case-sensitive. A lowercase custom element is
+    // ordinary rendered HTML and may expose children.
+    const exactPrefix = tag.isClose ? `</${componentName}` : `<${componentName}`;
+    if (!source.startsWith(exactPrefix, tag.start)) continue;
+    if (!tag.isClose && !tag.selfClosing) {
+      const stack = stacks.get(componentName) || [];
+      stack.push(tag.end + 1);
+      stacks.set(componentName, stack);
+      continue;
+    }
+    if (!tag.isClose) continue;
+    const stack = stacks.get(componentName);
+    if (!stack?.length) continue;
+    const start = stack.pop();
+    for (let i = start; i < tag.start; i += 1) if (chars[i] !== '\n') chars[i] = ' ';
+  }
+  // Fail closed for an unclosed prop-only component: none of the remaining
+  // source can be proven to render outside its nonexistent slot.
+  for (const stack of stacks.values()) {
+    for (const start of stack) {
+      for (let i = start; i < chars.length; i += 1) if (chars[i] !== '\n') chars[i] = ' ';
+    }
+  }
+  return chars.join('');
+}
 // A PascalCase JSX opening tag — the shape MDX treats as a component
 // invocation. Member expressions (<ComparisonTable.Row>) are captured WHOLE
 // so an invented subcomponent of a safe root can never slip through — the
@@ -6719,6 +6763,7 @@ module.exports = {
   blankWhitespaceEntities,
   blankNonRenderingExpressions,
   visibleRenderedInlineText,
+  blankSlotlessComponentChildren,
   // quote-aware tag walker + balanced MDX-expression blanker — the ONE tag
   // scanner (astro-publisher's body-image scan masks with these, never a
   // parallel regex).

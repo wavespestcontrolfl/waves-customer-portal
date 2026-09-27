@@ -708,6 +708,44 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
       ).ok).toBe(true);
     });
 
+    test('numeric references for combining and variation marks do not create visible labels', () => {
+      const invisible = 'See [&#xFE0F;](/termite/a/), [&#x301;](/termite/b/), and [&#65039;](/termite/c/).';
+      const result = checkRelatedPostsLinked(
+        { body: invisible },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 0 so far/);
+
+      const visible = 'See [&#65;](/termite/a/), [B](/termite/b/), and [C](/termite/c/).';
+      expect(checkRelatedPostsLinked(
+        { body: visible },
+        { voice_constraints: { related_posts: relatedPosts } }
+      ).ok).toBe(true);
+    });
+
+    test('links inside prop-only component bodies do not count as rendered anchors', () => {
+      const hiddenLinks = '[A](/termite/a/), [B](/termite/b/), and [C](/termite/c/).';
+      for (const component of [
+        'AppPhone', 'BottomLineBox', 'ComparisonTable', 'HomeZoneMap',
+        'HonestRejection', 'InlineCTA', 'PestEvidenceGrid',
+        'SeasonalPressureChart', 'SpiderIdBoard',
+      ]) {
+        const result = checkRelatedPostsLinked(
+          { body: `<${component}>${hiddenLinks}</${component}>` },
+          { voice_constraints: { related_posts: relatedPosts } }
+        );
+        expect(result.ok).toBe(false);
+        expect(result.reason).toMatch(/linked 0 so far/);
+      }
+
+      const visibleSiblings = checkRelatedPostsLinked(
+        { body: `<BottomLineBox>${hiddenLinks}</BottomLineBox> ${hiddenLinks}` },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(visibleSiblings.ok).toBe(true);
+    });
+
     test('absolute related links require a standard credential-free publish origin', () => {
       for (const unsafeDest of [
         'https://www.wavespestcontrol.com:8443/termite/a/',

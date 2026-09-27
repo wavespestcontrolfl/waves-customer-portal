@@ -45,6 +45,7 @@ const {
   parseLinkDestination,
   blankExpressionStringLiterals,
   blankNonRenderedMarkdownWithDepths,
+  blankSlotlessComponentChildren,
   normalizeInternalPath,
   safeFleetUrlPath,
 } = require('./content-guardrails');
@@ -1075,7 +1076,7 @@ function visibleInlineLinkLabel(label) {
 
 function realMarkdownLinkPaths(body, allowedHosts) {
   const { text: rendered } = blankNonRenderedMarkdownWithDepths(body);
-  const scanned = blankExpressionStringLiterals(rendered);
+  const scanned = blankSlotlessComponentChildren(blankExpressionStringLiterals(rendered));
   const paths = new Set();
   for (const span of eachMarkdownLink(scanned)) {
     if (span.kind !== 'inline' || span.isImage) continue;
