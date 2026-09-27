@@ -340,4 +340,7 @@ module.exports = {
   // SiteOne: a return, an unverified UOM or invoice) never reaches the
   // agent, so the replay leaves it out the same way.
   amazonLine, siteOneHold,
+  // The live sender-authentication check (aligned SPF/DKIM for the claimed
+  // domain), so the replay reads only the emails the live lanes accept.
+  authenticated,
 };

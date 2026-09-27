@@ -23,13 +23,16 @@ describe('assertReadOnly', () => {
     await expect(assertReadOnly(db)).resolves.toBeUndefined();
     expect(db.raw).toHaveBeenCalledTimes(1);
     expect(db.raw.mock.calls[0][0]).toMatch(/^UPDATE products_catalog/);
+    // Zero rows by construction, never an id assumed not to exist.
+    expect(db.raw.mock.calls[0][0]).toMatch(/WHERE false$/);
   });
 
   test('the write matches zero rows by construction, so it is a no-op even in the failure branch below', () => {
-    // Documents the safety property directly: the id is a literal
-    // impossible uuid, checked once here as a static guard against someone
-    // loosening the WHERE clause later.
-    expect(assertReadOnly.toString()).toContain("id = '00000000-0000-0000-0000-000000000000'");
+    // Documents the safety property directly: an unconditional false
+    // predicate, never an id assumed not to exist (Codex round 1 on #5080 —
+    // nothing in the schema forbids the nil uuid), checked here as a static
+    // guard against someone loosening the WHERE clause later.
+    expect(assertReadOnly.toString()).toContain("'UPDATE products_catalog SET name = name WHERE false'");
   });
 
   test('a write that succeeds outright (no error at all) fails the self-check loudly', async () => {
@@ -58,20 +61,22 @@ describe('siteOneReplayItems', () => {
       { title: 'DEMAND CS 8OZ', quantity: 1, lineNo: 3, uom: 'EA' },
     ] };
     expect(siteOneReplayItems(email, invoice)).toEqual([
-      { vendor: 'siteone', title: 'TAURUS SC 78OZ', quantity: 2, emailId: 'email-1', lineNo: 1 },
-      { vendor: 'siteone', title: 'DEMAND CS 8OZ', quantity: 1, emailId: 'email-1', lineNo: 3 },
+      { vendor: 'siteone', title: 'TAURUS SC 78OZ', quantity: 2, emailId: 'email-1', lineNo: 1, heldAs: null },
+      { vendor: 'siteone', title: 'DEMAND CS 8OZ', quantity: 1, emailId: 'email-1', lineNo: 3, heldAs: null },
     ]);
   });
 
-  test('leaves out zero-quantity lines and the lines the sweep holds for a person', () => {
+  test('leaves out zero-quantity lines and flags the lines the sweep holds for a person', () => {
     const invoice = { lines: [
       { title: 'NOT SHIPPED', quantity: 0, lineNo: 1, uom: 'EA' },
       { title: 'RETURNED BAIT', quantity: -1, lineNo: 2, uom: 'EA' },
       { title: 'CASE OF 4', quantity: 1, lineNo: 3, uom: 'CS' },
       { title: 'TAURUS SC 78OZ', quantity: 1, lineNo: 4, uom: 'EA' },
     ] };
-    expect(siteOneReplayItems(email, invoice).map((item) => item.title)).toEqual(['TAURUS SC 78OZ']);
-    expect(siteOneReplayItems(email, { ...invoice, problem: 'unverified' })).toEqual([]);
+    expect(siteOneReplayItems(email, invoice).map((item) => [item.title, item.heldAs])).toEqual([
+      ['RETURNED BAIT', 'returned'], ['CASE OF 4', 'unverified'], ['TAURUS SC 78OZ', null],
+    ]);
+    expect(siteOneReplayItems(email, { ...invoice, problem: 'unverified' }).every((item) => item.heldAs)).toBe(true);
   });
 
   test('a pending or unreadable invoice yields nothing', () => {
@@ -98,5 +103,10 @@ describe('amazonReplayItems', () => {
 
   test('an unparsed email yields nothing', () => {
     expect(amazonReplayItems(null)).toEqual([]);
+  });
+
+  test('an itemless Delivered email is one no_items placeholder held for a person, as the live lane records it', () => {
+    expect(amazonReplayItems({ orderNumber: '111-2222222-3333333', items: [] }, { subject: 'Delivered: 2 Lawn & Garden items' }))
+      .toEqual([{ vendor: 'amazon', title: 'Delivered: 2 Lawn & Garden items', quantity: 1, heldAs: 'no_items' }]);
   });
 });

@@ -78,10 +78,10 @@ const SINCE = new Date(arg('since', '2000-01-01T00:00:00Z'));
 
 const server = (relative) => path.join(__dirname, '..', '..', 'server', relative);
 const { classifyItem, AGENT_HANDOFF_STATUSES } = require(server('services/purchase-receipts/receipt-processor'));
-const { parseAmazonDeliveredEmail, parseAmazonShippedEmail, AMAZON_DELIVERY_FROM, AMAZON_SHIPPED_FROM } = require(server('services/purchase-receipts/amazon-delivery-parser'));
+const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require(server('services/purchase-receipts/amazon-delivery-parser'));
 const siteOne = require(server('services/purchase-receipts/siteone-invoices'));
 const { decideForTitle, loadAllowedCategories, loadActiveCatalog, siteOneLineFields } = require(server('services/purchase-receipts/inventory-agent'));
-const { amazonLine, siteOneHold } = require(server('services/purchase-receipts/sweep'));
+const { amazonLine, siteOneHold, authenticated } = require(server('services/purchase-receipts/sweep'));
 const { dispatchWithFallback } = require(server('services/llm/call'));
 // The shared pool dispatchWithFallback's telemetry can write through —
 // required here ONLY so assertReadOnly can prove it's read-only too; every
@@ -95,9 +95,12 @@ const sharedDb = require(server('models/db'));
 async function assertReadOnly(db) {
   let rejected = false;
   try {
-    // products_catalog.name exists in every environment, before or after
-    // this lane's migration, so the check never fails for a missing column.
-    await db.raw("UPDATE products_catalog SET name = name WHERE id = '00000000-0000-0000-0000-000000000000'::uuid");
+    // products_catalog.name exists in every environment, so the check never
+    // fails for a missing column.
+    // WHERE false: zero rows by construction, never by assuming some id is
+    // impossible — Postgres still refuses the statement itself when the
+    // transaction is read-only, which is all this probe needs to see.
+    await db.raw('UPDATE products_catalog SET name = name WHERE false');
   } catch (err) {
     if (!/read-only transaction/i.test(err.message)) {
       throw new Error(`read-only self-check errored, but not with the expected read-only rejection — refusing to run: ${err.message}`);
@@ -123,22 +126,29 @@ function readOnlyConn() {
   });
 }
 
+// Only what the live Amazon lane (sweep.js processReceiptEmail) reads: a
+// Delivered email that passes the same sender authentication. Shipped
+// emails only feed the undelivered-shipment tracker, never stock, so the
+// live agent never sees their items and neither does the replay.
 async function amazonTitles(conn, since) {
   const items = [];
-  // from_address is required: both Amazon parsers check the sender first.
-  const columns = ['id', 'gmail_id', 'from_address', 'subject', 'body_text', 'body_html', 'received_at'];
+  // from_address is required: the parser checks the sender first.
+  const columns = ['id', 'gmail_id', 'from_address', 'subject', 'body_text', 'body_html', 'received_at', 'authentication_results'];
   const delivered = await conn('emails').select(columns)
     .whereRaw('LOWER(from_address) = ?', [AMAZON_DELIVERY_FROM]).whereRaw('subject ILIKE ?', ['Delivered:%']).where('received_at', '>=', since);
-  for (const email of delivered) items.push(...amazonReplayItems(parseAmazonDeliveredEmail(email)));
-  const shipped = await conn('emails').select(columns)
-    .whereRaw('LOWER(from_address) = ?', [AMAZON_SHIPPED_FROM]).whereRaw('subject ILIKE ?', ['Shipped:%']).where('received_at', '>=', since);
-  for (const email of shipped) items.push(...amazonReplayItems(parseAmazonShippedEmail(email)));
+  for (const email of delivered) {
+    const parsed = parseAmazonDeliveredEmail(email);
+    if (!parsed || !authenticated(email)) continue;
+    items.push(...amazonReplayItems(parsed, email));
+  }
   return items;
 }
 
 async function siteOneTitles(conn, since) {
   const items = [];
   for (const email of await siteOne.findSiteOneInvoiceEmails(since, conn)) {
+    // The same gate the live sweep's siteOneInvoiceLines applies.
+    if (!siteOne.isSiteOneInvoiceEmail(email) || !authenticated(email)) continue;
     let invoice;
     try {
       invoice = await siteOne.readSiteOneInvoice(email, Date.now(), conn);
@@ -156,8 +166,12 @@ async function siteOneTitles(conn, since) {
 // order number is held for a person and never reaches the agent, so it is
 // counted but not decided (2026-09-27 pre-push audit). Held lines come back
 // flagged so the summary can say how many there were.
-function amazonReplayItems(parsed) {
-  return (parsed?.items || []).map((raw) => {
+function amazonReplayItems(parsed, email) {
+  if (!parsed) return [];
+  // An itemless "Delivered: N items" email becomes one no_items placeholder
+  // the live lane hands to a person, titled with its subject.
+  if (!parsed.items?.length) return [{ vendor: 'amazon', title: email?.subject || '(no subject)', quantity: 1, heldAs: 'no_items' }];
+  return parsed.items.map((raw) => {
     const { item, holdAs } = amazonLine(raw, parsed.orderNumber);
     return { vendor: 'amazon', title: item.title, quantity: item.quantity, heldAs: holdAs || null };
   });
@@ -166,14 +180,18 @@ function amazonReplayItems(parsed) {
 // The SiteOne lines the live sweep would hand the agent, each keeping its
 // email id and invoice line number so the replay can read the same invoice
 // evidence (siteOneLineFields) processOneLine gives the model. A
-// zero-quantity line is never recorded, and a line the sweep holds for a
-// person (siteOneHold: a return, an unverified UOM or invoice) never
-// reaches the agent — both are left out, as the live lane leaves them out.
+// zero-quantity line is never recorded, so it's left out; a line the sweep
+// holds for a person (siteOneHold: a return, an unverified UOM or invoice)
+// never reaches the agent, so it comes back flagged (heldAs) — counted, not
+// decided.
 function siteOneReplayItems(email, invoice) {
   if (!invoice || invoice.pending || !Array.isArray(invoice.lines)) return [];
   return invoice.lines
-    .filter((line) => line.quantity !== 0 && !siteOneHold(invoice.problem, line.quantity, line.uom))
-    .map((line) => ({ vendor: 'siteone', title: line.title, quantity: line.quantity, emailId: email.id, lineNo: line.lineNo }));
+    .filter((line) => line.quantity !== 0)
+    .map((line) => ({
+      vendor: 'siteone', title: line.title, quantity: line.quantity, emailId: email.id, lineNo: line.lineNo,
+      heldAs: siteOneHold(invoice.problem, line.quantity, line.uom) || null,
+    }));
 }
 
 // One title, one quantity — the same title bought several times over the
@@ -211,19 +229,19 @@ async function main() {
   await assertReadOnly(sharedDb);
   const conn = readOnlyConn();
   try {
-    const [amazonAll, siteOneItems] = await Promise.all([amazonTitles(conn, SINCE), siteOneTitles(conn, SINCE)]);
+    const [amazonAll, siteOneAll] = await Promise.all([amazonTitles(conn, SINCE), siteOneTitles(conn, SINCE)]);
     const amazon = amazonAll.filter((item) => !item.heldAs);
-    const heldForPerson = amazonAll.length - amazon.length;
+    const siteOneItems = siteOneAll.filter((item) => !item.heldAs);
+    const heldForPerson = (amazonAll.length - amazon.length) + (siteOneAll.length - siteOneItems.length);
     const items = dedupe([...amazon, ...siteOneItems]);
     console.log(`${items.length} distinct past purchase title(s) since ${SINCE.toISOString().slice(0, 10)} `
       + `(${amazon.length} Amazon item mention(s), ${siteOneItems.length} SiteOne line mention(s) before dedupe; `
-      + `${heldForPerson} Amazon line(s) the sweep holds for a person — never the agent's — left out).`);
+      + `${heldForPerson} line(s) the sweep holds for a person — never the agent's — left out).`);
 
     const rows = [];
     let unresolvedCount = 0;
     let llmCalls = 0;
     let allowedCategories = null;
-    let catalog = null;
 
     for (const item of items) {
       const classified = await classifyItem({ title: item.title, quantity: item.quantity }, conn);
@@ -236,13 +254,12 @@ async function main() {
         rows.push({ ...item, classifierStatus: classified.status, decisionText: '(skipped — --limit reached)' });
         continue;
       }
-      if (!allowedCategories) {
-        // Read-only: the catalog can't change under this replay, so one load
-        // serves every title (the live agent reloads per line only because
-        // its own writes can add products mid-run).
-        allowedCategories = await loadAllowedCategories(conn);
-        catalog = await loadActiveCatalog(conn);
-      }
+      // Categories load once, as the live runner loads them once per run; the
+      // active catalog reloads before every decision, as the live runner
+      // reloads it per line — staff can add a product or alias while this
+      // replay waits on the model.
+      if (!allowedCategories) allowedCategories = await loadAllowedCategories(conn);
+      const catalog = await loadActiveCatalog(conn);
       llmCalls += 1;
       const siteOneFields = item.vendor === 'siteone' ? await siteOneLineFields(conn, { email_id: item.emailId, line_no: item.lineNo }) : null;
       const outcome = await decideForTitle(conn, dispatchWithFallback, { rawTitle: item.title, quantity: item.quantity, vendor: item.vendor, siteOneFields }, { allowedCategories, ...catalog });
