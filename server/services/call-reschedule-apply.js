@@ -76,7 +76,7 @@ const { lockTriageCall } = require('../utils/triage-locks');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { hasAgentCommittedEvidence, confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
-const { exactDatesNamed } = require('./call-date-mentions');
+const { exactDatesNamed, monthsReferenced, hoursMentioned } = require('./call-time-mentions');
 const { addressKey } = require('./customer-properties');
 const { phoneMatchDigits } = require('../utils/phone');
 const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
@@ -192,6 +192,24 @@ function humanHandledRescheduleCard(conn, callLogId, { excludeId = null } = {}) 
       .where('resolution_source', 'human').whereIn('status', ['resolved', 'dismissed'])));
   if (excludeId) query.whereNot('id', excludeId);
   return query.first('id');
+}
+
+// With several upcoming occurrences of a program, the call must identify the
+// one it moves. No other occurrence may come up even loosely (its exact
+// date, or its month without a day: "keep December"), and the chosen one must
+// be named: by its exact date when it moves to another day ("move my October
+// 2nd visit"), by its current start hour when only the time changes that day
+// ("September 24th, 9 a.m. ... switch it to noon"), since there its date is
+// also the destination's and naming it proves nothing.
+function sourceOccurrenceGrounded({ call, chosen, others, newDate }) {
+  const ctx = { transcript: call.transcription, callStartedAt: call.created_at };
+  const named = exactDatesNamed(ctx);
+  const looseMonths = monthsReferenced(ctx);
+  if (others.some((row) => named.has(dateOnly(row.scheduled_date)) || looseMonths.has(dateOnly(row.scheduled_date).slice(0, 7)))) return false;
+  const chosenDate = dateOnly(chosen.scheduled_date);
+  if (chosenDate !== newDate) return named.has(chosenDate);
+  const startHour = Number((hhmm(chosen.window_start) || '').slice(0, 2));
+  return hoursMentioned(ctx).some((m) => m.hour24 === startHour && !m.offHour);
 }
 
 /**
@@ -326,21 +344,15 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
       nearby = inSpan; // invariant preserved: length is 0 or 1 here
     }
     // Nearness to the destination cannot say WHICH occurrence the caller
-    // meant, and V2 records only the new slot. So with more than one upcoming
-    // occurrence of the program, the call itself must name exactly one of
-    // their dates (month and day, today, tomorrow) and it must be the one
-    // chosen here: "move the September visit to December 17" never moves
-    // December 24, "move December to October 1" never moves September.
+    // meant, and V2 records only the new slot: with more than one upcoming
+    // occurrence of the program the call itself must identify it
+    // (sourceOccurrenceGrounded).
     if (nearby.length === 1) {
       const chosen = nearby[0];
       const today = etDateString(now);
       const upcoming = atProperty.filter((row) => programOf(row) === programOf(chosen) && dateOnly(row.scheduled_date) >= today);
-      if (upcoming.length > 1) {
-        const named = exactDatesNamed({ transcript: call.transcription, callStartedAt: call.created_at });
-        const namedOccurrences = upcoming.filter((row) => named.has(dateOnly(row.scheduled_date)));
-        if (namedOccurrences.length !== 1 || namedOccurrences[0].id !== chosen.id) {
-          return skip('ambiguous_visit', { candidateIds: upcoming.map((r) => r.id) });
-        }
+      if (upcoming.length > 1 && !sourceOccurrenceGrounded({ call, chosen, others: upcoming.filter((row) => row.id !== chosen.id), newDate })) {
+        return skip('ambiguous_visit', { candidateIds: upcoming.map((r) => r.id) });
       }
     }
   }

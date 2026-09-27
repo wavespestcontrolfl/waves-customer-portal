@@ -80,6 +80,9 @@ const call = (overrides = {}) => ({
 // Each call carries only ITS OWN commitment (#4806 single-sentence rule: any
 // later non-acknowledgement sentence — such as a second, different
 // commitment bundled into one fixture transcript — ungrounds the first).
+// A same-day time change among several occurrences must state the visit's
+// current time, as a real "9 is early, make it noon" call does.
+const RETIME_TRANSCRIPT = `Agent: You are on September 24th at 9 AM.\nCaller: Can it be later?\nAgent: ${QUOTE}\nCaller: Thank you.`;
 const callFor = (startAt, overrides = {}) => call({ transcription: `Agent: ${quoteFor(startAt)}\nCaller: Thank you.`, ...overrides });
 const customer = (overrides = {}) => ({ id: CUSTOMER_ID, phone: PHONE, ...ADDRESS, ...overrides });
 const visit = (overrides = {}) => {
@@ -185,6 +188,11 @@ describe('planRescheduleFromCall', () => {
       .toMatchObject({ action: 'apply', visitId: VISIT_ID });
     expect(plan('2026-09-25T10:00:00-04:00', 'Caller: Can we do Friday instead?\nAgent: Okay.').reason).toBe('ambiguous_visit');
     expect(plan('2026-09-25T10:00:00-04:00', 'Caller: Keep December 24th, but can September 24th be Friday?\nAgent: Okay.').reason).toBe('ambiguous_visit');
+    // Even a loose reference to another occurrence ("the December one") leaves it to a person.
+    expect(plan('2026-09-25T10:00:00-04:00', 'Caller: Can my September 24th visit be Friday instead? The December one is fine.\nAgent: Okay.').reason).toBe('ambiguous_visit');
+    // A same-day time change: the date is also the destination, so the visit's current time must come up.
+    expect(plan('2026-09-24T12:00:00-04:00', RETIME_TRANSCRIPT)).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    expect(plan('2026-09-24T12:00:00-04:00', `Agent: ${QUOTE}\nCaller: Thank you.`).reason).toBe('ambiguous_visit');
     // Once September is behind today, December 24 is the only upcoming one.
     expect(plan('2026-12-17T12:00:00-05:00', 'Caller: Move it to December 17th.\nAgent: Okay.', new Date('2026-09-25T19:00:00Z')))
       .toMatchObject({ action: 'apply', visitId: 'dec-visit' });
@@ -360,7 +368,7 @@ describe('planRescheduleFromCall', () => {
     // occurrences of the same recurring program resolves on the one actually
     // near the target instead of always landing on ambiguous_visit.
     const farSibling = planRescheduleFromCall({
-      v2: v2(), call: call(), customer: customer(), now: NOW,
+      v2: v2(), call: call({ transcription: RETIME_TRANSCRIPT }), customer: customer(), now: NOW,
       candidates: [visit(), visit({ id: '70000000-0000-4000-8000-000000000003', scheduled_date: '2026-12-17', window_start: '14:00:00', window_end: '15:00:00' })],
     });
     expect(farSibling).toMatchObject({ action: 'apply', visitId: VISIT_ID });
@@ -377,7 +385,7 @@ describe('planRescheduleFromCall', () => {
       visit({ id: 'q-next', scheduled_date: '2026-12-24' }),
       visit({ id: 'q-after', scheduled_date: '2027-03-24' }),
     ];
-    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates, now: NOW }))
+    expect(planRescheduleFromCall({ v2: v2(), call: call({ transcription: RETIME_TRANSCRIPT }), customer: customer(), candidates, now: NOW }))
       .toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 
