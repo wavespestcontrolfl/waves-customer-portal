@@ -99,18 +99,16 @@ const INITIATED_BY = 'ai_call_pipeline'; // reschedule_log.initiated_by varchar(
 const DEFAULT_DURATION_MINUTES = 60;
 // A call that names no service falls back to a visit only when V2's
 // service_request.primary_service_category agrees with the visit's own
-// family (appointment-tagger's classifyAppointmentType). A category not
-// listed here (rodent, exclusion, stinging_insect, inspection_only, other, or
-// none) never falls back.
+// family (appointment-tagger's classifyAppointmentType), and only for the
+// recurring families whose category maps one-to-one onto a visit type.
+// Specialty categories (termite, palm_injection, bed_bug, wdo, rodent,
+// exclusion, stinging_insect, inspection_only, other) and a missing one never
+// fall back: their visits are distinct services a tag cannot tell apart.
 const FALLBACK_CATEGORY_TAGS = {
   pest_general: ['pest_general'],
   bundled_waveguard: ['pest_general'],
   mosquito: ['mosquito'],
   lawn_care: ['lawn'],
-  palm_injection: ['tree_shrub'],
-  termite: ['termite_treatment'],
-  bed_bug: ['bed_bug'],
-  wdo: ['wdo_inspection'],
 };
 
 function pad2(n) { return String(n).padStart(2, '0'); }
