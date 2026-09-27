@@ -64,12 +64,12 @@ function authority(overrides = {}) {
   });
 }
 
-async function runAtProviderBoundary(guard = authority()) {
+async function runAtProviderBoundary(guard = authority(), metadata = {}) {
   return sendCustomerMessage({
     to: phone, body: 'Your recurring service balance is $96.60.', channel: 'sms',
     audience: 'customer', purpose: 'billing', customerId,
     entryPoint: 'previsit_balance_reminder', ...guard,
-    metadata: { fromNumber: '+19415550101' },
+    metadata: { fromNumber: '+19415550101', ...metadata },
   });
 }
 
@@ -93,6 +93,7 @@ postgres('previsit Text billing authority (PostgreSQL)', () => {
     await mockPg.raw('ALTER TABLE scheduled_services ADD CONSTRAINT previsit_visit_customer_fk FOREIGN KEY (customer_id) REFERENCES customers(id)');
     await mockPg.raw('ALTER TABLE invoices ADD CONSTRAINT previsit_invoice_customer_fk FOREIGN KEY (customer_id) REFERENCES customers(id)');
     await mockPg.raw('ALTER TABLE payments ADD CONSTRAINT previsit_payment_customer_fk FOREIGN KEY (customer_id) REFERENCES customers(id)');
+    await mockPg.raw('ALTER TABLE sms_log ADD CONSTRAINT previsit_sms_log_customer_fk FOREIGN KEY (customer_id) REFERENCES customers(id)');
 
     await mockPg.raw('ALTER TABLE invoices ADD CONSTRAINT previsit_invoice_visit_fk FOREIGN KEY (scheduled_service_id) REFERENCES scheduled_services(id)');
 
@@ -165,6 +166,7 @@ postgres('previsit Text billing authority (PostgreSQL)', () => {
     mockProbeParent = false;
     delete process.env.GATE_COLLECTIONS_POLICY;
     await mockPg('collections_contact_ledger').del();
+    await mockPg('notification_prefs').del();
     await mockPg('payments').whereNot({ id: failedPaymentId }).del();
     await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sent', credit_applied: 0 });
     await mockPg('invoices').whereNot({ id: invoiceId }).del();
@@ -238,6 +240,7 @@ postgres('previsit Text billing authority (PostgreSQL)', () => {
     await expect(sending).resolves.toMatchObject({ sent: true, providerMessageId: `SM${'a'.repeat(32)}` });
     if (proofError) throw proofError;
     expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(await mockPg('sms_log').where({ customer_id: customerId, twilio_sid: `SM${'a'.repeat(32)}` }).first('id')).toBeDefined();
     for (const mutate of mutations) await writer.transaction(mutate);
   }, 30000);
 
@@ -334,6 +337,10 @@ postgres('previsit Text billing authority (PostgreSQL)', () => {
     const guard = authority();
     const handoff = jest.fn(guard.withSmsHandoff);
     await expect(runAtProviderBoundary({ ...guard, withSmsHandoff: handoff })).resolves.toMatchObject({ sent: true });
+    await mockPg('notification_prefs').insert({ customer_id: customerId, billing_channels: ['push'] });
+    const explicit = await runAtProviderBoundary({ ...guard, withSmsHandoff: handoff },
+      { billingDeliveryCategory: 'billing', billingDeliveryLeg: 'push', appOnly: true });
+    expect(explicit).toEqual(expect.objectContaining({ sent: true }));
     expect(handoff).not.toHaveBeenCalled();
     expect(mockCreate).toHaveBeenCalledTimes(1);
   }, 15000);
