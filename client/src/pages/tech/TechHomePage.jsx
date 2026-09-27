@@ -102,7 +102,11 @@ function isPestControlService(service) {
 // Gate off, or any other service, is byte-identical to today's routing.
 function isReserviceFastCompleteEligible(service) {
   return service?.reserviceFastCompleteEnabled === true
-    && service?.completionProfile?.serviceKey === 'pest_re_service';
+    && service?.completionProfile?.serviceKey === 'pest_re_service'
+    // A completed (or otherwise closed) re-service stays on the recap
+    // editor, which updates an existing record; /complete would only
+    // answer service_already_completed and drop the tech's corrections.
+    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
 }
 
 // Typed specialty jobs (profile cut over to the service-report flow with a
@@ -1006,7 +1010,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onProject={(s) => (
                   usesDispatchCompletion(s)
                     ? openTypedCompletion(s)
-                    : isPestControlService(s) ? setRecapService(s) : openProjectOrContinue(s)
+                    : isPestControlService(s) ? openPestCompletion(s) : openProjectOrContinue(s)
                 )}
                 onPhotos={(s) => setPhotoTarget({
                   id: s.id,

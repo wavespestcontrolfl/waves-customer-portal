@@ -41,11 +41,11 @@ const row = (id, overrides = {}) => ({
 let rows;
 let fetchMock;
 
-function mount(path = '/tech/tools') {
+function mount(path = '/tech/tools', { fieldWorkspace = true } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-fixture', name: 'Fixture Technician', role: 'technician' }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/tech" element={<Outlet context={{ fieldWorkspace: true, setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/tech" element={<Outlet context={{ fieldWorkspace, setNavigationBusy: mocks.navigationBusy }} />}>
       <Route index element={<TechHomePage />} />
       <Route path="tools" element={<TechHomePage section="tools" />} />
     </Route>
@@ -88,5 +88,15 @@ it('opens the existing ServiceRecapModal for a non-re-service pest job even when
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   expect(await screen.findByText('Existing recap form for svc-not-reservice')).toBeInTheDocument();
+  expect(screen.queryByText(/Fast Complete sheet/)).not.toBeInTheDocument();
+});
+
+it('keeps a completed re-service on the recap editor even with the gate on', async () => {
+  // The legacy workspace lists completed rows; a completed visit is edited
+  // through the recap path, which updates its existing record.
+  rows = [row('svc-completed', { reserviceFastCompleteEnabled: true, status: 'completed' })];
+  mount('/tech/tools', { fieldWorkspace: false });
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  expect(await screen.findByText('Existing recap form for svc-completed')).toBeInTheDocument();
   expect(screen.queryByText(/Fast Complete sheet/)).not.toBeInTheDocument();
 });
