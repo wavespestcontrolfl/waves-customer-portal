@@ -437,6 +437,30 @@ describe('resolveName regressions', () => {
     expect(catalog.getEntry('termite-swarmers').review.status).toBe('draft');
   });
 
+  test.each(['swarmer', 'swarmers'])('bare %s does not claim termites when ants also swarm', (name) => {
+    expect(catalog.resolveName(name)).toBeNull();
+    expect(catalog.resolveName('termite swarmers')).toMatchObject({ node: { slug: 'termite-swarmers' } });
+    expect(catalog.resolveName('ant swarmers')).toMatchObject({ node: { slug: 'winged-ants' } });
+  });
+
+  test.each(['white fly', 'white flies'])('generic spaced %s names the shared whitefly subgroup', (name) => {
+    expect(catalog.resolveName(name)).toMatchObject({ via: 'node', node: { level: 'subgroup', id: 'whiteflies' } });
+    expect(catalog.resolveName('rugose spiraling whitefly')).toMatchObject({ node: { slug: 'spiraling-whitefly' } });
+    expect(catalog.resolveName('ficus whitefly')).toMatchObject({ node: { slug: 'ficus-whitefly' } });
+  });
+
+  test.each(['dog tick', 'dog ticks'])('generic %s names the shared tick subgroup', (name) => {
+    expect(catalog.resolveName(name)).toMatchObject({ via: 'node', node: { level: 'subgroup', id: 'ticks' } });
+    expect(catalog.resolveName('brown dog tick')).toMatchObject({ node: { slug: 'brown-dog-tick' } });
+    expect(catalog.resolveName('American dog tick')).toMatchObject({ node: { slug: 'american-dog-tick' } });
+  });
+
+  test.each(['centipede', 'centipedes'])('generic %s names the shared many-legged group', (name) => {
+    expect(catalog.resolveName(name)).toMatchObject({ node: { level: 'group', id: 'many-legged' } });
+    expect(catalog.resolveName('house centipede')).toMatchObject({ node: { slug: 'house-centipede' } });
+    expect(catalog.resolveName('Florida blue centipede')).toMatchObject({ node: { slug: 'florida-blue-centipede' } });
+  });
+
   test('never a false substring match (the "walkingstick"/"antenna" class)', () => {
     expect(catalog.resolveName('walkingstick')).toBeNull();
     expect(catalog.resolveName('antenna')).toBeNull();

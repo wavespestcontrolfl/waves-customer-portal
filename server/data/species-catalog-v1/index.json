@@ -260,6 +260,10 @@
       "id": "many-legged",
       "label": "Millipedes, centipedes & pillbugs",
       "generic": "a millipede, centipede, or pillbug",
+      "aliases": [
+        "centipede",
+        "centipedes"
+      ],
       "category": "other",
       "next_photo": {
         "ask": "A close-up from the side showing how many legs there are per body segment, next to a coin.",
@@ -459,6 +463,10 @@
       "group": "ticks-mites",
       "label": "Ticks",
       "generic": "a tick",
+      "aliases": [
+        "dog tick",
+        "dog ticks"
+      ],
       "scientific": "Ixodida",
       "rank": "order",
       "next_photo": {
@@ -669,6 +677,10 @@
       "group": "plant-pests-small",
       "label": "Whiteflies",
       "generic": "a whitefly",
+      "aliases": [
+        "white fly",
+        "white flies"
+      ],
       "scientific": "Aleyrodidae",
       "rank": "family",
       "next_photo": {
@@ -937,9 +949,9 @@
       "note": ""
     },
     "centipede": {
-      "node": "house-centipede",
-      "kind": "entry",
-      "note": "v1's own alias list named \"house centipede\" specifically; other centipede species added later stay separate."
+      "node": "many-legged",
+      "kind": "group",
+      "note": "The v1 entry mixed the qualified house-centipede name with generic centipede labels; maps to the group now that another centipede species is cataloged."
     },
     "stink-bug": {
       "node": "stink-bug",
