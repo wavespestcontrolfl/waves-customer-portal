@@ -184,9 +184,31 @@ async function latestQuoteFormLead({ customerId, phoneLast10, before, since }) {
     .first('id', 'created_at');
 }
 
-// Any CUSTOMER-ORIGINATED lead row for this phone (not scoped to the
-// form/quote channels latestQuoteFormLead checks, but never a staff-created
-// one either — see CUSTOMER_ORIGINATED_LEAD_CHANNELS below) — "a lead
+// Call-derived first_contact_channel values (codex pre-push r5 P1): the
+// call pipeline (call-recording-processor.js Step 4b, lead-attribution.js's
+// attributeInboundContact) writes 'call' for EVERY phone-call-minted lead —
+// voicemail-sourced leads included, per call-recording-processor.js's own
+// comment ("first_contact_channel stays 'call'") — regardless of the call's
+// DIRECTION. A lead minted from a COLD OUTBOUND call we placed gets the
+// exact same 'call' value as one from a genuine inbound call, so it would
+// otherwise pass CUSTOMER_ORIGINATED_LEAD_CHANNELS and wrongly count as
+// "the person contacted us". Verified exhaustively (grep
+// `first_contact_channel:` across server/): 'call' is the ONLY value any
+// call/voicemail source writes anywhere in the repo — no separate
+// 'voicemail' or 'phone_call' variant exists. Phone calls count as prior
+// contact ONLY through existsQualifyingInboundCall above, which is
+// direction-aware (`.where('direction', 'inbound')`) — never through a
+// lead row here.
+const CALL_DERIVED_LEAD_CHANNELS = new Set(['call']);
+// The lead-evidence allowlist for THIS module: customer-originated (reused
+// from consent-provenance.js) MINUS anything call-derived — computed once,
+// not per query.
+const LEAD_EVIDENCE_CHANNELS = CUSTOMER_ORIGINATED_LEAD_CHANNELS.filter(
+  (channel) => !CALL_DERIVED_LEAD_CHANNELS.has(channel)
+);
+
+// Any CUSTOMER-ORIGINATED, NON-CALL-DERIVED lead row for this phone (not
+// scoped to the form/quote channels latestQuoteFormLead checks) — "a lead
 // record" in the owner's own list of what counts as prior contact
 // (2026-09-26, outbound return-message gate).
 async function anyLeadRecord({ phoneLast10, before }) {
@@ -195,12 +217,14 @@ async function anyLeadRecord({ phoneLast10, before }) {
     .whereNull('deleted_at')
     .where('created_at', '<', before)
     .whereRaw("right(regexp_replace(phone, '\\D', '', 'g'), 10) = ?", [phoneLast10])
-    // Customer-originated channels ONLY (codex pre-push r4 P1): a lead this
-    // module counted before included 'manual' / 'field_observation' /
-    // 'lawn_diagnostic' rows, which only prove a STAFFER entered a number —
-    // never that its owner contacted Waves. whereIn also fails closed on a
-    // NULL or unrecognized channel (it matches no IN list, never a wildcard).
-    .whereIn('first_contact_channel', CUSTOMER_ORIGINATED_LEAD_CHANNELS)
+    // Customer-originated AND non-call-derived (codex pre-push r4 P1 + r5
+    // P1): a lead this module counted before included 'manual' /
+    // 'field_observation' / 'lawn_diagnostic' rows (staffer typed a
+    // number) and 'call' rows minted from a COLD OUTBOUND call (see
+    // CALL_DERIVED_LEAD_CHANNELS above) — neither proves the number's
+    // owner ever contacted Waves. whereIn also fails closed on a NULL or
+    // unrecognized channel (it matches no IN list, never a wildcard).
+    .whereIn('first_contact_channel', LEAD_EVIDENCE_CHANNELS)
     .orderBy('created_at', 'desc')
     .first('id', 'created_at');
 }
@@ -221,7 +245,12 @@ async function anyLeadRecord({ phoneLast10, before }) {
 // with no `.limit()` this time.
 async function existsQualifyingInboundCall({ phoneLast10, before }) {
   if (!phoneLast10) return false;
-  const natures = [...NON_CONTACT_NATURES];
+  // NON_SERVICE_NATURES (codex pre-push r5 P1) — NOT the narrower
+  // NON_CONTACT_NATURES: a job_applicant or an 'other'-natured inbound call
+  // is exactly as non-qualifying here as spam/robocall/wrong-number/vendor —
+  // NON_SERVICE_NATURES is this file's own documented "never earns a text"
+  // set (owner ruling 2026-09-09), reused rather than a narrower copy.
+  const natures = [...NON_SERVICE_NATURES];
   const row = await whereNotSandboxCall(db('call_log')
     .where('direction', 'inbound')
     .where('created_at', '<', before))

@@ -69,6 +69,19 @@ function installDb(byTable = {}) {
         const rows = state.byTable.leads || [];
         return allowlistEntry ? rows.filter((r) => allowlistEntry[2].includes(r.first_contact_channel)) : rows;
       }
+      // existsQualifyingInboundCall's call_log query (identified by its own
+      // whereRaw nature clause — latestInboundCall's JS-side filtering
+      // elsewhere in this file never adds one): apply the recorded nature
+      // exclusion for real (codex pre-push r5 P1), reusing _private.callNature
+      // so the mock's extraction matches the module's own.
+      if (table === 'call_log') {
+        const natureClause = q.raws.find((r) => String(r[0]).includes('call_nature'));
+        if (natureClause) {
+          const excluded = natureClause[1];
+          const rows = state.byTable.call_log || [];
+          return rows.filter((r) => !excluded.includes(_private.callNature(r)));
+        }
+      }
       return state.byTable[table] || [];
     };
     b.whereIn = jest.fn((...a) => { q.wheres.push(['IN', ...a]); return b; });
@@ -416,14 +429,33 @@ describe('hasPriorContact', () => {
   // "returns" whatever rows a test installs, regardless of WHERE clauses —
   // so a nature exclusion is proven by asserting the QUERY the code built,
   // not by the mock filtering rows for us. Real Postgres applies it.
-  test('the call probe excludes spam/robocall/wrong-number/vendor natures IN SQL, not via a row cap (codex pre-push r1 P2)', async () => {
+  test('the call probe excludes every NON_SERVICE_NATURES value IN SQL, not via a row cap (codex pre-push r1 P2 + r5 P1)', async () => {
     installDb({ call_log: [{ id: 'in-spam' }] });
     await hasPriorContact({ customerId: null, phone: PHONE, before: T0 });
     const callQuery = state.queries.find((q) => q.table === 'call_log');
     expect(callQuery.limits).toHaveLength(0); // no row cap
     const natureClause = callQuery.raws.find((r) => String(r[0]).includes('call_nature'));
     expect(natureClause[0]).toContain('NOT IN');
-    expect(natureClause[1]).toEqual(['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner']);
+    // NON_SERVICE_NATURES (codex pre-push r5 P1), not the narrower
+    // NON_CONTACT_NATURES — a job_applicant or 'other'-natured call is
+    // exactly as non-qualifying as spam/robocall/wrong-number/vendor.
+    expect(natureClause[1]).toEqual([...NON_SERVICE_NATURES]);
+    expect(natureClause[1]).toEqual(expect.arrayContaining(['job_applicant', 'other']));
+  });
+
+  test('a job_applicant-only call history does NOT count as prior contact (codex pre-push r5 P1)', async () => {
+    installDb({ call_log: [{ id: 'in-applicant', ai_extraction_enriched: { call_nature: 'job_applicant' } }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+  });
+
+  test('an "other"-natured call history does NOT count as prior contact either (codex pre-push r5 P1)', async () => {
+    installDb({ call_log: [{ id: 'in-other', ai_extraction_enriched: { call_nature: 'other' } }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+  });
+
+  test('a genuine new_lead-natured call still counts as prior contact', async () => {
+    installDb({ call_log: [{ id: 'in-lead', ai_extraction_enriched: { call_nature: 'new_lead' } }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
   });
 
   test('a prior substantive inbound text counts, and the probe never caps rows at TEXT_SCAN_LIMIT (codex pre-push r1 P2)', async () => {
@@ -478,13 +510,42 @@ describe('hasPriorContact', () => {
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
   });
 
-  test('the lead probe reuses the EXACT consent-provenance allowlist (never a second, drift-prone list)', async () => {
+  test('the lead probe reuses the consent-provenance allowlist, minus every call-derived channel', async () => {
     const { CUSTOMER_ORIGINATED_LEAD_CHANNELS } = require('../services/collections/consent-provenance');
     installDb({ leads: [{ id: 'lead-1' }] });
     await hasPriorContact({ customerId: null, phone: PHONE, before: T0 });
     const leadsQuery = state.queries.find((q) => q.table === 'leads');
     const allowlistClause = leadsQuery.wheres.find((w) => w[0] === 'IN' && w[1] === 'first_contact_channel');
-    expect(allowlistClause[2]).toBe(CUSTOMER_ORIGINATED_LEAD_CHANNELS);
+    // Every channel used is one consent-provenance already vouches for as
+    // customer-originated (never a second, drift-prone list)...
+    expect(allowlistClause[2].every((c) => CUSTOMER_ORIGINATED_LEAD_CHANNELS.includes(c))).toBe(true);
+    // ...but 'call' is deliberately excluded (codex pre-push r5 P1: see the
+    // dedicated test below) even though consent-provenance's own list
+    // includes it for its own, different purpose.
+    expect(CUSTOMER_ORIGINATED_LEAD_CHANNELS).toContain('call');
+    expect(allowlistClause[2]).not.toContain('call');
+  });
+
+  // Codex pre-push r5 P1: the call pipeline (call-recording-processor.js,
+  // lead-attribution.js) writes first_contact_channel 'call' for EVERY
+  // phone-call-minted lead regardless of the call's DIRECTION — a lead
+  // minted from a COLD OUTBOUND call we placed gets the exact same 'call'
+  // value as a genuine inbound one, so it must never count as customer-
+  // originated evidence through the lead probe. Phone calls count as prior
+  // contact ONLY through the direction-aware call probe above.
+  test("a 'call'-channel lead minted from a COLD OUTBOUND call does NOT count as prior contact", async () => {
+    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: 'call' }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+  });
+
+  test('an actual prior INBOUND call still counts as prior contact (the direction-aware call probe, not the lead probe)', async () => {
+    installDb({ call_log: [{ id: 'in-1', ai_extraction_enriched: { call_nature: 'new_lead' } }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+  });
+
+  test('a web-form lead still counts (customer-originated, never call-derived)', async () => {
+    installDb({ leads: [{ id: 'lead-1', created_at: hoursAgo(1), first_contact_channel: 'web' }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
   });
 
   // "an actual prior inbound call still counts regardless" — this is the
