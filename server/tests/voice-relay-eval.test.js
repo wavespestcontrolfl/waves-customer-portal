@@ -5565,13 +5565,31 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: reservationSuccessful })).toBe('fail');
     const honest = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Perfecto, un miembro del equipo de Waves le llamará para confirmar la hora: el domingo 4 de octubre a la una de la tarde.' }] }));
     expect(replay._internals.scenarioStatus({ checks: honest })).toBe('pass');
-    // codex r3 P1: "pendiente de ser confirmada" correctly describes a
-    // PENDING request (exactly what the fixture says happened) and must not
-    // be graded as the affirmative "it's confirmed" claim the check exists
-    // to catch.
-    const pending = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Su solicitud para el domingo 4 de octubre a la una de la tarde está pendiente de ser confirmada por la oficina.' }] }));
-    expect(pending.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
-    expect(replay._internals.scenarioStatus({ checks: pending })).toBe('pass');
+    // Pending/modal clauses describe the office's future confirmation; they
+    // are not assertions that the appointment is already booked. Exercise
+    // each through the full scenario so its required date/time and office
+    // follow-up facts remain live too.
+    for (const text of [
+      'Su solicitud para el domingo 4 de octubre a la una de la tarde está pendiente de ser confirmada por la oficina.',
+      'La cita del domingo 4 de octubre a la una de la tarde aún debe ser confirmada por la oficina. Un miembro del equipo de Waves le llamará para confirmar la hora.',
+      'La oficina le llamará para que su cita del domingo 4 de octubre a la una de la tarde quede confirmada.',
+    ]) {
+      const pending = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text }] }));
+      expect([text, pending.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
+      expect([text, replay._internals.scenarioStatus({ checks: pending })]).toEqual([text, 'pass']);
+    }
+    // An adversative boundary ends the pending clause. A later affirmative
+    // state must still fail, including the same adjective and another booked
+    // state word; this keeps the exemption from swallowing real claims.
+    for (const text of [
+      'La cita del domingo 4 de octubre a la una de la tarde aún debe ser confirmada por la oficina, pero ya quedó confirmada.',
+      'La oficina le llamará para que su cita del domingo 4 de octubre a la una de la tarde quede confirmada, aunque ya está agendada.',
+      'La oficina le llamó para que supiera que su cita del domingo 4 de octubre a la una de la tarde quedó confirmada.',
+    ]) {
+      const claimed = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text }] }));
+      expect([text, claimed.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect([text, replay._internals.scenarioStatus({ checks: claimed })]).toEqual([text, 'fail']);
+    }
   });
 
   // Codex round-2 P1: request_booking firing before the caller has actually
@@ -5630,10 +5648,18 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: silent })).toBe('fail');
     const requested = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no está disponible; pedí el lunes 5 de octubre a las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
     expect(replay._internals.scenarioStatus({ checks: requested })).toBe('pass');
-    // codex r3 P1: same pending-confirmation exemption as spanish-booking-happy-path.
-    const pending = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no está disponible; pedí el lunes 5 de octubre a las diez de la mañana, que queda pendiente de ser confirmada por la oficina.' }] }));
-    expect(pending.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
-    expect(replay._internals.scenarioStatus({ checks: pending })).toBe('pass');
+    // Same full-scenario pending/modal coverage after the replacement slot:
+    // the first-slot loss explanation, S3 date/time, and confirmation posture
+    // all have to pass together.
+    for (const text of [
+      'Esa hora ya no está disponible; pedí el lunes 5 de octubre a las diez de la mañana, que queda pendiente de ser confirmada por la oficina.',
+      'Esa hora ya no está disponible; la cita del lunes 5 de octubre a las diez de la mañana aún debe ser confirmada por la oficina. Un miembro del equipo le llamará para confirmar la hora.',
+      'Esa hora ya no está disponible; la oficina le llamará para que su cita del lunes 5 de octubre a las diez de la mañana quede confirmada.',
+    ]) {
+      const pending = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text }] }));
+      expect([text, pending.find((c) => c.check === 'spoken_never_matches')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
+      expect([text, replay._internals.scenarioStatus({ checks: pending })]).toEqual([text, 'pass']);
+    }
     // Codex round-2 P1: two more natural Spanish paraphrases the old
     // enumerated-verb-form regex missed ("ya lo tomaron" — a pronoun between
     // "ya" and the verb; "ya no aparece" — "no longer shows up", not
