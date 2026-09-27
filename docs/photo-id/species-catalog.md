@@ -59,6 +59,12 @@ broader node has incompatible descendants. They cover regulated reporting,
 protected-wildlife handling, exposure guidance, medically significant safety
 flags, and no-service routing. Mixed or lower-confidence results stop above
 those nodes and do not inherit the narrower referral, urgency, or hazard.
+Singleton generic nodes also retain source-backed contracts that are true of
+their sole descendant: carpenter ants keep inspection-first moderate service,
+jumping spiders keep no-treatment routing, and stinging caterpillars keep
+Tree & Shrub Care plus neutral rash guidance. The native-toad singleton keeps
+neutral pet-exposure guidance. A mixed caterpillar or mixed frog/toad result
+stops above these nodes and cannot borrow those narrower facts.
 Benign draft entries that share a broader node with treatable descendants
 keep the conservative Pest Consultation fallback until the photo supports an
 entry-level name; a no-treatment contract is not inferred from one candidate.

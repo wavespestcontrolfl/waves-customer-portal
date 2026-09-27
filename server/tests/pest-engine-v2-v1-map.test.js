@@ -84,6 +84,61 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     expect(mapToV1(built).report_contract.service).toMatchObject({ line: 'none', key: null, label });
   });
 
+  test.each([
+    ['carpenter-ant', 'carpenter-ants', {
+      line: 'pest', key: null, label: 'General Pest Control', inspection_required: true,
+    }, 'moderate'],
+    ['tussock-moth-caterpillar', 'stinging-caterpillars', {
+      line: 'tree_shrub', key: null, label: 'Tree & Shrub Care', inspection_required: false,
+    }, 'low'],
+    ['regal-jumping-spider', 'jumping-spiders', {
+      line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false,
+    }, 'low'],
+  ])('a singleton draft %s retains its source-backed service contract at %s', (
+    slug, nodeId, service, urgency,
+  ) => {
+    const built = answerFor(slug, { approved: false });
+    expect(built).toMatchObject({ answer: { node_id: nodeId }, entry: null, topEntrySlug: null });
+    expect(mapToV1(built)).toMatchObject({
+      species_slug: null, service_line: service.line, urgency,
+      report_contract: { service, urgency },
+    });
+  });
+
+  test.each([
+    ['tussock-moth-caterpillar', 'stinging-caterpillars', /itchy rash.+seek medical care/i],
+    ['southern-toad', 'toads', /irritate a pet's mouth.+contact a veterinarian/i],
+  ])('a singleton irritant draft %s retains neutral exposure guidance at %s', (slug, nodeId, safety) => {
+    const built = answerFor(slug, { approved: false });
+    expect(built).toMatchObject({
+      answer: { node_id: nodeId }, entry: null, topEntrySlug: null,
+      genericSafetyLine: expect.stringMatching(safety),
+    });
+    expect(catalog.genericGuidance(nodeId).sources.length).toBeGreaterThan(0);
+  });
+
+  test('a mixed caterpillar result cannot borrow the singleton tree-and-shrub or rash contract', () => {
+    const built = buildAnswer({
+      candidates: [
+        { ...candidate('tussock-moth-caterpillar', { approved: false }), confidence: 0.55 },
+        { ...candidate('fall-armyworm', { approved: false }), confidence: 0.3 },
+      ],
+      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
+      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+    });
+    expect(built).toMatchObject({
+      answer: { level: 'group', node_id: 'caterpillars-moths' }, entry: null,
+      genericSafetyLine: null,
+    });
+    expect(mapToV1(built)).toMatchObject({
+      service_line: 'pest', urgency: 'low',
+      report_contract: {
+        safety: { stinging: false },
+        service: { line: 'pest', key: null, label: 'Pest Consultation', inspection_required: true },
+      },
+    });
+  });
+
   test('a broader mixed toad result does not borrow toxic-toad safety guidance', () => {
     const built = buildAnswer({
       candidates: [

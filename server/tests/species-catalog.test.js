@@ -386,7 +386,9 @@ describe('index.json — groups, subgroups, next_photo', () => {
     const expected = {
       'fire-ants': { trueSafety: ['stinging', 'venomous'], serviceLine: 'pest', serviceKey: 'pest', urgency: 'high' },
       'social-wasps': { trueSafety: ['stinging', 'venomous'], serviceLine: 'pest', serviceKey: 'pest', urgency: 'moderate' },
-      'stinging-caterpillars': { trueSafety: ['stinging'], safetyOnly: true },
+      'stinging-caterpillars': {
+        trueSafety: ['stinging'], serviceLine: 'tree_shrub', serviceKey: null, urgency: 'low',
+      },
       'large-lizards': { trueSafety: ['disease_vector'], serviceLine: 'none', serviceKey: null, urgency: 'moderate' },
       'venomous-snakes': {
         trueSafety: ['venomous'], serviceLine: 'none', serviceKey: null, urgency: 'high', referral: 'wildlife_trapper',

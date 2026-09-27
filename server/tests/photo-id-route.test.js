@@ -1484,6 +1484,7 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
   test.each([
     ['fire-ant', /call 911 if someone has trouble breathing/i],
     ['black-widow', /see a doctor for a suspected bite.+call 911/i],
+    ['tussock-moth-caterpillar', /itchy rash.+seek medical care/i],
   ])('gate on: a real draft %s climb keeps visible generic medical guidance through POST, storage, and GET', async (
     slug, safety,
   ) => {
@@ -1499,6 +1500,45 @@ describe('GATE_PHOTO_ID_V2 (photoIdV2) — pest path only', () => {
 
       const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
       expect(detail.v2.generic_safety_line).toMatch(safety);
+    });
+  });
+
+  test('gate on: a real draft tussock climb keeps the tree-and-shrub contract through POST, storage, and GET', async () => {
+    mockGateState.photoIdV2 = true;
+    const engineResult = realCatalogV2ResultFor('tussock-moth-caterpillar');
+    expect(engineResult).toMatchObject({
+      v2: {
+        answer: { level: 'subgroup', node_id: 'stinging-caterpillars' },
+        entry: null,
+      },
+      v1: {
+        species_slug: null, service_line: 'tree_shrub', urgency: 'low',
+        report_contract: {
+          safety: { stinging: true },
+          service: { line: 'tree_shrub', key: null, label: 'Tree & Shrub Care', inspection_required: false },
+        },
+      },
+    });
+    mockIdentifyPestV2.mockResolvedValue(engineResult);
+
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.v2).toMatchObject({
+        answer: { node_id: 'stinging-caterpillars' }, entry: null,
+        generic_safety_line: expect.stringMatching(/itchy rash.+seek medical care/i),
+      });
+
+      const row = TABLES.pest_identifications[0];
+      expect(row).toMatchObject({ species_slug: null, service_line: 'tree_shrub', urgency: 'low' });
+      expect(JSON.parse(row.report_contract)).toMatchObject({
+        service: { line: 'tree_shrub', key: null, label: 'Tree & Shrub Care', inspection_required: false },
+      });
+
+      const detail = await fetch(`${base}/api/photo-id/pest/${body.id}`).then((res) => res.json());
+      expect(detail.v2).toMatchObject({
+        answer: { node_id: 'stinging-caterpillars' }, entry: null,
+        generic_safety_line: expect.stringMatching(/itchy rash.+seek medical care/i),
+      });
     });
   });
 
