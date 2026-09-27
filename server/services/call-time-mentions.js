@@ -108,6 +108,9 @@ const DAY_FORMS = [
     && { dates: [dayAfterCall(started, RELATIVE_DAYS[toks[i]])], kind: toks[i], len: 1 },
   (toks, i, started) => toks[i] === 'next' && WEEKDAY_NAMES.includes(toks[i + 1])
     && { dates: weekdayDates(toks[i + 1], started, true), kind: 'next_weekday', len: 2, weekday: WEEKDAY_NAMES.indexOf(toks[i + 1]) },
+  // "This Thursday": the nearest one only.
+  (toks, i, started) => toks[i] === 'this' && WEEKDAY_NAMES.includes(toks[i + 1])
+    && { dates: weekdayDates(toks[i + 1], started).slice(0, 1), kind: 'weekday', len: 2, weekday: WEEKDAY_NAMES.indexOf(toks[i + 1]) },
   (toks, i, started) => WEEKDAY_NAMES.includes(toks[i])
     && { dates: weekdayDates(toks[i], started), kind: 'weekday', len: 1, weekday: WEEKDAY_NAMES.indexOf(toks[i]) },
   // "October 8", "October 8th"
@@ -400,7 +403,8 @@ function talksOtherTime(ns, hour24) {
   if (RELATIVE_DAY_PHRASES.some((phrase) => ` ${ns} `.includes(` ${phrase} `))) return true;
   return toks.some((tok, i) => {
     const one = tok === 'one' && ONE_LEADS.has(toks[i - 1]);
-    if (!one && !TIME_WORDS.has(tok) && !/^(?:[1-9]|1[0-2])$/.test(tok)) return false;
+    // Digits 13-23 are a 24-hour clock ("make that 14:30"), never this slot.
+    if (!one && !TIME_WORDS.has(tok) && !/^(?:[1-9]|1\d|2[0-3])$/.test(tok)) return false;
     if (runsIntoDuration(toks, i + 1)) return false;
     const n = hourNumber(tok);
     if (n != null) return rangeStartHour(toks, n, -1) !== hour24;

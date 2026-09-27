@@ -408,6 +408,12 @@ describe('rescheduleAgreementEvidence', () => {
     expect(evidence(nextWeek, '2026-10-01T14:00:00-04:00').ok).toBe(true);
   });
 
+  test('"this Thursday" is the nearest one, and a 24-hour correction is another time', () => {
+    expect(evidence('Caller: Can we move it?\nAgent: We will see you this Thursday at two.', '2026-10-01T14:00:00-04:00').ok).toBe(false);
+    expect(evidence('Caller: Can we move it?\nAgent: We will see you this Thursday at two.').ok).toBe(true);
+    expect(evidence('Caller: Can we do Thursday at two?\nAgent: We will see you Thursday at two.\nCaller: Actually, make that 14:30.\nAgent: I will do that.').ok).toBe(false);
+  });
+
   test('a relative day after the agreed slot is a correction', () => {
     for (const said of ['Please move it a week later.', 'Make it next week.', 'Actually, another day would be better.',
       'Actually, move it back an hour.', 'Make that half an hour later.', 'Make it a day earlier.']) {
