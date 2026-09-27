@@ -245,7 +245,7 @@
     "scientific_name": "Sceliphron / Trypoxylon spp.",
     "rank": "group",
     "group": "wasps-bees",
-    "subgroup": "solitary-wasps",
+    "subgroup": "medical-solitary-wasps",
     "site_category": "Stingers",
     "traits": [
       "Organ-pipe or urn-shaped mud tubes stuck to walls, eaves, or bridges",
@@ -868,7 +868,7 @@
     "scientific_name": "Dasymutilla occidentalis",
     "rank": "species",
     "group": "wasps-bees",
-    "subgroup": null,
+    "subgroup": "allergy-risk-velvet-ants",
     "site_category": "Stingers",
     "stages": [
       "adult"

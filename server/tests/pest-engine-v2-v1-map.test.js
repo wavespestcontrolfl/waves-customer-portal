@@ -94,6 +94,9 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     ['regal-jumping-spider', 'jumping-spiders', {
       line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false,
     }, 'low'],
+    ['golden-silk-orbweaver', 'orb-weavers', {
+      line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false,
+    }, 'low'],
   ])('a singleton draft %s retains its source-backed service contract at %s', (
     slug, nodeId, service, urgency,
   ) => {
@@ -108,7 +111,24 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
   test.each([
     ['tussock-moth-caterpillar', 'stinging-caterpillars', /itchy rash.+seek medical care/i],
     ['southern-toad', 'toads', /irritate a pet's mouth.+contact a veterinarian/i],
-  ])('a singleton irritant draft %s retains neutral exposure guidance at %s', (slug, nodeId, safety) => {
+    ['cuban-treefrog', 'irritant-treefrogs', /irritate eyes, nose, and airways.+see a doctor/i],
+    ['bed-bug', 'bed-bugs', /bites can itch or welt.+see a doctor/i],
+    ['deer-fly', 'biting-flies', /bites can be painful, itchy, or swollen.+see a doctor/i],
+    ['chiggers', 'mites', /persistent, itchy welts.+see a doctor/i],
+    ['millipede', 'millipedes', /irritate skin or eyes.+avoid bare-hand contact/i],
+    ['carpenter-bee', 'carpenter-bees', /allergic reaction.+call 911/i],
+    ['wheel-bug', 'persistent-bite-assassin-bugs', /very painful.+numbness or pain lasts/i],
+    ['mud-dauber', 'medical-solitary-wasps', /allergic reaction.+call 911/i],
+    ['graceful-twig-ant', 'allergy-risk-ants', /sharply painful.+allergic reaction/i],
+    ['asian-lady-beetle', 'allergen-lady-beetles', /allergies or asthma/i],
+    ['monarch-caterpillar', 'pet-risk-garden-caterpillars', /upset a pet’s stomach/i],
+    ['house-centipede', 'bite-risk-centipedes', /centipede bite can hurt.+allergic reaction/i],
+    ['carpet-beetle', 'irritant-fabric-beetles', /mild skin irritation.+not a bite or sting/i],
+    ['hentz-striped-scorpion', 'allergy-risk-scorpions', /sting is painful.+allergic reaction/i],
+    ['hammerhead-flatworm', 'toxic-flatworms', /do not handle it bare-handed.+wash hands/i],
+    ['yellow-sac-spider', 'medical-sac-spiders', /mild pain and itching.+see a doctor/i],
+    ['velvet-ant', 'allergy-risk-velvet-ants', /sting can be extremely painful.+allergic reaction/i],
+  ])('a draft %s retains source-backed exposure guidance at %s', (slug, nodeId, safety) => {
     const built = answerFor(slug, { approved: false });
     expect(built).toMatchObject({
       answer: { node_id: nodeId }, entry: null, topEntrySlug: null,
@@ -155,6 +175,57 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     });
   });
 
+  test('a mixed Cuban and native treefrog result stays at the neutral treefrog parent', () => {
+    const built = buildAnswer({
+      candidates: [
+        { ...candidate('cuban-treefrog', { approved: false }), confidence: 0.55 },
+        { ...candidate('green-treefrog', { approved: false }), confidence: 0.35 },
+      ],
+      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
+      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+    });
+    expect(built).toMatchObject({
+      answer: { level: 'subgroup', node_id: 'treefrogs' }, entry: null,
+      genericSafetyLine: null,
+    });
+    const mapped = mapToV1(built).report_contract;
+    expect(mapped.safety).not.toHaveProperty('irritant');
+    expect(mapped.service).toMatchObject({
+      line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false,
+    });
+  });
+
+  test('every universally routed actual fallback preserves its catalog contract', () => {
+    const entries = catalog.listEntries();
+    const nodeIds = new Set();
+    for (const entry of entries) nodeIds.add(answerFor(entry.slug, { approved: false }).answer.node_id);
+    expect(nodeIds.size).toBeGreaterThanOrEqual(87);
+
+    for (const nodeId of nodeIds) {
+      const descendants = entries.filter((entry) => catalog.lineage(entry.slug).some((rung) => rung.id === nodeId));
+      const contracts = descendants.map((entry) => ({
+        line: entry.service.line, key: entry.service.key, label: entry.service.label,
+        inspection_required: entry.service.inspection_first, urgency: entry.urgency,
+      }));
+      // These established nodes intentionally choose a more conservative
+      // urgency, a referral-oriented label, or both.
+      const mapped = mapToV1(answerFor(descendants[0].slug, { approved: false }));
+      const actual = { ...mapped.report_contract.service, urgency: mapped.urgency };
+      const sharedIdentity = ['line', 'key', 'label'].every((field) => (
+        new Set(contracts.map((contract) => JSON.stringify(contract[field]))).size === 1
+      ));
+      for (const field of ['line', 'key', 'label', 'inspection_required', 'urgency']) {
+        if (new Set(contracts.map((contract) => JSON.stringify(contract[field]))).size !== 1) continue;
+        if (field === 'inspection_required' && !sharedIdentity) continue;
+        if (field === 'urgency' && nodeId === 'aedes') continue;
+        if (field === 'label' && ['anoles', 'bats', 'geckos'].includes(nodeId)) continue;
+        expect({ nodeId, field, value: actual[field] }).toEqual({
+          nodeId, field, value: contracts[0][field],
+        });
+      }
+    }
+  });
+
   test('swarm and wall-colony uncertainty stops at their neutral honey-bee parent', () => {
     const built = buildAnswer({
       candidates: [
@@ -175,7 +246,7 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
 
   test.each([
     ['carpenter-bee', 'honey-bee', 'carpenter-bees', 'insect', { key: 'pest', label: 'General Pest Control', inspection_required: false }],
-    ['aphid', 'aphid-scale', 'plant-pests-small', 'insect', { key: null, label: 'Pest Consultation', inspection_required: true }],
+    ['aphid', 'aphid-scale', 'plant-pests-small', 'insect', { key: null, label: 'Tree & Shrub Care', inspection_required: false }],
   ])('a draft %s climb preserves category but never borrows the narrower %s identity',
     (slug, forbiddenLegacySlug, nodeId, category, service) => {
       const built = answerFor(slug, { approved: false });

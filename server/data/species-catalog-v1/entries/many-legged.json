@@ -24,7 +24,7 @@
     "scientific_name": "Scutigera coleoptrata",
     "rank": "species",
     "group": "many-legged",
-    "subgroup": null,
+    "subgroup": "bite-risk-centipedes",
     "site_category": "Occasional invaders",
     "traits": [
       "Fifteen pairs of very long legs — moves in a fast, ghostly blur",
@@ -340,7 +340,7 @@
     "scientific_name": "Hemiscolopendra marginata",
     "rank": "species",
     "group": "many-legged",
-    "subgroup": null,
+    "subgroup": "bite-risk-centipedes",
     "site_category": "Occasional invaders",
     "stages": [
       "juvenile",

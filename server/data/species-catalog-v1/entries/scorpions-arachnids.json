@@ -133,7 +133,7 @@
     "scientific_name": "Centruroides hentzi",
     "rank": "species",
     "group": "scorpions-arachnids",
-    "subgroup": null,
+    "subgroup": "allergy-risk-scorpions",
     "site_category": "Stingers",
     "stages": [
       "adult"

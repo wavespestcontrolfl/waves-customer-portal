@@ -1395,7 +1395,7 @@
     "scientific_name": "Pseudomyrmex gracilis",
     "rank": "species",
     "group": "ants",
-    "subgroup": null,
+    "subgroup": "allergy-risk-ants",
     "site_category": "Ants",
     "stages": [
       "worker"

@@ -358,7 +358,7 @@ describe('owner approval content binding', () => {
 
 describe('index.json — groups, subgroups, next_photo', () => {
   test('every group and subgroup has an ask/why next_photo within its length caps', () => {
-    expect(index.subgroups).toHaveLength(61);
+    expect(index.subgroups).toHaveLength(73);
     for (const g of index.groups) {
       expect(g.next_photo.ask.length).toBeLessThanOrEqual(180);
       expect(g.next_photo.why.length).toBeLessThanOrEqual(160);
@@ -886,12 +886,12 @@ describe('loader API surface', () => {
     ['io-moth-caterpillar', 'subgroup', 'venomous-caterpillars', /Do not touch or handle/i],
     ['saddleback-caterpillar', 'subgroup', 'venomous-caterpillars', /Do not touch or handle/i],
     ['black-widow', 'subgroup', 'widow-spiders', /Do not approach, disturb, or handle/i],
-    ['mud-dauber', 'subgroup', 'solitary-wasps', /without approaching or disturbing/i],
+    ['mud-dauber', 'subgroup', 'medical-solitary-wasps', /without approaching or disturbing/i],
     ['yellowjacket', 'subgroup', 'high-risk-social-wasps', /Do not approach or disturb/i],
     ['paper-wasp', 'subgroup', 'social-wasps', /without approaching or disturbing/i],
     ['brown-recluse', 'subgroup', 'medically-significant-spiders', /Do not approach, disturb, or handle/i],
     ['cane-toad', 'subgroup', 'toxic-toads', /Do not touch or handle/i],
-    ['cuban-treefrog', 'subgroup', 'treefrogs', /do not approach, touch, or handle/i],
+    ['cuban-treefrog', 'subgroup', 'irritant-treefrogs', /do not approach, touch, or handle/i],
   ])('the actual draft %s fallback never asks the customer to approach or handle it', (slug, level, nodeId, distanceRule) => {
     const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
     expect(catalog.getEntry(slug).review.status).toBe('draft');

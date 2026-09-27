@@ -53,6 +53,15 @@
       "next_photo": {
         "ask": "Use zoom from a safe distance to show the whole animal and markings already visible. Never approach, handle, or disturb any animal, nest, burrow, or shelter.",
         "why": "Head shape, markings and size identify the animal and whether it is protected."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "Wildlife Guidance",
+          "inspectionRequired": true,
+          "urgency": "low"
+        }
       }
     },
     "other": {
@@ -123,6 +132,13 @@
       "next_photo": {
         "ask": "Use zoom from a safe distance for wings and body on a non-contact surface. Do not let it land on skin or bite for a photo. Tell us where and when you saw it.",
         "why": "Wing pattern and bite timing separate no-see-ums from horse, deer, and stable flies."
+      },
+      "generic_guidance": {
+        "safety_line": "Biting-fly bites can be painful, itchy, or swollen. See a doctor if a bite becomes very swollen, increasingly red or painful, or does not improve.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN155",
+          "https://ask.ifas.ufl.edu/publication/IN626"
+        ]
       }
     },
     {
@@ -179,6 +195,20 @@
       "next_photo": {
         "ask": "A close-up of the insect next to a mattress seam, plus a photo of any dark spotting on the fabric.",
         "why": "Body shape and the fecal-spotting pattern confirm bed bugs versus a bat bug or carpet beetle."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "pest",
+          "serviceKey": null,
+          "serviceLabel": "Bed Bug Inspection",
+          "inspectionRequired": true,
+          "urgency": "moderate"
+        },
+        "safety_line": "Bed bug and related bug bites can itch or welt. See a doctor if a bite site looks infected or you have a strong allergic reaction.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN297",
+          "https://pmc.ncbi.nlm.nih.gov/articles/PMC10146278/"
+        ]
       }
     },
     {
@@ -262,6 +292,19 @@
       "next_photo": {
         "ask": "An extreme close-up of the leaf underside where the insects are clustered, plus the whole plant.",
         "why": "Cluster shape and any waxy coating separate aphids, scale, mealybugs, and whiteflies."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "tree_shrub",
+          "serviceKey": null,
+          "serviceLabel": "Tree & Shrub Care",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/in330",
+          "https://ask.ifas.ufl.edu/publication/IN522"
+        ]
       }
     },
     {
@@ -292,6 +335,19 @@
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the insect and the food package or fabric where you found it. Do not touch or handle the insect for a photo.",
         "why": "What it's found in — food vs. fabric — narrows this group fast."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN153",
+          "https://ask.ifas.ufl.edu/publication/IN873"
+        ]
       }
     },
     {
@@ -528,6 +584,18 @@
       "next_photo": {
         "ask": "A sharp photo (or video frame) of the running trail from above.",
         "why": "The zigzag running pattern and antenna length separate crazy ants from other trailing ants."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://ask.ifas.ufl.edu/in1071"
+        ]
       }
     },
     {
@@ -612,6 +680,18 @@
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the band behind the head and wing length already visible. Do not touch or handle the insect for a photo.",
         "why": "The head band and wing length separate American, smokybrown, and woods roaches."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN298"
+        ]
       }
     },
     {
@@ -624,6 +704,18 @@
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the back markings already visible. Do not touch or handle the insect or place objects beside it.",
         "why": "Stripe pattern and whether it was found only indoors separate German from brown-banded roaches."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://blogs.ifas.ufl.edu/pestalert/2020/04/17/which-roach-is-around-your-yard/"
+        ]
       }
     },
     {
@@ -697,6 +789,20 @@
       "next_photo": {
         "ask": "The closest photo the camera can manage, plus when and where (after yard work, near a bird nest).",
         "why": "Because mites are nearly invisible, timing and location do most of the work separating chiggers from bird/rodent mites."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": true,
+          "urgency": "moderate"
+        },
+        "safety_line": "Mite bites can cause persistent, itchy welts. See a doctor if the reaction is severe, you develop a fever, or it does not improve.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IG085",
+          "https://en.wikipedia.org/wiki/Rodent_mite_dermatitis"
+        ]
       }
     },
     {
@@ -737,6 +843,20 @@
       "next_photo": {
         "ask": "A photo of the whole web shape plus the spider sitting in it.",
         "why": "Web shape and body pattern separate the harmless orb-weavers from each other."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN467",
+          "https://ask.ifas.ufl.edu/publication/IN568",
+          "https://ask.ifas.ufl.edu/publication/IN1243"
+        ]
       }
     },
     {
@@ -904,7 +1024,11 @@
           "serviceLabel": "General Pest Control",
           "inspectionRequired": false,
           "urgency": "low"
-        }
+        },
+        "safety_line": "Female carpenter bees can sting if handled, though they rarely do. See a doctor for signs of an allergic reaction, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://journals.flvc.org/edis/article/view/108283"
+        ]
       }
     },
     {
@@ -1011,6 +1135,19 @@
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the head shape and front legs. Do not approach, touch, or handle it or place objects beside it.",
         "why": "Head and leg shape separate a beneficial assassin bug from the kissing bug that bites people."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "sources": [
+          "https://en.wikipedia.org/wiki/Arilus_cristatus",
+          "https://en.wikipedia.org/wiki/Zelus_longipes"
+        ]
       }
     },
     {
@@ -1051,6 +1188,15 @@
       "next_photo": {
         "ask": "A close-up of the leaf underside showing the egg pattern and any waxy coating.",
         "why": "Egg-laying pattern (spiral vs. scattered) separates whitefly species."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "urgency": "moderate"
+        },
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1015",
+          "https://edis-news.ifas.ufl.edu/2018/05/pest-identification-guide-ficus-whitefly-singhiella-simplex"
+        ]
       }
     },
     {
@@ -1249,6 +1395,37 @@
       }
     },
     {
+      "id": "irritant-treefrogs",
+      "group": "frogs-toads",
+      "parent": "treefrogs",
+      "label": "Irritant Treefrogs",
+      "generic": "a treefrog",
+      "scientific": "Osteopilus",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the toe pads, skin texture, and overall size only if already visible. Do not approach, touch, or handle the frog.",
+        "why": "Large toe pads, warty skin, and overall size help separate a Cuban treefrog from native treefrogs."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "irritant": true,
+            "toxic_to_pets": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Skin secretions can irritate eyes, nose, and airways, especially for people with asthma, and can bother pets that mouth one. Wash hands after contact; see a doctor if irritation doesn’t clear up.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/UW259",
+          "https://ask.ifas.ufl.edu/publication/UW394"
+        ]
+      }
+    },
+    {
       "id": "bats",
       "group": "wild-mammals",
       "label": "Bats",
@@ -1300,6 +1477,22 @@
       "next_photo": {
         "ask": "Use zoom from a safe distance for a side view showing the legs and body segments. Do not handle it or place objects beside it.",
         "why": "Body shape, color, and leg count per segment help separate common millipedes."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "irritant": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Millipede defensive secretions can irritate skin or eyes. Avoid bare-hand contact and sweep them up instead of picking them up.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IG093"
+        ]
       }
     },
     {
@@ -1870,6 +2063,323 @@
           "urgency": "moderate"
         },
         "referral": "protected_leave_alone"
+      }
+    },
+    {
+      "id": "persistent-bite-assassin-bugs",
+      "group": "true-bugs",
+      "parent": "assassin-bugs",
+      "label": "Painful-bite Assassin Bugs",
+      "generic": "an assassin bug",
+      "scientific": "Arilus",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the wheel-shaped crest and front legs. Do not approach, touch, or handle it.",
+        "why": "The wheel-shaped crest separates a wheel bug from other assassin bugs."
+      },
+      "generic_guidance": {
+        "safety_line": "A bite can be very painful if the insect is picked up or handled. See a doctor if numbness or pain lasts more than a few days.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Arilus_cristatus"
+        ],
+        "compatibility": {
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low",
+          "safety": {
+            "bites": true,
+            "allergen": true
+          }
+        }
+      }
+    },
+    {
+      "id": "medical-solitary-wasps",
+      "group": "wasps-bees",
+      "parent": "solitary-wasps",
+      "label": "Allergy-risk Solitary Wasps",
+      "generic": "a solitary wasp",
+      "scientific": "Sceliphron / Trypoxylon spp.",
+      "rank": "group",
+      "next_photo": {
+        "ask": "From a safe distance, use camera zoom to show the narrow waist and mud nest without approaching or disturbing it.",
+        "why": "Body shape and a mud nest separate a mud dauber from other solitary wasps."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "These wasps rarely sting. See a doctor for an unusual allergic reaction, and call 911 if someone has trouble breathing.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN1478"
+        ]
+      }
+    },
+    {
+      "id": "allergy-risk-ants",
+      "group": "ants",
+      "label": "Allergy-risk Ants",
+      "generic": "an ant",
+      "scientific": "Pseudomyrmex",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the long slender body and trail. Do not approach, disturb, or handle the ants.",
+        "why": "Body shape and color help separate this ant from other slender ants."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "A sting can be sharply painful. See a doctor if you have a strong allergic reaction.",
+        "sources": [
+          "https://journals.flvc.org/edis/article/download/116996/115141"
+        ]
+      }
+    },
+    {
+      "id": "allergen-lady-beetles",
+      "group": "beetles",
+      "parent": "lady-beetles",
+      "label": "Allergen Lady Beetles",
+      "generic": "a lady beetle",
+      "scientific": "Harmonia",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the marking behind the head and any indoor cluster. Do not handle it.",
+        "why": "The head marking and cluster location separate this lady beetle from native species."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "allergen": true,
+            "irritant": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Large indoor clusters can bother people with allergies or asthma, and their yellow defensive fluid can stain fabric.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN361"
+        ]
+      }
+    },
+    {
+      "id": "pet-risk-garden-caterpillars",
+      "group": "caterpillars-moths",
+      "parent": "garden-caterpillars",
+      "label": "Pet-risk Garden Caterpillars",
+      "generic": "a garden caterpillar",
+      "scientific": "Danaus",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the stripe pattern and host plant. Do not let pets mouth it.",
+        "why": "Stripe pattern and the host plant separate this caterpillar from similar garden caterpillars."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "toxic_to_pets": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Milkweed toxins stored by the caterpillar can upset a pet’s stomach if a large amount is eaten. Keep pets from mouthing it.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN780"
+        ]
+      }
+    },
+    {
+      "id": "bite-risk-centipedes",
+      "group": "many-legged",
+      "label": "Bite-risk Centipedes",
+      "generic": "a centipede",
+      "scientific": "Chilopoda",
+      "rank": "class",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the body and legs. Do not touch or handle it.",
+        "why": "Body shape, leg length, and color help separate common centipedes."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "bites": true
+          }
+        },
+        "safety_line": "A centipede bite can hurt. See a doctor if you have an unusual or allergic reaction.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IG093"
+        ]
+      }
+    },
+    {
+      "id": "irritant-fabric-beetles",
+      "group": "pantry-fabric",
+      "label": "Irritant Fabric Beetles",
+      "generic": "a fabric beetle",
+      "scientific": "Dermestidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the beetle or larva and the fabric where it was found. Do not handle it.",
+        "why": "Body covering and the damaged material separate fabric beetles from pantry pests."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "irritant": true,
+            "allergen": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "safety_line": "Bristly larvae can cause mild skin irritation or an allergic-type reaction in sensitive people. This is not a bite or sting.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/IN873",
+          "https://ask.ifas.ufl.edu/publication/IN144"
+        ]
+      }
+    },
+    {
+      "id": "allergy-risk-scorpions",
+      "group": "scorpions-arachnids",
+      "label": "Allergy-risk Scorpions",
+      "generic": "a scorpion",
+      "scientific": "Centruroides",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the body stripes and tail. Do not approach, touch, or handle it.",
+        "why": "Body markings and tail shape help separate Florida scorpions."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "venomous": true,
+            "stinging": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "The sting is painful but is not medically dangerous for most people. See a doctor if you have a strong allergic reaction.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Centruroides_hentzi"
+        ]
+      }
+    },
+    {
+      "id": "toxic-flatworms",
+      "group": "snails-slugs-worms",
+      "label": "Toxic Flatworms",
+      "generic": "a flatworm",
+      "scientific": "Bipalium",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the head and body shape. Do not touch or handle it, and keep pets away.",
+        "why": "The hammer-shaped head separates this flatworm from earthworms and slugs."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "toxic_to_pets": true,
+            "irritant": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Do not handle it bare-handed or let pets mouth it. Wash hands well after any contact.",
+        "sources": [
+          "https://ask.ifas.ufl.edu/publication/in206",
+          "https://journals.plos.org/plosone/article?id=10.1371%2Fjournal.pone.0100718"
+        ]
+      }
+    },
+    {
+      "id": "medical-sac-spiders",
+      "group": "spiders",
+      "label": "Medical-advice Sac Spiders",
+      "generic": "a sac spider",
+      "scientific": "Cheiracanthium",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the pale body and resting sac only if already visible. Do not handle it.",
+        "why": "Body color and the resting sac help separate sac spiders from other indoor spiders."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "venomous": true,
+            "bites": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "safety_line": "Bites usually cause mild pain and itching. See a doctor if a bite site worsens or does not improve.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Cheiracanthium_inclusum"
+        ]
+      }
+    },
+    {
+      "id": "allergy-risk-velvet-ants",
+      "group": "wasps-bees",
+      "label": "Allergy-risk Velvet Ants",
+      "generic": "a wingless wasp",
+      "scientific": "Mutillidae",
+      "rank": "family",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the fuzzy body and color pattern. Do not touch or handle it.",
+        "why": "Body shape and dense hair separate a velvet ant from true ants."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "moderate"
+        },
+        "safety_line": "The sting can be extremely painful. See a doctor if you have a strong allergic reaction.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Dasymutilla_occidentalis"
+        ]
       }
     }
   ],
