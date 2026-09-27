@@ -650,7 +650,7 @@ describe('staff geocode review blocks coordinate-less re-service offers', () => 
     setReview(null);
     const booking = require('../routes/booking')._internals;
     jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({ advance_days_min: 1, advance_days_max: 14 });
-    jest.spyOn(booking, 'customerBookingLocation').mockResolvedValue({ lat: 27.34, lng: -82.53 });
+    const coords = jest.spyOn(booking, 'customerBookingLocation').mockResolvedValue({ lat: 27.34, lng: -82.53 });
     const build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({
       slots: [], nearby: false,
       days: [{
@@ -680,6 +680,42 @@ describe('staff geocode review blocks coordinate-less re-service offers', () => 
     expect(build).toHaveBeenCalledTimes(1);
     const customerReadsAfter = mockedDb.mock.calls.filter(([table]) => table === 'customers').length;
     expect(customerReadsAfter - customerReadsBefore).toBeGreaterThanOrEqual(2);
+  });
+
+  test('a contact-only customer change refreshes current availability instead of entering address recovery', async () => {
+    setReview(null);
+    const booking = require('../routes/booking')._internals;
+    jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({ advance_days_min: 1, advance_days_max: 14 });
+    const coords = jest.spyOn(booking, 'customerBookingLocation').mockResolvedValue({ lat: 27.34, lng: -82.53 });
+    const replacement = {
+      slots: [], nearby: false,
+      days: [{
+        date: slotDate,
+        slots: [{ start_time: '14:00', end_time: '14:20', technician_id: 'tech-2', start_label: '2:00 PM', end_label: '2:20 PM' }],
+      }],
+    };
+    const build = jest.spyOn(booking, 'buildBookingAvailability')
+      .mockResolvedValueOnce({ ...replacement, days: [{ ...replacement.days[0], slots: [{ ...replacement.days[0].slots[0], start_time: '09:00' }] }] })
+      .mockResolvedValueOnce(replacement);
+    jest.spyOn(booking, 'createSelfBooking').mockImplementation(async () => {
+      firstResults.customers = customer({ phone: '9415550199' });
+      return { ok: false, status: 409, code: 'CUSTOMER_CHANGED_RETRY', error: 'changed' };
+    });
+
+    const res = response();
+    await commitHandler()({
+      params: { token }, body: { lane: 'pest', date: slotDate, start_time: '09:00' },
+    }, res, jest.fn());
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      code: 'SLOT_TAKEN',
+      availability: expect.objectContaining({
+        days: [expect.objectContaining({ slots: [expect.objectContaining({ start_time: '14:00' })] })],
+      }),
+    }));
+    expect(build).toHaveBeenCalledTimes(2);
+    expect(coords.mock.calls[1][0]).toEqual(expect.objectContaining({ phone: '9415550199' }));
   });
 
   test('a customer change that retires the token stays a generic 404 without stale slots', async () => {

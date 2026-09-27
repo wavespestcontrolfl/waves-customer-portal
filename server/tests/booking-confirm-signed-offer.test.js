@@ -304,9 +304,20 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   const PHONE_EST = 'cccc3333-dd44-4e55-8f66-aaaa7777bbbb';
   const MISMATCH_EST = 'dddd4444-ee55-4f66-8a77-bbbb8888cccc';
   const CUST = {
-    id: 'cust-1', phone: '(941) 555-0100', email: 'ada@example.com', city: 'Sarasota',
+    id: 'cust-1', account_id: 'acct-1', phone: '(941) 555-0100', email: 'ada@example.com', city: 'Sarasota',
     address_line1: '123 Fixture Lane', address_line2: 'Unit 2', state: 'FL', zip: '34236',
     latitude: LAT, longitude: LNG,
+  };
+  const SIBLING = {
+    ...CUST,
+    id: 'cust-2',
+    address_line1: '456 Sibling Lane',
+    address_line2: 'Unit 4',
+  };
+  const OTHER_CUST = { ...CUST, id: 'cust-other', account_id: 'acct-other' };
+  const customerFixture = (id, { fenced = false } = {}) => {
+    if (String(id) === String(loadedCustomer?.id)) return fenced ? fencedCustomer : loadedCustomer;
+    return ({ [CUST.id]: CUST, [SIBLING.id]: SIBLING, [OTHER_CUST.id]: OTHER_CUST })[String(id)] || null;
   };
   const ESTIMATES = {
     [EST_ID]: { id: EST_ID, source: 'admin', customer_id: 'cust-1', status: 'sent' },
@@ -385,10 +396,15 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       // …and the county-verdict stored-pair read (#4667: email + phone of
       // the resolved customer, before the comms fence) — same row.
       const b = {
-        where: () => b,
+        _id: null,
+        where(arg, value) {
+          if (arg && typeof arg === 'object') b._id = arg.id ?? b._id;
+          else if (arg === 'id') b._id = value;
+          return b;
+        },
         whereNull: () => b,
         forShare: () => b,
-        first: async () => fencedCustomer,
+        first: async () => customerFixture(b._id || loadedCustomer.id, { fenced: true }),
       };
       return b;
     }
@@ -454,12 +470,19 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       if (table === 'customers') {
         // Phone lookup and the by-id lookup both resolve CUST — identity
         // lands on cust-1 for every path in this describe.
-        return {
-          whereRaw: jest.fn().mockReturnThis(),
-          where: jest.fn().mockReturnThis(),
-          andWhere: jest.fn().mockReturnThis(),
-          first: jest.fn().mockImplementation(async () => loadedCustomer),
+        const builder = {
+          _id: null,
+          whereRaw: jest.fn(() => builder),
+          where: jest.fn((arg, value) => {
+            if (arg && typeof arg === 'object') builder._id = arg.id ?? builder._id;
+            else if (arg === 'id') builder._id = value;
+            return builder;
+          }),
+          whereNull: jest.fn(() => builder),
+          andWhere: jest.fn(() => builder),
+          first: jest.fn(async () => customerFixture(builder._id || loadedCustomer.id)),
         };
+        return builder;
       }
       if (table === 'notification_prefs' || table === 'property_preferences') {
         // Both rows are seeded via createDefaultCustomerRows for every
@@ -537,6 +560,19 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
+  test("an estimate owned by a sibling property on the same account keeps its source link", async () => {
+    loadedCustomer = { ...SIBLING };
+    fencedCustomer = { ...SIBLING };
+    const row = await runToScheduledInsert({
+      estimate_id: undefined,
+      authedCustomer: loadedCustomer,
+      source_estimate_id: EST_ID,
+    });
+    expect(row.customer_id).toBe(SIBLING.id);
+    expect(row.source_estimate_id).toBe(EST_ID);
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('does not belong'));
+  });
+
   test('a customer-less estimate whose contact PHONE matches the booking customer stamps the link', async () => {
     const row = await runToScheduledInsert({ source_estimate_id: PHONE_EST });
     expect(row.source_estimate_id).toBe(PHONE_EST);
@@ -563,6 +599,19 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       status: 409,
       error: 'Your address just changed — please pick a time again.',
       code: 'LOCATION_CHANGED_RETRY',
+    });
+    expect(capturedScheduledInsert).toBeUndefined();
+  });
+
+  test('an account reassignment under the booking fence requires a fresh customer resolution', async () => {
+    fencedCustomer = { ...CUST, account_id: 'acct-moved' };
+    const sig = mintSlotOfferField(offerPayload());
+
+    await expect(createSelfBooking(confirmPayload(sig))).resolves.toEqual({
+      ok: false,
+      status: 409,
+      error: 'Your account details just changed — please refresh and book again.',
+      code: 'CUSTOMER_CHANGED_RETRY',
     });
     expect(capturedScheduledInsert).toBeUndefined();
   });

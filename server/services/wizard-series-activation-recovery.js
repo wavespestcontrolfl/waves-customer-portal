@@ -24,6 +24,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { estimateBelongsToCustomerAccount } = require('./customer-account-ownership');
 
 // Only look at bookings old enough that no in-flight request is still
 // racing toward its own activation. Deliberately NO upper age bound
@@ -284,7 +285,7 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
         // full-program rebook), and anything else is a newer quote whose
         // link must survive. Unstamped rows fail closed (never retire).
         const draftRepresentsParent = draftLive
-          && String(freshDraft.customer_id || '') === String(fresh.customer_id || '')
+          && await estimateBelongsToCustomerAccount(trx, freshDraft, fresh.customer_id)
           && !!fresh.source_estimate_generation
           && !!freshDraft.updated_at
           && new Date(freshDraft.updated_at).getTime() === new Date(fresh.source_estimate_generation).getTime();

@@ -529,7 +529,7 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(gateEndIdx).toBeGreaterThan(gateIdx);
     const gateBlock = src.slice(gateIdx, gateEndIdx + 120);
     // linked estimate → must be THIS customer's
-    expect(gateBlock).toMatch(/String\(sourceEstimateRow\.customer_id\) === String\(custId\)/);
+    expect(gateBlock).toMatch(/estimateBelongsToCustomerAccount\(db, sourceEstimateRow, customer\)/);
     // unlinked estimate → contact match: last-10 phone, email only when the
     // estimate has no phone (estimates.customer_phone may be freeform/E.164)
     expect(gateBlock).toMatch(/customer_phone/);

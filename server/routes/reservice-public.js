@@ -160,6 +160,18 @@ function locationReviewFailure() {
   return { error: LOCATION_REVIEW_ERROR, code: 'LOCATION_REVIEW_REQUIRED' };
 }
 
+function serviceLocationFingerprint(customer) {
+  return [
+    customer?.address_line1,
+    customer?.address_line2,
+    customer?.city,
+    customer?.state,
+    customer?.zip,
+    customer?.latitude,
+    customer?.longitude,
+  ].map(value => String(value ?? '').trim()).join('|');
+}
+
 // The booking window mirrors the public /book funnel's config-driven range —
 // identical to reschedule-public's bookingRange.
 function bookingRange(config, now = new Date()) {
@@ -535,13 +547,30 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           alreadyBooked: booked,
         });
       }
-      // An address or review can change after the pre-check or while the
-      // transaction waits on its fences. Reload the token row so a retired
-      // link stays indistinguishable, then enter address recovery; never
-      // rebuild slots from the stale customer object loaded above.
+      // An address, pin, review, or contact can change after the pre-check or
+      // while the transaction waits on its fences. Reload the token row so a
+      // retired link stays indistinguishable. A genuine location/review change
+      // enters address recovery; a contact-only race can safely rebuild times
+      // from the current row and keep the customer in the scheduling flow.
       if (result.code === 'LOCATION_CHANGED_RETRY' || result.code === 'CUSTOMER_CHANGED_RETRY') {
-        if (!await loadByToken(req.params.token)) return res.status(404).json({ error: 'Not found' });
-        return res.status(409).json(locationReviewFailure());
+        const currentCustomer = await loadByToken(req.params.token);
+        if (!currentCustomer) return res.status(404).json({ error: 'Not found' });
+        const locationChanged = result.code === 'LOCATION_CHANGED_RETRY'
+          || serviceLocationFingerprint(currentCustomer) !== serviceLocationFingerprint(customer);
+        if (locationChanged || await reserviceLocationReviewRequired(currentCustomer)) {
+          return res.status(409).json(locationReviewFailure());
+        }
+        let refreshed = null;
+        try {
+          refreshed = await buildAvailabilityForCustomer(currentCustomer, {
+            ...range, config, duration: catalog.durationMinutes, lanes: [lane],
+          });
+        } catch { /* answer without the refresh; the client reloads */ }
+        return res.status(409).json({
+          error: 'Your account details changed while we were booking. Please choose a time again.',
+          code: 'SLOT_TAKEN',
+          availability: refreshed ? reserviceAvailabilityPayload(refreshed, range) : null,
+        });
       }
       // Any other 409 out of the transaction is a slot-level race
       // (SLOT_TAKEN / DAY_FULL) — refresh the list so the page recovers in
@@ -601,6 +630,7 @@ router._test = {
   resolveLaneState,
   buildAvailabilityForCustomer,
   reserviceLocationReviewRequired,
+  serviceLocationFingerprint,
 };
 
 module.exports = router;

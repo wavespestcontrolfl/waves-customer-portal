@@ -8,8 +8,14 @@ import PublicBookingPage from './PublicBookingPage';
 import { ESTIMATE_QUOTE_URL } from '../lib/estimateMarketingRedirects';
 
 vi.mock('../components/AddressAutocomplete', () => ({
-  default: ({ value, onChange, placeholder }) => (
-    <input aria-label="Service address" value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+  default: ({ value, onChange, onSelect, placeholder }) => (
+    <>
+      <input aria-label="Service address" value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+      <button type="button" onClick={() => onSelect?.({
+        line1: '123 Main St', line2: 'Apt A', formatted: '123 Main St Apt A, Sarasota, FL 34236',
+        city: 'Sarasota', state: 'FL', zip: '34236', lat: 27.34, lng: -82.53,
+      })}>Choose address with Apt A</button>
+    </>
   ),
 }));
 vi.mock('../components/brand', async (importOriginal) => ({ ...(await importOriginal()), WavesShell: ({ children }) => <div>{children}</div> }));
@@ -136,7 +142,8 @@ describe('PublicBookingPage offer identity', () => {
       </MemoryRouter>,
     );
 
-    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+    await screen.findByLabelText('Service address');
+    fireEvent.click(screen.getByRole('button', { name: 'Choose address with Apt A' }));
     fireEvent.change(screen.getByLabelText('Apartment or unit (optional)'), { target: { value: 'Apt B' } });
     fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
     await screen.findByRole('button', { name: /^Choose 9:00 AM/ });
@@ -153,9 +160,10 @@ describe('PublicBookingPage offer identity', () => {
       const browse = calls.find(call => call.url.pathname.endsWith('/booking/availability') && call.url.searchParams.has('date_from'));
       for (const call of [availability, browse]) {
         expect(call.url.searchParams.get('estimate_id')).toBe('est-fixture');
+        expect(call.url.searchParams.get('address')).toBe('123 Main St');
         expect(call.url.searchParams.get('unit')).toBe('Apt B');
       }
-      expect(search.body).toMatchObject({ estimate_id: 'est-fixture', unit: 'Apt B' });
+      expect(search.body).toMatchObject({ estimate_id: 'est-fixture', address: '123 Main St', unit: 'Apt B' });
     });
   });
 });

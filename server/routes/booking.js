@@ -7,6 +7,7 @@ const db = require('../models/db');
 const { isAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { estimateBelongsToCustomerAccount } = require('../services/customer-account-ownership');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
@@ -2790,7 +2791,7 @@ async function createSelfBooking(payload = {}) {
       const srcEstIdStr = String(sourceEstimateRow.id);
       let owned = false;
       if (sourceEstimateRow.customer_id) {
-        owned = String(sourceEstimateRow.customer_id) === String(custId);
+        owned = await estimateBelongsToCustomerAccount(db, sourceEstimateRow, customer);
       } else {
         const last10 = (v) => {
           const digits = String(v || '').replace(/\D/g, '');
@@ -2984,7 +2985,7 @@ async function createSelfBooking(payload = {}) {
         const pricingEstimateEligible = pricingShapeEligible(pricingEstimate);
         const pricingTrusted = handoffTokenValid
           && pricingEstimateEligible
-          && String(pricingEstimate.customer_id) === String(custId);
+          && await estimateBelongsToCustomerAccount(db, pricingEstimate, customer);
         // The verified LINKED-estimate path (/book/:estimateToken posts
         // estimate_id) still prices as it did before the handoff landed: that
         // estimate resolved identity above (non-quote_wizard only), so pricing
@@ -2992,7 +2993,7 @@ async function createSelfBooking(payload = {}) {
         // customer_id pair can't stamp another customer's price.
         const linkedEstimatePriceable = !!estimate
           && estimate.source !== 'quote_wizard'
-          && String(estimate.customer_id) === String(custId);
+          && await estimateBelongsToCustomerAccount(db, estimate, customer);
         // NON-pest wizard series: the quote's own cadence supplies the
         // divisor, under the same trust (token + shape + customer match)
         // and the same signed-service bind the pest rule uses — and ONLY
@@ -3125,7 +3126,7 @@ async function createSelfBooking(payload = {}) {
       // the fence and clears an inherited address/contact, the booking
       // must retry against live state, not commit on stale assumptions.
       const COMMS_FINGERPRINT_COLS = [
-        'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone',
+        'account_id', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone',
         ...[1, 2, 3].flatMap((n) => {
           const pfx = n === 1 ? 'service_contact' : `service_contact${n}`;
           return [`${pfx}_name`, `${pfx}_phone`, `${pfx}_email`, `${pfx}_role`];
@@ -3304,7 +3305,7 @@ async function createSelfBooking(payload = {}) {
       if (custId) {
         const freshBookingCustomer = await trx('customers')
           .where({ id: custId }).forShare()
-          .first(...COMMS_FINGERPRINT_COLS, 'latitude', 'longitude');
+          .first('id', ...COMMS_FINGERPRINT_COLS, 'latitude', 'longitude');
         if (!freshBookingCustomer || commsFingerprint(freshBookingCustomer) !== commsFingerprint(preFenceCustomer)) {
           throw Object.assign(new Error('Your account details just changed — please refresh and book again.'), {
             statusCode: 409,
@@ -3387,7 +3388,8 @@ async function createSelfBooking(payload = {}) {
         for (const estRef of [estimate?.id, sourceEstimateId]) {
           if (!estRef) continue;
           const freshEst = await trx('estimates').where({ id: estRef }).first('id', 'customer_id');
-          if (!freshEst || (freshEst.customer_id && String(freshEst.customer_id) !== String(custId))) {
+          if (!freshEst || (freshEst.customer_id
+            && !await estimateBelongsToCustomerAccount(trx, freshEst, freshBookingCustomer))) {
             throw Object.assign(new Error('Your quote was just updated — please refresh and book again.'), {
               statusCode: 409,
               isOperational: true,
@@ -4132,7 +4134,7 @@ async function createSelfBooking(payload = {}) {
                 // stamp). A draft linked to a DIFFERENT customer never
                 // stamps.
                 if (freshPricingEst.customer_id) {
-                  if (String(freshPricingEst.customer_id) !== String(custId)) return;
+                  if (!await estimateBelongsToCustomerAccount(sp, freshPricingEst, custId)) return;
                 } else {
                   const last10 = (v) => {
                     const digits = String(v || '').replace(/\D/g, '');
@@ -4669,9 +4671,9 @@ async function createSelfBooking(payload = {}) {
           // #3504): a concurrent refresh/promotion can leave the same
           // recurring line on an archived/promoted/commercial/mixed draft.
           const { wizardDraftSelfServeBookable: lockedShapeOk } = require('../services/booking-pay-at-visit');
-          const freshPlan = (lockedDraft
-            && String(lockedDraft.customer_id) === String(custId)
-            && lockedShapeOk(lockedDraft))
+          const lockedDraftOwned = lockedDraft
+            && await estimateBelongsToCustomerAccount(trx, lockedDraft, custId);
+          const freshPlan = (lockedDraftOwned && lockedShapeOk(lockedDraft))
             ? freshPlanFor(lockedDraft, RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }))
             : null;
           const freshPriced = freshPlan

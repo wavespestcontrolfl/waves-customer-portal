@@ -356,7 +356,11 @@ export default function PublicBookingPage() {
     setLoading(true);
     setError('');
     try {
-      const fullAddress = address.formatted || address.line1;
+      // The unit has one authority: the dedicated `unit` parameter. Google
+      // formatted text can retain the originally selected subpremise after
+      // the visitor edits the unit box, which would otherwise submit Apt A
+      // inline beside `unit=Apt B` and make the offer identity contradictory.
+      const fullAddress = address.line1 || address.formatted;
       const params = new URLSearchParams({
         address: fullAddress,
         service_type: service.id,
@@ -766,7 +770,7 @@ export default function PublicBookingPage() {
   const selectSlot = (date, slot) => { setSelectedDate(date); setSelectedSlot({ ...slot, date }); track(FUNNEL_EVENTS.BOOKING_SLOT_SELECTED, { date }); };
 
   const slotSearchBody = () => ({
-    address: address.formatted || address.line1,
+    address: address.line1 || address.formatted,
     ...(address.line2 ? { unit: address.line2 } : {}),
     ...(estimateIdParam ? { estimate_id: estimateIdParam } : {}),
     service_type: service.id,
@@ -820,7 +824,7 @@ export default function PublicBookingPage() {
     setBrowseLoading(true);
     try {
       const params = new URLSearchParams({
-        address: address.formatted || address.line1,
+        address: address.line1 || address.formatted,
         service_type: service.id,
         duration_minutes: String(service.duration),
         expand: 'open',

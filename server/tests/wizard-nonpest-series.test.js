@@ -845,7 +845,7 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/hasColumn\('scheduled_services', 'source_estimate_generation'\)/);
     // ownership never infers from content — the price match lives only in
     // mintedPriceConfirmed (r25), which is gated on the generation proof.
-    expect(recoverySrc).toMatch(/const draftRepresentsParent = draftLive\s*\n\s*&& String\(freshDraft\.customer_id \|\| ''\) === String\(fresh\.customer_id \|\| ''\)\s*\n\s*&& !!fresh\.source_estimate_generation/);
+    expect(recoverySrc).toMatch(/const draftRepresentsParent = draftLive\s*\n\s*&& await estimateBelongsToCustomerAccount\(trx, freshDraft, fresh\.customer_id\)\s*\n\s*&& !!fresh\.source_estimate_generation/);
     // The booking stamps the generation on the parent at INSERT, only for
     // trusted wizard pricing, column-guarded.
     expect(booking).toMatch(/sourceEstimateGeneration = pricingTrusted && pricingEstimate\?\.updated_at \? pricingEstimate\.updated_at : null;/);

@@ -533,7 +533,7 @@ describe('booking.js activateWizardSeries — re-verifies the parent owner under
     const fnAt = booking.indexOf('const activateWizardSeries = async (seriesParentRow) => {');
     const lockedParentAt = booking.indexOf("const lockedParent = await trx('scheduled_services')", fnAt);
     const throwAt = booking.indexOf('throw new SeriesOwnerMovedError(lockedParent.customer_id, lockedParent);', lockedParentAt);
-    const draftOwnerCheckAt = booking.indexOf("String(lockedDraft.customer_id) === String(custId)", lockedParentAt);
+    const draftOwnerCheckAt = booking.indexOf('estimateBelongsToCustomerAccount(trx, lockedDraft, custId)', lockedParentAt);
     const dupGuardAt = booking.indexOf('checkActiveSeriesLocked(trx, {', lockedParentAt);
     expect(throwAt).toBeGreaterThan(lockedParentAt);
     expect(draftOwnerCheckAt).toBeGreaterThan(throwAt);
