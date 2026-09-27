@@ -887,5 +887,109 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       });
       expect(result).toMatchObject({ code: 'target_clarification_required' });
     });
+
+    // Single-word evidence (a distinctive TOKEN, or a ONE-WORD alias) grounds
+    // on ordinary English otherwise — "Dispatch" (product_aliases seeds it
+    // for "Dispatch Sprayable Wetting Agent") matches "can you dispatch this
+    // inventory adjustment?" with no product in mind at all. A full name or
+    // a multi-word alias is unaffected (already tested elsewhere above).
+    describe('single-word evidence needs supporting context', () => {
+      const DISPATCH = { id: 'p-dispatch', name: 'Dispatch Sprayable Wetting Agent', active: true };
+
+      test.each([
+        "We just bought a thing of Taurus as to add this to your inventory I think it's 78 ounces",
+        'Can you add 12 fluid ounces of Taurus ST to our inventory',
+      ])('a real production prompt still grounds via the distinctive "taurus" token (%s)', async (prompt) => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt,
+          preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+        });
+        expect(result).toEqual({ productId: TAURUS.id });
+      });
+
+      test('a one-word alias on ordinary English refuses ("can you dispatch this inventory adjustment?")', async () => {
+        setGroundingDb({ products: [DISPATCH, ALPINE], aliases: [{ product_id: DISPATCH.id, alias_name: 'Dispatch' }] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock',
+          prompt: 'can you dispatch this inventory adjustment?',
+          preview: { product: { id: DISPATCH.id, name: DISPATCH.name } },
+        });
+        expect(result).toMatchObject({ code: 'target_clarification_required' });
+      });
+
+      test('the same one-word alias grounds once a stock-context word sits nearby ("add a jug of dispatch")', async () => {
+        setGroundingDb({ products: [DISPATCH, ALPINE], aliases: [{ product_id: DISPATCH.id, alias_name: 'Dispatch' }] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock',
+          prompt: 'add a jug of dispatch',
+          preview: { product: { id: DISPATCH.id, name: DISPATCH.name } },
+        });
+        expect(result).toEqual({ productId: DISPATCH.id });
+      });
+    });
+
+    // Prior turns resolve ONE AT A TIME, newest first — never concatenated.
+    // Concatenating them let a name or qualifier spill across a turn
+    // boundary that was never actually adjacent in what the operator said.
+    describe('prior turns resolve newest-first, independently', () => {
+      test('the NEWEST prior turn wins over an older, different-product turn', async () => {
+        setGroundingDb({ products: [TAURUS, ALPINE] });
+        IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+        IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce([
+          'Actually use Taurus SC', // newest
+          'Could you add we added your purchase in the Alpine WSG can you add that to our inventory stock', // older
+        ]);
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt: '1 bottle',
+          preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+          actorId: 'actor-1', threadId: THREAD_ID,
+        });
+        expect(result).toEqual({ productId: TAURUS.id });
+      });
+
+      test('a turn ending "...Demand" and an older turn beginning "CS..." never combine into a false qualifier', async () => {
+        const DEMAND = { id: 'p-demand', name: 'Demand', active: true };
+        setGroundingDb({ products: [DEMAND, ALPINE] });
+        IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+        IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce([
+          "we're nearly out of Demand", // newest
+          'CS is what we need for that job', // older
+        ]);
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt: '1 bottle',
+          preview: { product: { id: DEMAND.id, name: DEMAND.name } },
+          actorId: 'actor-1', threadId: THREAD_ID,
+        });
+        expect(result).toEqual({ productId: DEMAND.id });
+      });
+    });
+
+    // A bare STRENGTH number immediately followed by a formulation code is a
+    // qualifier too, even with no '%' — "20 WDG" against a "50 WDG" catalog
+    // row is exactly as much a mismatch as "20%" against "10%".
+    describe('a bare strength number followed by a formulation code is a qualifier', () => {
+      const ARMADA_50 = { id: 'p-armada-50', name: 'Armada 50 WDG', active: true };
+
+      test('"Armada 20 WDG" refuses against an "Armada 50 WDG" catalog row', async () => {
+        setGroundingDb({ products: [ARMADA_50, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock',
+          prompt: 'we bought Armada 20 WDG, add it',
+          preview: { product: { id: ARMADA_50.id, name: ARMADA_50.name } },
+        });
+        expect(result).toMatchObject({ code: 'target_clarification_required' });
+      });
+
+      test('"Armada 50 WDG, 2 lb" grounds — the strength matches and "2 lb" is an ordinary quantity', async () => {
+        setGroundingDb({ products: [ARMADA_50, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock',
+          prompt: 'Armada 50 WDG, 2 lb',
+          preview: { product: { id: ARMADA_50.id, name: ARMADA_50.name } },
+        });
+        expect(result).toEqual({ productId: ARMADA_50.id });
+      });
+    });
   });
 });

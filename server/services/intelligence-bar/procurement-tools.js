@@ -984,12 +984,19 @@ const FORMULATION_CODE_ALT = FORMULATION_CODES.join('|');
 // (any non-alphanumeric run: commas, colons, quotes, parentheses, ...) sits
 // between them, checked in both directions (qualifiersFollowing /
 // qualifiersPreceding). "Taurus SC: 20%" and "Taurus SC (20%)" both carry
-// the qualifier. A bare number with no '%' is never a concentration
-// ("Taurus 78 ounces").
-const QUALIFIER_AFTER_RE = new RegExp(`^[^a-zA-Z0-9]*(?:(\\d+(?:\\.\\d+)?)\\s*%|(${FORMULATION_CODE_ALT})\\b)`, 'i');
+// the qualifier. A bare number with no '%' is still not a concentration on
+// its own ("Taurus 78 ounces") — but a bare STRENGTH number immediately
+// followed by a formulation code IS a qualifier ("Armada 20 WDG" against a
+// "Armada 50 WDG" catalog row): the middle alternative below captures the
+// number and the code as one pair, checked together in qualifierConflict.
+const QUALIFIER_AFTER_RE = new RegExp(
+  `^[^a-zA-Z0-9]*(?:(\\d+(?:\\.\\d+)?)\\s*%|(\\d+(?:\\.\\d+)?)\\s+(${FORMULATION_CODE_ALT})\\b|(${FORMULATION_CODE_ALT})\\b)`, 'i',
+);
 // Reading backward, a qualifier must also START on a word boundary: the
 // code "SE" must not be read out of "Please", nor "1.5%" out of "21.5%".
-const QUALIFIER_BEFORE_RE = new RegExp(`(?:(?<![\\d.])(\\d+(?:\\.\\d+)?)\\s*%|\\b(${FORMULATION_CODE_ALT})\\b)[^a-zA-Z0-9]*$`, 'i');
+const QUALIFIER_BEFORE_RE = new RegExp(
+  `(?:(?<![\\d.])(\\d+(?:\\.\\d+)?)\\s*%|(?<![\\d.])(\\d+(?:\\.\\d+)?)\\s+\\b(${FORMULATION_CODE_ALT})\\b|\\b(${FORMULATION_CODE_ALT})\\b)[^a-zA-Z0-9]*$`, 'i',
+);
 
 function escapeRegExpLiteral(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1005,37 +1012,43 @@ function findPhraseSpansInRawText(rawText, words) {
     .map((match) => ({ start: match.index, end: match.index + match[0].length }));
 }
 
-// The concentration(s)/formulation code(s) immediately trailing `fromIndex`,
-// reading forward. Raw text, so '%' survives (normalizeForMatch drops it).
+// The concentration(s)/formulation code(s)/number+code pair(s) immediately
+// trailing `fromIndex`, reading forward. Raw text, so '%' survives
+// (normalizeForMatch drops it).
 function qualifiersFollowing(rawText, fromIndex) {
   let rest = rawText.slice(fromIndex);
   const concentrations = [];
   const formulations = [];
+  const numberCodes = [];
   let step = QUALIFIER_AFTER_RE.exec(rest);
   while (step) {
     if (step[1] !== undefined) concentrations.push(Number(step[1]));
-    else formulations.push(step[2].toUpperCase());
+    else if (step[2] !== undefined) numberCodes.push({ number: Number(step[2]), code: step[3].toUpperCase() });
+    else formulations.push(step[4].toUpperCase());
     rest = rest.slice(step[0].length);
     step = QUALIFIER_AFTER_RE.exec(rest);
   }
-  return { concentrations, formulations };
+  return { concentrations, formulations, numberCodes };
 }
 
-// The concentration(s)/formulation code(s) immediately preceding `toIndex`,
-// reading backward (each found qualifier must reach all the way to `toIndex`
-// through only separator characters — mirrors qualifiersFollowing).
+// The concentration(s)/formulation code(s)/number+code pair(s) immediately
+// preceding `toIndex`, reading backward (each found qualifier must reach
+// all the way to `toIndex` through only separator characters — mirrors
+// qualifiersFollowing).
 function qualifiersPreceding(rawText, toIndex) {
   let rest = rawText.slice(0, toIndex);
   const concentrations = [];
   const formulations = [];
+  const numberCodes = [];
   let step = QUALIFIER_BEFORE_RE.exec(rest);
   while (step) {
     if (step[1] !== undefined) concentrations.push(Number(step[1]));
-    else formulations.push(step[2].toUpperCase());
+    else if (step[2] !== undefined) numberCodes.push({ number: Number(step[2]), code: step[3].toUpperCase() });
+    else formulations.push(step[4].toUpperCase());
     rest = rest.slice(0, step.index);
     step = QUALIFIER_BEFORE_RE.exec(rest);
   }
-  return { concentrations, formulations };
+  return { concentrations, formulations, numberCodes };
 }
 
 // Does a match of `words` (any match type — full name, alias, or a single
@@ -1060,8 +1073,10 @@ function qualifierConflict(rawText, phrases, productNameRaw) {
     const after = qualifiersFollowing(rawText, span.end);
     const formulations = [...before.formulations, ...after.formulations];
     const concentrations = [...before.concentrations, ...after.concentrations];
+    const numberCodes = [...before.numberCodes, ...after.numberCodes];
     return !formulations.every((code) => nameTokens.has(code.toLowerCase()))
-      || !concentrations.every((n) => nameConcentrations.includes(n));
+      || !concentrations.every((n) => nameConcentrations.includes(n))
+      || !numberCodes.every((nc) => nameTokens.has(String(nc.number)) && nameTokens.has(nc.code.toLowerCase()));
   }));
 }
 
@@ -1093,6 +1108,53 @@ function isBareFollowUp(text) {
     || FOLLOW_UP_NUMBER_WORDS.has(token)
     || FOLLOW_UP_UNIT_WORDS.has(token)
     || FOLLOW_UP_FILLER_WORDS.has(token));
+}
+
+// Single-word evidence (a distinctive TOKEN, or a ONE-WORD alias) is too
+// weak on its own — a one-word alias like "Dispatch" (→ "Dispatch
+// Sprayable Wetting Agent", product_aliases) grounds on ordinary English
+// ("can you dispatch this inventory adjustment?"), and the same hole exists
+// for single distinctive tokens ("complete", "signature", "demand",
+// "agent", ...). A full catalog name or a multi-word alias needs no extra
+// context — it's already too specific to be a coincidence. For single-word
+// evidence, at least one occurrence must carry supporting context: the RAW
+// occurrence is capitalized and not sentence-initial (start of text, or
+// right after `[.!?]` + whitespace), OR a quantity/unit/container word or a
+// stock verb sits within 3 words either side.
+const CONTEXT_STOCK_VERBS = new Set([
+  'bought', 'got', 'purchased', 'received', 'picked', 'add', 'added',
+  'restock', 'reorder', 'order', 'ordered',
+]);
+function rawWordTokens(rawText) {
+  return [...rawText.matchAll(/[A-Za-z0-9]+/g)].map((m) => ({ text: m[0], start: m.index, end: m.index + m[0].length }));
+}
+function isCapitalizedNotSentenceStart(rawText, spanStart) {
+  const ch = rawText[spanStart];
+  if (!ch || ch === ch.toLowerCase()) return false; // no cased letter here, or already lowercase
+  const before = rawText.slice(0, spanStart);
+  if (/^\s*$/.test(before)) return false; // start of the whole text
+  if (/[.!?]\s+$/.test(before)) return false; // right after a sentence boundary
+  return true;
+}
+function hasNearbyStockContext(tokens, tokenIdx) {
+  for (let i = Math.max(0, tokenIdx - 3); i <= Math.min(tokens.length - 1, tokenIdx + 3); i++) {
+    if (i === tokenIdx) continue;
+    const w = tokens[i].text.toLowerCase();
+    if (/^[0-9]+(?:\.[0-9]+)?$/.test(w) || FOLLOW_UP_NUMBER_WORDS.has(w)
+      || FOLLOW_UP_UNIT_WORDS.has(w) || CONTEXT_STOCK_VERBS.has(w)) return true;
+  }
+  return false;
+}
+// `words` is always a single-word phrase here (a token, or a one-word
+// alias) — every occurrence in the RAW text is a single word token, so one
+// tokens-array lookup per occurrence is enough.
+function hasSupportingContext(rawText, words) {
+  const tokens = rawWordTokens(rawText);
+  return findPhraseSpansInRawText(rawText, words).some((span) => {
+    if (isCapitalizedNotSentenceStart(rawText, span.start)) return true;
+    const tokenIdx = tokens.findIndex((t) => t.start === span.start && t.end === span.end);
+    return tokenIdx !== -1 && hasNearbyStockContext(tokens, tokenIdx);
+  });
 }
 
 // Which ACTIVE catalog products does operator text name? A product is named
@@ -1138,17 +1200,28 @@ async function productsNamedIn(textNorm, rawText) {
     // catalog row (see qualifierConflict's own doc for why a qualifier
     // INSIDE the matched span needs no separate check).
     // Every phrase that names this product here (full name, each alias,
-    // each distinctive token) is collected, so a qualifier next to ANY
-    // mention of it is checked, not just the first match type found.
+    // each distinctive token) is collected, tagged `weak` when it's
+    // single-word evidence (a distinctive token, or a one-word alias) — a
+    // qualifier next to ANY mention of any phrase is checked, not just the
+    // first match type found.
     const phrases = [
-      ...(containsWholeWords(textNorm, nameNorm) ? [nameNorm.split(' ')] : []),
+      ...(containsWholeWords(textNorm, nameNorm) ? [{ words: nameNorm.split(' '), weak: false }] : []),
       ...aliasRows.filter((a) => a.product_id === p.id && containsWholeWords(textNorm, normalizeForMatch(a.alias_name)))
-        .map((a) => normalizeForMatch(a.alias_name).split(' ')),
+        .map((a) => {
+          const words = normalizeForMatch(a.alias_name).split(' ');
+          return { words, weak: words.length === 1 };
+        }),
       ...nameNorm.split(' ').filter((token) => isCandidateToken(token)
-        && tokenOwners.get(token)?.size === 1 && containsWholeWords(textNorm, token)).map((token) => [token]),
+        && tokenOwners.get(token)?.size === 1 && containsWholeWords(textNorm, token)).map((token) => ({ words: [token], weak: true })),
     ];
     if (!phrases.length) continue;
-    if (qualifierConflict(rawText, phrases, p.name)) { conflict = true; continue; }
+    // Single-word evidence needs supporting context (see hasSupportingContext)
+    // — a full name or a multi-word alias is specific enough to stand alone.
+    // No context on any weak phrase, with no strong phrase either, means
+    // this text simply doesn't name the product (not a conflict — just
+    // insufficient evidence, so it never blocks a prior-turn fallback).
+    if (phrases.every((phrase) => phrase.weak) && !phrases.some((phrase) => hasSupportingContext(rawText, phrase.words))) continue;
+    if (qualifierConflict(rawText, phrases.map((phrase) => phrase.words), p.name)) { conflict = true; continue; }
     named.add(p.id);
   }
   return { named, conflict };
@@ -1187,12 +1260,20 @@ async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { 
   if (!allowPriorTurns || !isBareFollowUp(prompt)) return null;
   const IbThreads = require('./threads');
   if (!IbThreads.threadsEnabled() || !actorId || !UUID_RE_THREAD.test(String(threadId || ''))) return null;
+  // Newest first (recentOperatorTurns' own contract) and resolved ONE AT A
+  // TIME, never concatenated: a turn ending "...Demand" and the next-older
+  // turn beginning "CS..." must never combine into a phantom "Demand CS" —
+  // joining them would let a qualifier (or a name) spill across a turn
+  // boundary that was never actually adjacent in what the operator said.
   const turns = await IbThreads.recentOperatorTurns(actorId, threadId, { limit: 3, maxAgeMinutes: 30 });
-  if (!turns.length) return null;
-  const priorClauses = turns.map((turn) => targetClause(turn)).join('\n');
-  const prior = await productsNamedIn(normalizeForMatch(priorClauses), turns.join('\n'));
-  if (prior.conflict) return null; // a conflict found while scanning prior turns also refuses
-  return decide(prior.named);
+  for (const turn of turns) {
+    const turnResult = await productsNamedIn(normalizeForMatch(targetClause(turn)), turn);
+    if (turnResult.conflict) return null; // a conflict on any prior turn refuses outright
+    if (turnResult.named.size > 1) return null; // that turn alone is ambiguous — refuse, don't guess
+    if (turnResult.named.size === 1) return decide(turnResult.named);
+    // Named nothing: this turn has no opinion — check the next-older one.
+  }
+  return null;
 }
 
 // Inventory noun slots come from the current operator request, never a model

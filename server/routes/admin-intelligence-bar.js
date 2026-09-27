@@ -270,6 +270,16 @@ const CARD_CLAIM_RE = /\bcard below\b|\bconfirm(?:ation)? card\b|\bclick confirm
 // A reply can truthfully mention an EARLIER card (already sent, still open
 // from a prior turn) without this turn creating a new one — never flag that.
 const EARLIER_CARD_REFERENCE_RE = /\b(?:earlier|already|previous(?:ly)?|above|prior)\b[^.?!]{0,40}\bcard\b|\bcard\b[^.?!]{0,40}\b(?:earlier|already|previous(?:ly)?|above|prior)\b/i;
+// Evaluated per SENTENCE, not over the whole reply: "The earlier card
+// expired. I've prepared a new confirmation card below." must still flag —
+// the earlier-card exclusion in one sentence must never cover a genuine new
+// claim in another.
+function splitIntoSentences(text) {
+  return String(text).split(/(?<=[.!?])\s+/).filter(Boolean);
+}
+function claimsCardWithoutEarlierReference(text) {
+  return splitIntoSentences(text).some((sentence) => CARD_CLAIM_RE.test(sentence) && !EARLIER_CARD_REFERENCE_RE.test(sentence));
+}
 
 function hasImageTaintedHistory(conversationHistory) {
   if (!Array.isArray(conversationHistory)) return false;
@@ -2591,11 +2601,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // renders. Deterministic and truthful either way — it only compares what
     // this reply claims against what this turn actually produced, so a reply
     // that merely references an EARLIER card (already sent, still open from a
-    // prior turn) is left alone. Appended here, before analytics logging and
-    // thread persistence, so the logged/persisted text matches what the
-    // operator sees.
-    if (!pendingProposals.length && CARD_CLAIM_RE.test(finalResponse) && !EARLIER_CARD_REFERENCE_RE.test(finalResponse)) {
-      finalResponse += '\n\nNo confirmation card was created for this reply, so nothing will change. Ask again with the product and amount (for example: add 78 fl oz of Taurus SC).';
+    // prior turn) is left alone (checked per sentence — see
+    // claimsCardWithoutEarlierReference). Appended here, before analytics
+    // logging and thread persistence, so the logged/persisted text matches
+    // what the operator sees. The notice is tool-agnostic (not every write
+    // tool has "a product and amount") — it never names a specific field.
+    if (!pendingProposals.length && claimsCardWithoutEarlierReference(finalResponse)) {
+      finalResponse += '\n\nNo confirmation card was created for this reply, so nothing will change. Ask again and say exactly what to change.';
     }
 
     // Log the query for analytics. tool_calls stores names + field keys only;

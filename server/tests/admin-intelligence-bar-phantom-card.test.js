@@ -112,6 +112,11 @@ async function postQuery(baseUrl, body) {
 }
 
 const NOTICE = 'No confirmation card was created for this reply';
+// Tool-agnostic (finding 3): the notice never names a specific tool's own
+// fields (the old wording's "product and amount" example didn't fit every
+// write tool), so it reads the same regardless of which tool's card was
+// claimed.
+const FULL_NOTICE = 'No confirmation card was created for this reply, so nothing will change. Ask again and say exactly what to change.';
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -127,9 +132,21 @@ test('a reply claiming a confirmation card with NO tool call gets the phantom-ca
     expect(status).toBe(200);
     expect(body.pendingActions).toEqual([]);
     expect(body.response).toContain(NOTICE);
+    // Exact tool-agnostic wording (finding 3) — never a specific tool's own
+    // field names or example.
+    expect(body.response).toContain(FULL_NOTICE);
     // The persisted/analytics-logged turn matches what the operator sees.
     const insertedRow = mockDbInsert.mock.calls[0]?.[0];
     expect(insertedRow?.response).toContain(NOTICE);
+  });
+});
+
+test('the notice is tool-agnostic even when the claimed card belongs to a non-inventory tool', async () => {
+  scriptModelTurns([[{ type: 'text', text: "Prepared — I've set that up, confirm on the card below." }]]);
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'update the customer address', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.response).toContain(FULL_NOTICE);
   });
 });
 
@@ -149,6 +166,15 @@ test('a reply that only references an EARLIER, already-sent card is left alone',
     const { status, body } = await postQuery(baseUrl, { prompt: 'anything', context: 'customers' });
     expect(status).toBe(200);
     expect(body.response).not.toContain(NOTICE);
+  });
+});
+
+test('a genuine new-card claim is flagged even when an EARLIER sentence in the same reply mentions an old card (per-sentence evaluation)', async () => {
+  scriptModelTurns([[{ type: 'text', text: "The earlier card expired. I've prepared a new confirmation card below." }]]);
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'anything', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.response).toContain(NOTICE);
   });
 });
 
