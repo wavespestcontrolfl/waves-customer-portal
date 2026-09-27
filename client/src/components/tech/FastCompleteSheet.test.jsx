@@ -18,20 +18,29 @@ const CATALOG = [
   { id: 'talstar', name: 'Talstar P', category: 'Insecticide' },
   { id: 'surfactant', name: 'Non-ionic Surfactant', category: 'adjuvant' },
   { id: 'extra', name: 'Advion Ant Bait Gel', category: 'Bait' },
+  { id: 'stations', name: 'Bait Stations', category: 'Bait', default_rate: '1-4', default_unit: 'each/station' },
 ];
 
-function makeRequest() {
+// The context's visit identity (what recapVisitIdentity reads).
+const CONTEXT_SERVICE = {
+  id: 'svc-1', customerName: 'Pat Jones', hasPhone: false,
+  customerId: 'cust-1', propertyId: 'prop-1', catalogServiceId: 'cat-1',
+  serviceType: 'Pest Control Re-Service', scheduledDate: '2026-09-26', address: { line1: '123 Main St' },
+};
+
+function makeRequest({ rating = { allowed: true, scaleLabels: null } } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
     if (path.endsWith('/pest-recap/context')) {
       return {
         ok: true,
-        service: { id: 'svc-1', customerName: 'Pat Jones', hasPhone: false },
+        service: CONTEXT_SERVICE,
         products: CATALOG,
         existingRecord: null,
       };
     }
+    if (path.endsWith('/tech-rating-allowed')) return rating;
     if (path.endsWith('/complete')) {
       return { success: true };
     }
@@ -125,6 +134,8 @@ describe('FastCompleteSheet', () => {
     const body = JSON.parse(request.calls.find((c) => c.path.endsWith('/complete')).options.body);
     const taurus = body.products.find((p) => p.productId === 'taurus');
     expect(taurus).toMatchObject({ applicationMethod: 'perimeter_spray', areaValue: 140, areaUnit: 'linear_ft', applicationArea: 'Outside' });
+    // At perimeter spray the shared resolver gives the 4-oz house default.
+    expect(taurus).toMatchObject({ rate: 4, rateUnit: 'oz' });
     expect(taurus.targets).toEqual(['Ants', 'Palmetto bugs']);
     const bait = body.products.find((p) => p.productId === 'extra');
     expect(bait.applicationMethod).toBe('bait_placement');
@@ -163,10 +174,13 @@ describe('FastCompleteSheet', () => {
     expect(body.products).toHaveLength(3);
     const taurus = body.products.find((p) => p.productId === 'taurus');
     expect(taurus).toMatchObject({ totalAmount: 4, amountUnit: 'oz', applicationMethod: 'spot_treatment' });
-    // The same rate the recap form prefills (the shared resolver at the
-    // product's default pest method: the 4-oz perimeter house default when
-    // the catalog has no per-1,000 rate).
-    expect(taurus).toMatchObject({ rate: 4, rateUnit: 'oz' });
+    // The rate is resolved at the method actually sent: spot treatment
+    // takes the catalog label band's low end in its own unit.
+    expect(taurus).toMatchObject({ rate: 0.2, rateUnit: 'fl_oz/gal' });
+    expect(body.expectedVisit).toEqual({
+      customerId: 'cust-1', propertyId: 'prop-1', catalogServiceId: 'cat-1',
+      serviceType: 'Pest Control Re-Service', scheduledDate: '2026-09-26', address: { line1: '123 Main St' },
+    });
     expect(taurus.targets).toEqual(['Ants', 'Roaches']);
     // Where rides each product row for the application record.
     expect(taurus.applicationArea).toBe('Inside');
@@ -315,6 +329,54 @@ describe('FastCompleteSheet', () => {
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  test('a count product keeps its own amount unit and catalog method', async () => {
+    const request = makeRequest();
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
+
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: '+ Add product' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Bait Stations' }));
+    expect(screen.getByLabelText('Unit for Bait Stations').value).toBe('each');
+    fireEvent.change(screen.getByLabelText('Bait Stations'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Outside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Perimeter spray' }));
+    fireEvent.change(screen.getByLabelText('Linear ft sprayed'), { target: { value: '100' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+
+    await waitFor(() => {
+      expect(request.calls.some((c) => c.path.endsWith('/complete'))).toBe(true);
+    });
+    const body = JSON.parse(request.calls.find((c) => c.path.endsWith('/complete')).options.body);
+    const stations = body.products.find((p) => p.productId === 'stations');
+    // The How row only moves sprays; the stations stay bait placement.
+    expect(stations).toMatchObject({ applicationMethod: 'bait_placement', totalAmount: 3, amountUnit: 'each' });
+    expect(stations.areaValue).toBeUndefined();
+  });
+
+  test('the activity row follows the server rating contract', async () => {
+    const off = makeRequest({ rating: { allowed: false, scaleLabels: null } });
+    const { unmount } = render(<FastCompleteSheet service={SERVICE} request={off} onClose={() => {}} />);
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    expect(screen.queryByText('Activity seen')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+    await waitFor(() => {
+      expect(off.calls.some((c) => c.path.endsWith('/complete'))).toBe(true);
+    });
+    const body = JSON.parse(off.calls.find((c) => c.path.endsWith('/complete')).options.body);
+    expect('clientPestRating' in body).toBe(false);
+    unmount();
+
+    const labelled = makeRequest({ rating: { allowed: true, scaleLabels: ['None', 'Very low', 'Low', 'Moderate', 'Elevated', 'High'] } });
+    render(<FastCompleteSheet service={SERVICE} request={labelled} onClose={() => {}} />);
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    expect(screen.getByRole('button', { name: 'Low' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'High' })).toBeTruthy();
   });
 
   test('an added product blocks Complete until its amount is entered; edited amounts and units are submitted', async () => {

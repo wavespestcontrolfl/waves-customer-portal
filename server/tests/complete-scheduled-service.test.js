@@ -285,6 +285,29 @@ describe('assignment drift is re-checked on the record transaction\'s locked row
   });
 });
 
+describe('expectedVisit identity is re-checked on the record transaction\'s locked row', () => {
+  // The tech Fast Complete sheet sends the visit identity its form was built
+  // against; a visit moved to another customer/property, reclassified or
+  // rescheduled after it loaded must not take that form's treatment record.
+  const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+  const lockAt = source.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+  const checkAt = source.indexOf("require('./pest-recap').recapVisitIdentityChanged(expectedVisit, lockedSvcRow, snapshotCustomerRow)");
+
+  test('the check compares the LOCKED row, using the recap path\'s identity comparison', () => {
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(checkAt).toBeGreaterThan(lockAt);
+    expect(typeof require('../services/pest-recap').recapVisitIdentityChanged).toBe('function');
+  });
+
+  test('the record transaction\'s catch releases the claim and answers 409 visit_identity_changed', () => {
+    const catchAt = source.indexOf("if (err && err.code === 'visit_identity_changed') {");
+    expect(catchAt).toBeGreaterThan(checkAt);
+    const handler = source.slice(catchAt, source.indexOf("if (err && err.code === 'issued_visit_rescheduled') {", catchAt));
+    expect(handler).toContain('markCompletionAttemptFailed(completionAttempt, err, db)');
+    expect(handler).toContain("code: 'visit_identity_changed'");
+  });
+});
+
 test('packet fields in the submitted form cannot grant packet ownership', async () => {
   service.visit_id = '00000000-0000-4000-8000-000000000105';
   const result = await complete({ packetRecord: { itemId: SERVICE_ID }, visitPacketId: SERVICE_ID });

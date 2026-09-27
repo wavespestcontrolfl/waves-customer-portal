@@ -2443,6 +2443,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
       reportReconcileConfirmed = false, // tech confirmed the report/typed-value contradiction prompt
       reentryExteriorMinutes,       // tech-adjusted exterior dry-down minutes — OPTIONAL, see completionReentryPlan
       reentryInteriorMinutes,       // tech-adjusted interior re-entry minutes — OPTIONAL
+      // The visit identity the client's form was built against (customer,
+      // property, catalog service, type, date, address) — OPTIONAL. Sent by
+      // the tech Fast Complete sheet; re-checked on the locked row below.
+      expectedVisit = null,
     } = completionInput.body;
     // The field already exists for older clients; retain numeric-string input,
     // while rejecting booleans, fractions and invalid values before any write.
@@ -5271,6 +5275,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
               code: 'service_reassigned', assignedTechnicianId: lockedSvcRow.technician_id || null,
             });
           }
+          // Identity drift on the LOCKED row, for a client that sent the
+          // visit identity its form was built against: a visit moved to
+          // another customer/property, reclassified, or rescheduled after
+          // the form loaded must not take that form's treatment record. Same
+          // comparison the recap path runs (pest-recap.js).
+          if (expectedVisit && lockedSvcRow
+            && require('./pest-recap').recapVisitIdentityChanged(expectedVisit, lockedSvcRow, snapshotCustomerRow)) {
+            throw Object.assign(new Error('visit identity changed during completion'), { code: 'visit_identity_changed' });
+          }
           // Invoice-issued closeout: the not-future decision (resolveVisit +
           // backfillCompletionPlan) read the UNLOCKED scheduled_date. A
           // reschedule that landed between that read and this lock would
@@ -7306,6 +7319,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'The invoice this closeout was issued for is no longer this visit\'s live invoice — the visit stays open.',
             code: 'issued_invoice_not_reusable',
+          } });
+        }
+        if (err && err.code === 'visit_identity_changed') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'This visit changed since it was opened. Close and reopen it to review the current property before completing.',
+            code: 'visit_identity_changed',
           } });
         }
         if (err && err.code === 'issued_visit_rescheduled') {

@@ -1419,4 +1419,6 @@ module.exports = {
   buildRecapContext,
   draftRecapMessage,
   submitRecap,
+  // Shared with completeScheduledService's expectedVisit guard.
+  recapVisitIdentityChanged,
 };
