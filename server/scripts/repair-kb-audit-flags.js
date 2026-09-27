@@ -29,29 +29,29 @@ const APPLY = process.argv.includes('--apply');
 const reauditIdx = process.argv.indexOf('--reaudit');
 const REAUDIT = reauditIdx >= 0 ? Math.max(0, parseInt(process.argv[reauditIdx + 1], 10) || 0) : 0;
 
-async function generatedAiFlagged() {
-  return db('knowledge_base as k')
-    .select('k.id', 'k.slug')
-    .where({ 'k.status': 'flagged', 'k.source': 'auto-sync' })
+// Generated rows whose latest flag came from the AI audit. The same filter
+// guards the UPDATE, so a person's flag landing after the dry-run list is
+// never cleared.
+function generatedAiFlaggedQuery() {
+  return db('knowledge_base')
+    .where({ status: 'flagged', source: 'auto-sync' })
     .whereRaw(`(
       SELECT a.audit_type FROM knowledge_base_audits a
-      WHERE a.kb_entry_id = k.id AND a.audit_type IN ('ai-review', 'manual-flag')
+      WHERE a.kb_entry_id = knowledge_base.id AND a.audit_type IN ('ai-review', 'manual-flag')
         AND a.result = 'flagged'
       ORDER BY a.created_at DESC LIMIT 1
-    ) = 'ai-review'`)
-    .orderBy('k.slug');
+    ) = 'ai-review'`);
 }
 
 async function main() {
-  const rows = await generatedAiFlagged();
+  const rows = await generatedAiFlaggedQuery().select('id', 'slug').orderBy('slug');
   console.log(`${APPLY ? 'APPLY' : 'DRY-RUN'}: ${rows.length} generated entries flagged by the AI audit`);
   for (const r of rows.slice(0, 20)) console.log(`  ${r.slug}`);
   if (rows.length > 20) console.log(`  … ${rows.length - 20} more`);
 
   if (APPLY && rows.length) {
-    const n = await db('knowledge_base')
+    const n = await generatedAiFlaggedQuery()
       .whereIn('id', rows.map((r) => r.id))
-      .where({ status: 'flagged' })
       .update({ status: 'active', updated_at: new Date() });
     console.log(`restored ${n}`);
   }

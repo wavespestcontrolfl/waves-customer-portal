@@ -373,7 +373,15 @@ const KnowledgeBaseService = {
         });
 
         if (Object.keys(updates).length) {
-          await db('knowledge_base').where({ id: entry.id }).update(updates);
+          // Apply only to the version that was audited: the model call is slow,
+          // and an edit or a person's flag in the meantime wins. A restore
+          // re-checks, in the same statement, that the flag is still the AI's.
+          let write = db('knowledge_base')
+            .where({ id: entry.id, content: entry.content, status: entry.status });
+          if (updates.status === 'active') {
+            write = write.whereRaw(`${FLAG_OWNER_SQL} = 'ai-review'`);
+          }
+          await write.update(updates);
         }
 
         results.push({
