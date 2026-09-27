@@ -1224,6 +1224,12 @@ async function deliverInvoiceAndStampSkip(successor, kind, explanation, conn) {
   const deliveryNote = delivered?.ok
     ? 'The renewal invoice was sent with its pay link.'
     : `The renewal invoice could NOT be delivered (${delivered?.error || 'unknown error'}) — it will be retried automatically.`;
+  if (delivered?.code === 'payer_billed') {
+    // Not a failed delivery: the homeowner pay link is not owed at all.
+    // Handled (off leg 7a) only once the payer bell persisted — bellOrRotate.
+    if (await bellOrRotate(successor, 'payer_billed', explanation, conn)) await stampRenewalChargeSkip(successor, `${kind}:payer_billed`, conn);
+    return delivered;
+  }
   const told = await ringRenewalBell(successor, kind, `${explanation} ${deliveryNote}`);
   if (delivered?.ok && told) {
     await stampRenewalChargeSkip(successor, kind, conn);
@@ -1459,7 +1465,7 @@ function chargeFailureFollowThroughKind(classification, err) {
   return err?.wavesCardDecline ? 'declined' : 'refused';
 }
 
-const FOLLOW_THROUGH_BELL_KIND = { ambiguous: 'ambiguous', payer_refused: 'refused', declined: 'declined', refused: 'refused' };
+const FOLLOW_THROUGH_BELL_KIND = { ambiguous: 'ambiguous', payer_refused: 'payer_billed', declined: 'declined', refused: 'refused' };
 const FOLLOW_THROUGH_SENDS_PAY_LINK = new Set(['declined', 'refused']);
 
 // Codex #4971 pre-push P1 — THE follow-through chokepoint for a charge
@@ -1478,11 +1484,16 @@ const FOLLOW_THROUGH_SENDS_PAY_LINK = new Set(['declined', 'refused']);
 async function followThroughChargeOutcome(successor, kind, reason, conn, { first = false } = {}) {
   if (first) await recordChargeFollowThroughOwed(successor, kind, reason, conn);
   let delivered = true;
+  let bellKind = FOLLOW_THROUGH_BELL_KIND[kind] || 'ambiguous';
   if (FOLLOW_THROUGH_SENDS_PAY_LINK.has(kind) && !(await renewalInvoiceAlreadyDelivered(successor, conn))) {
-    delivered = Boolean((await deliverRenewalInvoice(successor))?.ok);
+    const delivery = await deliverRenewalInvoice(successor);
+    // A payer assigned since the charge: the homeowner pay link is not owed
+    // (nothing was sent) — staff are told to route it to the payer instead.
+    if (delivery?.code === 'payer_billed') bellKind = 'payer_billed';
+    delivered = Boolean(delivery?.ok) || delivery?.code === 'payer_billed';
   }
-  const belled = await ringRenewalBell(successor, FOLLOW_THROUGH_BELL_KIND[kind] || 'ambiguous', reason);
-  if (first && kind === 'declined') {
+  const belled = await ringRenewalBell(successor, bellKind, reason);
+  if (first && kind === 'declined' && bellKind === 'declined') {
     // Best-effort customer notice — never blocks the bell/pay-link
     // fallback above, which are the load-bearing parts of this path.
     await sendRenewalChargeFailedNotice(successor).catch((noticeErr) => {
@@ -1530,6 +1541,13 @@ const RENEWAL_BELL_COPY = {
   refused: (successor, reason) => ({
     title: 'Termite annual renewal — card on file not charged',
     body: `The renewal charge of $${Number(successor.prepay_amount).toFixed(2)} for customer ${successor.customer_id}'s termite annual renewal was not attempted, or could not complete, for a reason other than a card decline: ${reason}. The renewal invoice was sent with its pay link instead. The card will NOT be retried automatically.`,
+  }),
+  // Codex #4971 pre-push P0: the renewal now routes to a third-party payer
+  // (assigned after the mint, or recorded by the charge's own payer guard).
+  // Neither the homeowner's card nor a homeowner pay link may collect it.
+  payer_billed: (successor, reason) => ({
+    title: 'Termite annual renewal — now billed to a third-party payer',
+    body: `The renewal for customer ${successor.customer_id} (invoice for $${Number(successor.prepay_amount).toFixed(2)}) now routes to a third-party payer (${reason}). The card on file was NOT charged and NO pay link was sent to the homeowner — route this renewal to the payer by hand.`,
   }),
   ambiguous: (successor, reason) => ({
     title: 'Termite annual renewal — charge outcome unclear, needs reconciliation',
@@ -1632,10 +1650,43 @@ async function ringRenewalBell(successor, kind, reason) {
   }
 }
 
+// Codex #4971 pre-push P0 ("preserve payer refusals") — the one homeowner
+// pay-link payer check. A payer can be assigned AFTER the mint, and these
+// renewal invoices carry no completion-packet marker, so InvoiceService's
+// own send path never re-checks the payer for them. Re-resolved right
+// before anything reaches the homeowner, with the SAME resolver and shape
+// as stripe.js's customer-default PAYER_BILLED_GUARD branch. Returns null
+// (self-pay: the homeowner may be billed), 'payer_billed' (a third-party
+// payer owns this bill — no homeowner pay link is owed), or
+// 'payer_unverifiable' (the lookup failed — fail closed, retry later).
+async function renewalPayerRouting(successor) {
+  try {
+    const resolved = await require('./payer').resolveForInvoice({
+      database: db, customerId: successor.customer_id, throwOnError: true,
+    });
+    return resolved?.payerId ? 'payer_billed' : null;
+  } catch (err) {
+    logger.warn(`[termite-annual-renewal] payer re-check failed for term ${successor.id}: ${err.message}`);
+    return 'payer_unverifiable';
+  }
+}
+
 // Delivers the renewal invoice (with its pay link) exactly once per call —
 // best-effort; a delivery failure never blocks the bell above, which is
-// what actually gets a human looking at the account.
+// what actually gets a human looking at the account. THE homeowner
+// pay-link sender: every caller goes through here (the no-consent /
+// no-method / surcharge skip delivery, the charge follow-through for a
+// decline or refusal, leg 7b's recovery), and it sends NOTHING when the
+// bill now routes to a third-party payer ({ ok: false, code:
+// 'payer_billed' } — not a retryable delivery failure: the homeowner pay
+// link is simply not owed) or the payer cannot be verified ({ ok: false,
+// code: 'payer_unverifiable' } — transient, fail closed).
 async function deliverRenewalInvoice(successor) {
+  const payerRouting = await renewalPayerRouting(successor);
+  if (payerRouting) {
+    logger.warn(`[termite-annual-renewal] renewal pay link withheld for term ${successor.id}: ${payerRouting}`);
+    return { ok: false, code: payerRouting, error: payerRouting };
+  }
   try {
     const InvoiceService = require('./invoice');
     const result = await InvoiceService.sendViaSMSAndEmail(successor.prepay_invoice_id, {
@@ -1662,6 +1713,9 @@ async function deliverRenewalInvoice(successor) {
 // customer-messaging pipeline — nothing here bypasses quiet hours,
 // opt-outs, or template enable state.
 async function sendRenewalChargeFailedNotice(successor) {
+  // It carries the homeowner pay URL — the same payer guard as the pay link.
+  const payerRouting = await renewalPayerRouting(successor);
+  if (payerRouting) return { sent: false, reason: payerRouting };
   const customer = await db('customers').where({ id: successor.customer_id }).first();
   if (!customer?.phone) return { sent: false, reason: 'no_phone' };
   const invoice = await db('invoices').where({ id: successor.prepay_invoice_id }).first('token');
@@ -2413,6 +2467,11 @@ async function bellAndVerifyDeliveryForNeverReachedStripe(successor, conn) {
   if (invoice.delivered) return true;
   const delivery = await deliverRenewalInvoice(successor);
   if (delivery?.ok) return 'delivered';
+  if (delivery?.code === 'payer_billed') {
+    // A payer assigned since the mint owns this bill: nothing was sent to
+    // the homeowner. Handled once staff are told to route it to the payer.
+    return Boolean(await bellOrRotate(successor, 'payer_billed', 'the renewal charge never reached Stripe, and a third-party payer is now assigned', conn));
+  }
   await stampSweepDeferred(successor, conn);
   return false;
 }
@@ -2496,6 +2555,10 @@ async function reconcileStuckSuccessors({ conn = db, limit = 200, counts }) {
       .where('t.status', PAYMENT_PENDING_STATUS)
       .whereNotNull('t.renewal_charge_attempted_at')
       .whereNull('t.renewal_charge_never_reached_stripe_belled_at')
+      // A recorded charge outcome (renewal_charge_failure_kind) means the
+      // result is KNOWN — not a crash gap. Leg 7c owns it, with that kind's
+      // delivery rules (payer_refused / ambiguous never get a pay link).
+      .whereNull('t.renewal_charge_failure_kind')
       .whereNull('t.dispute_suspended_at')
       .whereNull('t.renewal_lapse_started_at')
       // Chokepoint A (Codex #4971 round-3 P1, item 7): only an attempt with
@@ -2708,6 +2771,8 @@ module.exports = {
     followThroughChargeOutcome,
     withdrawSuccessorsOfIneligibleParents,
     renewalMoneyInMotion,
+    deliverRenewalInvoice,
+    sendRenewalChargeFailedNotice,
     bellNoWitnessTerms,
     bellUnanchoredOriginalTerms,
     bellStaleOverdueTerms,

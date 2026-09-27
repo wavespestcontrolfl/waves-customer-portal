@@ -36,6 +36,8 @@ jest.mock('../services/invoice', () => ({
   sendViaSMSAndEmail: (...args) => mockSendViaSMSAndEmail(...args),
   voidInvoice: (...args) => mockVoidInvoice(...args),
 }));
+// The homeowner pay-link payer re-check (self-pay here).
+jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: null })) }));
 // The grace lapse's own reconciliation re-check — refused here, so a
 // selected row stops right after the scan (started_at stamped, deferred):
 // these tests are about WHICH rows the scan selects.

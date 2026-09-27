@@ -21,6 +21,10 @@ describe('termite annual renewal charge', () => {
   });
 
   function mockCommon() {
+    // Codex #4971 pre-push P0: every homeowner pay link / charge-failed text
+    // re-resolves the payer first. Default: self-pay (no payer assigned);
+    // the payer tests override this.
+    jest.doMock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: null })) }));
     jest.doMock('../models/db', () => {
       const dbFn = jest.fn();
       dbFn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -1152,7 +1156,7 @@ describe('termite annual renewal charge', () => {
       expect(handledStampUpdate).toHaveBeenCalledTimes(1);
     });
 
-    test('a payer-billed guard (deferred) bells "refused" and delivers NO pay link, matching the sibling', async () => {
+    test('a payer-billed guard (deferred) bells "payer_billed" and delivers NO pay link, matching the sibling', async () => {
       mockCommon();
       mockGraceHelpers({ graceDays: 30 });
       const sendViaSMSAndEmail = jest.fn(async () => ({ ok: true }));
@@ -1176,7 +1180,7 @@ describe('termite annual renewal charge', () => {
       expect(outcome.status).toBe('failed');
       expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
       expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.any(String), expect.objectContaining({
-        dedupeKey: 'termite-renewal-charge:succ-term-1:refused',
+        dedupeKey: 'termite-renewal-charge:succ-term-1:payer_billed',
       }));
       // The payer guard throws before any attempt row exists — without the
       // handled marker, leg 7b would later send the HOMEOWNER a pay link for
@@ -3334,6 +3338,28 @@ describe('termite annual renewal charge', () => {
       expect(stampUpdate).toHaveBeenCalledTimes(1);
     });
 
+    // Codex #4971 pre-push P0: a payer assigned since the mint — leg 7b's
+    // recovery sends the homeowner nothing and tells staff to route it.
+    test('leg 7b recovery with a payer now assigned: no pay link; handled once the payer bell persisted', async () => {
+      mockCommon();
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      const sendViaSMSAndEmail = jest.fn();
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      jest.doMock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: 'payer-9' })) }));
+      const successor = baseSuccessor({ renewed_from_term_id: 'parent-1', annual_plan_version: 'v3' });
+      const { conn, stampUpdate } = makeLeg7bConn(successor);
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      await _private.reconcileStuckSuccessors({ conn, limit: 200, counts: { reconcileNeverReachedStripeBelled: 0 } });
+
+      expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/third-party payer/i), expect.any(String), expect.objectContaining({
+        dedupeKey: 'termite-renewal-charge:succ-term-1:payer_billed',
+      }));
+      expect(stampUpdate).toHaveBeenCalledTimes(1);
+    });
+
     test('6b P1: a TRANSIENT parent refusal (its own invoice in dispute) sends nothing, retires nothing, and stays retryable — rotated to the back', async () => {
       mockCommon();
       jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
@@ -3481,5 +3507,169 @@ describe('termite annual renewal charge', () => {
       expect(updates.some((u) => 'renewal_charge_failure_handled_at' in u)).toBe(false);
       expect(updates).toContainEqual({ renewal_sweep_deferred_at: expect.any(Date) });
     });
+  });
+
+  // Codex #4971 pre-push P0 ("preserve payer refusals during recovery"): a
+  // payer assigned AFTER the mint owns the renewal. deliverRenewalInvoice —
+  // the one homeowner pay-link sender — re-resolves the payer right before
+  // sending (the same resolver + shape as stripe.js's customer-default
+  // PAYER_BILLED_GUARD) and sends nothing on a payer or an unverifiable
+  // lookup. Every caller path is pinned; leg 7b also leaves recorded
+  // outcomes to leg 7c.
+  describe('payer assigned after mint — no homeowner pay link on any path', () => {
+    function mockPayer({ payerId = 'payer-9', rejects = false } = {}) {
+      const resolveForInvoice = jest.fn(async () => { if (rejects) throw new Error('payer lookup failed'); return { payerId }; });
+      jest.doMock('../services/payer', () => ({ resolveForInvoice }));
+      return resolveForInvoice;
+    }
+    function memConn({ invoice = { status: 'draft' }, rows = [] } = {}) {
+      const updates = [];
+      const conn = jest.fn((table) => {
+        if (table === 'annual_prepay_terms as t') {
+          const q = {};
+          for (const m of ['whereNotNull', 'whereNull', 'where', 'whereRaw', 'whereNotExists', 'orderByRaw', 'orderBy', 'select']) q[m] = jest.fn(() => q);
+          q.limit = jest.fn(async () => rows);
+          return q;
+        }
+        if (table === 'annual_prepay_terms') {
+          return {
+            where: jest.fn(() => ({
+              update: jest.fn(async (payload) => { updates.push(payload); return 1; }),
+              whereNull: jest.fn(() => ({ update: jest.fn(async (payload) => { updates.push(payload); return 1; }) })),
+              first: jest.fn(async () => ({ status: 'active', renewal_decision: null, prepay_invoice_id: null, term_end: '2026-09-26' })),
+            })),
+          };
+        }
+        if (table === 'invoices') return { where: jest.fn(() => ({ first: jest.fn(async () => invoice) })) };
+        throw new Error(`unexpected table ${table}`);
+      });
+      return { conn, updates };
+    }
+
+    test('deliverRenewalInvoice with a payer assigned sends nothing ({ok:false, code:payer_billed}); a lookup error sends nothing (payer_unverifiable)', async () => {
+      mockCommon();
+      const sendViaSMSAndEmail = jest.fn();
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      const resolveForInvoice = mockPayer();
+      let { _private } = require('../services/termite-annual-renewal-charge');
+      await expect(_private.deliverRenewalInvoice(baseSuccessor())).resolves.toMatchObject({ ok: false, code: 'payer_billed' });
+      expect(resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', throwOnError: true }));
+
+      jest.resetModules();
+      mockCommon();
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      mockPayer({ rejects: true });
+      ({ _private } = require('../services/termite-annual-renewal-charge'));
+      await expect(_private.deliverRenewalInvoice(baseSuccessor())).resolves.toMatchObject({ ok: false, code: 'payer_unverifiable' });
+      expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+    });
+
+    test('the charge-failed customer notice (it carries the pay URL) is never sent to a payer-billed or unverifiable account', async () => {
+      mockCommon();
+      const sendCustomerMessage = jest.fn();
+      jest.doMock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage }));
+      mockPayer();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      await expect(_private.sendRenewalChargeFailedNotice(baseSuccessor())).resolves.toEqual({ sent: false, reason: 'payer_billed' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('no-consent skip delivery: nothing sent; the payer bell persists, then the row is marked handled (no nightly re-send)', async () => {
+      mockCommon();
+      const sendViaSMSAndEmail = jest.fn();
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      jest.doMock('../services/recurring-card-on-file', () => ({ resolvePrepayChargeMethod: jest.fn() }));
+      jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined), chargeInvoiceWithSavedCard: jest.fn(), quoteInvoiceSavedCardCharge: jest.fn() }));
+      mockPayer();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const { conn, skipStampUpdate } = makeClaimConn({ successorInvoice: { status: 'draft' } });
+
+      await _private.decideAndCharge(baseSuccessor(), baseParent({ renewal_charge_consent_at: null }), conn);
+
+      expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/third-party payer/i), expect.any(String), expect.objectContaining({
+        dedupeKey: 'termite-renewal-charge:succ-term-1:payer_billed',
+      }));
+      expect(skipStampUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_charge_skip_reason: 'no_consent:payer_billed' }));
+    });
+
+    test('no-consent skip delivery with an unverifiable payer: nothing sent, not handled — rotated to retry', async () => {
+      mockCommon();
+      const sendViaSMSAndEmail = jest.fn();
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+      jest.doMock('../services/recurring-card-on-file', () => ({ resolvePrepayChargeMethod: jest.fn() }));
+      jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined), chargeInvoiceWithSavedCard: jest.fn(), quoteInvoiceSavedCardCharge: jest.fn() }));
+      mockPayer({ rejects: true });
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const { conn, skipStampUpdate, deferredUpdate } = makeClaimConn({ successorInvoice: { status: 'draft' } });
+
+      await _private.decideAndCharge(baseSuccessor(), baseParent({ renewal_charge_consent_at: null }), conn);
+
+      expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(skipStampUpdate).not.toHaveBeenCalled();
+      expect(deferredUpdate).toHaveBeenCalledWith({ renewal_sweep_deferred_at: expect.any(Date) });
+    });
+
+    test.each(['declined', 'refused'])('follow-through (%s): a payer now assigned — no pay link, no customer text; the payer bell marks it handled', async (kind) => {
+      mockCommon();
+      const sendViaSMSAndEmail = jest.fn();
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      const sendCustomerMessage = jest.fn();
+      jest.doMock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage }));
+      mockPayer();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const { conn, updates } = memConn();
+
+      await expect(_private.followThroughChargeOutcome(baseSuccessor(), kind, 'card declined', conn, { first: true })).resolves.toBe(true);
+
+      expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/third-party payer/i), expect.any(String), expect.objectContaining({
+        dedupeKey: 'termite-renewal-charge:succ-term-1:payer_billed',
+      }));
+      expect(updates).toContainEqual({ renewal_charge_failure_handled_at: expect.any(Date) });
+    });
+
+    test('leg 7c on a recorded payer_refused outcome: never a pay link; a lost bell stays owed (rotated)', async () => {
+      mockCommon();
+      const sendViaSMSAndEmail = jest.fn();
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
+      const resolveForInvoice = mockPayer();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const owed = baseSuccessor({ renewal_charge_failure_kind: 'payer_refused', renewal_charge_failure_reason: 'payer_billed_guard' });
+      const { conn, updates } = memConn({ rows: [owed] });
+
+      await _private.reconcileChargeFollowThrough({ conn, limit: 50, counts: {} });
+
+      expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+      expect(resolveForInvoice).not.toHaveBeenCalled(); // payer_refused never even attempts a pay link
+      expect(updates.some((u) => 'renewal_charge_failure_handled_at' in u)).toBe(false);
+      expect(updates).toContainEqual({ renewal_sweep_deferred_at: expect.any(Date) });
+    });
+
+    test('leg 7b skips a row whose charge outcome is recorded (renewal_charge_failure_kind set) — 7c owns it', async () => {
+      mockCommon();
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const scans = [];
+      const conn = jest.fn((table) => {
+        if (table !== 'annual_prepay_terms as t') throw new Error(`unexpected table ${table}`);
+        const q = {};
+        for (const m of ['whereNotNull', 'whereNull', 'where', 'whereRaw', 'whereNotExists', 'orderByRaw', 'orderBy', 'select']) q[m] = jest.fn(() => q);
+        q.limit = jest.fn(async () => []);
+        scans.push(q);
+        return q;
+      });
+      await _private.reconcileStuckSuccessors({ conn, limit: 50, counts: {} });
+      const leg7b = scans[1];
+      expect(leg7b.whereNotNull).toHaveBeenCalledWith('t.renewal_charge_attempted_at');
+      expect(leg7b.whereNull).toHaveBeenCalledWith('t.renewal_charge_failure_kind');
+    });
+
   });
 });
