@@ -133,8 +133,12 @@ const RENEWAL_LOOKUP_FAILED = Symbol('renewal_lookup_failed');
 // originating call's own time — that IS when the promise was spoken.
 function describePromise(row) {
   const what = WHAT[row.kind] || 'follow-up';
-  const source = row.source === 'human' ? row.created_at : row.call_started_at;
-  const at = source ? new Date(source) : null;
+  // findPromiseToRing's effective obligation time wins when present: it is
+  // the later of the source time and a renewal (codex r9 P2), so a reopened
+  // promise reads as promised when it was renewed.
+  const source = Number.isFinite(row.__obligationAtMs) ? row.__obligationAtMs
+    : (row.source === 'human' ? row.created_at : row.call_started_at);
+  const at = source != null ? new Date(source) : null;
   const when = at && !Number.isNaN(at.getTime()) ? `${formatETDate(at)} ${formatETTime(at)}` : 'an earlier call';
   return { what, when };
 }

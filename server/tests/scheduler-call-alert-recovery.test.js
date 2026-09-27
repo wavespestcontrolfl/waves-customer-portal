@@ -32,9 +32,13 @@ const { initScheduledJobs } = require('../services/scheduler');
 
 const SWEEPS = { missed: sweepMissedCalls, repeat: sweepRepeatCallers, 'promise-chaser': sweepPromiseChasers };
 
+// The promise-chaser sweep is gate-checked before its cron lock (codex r9
+// P2), so these ticks run with its two gates on.
+const PROMISE_CHASER_GATES = ['promiseChaserBell', 'callCommitments'];
+
 beforeEach(() => {
   jest.clearAllMocks();
-  isEnabled.mockImplementation(name => name === 'cronJobs');
+  isEnabled.mockImplementation(name => name === 'cronJobs' || PROMISE_CHASER_GATES.includes(name));
 });
 
 test.each(['missed', 'repeat', 'promise-chaser'])('one call-alert tick starts every sweep when %s recovery is still pending', async pending => {
@@ -56,4 +60,16 @@ test.each(['missed', 'repeat', 'promise-chaser'])('one call-alert tick starts ev
   await expect(running).resolves.toBeUndefined();
   expect(blocked).toHaveBeenCalledTimes(1);
   expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('synthetic sweep failure'));
+});
+
+test.each(PROMISE_CHASER_GATES)('with %s off, the tick never takes the promise-chaser lock or calls its sweep', async (offGate) => {
+  const { runExclusive } = require('../utils/cron-lock');
+  isEnabled.mockImplementation(name => name === 'cronJobs' || (PROMISE_CHASER_GATES.includes(name) && name !== offGate));
+  sweepMissedCalls.mockResolvedValue(0);
+  sweepRepeatCallers.mockResolvedValue(0);
+  initScheduledJobs();
+  const [, tick] = cron.schedule.mock.calls.find(([, callback]) => /sweepPromiseChasers/.test(String(callback)));
+  await tick();
+  expect(sweepPromiseChasers).not.toHaveBeenCalled();
+  expect(runExclusive).not.toHaveBeenCalledWith('promise-chaser-bell', expect.any(Function));
 });

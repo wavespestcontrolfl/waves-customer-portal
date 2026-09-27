@@ -824,6 +824,9 @@ const OUR_NUMBER = '+19415550100';
       const [, , opts2] = triggerNotification.mock.calls[1];
       expect(opts2.dedupeKey).toBe(`promise_chaser:${commitment.id}:${renewedAt.getTime()}:${etDateString(new Date(now))}`);
       expect(opts2.dedupeKey).not.toBe(opts1.dedupeKey);
+      // The renewed obligation's alert says when it was RENEWED (codex r9 P2).
+      const [, payload2] = triggerNotification.mock.calls[1];
+      expect(payload2.when).toBe(`${formatETDate(renewedAt)} ${formatETTime(renewedAt)}`);
     });
 
     test('repeated calls for the SAME unrenewed obligation still collapse onto one dedupeKey', async () => {

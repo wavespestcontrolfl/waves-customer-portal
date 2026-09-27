@@ -4804,7 +4804,11 @@ function initScheduledJobs() {
       // one — a held lease elsewhere is a quiet skip (runExclusive resolves,
       // never rejects, on a skip), so it needs no special handling in the
       // results.forEach below.
-      runExclusive('promise-chaser-bell', () => require('./promise-chaser-bell').sweepPromiseChasers()),
+      // Gate-checked BEFORE the lock (codex r9 P2): dark means no lock, no
+      // connection, no job_health row, the same conjunction the sweep checks.
+      (isEnabled('promiseChaserBell') && isEnabled('callCommitments'))
+        ? runExclusive('promise-chaser-bell', () => require('./promise-chaser-bell').sweepPromiseChasers())
+        : Promise.resolve(0),
     ]);
     results.forEach((result, index) => {
       if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller', 'missed-call-text-back', 'promise-chaser'][index]} sweep failed: ${result.reason.message}`);
