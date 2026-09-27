@@ -1783,6 +1783,14 @@ const StripeService = {
             // the retry sweep's already-collected guard match on this
             // (metadata-first, payment_date window only as legacy fallback).
             ...(metadata.billed_month ? { billed_month: metadata.billed_month } : {}),
+            // Stripe's settlement moment, so readers never wait on the
+            // succeeded webhook for it (Codex #4996 r14): an off-session
+            // intent is created, confirmed and charged in one request, so a
+            // synchronous success landed at the intent's own creation — and a
+            // replayed intent keeps its original time, never this run's. A
+            // bank charge is stamped by the webhook as it clears.
+            ...(status === 'paid' && Number(paymentIntent.created) > 0
+              ? { settled_event_at: new Date(Number(paymentIntent.created) * 1000).toISOString() } : {}),
           }),
         }).returning('*');
         return row;
@@ -2626,6 +2634,14 @@ const StripeService = {
             surcharge_rate_bps: invRateBps,
             surcharge_policy_version: invPolicyVersion,
             source: 'admin_card_on_file',
+            // Stripe's settlement moment, so readers never wait on the
+            // succeeded webhook for it (Codex #4996 r14): an off-session
+            // intent is created, confirmed and charged in one request, so a
+            // synchronous success landed at the intent's own creation — and a
+            // replayed intent keeps its original time, never this run's. A
+            // bank charge is stamped by the webhook as it clears.
+            ...(status === 'paid' && Number(paymentIntent.created) > 0
+              ? { settled_event_at: new Date(Number(paymentIntent.created) * 1000).toISOString() } : {}),
           }),
         }).returning('*');
       });

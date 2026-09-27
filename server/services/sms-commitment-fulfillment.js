@@ -120,8 +120,9 @@ const WITNESS_TRANSITION_STATUSES = Object.freeze(['confirmed', 'rescheduled', '
 // as the thing changed ("did you add my cash payment?" asks whether it was
 // recorded, r7): the change must be to a card, method, autopay or billing.
 // Money going back is named many ways: reverse or void a charge, return or
-// cancel a payment, "put it back", "my money back" (Codex #4996 r12).
-const NOT_ANSWERED_BY_PAYMENT = /\b(?:(?:two|2|multiple)\s+(?:payment\s+)?(?:methods|cards)|(?:update|change|switch|replace|remove|add|set up|cancel|turn (?:on|off))\s+(?:\w+\s+){0,3}?(?:cards?|methods?|autopay|auto ?pay|billing)|setup\s+(?:autopay|auto ?pay)|refund\w*|disput\w*|chargeback\w*|overcharg\w*|double[- ]?charg\w*|revers(?:e|es|ed|al|ing)|void(?:s|ed|ing)?|money back|(?:give|send|put|credit)\w*\s+(?:\w+\s+){0,3}?back|pay\s+(?:me|us)\s+back|return\w*\s+(?:\w+\s+){0,2}?(?:money|payment|charge|funds)|cancel\w*\s+(?:\w+\s+){0,2}?(?:charge|payment|transaction))\b/i;
+// cancel a payment, "put it back", "my money back" (Codex #4996 r12), a
+// reimbursement or a charge-back (r14).
+const NOT_ANSWERED_BY_PAYMENT = /\b(?:(?:two|2|multiple)\s+(?:payment\s+)?(?:methods|cards)|(?:update|change|switch|replace|remove|add|set up|cancel|turn (?:on|off))\s+(?:\w+\s+){0,3}?(?:cards?|methods?|autopay|auto ?pay|billing)|setup\s+(?:autopay|auto ?pay)|refund\w*|reimburs\w*|disput\w*|charge[- ]?back\w*|overcharg\w*|double[- ]?charg\w*|revers(?:e|es|ed|al|ing)|void(?:s|ed|ing)?|money back|(?:give|send|put|credit)\w*\s+(?:\w+\s+){0,3}?back|pay\s+(?:me|us)\s+back|return\w*\s+(?:\w+\s+){0,2}?(?:money|payment|charge|funds)|cancel\w*\s+(?:\w+\s+){0,2}?(?:charge|payment|transaction))\b/i;
 // The ask itself decides, whatever its grammar. The extractor grounds a
 // description as a verbatim phrase of its quote naming the requested action
 // (groundExtraction), so when it is found there the rest of the quote is

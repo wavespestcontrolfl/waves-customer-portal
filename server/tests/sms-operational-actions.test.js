@@ -1309,7 +1309,9 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     }
     // r12: money going back is named many ways; a settlement question that merely says "back" is not one.
     for (const description of ['Please reverse that charge', 'Can you void the charge?', 'I want my money back', 'Please return my payment',
-      'Cancel the charge please', 'Can you put it back on my card?', 'Can you credit it back?', 'Please pay me back']) {
+      'Cancel the charge please', 'Can you put it back on my card?', 'Can you credit it back?', 'Please pay me back',
+      // r14: a reimbursement, and a charge-back however it is spelled.
+      'Please reimburse me', 'Where is my reimbursement?', 'I will issue a charge-back', 'I filed a charge back']) {
       expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(false);
     }
     for (const description of ['Did the payment post back to my account?', 'Did my payment go through? Call me back']) {
