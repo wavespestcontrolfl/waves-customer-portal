@@ -46,16 +46,19 @@
 // what a same-trip date divergence calls for.
 //
 // So the hold is now scoped to UNDELIVERED invoices only —
-// invoice-helpers.js's UNDELIVERED_INVOICE_STATUSES ('draft': never sent;
-// 'scheduled': queued, not yet sent; 'sending': claimed for an in-flight
-// send, provider not yet called). A draft/scheduled/sending invoice has NO
-// pay link out, NO PaymentIntent a customer could confirm, and NO dunning
-// sequence (dunning only ever runs on a DELIVERED invoice) — the only
-// money seams that can reach it are the ones that already gate on
+// invoice-helpers.js's isInvoiceUndeliveredForBillingReview ('draft':
+// never sent; 'scheduled': queued, not yet sent; 'sending' claimed for an
+// in-flight send AND never delivered before — a resend claim also parks
+// at 'sending', so that status alone can't tell a first send from a
+// resend of an already-delivered invoice; the delivery stamps break the
+// tie). A genuinely-undelivered invoice has NO pay link out, NO
+// PaymentIntent a customer could confirm, and NO dunning sequence
+// (dunning only ever runs on a DELIVERED invoice) — the only money seams
+// that can reach it are the ones that already gate on
 // assertInvoiceCollectible or the two send-claim predicates, which is
-// exactly the bounded set this hold protects. Once an invoice reaches
-// 'sent'/'viewed'/'overdue' (or any terminal status — paid, etc.), this
-// module still opens the SAME durable review + admin alert, but
+// exactly the bounded set this hold protects. Once an invoice is (or was
+// already) delivered — 'sent'/'viewed'/'overdue', or any terminal status
+// — this module still opens the SAME durable review + admin alert, but
 // assertInvoiceCollectible and the send-claim predicates never block it —
 // the alert instead reads "already sent — review the split by hand", and
 // the office resolves the mismatch out-of-band (adjust by hand, credit,
@@ -69,7 +72,7 @@
 // review opened, clears itself (undelivered or not).
 const logger = require('./logger');
 const db = require('../models/db');
-const { UNDELIVERED_INVOICE_STATUSES, billingReviewVersion } = require('./invoice-helpers');
+const { isInvoiceUndeliveredForBillingReview, billingReviewVersion } = require('./invoice-helpers');
 
 function dateOnly(value) {
   if (!value) return null;
@@ -282,10 +285,13 @@ async function openBillingReview(trx, invoice, moved, diverging) {
   // `new Date()` twice, once per use, could let the two drift by a tick).
   const openedAt = invoice.billing_review_opened_at ? new Date(invoice.billing_review_opened_at) : new Date();
   // Round-3: only an UNDELIVERED invoice is actually held — see the module
-  // header and invoice-helpers.js's UNDELIVERED_INVOICE_STATUSES. A review
+  // header and invoice-helpers.js's isInvoiceUndeliveredForBillingReview
+  // (status alone is ambiguous for 'sending': a concurrent send claim can
+  // put the invoice-holder at 'sending' whether or not it was EVER
+  // delivered before, so the delivery stamps break the tie). A review
   // that opens after delivery gets the identical record and bell, worded
   // as an alert only (raiseBillingReviewAlert).
-  const held = UNDELIVERED_INVOICE_STATUSES.includes(invoice.status);
+  const held = isInvoiceUndeliveredForBillingReview(invoice);
   const priorSiblingIds = Array.isArray(existingContext?.divergingSiblingIds) ? existingContext.divergingSiblingIds : [];
   const mergedSiblingIds = [...new Set([...priorSiblingIds, ...diverging.map((d) => String(d.id))])];
   const context = {

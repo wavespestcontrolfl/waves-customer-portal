@@ -20,6 +20,32 @@ const SEND_FINALIZABLE_STATUSES = [...SEND_CLAIMABLE_STATUSES, 'sending'];
 // already saw, with nothing left to protect.
 const UNDELIVERED_INVOICE_STATUSES = Object.freeze(['draft', 'scheduled', 'sending']);
 
+// The status-only check above is ambiguous for 'sending': claimInvoiceForSend
+// flips ANY claimed row to 'sending' during the claim — a first send of a
+// never-delivered draft AND a resend of an already-delivered (sent/viewed/
+// overdue) invoice both read as 'sending' by the time a provider-handoff
+// recheck (or a review that opens while the claim is in flight) looks at
+// the row (Codex #5021 round-3 pre-push P1: the earlier version of this
+// file used UNDELIVERED_INVOICE_STATUSES.includes(status) directly at
+// EVERY billing-review checkpoint, which read a resend-in-flight of a
+// DELIVERED invoice as still-undelivered and wrongly held it). The
+// delivery stamps (sent_at/sms_sent_at/email_sent_at) are written once, on
+// the FIRST successful delivery, and are never cleared by a later resend
+// claim — their presence is the one signal a claim's own status flip
+// can't erase, so 'sending' only counts as undelivered when none of them
+// are set yet. Every billing-review enforcement point (assertInvoiceCollectible,
+// the two claimInvoiceForSend checks, the sendViaSMS/sendInvoiceEmail
+// provider-handoff rechecks) and the write-time `held` decision
+// (first-application-sibling-split.js's openBillingReview) all call THIS,
+// never the raw array, for exactly that reason.
+function isInvoiceUndeliveredForBillingReview(invoice) {
+  const status = invoiceStatusKey(invoice?.status);
+  if (status === 'sending') {
+    return !(invoice?.sent_at || invoice?.sms_sent_at || invoice?.email_sent_at);
+  }
+  return UNDELIVERED_INVOICE_STATUSES.includes(status);
+}
+
 /**
  * Pure invoice helpers — no DB, no Stripe SDK, no Twilio.
  *
@@ -256,7 +282,7 @@ function assertInvoiceCollectible(invoice) {
   // projection, so this is never missing today; a future caller that
   // narrows its own SELECT must include billing_review_opened_at (and
   // status) or this hold silently never fires for it.
-  if (invoice.billing_review_opened_at && UNDELIVERED_INVOICE_STATUSES.includes(status)) {
+  if (invoice.billing_review_opened_at && isInvoiceUndeliveredForBillingReview(invoice)) {
     throw new Error('This invoice has an open billing review — a same-trip visit diverged in date; resolve and clear the review before collecting');
   }
   // Checked last so a terminal status still reports its own, more accurate
@@ -323,7 +349,7 @@ function billingReviewSummary(invoice) {
     reason: invoice.billing_review_reason || null,
     context: context || null,
     opened_at: invoice.billing_review_opened_at,
-    held: UNDELIVERED_INVOICE_STATUSES.includes(invoiceStatusKey(invoice.status)),
+    held: isInvoiceUndeliveredForBillingReview(invoice),
     version: billingReviewVersion(invoice),
   };
 }
@@ -366,6 +392,7 @@ module.exports = {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
   UNDELIVERED_INVOICE_STATUSES,
+  isInvoiceUndeliveredForBillingReview,
   INVOICE_UPDATE_ALLOWED_FIELDS,
   STALE_SEND_PARK_ERROR,
   isStaleClaimReviewHold,

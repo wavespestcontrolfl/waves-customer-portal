@@ -235,10 +235,17 @@ describe('invoice SMS provider handoff', () => {
   });
 
   // A DELIVERED invoice's review (round-3: alert-only, never a hold) must
-  // never refuse a legitimate resend through this SAME chokepoint —
-  // status here is 'sent', outside UNDELIVERED_INVOICE_STATUSES.
-  test('a review on an already-delivered (sent) invoice never blocks the provider handoff', async () => {
-    const delivered = { ...invoice, billing_review_opened_at: new Date(), status: 'sent' };
+  // never refuse a legitimate RESEND through this SAME chokepoint. Codex
+  // #5021 round-3 pre-push P1: claimInvoiceForSend already flipped status
+  // to 'sending' by the time this callback runs, for a first send OR a
+  // resend alike — status here is genuinely 'sending' (matching the real
+  // transition, not a stand-in 'sent'), and it is the delivery stamp
+  // (sent_at from an earlier, real delivery) that proves this resend must
+  // NOT be blocked.
+  test('a review on an already-delivered invoice (status now \'sending\' from THIS resend claim, but sent_at proves a prior delivery) never blocks the provider handoff', async () => {
+    const delivered = {
+      ...invoice, billing_review_opened_at: new Date(), status: 'sending', sent_at: new Date('2026-01-01T00:00:00Z'),
+    };
     invoiceReads = [invoice, invoice, delivered];
     const dispatch = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
     sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));

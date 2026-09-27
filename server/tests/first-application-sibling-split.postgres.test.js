@@ -641,5 +641,32 @@ suite('first-application-sibling-split — same-trip billing review on date chan
       expect(invoice.status).toBe('sending');
       expect(() => assertInvoiceCollectible(invoice)).toThrow(/billing review/i);
     }));
+
+    // Codex #5021 round-3 pre-push P1: claimInvoiceForSend flips ANY
+    // claimed row to 'sending' — a first send AND a resend of an
+    // ALREADY-delivered invoice both read as 'sending' by status alone.
+    // A review opened while a RESEND (not a first send) sits claimed at
+    // 'sending' must stay alert-only — the customer already has an
+    // earlier copy of this invoice — proven here by a delivery stamp
+    // (sent_at) from a prior send that predates this resend claim.
+    test('a review that opens while a RESEND of an already-delivered invoice sits claimed at \'sending\' stays alert-only, not held', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx, { invoiceStatus: 'draft' });
+      // This invoice was delivered once already (sent_at set)...
+      await trx('invoices').where({ id: ids.invoiceId }).update({ sent_at: new Date('2026-01-01') });
+      // ...and is now claimed again for a RESEND, which also parks it at
+      // 'sending' — status alone is identical to the never-delivered case.
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'sending', send_claim_token: randomUUID() });
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(result.action).toBe('review_opened');
+      const invoice = (await readState(trx, ids)).invoice;
+      expect(invoice.billing_review_opened_at).toBeTruthy();
+      expect(invoice.billing_review_reason).toBe('sibling_date_diverged_after_delivery');
+      expect(invoice.status).toBe('sending');
+      // The delivery stamp is what makes the difference — assertInvoiceCollectible
+      // must NOT throw for this resend-in-flight, unlike the never-delivered
+      // 'sending' case just above.
+      expect(() => assertInvoiceCollectible(invoice)).not.toThrow();
+    }));
   });
 });

@@ -24,7 +24,7 @@ const { customerSafeServiceNotes } = require("./project-types");
 const {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
-  UNDELIVERED_INVOICE_STATUSES,
+  isInvoiceUndeliveredForBillingReview,
   isStaleClaimReviewHold,
   staleClaimReviewHoldError,
   billingReviewSummary,
@@ -2877,17 +2877,18 @@ async function claimInvoiceForSend(invoiceId, {
   // round-3 redesign): a diverging sibling's move opens a durable review on
   // this invoice (first-application-sibling-split.js, invoices.
   // billing_review_opened_at) rather than touching its money — but only an
-  // UNDELIVERED invoice (current.status here, since the flip is gated on
-  // matching it) is ever actually held: current.status can also be
-  // sent/viewed/overdue (an operator resend of an already-delivered
-  // invoice), and for those the customer already has the invoice — the
-  // review is a durable item + admin alert only, never a block, so this
-  // predicate must not apply to them (round-3 P1: blocking a resend of a
-  // delivered invoice was never the design). No override switch here
-  // (unlike the stale-claim review hold above): the release valve is
-  // clearing the review itself (POST /admin/invoices/:id/billing-review/
-  // clear), not a per-send flag.
-  if (UNDELIVERED_INVOICE_STATUSES.includes(current.status)) {
+  // UNDELIVERED invoice is ever actually held: current.status here can
+  // also be sent/viewed/overdue (an operator resend of an already-
+  // delivered invoice, still pre-flip so status alone is trustworthy —
+  // see isInvoiceUndeliveredForBillingReview's own comment for the 'sending'
+  // case that is NOT trustworthy), and for those the customer already has
+  // the invoice — the review is a durable item + admin alert only, never a
+  // block, so this predicate must not apply to them (round-3 P1: blocking
+  // a resend of a delivered invoice was never the design). No override
+  // switch here (unlike the stale-claim review hold above): the release
+  // valve is clearing the review itself (POST /admin/invoices/:id/
+  // billing-review/clear), not a per-send flag.
+  if (isInvoiceUndeliveredForBillingReview(current)) {
     claimFlip.whereNull("billing_review_opened_at");
   }
   const [invoice] = await claimFlip
@@ -2900,8 +2901,11 @@ async function claimInvoiceForSend(invoiceId, {
     // predicate above. Scoped the same way: a billing_review_opened_at on
     // an already-delivered/terminal latest row never explains a claim
     // miss here (that predicate never ran for it), so falling through to
-    // the ordinary diagnostics below is correct.
-    if (latest?.billing_review_opened_at && UNDELIVERED_INVOICE_STATUSES.includes(latest.status)) {
+    // the ordinary diagnostics below is correct. `latest.status` CAN be
+    // 'sending' here (a concurrent claim won the race) — isInvoiceUndelivered-
+    // ForBillingReview's own delivery-stamp fallback handles that case
+    // correctly, unlike a raw status-list check.
+    if (latest?.billing_review_opened_at && isInvoiceUndeliveredForBillingReview(latest)) {
       const err = new Error(`Invoice ${invoiceId} has an open billing review — resolve and clear it before sending`);
       err.code = "billing_review_open";
       throw err;
@@ -5265,11 +5269,16 @@ const InvoiceService = {
                 // provider handoff — the one point a review opened AFTER
                 // the claim (whether this send was preclaimed or claimed
                 // fresh moments ago) is still guaranteed to be caught.
-                // Scoped to UNDELIVERED_INVOICE_STATUSES like every other
-                // billing-review gate: an already-delivered invoice was
-                // never held in the first place, so this never refuses a
-                // legitimate resend of one.
-                if (current.billing_review_opened_at && UNDELIVERED_INVOICE_STATUSES.includes(current.status)) {
+                // current.status is ALWAYS 'sending' here (the claim above
+                // already flipped it, whether this is a first send or a
+                // resend of an already-delivered invoice) — status alone
+                // cannot tell those apart, so isInvoiceUndeliveredForBilling-
+                // Review falls back to the delivery stamps (Codex #5021
+                // round-3 pre-push P1: an earlier version of this check
+                // used the raw UNDELIVERED_INVOICE_STATUSES list directly,
+                // which read 'sending' as always-undelivered and wrongly
+                // blocked a resend of a delivered invoice too).
+                if (current.billing_review_opened_at && isInvoiceUndeliveredForBillingReview(current)) {
                   return { sent: false, blocked: true, deliveryOutcome: "not_sent",
                     code: "billing_review_open", error: "This invoice has an open billing review — resolve and clear it before sending",
                     validator: "check_invoice_billing_review" };
