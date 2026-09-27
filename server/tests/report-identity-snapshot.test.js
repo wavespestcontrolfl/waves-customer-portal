@@ -262,6 +262,26 @@ describe('resolveApplicatorFdacsId', () => {
   test('expiry after the service date is active', () => {
     expect(resolveApplicatorFdacsId('JB1234567', '2026-12-31', '2026-06-11')).toBe('JB1234567');
   });
+
+  // pg returns DATE columns as UTC-midnight Date objects — String() of one
+  // starts with the weekday name, which compared lexically withheld a valid
+  // Dec 31 expiry for a Jun 11 visit (codex pre-push P1).
+  test('pg Date values compare as calendar days, never as weekday-prefixed text', () => {
+    const pgDate = (ymd) => new Date(`${ymd}T00:00:00.000Z`);
+    expect(resolveApplicatorFdacsId('JB1234567', pgDate('2026-12-31'), pgDate('2026-06-11'))).toBe('JB1234567');
+    expect(resolveApplicatorFdacsId('JB1234567', pgDate('2026-01-01'), pgDate('2026-06-11'))).toBeNull();
+    expect(resolveApplicatorFdacsId('JB1234567', pgDate('2026-06-11'), '2026-06-11')).toBe('JB1234567');
+  });
+
+  test('a timestamp visit date (project created_at fallback) is judged on its ET day', () => {
+    // 2026-06-12 02:00Z is still Jun 11 in Eastern time
+    expect(resolveApplicatorFdacsId('JB1234567', '2026-06-11', new Date('2026-06-12T02:00:00.000Z'))).toBe('JB1234567');
+    expect(resolveApplicatorFdacsId('JB1234567', '2026-06-10', new Date('2026-06-12T02:00:00.000Z'))).toBeNull();
+  });
+
+  test('an unparseable date judges nothing rather than throwing', () => {
+    expect(resolveApplicatorFdacsId('JB1234567', 'not-a-date', '2026-06-11')).toBe('JB1234567');
+  });
 });
 
 describe('applyReportIdentitySnapshotToLegacyPdf (documents.js generator inputs)', () => {

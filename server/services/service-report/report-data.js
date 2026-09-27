@@ -50,7 +50,7 @@ const {
   isGenericTechnicianLabel,
   initialsForCustomerTechnicianName,
 } = require('../../utils/technician-name');
-const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
+const { etCalendarDayOf, etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
@@ -341,13 +341,27 @@ function numberOrNull(value) {
 // admin-projects.js: a MISSING expiry is active by design (seed
 // 20260703000004) rather than a failure, so a blank expiry never withholds
 // the id. Shared by the service-report and project-report payloads.
+// Both dates go through etCalendarDayOf: pg hands DATE columns back as
+// UTC-midnight Date objects (String() of one is "Thu Dec 31 …", which
+// compares by weekday name — codex pre-push P1), and a project's created_at
+// fallback is a real timestamp that must land on its ET calendar day.
 function resolveApplicatorFdacsId(fdacsId, licenseExpiry, visitDate) {
   const id = String(fdacsId == null ? '' : fdacsId).trim();
   if (!id) return null;
-  const expiry = licenseExpiry ? String(licenseExpiry).slice(0, 10) : null;
-  const visitDay = visitDate ? String(visitDate).slice(0, 10) : null;
+  const expiry = calendarDayOrNull(licenseExpiry);
+  const visitDay = calendarDayOrNull(visitDate);
   if (expiry && visitDay && expiry < visitDay) return null;
   return id;
+}
+
+function calendarDayOrNull(value) {
+  if (!value) return null;
+  try {
+    const day = etCalendarDayOf(value);
+    return /^\d{4}-\d{2}-\d{2}$/.test(day || '') ? day : null;
+  } catch {
+    return null; // an unparseable date throws inside Intl — judge nothing
+  }
 }
 
 function firstNumber(...values) {
