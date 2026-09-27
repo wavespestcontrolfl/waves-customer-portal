@@ -42,9 +42,9 @@
 const crypto = require('crypto');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
-// Code-noun anchored credential detector (shared with the generate-report
-// output gate): a token counts as a credential only beside an actual
-// code/PIN noun — location keywords alone ("120 linear feet around the
+// Credential detector shared with the generate-report output gate: tokens
+// need an explicit code/PIN noun or a device credential shape. Location
+// keywords alone ("120 linear feet around the
 // garage") never trip it. Post-generation inline edits go through THIS
 // parser at completion, so the screen lives here (codex r36 #3420). The
 // shapes mirror the canonical scrubber: digit codes either side of the
@@ -67,6 +67,13 @@ const REPORT_ACCESS_CODE_RES = [
   // ≥3 digits so counts ("2 doors") never trip
   /\b\d{3,8}\b[^\n.!?]{0,20}\b(?:open(?:s|ing)?|unlock(?:s|ing)?|access(?:es|ing)?)\b[^\n.!?]{0,20}\b(?:gate|door|garage|entry|lock)\b/i,
   /\b(?:open(?:s|ing)?|unlock(?:s|ing)?|access(?:es|ing)?|enter(?:s|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b[^\n.!?]{0,15}\b\d{3,8}\b/i,
+  // Past actions also carry credentials; decimals and explicit dimension units
+  // remain work details. Bare "in" is a preposition, not evidence of inches.
+  /\b(?:opened|unlocked|accessed|entered)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|lock)\b[^\n.!?]{0,15}\b\d{3,8}(?!\.\d)\b(?!\s*(?:feet|foot|ft|inch(?:es)?|yards?|yds?|meters?|metres?|sq|square|percent|%|min(?:utes?)?|h(?:ou)?rs?|days?|weeks?|months?|years?|dollars?|linear|gallons?|oz|ounces?|pounds?|lbs?)\b)/i,
+  // Shorthand device credentials ("rear gate 2468", "rear gate #2468",
+  // "rear gate A2468") need no linking verb. Direct adjacency and the unit
+  // exclusion preserve treatment measurements.
+  /\b(?:gate|door|garage|lock\s?box|alarm|entry|keypad)\s*[:=-]?\s*["'‘’“”]?[a-z#*]?\d{3,8}(?!\.\d)\b(?!\s*(?:feet|foot|ft|inch(?:es)?|yards?|yds?|meters?|metres?|sq|square|percent|%|min(?:utes?)?|h(?:ou)?rs?|days?|weeks?|months?|years?|dollars?|linear|gallons?|oz|ounces?|pounds?|lbs?)\b)/i,
   // digits directly before a positional prep + device noun are the same
   // credential without any action verb ("Use 4417 at the side gate",
   // codex r87) — mirrors the canonical redactor's digit-to-location form;
@@ -162,9 +169,189 @@ const REPORT_ACCESS_CODE_RES = [
   /\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\s+(?:code|combo|combination|pin)\b\s*:?\s*(?!(?:is|was|were|for|the|we|to|that|this|will|should|of|and|or|in|on|at|has|have|had|used|works?|worked|changed|updated|remains?|stays?|near|by)\b)[a-z][a-z0-9#*]{1,11}\b/i,
   /\b(?:passphrase|passcode|password|keypad|lock\s?box)\b\s*:?\s*(?!(?:is|was|were|for|the|we|to|that|this|will|should|of|and|or|in|on|at|has|have|had|used|works?|worked|changed|updated|remains?|stays?|near|by)\b)[a-z][a-z0-9#*]{1,11}\b/i,
 ];
-function containsReportAccessCode(text) {
+
+// An explicit credential noun outranks a unit-shaped suffix: "gate code
+// 2468ft" is still a credential, even though "400 ft" beside a gate can be
+// legitimate work detail. Inspect the original text before measurement
+// suppression and count digits in compact or grouped numeric tokens.
+const REPORT_NUMERIC_CREDENTIAL_GROUP = String.raw`[A-Za-z#*]*\d[A-Za-z0-9#*]*`;
+// Do not let the optional leading affix consume the device noun itself in
+// suffix forms such as "rear gate 2468-AB"; the contextual detector still
+// needs that noun after normalization.
+const REPORT_CREDENTIAL_LEADING_AFFIX_GROUP = String.raw`(?!(?:[Gg][Aa][Tt][Ee]|[Dd][Oo][Oo][Rr]|[Gg][Aa][Rr][Aa][Gg][Ee]|[Ee][Nn][Tt][Rr][Yy]|[Kk][Ee][Yy][Pp][Aa][Dd]|[Ll][Oo][Cc][Kk][Bb][Oo][Xx]|[Aa][Ll][Aa][Rr][Mm])\b)(?=[A-Za-z0-9#*]{1,12}[\s–—-])(?=[A-Za-z0-9#*]*[A-Za-z#*])[A-Za-z0-9#*]{1,12}`;
+// A separated suffix must be uppercase/symbolic. Lowercase words after a code
+// are ordinary prose ("8842 after hours") and must remain available to the
+// surrounding detector rather than being absorbed as part of the token.
+// Uppercase relation/action words are context too: consuming "AT THE SIDE"
+// or "TO OPEN THE" would erase the link between a credential and its device.
+const REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP = String.raw`(?!(?:AT|FOR|TO|ON|IN|INTO|NEAR|BY|AS|WITH|USING|VIA|IS|WAS|WERE|REMAINS?|STAYS?|BECOMES?|OPEN(?:S|ED|ING)?|UNLOCK(?:S|ED|ING)?|ACCESS(?:ES|ED|ING)?|ENTER(?:S|ED|ING)?)\b)(?=[A-Z0-9#*]{1,12}(?![A-Za-z0-9#*]))(?=[A-Z0-9#*]*[A-Z#*])[A-Z0-9#*]{1,12}`;
+// A suffix joined by a hyphen is part of the credential token even when it
+// is lowercase ("24-68-ab"). Keep the uppercase-only rule for whitespace:
+// lowercase words separated by spaces are ordinary surrounding prose.
+const REPORT_CREDENTIAL_HYPHEN_TRAILING_AFFIX_GROUP = String.raw`(?=[A-Za-z0-9#*]{1,12}(?![A-Za-z0-9#*]))(?=[A-Za-z0-9#*]*[A-Za-z#*])[A-Za-z0-9#*]{1,12}`;
+const REPORT_CREDENTIAL_TRAILING_AFFIX_RE = new RegExp(String.raw`^${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}$`);
+const REPORT_NUMERIC_CREDENTIAL_TOKEN = String.raw`(?:${REPORT_CREDENTIAL_LEADING_AFFIX_GROUP}[\s–—-]+){0,3}${REPORT_NUMERIC_CREDENTIAL_GROUP}(?:[\s–—-]+${REPORT_NUMERIC_CREDENTIAL_GROUP})*(?:(?:\s+${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}|\s*[–—-]\s*${REPORT_CREDENTIAL_HYPHEN_TRAILING_AFFIX_GROUP})){0,3}`;
+const REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE = new RegExp(
+  String.raw`\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}?["'‘’“”]?(${REPORT_NUMERIC_CREDENTIAL_TOKEN})`,
+  'gi',
+);
+const REPORT_REVERSE_EXPLICIT_NUMERIC_CREDENTIAL_RE = new RegExp(
+  String.raw`(${REPORT_NUMERIC_CREDENTIAL_TOKEN})\s+(?:is|=|was|were|remains?|stays?)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b`,
+  'gi',
+);
+
+function containsExplicitNumericCredential(text) {
   const value = String(text || '');
-  return REPORT_ACCESS_CODE_RES.some((re) => re.test(value));
+  for (const pattern of [REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE, REPORT_REVERSE_EXPLICIT_NUMERIC_CREDENTIAL_RE]) {
+    for (const match of value.matchAll(pattern)) {
+      const digitCount = match[1].replace(/\D/g, '').length;
+      if (digitCount >= 2 && digitCount <= 8) return true;
+    }
+  }
+  return false;
+}
+
+// Remove explicit measurements before looking for device-adjacent numbers.
+// The access patterns intentionally treat bare numbers near a gate as private,
+// so the unit is the evidence that quantities such as "400 sqft" and "100 ml"
+// are treatment details. Bare "in" stays out because it is commonly a
+// preposition ("2468 in the morning"), not reliable evidence of inches.
+const REPORT_MEASUREMENT_QUANTITY_RE = new RegExp(
+  String.raw`\b(?:\d+(?:\.\d+)?(?:\s*[-–—]\s*\d+(?:\.\d+)?)?|\d(?:[\s-]+\d){2,7})\s*(?:feet|foot|ft|inch(?:es)?|yards?|yds?|meters?|metres?|acres?|linear\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|square\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|sqft|sq\.?\s*(?:ft|feet|foot|yds?|yards?|meters?|metres?)|percent|min(?:utes?)?|h(?:ou)?rs?|days?|weeks?|months?|years?|dollars?|gallons?|gal|ml|millilit(?:er|re)s?|lit(?:er|re)s?|fl\.?\s*oz|oz|ounces?|pounds?|lbs?|grams?|kg)(?=\s|[.,;:!?)]|$)`,
+  'gi',
+);
+
+// N-P-K fertilizer analyses use the same separated-number surface as an
+// access token. Preserve only a complete three-part analysis directly governed
+// by an application verb or identified as fertilizer. Loose proximity is not
+// enough: a later fertilizer sentence must not license an earlier gate code.
+// This masking runs after the original-text explicit code/PIN scan, including
+// reverse assignments, so credential nouns always take priority.
+const REPORT_FERTILIZER_ANALYSIS_RE = /\b\d{1,2}(?:\.\d+)?\s*[-–—]\s*\d{1,2}(?:\.\d+)?\s*[-–—]\s*\d{1,2}(?:\.\d+)?\b/g;
+const REPORT_FERTILIZER_NOUN = String.raw`(?:fertili[sz]er|plant\s+food|nutrient(?:\s+blend)?|n\s*[-–—]\s*p\s*[-–—]\s*k|npk|analysis)`;
+const REPORT_FERTILIZER_NOUN_BEFORE_RE = new RegExp(String.raw`\b${REPORT_FERTILIZER_NOUN}\b\s*(?::|=)?\s*$`, 'i');
+const REPORT_FERTILIZER_NOUN_AFTER_RE = new RegExp(String.raw`^\s*(?:${REPORT_FERTILIZER_NOUN})\b`, 'i');
+// Product names and formulation descriptors may sit between an application
+// verb and the N-P-K analysis ("Applied Lesco 24-0-11", "Broadcast granular
+// 24-0-11"). Admit a small, word-shaped qualifier span while refusing access
+// verbs, device nouns, credential linkers, and clause transitions. That keeps
+// "Applied product, then opened the gate with 24-0-11" on the credential path.
+const REPORT_APPLICATION_QUALIFIER_WORD = String.raw`(?!(?:and|then|before|after|with|using|used|via|to|for|at|on|into|near|by|open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?|gate|door|garage|entry|keypad|lockbox|lock|alarm|code|pin|combo|combination|passcode|password|passphrase)\b)[a-z][a-z0-9&+'’./-]*`;
+const REPORT_APPLICATION_BEFORE_RE = new RegExp(
+  String.raw`\b(?:appl(?:y|ied|ying|ication(?:\s+of)?)|broadcast(?:ed|ing)?|spread(?:ing)?|distribut(?:e|ed|ing))\b\s+(?:(?:an?|the)\s+)?(?:${REPORT_APPLICATION_QUALIFIER_WORD}\s+){0,4}(?:${REPORT_FERTILIZER_NOUN}\s+)?$`,
+  'i',
+);
+const REPORT_APPLICATION_AFTER_RE = /^\s*(?:was\s+|were\s+)?(?:applied|broadcast|spread|distributed)\b/i;
+const REPORT_CREDENTIAL_NOUN_IN_CLAUSE_RE = /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i;
+const REPORT_ACCESS_BEFORE_ANALYSIS_RE = /\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,15}(?:with|using|via|code|pin|combo|combination|[:=])?\s*$/i;
+const REPORT_DEVICE_BEFORE_ANALYSIS_RE = /\b(?:gate|door|garage|entry|keypad|lock\s?box|alarm)\b(?:\s+(?:is|was|were|reads?))?\s*[:=]?\s*$/i;
+const REPORT_DEVICE_ACCESS_BEFORE_ANALYSIS_RE = /\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,20}\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?)\b[^\n.!?]{0,15}(?:with|using|via|code|pin|combo|combination|[:=])?\s*$/i;
+const REPORT_ACCESS_AFTER_ANALYSIS_RE = /^[^\n.!?]{0,20}\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b/i;
+
+function hasCredentialAffixAroundAnalysis(before, after, preserveLeading, preserveTrailing) {
+  if (/(?:\d\s*[-–—]|[#*])\s*$/.test(before)) return true;
+  if (/^\s*(?:[-–—]\s*\d|[#*])/.test(after)) return true;
+
+  const leadingGroup = before.match(/([A-Za-z0-9#*]{1,12})([\s–—-]+)$/);
+  if (leadingGroup && /[A-Za-z#*]/.test(leadingGroup[1])) {
+    if (/[-–—]/.test(leadingGroup[2]) || !preserveLeading) return true;
+  }
+
+  const trailingGroup = after.match(/^([\s–—-]+)([A-Za-z0-9#*]{1,12})/);
+  const uppercaseCredentialGroup = trailingGroup
+    && REPORT_CREDENTIAL_TRAILING_AFFIX_RE.test(trailingGroup[2]);
+  return Boolean(uppercaseCredentialGroup && !preserveTrailing);
+}
+
+function maskFertilizerAnalyses(text) {
+  return String(text || '').replace(REPORT_FERTILIZER_ANALYSIS_RE, (analysis, offset, source) => {
+    const before = source.slice(0, offset);
+    const after = source.slice(offset + analysis.length);
+    const clauseBefore = before.slice(Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf('\n')) + 1);
+    const clauseEndOffsets = [after.indexOf('.'), after.indexOf('!'), after.indexOf('?'), after.indexOf('\n')]
+      .filter((value) => value >= 0);
+    const clauseAfter = clauseEndOffsets.length ? after.slice(0, Math.min(...clauseEndOffsets)) : after;
+    const applicationBefore = REPORT_APPLICATION_BEFORE_RE.test(clauseBefore);
+    const applicationAfter = REPORT_APPLICATION_AFTER_RE.test(clauseAfter);
+    const fertilizerNounBefore = REPORT_FERTILIZER_NOUN_BEFORE_RE.test(clauseBefore);
+    const fertilizerNounAfter = REPORT_FERTILIZER_NOUN_AFTER_RE.test(clauseAfter);
+
+    const embeddedToken = hasCredentialAffixAroundAnalysis(
+      before,
+      after,
+      applicationBefore || fertilizerNounBefore,
+      applicationAfter || fertilizerNounAfter,
+    );
+    if (embeddedToken) return analysis;
+
+    const directApplication = applicationBefore || applicationAfter;
+    const credentialNoun = REPORT_CREDENTIAL_NOUN_IN_CLAUSE_RE.test(clauseBefore)
+      || REPORT_CREDENTIAL_NOUN_IN_CLAUSE_RE.test(clauseAfter);
+    const deviceAccess = REPORT_ACCESS_BEFORE_ANALYSIS_RE.test(clauseBefore)
+      || REPORT_DEVICE_BEFORE_ANALYSIS_RE.test(clauseBefore)
+      || REPORT_DEVICE_ACCESS_BEFORE_ANALYSIS_RE.test(clauseBefore)
+      || REPORT_ACCESS_AFTER_ANALYSIS_RE.test(clauseAfter);
+    const accessInstruction = credentialNoun || (!directApplication && deviceAccess);
+    if (accessInstruction) return analysis;
+
+    const treatmentEvidence = directApplication || fertilizerNounBefore || fertilizerNounAfter;
+    return treatmentEvidence ? '[fertilizer-analysis]' : analysis;
+  });
+}
+
+// Normalize numeric credential tokens to the digit-only shape already handled
+// by every contextual detector above. This covers compact alphanumeric tokens
+// on either side of the digits and individually separated digits without
+// teaching each gate/action/shorthand branch another token spelling.
+const REPORT_CREDENTIAL_TOKEN_RE = new RegExp(
+  String.raw`(^|[^A-Za-z0-9])(${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?=$|[^A-Za-z0-9])`,
+  'g',
+);
+const REPORT_CREDENTIAL_CONTEXT_PREFIX_RE = /^(?:(?:use|using|enter|entering|type|typing|press|pressing|punch(?:ing)?|input(?:ting)?|try|trying|open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|with|via|to|for|at|on|into|near|by)\s+)+/i;
+
+function accessCodeDetectionText(text) {
+  return text.replace(REPORT_CREDENTIAL_TOKEN_RE, (match, prefix, token) => {
+    const digits = token.replace(/\D/g, '');
+    const credentialShape = /[A-Za-z#*]/.test(token) || /[\s–—-]/.test(token);
+    if (!credentialShape || digits.length < 3 || digits.length > 8) return match;
+    const compactDevice = token.match(/^(?:(rear|side|front|back|main|north|south|east|west)[\s–—-]*)?(gate|door|garage|entry|keypad|lockbox|alarm)(?=[\d#*\s–—-]|$)/i);
+    if (compactDevice) {
+      const direction = compactDevice[1] ? `${compactDevice[1]} ` : '';
+      return `${prefix}${direction}${compactDevice[2]} ${digits}`;
+    }
+    // The token grammar accepts alphabetic prefixes for forms such as
+    // "AB 2468". Preserve access verbs/connectors that happen to occupy that
+    // slot so normalization cannot erase the credential/device relationship.
+    const contextPrefix = token.match(REPORT_CREDENTIAL_CONTEXT_PREFIX_RE)?.[0] || '';
+    return `${prefix}${contextPrefix}${digits}`;
+  });
+}
+
+// Measurement-looking suffixes do not make a credential safe when the
+// original sentence directly ties that token to opening or entering a device.
+// Keep this relationship check narrow so later treatment detail remains legal:
+// "Opened rear gate, applied 100 ml around hinges" has no access connector.
+const REPORT_DIRECT_ACCESS_CODE_RES = [
+  /\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,
+  /\b\d{3,8}\b\s+(?:(?:to|for)\s+)?(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,20}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b/i,
+  /\b(?:use|using|enter|entering|type|typing|press|pressing|punch(?:ing)?|input(?:ting)?|try|trying)\s+\d{3,8}\b\s+(?:at|for|on|into|near|by)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b/i,
+  /\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,20}\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?)\b\s*(?:with|using|via|code|pin|combo|combination|[:=])\s*\d{3,8}\b/i,
+];
+
+function containsReportAccessCode(text) {
+  const raw = String(text || '');
+  if (containsExplicitNumericCredential(raw)) return true;
+  // Direct token-to-device relationships outrank fertilizer context. Check the
+  // original copy before an application qualifier can mask an N-P-K-shaped
+  // credential ("Applied override 24-0-11 to open the rear gate").
+  const originalRelationship = accessCodeDetectionText(raw);
+  if (REPORT_DIRECT_ACCESS_CODE_RES.some((re) => re.test(originalRelationship))) return true;
+  const fertilizerScreened = maskFertilizerAnalyses(raw);
+  const value = fertilizerScreened.replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]');
+  const normalized = accessCodeDetectionText(value);
+  // Normalization adds grouped/affixed spellings; it must never remove an
+  // access relationship that the original, measurement-screened copy exposes.
+  return REPORT_ACCESS_CODE_RES.some((re) => re.test(value) || re.test(normalized));
 }
 const { validateCustomerCopy } = require('./premium-experience');
 const { EXTRA_FORBIDDEN } = require('./visit-summary-narrative');
