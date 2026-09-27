@@ -1638,9 +1638,13 @@ class SmartRebooker {
       // Caller-supplied guard for THIS row on the move transaction (auto-dispatch
       // re-reads the receiving tech's capabilities here; the unit mover runs the
       // matching options.memberGuard for grouped members). Refuses before the
-      // first write; nothing to undo.
+      // first write; nothing to undo. `destination` is where THIS row lands —
+      // for a grouped member, its own derived window — so a guard can judge
+      // the placement being written rather than the caller's plan.
       if (typeof options.moveGuard === 'function') {
-        await options.moveGuard({ trx, technicianId: keptTechId, service });
+        await options.moveGuard({
+          trx, technicianId: keptTechId, service, destination: { date: newDateStr, windowStart: updates.window_start || null },
+        });
       }
       // A reviewed move also pins the route whose destination was probed.
       // A tech CHANGE pins the observed prior technician in the CAS: the

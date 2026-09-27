@@ -395,29 +395,35 @@ describe('destination freeze — the DESTINATION instant must clear 73h, not jus
     id: 's1', scheduled_date: '2026-10-08', window_start: '17:00', is_recurring: true, recurring_parent_id: 'p1', technician_id: null,
   };
 
-  test('the tapped row: 17:00 -> 09:00 the same day is refused; keeping 17:00 or a later day passes', async () => {
+  test('the row being written: 17:00 -> 09:00 the same day is refused; keeping 17:00 or a later day passes', async () => {
     const trx = seriesTrx({ p1: [{ id: 's1', scheduled_date: '2026-10-08' }] });
-    await expect(checkFlexOwnBounds(trx, row, { date: '2026-10-08', start_time: '09:00' }, 'flex', refuseFactory(), 's1'))
+    await expect(checkFlexOwnBounds(trx, row, { date: '2026-10-08', start_time: '09:00' }, 'flex', refuseFactory(), { date: '2026-10-08', windowStart: '09:00' }))
       .rejects.toMatchObject({ id: 's1', why: expect.stringContaining('at its destination') });
-    await expect(checkFlexOwnBounds(trx, row, { date: '2026-10-08', start_time: '17:00' }, 'flex', refuseFactory(), 's1')).resolves.toBeUndefined();
-    await expect(checkFlexOwnBounds(trx, row, { date: '2026-10-10', start_time: '08:00' }, 'flex', refuseFactory(), 's1')).resolves.toBeUndefined();
+    await expect(checkFlexOwnBounds(trx, row, { date: '2026-10-08', start_time: '17:00' }, 'flex', refuseFactory(), { date: '2026-10-08', windowStart: '17:00' })).resolves.toBeUndefined();
+    await expect(checkFlexOwnBounds(trx, row, { date: '2026-10-10', start_time: '08:00' }, 'flex', refuseFactory(), { date: '2026-10-10', windowStart: '08:00' })).resolves.toBeUndefined();
   });
 
   test('a day move below the 5-day destination floor is refused; only the current date is exempt (Codex #4995 r3 P1)', async () => {
     // Today is 10-05, so the floor is 10-10: Fri 10-09 sits between the
     // visit's own date (10-08) and the floor.
     const trx = seriesTrx({ p1: [{ id: 's1', scheduled_date: '2026-10-08' }] });
-    await expect(checkFlexOwnBounds(trx, row, { date: '2026-10-09', start_time: '09:00' }, 'flex', refuseFactory(), 's1'))
+    await expect(checkFlexOwnBounds(trx, row, { date: '2026-10-09', start_time: '09:00' }, 'flex', refuseFactory(), { date: '2026-10-09', windowStart: '09:00' }))
       .rejects.toMatchObject({ id: 's1', why: expect.stringContaining('destination floor') });
   });
 
-  test('makeMoveGuard applies it to the tapped row only — a forwarded member lands on its own start, checked by the member guard', async () => {
+  test('makeMoveGuard checks the destination the rebooker is about to write — the tapped row and a forwarded grouped member alike', async () => {
     const best = { date: '2026-10-08', start_time: '09:00', technician_id: null };
     const guard = makeMoveGuard({ service: row, best, config: { guardMode: 'flex' } });
-    await expect(guard({ trx: seriesTrx({ p1: [{ id: 's1', scheduled_date: '2026-10-08' }] }), technicianId: null }))
+    await expect(guard({ trx: seriesTrx({ p1: [{ id: 's1', scheduled_date: '2026-10-08' }] }), technicianId: null, destination: { date: '2026-10-08', windowStart: '09:00' } }))
       .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', message: expect.stringContaining('at its destination') });
+    // A grouped member whose own derived start crossed into the freeze since
+    // planning is refused in its own write transaction...
     const member = { ...row, id: 's2' };
-    await expect(guard({ trx: seriesTrx({ p1: [{ id: 's2', scheduled_date: '2026-10-08' }] }), technicianId: null, service: member }))
+    const memberTrx = () => seriesTrx({ p1: [{ id: 's2', scheduled_date: '2026-10-08' }] });
+    await expect(guard({ trx: memberTrx(), technicianId: null, service: member, destination: { date: '2026-10-08', windowStart: '09:00' } }))
+      .rejects.toMatchObject({ message: expect.stringContaining('at its destination') });
+    // ...and passes when its own start clears it.
+    await expect(guard({ trx: memberTrx(), technicianId: null, service: member, destination: { date: '2026-10-08', windowStart: '17:00' } }))
       .resolves.toBeUndefined();
   });
 

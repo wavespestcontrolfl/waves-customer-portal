@@ -241,20 +241,22 @@ function isUnplacedDueDate(row) {
 // same assertFlexWindows the grouped-sibling check uses. Extracted so
 // makeMoveGuard's closure never grows from this. No-ops outside flex mode,
 // for a non-recurring-child row, or the unplaced due-date shape.
-// The tapped row (`tappedId`) must also clear the freeze at its DESTINATION,
-// best.date + best.start_time (flexTier.destinationFrozen — a same-day
-// re-time to an earlier hour can land inside it). A grouped member the unit
-// mover forwards here lands on its own derived start, which only the member
-// guard's targets carry, so checkFlexSiblingBounds checks those.
-async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, tappedId) {
+// The row must also clear the freeze at its DESTINATION
+// (flexTier.destinationFrozen — a same-day re-time to an earlier hour can
+// land inside it): `destination` is the placement the rebooker is about to
+// write for THIS row, in this transaction — the tapped row's, or a grouped
+// member's own derived window — so the check is as late as the write itself
+// (the member guard's earlier planning-time check alone could go stale while
+// the members before it move).
+async function checkFlexOwnBounds(trx, row, best, guardMode, refuse, destination) {
   if (guardMode !== 'flex' || row.is_recurring !== true || !row.recurring_parent_id
     || isUnplacedDueDate(row)) return;
   const now = new Date();
   if (await flexTier.ownScheduleFrozen(trx, row, now)) {
     throw refuse(row.id, 'is within 73 hours of its own scheduled time (frozen, independent of reminder evidence)');
   }
-  if (String(row.id) === String(tappedId) && flexTier.destinationFrozen(row, best.date, best.start_time, now)) {
-    throw refuse(row.id, `would start within 73 hours at its destination (${best.date} ${best.start_time || 'no start'}) — frozen`);
+  if (destination && flexTier.destinationFrozen(row, destination.date, destination.windowStart, now)) {
+    throw refuse(row.id, `would start within 73 hours at its destination (${destination.date} ${destination.windowStart || 'no start'}) — frozen`);
   }
   await fenceFlexSeries(trx, [row], refuse);
   await assertFlexWindows(trx, [row], best, etDateString(new Date()), refuse);
@@ -265,12 +267,14 @@ function makeMoveGuard({ service, best, config = {} }) {
     new Error(`Cannot auto-move this stop: service ${rowId} ${why}`),
     { statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', isOperational: true },
   );
-  return async ({ trx, technicianId, service: movingRow }) => {
+  return async ({
+    trx, technicianId, service: movingRow, destination,
+  }) => {
     const row = movingRow || service;
     if (row.recurring_dispatch_due_date && row.customer_confirmed === true) {
       throw refuse(row.id, 'was confirmed by the customer');
     }
-    await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, service.id);
+    await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
   };

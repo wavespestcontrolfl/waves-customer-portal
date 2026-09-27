@@ -122,7 +122,7 @@ postgres('flex-tier neighbor row lock against PostgreSQL', () => {
           id: aId, recurring_parent_id: parentId, is_recurring: true, scheduled_date: '2040-11-10', window_start: '09:00',
         };
         const refuse = (id, why) => Object.assign(new Error(`refused ${id}: ${why}`), { id, why });
-        await expect(checkFlexOwnBounds(trx2, row, { date: '2040-11-14', start_time: '09:00' }, 'flex', refuse, aId))
+        await expect(checkFlexOwnBounds(trx2, row, { date: '2040-11-14', start_time: '09:00' }, 'flex', refuse, { date: '2040-11-14', windowStart: '09:00' }))
           .rejects.toMatchObject({ id: aId, why: expect.stringContaining('being edited') });
       } finally {
         await trx2.rollback();
