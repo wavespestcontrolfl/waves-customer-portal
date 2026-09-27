@@ -66,13 +66,6 @@ describe('public pricing ranges', () => {
     }
   });
 
-  // The two live-bracket-ladder envelope tests that used to live here
-  // (an operator-added narrow bracket, and a boundary beyond the 20,000 sf
-  // public cap) are gone: rodent_bait_program no longer sweeps the live
-  // ladder at all — owner ruling 2026-09-27 replaced the envelope sweep
-  // (every reachable bracket + extension step) with a fixed typical-home
-  // footprint sweep (TYPICAL_HOMES), so an operator-added bracket outside
-  // that span is no longer expected to be sampled by this row.
 
   test('rodent bait note tracks the live setup fee to the cent and disappears when the fee is disabled (codex #3591 r10 P2)', () => {
     const constants = require('../services/pricing-engine/constants');

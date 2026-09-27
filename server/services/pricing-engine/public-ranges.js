@@ -28,9 +28,9 @@ const sp = require('./service-pricing');
 
 // Typical single-family home footprints (sq ft) — NOT the brackets' extremes.
 const TYPICAL_HOMES = [1500, 2000, 2500, 3000, 3500];
-// Wider typical-footprint span used by the two pest pricers whose bracket
-// curve is not well captured by the 5-point TYPICAL_HOMES span alone.
-const FOOTPRINTS8 = [1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000];
+// Wider span for general pest and termite monitoring: the owner judged the
+// 1,500-3,500 sq ft span too tight for those two rows (2026-09-27).
+const WIDE_TYPICAL_HOMES = [1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000];
 
 function sweepValues(inputs, fn, pick) {
   const values = [];
@@ -102,7 +102,7 @@ function buildRows() {
     // per-application prices sit below quarterly, so quarterly-only would
     // overstate the low end of an advertised option.
     values: sweepValues(
-      FOOTPRINTS8.flatMap((f) => PEST_PROFILES.map((p) => ({ f, p }))),
+      WIDE_TYPICAL_HOMES.flatMap((f) => PEST_PROFILES.map((p) => ({ f, p }))),
       ({ f, p }) => sp.pricePestControl({ footprint: f, propertyType: 'single_family', ...p.property }, { frequency: 'quarterly' }),
       (r) => (r.tiers || []).map((t) => t.perApp)),
     notes: `Quarterly, bi-monthly, or monthly cadence; priced by home size, landscaping, and property features — larger, more complex homes price higher. WaveGuard bundle tiers discount qualifying recurring services up to ${maxWaveGuardPct}%. A one-time $${Math.round(constants.PEST.initialFee)} initial service fee applies to standalone pest service only — waived when bundled with another recurring service or with annual prepay.`,
@@ -283,14 +283,21 @@ function buildRows() {
     key: 'rodent_exclusion',
     name: 'Rodent Exclusion',
     unit: 'per job',
-    // Typical wire-mesh scopes with the inspection included (not waived).
+    // Typical wire-mesh scopes with the inspection included (not waived),
+    // plus the size-tier price the website's /estimate/rodent-exclusion/
+    // page gets for a typical home (public-quote sends only homeSqFt and
+    // stories, so the estimate engine prices it through priceExclusion) —
+    // the published range must hold what that page actually quotes.
     values: sweepValues(
       [
         { standardWireMeshPoints: 5, meshSoftLF: 20 },
         { standardWireMeshPoints: 10, meshSoftLF: 50 },
       ],
       (opts) => sp.priceRodentExclusionV2(opts),
-      (r) => (r.customRecommended || r.requiresCustomQuote ? NaN : (r.total ?? r.price))),
+      (r) => (r.customRecommended || r.requiresCustomQuote ? NaN : (r.total ?? r.price)))
+      .concat(sweepValues(TYPICAL_HOMES,
+        (homeSqFt) => sp.priceExclusion({ homeSqFt, stories: 1 }),
+        (r) => (r.customRecommended || r.requiresCustomQuote ? NaN : r.price))),
     notes: `Scope set by inspection findings; components price per unit (standard point $${Math.round(constants.RODENT.exclusionV2.wireMeshPoints.standard)}, advanced/roof point $${Math.round(constants.RODENT.exclusionV2.wireMeshPoints.advancedRoofHigh)}, soft mesh $${Math.round(constants.RODENT.exclusionV2.linearMesh.softRatePerLF)}/LF, concrete mesh $${Math.round(constants.RODENT.exclusionV2.linearMesh.hardRatePerLF)}/LF), so larger scopes price higher at those rates; the rodent inspection fee is included. ${rodentBundleTerms}`,
   }));
 
@@ -316,7 +323,7 @@ function buildRows() {
     name: 'Termite Bait Monitoring',
     unit: 'per application',
     values: sweepValues(
-      FOOTPRINTS8.flatMap((f) => TERMITE_BAIT_PROFILES.map((opts) => ({ f, opts }))),
+      WIDE_TYPICAL_HOMES.flatMap((f) => TERMITE_BAIT_PROFILES.map((opts) => ({ f, opts }))),
       ({ f, opts }) => sp.priceTermiteBait({ footprint: f }, opts),
       (r) => (r.quoteRequired ? NaN : r.perApp)),
     notes: `Quarterly station-check applications; priced by home size and structural complexity. WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
