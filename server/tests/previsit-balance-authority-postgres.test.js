@@ -181,7 +181,7 @@ postgres('previsit billing quote authority (PostgreSQL)', () => {
     delete process.env.GATE_COLLECTIONS_POLICY;
     await mockPg('collections_contact_ledger').del();
     await mockPg('notification_prefs').del();
-    await mockPg('customers').where({ id: customerId }).update({ phone });
+    await mockPg('customers').where({ id: customerId }).update({ phone, email: 'previsit-authority@example.invalid' });
     await mockPg('payments').whereNot({ id: failedPaymentId }).del();
     await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sent', credit_applied: 0 });
     await mockPg('invoices').whereNot({ id: invoiceId }).del();
@@ -376,8 +376,55 @@ postgres('previsit billing quote authority (PostgreSQL)', () => {
     return context;
   }
 
-  test.each(['fresh', 'retry'])('%s Email uses the held authority without a phone, and fences debt through provider completion', async (attempt) => {
+  test.each(['preference', 'recipient'])('a changed %s retires the unsent previsit snapshot before provider work', async (changed) => {
     const context = await replayFixture();
+    if (changed === 'preference') {
+      await mockPg('notification_prefs').where({ customer_id: customerId }).update({ billing_channels: ['sms'] });
+    } else {
+      await mockPg('customers').where({ id: customerId }).update({ email: 'new-previsit-authority@example.invalid' });
+    }
+    const provider = jest.fn();
+    await expect(require('../services/billing-email-provider-replay').runBillingEmailProviderReplayHandoff({
+      template_key: 'billing.notice', recipient_type: 'customer', recipient_id: customerId,
+      recipient_email_snapshot: 'previsit-authority@example.invalid', trigger_event_id: context.notificationEventKey,
+      idempotency_key: `billing_channel_email:${context.notificationEventKey}:email`, categories: ['billing'],
+      payload_snapshot: { __billing_replay_context: context },
+    }, provider)).resolves.toMatchObject({ handled: true, allowed: false, terminal: true, retryable: false,
+      code: 'BILLING_REPLAY_REQUOTE_REQUIRED' });
+    expect(provider).not.toHaveBeenCalled();
+  }, 15000);
+
+  test.each(['null', 'missing', 'unreadable'])('explicit previsit Email holds a %s choice without retiring or sending', async (choice) => {
+    const context = await replayFixture();
+    if (choice === 'null') await mockPg('notification_prefs').update({ billing_channels: null });
+    if (choice === 'missing') await mockPg('notification_prefs').del();
+    if (choice === 'unreadable') await mockPg.schema.renameTable('notification_prefs', 'unreadable_notification_prefs');
+    try {
+      await mockPg.transaction(async (trx) => {
+        expect(await previsitReplayQuoteEligible(context, trx)).toMatchObject({ ok: false, retryable: true,
+          reason: choice === 'unreadable' ? 'previsit-choice-unavailable' : 'previsit-email-not-selected' });
+        expect((await trx.raw('SELECT 1 AS usable')).rows[0].usable).toBe(1);
+      });
+      const provider = jest.fn();
+      await expect(require('../services/billing-email-provider-replay').runBillingEmailProviderReplayHandoff({
+        template_key: 'billing.notice', recipient_type: 'customer', recipient_id: customerId,
+        recipient_email_snapshot: 'previsit-authority@example.invalid', trigger_event_id: context.notificationEventKey,
+        idempotency_key: `billing_channel_email:${context.notificationEventKey}:email`, categories: ['billing'],
+        payload_snapshot: { __billing_replay_context: context },
+      }, provider)).resolves.toMatchObject({ handled: true, allowed: false, terminal: false, retryable: true });
+      expect(provider).not.toHaveBeenCalled();
+      expect((await mockPg('collections_contact_ledger').where({ id: context.collections_ledger_id }).first()).metadata)
+        .toMatchObject({ pending: true });
+    } finally {
+      if (choice === 'unreadable') await mockPg.schema.renameTable('unreadable_notification_prefs', 'notification_prefs');
+    }
+  }, 15000);
+
+  test.each(['fresh', 'retry'])('%s Email retains its explicit choice across sibling edits and fences debt through provider completion', async (attempt) => {
+    const context = await replayFixture();
+    await mockPg('notification_prefs').where({ customer_id: customerId }).update({
+      billing_channels: attempt === 'fresh' ? ['email'] : ['email', 'push', 'sms'],
+    });
     if (attempt === 'retry') await mockPg('scheduled_services').where({ id: visitId }).update({ balance_reminder_sent_at: null });
     let entered;
     let release;
@@ -404,6 +451,7 @@ postgres('previsit billing quote authority (PostgreSQL)', () => {
     let proofError;
     try {
       for (const mutate of [
+        (trx) => trx('notification_prefs').where({ customer_id: customerId }).update({ billing_channels: null }),
         (trx) => trx('invoices').where({ id: invoiceId }).update({ credit_applied: 20 }),
         (trx) => trx('payments').where({ id: failedPaymentId }).update({ status: 'paid' }),
         (trx) => trx('invoices').insert({ ...quotedInvoice, id: randomUUID(), token: randomUUID(),

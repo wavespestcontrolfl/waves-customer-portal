@@ -7,6 +7,7 @@ jest.mock('../models/db', () => {
   const database = (...args) => mockDatabase(...args);
   database.transaction = (...args) => mockDatabase.transaction(...args);
   database.raw = (...args) => mockDatabase.raw(...args);
+  Object.defineProperty(database, 'client', { get: () => mockDatabase.client });
   return database;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -132,7 +133,17 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
       table.uuid('id').primary();
       table.uuid('customer_id').notNullable();
       table.timestamp('balance_reminder_sent_at', { useTz: true });
+      table.date('scheduled_date'); table.uuid('payer_id'); table.boolean('is_recurring');
+      table.text('status'); table.text('service_type');
     });
+    await mockDatabase.schema.createTable('customers', (table) => {
+      table.uuid('id').primary(); table.timestamp('deleted_at'); table.decimal('monthly_rate'); table.integer('billing_day');
+      for (const field of ['first_name', 'phone', 'billing_mode', 'waveguard_tier']) table.text(field);
+    });
+    await mockDatabase.schema.createTable('sms_templates', (table) => {
+      table.text('template_key'); table.boolean('is_active');
+    });
+    await mockDatabase('sms_templates').insert({ template_key: 'previsit_balance_reminder', is_active: true });
   }, 30000);
 
   afterEach(async () => {
@@ -350,6 +361,82 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
     });
     return { customerId, invoiceIds, appointmentId, email, stopped };
   }
+
+  async function withTwoConnections(run) {
+    const prior = mockDatabase;
+    const gate = process.env.PREVISIT_BALANCE_REMINDER;
+    const limited = knex({ client: 'pg', connection: process.env.DATABASE_URL,
+      searchPath: [schema], pool: { min: 0, max: 2 }, acquireConnectionTimeout: 2000 });
+    mockDatabase = limited;
+    process.env.PREVISIT_BALANCE_REMINDER = 'true';
+    try { return await run(limited); } finally {
+      mockDatabase = prior;
+      if (gate === undefined) delete process.env.PREVISIT_BALANCE_REMINDER;
+      else process.env.PREVISIT_BALANCE_REMINDER = gate;
+      await limited.destroy();
+    }
+  }
+
+  test('retirement waits for a newer producer snapshot, then recovers its idle claim with two connections', async () => {
+    const { customerId, appointmentId, email, stopped } = await requoteFixture({ delivered: true });
+    const newerClaim = new Date(Date.now() + 1000);
+    await mockDatabase('scheduled_services').where({ id: appointmentId }).update({ balance_reminder_sent_at: newerClaim });
+    await withTwoConnections(async (database) => {
+      const { runExclusive } = require('../utils/cron-lock');
+      await runExclusive('previsit-balance-reminder', async () => {
+        // The public service must reuse this scheduler lease's connection.
+        await expect(require('../services/previsit-balance-reminder').runSweep())
+          .resolves.toMatchObject({ considered: 0 });
+        const [snapshot] = await require('../services/billing-reminder-delivery')
+          .reminderProgress(customerId, 'previsit_balance_reminder', ['email', 'sms']);
+        expect(snapshot.delivered.has('email')).toBe(true);
+        await expect(Reservation.releaseBillingEmailReservationForRequote(stopped, database)).resolves.toBe(false);
+        await expect(database('collections_contact_ledger').where({ id: email.id }).first())
+          .resolves.toMatchObject({ metadata: { delivered: true } });
+        await expect(database('scheduled_services').where({ id: appointmentId }).first())
+          .resolves.toMatchObject({ balance_reminder_sent_at: newerClaim });
+        await expect(database('email_messages').where({ id: stopped.id }).first())
+          .resolves.toMatchObject({ error_message: stopped.error_message });
+      }, { recordHealth: false, waitForSlot: false });
+      await expect(require('../services/transactional-email-provider-retry').recoverStaleClaims(new Date(), database))
+        .resolves.toBe(1);
+      await expect(database('scheduled_services').where({ id: appointmentId }).first())
+        .resolves.toMatchObject({ balance_reminder_sent_at: null });
+      await expect(database('collections_contact_ledger').where({ id: email.id }).first())
+        .resolves.toMatchObject({ metadata: { send_failed: true } });
+    });
+  }, 30000);
+
+  test('retirement cannot reopen a newer Email reservation before its adapter replaces the old token', async () => {
+    const { email, stopped } = await requoteFixture();
+    await mockDatabase('collections_contact_ledger').where({ id: email.id })
+      .update({ metadata: mockDatabase.raw("metadata || '{\"send_failed\": true}'::jsonb") });
+    await withTwoConnections(async (database) => {
+      await require('../utils/cron-lock').runExclusive('previsit-balance-reminder', async () => {
+        const ContactLedger = require('../services/collections/contact-ledger');
+        const row = await database('collections_contact_ledger').where({ id: email.id }).first();
+        await expect(ContactLedger.claimAttempt({ ...row, reused: true }, { metadata: { amount: 60 } }))
+          .resolves.toEqual({ allowed: true });
+        await expect(Reservation.releaseBillingEmailReservationForRequote(stopped, database)).resolves.toBe(false);
+        await expect(database('collections_contact_ledger').where({ id: email.id }).first())
+          .resolves.toMatchObject({ metadata: { amount: 60, send_failed: false } });
+      }, { recordHealth: false, waitForSlot: false });
+    });
+  }, 30000);
+
+  test('the retirement transaction prevents a direct sweep from taking any visit claim', async () => {
+    const { appointmentId } = await requoteFixture({ delivered: true });
+    await withTwoConnections(async (database) => {
+      const held = await database.transaction();
+      try {
+        await held.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['cron:previsit-balance-reminder']);
+        await expect(require('../services/previsit-balance-reminder').runSweep())
+          .resolves.toEqual({ skipped: true, reason: 'lease_held' });
+        await expect(database('scheduled_services').where({ id: appointmentId }).first())
+          .resolves.toMatchObject({ balance_reminder_sent_at: expect.any(Date) });
+      } finally { await held.rollback(); }
+    });
+  }, 30000);
 
   test('changed-quote repair reopens a delivered Email reservation and releases its visit claim', async () => {
     const { customerId, invoiceIds, appointmentId, email } = await requoteFixture({ delivered: true });

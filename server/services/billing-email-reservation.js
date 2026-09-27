@@ -105,6 +105,12 @@ async function releaseBillingEmailReservationForRequote(message, database = db) 
   if (!hasRequoteRefusalEvidence(message)) return false;
   try {
     return await database.transaction(async (trx) => {
+      // Match the producer's scheduler/service lease on this separate work
+      // connection. An active producer may have snapshotted Email delivery;
+      // do not change its progress or claim until the entire sweep is idle.
+      const lease = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?)) AS locked',
+        ['cron:previsit-balance-reminder']);
+      if (lease?.rows?.[0]?.locked !== true) return false;
       const current = await trx('email_messages')
         .where({ id: message.id, send_attempt_token: message.send_attempt_token }).forUpdate().first();
       if (!hasRequoteRefusalEvidence(current)) return false;

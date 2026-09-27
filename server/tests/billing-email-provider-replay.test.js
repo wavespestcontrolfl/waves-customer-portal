@@ -361,3 +361,54 @@ test('fresh rendering is restricted to the previsit producer', async () => {
   await expect(runBillingEmailProviderReplayHandoff(message(), jest.fn()))
     .resolves.toMatchObject({ code: 'BILLING_REPLAY_INELIGIBLE', terminal: true });
 });
+
+function previsitMessage() {
+  const stored = { ...context, category: 'billing', source_entry_point: 'previsit_balance_reminder',
+    notificationEventKey: 'previsit-balance:visit-1', appointment_id: 'visit-1' };
+  EmailTemplateLibrary.readStoredBillingReplayContext.mockReturnValueOnce(stored);
+  return message({ trigger_event_id: stored.notificationEventKey,
+    idempotency_key: `billing_channel_email:${stored.notificationEventKey}:email`,
+    payload_snapshot: { __billing_replay_context: stored } });
+}
+
+test.each(['BILLING_PREFERENCES_CHANGED', 'EMAIL_RECIPIENT_CHANGED'])(
+  'an unsent previsit authority refusal %s reopens source delivery', async (code) => {
+    dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => {
+      state.boundaryBlock = { code, reason: 'Stored authority changed', retryable: true };
+    });
+    const dispatch = jest.fn();
+    await expect(runBillingEmailProviderReplayHandoff(previsitMessage(), dispatch)).resolves.toMatchObject({
+      allowed: false, terminal: true, retryable: false, code: 'BILLING_REPLAY_REQUOTE_REQUIRED',
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(billingEmailReplayEligible).not.toHaveBeenCalled();
+  },
+);
+
+test.each(['providerPreparationStarted', 'handoffStarted'])(
+  'previsit authority supersession after %s cannot release an uncertain attempt', async (phase) => {
+    dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => {
+      state[phase] = true;
+      state.boundaryBlock = { code: 'EMAIL_RECIPIENT_CHANGED', retryable: true };
+    });
+    await expect(runBillingEmailProviderReplayHandoff(previsitMessage(), jest.fn()))
+      .resolves.toMatchObject({ allowed: false, code: 'EMAIL_RECIPIENT_CHANGED', retryable: true });
+  },
+);
+
+test('accepted previsit provider evidence wins over later authority supersession', async () => {
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => {
+    state.providerAccepted = true;
+    state.boundaryBlock = { code: 'BILLING_PREFERENCES_CHANGED', retryable: true };
+  });
+  await expect(runBillingEmailProviderReplayHandoff(previsitMessage(), jest.fn()))
+    .resolves.toEqual({ handled: true, allowed: true });
+});
+
+test('a transient previsit authority read failure retains its retry', async () => {
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => {
+    state.boundaryBlock = { code: 'BILLING_EMAIL_RECHECK_FAILED', retryable: true };
+  });
+  await expect(runBillingEmailProviderReplayHandoff(previsitMessage(), jest.fn()))
+    .resolves.toMatchObject({ allowed: false, code: 'BILLING_EMAIL_RECHECK_FAILED', retryable: true });
+});

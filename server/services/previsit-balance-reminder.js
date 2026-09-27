@@ -31,13 +31,14 @@ const { etDateString } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { toE164 } = require('../utils/phone');
 const { withSmsConsentLock } = require('../utils/customer-comms-lock');
+const { runExclusive } = require('../utils/cron-lock');
 const { resolveBillingLane, monthlyDuesCollected } = require('./billing-lane');
 const { invoiceAmountDue, isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { collectionsChannelVerdict } = require('./collections/rail-guard');
 const ContactLedger = require('./collections/contact-ledger');
-const { explicitBillingChannels } = require('./billing-delivery-channels');
+const { explicitBillingChannels, billingChannelAllowed } = require('./billing-delivery-channels');
 const { reminderProgress, sendReminderChannels } = require('./billing-reminder-delivery');
 
 const TEMPLATE_KEY = 'previsit_balance_reminder';
@@ -241,6 +242,31 @@ function previsitInvoicePolicy(snapshots, explicit) {
   };
 }
 
+function retainedPrevisitQuote(episode, visit) {
+  if (!episode) return undefined;
+  const { sanitizeBillingReplayContext } = require('./billing-email-replay-context');
+  const quotes = [];
+  for (const entry of episode.entries) {
+    let metadata = entry.metadata;
+    try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { return null; }
+    if (!episode.delivered?.has(entry.channel)
+      && (metadata?.send_failed === true || metadata?.resolved === true)) continue;
+    const quote = sanitizeBillingReplayContext({ ...metadata,
+      schema_version: 1, category: 'billing', customer_id: String(visit.customer_id),
+      source_entry_point: 'previsit_balance_reminder', collections_ledger_id: String(entry.id),
+      appointment_id: metadata?.scheduled_service_id,
+    });
+    if (!quote || quote.appointment_id !== String(visit.id)) return null;
+    quotes.push({ amount: Number(quote.rendered_amount), duesCents: quote.dues_cents,
+      fresh: quote.invoice_quotes.map((invoice) => ({ id: invoice.id, total: invoice.dueCents / 100 }))
+        .sort((a, b) => a.id.localeCompare(b.id)),
+      quotedVisit: { scheduled_date: quote.appointment_date, service_type: quote.appointment_service_type } });
+  }
+  if (!quotes.length) return episode.delivered?.size ? null : undefined;
+  if (quotes.some((quote) => JSON.stringify(quote) !== JSON.stringify(quotes[0]))) return null;
+  return quotes[0];
+}
+
 async function prepareVisitReminder(visit, { now, todayEt }) {
   // An unreadable choice must leave the visit unclaimed. Null alone retains legacy delivery.
   const prefs = await db('notification_prefs').where({ customer_id: visit.customer_id }).first();
@@ -267,6 +293,10 @@ async function prepareVisitReminder(visit, { now, todayEt }) {
   };
   const episode = channels ? (await reminderProgress(visit.customer_id, 'previsit_balance_reminder', channels))
     .find((event) => event.metadata.notificationEventKey === `previsit-balance:${visit.id}`) : null;
+  // Delivered or uncertain siblings fix this episode's debt and visit quote.
+  // Pending legs may retry that quote only; their held guard checks live debt.
+  const retainedQuote = retainedPrevisitQuote(episode, visit);
+  if (retainedQuote === null) return null;
   const snapshots = await previsitPolicySnapshots(channels || ['sms', 'email'], {
     ...consult, ...(channels ? { excludeLedgerIds: (episode?.entries || []).map((entry) => entry.id) } : {}),
   });
@@ -287,9 +317,7 @@ async function prepareVisitReminder(visit, { now, todayEt }) {
     overdueRecurringDue,
   });
   if (!verdict.send) return null;
-  const amount = verdict.duesLate
-    ? monthlyRate + verdict.overdueDue
-    : verdict.overdueDue;
+  const amount = duesCents / 100 + verdict.overdueDue;
   if (!(amount > 0)) return null;
   return {
     smsPolicyPermitted: policy.smsPolicyPermitted,
@@ -298,6 +326,7 @@ async function prepareVisitReminder(visit, { now, todayEt }) {
     amount,
     duesCents,
     fresh,
+    ...retainedQuote,
   };
 }
 
@@ -507,6 +536,21 @@ function previsitQuoteAuthority({ visit, quotedInvoices, quotedDuesCents, ledger
 async function previsitReplayQuoteEligible(meta, database, { channel = 'email' } = {}) {
   const context = require('./billing-email-replay-context').sanitizeBillingReplayContext(meta);
   if (!context || context.source_entry_point !== 'previsit_balance_reminder') return PREVISIT_AUTHORITY_BUSY;
+  if (channel === 'email') {
+    if (!database?.isTransaction) return PREVISIT_AUTHORITY_BUSY;
+    try {
+      // This episode was created by an explicit choice. Legacy NULL Email
+      // permission must not authorize it; retain the preference lock through send.
+      const selected = await database.transaction(async (savepoint) => {
+        const prefs = await savepoint('notification_prefs').where({ customer_id: context.customer_id })
+          .forUpdate().first('billing_channels');
+        return billingChannelAllowed(prefs || {}, 'billing', 'email');
+      });
+      if (selected !== true) return { ...PREVISIT_AUTHORITY_BUSY, reason: 'previsit-email-not-selected' };
+    } catch {
+      return { ...PREVISIT_AUTHORITY_BUSY, reason: 'previsit-choice-unavailable' };
+    }
+  }
   const guard = previsitQuoteAuthority({
     visit: { id: context.appointment_id, customer_id: context.customer_id,
       scheduled_date: context.appointment_date, service_type: context.appointment_service_type },
@@ -519,7 +563,8 @@ async function previsitReplayQuoteEligible(meta, database, { channel = 'email' }
     readOnly: channel === 'push' && !database?.isTransaction });
 }
 
-async function deliverExplicitPrevisitReminder({ visit, amount, duesCents, fresh, channels }) {
+async function deliverExplicitPrevisitReminder({ visit, amount, duesCents, fresh, channels, quotedVisit }) {
+  visit = { ...visit, ...quotedVisit };
   const eventKey = `previsit-balance:${visit.id}`;
   const metadata = {
     selected_channels: channels, scheduled_service_id: visit.id, amount, rendered_amount: amount.toFixed(2),
@@ -648,7 +693,14 @@ async function processVisitReminder(visit, context) {
 async function runSweep({ now = new Date() } = {}) {
   if (!gateEnabled()) return { skipped: true, reason: 'gate_off' };
   if (!(await smsTemplateActive())) return { skipped: true, reason: 'template_inactive' };
+  // Reentrant with the scheduler's lease, and also protects direct callers.
+  // Email retirement takes the same key on its work transaction, so it can
+  // reopen an idle claim only after this producer has finished every leg.
+  return runExclusive('previsit-balance-reminder', () => runSweepHeld(now),
+    { recordHealth: false, waitForSlot: false });
+}
 
+async function runSweepHeld(now) {
   const todayEt = etDateString(now);
   const iso = (dt) => dt.toISOString().slice(0, 10);
   // WINDOW, not a single day: the claim releases on a failed send, and a

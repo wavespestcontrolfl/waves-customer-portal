@@ -14,6 +14,7 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_name, run) => run()) }));
 jest.mock('../services/billing-lane', () => ({
   resolveBillingLane: jest.fn(() => ({ mode: 'per_visit' })),
   monthlyDuesCollected: jest.fn(async () => false),
@@ -401,7 +402,8 @@ test('explicit quotes intersect selected allowed balances and exclude only this 
   armExplicit(['email', 'sms']);
   require('../services/billing-reminder-delivery').reminderProgress.mockResolvedValueOnce([
     { metadata: { notificationEventKey: 'previsit-balance:unrelated' }, entries: [{ id: 'other' }] },
-    { metadata: { notificationEventKey: `previsit-balance:${VISIT.id}` }, entries: [{ id: 'own-email' }] },
+    { metadata: { notificationEventKey: `previsit-balance:${VISIT.id}` },
+      entries: [{ id: 'own-email', metadata: { send_failed: true } }] },
   ]);
   collectionsChannelVerdict.mockImplementation(async ({ channel }) => ({ permitted: true,
     eligibleInvoiceIds: channel === 'email' ? ['inv-9'] : ['inv-9', 'other'] }));
@@ -409,4 +411,49 @@ test('explicit quotes intersect selected allowed balances and exclude only this 
   expect(collectionsChannelVerdict).toHaveBeenCalledWith(expect.objectContaining({ excludeLedgerIds: ['own-email'] }));
   expect(require('../services/billing-reminder-delivery').sendReminderChannels)
     .toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['inv-9'] }));
+});
+
+function priorQuoteMetadata(overrides = {}) {
+  return { notificationEventKey: `previsit-balance:${VISIT.id}`, scheduled_service_id: VISIT.id,
+    appointment_date: VISIT.scheduled_date, appointment_service_type: VISIT.service_type,
+    appointment_rendered_on: '2026-08-13', rendered_amount: '96.60',
+    invoice_ids: ['inv-9'], invoice_quotes: [{ id: 'inv-9', dueCents: 9660 }],
+    dues_cents: 0, selected_channels: ['email', 'sms'], ...overrides };
+}
+
+test.each([true, false])('a partial retry retains a delivered=%s sibling quote after the balance changes', async (delivered) => {
+  armExplicit(['email', 'sms'], { invoices: [chain({ result: [
+    { ...OVERDUE_INVOICE, total: '60.00' }, { ...OVERDUE_INVOICE, id: 'new-invoice', total: '200.00' },
+  ] })] });
+  const helper = require('../services/billing-reminder-delivery');
+  helper.reminderProgress.mockResolvedValueOnce([{
+    metadata: priorQuoteMetadata(), delivered: new Set(delivered ? ['email'] : []),
+    entries: [
+      { id: 'sms', channel: 'sms', metadata: priorQuoteMetadata({ send_failed: true, rendered_amount: '260.00' }) },
+      { id: 'email', channel: 'email', metadata: priorQuoteMetadata({ delivered, send_failed: false }) },
+    ],
+  }]);
+  helper.sendReminderChannels.mockImplementationOnce(async (input) => {
+    await input.send('sms', { id: 'sms' });
+    return { complete: delivered, deliveredNow: ['sms'] };
+  });
+  await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(helper.sendReminderChannels).toHaveBeenCalledWith(expect.objectContaining({
+    invoiceIds: ['inv-9'], offLedgerBalanceCents: 0,
+    metadata: expect.objectContaining({ rendered_amount: '96.60', invoice_quotes: [{ id: 'inv-9', dueCents: 9660 }] }),
+  }));
+  expect(require('../services/sms-template-renderer').renderSmsTemplate)
+    .toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ amount: '96.60' }));
+  expect(sendCustomerMessage.mock.calls.map(([input]) => input.metadata.billingDeliveryLeg)).toEqual(['sms']);
+});
+
+test('an unreadable delivered quote holds the episode before taking the visit claim', async () => {
+  const claim = armExplicit(['email', 'sms']);
+  require('../services/billing-reminder-delivery').reminderProgress.mockResolvedValueOnce([{
+    metadata: priorQuoteMetadata(), delivered: new Set(['email']),
+    entries: [{ id: 'email', channel: 'email', metadata: priorQuoteMetadata({ invoice_quotes: null, delivered: true }) }],
+  }]);
+  await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(claim.update).not.toHaveBeenCalled();
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
 });
