@@ -1749,13 +1749,14 @@ async function resolveFulfillment(conn, commitment, call) {
 // as a hint (status stays open, nothing is invented). Human-touched rows are
 // left to the human either way.
 // When a WAVES obligation was last (re)stated: a human-recorded promise
-// exists from the moment it was typed, and — for a callback card
-// specifically — the card's own audited callback_edit / callback_reopen
-// events restate it (the row's reviewed_at is overwritten by every later
-// action, so it cannot carry that history on its own). Every other
-// alertable SLA kind (send_estimate, schedule_visit — Codex #5019 r11 P2)
-// has no such audit trail and falls back to reviewed_at directly, below.
-// Null for anything that is not a reviewed, party:'waves' SLA commitment.
+// exists from the moment it was typed, and — for every alertable SLA kind
+// (callback via callback_edit/callback_reopen, every other one via
+// commitment_edit/commitment_reopen, Codex #5019 r17 structural fix) — its
+// OWN audited renewal events restate it (the row's human_state/reviewed_at
+// are overwritten by every later action, including an ordinary confirm, so
+// neither can carry that history on its own — see applyHumanUpdate's
+// writers for both event families). Null for anything that is not a
+// reviewed, party:'waves' SLA commitment.
 async function obligationRenewedAt(conn, commitment) {
   if (!commitment || commitment.party !== 'waves') return null;
   if (!['confirmed', 'edited'].includes(commitment.human_state)) return null;
@@ -1768,29 +1769,24 @@ async function obligationRenewedAt(conn, commitment) {
   // this file; the module is fully initialized by the time this runs.
   if (commitment.kind !== 'callback') {
     if (!require('./followup-sla-watcher').SLA_KINDS.includes(commitment.kind)) return null;
-    // ONLY human_state === 'edited' counts (Codex #5019 r16 P1) — never
-    // 'confirmed'. applyHumanUpdate's 'edit' action ALWAYS sets human_state
-    // to 'edited', for every kind, so that check alone is unambiguous. But
-    // 'confirm' AND 'reopen' both land on 'confirmed' for these kinds
-    // (unlike callback, which tells them apart via its own callback_edit /
-    // callback_reopen audit trail below) — and reviewed_at advances on
-    // EVERY one of the three, confirm included. Using reviewed_at as the
-    // boundary whenever human_state is merely 'confirmed' would treat an
-    // ordinary "yes, the AI got this right" acknowledgment as if the
-    // obligation had been restated: earlier, genuine fulfillment evidence
-    // (a quote actually sent) would stop counting as kept the moment
-    // someone later confirmed the row, producing a false "still owed"
-    // alert on the next callback — and a callback that arrived BEFORE an
-    // ordinary confirm could be wrongly excluded as "pre-renewal" even
-    // though nothing about the obligation itself ever changed. A genuine
-    // reopen-with-no-edit on these kinds is therefore NOT currently
-    // renewable this way (no row field distinguishes it from a bare
-    // confirm without a dedicated audit trail, which applyHumanUpdate does
-    // not write for these kinds) — accepted as a narrower, safer scope
-    // than risking either false direction above.
-    if (commitment.human_state !== 'edited') return null;
-    const ms = [commitment.source === 'human' ? commitment.created_at : null, commitment.reviewed_at]
-      .filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
+    // The durable commitment_edit/commitment_reopen event is the ONLY
+    // renewal boundary for these kinds (Codex #5019 r17, superseding r16's
+    // human_state === 'edited' rule — CLAUDE.md rule 19; the r16 code is
+    // removed, not kept alongside this). r16 read the boundary off
+    // human_state, but applyHumanUpdate's 'confirm' CASE only ever
+    // preserves 'edited' for kind === 'callback' — for these kinds a later
+    // ORDINARY confirm always resets human_state to 'confirmed' regardless
+    // of a genuine prior edit, which silently erased a human_state-based
+    // boundary the moment anyone confirmed the row afterward. A durable
+    // audit_log event, once written, is unaffected by anything a later
+    // confirm does to the row — exactly the same shape callback already
+    // uses below, just under its own action names so nothing reading the
+    // callback events changes.
+    const events = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
+      .whereIn('action', ['commitment_edit', 'commitment_reopen']).select('created_at', 'metadata');
+    const meta = (e) => { try { return typeof e.metadata === 'string' ? JSON.parse(e.metadata) : (e.metadata || {}); } catch { return {}; } };
+    const times = [commitment.source === 'human' ? commitment.created_at : null, ...events.map((e) => meta(e).renewed_at || e.created_at)];
+    const ms = times.filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
     return ms.length ? new Date(Math.max(...ms)) : null;
   }
   const events = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
@@ -2461,6 +2457,29 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
     await require('./audit-log').recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy || null,
       action: `callback_${action}`, resource_type: 'call_commitment', resource_id: id,
       metadata: { via: 'ledger', renewed_at: new Date().toISOString(), ...renewal }, critical: true, trx: conn });
+  } else if (before && before.party === 'waves' && before.kind !== 'callback'
+    && require('./followup-sla-watcher').SLA_KINDS.includes(before.kind)
+    && (action === 'reopen' || (action === 'edit' && editRestatesRow(before, { description, due_at })))) {
+    // The durable renewal event for every OTHER alertable SLA kind
+    // (send_estimate, schedule_visit), mirroring callback's own
+    // callback_edit/callback_reopen trail above — structural fix for Codex
+    // #5019 r17, superseding r16's human_state-based rule (CLAUDE.md rule
+    // 19: the r16 guard in obligationRenewedAt is removed, not kept
+    // alongside this). r16 read the boundary off human_state === 'edited',
+    // but applyHumanUpdate's own 'confirm' CASE above only ever preserves
+    // 'edited' for kind === 'callback' — for these kinds a later ORDINARY
+    // confirm always resets human_state to 'confirmed' regardless of a
+    // genuine prior edit, silently erasing a human_state-based boundary.
+    // A durable audit_log event, once written, is unaffected by anything a
+    // later confirm does to the row — a distinct action name
+    // (commitment_edit / commitment_reopen, never callback_*) so nothing
+    // reading the callback events changes. A bare confirm never reaches
+    // this branch at all (`before` is populated only for reopen/edit,
+    // above), and a non-substantive edit (wording/due_at unchanged) writes
+    // nothing, since nothing about the obligation was actually restated.
+    await require('./audit-log').recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy || null,
+      action: `commitment_${action}`, resource_type: 'call_commitment', resource_id: id,
+      metadata: { via: 'ledger', renewed_at: new Date().toISOString() }, critical: true, trx: conn });
   } else if (before && before.kind === 'send_reschedule_link' && before.party === 'waves' && action === 'reopen') {
     // The inverse of a dismiss is not a no-op for this kind: an explicit
     // office verdict is one of only two things allowed to move the
