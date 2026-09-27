@@ -893,6 +893,24 @@ function neverSendRecheck(call, leadId, destinationPhone) {
       const callStart = callStartedAt(call) || new Date(call.created_at);
       if (await bookedSinceCall(dbi, lead.customer_id, callStart)) return { ok: false, code: 'booked_since_call' };
       if (await linkSentRecently(dbi, leadId, new Date())) return { ok: false, code: 'link_sent_recently' };
+      // Stamped HERE, on THIS connection (dbi), as the LAST thing before
+      // returning ok — the true provider-start boundary for a caller with
+      // no withSmsHandoff transaction of its own (codex r8 P2). Moved out
+      // of dispatchClaimedCall's own body, which used to stamp this before
+      // ever calling sendCustomerMessage at all: that function still does
+      // its OWN fallible pre-provider work first (acquiring the provider
+      // handoff reservation, a fresh suppression/consent read) — a throw
+      // anywhere in that gap left the row 'claimed' with handoff_started_at
+      // already set, permanently ambiguous (never resent) even though
+      // Twilio was never contacted. Every check above this line, and every
+      // one of sendCustomerMessage's own earlier steps, now fails or throws
+      // BEFORE this write — flowing to recoverAbandonedClaim's ordinary
+      // retry rail — and only a failure in the narrow window AFTER this
+      // (the callback_number_needed check, the final isStillValid recheck,
+      // or messages.create() itself) is still, correctly, terminal-
+      // ambiguous.
+      const entry = parseMetadata(call)[METADATA_KEY] || {};
+      await recordDecision(dbi, call, { ...entry, status: 'claimed', handoff_started_at: new Date().toISOString() }, { logActivity: false });
       return { ok: true };
     } catch (err) {
       // A DB read failing here is an infrastructure hiccup, not a
@@ -1022,20 +1040,14 @@ async function dispatchClaimedCall(conn, call, now) {
   const destinationPhone = built.phone || lead.phone;
   if (!consentedDestination(call, extractionOf(call), destinationPhone)) return skip('destination_not_consented');
 
-  // Stamped on the SAME row, on THIS connection, immediately before the
-  // actual provider request — the one fact that later distinguishes "this
-  // attempt never reached Twilio" (safe to requeue through the ordinary
-  // retry rail) from "the provider may already have this" (never resend,
-  // exactly like an ambiguous provider outcome) if the process throws or
-  // dies anywhere between here and a recorded terminal outcome (codex r3
-  // P2 — the sweep's own catch used to stamp every such failure
-  // worker_error/terminal regardless of whether Twilio was ever called,
-  // and a failure in THIS write would otherwise leave the row 'claimed'
-  // forever with no way back). See recoverAbandonedClaim, sweep()'s own
-  // catch, and the stale-claim recovery pass below — all three read this
-  // same field to make that call.
-  await recordDecision(conn, call, { ...entry, status: 'claimed', handoff_started_at: now.toISOString() }, { logActivity: false });
-
+  // handoff_started_at is stamped inside neverSendRecheck itself (codex r8
+  // P2), not here — sendCustomerMessage still does its OWN fallible
+  // pre-provider work (acquiring the provider handoff reservation, a fresh
+  // suppression/consent read) before it ever reaches that hook, and
+  // stamping this row 'claimed'+handoff_started_at before any of that ran
+  // left a throw in that gap permanently ambiguous even though Twilio was
+  // never contacted. See neverSendRecheck's own doc comment for exactly
+  // where the boundary now sits.
   const managedLine = managedLineForCall(call);
   const result = await sendCustomerMessage({
     to: destinationPhone,
@@ -1125,19 +1137,32 @@ async function recordSendOutcome(conn, call, entry, leadId, now, result) {
 // synchronous claim-then-dispatch could still legitimately be in flight
 // (staleClaimRecovery below, after STALE_CLAIM_MS — the previous worker
 // most likely died mid-dispatch and never got to run any catch at all).
-// Both callers share this one decision: handoff_started_at (stamped
-// immediately before dispatchClaimedCall's own sendCustomerMessage call) is
-// the ONE fact that says whether resending is safe. Present, the provider
-// may already have this exact attempt — leave the row 'claimed' (no
-// further write), the same fate as an ordinary ambiguous provider outcome:
-// never resent, visible only by querying call_log directly. Absent, the
-// failure happened strictly before any network attempt, so this is exactly
-// as safe to requeue as any other retryable send outcome — through the
-// SAME bounded rail (original_send_at's own 24h deadline, then the ordinary
-// backoff) recordSendOutcome already owns for that case.
+// Both callers share this one decision: handoff_started_at (stamped inside
+// neverSendRecheck itself, as the actual provider-start boundary — see its
+// own doc comment) is the ONE fact that says whether resending is safe.
+// Absent, the failure happened strictly before any network attempt, so
+// this is exactly as safe to requeue as any other retryable send outcome —
+// through the SAME bounded rail (original_send_at's own 24h deadline, then
+// the ordinary backoff) recordSendOutcome already owns for that case.
+// Present, the provider may already have this exact attempt — moved to
+// its own terminal 'ambiguous' status (codex r8 P2 — previously left
+// merely 'claimed' with no further write, which matched
+// recoverStaleClaims' own WHERE clause on every future sweep forever;
+// enough of those piling up, oldest-created-at-first, could occupy the
+// whole DISPATCH_BATCH window and starve a genuinely recoverable
+// pre-handoff row from ever being reached). Never resent — 'ambiguous'
+// matches neither claimForDispatch's 'pending' filter nor this function's
+// own 'claimed' one — and logged (not a customer-facing outcome, but
+// visible in the activity feed rather than only by querying call_log
+// directly, unlike this lane's own documented pre-existing limitation for
+// a live ambiguous provider outcome, which converges on this SAME status
+// once IT goes stale enough for a stale-claim sweep to find it too).
 async function recoverAbandonedClaim(conn, call, now) {
   const entry = parseMetadata(call)[METADATA_KEY] || {};
-  if (entry.handoff_started_at) return { ambiguous: true };
+  if (entry.handoff_started_at) {
+    await recordDecision(conn, call, { ...entry, status: 'ambiguous', reason: 'ambiguous_provider_outcome' });
+    return { ambiguous: true };
+  }
   if (pastRetryDeadline(entry, now)) {
     await recordDecision(conn, call, { status: 'skipped', reason: 'worker_error', lead_id: entry.lead_id, send_at: entry.send_at });
     return { ambiguous: false, terminal: true };

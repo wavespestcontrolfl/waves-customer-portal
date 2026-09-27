@@ -957,7 +957,7 @@ describe('neverSendRecheck', () => {
   const OPEN = { id: 'lead-1', status: 'new', converted_at: null, estimate_id: null, customer_id: null, deleted_at: null, phone: DESTINATION };
 
   function dbi({ lead = OPEN, bookedSince = null, smsWithLink = null } = {}) {
-    return jest.fn((table) => {
+    const conn = jest.fn((table) => {
       const chain = {};
       ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
@@ -968,8 +968,13 @@ describe('neverSendRecheck', () => {
         return undefined;
       });
       chain.pluck = jest.fn(async () => []);
+      // The handoff_started_at stamp (codex r8 P2) writes here, on this
+      // same dbi, as the LAST thing before neverSendRecheck returns ok.
+      chain.update = jest.fn(async () => 1);
       return chain;
     });
+    conn.raw = jest.fn(() => 'RAW');
+    return conn;
   }
 
   test('an open lead with no estimate, not booked, no recent link: ok', async () => {
@@ -1530,22 +1535,45 @@ describe('dispatchClaimedCall', () => {
       return call ? JSON.parse(call[1][0]).call_booking_link_text : null;
     }
 
-    test('the stamp lands before sendCustomerMessage is ever called, and survives a subsequent successful send', async () => {
+    // codex r8 P2: the stamp used to land in dispatchClaimedCall's own body,
+    // BEFORE sendCustomerMessage was ever called at all — but that function
+    // still does its OWN fallible pre-provider work first (acquiring the
+    // provider handoff reservation, a fresh suppression/consent read)
+    // before it ever reaches twilio.js's dispatch/providerPreSendCheck.
+    // Moved into neverSendRecheck itself — invoked as providerPreSendCheck,
+    // "once, on the SAME connection the provider handoff holds, right
+    // after the annual-offer guard and right before the SDK request"
+    // (twilio.js's own contract) — as the LAST thing it does before
+    // returning ok. These tests invoke providerPreSendCheck explicitly,
+    // the way twilio.js's real dispatch() does, since the mock otherwise
+    // never calls it at all.
+    test('the stamp lands inside providerPreSendCheck, as the LAST thing before it returns ok — never before sendCustomerMessage\'s own earlier pre-provider work', async () => {
       const conn = makeDb();
-      let stampWrittenBeforeSend = null;
-      sendCustomerMessage.mockImplementation(async () => {
-        stampWrittenBeforeSend = lastMetadataPatch(conn);
+      let stampedBeforePreProviderWork;
+      let stampedAfterCheckReturnedOk;
+      sendCustomerMessage.mockImplementation(async (opts) => {
+        // Simulates sendCustomerMessage's OWN reservation/suppression/
+        // consent work running BEFORE providerPreSendCheck is ever called.
+        stampedBeforePreProviderWork = lastMetadataPatch(conn);
+        const verdict = await opts.providerPreSendCheck({ dbi: conn });
+        expect(verdict).toEqual({ ok: true });
+        stampedAfterCheckReturnedOk = lastMetadataPatch(conn);
         return { sent: true, providerMessageId: 'SM_test_sid', deliveryOutcome: 'accepted' };
       });
       const result = await dispatchClaimedCall(conn, CALL, NOW);
       expect(result.sent).toBe(true);
-      expect(stampWrittenBeforeSend).toMatchObject({ status: 'claimed' });
-      expect(stampWrittenBeforeSend.handoff_started_at).toBeTruthy();
+      expect(stampedBeforePreProviderWork).toBeNull(); // not stamped before providerPreSendCheck even ran
+      expect(stampedAfterCheckReturnedOk).toMatchObject({ status: 'claimed' });
+      expect(stampedAfterCheckReturnedOk.handoff_started_at).toBeTruthy();
     });
 
-    test('a throw from sendCustomerMessage AFTER the stamp leaves handoff_started_at on the row — recoverAbandonedClaim then treats it as ambiguous, never resent', async () => {
-      sendCustomerMessage.mockRejectedValue(new Error('provider timeout, no result'));
+    test('a throw AFTER providerPreSendCheck stamps the row leaves handoff_started_at set — recoverAbandonedClaim then treats it as ambiguous, never resent', async () => {
       const conn = makeDb();
+      sendCustomerMessage.mockImplementation(async (opts) => {
+        const verdict = await opts.providerPreSendCheck({ dbi: conn });
+        expect(verdict).toEqual({ ok: true });
+        throw new Error('provider timeout, no result'); // messages.create() itself failed AFTER the stamp
+      });
       await expect(dispatchClaimedCall(conn, CALL, NOW)).rejects.toThrow('provider timeout, no result');
       const patch = lastMetadataPatch(conn);
       expect(patch.handoff_started_at).toBeTruthy(); // the stamp survived the throw
@@ -1553,6 +1581,23 @@ describe('dispatchClaimedCall', () => {
       const stampedCall = { ...CALL, metadata: { ...CALL.metadata, call_booking_link_text: patch } };
       const outcome = await recoverAbandonedClaim(conn, stampedCall, NOW);
       expect(outcome).toEqual({ ambiguous: true });
+    });
+
+    // The actual r8 P2 fix: a failure in sendCustomerMessage's OWN
+    // pre-provider work — before it ever reaches providerPreSendCheck —
+    // must leave NO handoff_started_at at all, unlike the old behavior
+    // (stamped unconditionally before sendCustomerMessage was even called).
+    test('a throw from sendCustomerMessage\'s OWN pre-provider work, before providerPreSendCheck is ever called, leaves no handoff_started_at — safe to requeue', async () => {
+      const conn = makeDb();
+      sendCustomerMessage.mockImplementation(async () => {
+        throw new Error('reservation acquisition failed'); // never invokes providerPreSendCheck at all
+      });
+      await expect(dispatchClaimedCall(conn, CALL, NOW)).rejects.toThrow('reservation acquisition failed');
+      const patch = lastMetadataPatch(conn);
+      expect(patch).toBeNull(); // no stamp write happened — providerPreSendCheck never ran
+
+      const outcome = await recoverAbandonedClaim(conn, CALL, NOW); // CALL's own metadata never carried handoff_started_at
+      expect(outcome.ambiguous).toBe(false);
     });
 
     test('a throw BEFORE the stamp (the link builder itself throws) leaves no handoff_started_at — safe for recoverAbandonedClaim to requeue', async () => {
@@ -1615,12 +1660,20 @@ describe('recoverAbandonedClaim', () => {
     expect(patch).toMatchObject({ status: 'skipped', reason: 'worker_error' });
   });
 
-  test('handoff_started_at present: leaves the row claimed with no further write — the provider may already have this attempt', async () => {
+  // codex r8 P2: previously left 'claimed' with NO write at all — which
+  // matched recoverStaleClaims' own WHERE clause on every future sweep
+  // forever, since claimed_at never changes on a row nothing ever touches
+  // again. Moved to its own terminal 'ambiguous' status instead (never
+  // 'pending', never 'claimed') so a future stale-claim sweep never
+  // selects it again — see recoverStaleClaims' own "60 ambiguous rows"
+  // test for the actual starvation this fixes.
+  test('handoff_started_at present: moves the row to its own terminal ambiguous status, logged — the provider may already have this attempt', async () => {
     const conn = rawCapturingConn();
     const entry = { status: 'claimed', lead_id: 'lead-1', send_at: NOW.toISOString(), handoff_started_at: NOW.toISOString() };
     const outcome = await recoverAbandonedClaim(conn, { id: 'call-1', metadata: { call_booking_link_text: entry } }, NOW);
     expect(outcome).toEqual({ ambiguous: true });
-    expect(conn.raw).not.toHaveBeenCalled(); // no metadata write at all
+    const patch = lastPatch(conn);
+    expect(patch).toMatchObject({ status: 'ambiguous', handoff_started_at: NOW.toISOString(), lead_id: 'lead-1' });
   });
 });
 
@@ -1660,11 +1713,85 @@ describe('recoverStaleClaims', () => {
     expect(conn.raw).not.toHaveBeenCalled(); // recoverAbandonedClaim never even ran
   });
 
-  test('a stale claimed row WITH handoff_started_at is left claimed (ambiguous) and not counted', async () => {
+  // codex r8 P2: moved OUT of 'claimed' into 'ambiguous' (never resent),
+  // not left 'claimed' with no write — see the "60 ambiguous rows" test
+  // below for the starvation this specifically fixes.
+  test('a stale claimed row WITH handoff_started_at moves to ambiguous and is not counted', async () => {
     const row = { id: 'call-stale-3', metadata: { call_booking_link_text: { status: 'claimed', handoff_started_at: NOW.toISOString() } } };
     const conn = connFor(row);
     const recovered = await recoverStaleClaims(conn, NOW);
     expect(recovered).toBe(0);
+    const [json] = conn.raw.captured[conn.raw.captured.length - 1];
+    expect(JSON.parse(json).call_booking_link_text).toMatchObject({ status: 'ambiguous' });
+  });
+
+  // The actual starvation this round's fix closes: a batch's worth (and
+  // more) of permanently-ambiguous rows, all OLDER than one genuinely
+  // recoverable row, must not block that row forever — each ambiguous row
+  // is moved out of the 'claimed' pool the FIRST time it is found, so a
+  // later sweep's batch is no longer full of rows nothing will ever
+  // resolve.
+  test('60 ambiguous rows, all older than one recoverable row, do not starve it across repeated sweeps', async () => {
+    const AMBIGUOUS_COUNT = 60;
+    const rows = new Map();
+    for (let i = 0; i < AMBIGUOUS_COUNT; i += 1) {
+      const id = `ambiguous-${i}`;
+      rows.set(id, {
+        id, createdAt: i, // older than the recoverable row (created_at index AMBIGUOUS_COUNT)
+        metadata: { call_booking_link_text: { status: 'claimed', lead_id: 'lead-x', send_at: NOW.toISOString(), handoff_started_at: NOW.toISOString() } },
+      });
+    }
+    const recoverableId = 'recoverable-1';
+    rows.set(recoverableId, {
+      id: recoverableId, createdAt: AMBIGUOUS_COUNT, // the newest row — sorts LAST in oldest-first order
+      metadata: { call_booking_link_text: { status: 'claimed', lead_id: 'lead-y', send_at: NOW.toISOString(), original_send_at: NOW.toISOString() } },
+    });
+
+    // ONE shared chain + a single pendingId set by where() — read by both
+    // first() and raw() (raw() is evaluated as an argument to update(),
+    // strictly after the SAME chain's own where() already ran), so a real
+    // jsonb merge can be applied in-memory and seen by the NEXT sweep's own
+    // select() — a stateless per-call mock can't reproduce that across
+    // repeated sweeps, and this fix is specifically about repeated sweeps.
+    let pendingId;
+    const chain = {};
+    ['whereRaw', 'orderBy'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+    chain.limit = jest.fn((n) => { chain._limit = n; return chain; });
+    chain.where = jest.fn((cond) => {
+      if (cond && typeof cond === 'object' && cond.id) pendingId = cond.id;
+      return chain;
+    });
+    chain.select = jest.fn(async () => [...rows.values()]
+      .filter((r) => r.metadata.call_booking_link_text.status === 'claimed')
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .slice(0, chain._limit)
+      .map((r) => ({ id: r.id })));
+    chain.first = jest.fn(async () => (pendingId && rows.has(pendingId) ? { id: pendingId, metadata: rows.get(pendingId).metadata } : undefined));
+    chain.update = jest.fn(async () => 1);
+    chain.insert = jest.fn(async () => {}); // the ambiguous write's own activity_log row
+    const conn = jest.fn(() => chain);
+    conn.raw = jest.fn((sql, bindings) => {
+      const patchValue = JSON.parse(bindings[0]).call_booking_link_text;
+      if (pendingId && rows.has(pendingId)) rows.get(pendingId).metadata = { call_booking_link_text: patchValue };
+      return 'RAW';
+    });
+
+    // Sweep 1: DISPATCH_BATCH (50) oldest 'claimed' rows are ALL ambiguous
+    // (indices 0-49) — none recovered, but each moved to 'ambiguous', so
+    // they leave the 'claimed' pool for good.
+    const firstSweep = await recoverStaleClaims(conn, NOW);
+    expect(firstSweep).toBe(0);
+    const stillClaimedAfterFirst = [...rows.values()].filter((r) => r.metadata.call_booking_link_text.status === 'claimed');
+    expect(stillClaimedAfterFirst).toHaveLength(11); // 10 remaining ambiguous + the 1 recoverable
+
+    // Sweep 2: the remaining 11 easily fit in one batch — the recoverable
+    // row is finally reached and requeued.
+    const secondSweep = await recoverStaleClaims(conn, NOW);
+    expect(secondSweep).toBe(1);
+    const recoverableRow = rows.get(recoverableId);
+    expect(recoverableRow.metadata.call_booking_link_text.status).toBe('pending'); // recovered, never starved
+    const stillClaimedAfterSecond = [...rows.values()].filter((r) => r.metadata.call_booking_link_text.status === 'claimed');
+    expect(stillClaimedAfterSecond).toHaveLength(0);
   });
 
   test('a row no longer found at all (deleted/merged since the candidate SELECT) is skipped without throwing', async () => {

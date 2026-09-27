@@ -365,4 +365,51 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     const freshRow = await mockPg('call_log').where({ id: freshCallId }).first('metadata');
     expect(freshRow.metadata.call_booking_link_text.status).toBe('claimed'); // untouched — not yet stale
   });
+
+  // codex r8 P2 — the real batch-ordering behavior a mocked query can't
+  // fully prove: 60 permanently-ambiguous rows (handoff_started_at set),
+  // all OLDER than one genuinely recoverable row, sorted oldest-first
+  // under a real ORDER BY/LIMIT. Before this fix, each stayed 'claimed'
+  // forever with no write, so they occupied the whole batch window on
+  // every future sweep; now each is moved to 'ambiguous' the first time
+  // it's found, so a second sweep's own real SELECT reaches the
+  // recoverable row.
+  test('60 real ambiguous rows older than one recoverable row do not starve it across repeated real sweeps', async () => {
+    const leadId = await insertLead(mockPg);
+    const staleClaimedAt = new Date(NOW.getTime() - callBookingLinkText.STALE_CLAIM_MS - 5 * 60 * 1000);
+    const originalSendAt = new Date(NOW.getTime() - 2 * 60 * 60 * 1000).toISOString();
+    for (let i = 0; i < 60; i += 1) {
+      // created_at strictly increasing but all older than the recoverable
+      // row below — oldest-first ORDER BY puts every one of these ahead of
+      // it, the worst case for the starvation this fixes.
+      const createdAt = new Date(NOW.getTime() - 3 * 60 * 60 * 1000 + i * 1000);
+      await insertCall(mockPg, {
+        created_at: createdAt, updated_at: createdAt,
+        metadata: {
+          lead_id: leadId,
+          call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at: originalSendAt, original_send_at: originalSendAt, claimed_at: staleClaimedAt.toISOString(), handoff_started_at: staleClaimedAt.toISOString() },
+        },
+      });
+    }
+    const recoverableCreatedAt = new Date(NOW.getTime() - 3 * 60 * 60 * 1000 + 60 * 1000); // the newest — sorts LAST
+    const recoverableCallId = await insertCall(mockPg, {
+      created_at: recoverableCreatedAt, updated_at: recoverableCreatedAt,
+      metadata: {
+        lead_id: leadId,
+        call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at: originalSendAt, original_send_at: originalSendAt, claimed_at: staleClaimedAt.toISOString() },
+      },
+    });
+
+    const firstSweep = await callBookingLinkText.recoverStaleClaims(mockPg, NOW);
+    expect(firstSweep).toBe(0); // the first batch is entirely the older, ambiguous rows
+    const stillClaimedAfterFirst = await mockPg('call_log').whereRaw("metadata->'call_booking_link_text'->>'status' = 'claimed'").count('* as n').first();
+    expect(Number(stillClaimedAfterFirst.n)).toBe(11); // 10 remaining ambiguous + the 1 recoverable
+
+    const secondSweep = await callBookingLinkText.recoverStaleClaims(mockPg, NOW);
+    expect(secondSweep).toBe(1); // the recoverable row is finally reached
+    const recoverableRow = await mockPg('call_log').where({ id: recoverableCallId }).first('metadata');
+    expect(recoverableRow.metadata.call_booking_link_text.status).toBe('pending'); // recovered, never starved
+    const stillClaimedAfterSecond = await mockPg('call_log').whereRaw("metadata->'call_booking_link_text'->>'status' = 'claimed'").count('* as n').first();
+    expect(Number(stillClaimedAfterSecond.n)).toBe(0);
+  });
 });

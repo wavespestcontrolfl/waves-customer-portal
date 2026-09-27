@@ -257,10 +257,22 @@ async function buildLeadConsultationSmsLine(leadOrId, firstName) {
     const row = await db('sms_templates').where({ template_key: CONSULTATION_SMS_TEMPLATE_KEY }).first('is_active');
     if (!row || row.is_active === false) return unavailable('template disabled');
     const templates = require('../routes/admin-sms-templates');
+    // throwOnError (codex r8 P2): getTemplate's own try/catch already
+    // swallows a genuine infrastructure failure (a schema/query/render
+    // error) into a bare `null` — indistinguishable from "the template is
+    // deliberately missing or disabled" without this. The `if (opts.
+    // throwOnError) throw err;` branch (admin-sms-templates.js) affects
+    // ONLY that caught-exception path; every deliberate return-null
+    // (missing table/row, is_active===false, a required placeholder lost,
+    // an unresolved placeholder) is a plain early return inside its own
+    // try block and never reaches that catch, so this never turns a
+    // genuine refusal into a false transient. The catch below maps the
+    // resulting throw to transient: true; every other caller of
+    // getTemplate is unaffected (additive option, opt-in only here).
     const dry = await templates.getTemplate(CONSULTATION_SMS_TEMPLATE_KEY, {
       first_name: firstName || 'there',
       consultation_url: 'https://wavespest.co/l/preview',
-    }, {}, { requiredVars: ['consultation_url'] });
+    }, {}, { requiredVars: ['consultation_url'], throwOnError: true });
     if (!dry) return unavailable('Consultation text template is unavailable');
     if (!templates.hasStopLine(dry)) {
       return unavailable('Consultation text is missing the required "Reply STOP to opt out." disclosure');
@@ -283,10 +295,13 @@ async function buildLeadConsultationSmsLine(leadOrId, firstName) {
       return unavailable('template disabled');
     }
     const templates = require('../routes/admin-sms-templates');
+    // throwOnError (codex r8 P2) — see the dry-render pre-check's own doc
+    // comment above for the full reasoning; same mechanism, same reason,
+    // here for the real render.
     const body = await templates.getTemplate(CONSULTATION_SMS_TEMPLATE_KEY, {
       first_name: firstName || 'there',
       consultation_url: built.url,
-    }, {}, { requiredVars: ['consultation_url'] });
+    }, {}, { requiredVars: ['consultation_url'], throwOnError: true });
     if (!body) {
       // getTemplate itself already audited WHY (missing table/row, a body
       // that lost {consultation_url}, or unresolved placeholders) — this
