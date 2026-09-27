@@ -445,4 +445,46 @@ const OUR_NUMBER = '+19415550100';
     const [, payload] = triggerNotification.mock.calls[0];
     expect(payload.liveCall).toBe(true);
   });
+
+  test('a call that never acquired ANY claim (the live attempt itself failed before claiming) is recovered by the sweep', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    // Old enough to be past UNCLAIMED_GRACE_MS — never touched by
+    // ringPromiseChaserIfNeeded at all, as if the initial call_log lookup
+    // or the claim UPDATE itself failed on the live attempt.
+    const back = callRow(10);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    expect(await sweepPromiseChasers()).toBe(1);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(row.metadata.promise_chaser).toMatchObject({ status: 'rung' });
+  });
+
+  test('a call still mid an outstanding pre-connect screen is never swept prematurely', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    // No claim yet (the webhook deliberately deferred) AND still 'gated' —
+    // the sweep must leave it alone regardless of age.
+    const back = callRow(10, { metadata: { preconnect_screen: 'gated' } });
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    expect(await sweepPromiseChasers()).toBe(0);
+    expect(triggerNotification).not.toHaveBeenCalled();
+    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(row.metadata.promise_chaser).toBeUndefined();
+  });
+
+  test('a call younger than the unclaimed grace period is never swept — an active challenge may still be outstanding', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(1); // 1 minute ago — inside UNCLAIMED_GRACE_MS
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    expect(await sweepPromiseChasers()).toBe(0);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
 });

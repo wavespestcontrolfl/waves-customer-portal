@@ -176,11 +176,17 @@ function evidenceFrom(r) {
 // every row the pager itself passes in; it only matters for another caller
 // (the promise-chaser bell) that reuses this evidence check on a promise
 // staff have since touched.
+// A lookup failure here PROPAGATES rather than reading as "no renewal" —
+// every caller of followedUpIds already wraps it in its own fail-closed
+// .catch (unproven evidence must never count as fulfillment, here specifically:
+// old evidence from BEFORE a reopen must never count as kept AFTER it). Both
+// existing callers already treat a thrown followedUpIds as "unverified, hold
+// for retry" (runFollowUpSlaWatcher's own .catch, promise-chaser-bell's).
 async function renewedFloors(conn, rows) {
   const floors = new Map();
   for (const r of rows || []) {
     if (r.kind !== 'callback' || r.party !== 'waves' || !['confirmed', 'edited'].includes(r.human_state)) continue;
-    const renewed = await commitments.obligationRenewedAt(conn, r).catch(() => null);
+    const renewed = await commitments.obligationRenewedAt(conn, r);
     if (renewed) floors.set(String(r.id), renewed);
   }
   return floors;

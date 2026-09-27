@@ -337,6 +337,12 @@ async function markScreenFailed(callSid) {
   }
 }
 
+// A challenged caller who genuinely never gets a claim written (still mid-
+// Gather) resolves within Twilio's own ~12s timeout; this grace floor is
+// far past that, so a call this old with no claim at all is a failure to
+// recover, never one still legitimately outstanding.
+const UNCLAIMED_GRACE_MS = 5 * 60 * 1000;
+
 /**
  * Durable retry (runs on the existing 2-minute call-alert recovery tick,
  * scheduler.js — the same one missed-call-bell / repeat-caller-bell use):
@@ -344,19 +350,38 @@ async function markScreenFailed(callSid) {
  * threw, or a notification insert/push failed) from the last 24h. Idempotent
  * — the atomic claim inside ringPromiseChaserIfNeeded makes a re-offer a
  * no-op once another attempt already owns or has settled the call.
+ *
+ * Also recovers a call that never acquired a claim AT ALL — the initial
+ * call_log lookup or the claim UPDATE itself can fail, or the process can
+ * exit right after logging the call, before any 'pending' row ever exists;
+ * the webhook's own firstDelivery guard means an ordinary Twilio redelivery
+ * can never retry it. Excludes anything still mid pre-connect-screen
+ * ('gated') and anything younger than UNCLAIMED_GRACE_MS, so a challenge
+ * genuinely still outstanding is never rung prematurely.
  */
 async function sweepPromiseChasers({ limit = 50 } = {}) {
   if (!isEnabled('promiseChaserBell') || !isEnabled('callCommitments')) return 0;
-  const rows = await db('call_log')
+  const since = new Date(Date.now() - SWEEP_LOOKBACK_MS);
+  const pendingRows = await db('call_log')
     .where({ direction: 'inbound' })
-    .where('created_at', '>', new Date(Date.now() - SWEEP_LOOKBACK_MS))
+    .where('created_at', '>', since)
     .whereRaw("metadata->'promise_chaser'->>'status' = 'pending'")
     .orderBy('created_at', 'asc')
     .limit(limit)
     .select('twilio_call_sid');
+  const unclaimedRows = await db('call_log')
+    .where({ direction: 'inbound' })
+    .where('created_at', '>', since)
+    .where('created_at', '<', new Date(Date.now() - UNCLAIMED_GRACE_MS))
+    .whereRaw("metadata->'promise_chaser' IS NULL")
+    .whereRaw("COALESCE(metadata->>'preconnect_screen', '') <> 'gated'")
+    .orderBy('created_at', 'asc')
+    .limit(limit)
+    .select('twilio_call_sid');
+  const sids = [...new Set([...pendingRows, ...unclaimedRows].map((r) => r.twilio_call_sid).filter(Boolean))];
   let rang = 0;
-  for (const row of rows) {
-    if (row.twilio_call_sid && await ringPromiseChaserIfNeeded(row.twilio_call_sid, { viaSweep: true })) rang += 1;
+  for (const sid of sids) {
+    if (await ringPromiseChaserIfNeeded(sid, { viaSweep: true })) rang += 1;
   }
   return rang;
 }
