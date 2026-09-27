@@ -1180,17 +1180,19 @@ describe('fulfillment proof', () => {
       .toMatchObject({ verdict: 'uncertain', reason: 'sensitive_model_output' });
   });
 
-  test('only admissible records are offered to the model as witness_refs; payment evidence is split out of #4816', async () => {
+  test('only admissible records are offered to the model as witness_refs (R2/R3: a staff reply never is; a payment now can be)', async () => {
     dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
     const visit = { ref: 'visit:v-1', type: 'visit', id: 'v-1', status: 'en_route', progressed_at: '2040-03-11T15:00:00Z',
       text: 'Quarterly Lawn on 2040-03-11 at 09:00:00; status en_route; en route/on site/completed after the request' };
     const staffSms = { ref: 'sms:1', type: 'sms', status: 'delivered', message_type: 'manual', created_at: '2040-03-11T15:00:00Z', text: 'On our way' };
-    const paid = { ref: 'payment:i-1', type: 'payment', id: 'i-1', paid_at: '2040-03-11T15:00:00Z', text: 'Invoice paid' };
+    const paid = { ref: 'payment:i-1', type: 'payment', payment_source: 'invoice', id: 'i-1', paid_at: '2040-03-11T15:00:00Z', text: 'Invoice paid 2040-03-11' };
     const ask = { kind: 'other', description: 'You still coming this morning?', sms_context: ctx };
-    expect(admissibleWitness(paid, ask)).toBe(false);
-    await verifySmsFulfillment(ask, { records: [visit, staffSms], failures: [] });
-    expect(dispatchWithFallback.mock.calls[0][1].text).toContain('"witness_refs":["visit:v-1"]');
+    expect(admissibleWitness(staffSms, ask)).toBe(false);
+    expect(admissibleWitness(paid, ask)).toBe(true);
+    await verifySmsFulfillment(ask, { records: [visit, staffSms, paid], failures: [] });
+    const witnessRefs = JSON.parse(dispatchWithFallback.mock.calls[0][1].text.match(/"witness_refs":(\[[^\]]*\])/)[1]);
+    expect(witnessRefs.sort()).toEqual(['payment:i-1', 'visit:v-1']);
   });
 
   test('a PAN-lookalike record id survives the prompt and the sensitive-output guard', async () => {
@@ -1242,6 +1244,124 @@ describe('fulfillment proof', () => {
     expect(groundFulfillment({ ...verdict, quote: 'I answered the invoice dispute' }, { records: [record], failures: [] }, commitment))
       .toMatchObject({ verdict: 'uncertain', reason: 'ungrounded_witness' });
     await expect(verifySmsFulfillment(commitment, { records: [], failures: [] })).resolves.toMatchObject({ verdict: 'open' });
+  });
+});
+
+describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid invoice/payments row, a deposit) closes a settlement question; a staff "done" reply never does', () => {
+  const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
+  const invoicePaid = { id: 'invoice-1', ref: 'payment:invoice-1', type: 'payment', payment_source: 'invoice',
+    paid_at: '2040-03-11T15:00:00Z', text: 'Invoice Quarterly paid 2040-03-11' };
+  const ledgerPaid = { id: 'pay-1', ref: 'payment:pay-1', type: 'payment', payment_source: 'ledger',
+    created_at: '2040-03-11T15:00:00Z', text: 'Payment of $200.00 recorded 2040-03-11' };
+
+  test('rule 2: a payment is admissible for a settlement-worded `other` ask, and even an unrelated one — the model always decides (rule 1)', () => {
+    const paymentOther = { kind: 'other', description: 'What is the Zelle number?', sms_context: ctx };
+    const unrelatedOther = { kind: 'other', description: 'My son should be there for the visit', sms_context: ctx };
+    for (const witness of [invoicePaid, ledgerPaid]) {
+      expect(admissibleWitness(witness, paymentOther)).toBe(true);
+      expect(admissibleWitness(witness, unrelatedOther)).toBe(true);
+    }
+    // Payment evidence is `other`-only — a payment-worded ask of another kind never admits it.
+    expect(admissibleWitness(invoicePaid, { kind: 'callback', description: 'Call me about my payment' })).toBe(false);
+    expect(admissibleWitness(invoicePaid, { kind: 'schedule_visit', description: 'Did my payment go through?' })).toBe(false);
+  });
+
+  test('rule 2: money going the other way, or changing HOW the customer pays, is never answered by a payment landing', () => {
+    for (const description of ['Where is my refund?', 'I want to dispute this charge', 'You double charged me', 'I need a chargeback']) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(false);
+    }
+    for (const description of ['Can you separate the charges under two payment methods?', 'Please update my card on file',
+      'Set up autopay for me', 'Please setup autopay', 'Can you change the card on the account?', 'Can you bill this across two cards?',
+      'Please change my payment method']) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(false);
+    }
+    // Naming the tender, or a bare split/separate, describes a payment — not a change request.
+    for (const description of ['Did my card payment go through?', 'Was the autopay charged this month?',
+      'I split the payment into two charges; did both payments go through?', 'Did you receive the separate payment?',
+      'Did that payment method work?', 'Was this payment method charged?', 'Did my setup payment go through?',
+      'Did you add my cash payment?', 'Can you update me on my payment?']) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(true);
+    }
+    // Codex #4996 r2: a refund or method change the customer declines BESIDE the ask is not the request;
+    // the ask is the grounded description, a verbatim phrase of its quote.
+    for (const [quote, description] of [["Don't refund it; I only want to know whether my payment went through", 'whether my payment went through'],
+      ["I don't want to change my card, did the charge land?", 'did the charge land?'],
+      ['I don’t want to change my card — did the charge land?', 'did the charge land?'],
+      ["A refund isn't needed, did my payment go through?", 'did my payment go through?'],
+      ['No refund needed. Did you get my check?', 'Did you get my check?']]) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description, evidence: [{ quote }] })).toBe(true);
+    }
+    // The ask itself decides: a clause that only narrates a change beside the question does not stop money
+    // answering it, while the ask's own words still do (Codex #4996 review before r10).
+    for (const [description, quote] of [['Did the first payment go through?', 'I set up autopay on Friday. Did the first payment go through?'],
+      ['Did the payment go through?', 'I had to update my card yesterday. Did the payment go through?']]) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description, evidence: [{ quote }] })).toBe(true);
+    }
+    expect(admissibleWitness(invoicePaid, { kind: 'other', description: 'Please refund the double charge',
+      evidence: [{ quote: 'You charged me twice. Please refund the double charge' }] })).toBe(false);
+    // r11: inside the ask the term counts however it is negated — a refund complaint is a refund request.
+    for (const [quote, description] of [['You did not refund me', 'You did not refund me'], ['I was not refunded', 'I was not refunded'],
+      ['No refund has arrived yet, where is it?', 'No refund has arrived yet'], ["You haven't refunded me yet", "You haven't refunded me yet"],
+      ["Don't refund it, did my payment go through?", "Don't refund it, did my payment go through?"],
+      ['I did not authorize this charge, please refund it', 'please refund it'],
+      ["I can't update my card online, can you do it?", "I can't update my card online, can you do it?"]]) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description, evidence: [{ quote }] })).toBe(false);
+    }
+    // r12: money going back is named many ways; a settlement question that merely says "back" is not one.
+    for (const description of ['Please reverse that charge', 'Can you void the charge?', 'I want my money back', 'Please return my payment',
+      'Cancel the charge please', 'Can you put it back on my card?', 'Can you credit it back?', 'Please pay me back',
+      // r14: a reimbursement, and a charge-back however it is spelled.
+      'Please reimburse me', 'Where is my reimbursement?', 'I will issue a charge-back', 'I filed a charge back']) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(false);
+    }
+    for (const description of ['Did the payment post back to my account?', 'Did my payment go through? Call me back']) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(true);
+    }
+    // A description not found in its quote (a hand-written row) is read with the quote.
+    for (const quote of ['I did not authorize this charge, please refund it', 'No, I want a refund', 'Refund the extra charge not the whole invoice']) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description: 'Billing request', evidence: [{ quote }] })).toBe(false);
+    }
+  });
+
+  test('rule 6: a property-scoped ask needs the payment tied to that property; an unscoped ask admits any of the customer\'s own payments', () => {
+    const scopedAsk = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: 'home', source_at: ctx.source_at } };
+    const unscopedAsk = { kind: 'other', description: 'Did you receive my payment?', sms_context: ctx };
+    const invoiceAtHome = { ...invoicePaid, property_id: 'home' };
+    const invoiceElsewhere = { ...invoicePaid, property_id: 'rental' };
+    const invoiceUnlinked = { ...invoicePaid, property_id: null };
+    expect(admissibleWitness(invoiceAtHome, scopedAsk)).toBe(true);
+    expect(admissibleWitness(invoiceElsewhere, scopedAsk)).toBe(false);
+    // An unlinked ledger prepayment (no property at all) can never vouch for a scoped ask.
+    expect(admissibleWitness(invoiceUnlinked, scopedAsk)).toBe(false);
+    expect(admissibleWitness(ledgerPaid, scopedAsk)).toBe(false);
+    // Unscoped: every leg, linked or not, is admitted.
+    expect(admissibleWitness(invoiceUnlinked, unscopedAsk)).toBe(true);
+    expect(admissibleWitness(ledgerPaid, unscopedAsk)).toBe(true);
+  });
+
+  test('rule 9 / Codex round 1 P1-B: a ledger record carries only amount, date and the structured method — never a free-text key', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    // The real query (loadSmsFulfillmentEvidence) never selects
+    // payments.description at all any more; this is the shape it actually
+    // produces — a controlled `method` enum, no free-text field whatsoever.
+    const ledger = { ...ledgerPaid, method: 'zelle', text: 'Payment of $200.00 recorded 2040-03-11 (zelle)' };
+    const ask = { kind: 'other', description: 'What is the Zelle number?', sms_context: ctx };
+    await verifySmsFulfillment(ask, { records: [ledger], failures: [] });
+    const prompt = dispatchWithFallback.mock.calls.at(-1)[1].text;
+    expect(prompt).toContain('(zelle)');
+    const record = JSON.parse(prompt.slice(prompt.indexOf('{"obligation"'))).records[0];
+    expect(record).not.toHaveProperty('description');
+    expect(prompt).toContain('"witness_refs":["payment:pay-1"]');
+  });
+
+  test('rule 1: admissibility alone never closes the row — grounding still requires the model to cite and quote the payment witness', () => {
+    const paymentOther = { kind: 'other', description: 'What is the Zelle number?', sms_context: ctx };
+    const evidence = { records: [invoicePaid], failures: [] };
+    // The model said open: no auto-fulfill even though a payment witness exists.
+    expect(groundFulfillment({ verdict: 'open', record_ref: null, quote: null }, evidence, paymentOther)).toEqual({ verdict: 'open' });
+    // The model cited it with a grounded quote: fulfilled, carrying which table to lock (rule 8).
+    expect(groundFulfillment({ verdict: 'fulfilled', record_ref: 'payment:invoice-1', quote: 'Invoice Quarterly paid' }, evidence, paymentOther))
+      .toMatchObject({ verdict: 'fulfilled', record_type: 'payment', record_id: 'invoice-1', payment_source: 'invoice' });
   });
 });
 
