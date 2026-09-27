@@ -168,6 +168,76 @@ jest.setTimeout(30000);
     expect(saved.status).toBe('logged');
   });
 
+  test('two DIFFERENT titles the model independently proposes the SAME new-product name for, in one run: exactly one product is created (the reload-per-line + in-transaction collision re-check, review item 1)', async () => {
+    const decisionFor = (sizeText) => ({
+      kind: 'new_product', reason: 'not in the catalog', product_id: null,
+      new_product: { name: 'Bifen XTS', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: sizeText, size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    });
+    // Deliberately no shared words between the two titles — the deterministic
+    // matcher (alias or whole-word containment) cannot tie the second title
+    // to the product the first creates, so item 3's matchedProductId guard
+    // never fires here; only the new-product collision guard can catch it.
+    const titleA = 'Bifen XTS Insecticide Concentrate 96 oz';
+    const titleB = 'Atticus Bifenthrin 7.9 IT 96 oz Termiticide Concentrate';
+    const lineA = await pendingLine({ raw_title: titleA, shipment_key: 'ship-a', order_number: '900-8000001-0000001' });
+    const lineB = await pendingLine({ raw_title: titleB, shipment_key: 'ship-b', order_number: '900-8000002-0000002' });
+    const dispatch = async (route, payload) => {
+      if (payload.text.includes(titleA)) return { ok: true, json: decisionFor('96 oz') };
+      if (payload.text.includes(titleB)) return { ok: true, json: decisionFor('96 oz') };
+      throw new Error(`unexpected prompt: ${payload.text.slice(0, 80)}`);
+    };
+    await Promise.all([
+      runInventoryAgent({ conn: mockConn, llm: dispatch, notifyAdmin }),
+      runInventoryAgent({ conn: mockConn, llm: dispatch, notifyAdmin }),
+    ]);
+
+    const products = await mockConn('products_catalog').where({ name: 'Bifen XTS' });
+    expect(products).toHaveLength(1); // never two, however the race lands
+
+    const lines = await mockConn('purchase_receipt_lines').whereIn('id', [lineA.id, lineB.id]);
+    for (const line of lines) {
+      // Applied (to the one product that exists) or left pending for a
+      // later run to pick up as a now-matchable candidate — never anything
+      // that implies a second catalog row.
+      if (line.status === 'logged') expect(line.product_id).toBe(products[0].id);
+      else expect(['agent_pending', 'agent_unsure']).toContain(line.status);
+    }
+  });
+
+  test('an apply-time throw (e.g. a bell that fails to save) counts toward agent_attempts like an LLM failure; the 3rd hands off to a person', async () => {
+    const line = await pendingLine({ raw_title: 'Taurus SC Termiticide 78 oz', product_id: taurus.id, quantity: 2, shipment_key: 'ship-throw' });
+    const decision = {
+      kind: 'existing', reason: 'matches the candidate', product_id: taurus.id, new_product: null,
+      reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    };
+    // Fails ONLY the success bell (the same "a bell that can't be saved
+    // rolls the whole line back" discipline the deterministic lane's own
+    // tests already rely on) — the hand-off bell on the 3rd try still goes
+    // through, so this is a real, repeatable apply-time throw, not a
+    // contrived one.
+    const flakyNotify = async (category, title, body, opts) => {
+      if (title === 'Inventory agent logged a purchase') throw new Error('notification service down');
+      return notifications.notifyAdmin(category, title, body, opts);
+    };
+    const runOnce = () => runInventoryAgent({ conn: mockConn, llm: async () => ({ ok: true, json: decision }), notifyAdmin: flakyNotify });
+
+    const r1 = await runOnce();
+    expect(r1.errors).toBe(0); // the failure was recorded, not surfaced as a run-level error
+    expect(await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).toMatchObject({ status: 'agent_pending', agent_attempts: 1 });
+    expect(await stockOf(taurus.id)).toBe(0); // the whole apply rolled back with the bell — no partial write
+
+    await runOnce();
+    expect(await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).toMatchObject({ status: 'agent_pending', agent_attempts: 2 });
+
+    await runOnce();
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'agent_unsure', agent_attempts: 3 });
+    expect(saved.agent_decision.reason).toMatch(/notification service down/);
+    expect(await stockOf(taurus.id)).toBe(0); // never applied
+    expect(await bellsFor(line.id)).toHaveLength(1); // only the hand-off bell landed
+  });
+
   test('gated off: runInventoryAgent does nothing', async () => {
     delete process.env.GATE_INVENTORY_AGENT;
     await pendingLine();

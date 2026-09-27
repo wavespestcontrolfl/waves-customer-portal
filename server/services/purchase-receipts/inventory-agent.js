@@ -44,6 +44,11 @@ const LLM_TIMEOUT_MS = 20000;
 const INVENTORY_LINK = '/admin/inventory?tab=products';
 const VENDOR_LABEL = { amazon: 'Amazon delivery', siteone: 'SiteOne invoice' };
 const VENDOR_BEST = { amazon: 'Amazon', siteone: 'SiteOne' };
+// Serializes every agent-created product across concurrent applies (see
+// applyDecision's new_product branch) — a single global key, since the
+// resource being protected is "the active-product name space" as a whole,
+// not one specific product (there is no product row to lock yet).
+const NEW_PRODUCT_LOCK_KEY = 'inventory-agent:new-product';
 
 // Count-item nouns receipt-processor's own SIZE_UNITS has no reason to know
 // (it only reads measured sizes): a title reading like "12 Count" or "1
@@ -171,11 +176,35 @@ function inventoryUnitForNewProduct(unit) {
   return def.dimension === 'volume' ? 'fl_oz' : unit;
 }
 
+// True when `proposedName` collides with an active catalog product's own
+// name (either direction of containment) OR `rawTitle` itself contains an
+// active product's name as whole words — the one check shared by
+// validateNewProduct (pure, also used by ops/agents/inventory-agent-replay.js)
+// and applyDecision's own in-transaction re-check (item 1 of the 2026-09-27
+// review: two lines for the same new item in one run must not both create
+// it — see applyDecision's new_product branch).
+function collidesWithActiveProduct(proposedName, rawTitle, activeProducts) {
+  const normName = normalizeForMatch(proposedName);
+  const normTitle = normalizeForMatch(rawTitle);
+  return activeProducts.some((p) => {
+    const n = normalizeForMatch(p.name);
+    return n === normName || n.includes(normName) || normName.includes(n) || containsWholeWords(normTitle, n);
+  });
+}
+
 // A validated 'existing' decision, or 'agent_unsure' with why.
 function validateExisting(raw, ctx) {
-  const { candidates, rawTitle, lineQuantity } = ctx;
+  const { candidates, rawTitle, lineQuantity, matchedProductId } = ctx;
   const candidate = candidates.find((c) => c.id === raw.product_id);
   if (!candidate) return { kind: 'unsure', status: 'agent_unsure', reason: 'proposed product is not one of the candidates offered' };
+
+  // The deterministic matcher already named this exact product (an exact
+  // alias or whole-word name match — that's what put the line in
+  // needs_size/size_mismatch in the first place): the agent may only
+  // confirm THAT product, never substitute a different one it prefers.
+  if (matchedProductId && candidate.id !== matchedProductId) {
+    return { kind: 'unsure', status: 'agent_unsure', reason: 'the agent picked a different product than the catalog match' };
+  }
 
   const reading = validateReading(raw.reading, { rawTitle, lineQuantity });
   if (!reading.ok) return { kind: 'unsure', status: 'agent_unsure', reason: `reading did not check out (${reading.reason})` };
@@ -221,19 +250,21 @@ function validateExisting(raw, ctx) {
 
 // A validated 'new_product' decision, or 'agent_unsure' with why.
 function validateNewProduct(raw, ctx) {
-  const { rawTitle, lineQuantity, allActiveProducts, allowedCategories } = ctx;
+  const { rawTitle, lineQuantity, allActiveProducts, allowedCategories, matchedProductId } = ctx;
+  // The deterministic matcher already tied this title to a real catalog
+  // product (needs_size/size_mismatch): proposing a brand-new one instead
+  // would fork the catalog rather than fix that product's size — refuse.
+  if (matchedProductId) {
+    return { kind: 'unsure', status: 'agent_unsure', reason: 'the catalog already matches this title to an existing product' };
+  }
   const proposed = raw.new_product;
   if (!proposed || !proposed.name || typeof proposed.name !== 'string' || !proposed.name.trim()) {
     return { kind: 'unsure', status: 'agent_unsure', reason: 'no product name proposed' };
   }
   const name = proposed.name.trim();
-  const normName = normalizeForMatch(name);
-  const normTitle = normalizeForMatch(rawTitle);
-  const collides = allActiveProducts.some((p) => {
-    const n = normalizeForMatch(p.name);
-    return n === normName || n.includes(normName) || normName.includes(n) || containsWholeWords(normTitle, n);
-  });
-  if (collides) return { kind: 'unsure', status: 'agent_unsure', reason: `looks like an existing product ("${name}")` };
+  if (collidesWithActiveProduct(name, rawTitle, allActiveProducts)) {
+    return { kind: 'unsure', status: 'agent_unsure', reason: `looks like an existing product ("${name}")` };
+  }
 
   const category = String(proposed.category || '').trim().toLowerCase();
   if (!category || !allowedCategories.has(category)) return { kind: 'unsure', status: 'agent_unsure', reason: 'proposed category is not in the catalog\'s allowed set' };
@@ -506,6 +537,18 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
         catalogChangeNote = `set ${product.name}'s container size to ${decision.setContainerSize}`;
       }
     } else {
+      // Serialize every concurrent new-product creation, then re-check the
+      // collision against the CURRENT active catalog (not the possibly
+      // stale list the decision was validated against) — two lines for the
+      // same brand-new item in one run, or a manual add landing in between,
+      // must never both create it. A hit here is never a hard failure:
+      // leave the line pending so the next run sees the (now-existing)
+      // product as a candidate and very likely resolves to 'existing'.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [NEW_PRODUCT_LOCK_KEY]);
+      const currentActive = await trx('products_catalog').where({ active: true }).select('id', 'name');
+      if (collidesWithActiveProduct(decision.newProduct.name, line.raw_title, currentActive)) {
+        return { applied: false, reason: 'name_collision_retry' };
+      }
       const created = await inventoryOperations.createCatalogProduct({
         name: decision.newProduct.name,
         category: decision.newProduct.category,
@@ -588,10 +631,18 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
   });
 }
 
-// A failed/timed-out LLM call: bump the attempt count, or hand the line to
-// a person on the 3rd. Its own short transaction, same bell-with-the-write
-// discipline as everything else here.
-async function recordLlmFailure(conn, lineId, notifyAdmin) {
+// Any failure to resolve a line this run — the LLM call itself failed or
+// timed out, OR applyDecision threw (a create/adjustStock error, a
+// constraint violation, anything unexpected): bump the attempt count, or
+// hand the line to a person on the 3rd, same as a bad LLM answer would.
+// Without this, a line whose apply always throws (a bad conversion, a
+// stuck constraint) would retry — and fail — every 15 minutes forever.
+// Its own short transaction, same bell-with-the-write discipline as
+// everything else here. `reason` is a short machine-readable tag
+// ('llm_unavailable', an LLM failure reason, or an error message) stored in
+// agent_decision and folded into the bell's copy on the 3rd try.
+async function recordAttemptFailure(conn, lineId, notifyAdmin, reason = 'unknown_error') {
+  const reasonText = String(reason || 'unknown_error').slice(0, 300);
   return conn.transaction(async (trx) => {
     const line = await trx('purchase_receipt_lines').where({ id: lineId }).forUpdate().first();
     if (!line || line.status !== 'agent_pending') return { status: 'no_longer_pending' };
@@ -602,11 +653,11 @@ async function recordLlmFailure(conn, lineId, notifyAdmin) {
     }
     await trx('purchase_receipt_lines').where({ id: lineId }).update({
       status: 'agent_unsure', agent_attempts: attempts,
-      agent_decision: { kind: 'unsure', reason: 'llm_unavailable' }, agent_decided_at: new Date(),
+      agent_decision: { kind: 'unsure', reason: reasonText }, agent_decided_at: new Date(),
     });
     await ringBell(notifyAdmin, {
       lineId, emailId: line.email_id, status: 'agent_unsure', title: 'Inventory agent: not added',
-      body: `"${line.raw_title}" wasn't added: the agent couldn't get a reading after ${attempts} tries. Log it by hand if it's stock.`, trx,
+      body: `"${line.raw_title}" wasn't added: the agent couldn't resolve it after ${attempts} tries (${reasonText}). Log it by hand if it's stock.`, trx,
     });
     return { status: 'agent_unsure' };
   });
@@ -633,7 +684,13 @@ async function decideForTitle(conn, dispatch, { rawTitle, quantity, vendor, site
   const res = await callDecision(dispatch, prompt);
   if (!res.ok || !res.json) return { llmFailed: true, reClassified, reason: res.reason || null };
 
-  const decision = classifyDecision(res.json, { rawTitle, lineQuantity: quantity, candidates, allActiveProducts: activeProducts, allowedCategories });
+  const decision = classifyDecision(res.json, {
+    rawTitle, lineQuantity: quantity, candidates, allActiveProducts: activeProducts, allowedCategories,
+    // The deterministic matcher's OWN pick for this title, right now — the
+    // agent may only confirm it (or propose new_product when there's none),
+    // never substitute or duplicate it. See validateExisting/validateNewProduct.
+    matchedProductId: matchedProduct?.id || null,
+  });
   return { decision, reClassified, raw: res.json };
 }
 
@@ -643,7 +700,7 @@ async function processOneLine(conn, line, { dispatch, notifyAdmin, allowedCatego
 
   const siteOneFields = line.vendor === 'siteone' ? await siteOneLineFields(conn, line) : null;
   const outcome = await decideForTitle(conn, dispatch, { rawTitle: line.raw_title, quantity: Number(line.quantity), vendor: line.vendor, siteOneFields }, { allowedCategories, activeProducts });
-  if (outcome.llmFailed) return recordLlmFailure(conn, line.id, notifyAdmin);
+  if (outcome.llmFailed) return recordAttemptFailure(conn, line.id, notifyAdmin, outcome.reason || 'llm_unavailable');
 
   const applied = await applyDecision(conn, { lineId: line.id, vendor: line.vendor, shipmentKey: line.shipment_key, email, decision: outcome.decision }, notifyAdmin);
   return applied.applied ? { status: applied.status } : { status: 'still_pending' };
@@ -663,21 +720,34 @@ async function runInventoryAgent({ conn = db, llm, notifyAdmin, limit = BATCH_LI
   const lines = await conn('purchase_receipt_lines').where({ status: 'agent_pending' }).orderBy('created_at', 'asc').limit(limit);
   if (!lines.length) return { logged: 0, held: 0, stillPending: 0, errors: 0 };
 
-  const [allowedCategories, activeProducts] = await Promise.all([
-    loadAllowedCategories(conn),
-    conn('products_catalog').where({ active: true }).select('id', 'name'),
-  ]);
+  const allowedCategories = await loadAllowedCategories(conn);
 
   const totals = { logged: 0, held: 0, stillPending: 0, errors: 0 };
   for (const line of lines) {
     try {
+      // Reloaded fresh for EVERY line (not once for the whole run): an
+      // earlier line in this same batch may have just created the product
+      // a later line's new_product proposal would otherwise collide with
+      // (item 1 of the 2026-09-27 review) — validateNewProduct's collision
+      // check must see it.
+      const activeProducts = await conn('products_catalog').where({ active: true }).select('id', 'name');
       const outcome = await processOneLine(conn, line, { dispatch, notifyAdmin: notify, allowedCategories, activeProducts });
       if (outcome.status === 'logged') totals.logged += 1;
       else if (outcome.status === 'still_pending' || outcome.status === 'no_longer_pending') totals.stillPending += 1;
       else totals.held += 1;
     } catch (err) {
       logger.error(`[inventory-agent] line ${line.id} ("${line.raw_title}") failed: ${err.message}`);
-      totals.errors += 1;
+      try {
+        const failure = await recordAttemptFailure(conn, line.id, notify, err.message);
+        if (failure.status === 'agent_unsure') totals.held += 1;
+        else totals.stillPending += 1;
+      } catch (innerErr) {
+        // Even recording the failure failed (e.g. the bell write itself) —
+        // the line's own transaction rolled back, so its attempt count is
+        // unchanged and the next run retries it from scratch.
+        logger.error(`[inventory-agent] line ${line.id} also failed to record the failure: ${innerErr.message}`);
+        totals.errors += 1;
+      }
     }
   }
   return totals;
@@ -686,11 +756,11 @@ async function runInventoryAgent({ conn = db, llm, notifyAdmin, limit = BATCH_LI
 module.exports = {
   runInventoryAgent,
   // Exported for unit tests — see server/tests/inventory-agent.test.js.
-  // The first line is pure (no I/O); recordLlmFailure is the one small
+  // The first line is pure (no I/O); recordAttemptFailure is the one small
   // DB-touching unit worth testing without a full Postgres suite.
   validateReading, canonicalUnit, containerAgreement, classifyDecision, extractEpaRegNumber,
-  canonicalSizeText, inventoryUnitForNewProduct, candidateProducts, VENDOR_LABEL,
-  recordLlmFailure,
+  canonicalSizeText, inventoryUnitForNewProduct, candidateProducts, collidesWithActiveProduct, VENDOR_LABEL,
+  recordAttemptFailure,
   // The read-only decide pipeline — ops/agents/inventory-agent-replay.js reuses
   // this so a replay can never compute a decision differently than a live run.
   decideForTitle, loadAllowedCategories,

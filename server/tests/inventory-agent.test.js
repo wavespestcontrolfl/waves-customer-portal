@@ -1,22 +1,23 @@
 /**
  * purchase-receipts/inventory-agent.js — deterministic validation of an LLM
  * proposal (validateReading, containerAgreement, classifyDecision) and the
- * one small DB-touching unit (recordLlmFailure). These are pure functions
- * (no I/O) except recordLlmFailure, which gets a minimal hand-rolled
- * transaction mock rather than the full Postgres fixture — the actual
- * apply-transaction behavior (new product + alias + movement + bell,
- * needs_size container-set, the duplicate guard, concurrent runs) is
- * covered end-to-end in inventory-agent-postgres.test.js, matching how
+ * one small DB-touching unit (recordAttemptFailure). These are pure
+ * functions (no I/O) except recordAttemptFailure, which gets a minimal
+ * hand-rolled transaction mock rather than the full Postgres fixture — the
+ * actual apply-transaction behavior (new product + alias + movement + bell,
+ * needs_size container-set, the duplicate guard, concurrent runs, the
+ * new-product collision re-check, an apply-time throw) is covered
+ * end-to-end in inventory-agent-postgres.test.js, matching how
  * purchase-receipts-postgres.test.js splits from
  * purchase-receipts-processor.test.js.
  */
 const {
   validateReading, containerAgreement, classifyDecision, extractEpaRegNumber,
-  canonicalSizeText, inventoryUnitForNewProduct, recordLlmFailure,
+  canonicalSizeText, inventoryUnitForNewProduct, recordAttemptFailure,
 } = require('../services/purchase-receipts/inventory-agent');
 
 const ctx = (overrides = {}) => ({
-  rawTitle: '', lineQuantity: 1, candidates: [], allActiveProducts: [], allowedCategories: new Set(), ...overrides,
+  rawTitle: '', lineQuantity: 1, candidates: [], allActiveProducts: [], allowedCategories: new Set(), matchedProductId: null, ...overrides,
 });
 
 describe('validateReading — grounded vs invented numbers', () => {
@@ -237,6 +238,34 @@ describe('classifyDecision — new_product', () => {
     const decision = classifyDecision(raw, ctx({ rawTitle: 'New Chemical 78 oz. (QGCY) EPA# - 53883-279', allowedCategories }));
     expect(decision.newProduct.epaRegNumber).toBe('53883-279');
   });
+
+  test('a matched line (needs_size/size_mismatch already found a real product) refuses new_product outright — never forks the catalog', () => {
+    const raw = { kind: 'new_product', new_product: { name: 'Bifen XTS', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_count: 1 } };
+    const decision = classifyDecision(raw, ctx({ rawTitle: 'Bifen XTS Insecticide 96 oz', allowedCategories, matchedProductId: 'p-existing' }));
+    expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+  });
+});
+
+describe('classifyDecision — the agent may only confirm the deterministic match, never substitute', () => {
+  const taurus = { id: 'p-taurus', name: 'Taurus SC', container_size: '78 fl oz', inventory_unit: 'fl_oz' };
+  const other = { id: 'p-other', name: 'Other Product', container_size: '78 fl oz', inventory_unit: 'fl_oz' };
+
+  test('a needs_size/size_mismatch line whose LLM picks a DIFFERENT candidate than the catalog match -> unsure', () => {
+    const raw = { kind: 'existing', product_id: 'p-other', reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_count: 1 } };
+    const decision = classifyDecision(raw, ctx({
+      rawTitle: 'Taurus SC Termiticide 78 oz', lineQuantity: 1, candidates: [taurus, other], matchedProductId: 'p-taurus',
+    }));
+    expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
+  });
+
+  test('naming the SAME matched product back still validates normally', () => {
+    const raw = { kind: 'existing', product_id: 'p-taurus', reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_count: 1 } };
+    const decision = classifyDecision(raw, ctx({
+      rawTitle: 'Taurus SC Termiticide 78 oz', lineQuantity: 1, candidates: [taurus, other], matchedProductId: 'p-taurus',
+    }));
+    expect(decision).toMatchObject({ kind: 'existing', status: 'logged', amount: 78 });
+  });
 });
 
 describe('classifyDecision — equipment / not_stock / unsure routing', () => {
@@ -274,10 +303,10 @@ describe('extractEpaRegNumber / canonicalSizeText / inventoryUnitForNewProduct',
   });
 });
 
-describe('recordLlmFailure — attempts, then hands off to a person', () => {
+describe('recordAttemptFailure — attempts, then hands off to a person (LLM failures AND apply-time throws alike)', () => {
   // A minimal hand-rolled transaction mock, scoped to exactly what
-  // recordLlmFailure touches (see the file header for why the full apply
-  // path is a Postgres suite instead).
+  // recordAttemptFailure touches (see the file header for why the full
+  // apply path is a Postgres suite instead).
   function makeLineConn(initialLine) {
     let line = { ...initialLine };
     const trx = (table) => {
@@ -296,28 +325,40 @@ describe('recordLlmFailure — attempts, then hands off to a person', () => {
   test('the first two failures just increment agent_attempts, no bell', async () => {
     const { conn, getLine } = makeLineConn({ id: 'line-1', status: 'agent_pending', agent_attempts: 0, raw_title: 'Chromebook', email_id: 'email-1' });
     const notify = jest.fn(async () => {});
-    expect(await recordLlmFailure(conn, 'line-1', notify)).toEqual({ status: 'still_pending' });
+    expect(await recordAttemptFailure(conn, 'line-1', notify, 'llm_unavailable')).toEqual({ status: 'still_pending' });
     expect(getLine()).toMatchObject({ status: 'agent_pending', agent_attempts: 1 });
-    expect(await recordLlmFailure(conn, 'line-1', notify)).toEqual({ status: 'still_pending' });
+    expect(await recordAttemptFailure(conn, 'line-1', notify, 'llm_unavailable')).toEqual({ status: 'still_pending' });
     expect(getLine()).toMatchObject({ status: 'agent_pending', agent_attempts: 2 });
     expect(notify).not.toHaveBeenCalled();
   });
 
-  test('the 3rd failure hands the line to a person: agent_unsure + one bell', async () => {
+  test('the 3rd LLM failure hands the line to a person: agent_unsure + one bell', async () => {
     const { conn, getLine } = makeLineConn({ id: 'line-1', status: 'agent_pending', agent_attempts: 2, raw_title: 'Chromebook', email_id: 'email-1' });
     const notify = jest.fn(async () => {});
-    const result = await recordLlmFailure(conn, 'line-1', notify);
+    const result = await recordAttemptFailure(conn, 'line-1', notify, 'llm_unavailable');
     expect(result).toEqual({ status: 'agent_unsure' });
-    expect(getLine()).toMatchObject({ status: 'agent_unsure', agent_attempts: 3 });
+    expect(getLine()).toMatchObject({ status: 'agent_unsure', agent_attempts: 3, agent_decision: { kind: 'unsure', reason: 'llm_unavailable' } });
     expect(notify).toHaveBeenCalledTimes(1);
     expect(notify.mock.calls[0][0]).toBe('inventory');
     expect(notify.mock.calls[0][3]).toMatchObject({ bell: true, dedupeKey: 'purchase-receipt:line-1' });
   });
 
+  test('an apply-time throw (createCatalogProduct error, adjustStock conversion error, …) counts the SAME way: the 3rd hands off with the error as the reason', async () => {
+    const { conn, getLine } = makeLineConn({ id: 'line-1', status: 'agent_pending', agent_attempts: 2, raw_title: 'Chromebook', email_id: 'email-1' });
+    const notify = jest.fn(async () => {});
+    // runInventoryAgent's own catch calls this with err.message — simulated
+    // directly here since triggering a REAL applyDecision throw needs a
+    // live Postgres transaction (covered in inventory-agent-postgres.test.js).
+    const result = await recordAttemptFailure(conn, 'line-1', notify, 'Cannot convert fl_oz to inventory unit each');
+    expect(result).toEqual({ status: 'agent_unsure' });
+    expect(getLine()).toMatchObject({ agent_decision: { kind: 'unsure', reason: 'Cannot convert fl_oz to inventory unit each' } });
+    expect(notify.mock.calls[0][2]).toMatch(/Cannot convert fl_oz to inventory unit each/);
+  });
+
   test('a line no longer agent_pending (already resolved by another run) is left alone', async () => {
     const { conn, getLine } = makeLineConn({ id: 'line-1', status: 'logged', agent_attempts: 0 });
     const notify = jest.fn(async () => {});
-    expect(await recordLlmFailure(conn, 'line-1', notify)).toEqual({ status: 'no_longer_pending' });
+    expect(await recordAttemptFailure(conn, 'line-1', notify, 'llm_unavailable')).toEqual({ status: 'no_longer_pending' });
     expect(getLine().status).toBe('logged');
     expect(notify).not.toHaveBeenCalled();
   });
