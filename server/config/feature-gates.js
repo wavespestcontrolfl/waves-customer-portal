@@ -3042,6 +3042,23 @@ const gates = {
   // explicit offset, read by gateEnvTimestamp) set, independently of this
   // gate, or the lane does nothing (see sweep.js).
   purchaseReceiptRestock: gateEnvValue('GATE_PURCHASE_RECEIPT_RESTOCK'),
+
+  // Confirm-time whole-route capacity re-check for self-serve bookings
+  // (owner-approved 2026-09-26 dispatch backlog). Under GATE_SCHEDULING_CAPACITY,
+  // the OFFER (find-time.js's findCapacitySlots, packed from arrival-route.js's
+  // whole-route arrival simulation) already certifies a slot against the
+  // technician's complete route and owner planning minutes, but createSelfBooking's
+  // commit-time re-check only re-ran the overlap predicate (findConflictingVisits) —
+  // another booking landing on the same tech-day between offer and confirm (a
+  // late arrival, a day pushed over capacity) could make the route infeasible
+  // without ever overlapping this exact window, and the commit still succeeded.
+  // This entry is for logGateStatus only — the canonical CALL-TIME reader is
+  // bookCapacityCommitLive() below. **Ships DARK: off unless exactly `true`/`1`/`on`**;
+  // requires GATE_SCHEDULING_CAPACITY on too (checked together at the call site).
+  // Kill switch: unset GATE_BOOK_CAPACITY_COMMIT — createSelfBooking's commit
+  // gate goes back to the overlap-only re-check, byte for byte.
+  bookCapacityCommit: gateEnvValue('GATE_BOOK_CAPACITY_COMMIT'),
+
   // Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
   // "E2: cookie-free read-depth counts"). Ships DARK: off unless exactly
   // 'true'. The route reads this via isEnabled('blogReadDepth') at request
@@ -3187,6 +3204,16 @@ function reserviceRankAfterNewLive() {
   return gateEnvValue('GATE_RESERVICE_RANK_AFTER_NEW');
 }
 
+// GATE_BOOK_CAPACITY_COMMIT read at CALL time — the one canonical reader
+// createSelfBooking's commit-time capacity re-check uses (server/routes/booking.js).
+// The `bookCapacityCommit` gates-map entry above is for logGateStatus only.
+// Also requires GATE_SCHEDULING_CAPACITY (scheduling/policy.js's capacityEnabled())
+// — the call site checks both, since re-running the whole-route placement
+// evaluation only makes sense once the offer itself comes from that model.
+function bookCapacityCommitLive() {
+  return gateEnvValue('GATE_BOOK_CAPACITY_COMMIT');
+}
+
 // Fresh annual contracts require the term-aware cancellation path. Read both
 // switches at call time so pricing, availability and delivery agree.
 function termiteAnnualPlanSelectionEnabled() {
@@ -3234,5 +3261,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, commercialSuiteSizingLive, autoDispatchSharedModelLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, commercialSuiteSizingLive, autoDispatchSharedModelLive, bookCapacityCommitLive };
 // gates 1775330914
