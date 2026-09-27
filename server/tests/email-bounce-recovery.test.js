@@ -24,6 +24,7 @@ const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
 const emailLib = require('../services/email-template-library');
 const NotificationService = require('../services/notification-service');
+const logger = require('../services/logger');
 const billingReplay = require('../services/billing-email-provider-replay');
 const recovery = require('../services/email-bounce-recovery');
 
@@ -937,12 +938,12 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
       .resolves.toMatchObject({ resent: true, corrected: 'jane@gmail.com' });
 
     expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
-      to: 'jane@gmail.com', database: heldDatabase, providerBoundaryCheck,
+      to: 'jane@gmail.com', database: heldDatabase, providerBoundaryCheck, suppressErrorLog: true,
       customArgs: { email_message_id: messageRow.id, send_attempt_token: messageRow.send_attempt_token },
     }));
   });
 
-  test.each([false, true])('a refused billing replay never sends; temporary failure is surfaced (%s)', async (retryable) => {
+  test.each([false, true])('a refused billing replay never sends and always alerts operations (%s)', async (retryable) => {
     const messageRow = { id: 'msg-billing-invalid', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', subject_snapshot: 'Billing update', send_attempt_token: 'recovery-attempt' };
     const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
     db.mockImplementation(mockDb);
@@ -965,8 +966,37 @@ describe('annual-offer guard (pre-push audit P1 on 2eb19ceff7): bounce-recovery 
     expect(mockDb._calls).toContainEqual(expect.objectContaining({
       table: 'email_messages', data: expect.objectContaining({ status: retryable ? 'failed' : 'blocked' }),
     }));
-    if (retryable) expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
-      'alert', 'Email bounced — needs a correct address', expect.stringContaining('re-sending'),
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'alert', 'Email bounced — needs a correct address', expect.any(String),
+      expect.objectContaining({ metadata: expect.objectContaining({
+        status: retryable ? 'send_failed' : 'billing_replay_reauthorization_required',
+      }) }),
+    );
+  });
+
+  test('a billing provider rejection retains its status without leaking its response body', async () => {
+    const messageRow = { id: 'msg-billing-private', status: 'queued', subject_snapshot: 'Billing update' };
+    const mockDb = makeRecoveryDb({ customerRow: { id: 'c1', email: 'jane@gmial.com' }, messageRow });
+    db.mockImplementation(mockDb);
+    logger.warn.mockClear();
+    const body = 'rejected private-provider-recipient@example.invalid';
+    sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error(`SendGrid 400: ${body}`), { status: 400, body }));
+    billingReplay.isBillingEmailProviderReplay.mockReturnValue(true);
+    billingReplay.runBillingEmailProviderReplayHandoff.mockImplementationOnce(async (_original, dispatch) => {
+      await dispatch(jest.fn(), jest.fn());
+      return { handled: true, allowed: true };
+    });
+    const result = await recovery.attemptRecovery({
+      id: 'orig-billing-private', recipient_type: 'customer', recipient_id: 'c1',
+      recipient_email_snapshot: 'jane@gmial.com', template_key: 'billing.notice',
+      suppression_group_key_snapshot: 'transactional_required', categories: ['email_template', 'billing'],
+      payload_snapshot: { __billing_replay_context: {} }, html_snapshot: '<p>Billing</p>',
+    }, { event: 'bounce', type: 'bounce' });
+    expect(result).toEqual({ error: 'SendGrid bounce recovery failed (400)' });
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(body);
+    expect(JSON.stringify(mockDb._calls)).not.toContain(body);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'alert', 'Email bounced — needs a correct address', expect.any(String),
       expect.objectContaining({ metadata: expect.objectContaining({ status: 'send_failed' }) }),
     );
   });

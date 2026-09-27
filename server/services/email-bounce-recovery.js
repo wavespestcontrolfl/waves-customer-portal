@@ -553,6 +553,7 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
           // refused permanently just because this recovery path has no
           // explicit opinion of its own.
           templateKey: bouncedMessage.template_key,
+          suppressErrorLog: true,
           database,
           providerBoundaryCheck,
         }));
@@ -561,6 +562,9 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
           annualWithheld = true;
           return;
         }
+        // SendGrid's response body can echo a recipient. Keep only its status
+        // before the recovery result reaches persistence or the failure log.
+        if (Number.isInteger(err?.status)) throw new Error(`SendGrid bounce recovery failed (${err.status})`);
         throw err;
       }
     };
@@ -809,6 +813,11 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
         updated_at: new Date(),
         metadata: jsonbMerge({ suppression_reason: sendResult.reason }),
       });
+      if (billingReplay.isBillingEmailProviderReplay(bouncedMessage)) {
+        await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId,
+          status: sendResult.reason === 'corrected_owned_by_other'
+            ? 'corrected_owned_by_other' : 'billing_replay_reauthorization_required', candidate });
+      }
       logger.info(`[bounce-recovery] resend to ${redactEmail(candidate.corrected)} suppressed: ${sendResult.reason}`);
       return { skipped: sendResult.reason };
     }
