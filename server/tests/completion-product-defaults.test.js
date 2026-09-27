@@ -2,8 +2,6 @@ const {
   resolveCompletionDefaultProductNames,
   resolveCatalogProductForName,
   resolveCompletionProductDefaults,
-  resolveSeasonalWindow,
-  isSeasonalWindowList,
   monthFromDateColumn,
 } = require('../services/completion-product-defaults');
 const realProtocols = require('../config/protocols.json');
@@ -139,87 +137,6 @@ describe('resolveCompletionDefaultProductNames precedence', () => {
   });
 });
 
-// ---- seasonal windows + rate/amount objects (owner ruling 2026-09-27) ----
-
-describe('seasonal window resolution', () => {
-  const windows = [
-    { months: [1, 2, 3], products: ['Winter product'] },
-    { months: [10, 11, 12], products: ['Fall/winter product'] },
-  ];
-
-  test('isSeasonalWindowList distinguishes the new shape from a plain list', () => {
-    expect(isSeasonalWindowList(windows)).toBe(true);
-    expect(isSeasonalWindowList(['Taurus SC', 'Alpine WSG'])).toBe(false);
-    expect(isSeasonalWindowList([])).toBe(false);
-    expect(isSeasonalWindowList(null)).toBe(false);
-  });
-
-  test('resolveSeasonalWindow picks the window containing the month, including a December-to-October wrap set', () => {
-    expect(resolveSeasonalWindow(windows, 1)?.products).toEqual(['Winter product']);
-    expect(resolveSeasonalWindow(windows, 12)?.products).toEqual(['Fall/winter product']);
-    expect(resolveSeasonalWindow(windows, 6)).toBeNull();
-  });
-
-  test('a seasonal visit with no window for the given month falls through to the fallback, not an error', () => {
-    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', completionDefaultProducts: windows }] } };
-    const result = resolveCompletionDefaultProductNames({
-      protocols, serviceType: 'General Pest Control (Quarterly)', month: 6,
-      fallbackDefaultProducts: ['Fallback product'],
-    });
-    expect(result.source).toBe('service_default_products');
-    expect(result.names).toEqual(['Fallback product']);
-  });
-
-  test('a plain (non-seasonal) list ignores month entirely — back-compat for cockroach / pest visit 2', () => {
-    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', completionDefaultProducts: ['Alpine WSG', 'Gentrol IGR'] }] } };
-    for (const month of [1, 6, 12, null]) {
-      const result = resolveCompletionDefaultProductNames({ protocols, serviceType: 'General Pest Control (Quarterly)', month });
-      expect(result.names).toEqual(['Alpine WSG', 'Gentrol IGR']);
-    }
-  });
-});
-
-describe('protocol-specified rate/amount object entries', () => {
-  test('a rate object entry carries its ratePerGal x typicalGallons through to the shaped line', async () => {
-    const protocols = {
-      pest: {
-        visits: [{
-          visit: 1, month: 'Any',
-          completionDefaultProducts: [{ name: 'Atticus Talak 7.9 F', ratePerGal: 0.5, rateUnit: 'fl_oz/gal', typicalGallons: 3, zone: 'band' }],
-        }],
-      },
-    };
-    const db = fakeDb({
-      scheduled_services: [{ id: 'svc-rate', customer_id: 'cust-1', service_id: null, service_type: 'General Pest Control (Quarterly)', service_key_snapshot: null, scheduled_date: '2026-06-10' }],
-      services: [],
-      products_catalog: [{ id: 'p5', name: 'Atticus Talak 7.9 F', category: 'Insecticide', formulation: 'SC', application_method: 'perimeter_spray', default_rate_per_1000: null, rate_unit: 'fl_oz', default_rate: null, default_unit: null, epa_reg_number: '91234-145', active: true }],
-      product_aliases: [],
-    });
-    const result = await resolveCompletionProductDefaults({ db, serviceId: 'svc-rate', protocols });
-    expect(result.products).toHaveLength(1);
-    const line = result.products[0];
-    expect(line.protocolRate).toBe(0.5);
-    expect(line.protocolRateUnit).toBe('fl_oz/gal');
-    expect(line.protocolAmount).toBe(1.5); // 0.5 x 3
-    expect(line.protocolAmountUnit).toBe('fl_oz');
-    expect(line.zone).toBe('band');
-  });
-
-  test('a plain string entry (no rate object) carries no protocol rate — client falls back to the catalog default', async () => {
-    const protocols = { cockroach: { visits: [{ visit: 1, month: 'Any', completionDefaultProducts: ['Alpine WSG'] }] } };
-    const db = fakeDb({
-      scheduled_services: [{ id: 'svc-plain', customer_id: 'cust-1', service_id: null, service_type: 'Cockroach Control Service', service_key_snapshot: null, scheduled_date: '2026-06-10' }],
-      services: [],
-      products_catalog: [{ id: 'p1', name: 'Alpine WSG', category: 'Insecticide', formulation: 'WSG', application_method: 'perimeter_spray', default_rate_per_1000: null, rate_unit: 'oz', default_rate: '0.5-1', default_unit: 'oz', epa_reg_number: '432-1333', active: true }],
-      product_aliases: [],
-    });
-    const result = await resolveCompletionProductDefaults({ db, serviceId: 'svc-plain', protocols });
-    expect(result.products[0].protocolRate).toBeNull();
-    expect(result.products[0].protocolAmount).toBeNull();
-    expect(result.products[0].zone).toBeNull();
-  });
-});
-
 // ---- calendar month from a DATE column (pre-push audit P1) ----
 //
 // scheduled_date is a DATE column with no time-of-day. The bug: building
@@ -260,51 +177,40 @@ describe('monthFromDateColumn (pre-push audit P1: no ET shift on month/year boun
   });
 });
 
-describe('resolveCompletionProductDefaults: month-boundary dates select the right seasonal window', () => {
-  // A synthetic seasonal protocol (the generic mechanism — no real program
-  // carries this shape today; pest's own seasonal rotation is parked for a
-  // later PR per the owner ruling of 2026-09-27). Two adjacent windows so a
-  // one-day month-boundary error is unambiguous, not a coincidental match.
-  const seasonalProtocols = {
-    rodent: {
-      visits: [{
-        visit: 1, month: 'Any',
-        completionDefaultProducts: [
-          { months: [7, 8, 9], products: ['Summer product'] },
-          { months: [10, 11, 12], products: ['Fall/winter product'] },
-        ],
-      }],
-    },
-  };
-
-  function scheduledServiceDb(scheduledDate) {
-    return fakeDb({
-      scheduled_services: [{ id: 'svc-boundary', service_id: null, service_type: 'Rodent Monitoring', service_key_snapshot: null, scheduled_date: scheduledDate }],
-      services: [],
-      products_catalog: [],
-      product_aliases: [],
+describe('monthFromDateColumn feeding a real month-keyed program (tree & shrub)', () => {
+  // completionDefaultProducts has no seasonal shape (removed, PR #5049 r1 —
+  // AGENTS.md: no unexercised config contracts), but month-keyed PROGRAMS
+  // (lawn, tree & shrub — one visit per calendar month) still resolve
+  // their VISIT off this same month value via protocol-matcher.js's own
+  // monthVisit — this is the real consumer monthFromDateColumn's fix
+  // matters for. Tree & shrub visit numbers equal the calendar month
+  // (visit 10 = Oct) so a wrong month reads as the wrong visit number.
+  function monthFor(scheduledDate) {
+    const result = resolveCompletionDefaultProductNames({
+      protocols: realProtocols, serviceType: 'Tree & Shrub Care',
+      month: monthFromDateColumn(scheduledDate),
     });
+    return result.matchedVisit.visit;
   }
 
-  test('October 1st (string date) resolves the Oct-Dec window, not Jul-Sep', async () => {
-    const result = await resolveCompletionProductDefaults({ db: scheduledServiceDb('2026-10-01'), serviceId: 'svc-boundary', protocols: seasonalProtocols });
-    expect(result.unresolved).toEqual(['Fall/winter product']);
+  test('October 1st (string date) resolves the October visit (10), not September', () => {
+    expect(monthFor('2026-10-01')).toBe(10);
   });
 
-  test('October 1st as a UTC-midnight Date object still resolves Oct-Dec, not the ET-shifted Sep 30', async () => {
-    const result = await resolveCompletionProductDefaults({
-      db: scheduledServiceDb(new Date('2026-10-01T00:00:00.000Z')), serviceId: 'svc-boundary', protocols: seasonalProtocols,
-    });
-    expect(result.unresolved).toEqual(['Fall/winter product']);
+  test('October 1st as a UTC-midnight Date object still resolves October, not the ET-shifted Sep 30', () => {
+    // The exact shape node-pg hands back for a DATE column. Reading this
+    // through an America/New_York formatter would land on Sep 30 evening —
+    // the bug monthFromDateColumn exists to avoid.
+    expect(monthFor(new Date('2026-10-01T00:00:00.000Z'))).toBe(10);
   });
 
-  test('January 1st resolves neither window (no Jan-Mar window in this fixture) — proves the month read is exact, not off by one into December', async () => {
-    const result = await resolveCompletionProductDefaults({ db: scheduledServiceDb('2026-01-01'), serviceId: 'svc-boundary', protocols: seasonalProtocols });
-    // Neither window covers January — an off-by-one bug reading this as
-    // December would have wrongly matched the Oct-Dec window instead.
-    expect(result.source).toBe('none');
-    expect(result.products).toEqual([]);
-    expect(result.unresolved).toEqual([]);
+  test('January 1st resolves the January visit (1), not December of the prior year', () => {
+    expect(monthFor('2026-01-01')).toBe(1);
+    expect(monthFor(new Date('2026-01-01T00:00:00.000Z'))).toBe(1);
+  });
+
+  test('a mid-month date is unaffected either way', () => {
+    expect(monthFor('2026-06-15')).toBe(6);
   });
 });
 

@@ -2,10 +2,10 @@
  * completion-product-defaults
  *
  * Owner ruling 2026-09-26: the "Complete Service" drawer's product list
- * should start PREFILLED with the visit's default products (label-default
- * rates, tech adjusts) for any non-lawn service that uses sprays, granules,
- * or baits — "the default products used are Alpine WSG, Gentrol IGR, and
- * the Advion cockroach gel — these need to be defaults".
+ * should start PREFILLED with the visit's default products for any
+ * non-lawn service that uses sprays, granules, or baits — "the default
+ * products used are Alpine WSG, Gentrol IGR, and the Advion cockroach gel
+ * — these need to be defaults".
  *
  * Design pivot (owner, same day): do NOT prefill from every
  * `treatmentApplied` protocol lineMeta hint — a visit can carry several
@@ -17,32 +17,23 @@
  * job-card / protocol-actions tap-to-apply reference — untouched by this
  * module.
  *
- * Owner ruling 2026-09-27: a visit's completionDefaultProducts can be
- * either a plain array of entries, or an array of SEASONAL WINDOWS
- * ([{ months: [1,2,3], products: [...] }, …] — `months` are 1-12,
- * matched against the scheduled visit's own month). Either way, each
- * product entry is a plain name string OR an object
- * `{ name, ratePerGal, rateUnit, typicalGallons, zone }` — the protocol
- * (not the catalog) then owns the mix rate/volume. zone is a display hint
- * only ('foundation' | 'band' | 'eaves' | 'spots'), never enforced.
- *
- * PEST is NOT curated here (owner ruling 2026-09-27, pre-push audit): the
- * general recurring/one-time pest visit keeps its existing house mix —
- * lib/pest-default-mix.js on the client (Taurus SC + Atticus Talak 7.9 F +
- * LESCO 90/10 Nonionic Surfactant, fixed totals) — and a seasonal pest
- * rotation with per-window rates is parked for a later PR. This module's
- * seasonal-window + rate-object support is generic and stays (it is what
- * pest visit 2 and the cockroach program's flat roach list already prove
- * out with synthetic-data tests), but no pest visit carries
- * completionDefaultProducts today, so pest visits resolve through the
- * services.default_products fallback or empty, same as any other
- * uncurated program.
+ * `completionDefaultProducts` is a PLAIN ARRAY OF CATALOG NAME STRINGS,
+ * nothing else (pre-push audit P2, PR #5049 r1: a seasonal-window shape
+ * with per-entry rate/typicalGallons/zone objects was built ahead of any
+ * visit using it — an unexercised config contract, which AGENTS.md rules
+ * out — and was removed; the rate the completion form prefills always
+ * comes from the catalog row's own label default, exactly like a manual
+ * "add product" tap). PEST is NOT curated here either (owner ruling
+ * 2026-09-27): the general recurring/one-time pest visit keeps its
+ * existing house mix on the client — lib/pest-default-mix.js (Taurus SC +
+ * Atticus Talak 7.9 F + LESCO 90/10 Nonionic Surfactant, fixed totals). A
+ * seasonal pest rotation is a possible LATER PR, built when a visit
+ * actually needs it, not ahead of time.
  *
  * Precedence (per visit):
- *   1. protocols.json visit.completionDefaultProducts (curated, ordered;
- *      seasonal-window-resolved when the visit uses that shape) — today
- *      that's pest visit 2 (German roach cleanout) and the cockroach
- *      program's visit 1, both flat roach lists.
+ *   1. protocols.json visit.completionDefaultProducts (curated, ordered)
+ *      — today that's pest visit 2 (German roach cleanout) and the
+ *      cockroach program's visit 1, both flat roach lists.
  *   2. services.default_products (legacy JSONB name list) — a fallback
  *      for services the owner hasn't curated yet; frequently stale (the
  *      pest_general_* rows still say "Demand CS" / "Advion Gel"), so a
@@ -62,13 +53,12 @@
  * substituted with a guess.
  *
  * Pure with respect to its resolution logic (resolveCompletionDefaultProductNames,
- * resolveSeasonalWindow, resolveCatalogProductForName): same inputs, same
- * output, no I/O — so the precedence and seasonal rules are unit-testable
- * without a database. resolveCompletionProductDefaults is the DB-backed
- * orchestrator the route calls; it is fail-soft end to end — any failure
- * (missing row, DB error, malformed default_products) resolves to an
- * empty product list, and a completion can always proceed with no
- * products prefilled.
+ * resolveCatalogProductForName): same inputs, same output, no I/O — so the
+ * precedence rules are unit-testable without a database.
+ * resolveCompletionProductDefaults is the DB-backed orchestrator the route
+ * calls; it is fail-soft end to end — any failure (missing row, DB error,
+ * malformed default_products) resolves to an empty product list, and a
+ * completion can always proceed with no products prefilled.
  */
 
 const { matchServiceProtocol } = require('./protocol-matcher');
@@ -87,82 +77,20 @@ function parseDefaultProductNames(value) {
   return parsed.map((item) => String(item || '').trim()).filter(Boolean);
 }
 
-// A raw completionDefaultProducts entry is a name string OR an object
-// naming the protocol's own mix rate/volume — normalize to one shape so
-// every downstream step (dedupe, catalog resolution, line shaping) only
-// has one representation to handle.
-function normalizeProductEntry(raw) {
-  if (raw == null) return null;
-  if (typeof raw === 'string') {
-    const name = raw.trim();
-    return name ? { name } : null;
-  }
-  if (typeof raw === 'object') {
-    const name = String(raw.name || '').trim();
-    if (!name) return null;
-    const entry = { name };
-    if (Number.isFinite(Number(raw.ratePerGal))) entry.ratePerGal = Number(raw.ratePerGal);
-    if (raw.rateUnit) entry.rateUnit = String(raw.rateUnit);
-    if (Number.isFinite(Number(raw.typicalGallons))) entry.typicalGallons = Number(raw.typicalGallons);
-    if (raw.zone) entry.zone = String(raw.zone);
-    return entry;
-  }
-  return null;
-}
-
-// Case-insensitive dedupe by NAME that preserves first-seen order — order
-// matters (it is display order on the completion form). Keeps the first
-// occurrence's full entry (rate/volume/zone), not just its name.
-function dedupeEntries(rawEntries) {
+// Case-insensitive dedupe that preserves first-seen order and casing —
+// order matters (it is display order on the completion form).
+function dedupeNames(names) {
   const seen = new Set();
   const out = [];
-  for (const raw of rawEntries || []) {
-    const entry = normalizeProductEntry(raw);
-    if (!entry) continue;
-    const key = entry.name.toLowerCase();
+  for (const raw of names || []) {
+    const name = String(raw || '').trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push(entry);
+    out.push(name);
   }
   return out;
-}
-
-// -- seasonal window resolution (pure) ----------------------------------
-
-// True when every element of the list is a seasonal window ({ months,
-// products }), the NEW shape a visit's completionDefaultProducts can take
-// (owner ruling 2026-09-27) — as opposed to a plain, non-seasonal entry
-// list (the shape pest visit 2 and cockroach keep today). Generic support
-// only — no visit ships with this shape yet (pest's own seasonal rotation
-// is parked for a later PR), but it is proven out with synthetic-data
-// tests so a future protocols.json entry can use it without a resolver
-// change.
-function isSeasonalWindowList(value) {
-  return Array.isArray(value) && value.length > 0 && value.every((entry) => (
-    entry && typeof entry === 'object' && Array.isArray(entry.months) && Array.isArray(entry.products)
-  ));
-}
-
-// Picks the window whose `months` (1-12) includes the visit's own month.
-// No match (an unusable month, or a gap in the owner's window coverage)
-// returns null — the caller falls through to the services.default_products
-// fallback exactly as an empty completionDefaultProducts would.
-function resolveSeasonalWindow(windows, month) {
-  const m = Number(month);
-  if (!Number.isFinite(m)) return null;
-  return windows.find((window) => window.months.map(Number).includes(m)) || null;
-}
-
-// Resolves a visit's raw completionDefaultProducts (plain list OR seasonal
-// windows) down to the entry list that applies for this visit's month.
-function resolveRawCompletionDefaultProducts(visit, month) {
-  const raw = visit?.completionDefaultProducts;
-  if (!Array.isArray(raw) || !raw.length) return [];
-  if (isSeasonalWindowList(raw)) {
-    const window = resolveSeasonalWindow(raw, month);
-    return window ? window.products : [];
-  }
-  return raw;
 }
 
 // -- catalog name resolution (pure) ------------------------------------
@@ -211,8 +139,8 @@ function resolveCatalogProductForName(name, catalogRows = []) {
 // -- visit resolution + precedence (pure) ------------------------------
 
 // Resolves which protocol visit a service maps to and, from it, the
-// ordered product ENTRIES to prefill (before any catalog lookup).
-// Pure: given the same protocols.json + inputs, always the same output.
+// ordered product NAMES to prefill (before any catalog lookup). Pure:
+// given the same protocols.json + inputs, always the same output.
 function resolveCompletionDefaultProductNames({
   protocols, serviceType, serviceKey = null, month = null, fallbackDefaultProducts = null,
 } = {}) {
@@ -230,49 +158,25 @@ function resolveCompletionDefaultProductNames({
   // (lawn-completion-defaults.js) — this resolver must never seed a
   // second, conflicting product list for it.
   if (programKey === 'lawn') {
-    return { programKey, matchedVisit, source: 'excluded_lawn', entries: [], names: [] };
+    return { programKey, matchedVisit, source: 'excluded_lawn', names: [] };
   }
 
-  let entries;
-  try {
-    entries = dedupeEntries(resolveRawCompletionDefaultProducts(visit, month));
-  } catch {
-    entries = [];
-  }
-  if (entries.length) {
-    return { programKey, matchedVisit, source: 'protocol_visit', entries, names: entries.map((e) => e.name) };
+  const protocolNames = dedupeNames(visit?.completionDefaultProducts);
+  if (protocolNames.length) {
+    return { programKey, matchedVisit, source: 'protocol_visit', names: protocolNames };
   }
 
-  const fallbackEntries = dedupeEntries(parseDefaultProductNames(fallbackDefaultProducts));
-  if (fallbackEntries.length) {
-    return {
-      programKey, matchedVisit, source: 'service_default_products',
-      entries: fallbackEntries, names: fallbackEntries.map((e) => e.name),
-    };
+  const fallbackNames = dedupeNames(parseDefaultProductNames(fallbackDefaultProducts));
+  if (fallbackNames.length) {
+    return { programKey, matchedVisit, source: 'service_default_products', names: fallbackNames };
   }
 
-  return { programKey, matchedVisit, source: 'none', entries: [], names: [] };
+  return { programKey, matchedVisit, source: 'none', names: [] };
 }
 
 // -- line shaping --------------------------------------------------------
 
-// A "/gal" rate is a per-gallon mix concentration (matches
-// client/src/lib/product-rate-prefill.js's isPerGallonUnit convention) —
-// the base unit for a recorded amount is whatever precedes the "/".
-function baseUnitFromRateUnit(rateUnit) {
-  const unit = String(rateUnit || '');
-  return unit.includes('/') ? unit.split('/')[0] : unit || null;
-}
-
-function shapeCompletionProductLine(entry, row, resolved) {
-  // The protocol's own rate/volume (owner 2026-09-27) overrides the
-  // catalog's label default when the entry supplies one — the protocol,
-  // not the catalog, owns our mix. Round to 4 decimals, matching the
-  // client's own derivedTankTotal precision.
-  const hasExplicitRate = Number.isFinite(entry.ratePerGal);
-  const amount = hasExplicitRate && Number.isFinite(entry.typicalGallons)
-    ? Math.round(entry.ratePerGal * entry.typicalGallons * 10000) / 10000
-    : null;
+function shapeCompletionProductLine(row, resolved) {
   return {
     id: row.id,
     name: row.name,
@@ -284,17 +188,6 @@ function shapeCompletionProductLine(entry, row, resolved) {
     defaultUnit: row.default_unit || null,
     applicationMethod: row.application_method || null,
     epaRegNumber: row.epa_reg_number || null,
-    // Protocol-specified mix (owner 2026-09-27) — the protocol, not the
-    // catalog, owns the rate/volume when it names one; all null when the
-    // entry is a plain name (cockroach, pest visit 2), so the client falls
-    // back to the catalog's own label-default prefill exactly as before.
-    protocolRate: hasExplicitRate ? entry.ratePerGal : null,
-    protocolRateUnit: hasExplicitRate ? (entry.rateUnit || null) : null,
-    protocolAmount: amount,
-    protocolAmountUnit: amount != null ? baseUnitFromRateUnit(entry.rateUnit) : null,
-    // Display hint only ('foundation' | 'band' | 'eaves' | 'spots' | null)
-    // — never validated or enforced.
-    zone: entry.zone || null,
     // Where the name came from — the curated protocol list or the legacy
     // service default_products fallback — for client display/telemetry.
     source: {
@@ -335,16 +228,17 @@ async function loadActiveCatalogWithAliases(db) {
 }
 
 // The visit's calendar month (1-12) from scheduled_services.scheduled_date
-// — a DATE column, no time-of-day. Pre-push audit P1: building `new
-// Date(value)` and reading it back through an America/New_York formatter
-// (etParts) shifts the month back a day at every month/year boundary,
-// because a bare 'YYYY-MM-DD' (or a driver-built Date at UTC midnight)
-// reads as UTC midnight, which is still the PREVIOUS day in ET — the 1st
-// of the month read the LAST day of the prior month's window. A DATE
-// column has no timezone of its own; read its calendar parts directly
-// (string prefix, or getUTCMonth() on the Date the pg driver built at UTC
-// midnight) exactly as recap-payload.js's formatServiceDate does, never
-// through an ET conversion.
+// — a DATE column, no time-of-day. Still used to resolve which VISIT a
+// month-keyed program (lawn, tree & shrub) matches — pre-push audit P1:
+// building `new Date(value)` and reading it back through an
+// America/New_York formatter shifts the month back a day at every
+// month/year boundary, because a bare 'YYYY-MM-DD' (or a driver-built Date
+// at UTC midnight) reads as UTC midnight, which is still the PREVIOUS day
+// in ET. A DATE column has no timezone of its own; read its calendar
+// parts directly (string prefix, or getUTCMonth() on the Date the pg
+// driver built at UTC midnight) exactly as
+// server/services/service-report/recap-payload.js's formatServiceDate
+// does, never through an ET conversion.
 function monthFromDateColumn(value) {
   if (!value) return null;
   if (value instanceof Date) {
@@ -364,12 +258,11 @@ function emptyResult(serviceId) {
 }
 
 // The route-facing orchestrator: loads the scheduled service + its
-// service_key/service_type/month, resolves the default product ENTRIES
-// (pure, above; seasonal-window-resolved for this visit's month), then
-// resolves each entry to an active catalog row. Fail-soft throughout —
-// this must never block a completion: any error (missing row, DB error,
-// malformed default_products) resolves to an empty product list rather
-// than throwing.
+// service_key/service_type/month, resolves the default product NAMES
+// (pure, above), then resolves each name to an active catalog row.
+// Fail-soft throughout — this must never block a completion: any error
+// (missing row, DB error, malformed default_products) resolves to an
+// empty product list rather than throwing.
 async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {}) {
   const empty = emptyResult(serviceId);
   if (!db || !serviceId) return empty;
@@ -383,9 +276,10 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
       ? await db('services').where({ id: scheduled.service_id }).first('id', 'default_products').catch(() => null)
       : null;
 
-    // The visit's OWN calendar month — both for month-keyed programs
-    // (lawn, tree & shrub — neither carries completionDefaultProducts
-    // today) and for a future seasonal completionDefaultProducts window.
+    // Month only matters for month-keyed programs (lawn, tree & shrub) —
+    // neither carries completionDefaultProducts today, but resolve it
+    // correctly anyway so this stays generically right as the owner adds
+    // more visits.
     const month = monthFromDateColumn(scheduled.scheduled_date);
 
     const resolved = resolveCompletionDefaultProductNames({
@@ -399,7 +293,7 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
       fallbackDefaultProducts: serviceRow?.default_products,
     });
 
-    if (!resolved.entries.length) {
+    if (!resolved.names.length) {
       return {
         serviceId, programKey: resolved.programKey, matchedVisit: resolved.matchedVisit,
         source: resolved.source, products: [], unresolved: [],
@@ -409,15 +303,10 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
     const catalogRows = await loadActiveCatalogWithAliases(db);
     const products = [];
     const unresolved = [];
-    const seenProductIds = new Set();
-    for (const entry of resolved.entries) {
-      const row = resolveCatalogProductForName(entry.name, catalogRows);
-      if (!row) { unresolved.push(entry.name); continue; }
-      // Two entries resolving to the SAME catalog row show one line on the
-      // drawer, not two — first occurrence wins.
-      if (seenProductIds.has(row.id)) continue;
-      seenProductIds.add(row.id);
-      products.push(shapeCompletionProductLine(entry, row, resolved));
+    for (const name of resolved.names) {
+      const row = resolveCatalogProductForName(name, catalogRows);
+      if (!row) { unresolved.push(name); continue; }
+      products.push(shapeCompletionProductLine(row, resolved));
     }
 
     return {
@@ -433,8 +322,6 @@ module.exports = {
   resolveCompletionDefaultProductNames,
   resolveCatalogProductForName,
   resolveCompletionProductDefaults,
-  resolveSeasonalWindow,
-  isSeasonalWindowList,
   monthFromDateColumn,
   parseDefaultProductNames,
 };

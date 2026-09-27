@@ -13633,6 +13633,11 @@ export function CompletionPanel({
     return () => { cancelled = true; };
   }, [service.id]);
   const protocolCompletionDefaultsSeededRef = useRef(false);
+  // Lets the draft autosave treat an untouched seed as starting state, not
+  // tech input — mirrors pestDefaultMixSnapshotRef / lawnDefaultMixSnapshotRef
+  // exactly (pre-push audit P2, PR #5049 r1): merely opening a cockroach
+  // completion must not mint a draft or a restore prompt on its own.
+  const protocolCompletionDefaultsSnapshotRef = useRef(null);
   useEffect(() => {
     if (protocolCompletionDefaultsSeededRef.current) return;
     // NOT gated on isTypedFindings: the "Products Applied" section renders
@@ -13658,8 +13663,33 @@ export function CompletionPanel({
     const rows = protocolCompletionDefaultSelections(protocolCompletionDefaults, products, buildSelectedProduct);
     if (!rows.length) return;
     protocolCompletionDefaultsSeededRef.current = true;
+    protocolCompletionDefaultsSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
   }, [protocolCompletionDefaults, products, service, isBedBugVisit, isLawn, visitOutcome, selectedProducts, draftLoading, showDraftPrompt]);
+  // Pre-push audit P1, PR #5049 r1: an inspection_only / customer_declined
+  // outcome bills as NOTHING applied (shared/specialty-service-closeouts.js's
+  // own NO_APPLICATION_OUTCOMES — the exact pair the submit-time
+  // noApplicationOutcomeConflict guard treats as "no application
+  // performed"). That guard never runs for cockroach — it is scoped to
+  // specialty-service-closeouts.json's own service list (dethatching,
+  // plugging, mosquito, fire_ant, tick_control, bee/wasp/mud-dauber
+  // removal, bed bug), which cockroach isn't in — so a seeded default left
+  // on the form after switching to one of these outcomes would still
+  // submit real service_products rows, compliance records, and inventory
+  // deductions for a visit declared not performed. Rather than widen that
+  // server-side invariant to a program it was never scoped to, this seed
+  // polices only what it itself added: it drops its own rows (flagged
+  // protocolDefaultProduct, never a tech's own row) and clears the ref so
+  // the seed is eligible to run again if the outcome returns to
+  // "completed" with an empty list — a removal DRIVEN BY THE OUTCOME, not
+  // the tech's own deliberate deletion, which must never be re-added.
+  useEffect(() => {
+    if (visitOutcome !== "inspection_only" && visitOutcome !== "customer_declined") return;
+    if (!selectedProducts.some((p) => p.protocolDefaultProduct)) return;
+    setSelectedProducts((current) => current.filter((p) => !p.protocolDefaultProduct));
+    protocolCompletionDefaultsSeededRef.current = false;
+    protocolCompletionDefaultsSnapshotRef.current = null;
+  }, [visitOutcome, selectedProducts]);
   const lawnDefaultMixSeededRef = useRef(false);
   const lawnDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
@@ -14694,7 +14724,8 @@ export function CompletionPanel({
       // drafts as before.
       ((selectedProducts.length > 0 || lawnDefaultMixSnapshotRef.current) &&
         JSON.stringify(selectedProducts) !== pestDefaultMixSnapshotRef.current &&
-        JSON.stringify(selectedProducts) !== lawnDefaultMixSnapshotRef.current) ||
+        JSON.stringify(selectedProducts) !== lawnDefaultMixSnapshotRef.current &&
+        JSON.stringify(selectedProducts) !== protocolCompletionDefaultsSnapshotRef.current) ||
       JSON.stringify(areasServiced) !== JSON.stringify(lawnDefaultAreas) ||
       // Governed state restored under a plan outage (no live defaults) is
       // still draft content: the next autosave must not drop it (Codex #4113 P2).

@@ -198,6 +198,97 @@ it('does NOT seed on top of a restored draft’s own products', async () => {
   expect(screen.queryByText('Advion Cockroach Gel Bait')).toBeNull();
 });
 
+it('clears the seeded rows on customer_declined, then reseeds once the outcome returns to completed (pre-push audit P1, PR #5049 r1)', async () => {
+  // cockroach has no specialtyCompletionFor preset, so the submit-time
+  // noApplicationOutcomeConflict guard never runs for it — a seeded
+  // default left on the form after a customer_declined/inspection_only
+  // switch would otherwise still submit service_products rows for a visit
+  // declared not performed. The seed must police itself.
+  stubFetchWithImmediateDefaults();
+  await act(async () => {
+    render(
+      <CompletionPanel
+        service={cockroachService()}
+        products={cockroachCatalog}
+        onClose={() => {}}
+        onSubmit={vi.fn().mockResolvedValue({})}
+      />,
+    );
+  });
+  await screen.findByText('Alpine WSG');
+
+  const outcomeSelect = screen.getByDisplayValue('Completed');
+  fireEvent.change(outcomeSelect, { target: { value: 'customer_declined' } });
+  await waitFor(() => expect(screen.queryByText('Alpine WSG')).toBeNull());
+  expect(screen.queryByText('Gentrol IGR')).toBeNull();
+  expect(screen.queryByText('Advion Cockroach Gel Bait')).toBeNull();
+
+  fireEvent.change(outcomeSelect, { target: { value: 'completed' } });
+  await waitFor(() => expect(screen.queryByText('Alpine WSG')).not.toBeNull());
+  expect(screen.getByText('Gentrol IGR')).toBeTruthy();
+  expect(screen.getByText('Advion Cockroach Gel Bait')).toBeTruthy();
+});
+
+it('clears the seeded rows on inspection_only too (the same no-application pair the submit-time guard defines)', async () => {
+  stubFetchWithImmediateDefaults();
+  await act(async () => {
+    render(
+      <CompletionPanel
+        service={cockroachService()}
+        products={cockroachCatalog}
+        onClose={() => {}}
+        onSubmit={vi.fn().mockResolvedValue({})}
+      />,
+    );
+  });
+  await screen.findByText('Alpine WSG');
+
+  const outcomeSelect = screen.getByDisplayValue('Completed');
+  fireEvent.change(outcomeSelect, { target: { value: 'inspection_only' } });
+  await waitFor(() => expect(screen.queryByText('Alpine WSG')).toBeNull());
+});
+
+it('does NOT persist a draft merely from an untouched seed; removing one seeded row DOES (pre-push audit P2, PR #5049 r1)', async () => {
+  const visit = cockroachService();
+  const draftKey = `waves_completion_draft_${visit.id}`;
+
+  stubFetchWithImmediateDefaults();
+  let view;
+  await act(async () => {
+    view = render(
+      <CompletionPanel
+        service={visit}
+        products={cockroachCatalog}
+        onClose={() => {}}
+        onSubmit={vi.fn().mockResolvedValue({})}
+      />,
+    );
+  });
+  await screen.findByText('Alpine WSG');
+  // Let the autosave effect settle on the untouched-seed snapshot.
+  await act(async () => { await Promise.resolve(); });
+  view.unmount();
+  expect(localStorage.getItem(draftKey)).toBeNull();
+
+  // Fresh mount, seed again, then remove ONE row by hand — that edit is
+  // real tech input and must persist a draft.
+  await act(async () => {
+    view = render(
+      <CompletionPanel
+        service={visit}
+        products={cockroachCatalog}
+        onClose={() => {}}
+        onSubmit={vi.fn().mockResolvedValue({})}
+      />,
+    );
+  });
+  await screen.findByText('Alpine WSG');
+  fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[0]);
+  await waitFor(() => expect(screen.getAllByRole('button', { name: 'Remove product' })).toHaveLength(2));
+  view.unmount();
+  expect(localStorage.getItem(draftKey)).not.toBeNull();
+});
+
 it('does NOT re-seed when a restored draft deliberately saved an EMPTY product list (pre-push audit P1)', async () => {
   // The tech removed every prefilled default before the drawer closed, and
   // the draft saved that empty list. selectedProducts.length is falsy

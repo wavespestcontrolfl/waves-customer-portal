@@ -3091,7 +3091,6 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
 //   source: 'protocol_visit' | 'service_default_products' | 'excluded_lawn' | 'none',
 //   products: [{ id, name, category, formulation, defaultRatePer1000,
 //     rateUnit, defaultRate, defaultUnit, applicationMethod, epaRegNumber,
-//     protocolRate, protocolRateUnit, protocolAmount, protocolAmountUnit, zone,
 //     source: { programKey, visit, origin } }],
 //   unresolved: ['<name with no matching active catalog row>'] }
 router.get('/:serviceId/default-products', async (req, res, next) => {
