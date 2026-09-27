@@ -703,12 +703,14 @@ describe('content-registry reconciliation', () => {
         http_status: '301',
         live_status: 'redirected',
         sitemap_present: true,
+        live_status_checked_at: new Date('2026-09-26T12:00:00Z'),
       }],
     }).rows[0];
 
     expect(row.http_status).toBe('unknown');
     expect(row.live_status).toBe('unknown');
     expect(row.sitemap_present).toBeNull();
+    expect(row.live_status_checked_at).toBeNull();
   });
 
   test('does not preserve live-check mirror fields when URL is gained or lost', () => {

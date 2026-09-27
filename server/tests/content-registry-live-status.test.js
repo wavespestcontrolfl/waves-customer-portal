@@ -67,6 +67,13 @@ describe('content registry live status helpers', () => {
     expect(liveStatus.isNoindex(html)).toBe(true);
   });
 
+  test('prefers an absolute spoke canonical over a relative Astro live route', () => {
+    expect(liveStatus.targetUrlForRow({
+      live_url: '/termite/spoke-post/',
+      canonical_url: 'https://www.sarasotaflpestcontrol.com/different-canonical/',
+    })).toBe('https://www.sarasotaflpestcontrol.com/termite/spoke-post/');
+  });
+
   test('classifies direct canonicalized pages', async () => {
     const result = await liveStatus.checkRegistryRowLiveStatus(
       { id: 'row-1', canonical_url_normalized: '/old/' },

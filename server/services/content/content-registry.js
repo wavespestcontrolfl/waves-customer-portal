@@ -21,6 +21,7 @@ const LIVE_MIRROR_FIELDS = [
   'canonical_target_url',
   'noindex_detected',
   'sitemap_present',
+  'live_status_checked_at',
 ];
 
 function normalizeContentUrl(value) {
@@ -440,7 +441,8 @@ function isArchivedWorkflow(row = {}) {
 
 function preserveLiveMirrorFields(row, previous) {
   const prev = previous.byAstroPath.get(row.astro_source_path) || previous.byDbId.get(row.db_blog_id);
-  if (!prev || liveTargetChanged(row, prev)) return row;
+  if (!prev) return row;
+  if (liveTargetChanged(row, prev)) return { ...row, live_status_checked_at: null };
   const out = { ...row };
   for (const field of LIVE_MIRROR_FIELDS) {
     if (typeof prev[field] !== 'undefined') out[field] = prev[field];
@@ -482,6 +484,7 @@ function finalizeRegistryRow(row) {
     reviewer: row.reviewer || null,
     published_at: row.published_at || null,
     last_updated_at: row.last_updated_at || null,
+    live_status_checked_at: row.live_status_checked_at || null,
     astro_repo_sha: row.astro_repo_sha || null,
     astro_frontmatter_hash: row.astro_frontmatter_hash || null,
     astro_body_hash: row.astro_body_hash || null,

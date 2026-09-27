@@ -127,6 +127,15 @@ describe('rankRelatedPosts — ranking', () => {
     expect(out.map((r) => r.title)).toEqual(['Alpha Termite Post', 'Zebra Termite Post']);
   });
 
+  test('equal scores and titles use normalized path as a final deterministic tie-breaker', () => {
+    const same = { title: 'Same', keyword: 'termite bait systems', service: 'termite' };
+    const rows = rankRelatedPosts({ service: 'termite' }, [
+      candidate({ ...same, id: 'b', path: '/termite/z-post/' }),
+      candidate({ ...same, id: 'a', path: '/termite/a-post/' }),
+    ]);
+    expect(rows.map((row) => row.path)).toEqual(['/termite/a-post/', '/termite/z-post/']);
+  });
+
   test('output shape is exactly title, path, keyword — no internal ranking fields leak', () => {
     const target = { service: 'termite' };
     const out = rankRelatedPosts(target, [candidate({ service: 'termite', keyword: 'termite bait stations' })]);
@@ -324,6 +333,18 @@ describe('candidateFromRegistryRow', () => {
       { service: 'termite', domains: ['sarasotaflpestcontrol.com'] },
       [c]
     )).toEqual([]);
+  });
+
+  test('uses tracking.domains when top-level domains are absent', () => {
+    expect(candidateFromRegistryRow({
+      ...liveAstroOnly,
+      live_url: '/termite/direct-astro-post/',
+      canonical_url: 'https://www.sarasotaflpestcontrol.com/canonical-post/',
+      metadata: { frontmatter: { tracking: { domains: ['sarasotaflpestcontrol.com'] } } },
+    })).toMatchObject({
+      path: '/termite/direct-astro-post/',
+      targetSites: ['sarasotaflpestcontrol.com'],
+    });
   });
 
   test('rejects a spoke-configured row when only its relative hub URL was checked', () => {

@@ -52,7 +52,14 @@ function buildAbsoluteUrl(value, baseUrl = DEFAULT_BASE_URL) {
 }
 
 function targetUrlForRow(row, baseUrl = DEFAULT_BASE_URL) {
-  return buildAbsoluteUrl(row?.live_url || row?.canonical_url || row?.canonical_url_normalized, baseUrl);
+  const liveUrl = row?.live_url;
+  if (/^https?:\/\//i.test(String(liveUrl || ''))) return String(liveUrl);
+  const canonical = [row?.canonical_url, row?.canonical_url_normalized]
+    .find((value) => /^https?:\/\//i.test(String(value || '')));
+  if (liveUrl && canonical) {
+    try { return new URL(String(liveUrl), canonical).toString(); } catch { /* fall through */ }
+  }
+  return buildAbsoluteUrl(liveUrl || canonical || row?.canonical_url_normalized, baseUrl);
 }
 
 function absoluteFromLocation(location, requestedUrl) {

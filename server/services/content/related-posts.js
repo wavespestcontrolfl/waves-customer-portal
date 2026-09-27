@@ -202,7 +202,9 @@ function rankRelatedPosts(target = {}, candidates = [], { limit = RELATED_POSTS_
     if (score <= 0) continue; // no plausible topical relation — never force-fill
     scored.push({ title: c.title || null, path: normalizePathForCompare(c.path), keyword: c.keyword || null, _score: score });
   }
-  scored.sort((a, b) => b._score - a._score || String(a.title || '').localeCompare(String(b.title || '')));
+  scored.sort((a, b) => b._score - a._score
+    || String(a.title || '').localeCompare(String(b.title || ''))
+    || a.path.localeCompare(b.path));
   // Two rows can resolve to one live URL; the brief lists each page once
   // (its best-scored row), so one anchor can't stand in for several posts.
   const seenPaths = new Set();
@@ -251,9 +253,25 @@ function parseJsonObject(value) {
   }
 }
 
+function registryCheckedUrl(row) {
+  const liveUrl = row?.live_url;
+  if (/^https?:\/\//i.test(String(liveUrl || ''))) return String(liveUrl);
+  const canonical = [row?.canonical_url, row?.canonical_url_normalized]
+    .find((value) => /^https?:\/\//i.test(String(value || '')));
+  if (liveUrl && canonical) {
+    try { return new URL(String(liveUrl), canonical).toString(); } catch { /* fall through */ }
+  }
+  return liveUrl || canonical || row?.canonical_url_normalized || null;
+}
+
+function registryFrontmatterSites(frontmatter) {
+  const direct = normalizeSpokeSites(frontmatter?.domains);
+  return direct.length ? direct : normalizeSpokeSites(frontmatter?.tracking?.domains);
+}
+
 function registryRowLivePath(row) {
   const safeRow = row || {};
-  const rawPath = [safeRow.canonical_url_normalized, safeRow.live_url, safeRow.canonical_url].find(Boolean) || null;
+  const rawPath = registryCheckedUrl(safeRow);
   const requiredStates = [
     [safeRow.content_type, 'blog'],
     [safeRow.workflow_status, 'published'],
@@ -270,10 +288,10 @@ function registryRowVerifiedSites(row) {
   const safeRow = row || {};
   const metadata = parseJsonObject(safeRow.metadata);
   const frontmatter = parseJsonObject(metadata.frontmatter);
-  const rawPath = [safeRow.live_url, safeRow.canonical_url, safeRow.canonical_url_normalized].find(Boolean);
+  const rawPath = registryCheckedUrl(safeRow);
   const checkedSites = normalizeSpokeSites([rawPath]);
   const actualSites = checkedSites.length ? checkedSites : HUB_SITE_KEYS;
-  const configuredSites = normalizeSpokeSites(frontmatter.domains);
+  const configuredSites = registryFrontmatterSites(frontmatter);
   return configuredSites.length
     ? actualSites.filter((site) => configuredSites.includes(site))
     : [...actualSites];
