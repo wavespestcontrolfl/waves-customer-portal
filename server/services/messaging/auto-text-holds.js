@@ -104,8 +104,11 @@ async function autoTextHoldReason(phone, {
     .whereRaw(...matches('phone', digits)).first('id');
   if (assignedLead) return 'lead_assigned';
 
+  // Both DNC shapes: the V2 consent object, and the legacy extraction's flat
+  // field (a call processed with V2 off, unavailable or schema-failed).
   const doNotContact = await callsWith(dbi, digits, excludeCallLogId)
-    .whereRaw("ai_extraction_enriched->'consent'->>'do_not_contact_request' = 'true'")
+    .where((q) => q.whereRaw("ai_extraction_enriched->'consent'->>'do_not_contact_request' = 'true'")
+      .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"do_not_contact_request"\\s*:\\s*true'`))
     .first('id');
   if (doNotContact) return 'asked_not_to_be_contacted';
 

@@ -113,10 +113,18 @@ jest.setTimeout(30000);
       expect(await hold()).toBe('asked_not_to_be_contacted');
     });
 
+    test('an earlier call whose legacy extraction (V2 off or failed) carries the request', async () => {
+      await priorCall({ ai_extraction: '{"is_lead": true, "do_not_contact_request": true}' });
+      expect(await hold()).toBe('asked_not_to_be_contacted');
+    });
+
     test('never: the call setting this text off (excluded), or a call with no such request', async () => {
       const current = randomUUID();
       await priorCall({ id: current, ai_extraction_enriched: JSON.stringify({ consent: { do_not_contact_request: true } }) });
-      await priorCall({ ai_extraction_enriched: JSON.stringify({ consent: { do_not_contact_request: false } }) });
+      await priorCall({
+        ai_extraction_enriched: JSON.stringify({ consent: { do_not_contact_request: false } }),
+        ai_extraction: '{"do_not_contact_request": false}',
+      });
       expect(await hold({ excludeCallLogId: current })).toBeNull();
     });
   });
