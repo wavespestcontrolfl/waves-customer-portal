@@ -6372,6 +6372,8 @@ describe('voice relay eval — named spoken checks', () => {
     for (const loss of [
       'Esa cita de mi vecino ya no está disponible.',
       'Ese horario de la oficina ya no está disponible.',
+      'Esa cita de Carlos ya no está disponible.',
+      'Ese horario de María ya no está disponible.',
       'El sábado 3 de octubre a las nueve de la mañana mi teléfono ya no está disponible.',
     ]) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [...placed, {
