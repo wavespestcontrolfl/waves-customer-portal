@@ -1,4 +1,5 @@
 const {
+  addReadDepth,
   classifyPath,
   countsAsPageView,
   formatMarkdown,
@@ -168,6 +169,62 @@ describe('summarize', () => {
     expect(md).toContain('| Another blog post | 6 |');
     expect(md).toContain('| /pest-control/huntsman/ | 150 | 150 | 8 | 5.3% | 2 |');
     expect(md).not.toContain('/pest-control/bagworm/ |');
+  });
+});
+
+describe('read depth', () => {
+  const summary = summarize([
+    { path: '/pest-control/huntsman/', refererHost: 'www.google.com', refererPath: '/', views: 150 },
+    { path: '/pest-control/bagworm/', refererHost: 'www.google.com', refererPath: '/', views: 40 },
+  ]);
+  const depthRows = [
+    { path: '/pest-control/huntsman/', milestone: '25', count: 60 },
+    { path: '/pest-control/huntsman/', milestone: '50', count: 30 },
+    { path: '/pest-control/huntsman/', milestone: '100', count: 12 },
+    { path: '/pest-control/huntsman/', milestone: 'next', count: 9 },
+    { path: '/pest-control/bagworm', milestone: '50', count: '4' }, // pg may hand back strings; no trailing slash
+    { path: '/pest-control/unsampled/', milestone: '50', count: 5 }, // Cloudflare never sampled it
+    { path: '/pest-control/huntsman/', milestone: 'bogus', count: 3 },
+    { path: '/pest-control/huntsman/', milestone: '75', count: 0 },
+  ];
+
+  test('joins counts onto the Cloudflare posts, with rates per post view', () => {
+    const rd = addReadDepth(summary, depthRows, { start: '2026-09-28' });
+    expect(rd.posts[0]).toEqual({
+      path: '/pest-control/huntsman/', views: 150, r25: 60, r50: 30, r75: 0, r100: 12, next: 9, halfRate: 0.2, nextRate: 0.06,
+    });
+    expect(rd.posts[1]).toMatchObject({ path: '/pest-control/bagworm/', r50: 4, halfRate: 0.1, nextRate: 0 });
+    // the unsampled post and nothing unknown reach the totals
+    expect(rd.totals).toMatchObject({ r25: 60, r50: 39, r75: 0, r100: 12, next: 9 });
+    expect(rd.totals.halfRate).toBeCloseTo(39 / 190);
+    expect(rd.partialWindow).toBe(false);
+  });
+
+  test('a window starting on or before the first counted day is flagged partial', () => {
+    expect(addReadDepth(summary, [], { start: '2026-09-27' }).partialWindow).toBe(true);
+    expect(addReadDepth(summary, [], { start: '2026-09-21' }).partialWindow).toBe(true);
+  });
+
+  test('no views means no rate, never a divide-by-zero', () => {
+    const rd = addReadDepth(summarize([]), depthRows, { start: '2026-10-01' });
+    expect(rd.totals.halfRate).toBeNull();
+    expect(rd.posts).toEqual([]);
+  });
+
+  test('the markdown gains a read-depth section', () => {
+    const readDepth = addReadDepth(summary, depthRows, { start: '2026-09-21' });
+    const md = formatMarkdown(summary, { start: '2026-09-21', end: '2026-09-27', top: 1, readDepth });
+    expect(md).toContain('### Read depth (cookie-free counts, hub)');
+    expect(md).toContain('Counting began 2026-09-27 (Eastern), so this window is only partly covered.');
+    expect(md).toContain('Readers reaching 25 / 50 / 75 / 100% of a post: 60 / 39 / 0 / 12; reaching the keep-reading row: 9');
+    expect(md).toContain('| /pest-control/huntsman/ | 150 | 60 | 30 | 12 | 9 | 20.0% | 6.0% |');
+    expect(md).not.toContain('| /pest-control/bagworm/ | 40 |');
+  });
+
+  test('says how to include read depth when it could not be read, and stays silent when not asked', () => {
+    expect(formatMarkdown(summary, { start: 'a', end: 'b', readDepth: null })).toContain('Read depth: not included (needs DATABASE_PUBLIC_URL');
+    const plain = formatMarkdown(summary, { start: 'a', end: 'b' });
+    expect(plain).not.toContain('Read depth');
   });
 });
 

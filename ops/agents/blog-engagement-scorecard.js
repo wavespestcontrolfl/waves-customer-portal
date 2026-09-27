@@ -15,13 +15,26 @@
 // approximate. Baseline 2026-07-17 → 2026-09-23: ~8,220 post views, ~100
 // onward views (1.2% per post view).
 //
+// Read depth (research item E2, counting since 2026-09-27 10:37 AM ET): when
+// DATABASE_PUBLIC_URL is in the environment too, the report adds each post's
+// cookie-free read-depth counts from blog_read_depth_daily (hub rows; the
+// portal's POST /api/public/blog-read-depth) for the same Eastern days: how
+// many readers' screens reached 25/50/75/100% of the article and the "keep
+// reading" row, plus the half-read and keep-reading rates per Cloudflare post
+// view. Beacon counts are exact while Cloudflare views are sampled, so a small
+// post's rates are rough and can pass 100%.
+//
 // Writes nothing. Needs CF_API_TOKEN (Account Analytics read) and CF_ACCOUNT_ID
-// from the environment; CF_RUM_SITE_TAG overrides the site lookup.
+// from the environment; CF_RUM_SITE_TAG overrides the site lookup. Read depth
+// also needs DATABASE_PUBLIC_URL (the Postgres service's public proxy; the
+// query runs in a read-only transaction). Without it the report says so.
 //
 // Usage (repo root):
 //   railway run --service waves-customer-portal node ops/agents/blog-engagement-scorecard.js
 //   railway run --service waves-customer-portal node ops/agents/blog-engagement-scorecard.js --days 28 --end 2026-09-26 --top 30
 //   railway run --service waves-customer-portal node ops/agents/blog-engagement-scorecard.js --json
+//   # with read depth (outer run adds DATABASE_PUBLIC_URL, inner adds the Cloudflare credentials):
+//   railway run --service Postgres -- railway run --service waves-customer-portal node ops/agents/blog-engagement-scorecard.js
 //
 // Flags:
 //   --days=N      window length in days, default 7
@@ -195,7 +208,70 @@ function pct(rate) {
   return rate == null ? '—' : `${(rate * 100).toFixed(1)}%`;
 }
 
-function formatMarkdown(summary, { start, end, top = 20 } = {}) {
+const READ_DEPTH_SITE = 'wavespestcontrol.com';
+// First Eastern day with read-depth counts (counting began mid-morning).
+const READ_DEPTH_LIVE_SINCE = '2026-09-27';
+const MILESTONE_KEYS = { 25: 'r25', 50: 'r50', 75: 'r75', 100: 'r100', next: 'next' };
+
+function emptyDepth() {
+  return { r25: 0, r50: 0, r75: 0, r100: 0, next: 0 };
+}
+
+/**
+ * Joins the window's read-depth counts — rows of { path, milestone, count }
+ * summed from blog_read_depth_daily (hub only) — onto the Cloudflare per-post
+ * views from summarize(). Rates are per Cloudflare post view: exact beacon
+ * counts over sampled views, so a small post can read above 100%. Counts for
+ * posts Cloudflare did not sample still reach the totals.
+ */
+function addReadDepth(summary, depthRows, { start } = {}) {
+  const byPath = new Map();
+  const totals = emptyDepth();
+  for (const row of depthRows || []) {
+    const key = MILESTONE_KEYS[row.milestone];
+    const count = toCount(row.count);
+    if (!key || !count) continue;
+    const path = normalizePath(row.path);
+    if (!byPath.has(path)) byPath.set(path, emptyDepth());
+    byPath.get(path)[key] += count;
+    totals[key] += count;
+  }
+  const rate = (n, views) => (views > 0 ? n / views : null);
+  const views = summary.totals.blogViews;
+  return {
+    liveSince: READ_DEPTH_LIVE_SINCE,
+    partialWindow: start != null && start <= READ_DEPTH_LIVE_SINCE,
+    totals: { ...totals, halfRate: rate(totals.r50, views), nextRate: rate(totals.next, views) },
+    posts: summary.posts.map((p) => {
+      const d = byPath.get(p.path) || emptyDepth();
+      return { path: p.path, views: p.views, ...d, halfRate: rate(d.r50, p.views), nextRate: rate(d.next, p.views) };
+    }),
+  };
+}
+
+function formatReadDepth(lines, readDepth, top) {
+  lines.push('');
+  if (!readDepth) {
+    lines.push('Read depth: not included (needs DATABASE_PUBLIC_URL; see the usage header).');
+    return;
+  }
+  const t = readDepth.totals;
+  lines.push('### Read depth (cookie-free counts, hub)');
+  lines.push('');
+  if (readDepth.partialWindow) {
+    lines.push(`- Counting began ${readDepth.liveSince} (Eastern), so this window is only partly covered.`);
+  }
+  lines.push(`- Readers reaching 25 / 50 / 75 / 100% of a post: ${t.r25} / ${t.r50} / ${t.r75} / ${t.r100}; reaching the keep-reading row: ${t.next}`);
+  lines.push(`- Half-read: ${pct(t.halfRate)} of post views; reached keep reading: ${pct(t.nextRate)} (Cloudflare views are sampled, so rates are approximate)`);
+  lines.push('');
+  lines.push(`| Post (top ${top} by views) | Views | 25% | 50% | 100% | Keep reading | Half-read | Reached keep reading |`);
+  lines.push('|---|---:|---:|---:|---:|---:|---:|---:|');
+  for (const p of readDepth.posts.slice(0, top)) {
+    lines.push(`| ${p.path} | ${p.views} | ${p.r25} | ${p.r50} | ${p.r100} | ${p.next} | ${pct(p.halfRate)} | ${pct(p.nextRate)} |`);
+  }
+}
+
+function formatMarkdown(summary, { start, end, top = 20, readDepth } = {}) {
   const { totals, destinations, posts } = summary;
   const lines = [];
   lines.push(`## Blog engagement scorecard, ${start} to ${end}`);
@@ -216,6 +292,9 @@ function formatMarkdown(summary, { start, end, top = 20 } = {}) {
   for (const p of posts.slice(0, top)) {
     lines.push(`| ${p.path} | ${p.views} | ${p.entries} | ${p.onward} | ${pct(p.rate)} | ${p.toEstimateOrService} |`);
   }
+  // undefined: the caller didn't ask for read depth (section omitted);
+  // null: asked but unavailable (one line says how to include it).
+  if (readDepth !== undefined) formatReadDepth(lines, readDepth, top);
   return `${lines.join('\n')}\n`;
 }
 
@@ -332,6 +411,28 @@ async function fetchGroups(accountId, siteTag, slices) {
   return groups;
 }
 
+// Read-only: the window's read-depth rows, or null when DATABASE_PUBLIC_URL is
+// not in the environment. Same Eastern days as the Cloudflare window.
+async function fetchReadDepth(window) {
+  if (!process.env.DATABASE_PUBLIC_URL) return null;
+  const { Client } = require('pg');
+  const client = new Client({ connectionString: process.env.DATABASE_PUBLIC_URL, ssl: { rejectUnauthorized: false } });
+  await client.connect();
+  try {
+    await client.query('SET default_transaction_read_only = on');
+    const { rows } = await client.query(
+      `SELECT path, milestone, SUM(count)::int AS count
+         FROM blog_read_depth_daily
+        WHERE site = $1 AND day >= $2::date AND day < $3::date
+        GROUP BY path, milestone`,
+      [READ_DEPTH_SITE, window.startStr, window.endStr],
+    );
+    return rows;
+  } finally {
+    await client.end();
+  }
+}
+
 async function main() {
   const args = parseArgs();
   const accountId = process.env.CF_ACCOUNT_ID;
@@ -341,10 +442,18 @@ async function main() {
   const window = resolveWindow({ days: positiveInt(args.days, 7), end: args.end });
   const siteTag = await hubSiteTag(accountId);
   const summary = summarize(await fetchGroups(accountId, siteTag, window.slices));
+  let readDepth = null;
+  try {
+    const depthRows = await fetchReadDepth(window);
+    if (depthRows) readDepth = addReadDepth(summary, depthRows, { start: window.startStr });
+  } catch (err) {
+    // The Cloudflare half still prints; say why read depth is missing.
+    console.warn(`warning: read depth unavailable (${err.code || err.message})`);
+  }
   if (args.json) {
-    process.stdout.write(`${JSON.stringify({ start: window.startStr, end: window.lastDayStr, timezone: 'America/New_York', ...summary }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ start: window.startStr, end: window.lastDayStr, timezone: 'America/New_York', ...summary, readDepth }, null, 2)}\n`);
   } else {
-    process.stdout.write(formatMarkdown(summary, { start: window.startStr, end: window.lastDayStr, top: positiveInt(args.top, 20) }));
+    process.stdout.write(formatMarkdown(summary, { start: window.startStr, end: window.lastDayStr, top: positiveInt(args.top, 20), readDepth }));
   }
 }
 
@@ -356,6 +465,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  addReadDepth,
   classifyPath,
   countsAsPageView,
   formatMarkdown,
