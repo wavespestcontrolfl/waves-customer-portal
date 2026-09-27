@@ -25,7 +25,7 @@
 // ============================================================
 
 const PACK = require('./estimate-one-time-copy.json');
-const GUARANTEE_COPY = /guarantee|warrant(?:y|ies)|callbacks?|re[- ]?treat|money[- ]?back|risk[- ]?free|satisfaction|(?:re[- ]?service|service calls?)[^.!?]*(?:free|no charge)/i;
+const GUARANTEE_COPY = /guarantee|warrant(?:y|ies)|callbacks?|re[- ]?(?:treat(?:ment|s|ed|ing)?|spray(?:s|ed|ing)?)|money[- ]?back|risk[- ]?free|satisfaction|(?:free[^.!?]*(?:re[- ]?service|service calls?)|(?:re[- ]?service|service calls?)[^.!?]*(?:free|no charge))/i;
 const NO_GUARANTEE_HERO = 'Review the itemized service scope and terms below. Licensed & insured.';
 
 function searchText(item = {}) {

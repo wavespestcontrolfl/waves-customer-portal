@@ -572,6 +572,8 @@ describe('server-rendered page', () => {
 
   test.each([
     ['Rain re-spray guarantee', false],
+    ['Rain re-spray within 48 hours', false],
+    ['Free re-service between visits', false],
     ['One-year warranty', false],
     ['Exterior landscaping treatment', true],
   ])('the public contract and legacy renderer apply the estimate policy to raw detail: %s', (detail, retained) => {
