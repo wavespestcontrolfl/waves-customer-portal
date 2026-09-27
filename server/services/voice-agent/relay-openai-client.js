@@ -42,8 +42,9 @@
  *     first tool_use block (`_openai`, adapter-private) and is replayed in
  *     that order in the next rounds of the same caller turn, so each
  *     reasoning item stays immediately before the item that followed it (the
- *     pairing the Responses API validates). The message item carries only
- *     the text the relay kept in history, possibly empty. Reasoning from an
+ *     pairing the Responses API validates); only a terminal reasoning run,
+ *     which has no following item, is dropped. Message items carry only the
+ *     text the relay kept in history, possibly empty. Reasoning from an
  *     earlier turn, or a round missing an id or encrypted content, is not
  *     replayed.
  *   max_tokens → max_output_tokens
@@ -180,37 +181,61 @@ function functionCallItem(block, id) {
 }
 
 /**
+ * The text each message item of a replayed round carries, in order. The
+ * relay's history holds a round's text blocks exactly as the model produced
+ * them (one per output_text part) unless it withheld them (a write-tool
+ * turn), cut them to a sent prefix, or rewrote them after a barge-in — each
+ * of which leaves a different block count. Unchanged ⇒ every message gets
+ * its own parts back; changed ⇒ the kept text (possibly none) goes on the
+ * first message and the rest stay empty, so the model never believes the
+ * caller heard more than they did.
+ */
+function messageTexts(order, textBlocks) {
+  const messages = order.filter((entry) => entry.type === 'message');
+  const total = messages.reduce((n, entry) => n + (Number(entry.parts) || 0), 0);
+  if (total > 0 && textBlocks.length === total) {
+    let at = 0;
+    return messages.map((entry) => {
+      const parts = textBlocks.slice(at, at + entry.parts);
+      at += entry.parts;
+      return parts;
+    });
+  }
+  const kept = textBlocks.join('\n').trim();
+  return messages.map((_entry, i) => (i === 0 && kept ? [kept] : []));
+}
+
+/**
  * One assistant history message (one model round) rebuilt in the round's
  * ORIGINAL item order (`_openai.order`, set by mapResponseToMessage), or null
  * to fall back to the plain rebuild. Each reasoning item stays immediately
  * before the item that followed it, and every item keeps its own id — the
- * pairing the Responses API validates. The message item carries the text the
- * relay actually kept for this round (its history text blocks, which may
- * have been withheld on a write-tool turn, cut to a sent prefix, or rewritten
- * after a barge-in) — possibly empty, so the model never believes the caller
- * heard more than they did. A round with several message items puts all of
- * that text on the first and leaves the rest empty.
+ * pairing the Responses API validates. Message items carry only the text the
+ * relay kept for this round (messageTexts).
  */
 function replayRound(blocks) {
   const anchor = blocks.find((b) => b && b.type === 'tool_use' && b._openai && Array.isArray(b._openai.order));
   if (!anchor) return null;
+  const order = anchor._openai.order;
   const toolUses = new Map(blocks.filter((b) => b && b.type === 'tool_use').map((b) => [b.id, b]));
-  const text = blocks.filter((b) => b && b.type === 'text').map((b) => String(b.text ?? '')).join('\n').trim();
+  const textBlocks = blocks.filter((b) => b && b.type === 'text').map((b) => String(b.text ?? ''));
+  const texts = messageTexts(order, textBlocks);
   const out = [];
   const emitted = new Set();
-  let textPlaced = false;
-  for (const entry of anchor._openai.order) {
+  let messageIndex = 0;
+  for (const entry of order) {
     if (entry.type === 'reasoning') {
       out.push({ type: 'reasoning', id: entry.id, summary: entry.summary || [], encrypted_content: entry.encrypted_content });
     } else if (entry.type === 'message') {
+      const parts = texts[messageIndex] || [];
+      messageIndex += 1;
       out.push({
         type: 'message',
         id: entry.id,
         role: 'assistant',
-        status: 'completed',
-        content: [{ type: 'output_text', text: textPlaced ? '' : text, annotations: [] }],
+        status: entry.status || 'completed',
+        content: (parts.length ? parts : ['']).map((text) => ({ type: 'output_text', text, annotations: [] })),
       });
-      textPlaced = true;
     } else if (entry.type === 'function_call') {
       const block = toolUses.get(entry.call_id);
       if (!block) return null; // history no longer holds this call — never replay half a round
@@ -220,7 +245,8 @@ function replayRound(blocks) {
   }
   // Text with no message item to carry it (should not happen) still goes
   // back, ahead of the round; so does any call the order does not name.
-  if (!textPlaced && text) out.unshift({ role: 'assistant', content: text });
+  const orphanText = messageIndex === 0 ? textBlocks.join('\n').trim() : '';
+  if (orphanText) out.unshift({ role: 'assistant', content: orphanText });
   for (const [id, block] of toolUses) if (!emitted.has(id)) out.push(functionCallItem(block));
   return out;
 }
@@ -334,18 +360,21 @@ function functionCallBlock(item, response) {
   return { type: 'tool_use', id: item.call_id || item.id, name: item.name, input };
 }
 
+const MESSAGE_STATUSES = new Set(['completed', 'incomplete', 'in_progress']);
+
 /**
- * A tool round's output items, in order, as far as they can be passed back:
- * everything up to its last function_call (anything after it has no call to
- * pair with), or null when there is no reasoning to keep or any item lacks
- * what a stateless replay needs — an id on every item, and encrypted content
- * on every reasoning item (store:false keeps nothing server-side). A
- * reasoning item the API cannot pair, or cannot read back, is a 400.
+ * A tool round's output items, in their original order, as far as they can
+ * be passed back: every item except a terminal run of reasoning (a reasoning
+ * item with nothing after it has no following item to pair with), or null
+ * when there is no reasoning to keep or any item lacks what a stateless
+ * replay needs — an id on every item, and encrypted content on every
+ * reasoning item (store:false keeps nothing server-side). A reasoning item
+ * the API cannot pair, or cannot read back, is a 400.
  */
 function replayableOrder(order) {
-  let last = -1;
-  order.forEach((entry, i) => { if (entry.type === 'function_call') last = i; });
-  const kept = order.slice(0, last + 1);
+  let end = order.length;
+  while (end > 0 && order[end - 1].type === 'reasoning') end -= 1;
+  const kept = order.slice(0, end);
   if (!kept.some((entry) => entry.type === 'reasoning')) return null;
   const usable = kept.every((entry) => typeof entry.id === 'string' && entry.id
     && (entry.type !== 'reasoning' || (typeof entry.encrypted_content === 'string' && entry.encrypted_content))
@@ -376,8 +405,9 @@ function mapResponseToMessage(response, requestedModel) {
     if (item.type === 'reasoning') {
       order.push({ type: 'reasoning', id: item.id, summary: Array.isArray(item.summary) ? item.summary : [], encrypted_content: item.encrypted_content });
     } else if (item.type === 'message') {
-      content.push(...messageTextBlocks(item));
-      order.push({ type: 'message', id: item.id });
+      const blocks = messageTextBlocks(item);
+      content.push(...blocks);
+      order.push({ type: 'message', id: item.id, status: MESSAGE_STATUSES.has(item.status) ? item.status : 'completed', parts: blocks.length });
     } else if (item.type === 'function_call') {
       hasFunctionCall = true;
       content.push(functionCallBlock(item, response));

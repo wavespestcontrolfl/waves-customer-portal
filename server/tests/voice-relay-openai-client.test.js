@@ -485,7 +485,7 @@ describe('reasoning items across tool-call rounds', () => {
   const FC = (id, callId, name = 'lookup_customer') => ({ type: 'function_call', id, call_id: callId, name, arguments: '{}', status: 'completed' });
   const MSG = (id, text) => ({ type: 'message', id, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text }] });
   const rsIn = (id, enc = `enc-${id}`) => ({ type: 'reasoning', id, summary: [], encrypted_content: enc });
-  const msgIn = (id, text) => ({ type: 'message', id, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text, annotations: [] }] });
+  const msgIn = (id, ...texts) => ({ type: 'message', id, role: 'assistant', status: 'completed', content: (texts.length ? texts : ['']).map((text) => ({ type: 'output_text', text, annotations: [] })) });
   const fcIn = (id, callId, name = 'lookup_customer') => ({ type: 'function_call', ...(id ? { id } : {}), call_id: callId, name, arguments: '{}' });
   const tr = (callId, text = 'Found.') => ({ type: 'function_call_output', call_id: callId, output: text });
 
@@ -501,16 +501,44 @@ describe('reasoning items across tool-call rounds', () => {
   });
 
   test('a tool round records its original item order on its first tool_use block, trimmed to replay fields', () => {
-    const msg = round([RS('rs_1'), MSG('msg_1', 'Let me check.'), RS('rs_2'), FC('fc_1', 'call_1'), FC('fc_2', 'call_2'), RS('rs_trailing')]);
-    expect(msg.content.map((b) => b.type)).toEqual(['text', 'tool_use', 'tool_use']);
+    const msg = round([RS('rs_1'), MSG('msg_1', 'Let me check.'), RS('rs_2'), FC('fc_1', 'call_1'), FC('fc_2', 'call_2'), MSG('msg_2', 'Found it.'), RS('rs_t1'), RS('rs_t2')]);
+    expect(msg.content.map((b) => b.type)).toEqual(['text', 'tool_use', 'tool_use', 'text']);
     expect(msg.content[1]._openai.order).toEqual([
       { type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'enc-rs_1' },
-      { type: 'message', id: 'msg_1' },
+      { type: 'message', id: 'msg_1', status: 'completed', parts: 1 },
       { type: 'reasoning', id: 'rs_2', summary: [], encrypted_content: 'enc-rs_2' },
       { type: 'function_call', id: 'fc_1', call_id: 'call_1' },
       { type: 'function_call', id: 'fc_2', call_id: 'call_2' },
-    ]); // trailing reasoning has no following item to pair with — dropped
+      { type: 'message', id: 'msg_2', status: 'completed', parts: 1 },
+    ]); // only the terminal reasoning run (no following item to pair with) is dropped
     expect(msg.content[2]).not.toHaveProperty('_openai');
+  });
+
+  // Codex r7 P2: items after the last call keep their place too.
+  test('replay: [reasoning, function_call, message] keeps the trailing message after the call', () => {
+    const msg = round([RS('rs_1'), FC('fc_1', 'call_1'), RS('rs_2'), MSG('msg_1', 'Pulling that up now.'), RS('rs_t')]);
+    const items = toResponsesInput([{ role: 'user', content: 'hi' }, { role: 'assistant', content: msg.content }]);
+    expect(items.slice(1)).toEqual([rsIn('rs_1'), fcIn('fc_1', 'call_1'), rsIn('rs_2'), msgIn('msg_1', 'Pulling that up now.')]);
+  });
+
+  test('replay: a message before AND after the call each keep their own text when the relay kept it unchanged', () => {
+    const msg = round([MSG('msg_1', 'One sec.'), RS('rs_1'), FC('fc_1', 'call_1'), MSG('msg_2', 'Found you, Pat.')]);
+    const items = toResponsesInput([{ role: 'user', content: 'hi' }, { role: 'assistant', content: msg.content }]);
+    expect(items.slice(1)).toEqual([msgIn('msg_1', 'One sec.'), rsIn('rs_1'), fcIn('fc_1', 'call_1'), msgIn('msg_2', 'Found you, Pat.')]);
+  });
+
+  test('replay: once the relay cut the text to a sent prefix, it goes on the first message and the later one stays empty', () => {
+    const msg = round([MSG('msg_1', 'One sec.'), RS('rs_1'), FC('fc_1', 'call_1'), MSG('msg_2', 'Found you, Pat.')]);
+    const sentOnly = [{ type: 'text', text: 'One sec.' }, ...msg.content.filter((b) => b.type !== 'text')];
+    const items = toResponsesInput([{ role: 'user', content: 'hi' }, { role: 'assistant', content: sentOnly }]);
+    expect(items.slice(1)).toEqual([msgIn('msg_1', 'One sec.'), rsIn('rs_1'), fcIn('fc_1', 'call_1'), msgIn('msg_2', '')]);
+  });
+
+  test('replay: a message with several output_text parts gets each part back', () => {
+    const two = { type: 'message', id: 'msg_1', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'One sec.' }, { type: 'output_text', text: 'Checking.' }] };
+    const msg = round([RS('rs_1'), two, FC('fc_1', 'call_1')]);
+    const items = toResponsesInput([{ role: 'user', content: 'hi' }, { role: 'assistant', content: msg.content }]);
+    expect(items.slice(1)).toEqual([rsIn('rs_1'), msgIn('msg_1', 'One sec.', 'Checking.'), fcIn('fc_1', 'call_1')]);
   });
 
   test.each([
@@ -564,10 +592,17 @@ describe('reasoning items across tool-call rounds', () => {
     expect(items.slice(1)).toEqual([rsIn('rs_1'), msgIn('msg_1', 'Let me check… [interrupted]'), fcIn('fc_1', 'call_1')]);
   });
 
-  test('replay: several message items put the kept text on the first and leave the rest empty', () => {
+  test('replay: several message items before the call each keep their own text', () => {
     const msg = round([MSG('msg_1', 'One sec.'), RS('rs_1'), MSG('msg_2', 'Checking.'), FC('fc_1', 'call_1')]);
     const items = toResponsesInput([{ role: 'user', content: 'hi' }, { role: 'assistant', content: msg.content }]);
-    expect(items.slice(1)).toEqual([msgIn('msg_1', 'One sec.\nChecking.'), rsIn('rs_1'), msgIn('msg_2', ''), fcIn('fc_1', 'call_1')]);
+    expect(items.slice(1)).toEqual([msgIn('msg_1', 'One sec.'), rsIn('rs_1'), msgIn('msg_2', 'Checking.'), fcIn('fc_1', 'call_1')]);
+  });
+
+  test('replay: an incomplete message keeps its status', () => {
+    const cut = { type: 'message', id: 'msg_1', role: 'assistant', status: 'incomplete', content: [{ type: 'output_text', text: 'Let me' }] };
+    const msg = round([RS('rs_1'), cut, FC('fc_1', 'call_1')]);
+    const items = toResponsesInput([{ role: 'user', content: 'hi' }, { role: 'assistant', content: msg.content }]);
+    expect(items[2]).toMatchObject({ type: 'message', id: 'msg_1', status: 'incomplete' });
   });
 
   test('replay: a round from an earlier caller turn goes back plain — no reasoning, no item ids', () => {
