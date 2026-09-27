@@ -189,7 +189,10 @@ function withTermiteBondPurchasedTerms(row, proofRow = row, selectedTerms = []) 
 }
 
 function rawRecurringServiceRows(estData = {}) {
-  const containers = [...new Set([estData.result, estData.engineResult, estData]
+  // mergeServiceRows applies later matching values over earlier ones. Keep
+  // every container for identity/term evidence, while ordering the saved
+  // result last so its current display fields outrank historical engine data.
+  const containers = [...new Set([estData, estData.engineResult, estData.result]
     .filter((value) => value && typeof value === 'object'))];
   return containers.flatMap((result) => {
     const recurring = result.recurring || {};
@@ -409,6 +412,10 @@ function mergeServiceRows(primaryRows = [], fallbackRows = [], options = {}) {
     if (primaryOmitsLegacyTerms && currentService && rowService && currentService !== rowService) {
       delete current.purchasedTerms;
     }
+    const recurringPurchasedTerms = !row.oneTime && !current.oneTime
+      && (Array.isArray(current.purchasedTerms) || Array.isArray(row.purchasedTerms))
+      ? [...new Set([...(current.purchasedTerms || []), ...(row.purchasedTerms || [])])]
+      : null;
     byLabel.set(label, {
       ...current,
       ...Object.fromEntries(Object.entries(row).filter(([key, value]) => {
@@ -418,6 +425,7 @@ function mergeServiceRows(primaryRows = [], fallbackRows = [], options = {}) {
         if (typeof value === 'number') return Number.isFinite(value) && value > 0;
         return cleanText(value);
       })),
+      ...(recurringPurchasedTerms ? { purchasedTerms: recurringPurchasedTerms } : {}),
       label,
     });
   });
@@ -464,7 +472,13 @@ function oneTimeRowsFromPricing(pricingBundle = {}, evidenceGroups = []) {
         item.quoteRequired === true ? 'Quote required' : null,
         Number.isFinite(amount) && amount > 0 ? fmtMoney(amount) : null,
       ].filter(Boolean);
-      const evidence = reconcileTrenchingWarrantyEvidence(item, [[item], ...evidenceGroups]);
+      const [currentEvidence = [], ...fallbackEvidence] = evidenceGroups;
+      // A frozen pricing projection can fill missing legacy evidence, but a
+      // current saved decision (including removal) must take precedence.
+      const evidence = reconcileTrenchingWarrantyEvidence(
+        item,
+        [currentEvidence, [item], ...fallbackEvidence],
+      );
       return {
         service: cleanText(item.service || item.serviceKey || item.service_key || item.key) || null,
         label: cleanText(item.label || item.name || item.service || 'One-time service'),

@@ -23610,9 +23610,10 @@ function matchingRawOneTimeRow(row, rawRows = []) {
 
 function withReconciledContractWarranty(row, rawRowGroups = [], target = row) {
   if (trenchingServiceIdentity(row) !== 'termite_trenching') return row;
+  const [currentGroup = { sourceItems: [] }, ...fallbackGroups] = rawRowGroups;
   const evidence = reconcileTrenchingWarrantyEvidence(
     target,
-    [[target], ...rawRowGroups.map((group) => group.sourceItems)],
+    [currentGroup.sourceItems, [target], ...fallbackGroups.map((group) => group.sourceItems)],
   );
   const reconciled = { ...row };
   delete reconciled.warrantyTier;
@@ -23696,14 +23697,19 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
             return withReconciledContractWarranty(input, rawContractRowGroups, row);
           });
           const copies = resolveOneTimeRowCopies(copyInputs, { noGuaranteeClaims });
-          return labeled.map((row, i) => (copies[i] ? {
-            ...row,
-            ...(hasPurchasedTrenchingWarranty(copyInputs[i]) ? {
-              warrantyTier: copyInputs[i].warrantyTier,
-              warrantyAdder: Number(copyInputs[i].warrantyAdder),
-            } : {}),
-            copy: copies[i],
-          } : row));
+          return labeled.map((row, i) => {
+            if (!copies[i]) return row;
+            const returned = { ...row, copy: copies[i] };
+            if (trenchingServiceIdentity(row) === 'termite_trenching') {
+              delete returned.warrantyTier;
+              delete returned.warrantyAdder;
+              if (hasPurchasedTrenchingWarranty(copyInputs[i])) {
+                returned.warrantyTier = copyInputs[i].warrantyTier;
+                returned.warrantyAdder = Number(copyInputs[i].warrantyAdder);
+              }
+            }
+            return returned;
+          });
         })(),
       },
     }

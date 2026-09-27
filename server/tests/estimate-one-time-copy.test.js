@@ -608,11 +608,14 @@ describe('server-rendered page', () => {
   test.each([
     ['included tier', { warrantyTier: 'one_year_retreat', warrantyAdder: 0 }, {}, true],
     ['paid tier', { warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }, {}, true],
-    ['explicit current none', { warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }, { warrantyTier: 'none', warrantyAdder: 0 }, false],
+    ['saved paid tier over a different frozen purchase',
+      { warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 },
+      { warrantyTier: 'one_year_retreat', warrantyAdder: 0 }, true],
+    ['saved purchase over frozen projection removal', { warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 }, { warrantyTier: 'none', warrantyAdder: 0 }, true],
     ['missing purchase evidence', { warrantyTier: 'three_year_repair_retreat' }, {}, false],
-  ])('aligned trenching rows retain the same verified warranty evidence as their resolved copy: %s', (_label, rawScope, currentScope, purchased) => {
+  ])('aligned trenching rows retain the same verified warranty evidence as their resolved copy: %s', (_label, rawScope, projectedScope, purchased) => {
     const row = { service: 'trenching', label: 'Termite Trenching', amount: 900, ...rawScope };
-    const projected = { service: row.service, label: row.label, amount: row.amount, detail: 'Measured treatment path', ...currentScope };
+    const projected = { service: row.service, label: row.label, amount: row.amount, detail: 'Measured treatment path', ...projectedScope };
     const contract = attachPublicPricingContract(
       { frequencies: [], oneTimeBreakdown: { total: 900, items: [projected] } },
       { status: 'sent', show_one_time_option: true }, authoredTermiteData(row),
@@ -671,11 +674,9 @@ describe('server-rendered page', () => {
       warrantyTier: 'none', warrantyAdder: 0 }],
     ['zero-price removal', { service: 'trenching', label: 'Updated Trenching Scope', price: 0,
       warrantyTier: 'none', warrantyAdder: 0 }],
-  ])('projected copy honors current %s over older raw warranty proof', (_name, current) => {
+  ])('fully populated frozen projection honors current %s over older raw warranty proof', (_name, current) => {
     const projected = { service: 'trenching', label: 'Termite Trenching', amount: 900,
-      ...(current.warrantyTier && current.warrantyTier !== 'none'
-        ? { warrantyTier: current.warrantyTier }
-        : {}) };
+      warrantyTier: 'one_year_retreat', warrantyAdder: 0 };
     const raw = { service: 'trenching', label: 'Termite Trenching', price: 900,
       warrantyTier: 'one_year_retreat', warrantyAdder: 0 };
     const contract = attachPublicPricingContract(
