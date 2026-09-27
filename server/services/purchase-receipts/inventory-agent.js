@@ -156,6 +156,56 @@ function canonicalSizeText(number, unit) {
  *     "2ct", …), holds the line the same way it holds the deterministic
  *     lane.
  */
+// A title stating two different sizes of one kind ("1 gal … 2.5 gal", "12
+// Count … 2 Count") is ambiguous, as it is for amountPerItem: the reading may
+// not pick one. A restatement ("1 Gallon (128 fl oz)") agrees after
+// conversion, and a size of another kind (a count beside a weight) doesn't
+// convert, so neither conflicts.
+function hasConflictingClaim(claims, matchedClaim) {
+  return claims.some((c) => {
+    if (c === matchedClaim) return false;
+    const converted = convertInventoryQuantity(c.value, c.unit, matchedClaim.unit);
+    return converted != null && !sizesAgree(converted, matchedClaim.value);
+  });
+}
+
+// Plural containers with no pack marker ("4 tubes / 30 g") mean several
+// containers in a form this lane doesn't count, as amountPerItem holds them.
+// A count size is exempt: in "25 cartridges" the plural IS the counted item,
+// not a second quantity.
+function hasPluralContainerWithoutMarker({ multipack, matchedClaim, leftover }) {
+  if (multipack || matchedClaim.unit === 'each') return false;
+  return PLURAL_CONTAINER_RE.test(leftover) || PLURAL_COUNT_NOUN_RE.test(leftover);
+}
+
+// A weight or volume reading may not skip an item count the title states:
+// "Mosquito Dunks 6 Dunks 1.3 oz each" is six items, and reading 1.3 oz would
+// undercount it sixfold. Only a count reading ("6 each") can use it.
+function hasUnconsumedItemCount({ claims, matchedClaim }) {
+  return matchedClaim.unit !== 'each' && claims.some((c) => c.unit === 'each' && c.value > 1);
+}
+
+// Ordered rejection rules, checked in the same order the original if-chain
+// used, so the first one a reading would have failed before still fails it
+// first, with the same reason. Each rule is one clear predicate over the
+// context staged below; `matchedClaim` is guaranteed present by the time any
+// rule past 'size_not_a_full_title_claim' runs, since `.find` stops there.
+const READING_RULES = [
+  { reason: 'pack_count_mismatch', fails: (c) => Boolean(c.multipack) && c.packCount !== c.multipack.count },
+  { reason: 'pack_count_without_marker', fails: (c) => !c.multipack && c.packCount !== 1 },
+  { reason: 'size_not_a_full_title_claim', fails: (c) => !c.matchedClaim },
+  { reason: 'conflicting_size_claims', fails: (c) => hasConflictingClaim(c.claims, c.matchedClaim) },
+  // Whatever remains once the pack marker AND the matched size claim's own
+  // text are both gone must carry no OTHER pack/count wording — a second
+  // marker (e.g. "2 x 78 oz (Pack of 2)"), an unreadable count ("Twin
+  // Pack"), or a UOM other than each all land here, exactly mirroring
+  // amountPerItem's own ambiguity guard.
+  { reason: 'leftover_pack_wording', fails: (c) => PACK_CLAIM_RE.test(c.leftover) },
+  { reason: 'plural_containers_without_pack_marker', fails: (c) => hasPluralContainerWithoutMarker(c) },
+  { reason: 'item_count_not_consumed', fails: (c) => hasUnconsumedItemCount(c) },
+  { reason: 'bad_line_quantity', fails: (c) => !Number.isFinite(c.lineQty) || c.lineQty <= 0 },
+];
+
 function validateReading(reading, { rawTitle, lineQuantity }) {
   if (!reading || typeof reading !== 'object') return { ok: false, reason: 'no_reading' };
   const title = String(rawTitle || '');
@@ -169,56 +219,21 @@ function validateReading(reading, { rawTitle, lineQuantity }) {
   const packCount = Number(reading.pack_count);
   if (!Number.isInteger(packCount) || packCount < 1 || packCount > 100) return { ok: false, reason: 'pack_count_range' };
 
-  // parseMultipack is the SAME function (not a re-implementation) that
-  // decides a pack multiplier for the deterministic lane — "12 Count" never
-  // matches it (no MULTIPACK_PATTERNS entry looks for a bare count noun),
-  // so a genuine count SIZE is never mistaken for a pack marker here.
+  // Everything the rules below need, derived ONCE. parseMultipack is the
+  // SAME function (not a re-implementation) that decides a pack multiplier
+  // for the deterministic lane — "12 Count" never matches it (no
+  // MULTIPACK_PATTERNS entry looks for a bare count noun), so a genuine
+  // count SIZE is never mistaken for a pack marker here.
   const multipack = parseMultipack(title);
-  if (multipack) {
-    if (packCount !== multipack.count) return { ok: false, reason: 'pack_count_mismatch' };
-  } else if (packCount !== 1) {
-    return { ok: false, reason: 'pack_count_without_marker' };
-  }
   const afterMultipack = multipack ? multipack.rest : title;
-
   const claims = parsedSizeClaims(afterMultipack);
   const matchedClaim = claims.find((c) => c.unit === claimedUnit && sizesAgree(c.value, claimedNumber));
-  if (!matchedClaim) return { ok: false, reason: 'size_not_a_full_title_claim' };
-  // A title that states two different sizes of one kind ("1 gal … 2.5 gal",
-  // "12 Count … 2 Count") is ambiguous, as it is for amountPerItem: the
-  // reading may not pick one. A restatement ("1 Gallon (128 fl oz)") agrees
-  // after conversion, and a size of another kind (a count beside a weight)
-  // doesn't convert, so neither conflicts.
-  const conflictingClaim = claims.some((c) => {
-    if (c === matchedClaim) return false;
-    const converted = convertInventoryQuantity(c.value, c.unit, matchedClaim.unit);
-    return converted != null && !sizesAgree(converted, matchedClaim.value);
-  });
-  if (conflictingClaim) return { ok: false, reason: 'conflicting_size_claims' };
-
-  // Whatever remains once the pack marker AND the matched size claim's own
-  // text are both gone must carry no OTHER pack/count wording — a second
-  // marker (e.g. "2 x 78 oz (Pack of 2)"), an unreadable count ("Twin
-  // Pack"), or a UOM other than each all land here, exactly mirroring
-  // amountPerItem's own ambiguity guard.
-  const leftover = stripFirstOccurrence(afterMultipack, matchedClaim.matchText);
-  if (PACK_CLAIM_RE.test(leftover)) return { ok: false, reason: 'leftover_pack_wording' };
-  // Plural containers with no pack marker ("4 tubes / 30 g") mean several
-  // containers in a form this lane doesn't count, as amountPerItem holds
-  // them. A count size is exempt: in "25 cartridges" the plural IS the
-  // counted item, not a second quantity.
-  if (!multipack && matchedClaim.unit !== 'each' && (PLURAL_CONTAINER_RE.test(leftover) || PLURAL_COUNT_NOUN_RE.test(leftover))) {
-    return { ok: false, reason: 'plural_containers_without_pack_marker' };
-  }
-  // A weight or volume reading may not skip an item count the title states:
-  // "Mosquito Dunks 6 Dunks 1.3 oz each" is six items, and reading 1.3 oz
-  // would undercount it sixfold. Only a count reading ("6 each") can use it.
-  if (matchedClaim.unit !== 'each' && claims.some((c) => c.unit === 'each' && c.value > 1)) {
-    return { ok: false, reason: 'item_count_not_consumed' };
-  }
-
+  const leftover = matchedClaim ? stripFirstOccurrence(afterMultipack, matchedClaim.matchText) : afterMultipack;
   const lineQty = Number(lineQuantity);
-  if (!Number.isFinite(lineQty) || lineQty <= 0) return { ok: false, reason: 'bad_line_quantity' };
+
+  const ctx = { multipack, packCount, claims, matchedClaim, leftover, lineQty };
+  const failed = READING_RULES.find((rule) => rule.fails(ctx));
+  if (failed) return { ok: false, reason: failed.reason };
 
   return { ok: true, sizeNumber: matchedClaim.value, unit: matchedClaim.unit, packCount, amount: round4(lineQty * packCount * matchedClaim.value) };
 }
@@ -268,74 +283,99 @@ function collidesWithActiveProduct(proposedName, rawTitle, activeProducts) {
   });
 }
 
+function unsureResult(reason) {
+  return { kind: 'unsure', status: 'agent_unsure', reason };
+}
+
+// The candidate's container_size normalized to ONE shape, so
+// validateExisting runs a single agreement path over it instead of separate
+// measured/count/missing branches that could drift apart.
+//   'measured'   — a parseable size ("78 fl oz"): amount/unit are the
+//                  container's own amount/unit.
+//   'count'      — a parseable count ("12 count"): amount/unit are the
+//                  container's own count/unit.
+//   'missing'    — genuinely blank; this line's own reading may set it.
+//   'unreadable' — non-blank but neither parser can read it ("case of 4").
+function normalizeCandidateContainer(candidate) {
+  const container = parsePackSize(candidate.container_size);
+  if (container) return { kind: 'measured', amount: container.amount, unit: container.unit };
+  const countContainer = parsePackCount(candidate.container_size);
+  if (countContainer) return { kind: 'count', amount: countContainer.count, unit: countContainer.unit };
+  if (candidate.container_size && String(candidate.container_size).trim()) return { kind: 'unreadable' };
+  return { kind: 'missing' };
+}
+
+// ONE agreement path for a readable container (measured or count) — the
+// shape says which unit space to agree in and whether the match must be
+// exact (a count is either right or it's the wrong number of items; a
+// measured size keeps sizesAgree's normal rounding/labeling slack).
+function agreeAgainstContainer(candidate, reading, lineQuantity, rawReading, shape) {
+  const isCount = shape.kind === 'count';
+  if (isCount !== (reading.unit === 'each')) {
+    return unsureResult(isCount
+      ? 'the catalog container is a count; the title reads a measured size'
+      : 'the title reads a count; the catalog container is a measured size');
+  }
+  // "12 boxes" or "3 packs" counts containers, not single items; there is no
+  // known box-to-item conversion (order-dispatch applies the same rule).
+  if (isCount && !countUnitsCompatible('each', shape.unit)) {
+    return unsureResult(`the catalog container counts ${shape.unit}, not single items`);
+  }
+  if (isCount && candidate.inventory_unit && normalizeInventoryUnit(candidate.inventory_unit) !== 'each') {
+    return unsureResult('a count product must track in each');
+  }
+  const sizeInContainerUnit = isCount ? reading.sizeNumber : convertInventoryQuantity(reading.sizeNumber, reading.unit, shape.unit);
+  if (sizeInContainerUnit == null) return unsureResult('the title size does not convert to the container unit');
+  const perItem = containerAgreement(sizeInContainerUnit, reading.packCount, shape.amount, { exact: isCount });
+  if (perItem == null) {
+    return unsureResult(isCount ? "the title count disagrees with the catalog's container count" : "the title size disagrees with the catalog's container size");
+  }
+  const amount = round4(lineQuantity * perItem);
+  const unit = isCount ? 'each' : shape.unit;
+  if (!isCount) {
+    const target = candidate.inventory_unit || shape.unit;
+    if (convertInventoryQuantity(amount, shape.unit, target) == null) return unsureResult('the amount does not convert to the product inventory unit');
+  }
+  return { kind: 'existing', status: 'logged', product: candidate, amount, unit, setContainerSize: null, reading: rawReading };
+}
+
+// No readable container_size at all (never overwrite one that IS readable,
+// measured or count — only this branch may set one).
+function agreeAgainstBlankContainer(candidate, reading, lineQuantity, rawReading) {
+  if (reading.packCount !== 1) return unsureResult('no catalog container size to check a multi-pack title against');
+  const amount = round4(lineQuantity * reading.sizeNumber);
+  return {
+    kind: 'existing', status: 'logged', product: candidate, amount, unit: reading.unit,
+    setContainerSize: canonicalSizeText(reading.sizeNumber, reading.unit), reading: rawReading,
+  };
+}
+
 // A validated 'existing' decision, or 'agent_unsure' with why.
 function validateExisting(raw, ctx) {
   const { candidates, rawTitle, lineQuantity, matchedProductId } = ctx;
   const candidate = candidates.find((c) => c.id === raw.product_id);
-  if (!candidate) return { kind: 'unsure', status: 'agent_unsure', reason: 'proposed product is not one of the candidates offered' };
+  if (!candidate) return unsureResult('proposed product is not one of the candidates offered');
 
   // The deterministic matcher already named this exact product (an exact
   // alias or whole-word name match — that's what put the line in
   // needs_size/size_mismatch in the first place): the agent may only
   // confirm THAT product, never substitute a different one it prefers.
   if (matchedProductId && candidate.id !== matchedProductId) {
-    return { kind: 'unsure', status: 'agent_unsure', reason: 'the agent picked a different product than the catalog match' };
+    return unsureResult('the agent picked a different product than the catalog match');
   }
 
   const reading = validateReading(raw.reading, { rawTitle, lineQuantity });
-  if (!reading.ok) return { kind: 'unsure', status: 'agent_unsure', reason: `reading did not check out (${reading.reason})` };
+  if (!reading.ok) return unsureResult(`reading did not check out (${reading.reason})`);
 
-  const container = parsePackSize(candidate.container_size);
-  const countContainer = !container ? parsePackCount(candidate.container_size) : null;
-
-  if (container) {
-    if (reading.unit === 'each') return { kind: 'unsure', status: 'agent_unsure', reason: 'the title reads a count; the catalog container is a measured size' };
-    const sizeInContainerUnit = convertInventoryQuantity(reading.sizeNumber, reading.unit, container.unit);
-    if (sizeInContainerUnit == null) return { kind: 'unsure', status: 'agent_unsure', reason: 'the title size does not convert to the container unit' };
-    const perItem = containerAgreement(sizeInContainerUnit, reading.packCount, container.amount);
-    if (perItem == null) return { kind: 'unsure', status: 'agent_unsure', reason: "the title size disagrees with the catalog's container size" };
-    const amount = round4(lineQuantity * perItem);
-    const target = candidate.inventory_unit || container.unit;
-    if (convertInventoryQuantity(amount, container.unit, target) == null) {
-      return { kind: 'unsure', status: 'agent_unsure', reason: 'the amount does not convert to the product inventory unit' };
-    }
-    return { kind: 'existing', status: 'logged', product: candidate, amount, unit: container.unit, setContainerSize: null, reading: raw.reading };
-  }
-
-  if (countContainer) {
-    if (reading.unit !== 'each') return { kind: 'unsure', status: 'agent_unsure', reason: 'the catalog container is a count; the title reads a measured size' };
-    // "12 boxes" or "3 packs" counts containers, not single items; there is
-    // no known box-to-item conversion (order-dispatch applies the same rule).
-    if (!countUnitsCompatible('each', countContainer.unit)) {
-      return { kind: 'unsure', status: 'agent_unsure', reason: `the catalog container counts ${countContainer.unit}, not single items` };
-    }
-    if (candidate.inventory_unit && normalizeInventoryUnit(candidate.inventory_unit) !== 'each') {
-      return { kind: 'unsure', status: 'agent_unsure', reason: 'a count product must track in each' };
-    }
-    const perItem = containerAgreement(reading.sizeNumber, reading.packCount, countContainer.count, { exact: true });
-    if (perItem == null) return { kind: 'unsure', status: 'agent_unsure', reason: "the title count disagrees with the catalog's container count" };
-    return { kind: 'existing', status: 'logged', product: candidate, amount: round4(lineQuantity * perItem), unit: 'each', setContainerSize: null, reading: raw.reading };
-  }
-
+  const shape = normalizeCandidateContainer(candidate);
   // A non-empty container_size that neither parsePackSize nor parsePackCount
   // can read ("case of 4") is NOT a missing container — only a genuinely
-  // blank field may be set by this line's own reading (setContainerSize
-  // below). An unreadable value holds for a person instead: the catalog
-  // container might disagree with the title, and there's no way to check.
-  if (candidate.container_size && String(candidate.container_size).trim()) {
-    return { kind: 'unsure', status: 'agent_unsure', reason: "the catalog container size can't be read" };
-  }
-
-  // No readable container_size at all (never overwrite one that IS
-  // readable, measured or count — only this branch may set one).
-  if (reading.packCount !== 1) {
-    return { kind: 'unsure', status: 'agent_unsure', reason: 'no catalog container size to check a multi-pack title against' };
-  }
-  const amount = round4(lineQuantity * reading.sizeNumber);
-  return {
-    kind: 'existing', status: 'logged', product: candidate, amount, unit: reading.unit,
-    setContainerSize: canonicalSizeText(reading.sizeNumber, reading.unit), reading: raw.reading,
-  };
+  // blank field may be set by this line's own reading. An unreadable value
+  // holds for a person instead: the catalog container might disagree with
+  // the title, and there's no way to check.
+  if (shape.kind === 'unreadable') return unsureResult("the catalog container size can't be read");
+  if (shape.kind === 'missing') return agreeAgainstBlankContainer(candidate, reading, lineQuantity, raw.reading);
+  return agreeAgainstContainer(candidate, reading, lineQuantity, raw.reading, shape);
 }
 
 // A validated 'new_product' decision, or 'agent_unsure' with why.
@@ -613,257 +653,305 @@ async function ringBell(notifyAdmin, { lineId, emailId, status, title, body, trx
   });
 }
 
+// PHASE 1 — a terminal kind (not_stock/equipment/unsure) that never touches
+// the catalog: writes the line's final status, rings the bell the status
+// calls for (equipment/unsure only — not_stock/agent_ignored rings nothing,
+// matching the deterministic lane's own unmatched status), and returns the
+// outcome. null when there's nothing terminal to settle (existing/
+// new_product) — the caller resolves a product instead.
+async function settleTerminalKind(trx, { lineId, line, email, decision }, notifyAdmin) {
+  if (decision.kind !== 'not_stock' && decision.kind !== 'equipment' && decision.kind !== 'unsure') return null;
+  await trx('purchase_receipt_lines').where({ id: lineId }).update({
+    status: decision.status, agent_decision: decisionRecord(decision), agent_decided_at: new Date(),
+  });
+  if (decision.status === 'agent_equipment') {
+    await ringBell(notifyAdmin, {
+      lineId, emailId: email.id, status: decision.status, title: 'Inventory agent: equipment, not stock',
+      body: `"${line.raw_title}" wasn't added: looks like equipment, not stock — add it to the equipment list if you're keeping it.`, trx,
+    });
+  } else if (decision.status === 'agent_unsure') {
+    await ringBell(notifyAdmin, {
+      lineId, emailId: email.id, status: decision.status, title: 'Inventory agent: not added',
+      body: `"${line.raw_title}" wasn't added: ${decision.reason}. Log it by hand if it's stock.`, trx,
+    });
+  }
+  return { applied: true, status: decision.status };
+}
+
+// A count decision ('each' — a count container, or a bare count title
+// against a container_size this line is about to set) into a product whose
+// default_unit is still the admin-insert default ('oz') or genuinely unset:
+// adjustStock is about to initialize inventory_unit to 'each', but nothing
+// ever touches default_unit, so a later visit applies product in an ounce
+// rate that can't convert to the count now on the shelf — deduction is
+// silently skipped. Fixed here, in the same transaction, the FIRST time only
+// (no usage recorded yet); a product already carrying movements under an
+// incompatible default_unit holds for a person (writing the line + bell
+// itself) instead of silently reinterpreting it. Returns 'fixed' / 'unchanged'
+// / 'incompatible' — the caller folds 'fixed' into its own catalogChangeNote.
+async function fixCountDefaultUnit(trx, { line, productId, product, decision }, notifyAdmin) {
+  const defaultUnit = String(product.default_unit || '').trim();
+  const looksUnset = !defaultUnit || normalizeInventoryUnit(defaultUnit) === 'oz';
+  const hasAnyMovement = await trx('product_inventory_movements').where({ product_id: productId }).first('id');
+  if (looksUnset && !hasAnyMovement) {
+    await trx('products_catalog').where({ id: productId }).update({ default_unit: 'each', updated_at: new Date() });
+    return 'fixed';
+  }
+  if (convertInventoryQuantity(1, defaultUnit, 'each') == null) {
+    await trx('purchase_receipt_lines').where({ id: line.id }).update({
+      status: 'agent_unsure',
+      agent_decision: { ...decisionRecord(decision, {}), reason: 'application_unit_incompatible_with_count' },
+      agent_decided_at: new Date(),
+    });
+    await ringBell(notifyAdmin, {
+      lineId: line.id, emailId: line.email_id, status: 'agent_unsure', title: 'Inventory agent: not added',
+      body: `"${line.raw_title}" wasn't added: its application unit can't take a count; fix the product first.`, trx,
+    });
+    return 'incompatible';
+  }
+  return 'unchanged';
+}
+
+// Every candidate field the prompt showed the model (candidateLine: name,
+// category, container_size, inventory_unit) must still read exactly as it
+// did when the decision was validated — an admin rename, recategorization or
+// container/unit edit landing under this same lock is the catalog moving
+// under the decision, and re-deciding against stale text is worse than
+// spending an attempt and re-running against the current state.
+const CANDIDATE_FIELDS = ['name', 'category', 'container_size', 'inventory_unit'];
+function candidateDrifted(product, decisionProduct) {
+  return CANDIDATE_FIELDS.some((field) => (product[field] || null) !== (decisionProduct[field] || null));
+}
+
+// PHASE 2a — resolves an 'existing' decision to its locked product, or a
+// retry/unsure outcome. See resolveTargetProduct for the return contract.
+async function resolveExistingProduct(trx, { line, decision }, notifyAdmin) {
+  const productId = decision.product.id;
+  const product = await trx('products_catalog').where({ id: productId }).forUpdate().first();
+  // 'active' is one of the fields the prompt's candidate line carried
+  // (candidateProducts only offers active rows) — a product deactivated
+  // between the LLM call and this transaction is exactly the same kind of
+  // drift the other fields below catch, just with its own reason.
+  if (!product || !product.active) return { ok: false, outcome: { applied: false, reason: 'product_no_longer_active' } };
+  if (candidateDrifted(product, decision.product)) return { ok: false, outcome: { applied: false, reason: 'product_changed' } };
+  // The pre-write snapshot for the undo CLI — before setContainerSize, the
+  // default_unit fix below, or adjustStock touch anything. inventory_on_hand
+  // is kept exactly as read (null stays null, not 0) so an untracked
+  // product's undo restores it to untracked, not zero.
+  const originalProductFields = {
+    containerSize: product.container_size ?? null,
+    inventoryUnit: product.inventory_unit ?? null,
+    inventoryOnHand: product.inventory_on_hand,
+    defaultUnit: product.default_unit ?? null,
+  };
+  let catalogChangeNote = null;
+  if (decision.setContainerSize && !product.container_size) {
+    await trx('products_catalog').where({ id: productId }).update({ container_size: decision.setContainerSize, updated_at: new Date() });
+    catalogChangeNote = `set ${product.name}'s container size to ${decision.setContainerSize}`;
+  }
+  if (decision.unit === 'each') {
+    const fixOutcome = await fixCountDefaultUnit(trx, { line, productId, product, decision }, notifyAdmin);
+    if (fixOutcome === 'incompatible') return { ok: false, outcome: { applied: true, status: 'agent_unsure' } };
+    if (fixOutcome === 'fixed') {
+      catalogChangeNote = catalogChangeNote ? `${catalogChangeNote}; set its application unit to each` : `set ${product.name}'s application unit to each`;
+    }
+  }
+  return { ok: true, productId, createdProductId: null, catalogChangeNote, originalProductFields };
+}
+
+// PHASE 2b — resolves a 'new_product' decision by creating it, or a retry
+// outcome on a name collision. See resolveTargetProduct for the contract.
+async function resolveNewProduct(trx, { line, vendor, decision }) {
+  // createCatalogProduct serializes every catalog insert (this agent and the
+  // admin screen alike), and the guard re-checks the collision against the
+  // CURRENT active catalog under that lock, not the possibly stale list the
+  // decision was validated against. A hit is never a hard failure: the line
+  // stays pending, and the next run sees the now-existing product as a
+  // candidate and very likely resolves to 'existing'.
+  const created = await inventoryOperations.createCatalogProduct({
+    name: decision.newProduct.name,
+    category: decision.newProduct.category,
+    activeIngredient: decision.newProduct.activeIngredient || undefined,
+    epaRegNumber: decision.newProduct.epaRegNumber || undefined,
+    unitSize: decision.newProduct.containerSize,
+    inventoryUnit: decision.newProduct.inventoryUnit,
+    // The application unit matches the stock unit, so a visit recording
+    // usage ("each" for traps and stations) converts and deducts; the admin
+    // insert's default 'oz' can't convert to 'each'.
+    defaultUnit: decision.newProduct.inventoryUnit,
+    bestVendor: VENDOR_BEST[vendor] || null,
+    autoReorderEnabled: false,
+  }, {
+    trx,
+    source: 'inventory_agent_create',
+    // Checked under createCatalogProduct's catalog lock, which the admin
+    // "add product" screen takes too, so a product added a moment ago by
+    // hand or by another run is seen here.
+    guard: async (lockedTrx) => collidesWithActiveProduct(decision.newProduct.name, line.raw_title,
+      await lockedTrx('products_catalog').where({ active: true }).select('id', 'name')),
+  });
+  if (!created) return { ok: false, outcome: { applied: false, reason: 'name_collision_retry' } };
+  return {
+    ok: true, productId: created.id, createdProductId: created.id,
+    catalogChangeNote: `added "${created.name}" to the catalog`, originalProductFields: null,
+  };
+}
+
+// PHASE 2 — resolves 'existing'/'new_product' to one concrete, LOCKED
+// product id. Returns { ok:true, productId, createdProductId,
+// catalogChangeNote, originalProductFields } to continue, or { ok:false,
+// outcome } — the transaction's own return value — for a retry
+// (product_no_longer_active / product_changed / name_collision_retry, all
+// { applied:false }) or an unsure line already written+bell'd
+// (application_unit_incompatible_with_count, { applied:true }).
+async function resolveTargetProduct(trx, { line, vendor, decision }, notifyAdmin) {
+  if (decision.kind === 'existing') return resolveExistingProduct(trx, { line, decision }, notifyAdmin);
+  return resolveNewProduct(trx, { line, vendor, decision });
+}
+
+// PHASE 3 — an exact-title alias, only for a line that started with no
+// matched product at all, and only once resolution above succeeded (a
+// size-less title never becomes an agent alias — classifyItem treats an
+// alias as owner-vetted for a size-less title).
+async function createAgentAlias(trx, { line, productId }) {
+  if (line.product_id) return null;
+  const existingAlias = await trx('product_aliases').whereRaw('LOWER(alias_name) = LOWER(?)', [line.raw_title]).first('id');
+  if (existingAlias) return null;
+  const [alias] = await trx('product_aliases').insert({ product_id: productId, alias_name: line.raw_title, vendor_id: null }).returning('*');
+  return alias.id;
+}
+
+// PHASE 4 — the deterministic matcher must resolve THIS title to the SAME
+// product under this transaction's own catalog change (a correcting alias, a
+// new product, a now-ambiguous match landing meanwhile throws, rolling
+// everything back — the line stays pending and the failure counts toward
+// the 3-attempt hand-off); then the duplicate-movement guard and the
+// post-change amount-agreement check, each a normal outcome (not a retry)
+// that writes the line + bell itself. null to proceed to phase 5.
+async function checkIdentityAndDuplicate(trx, { line, lineId, email, decision, productId, createdProductId, createdAliasId }, notifyAdmin) {
+  const reclassified = await classifyItem({ title: line.raw_title, quantity: Number(line.quantity) }, trx);
+  if (reclassified.productId !== productId) {
+    throw new Error(`the catalog now resolves "${line.raw_title}" to ${reclassified.productId ? 'a different product' : 'no single product'}`);
+  }
+
+  if (await findPossibleDuplicateMovement(trx, productId, email.received_at)) {
+    await trx('purchase_receipt_lines').where({ id: lineId }).update({
+      status: 'possible_duplicate', product_id: productId, received_qty: decision.amount, received_unit: decision.unit,
+      agent_decision: decisionRecord(decision, { createdProductId, createdAliasId }), agent_decided_at: new Date(),
+      agent_created_product_id: createdProductId, agent_created_alias_id: createdAliasId,
+    });
+    await ringBell(notifyAdmin, {
+      lineId, emailId: email.id, status: 'possible_duplicate', title: 'Inventory agent: possible duplicate',
+      body: `"${line.raw_title}" wasn't added. A manual restock or count was logged around the same time, so check the count.`, trx,
+    });
+    return { applied: true, status: 'possible_duplicate' };
+  }
+
+  // A catalog change just made (container size set, or a brand-new product)
+  // can flip this SAME title to deterministically 'logged' next sweep via
+  // classifyItem — if it already would, its own amount must agree with what
+  // was just validated, or something is inconsistent and this holds for a
+  // person rather than trusting either read blindly.
+  if (reclassified.status === 'logged' && !sizesAgreeAcrossUnits(reclassified.receivedQty, reclassified.receivedUnit, decision.amount, decision.unit)) {
+    await trx('purchase_receipt_lines').where({ id: lineId }).update({
+      status: 'agent_unsure',
+      agent_decision: { ...decisionRecord(decision, { createdProductId, createdAliasId }), reclassifyDisagreed: true },
+      agent_decided_at: new Date(),
+    });
+    await ringBell(notifyAdmin, {
+      lineId, emailId: email.id, status: 'agent_unsure', title: 'Inventory agent: not added',
+      body: `"${line.raw_title}" wasn't added: the catalog read disagreed with the agent's own amount after its change. Log it by hand if it's stock.`, trx,
+    });
+    return { applied: true, status: 'agent_unsure' };
+  }
+  return null;
+}
+
+// PHASE 5 — the stock write itself (adjustStock, restock), the row-hash
+// fingerprint the undo CLI checks against, the line's own final 'logged'
+// write, and the success bell — all still inside the ONE transaction the
+// caller opened.
+async function commitStockMovement(trx, { line, lineId, vendor, email, decision, productId, createdProductId, createdAliasId, catalogChangeNote, originalProductFields }, notifyAdmin) {
+  const result = await inventoryOperations.adjustStock(productId, { movementType: 'restock', quantity: decision.amount, unit: decision.unit }, {
+    source: SOURCES[vendor],
+    extraMetadata: { inventoryAgent: true, orderNumber: line.order_number, emailId: email.id, rawTitle: line.raw_title, reading: decision.reading || null },
+    trx,
+  });
+  // A content fingerprint of the WHOLE product row right after this write,
+  // taken under the product lock. updated_at is NOT bumped by every writer
+  // (import enrichment, best-price recalculation), so it can't be trusted as
+  // a change marker — a hash of the row itself catches anything. The undo
+  // CLI reverses only while the row still hashes to this exact value: any
+  // later stock write (count, usage, restock) or field edit changes it, and
+  // movement timestamps can't order that (created_at is the transaction's
+  // start, not the moment its write landed).
+  const { row_hash: productRowHash } = await trx('products_catalog').where({ id: productId })
+    .first(trx.raw('md5(row_to_json(products_catalog.*)::text) as row_hash'));
+
+  await trx('purchase_receipt_lines').where({ id: lineId }).update({
+    status: 'logged', product_id: productId, received_qty: decision.amount, received_unit: decision.unit, movement_id: result.movement.id,
+    agent_decision: decisionRecord(decision, { createdProductId, createdAliasId, productRowHash, originalProductFields }), agent_decided_at: new Date(),
+    agent_created_product_id: createdProductId, agent_created_alias_id: createdAliasId,
+  });
+
+  // Read-only, as in the deterministic lane: a live restock request may
+  // cover this delivery, and receiving it would count the stock twice.
+  const liveRequest = await trx('product_restock_requests')
+    .where({ product_id: productId }).whereIn('status', LIVE_RESTOCK_STATUSES).first('id');
+  const { openRestockRequestNote } = require('./sweep');
+  await ringBell(notifyAdmin, {
+    lineId, emailId: email.id, status: 'logged', title: 'Inventory agent logged a purchase',
+    body: `${result.product.name} +${decision.amount} ${displayUnit(decision.unit)}`
+      + `${catalogChangeNote ? ` — ${catalogChangeNote}` : ''} (line ${String(lineId).slice(0, 8)}).`
+      + `${liveRequest ? ` ${openRestockRequestNote(result.product.name)}` : ''}`,
+    trx,
+  });
+  return { applied: true, status: 'logged' };
+}
+
+// Shipment-handoff short-circuit: a later email for this shipment may have
+// handed it to a person (no items, no order number, never delivered,
+// unreadable) while this line waited. Never add stock on top of that
+// instruction; the person already has that bell, so this line closes
+// quietly. Returns the outcome, or null to continue.
+async function settleIfShipmentHandedOff(trx, { lineId, vendor, shipmentKey, email, decision }) {
+  if (!(await shipmentHandedOff(trx, vendor, shipmentKey, email.id))) return null;
+  await trx('purchase_receipt_lines').where({ id: lineId }).update({
+    status: 'skipped', agent_decision: { ...decisionRecord(decision), reason: 'shipment_handed_to_person' }, agent_decided_at: new Date(),
+  });
+  return { applied: true, status: 'skipped' };
+}
+
 // One purchase_receipt_lines row, one transaction: lock + re-read (skip if
 // no longer agent_pending), lock the shipment, apply the decision, write
 // the bell on the SAME transaction (a bell that can't be saved rolls the
-// whole thing back, same discipline as processReceiptLine).
+// whole thing back, same discipline as processReceiptLine). The five phases
+// (terminal-kind settle; resolve the target product; alias; matcher identity
+// + duplicate guard; stock movement + line update + bell) are each their own
+// function above — this callback is just their sequence, every one still
+// running against the SAME `trx`, so rollback semantics are unchanged.
 async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decision }, notifyAdmin) {
   return conn.transaction(async (trx) => {
     const line = await trx('purchase_receipt_lines').where({ id: lineId }).forUpdate().first();
     if (!line || line.status !== 'agent_pending') return { applied: false, reason: 'no_longer_pending' };
     await lockShipment(trx, vendor, shipmentKey);
-    // A later email for this shipment may have handed it to a person (no
-    // items, no order number, never delivered, unreadable) while this line
-    // waited. Never add stock on top of that instruction; the person already
-    // has that bell, so this line closes quietly.
-    if (await shipmentHandedOff(trx, vendor, shipmentKey, email.id)) {
-      await trx('purchase_receipt_lines').where({ id: lineId }).update({
-        status: 'skipped', agent_decision: { ...decisionRecord(decision), reason: 'shipment_handed_to_person' }, agent_decided_at: new Date(),
-      });
-      return { applied: true, status: 'skipped' };
-    }
 
-    if (decision.kind === 'not_stock' || decision.kind === 'equipment' || decision.kind === 'unsure') {
-      await trx('purchase_receipt_lines').where({ id: lineId }).update({
-        status: decision.status, agent_decision: decisionRecord(decision), agent_decided_at: new Date(),
-      });
-      if (decision.status === 'agent_equipment') {
-        await ringBell(notifyAdmin, {
-          lineId, emailId: email.id, status: decision.status, title: 'Inventory agent: equipment, not stock',
-          body: `"${line.raw_title}" wasn't added: looks like equipment, not stock — add it to the equipment list if you're keeping it.`, trx,
-        });
-      } else if (decision.status === 'agent_unsure') {
-        await ringBell(notifyAdmin, {
-          lineId, emailId: email.id, status: decision.status, title: 'Inventory agent: not added',
-          body: `"${line.raw_title}" wasn't added: ${decision.reason}. Log it by hand if it's stock.`, trx,
-        });
-      }
-      // agent_ignored (not_stock): no bell, matching the deterministic
-      // lane's own unmatched status.
-      return { applied: true, status: decision.status };
-    }
+    const handedOff = await settleIfShipmentHandedOff(trx, { lineId, vendor, shipmentKey, email, decision });
+    if (handedOff) return handedOff;
 
-    // 'existing' / 'new_product' — resolve to one concrete, locked product.
-    let productId;
-    let createdProductId = null;
-    let catalogChangeNote = null;
-    // The original values of every field THIS decision may change on an
-    // EXISTING product (container_size via setContainerSize, inventory_unit
-    // and inventory_on_hand via adjustStock, default_unit via the count fix
-    // below) — captured before any of this transaction's own writes, so the
-    // undo CLI can restore them exactly rather than only posting a
-    // compensating movement. null for new_product: undo deactivates the
-    // whole row instead of restoring fields on it.
-    let originalProductFields = null;
+    const terminal = await settleTerminalKind(trx, { lineId, line, email, decision }, notifyAdmin);
+    if (terminal) return terminal;
 
-    if (decision.kind === 'existing') {
-      productId = decision.product.id;
-      const product = await trx('products_catalog').where({ id: productId }).forUpdate().first();
-      // 'active' is one of the fields the prompt's candidate line carried
-      // (candidateProducts only offers active rows) — a product deactivated
-      // between the LLM call and this transaction is exactly the same kind
-      // of drift the other fields below catch, just with its own reason.
-      if (!product || !product.active) return { applied: false, reason: 'product_no_longer_active' };
-      // Every OTHER candidate field the prompt showed the model
-      // (candidateLine: name, category, container_size, inventory_unit)
-      // must still read exactly as it did when the decision was validated —
-      // an admin rename, recategorization or container/unit edit landing
-      // under this same lock is the catalog moving under the decision, and
-      // re-deciding against stale text (a name that no longer matches, an
-      // agreement check against a size that isn't there anymore) is worse
-      // than spending an attempt and re-running against the current state.
-      if ((product.name || null) !== (decision.product.name || null)
-        || (product.category || null) !== (decision.product.category || null)
-        || (product.container_size || null) !== (decision.product.container_size || null)
-        || (product.inventory_unit || null) !== (decision.product.inventory_unit || null)) {
-        // The catalog moved under the decision between the LLM call and
-        // this transaction — leave it pending for the next run to
-        // re-decide against the current state, rather than apply a stale
-        // agreement check.
-        return { applied: false, reason: 'product_changed' };
-      }
-      // The pre-write snapshot for the undo CLI — before setContainerSize,
-      // the default_unit fix below, or adjustStock touch anything.
-      // inventory_on_hand is kept exactly as read (null stays null, not 0)
-      // so an untracked product's undo restores it to untracked, not zero.
-      originalProductFields = {
-        containerSize: product.container_size ?? null,
-        inventoryUnit: product.inventory_unit ?? null,
-        inventoryOnHand: product.inventory_on_hand,
-        defaultUnit: product.default_unit ?? null,
-      };
-      if (decision.setContainerSize && !product.container_size) {
-        await trx('products_catalog').where({ id: productId }).update({ container_size: decision.setContainerSize, updated_at: new Date() });
-        catalogChangeNote = `set ${product.name}'s container size to ${decision.setContainerSize}`;
-      }
-      // A count decision ('each' — a count container, or a bare count title
-      // against a container_size this line is about to set) into a product
-      // whose default_unit is still the admin-insert default ('oz') or
-      // genuinely unset: adjustStock is about to initialize inventory_unit
-      // to 'each' below, but nothing ever touches default_unit, so a later
-      // visit applies product in an ounce rate that can't convert to the
-      // count now on the shelf — deduction is silently skipped. Fix it here,
-      // in the same transaction, the FIRST time only (no usage recorded
-      // yet); a product already carrying movements under an incompatible
-      // default_unit is a data problem a person needs to look at, not
-      // something this line should silently reinterpret.
-      if (decision.unit === 'each') {
-        const defaultUnit = String(product.default_unit || '').trim();
-        const looksUnset = !defaultUnit || normalizeInventoryUnit(defaultUnit) === 'oz';
-        const hasAnyMovement = await trx('product_inventory_movements').where({ product_id: productId }).first('id');
-        if (looksUnset && !hasAnyMovement) {
-          await trx('products_catalog').where({ id: productId }).update({ default_unit: 'each', updated_at: new Date() });
-          catalogChangeNote = catalogChangeNote
-            ? `${catalogChangeNote}; set its application unit to each`
-            : `set ${product.name}'s application unit to each`;
-        } else if (convertInventoryQuantity(1, defaultUnit, 'each') == null) {
-          await trx('purchase_receipt_lines').where({ id: lineId }).update({
-            status: 'agent_unsure',
-            agent_decision: { ...decisionRecord(decision, {}), reason: 'application_unit_incompatible_with_count' },
-            agent_decided_at: new Date(),
-          });
-          await ringBell(notifyAdmin, {
-            lineId, emailId: email.id, status: 'agent_unsure', title: 'Inventory agent: not added',
-            body: `"${line.raw_title}" wasn't added: its application unit can't take a count; fix the product first.`, trx,
-          });
-          return { applied: true, status: 'agent_unsure' };
-        }
-      }
-    } else {
-      // createCatalogProduct serializes every catalog insert (this agent and
-      // the admin screen alike), and the guard re-checks the collision
-      // against the CURRENT active catalog under that lock, not the possibly
-      // stale list the decision was validated against. A hit is never a hard
-      // failure: the line stays pending, and the next run sees the
-      // now-existing product as a candidate and very likely resolves to
-      // 'existing'.
-      const created = await inventoryOperations.createCatalogProduct({
-        name: decision.newProduct.name,
-        category: decision.newProduct.category,
-        activeIngredient: decision.newProduct.activeIngredient || undefined,
-        epaRegNumber: decision.newProduct.epaRegNumber || undefined,
-        unitSize: decision.newProduct.containerSize,
-        inventoryUnit: decision.newProduct.inventoryUnit,
-        // The application unit matches the stock unit, so a visit recording
-        // usage ("each" for traps and stations) converts and deducts; the
-        // admin insert's default 'oz' can't convert to 'each'.
-        defaultUnit: decision.newProduct.inventoryUnit,
-        bestVendor: VENDOR_BEST[vendor] || null,
-        autoReorderEnabled: false,
-      }, {
-        trx,
-        source: 'inventory_agent_create',
-        // Checked under createCatalogProduct's catalog lock, which the admin
-        // "add product" screen takes too, so a product added a moment ago by
-        // hand or by another run is seen here.
-        guard: async (lockedTrx) => collidesWithActiveProduct(decision.newProduct.name, line.raw_title,
-          await lockedTrx('products_catalog').where({ active: true }).select('id', 'name')),
-      });
-      if (!created) return { applied: false, reason: 'name_collision_retry' };
-      productId = created.id;
-      createdProductId = created.id;
-      catalogChangeNote = `added "${created.name}" to the catalog`;
-    }
+    const resolved = await resolveTargetProduct(trx, { line, vendor, decision }, notifyAdmin);
+    if (!resolved.ok) return resolved.outcome;
+    const { productId, createdProductId, catalogChangeNote, originalProductFields } = resolved;
 
-    // Exact-title alias, only for a line that started with no matched
-    // product at all, and only once the reading validated — a title with
-    // no readable size never becomes an agent alias (classifyItem treats
-    // an alias as owner-vetted for a size-less title).
-    let createdAliasId = null;
-    if (!line.product_id) {
-      const existingAlias = await trx('product_aliases').whereRaw('LOWER(alias_name) = LOWER(?)', [line.raw_title]).first('id');
-      if (!existingAlias) {
-        const [alias] = await trx('product_aliases').insert({ product_id: productId, alias_name: line.raw_title, vendor_id: null }).returning('*');
-        createdAliasId = alias.id;
-      }
-    }
+    const createdAliasId = await createAgentAlias(trx, { line, productId });
 
-    // With this transaction's own catalog change in place, the deterministic
-    // matcher must resolve the title to this same product. If the catalog
-    // moved while the model was deciding (a correcting alias, a new product,
-    // a now-ambiguous match), roll everything back; the line stays pending
-    // and the failure counts toward the 3-attempt hand-off.
-    const reclassified = await classifyItem({ title: line.raw_title, quantity: Number(line.quantity) }, trx);
-    if (reclassified.productId !== productId) {
-      throw new Error(`the catalog now resolves "${line.raw_title}" to ${reclassified.productId ? 'a different product' : 'no single product'}`);
-    }
+    const identityOutcome = await checkIdentityAndDuplicate(trx, { line, lineId, email, decision, productId, createdProductId, createdAliasId }, notifyAdmin);
+    if (identityOutcome) return identityOutcome;
 
-    if (await findPossibleDuplicateMovement(trx, productId, email.received_at)) {
-      await trx('purchase_receipt_lines').where({ id: lineId }).update({
-        status: 'possible_duplicate', product_id: productId, received_qty: decision.amount, received_unit: decision.unit,
-        agent_decision: decisionRecord(decision, { createdProductId, createdAliasId }), agent_decided_at: new Date(),
-        agent_created_product_id: createdProductId, agent_created_alias_id: createdAliasId,
-      });
-      await ringBell(notifyAdmin, {
-        lineId, emailId: email.id, status: 'possible_duplicate', title: 'Inventory agent: possible duplicate',
-        body: `"${line.raw_title}" wasn't added. A manual restock or count was logged around the same time, so check the count.`, trx,
-      });
-      return { applied: true, status: 'possible_duplicate' };
-    }
-
-    // A catalog change just made (container size set, or a brand-new
-    // product) can flip this SAME title to deterministically 'logged' next
-    // sweep via classifyItem — if it already would, its own amount must
-    // agree with what was just validated, or something is inconsistent and
-    // this holds for a person rather than trusting either read blindly.
-    if (reclassified.status === 'logged' && !sizesAgreeAcrossUnits(reclassified.receivedQty, reclassified.receivedUnit, decision.amount, decision.unit)) {
-      await trx('purchase_receipt_lines').where({ id: lineId }).update({
-        status: 'agent_unsure',
-        agent_decision: { ...decisionRecord(decision, { createdProductId, createdAliasId }), reclassifyDisagreed: true },
-        agent_decided_at: new Date(),
-      });
-      await ringBell(notifyAdmin, {
-        lineId, emailId: email.id, status: 'agent_unsure', title: 'Inventory agent: not added',
-        body: `"${line.raw_title}" wasn't added: the catalog read disagreed with the agent's own amount after its change. Log it by hand if it's stock.`, trx,
-      });
-      return { applied: true, status: 'agent_unsure' };
-    }
-
-    const result = await inventoryOperations.adjustStock(productId, { movementType: 'restock', quantity: decision.amount, unit: decision.unit }, {
-      source: SOURCES[vendor],
-      extraMetadata: { inventoryAgent: true, orderNumber: line.order_number, emailId: email.id, rawTitle: line.raw_title, reading: decision.reading || null },
-      trx,
-    });
-    // A content fingerprint of the WHOLE product row right after this write,
-    // taken under the product lock. updated_at is NOT bumped by every writer
-    // (import enrichment, best-price recalculation), so it can't be trusted
-    // as a change marker — a hash of the row itself catches anything. The
-    // undo CLI reverses only while the row still hashes to this exact value:
-    // any later stock write (count, usage, restock) or field edit changes
-    // it, and movement timestamps can't order that (created_at is the
-    // transaction's start, not the moment its write landed).
-    const { row_hash: productRowHash } = await trx('products_catalog').where({ id: productId })
-      .first(trx.raw('md5(row_to_json(products_catalog.*)::text) as row_hash'));
-
-    await trx('purchase_receipt_lines').where({ id: lineId }).update({
-      status: 'logged', product_id: productId, received_qty: decision.amount, received_unit: decision.unit, movement_id: result.movement.id,
-      agent_decision: decisionRecord(decision, { createdProductId, createdAliasId, productRowHash, originalProductFields }), agent_decided_at: new Date(),
-      agent_created_product_id: createdProductId, agent_created_alias_id: createdAliasId,
-    });
-
-    // Read-only, as in the deterministic lane: a live restock request may
-    // cover this delivery, and receiving it would count the stock twice.
-    const liveRequest = await trx('product_restock_requests')
-      .where({ product_id: productId }).whereIn('status', LIVE_RESTOCK_STATUSES).first('id');
-    const { openRestockRequestNote } = require('./sweep');
-    await ringBell(notifyAdmin, {
-      lineId, emailId: email.id, status: 'logged', title: 'Inventory agent logged a purchase',
-      body: `${result.product.name} +${decision.amount} ${displayUnit(decision.unit)}`
-        + `${catalogChangeNote ? ` — ${catalogChangeNote}` : ''} (line ${String(lineId).slice(0, 8)}).`
-        + `${liveRequest ? ` ${openRestockRequestNote(result.product.name)}` : ''}`,
-      trx,
-    });
-    return { applied: true, status: 'logged' };
+    return commitStockMovement(trx, { line, lineId, vendor, email, decision, productId, createdProductId, createdAliasId, catalogChangeNote, originalProductFields }, notifyAdmin);
   });
 }
 
