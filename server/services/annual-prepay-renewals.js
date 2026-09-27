@@ -4231,7 +4231,7 @@ async function settleDecidedPendingTerm(term, nextStatus, conn) {
     if (lapse && paidSuccessor) await stampParentRenewedForSuccessor(lapse, 'decided pending->paid', t);
     return lapse;
   };
-  const ownTransaction = paidSuccessor && !conn.isTransaction && typeof conn.transaction === 'function';
+  const ownTransaction = paidSuccessor && typeof conn.transaction === 'function' && !conn.isTransaction;
   return ownTransaction ? conn.transaction(flip) : flip(conn);
 }
 
