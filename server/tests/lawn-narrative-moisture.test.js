@@ -25,6 +25,35 @@ function assessment(droughtStress, flag, status = 'balanced') {
 
 describe('structured moisture governs the optional whole-report narrative', () => {
   test.each([
+    { irrigation_required: false, irrigation_notes: 'Do not water for 24 hours.' },
+    { irrigation_required: true, irrigation_notes: 'Don’t water for 24 hours.' },
+    { irrigation_required: true, irrigation_notes: 'Water in after application.' },
+    { irrigation_required: true, irrigation_notes: 'Water within 1 hour. Water only after 24 hours.' },
+  ])('aftercare constraints bypass model and cached prose: %j', async (product) => {
+    const lawnAssessment = assessment('minor', true, 'deficit');
+    const unguarded = buildLawnReportV2({ lawnAssessment });
+    const guarded = buildLawnReportV2({ lawnAssessment, applications: [{ product }] });
+    const ctx = { observations: `aftercare-cache-probe:${JSON.stringify(product)}` };
+    const invented = 'Water every zone immediately for 30 minutes.';
+    const primeModel = jest.fn(async () => ({ ok: true, json: { customerAction: invented, water: invented } }));
+    await applyLawnReportNarrative(unguarded, ctx, { callModel: primeModel });
+    expect(primeModel).toHaveBeenCalledTimes(1);
+    const callModel = jest.fn(async () => ({ ok: true, json: {
+      customerAction: invented, water: invented,
+      insights: guarded.insights.map(() => ({ customerAction: invented })),
+    } }));
+    const out = await applyLawnReportNarrative(guarded, ctx, { callModel });
+    expect(out).toBe(guarded);
+    expect(callModel).not.toHaveBeenCalled();
+    expect(JSON.stringify(out)).not.toContain(invented);
+    const data = { serviceLine: 'lawn', lawnAssessment, reportV2: out };
+    applyLawnReportReconciliation(data, null);
+    expect(data.reportV2.aftercare).toEqual(guarded.aftercare);
+    expect(data.reportV2.snapshot.customerAction).toBe(guarded.snapshot.customerAction);
+    expect(data.reportV2.insights).toEqual(guarded.insights);
+  });
+
+  test.each([
     ['none', undefined, 'balanced'],
     [null, undefined, 'balanced'],
     [undefined, undefined, 'balanced'],

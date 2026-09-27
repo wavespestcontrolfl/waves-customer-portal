@@ -428,7 +428,7 @@ deficits/surpluses and eligible stored water snapshots
 retain their existing behavior.
 Lawn `reportV2.aftercare` distinguishes explicit, unopposed product water-in
 directions (`creditableWaterIn`) from conditional notes, missing directions,
-watering holds, or conflicting product instructions (`needsReview`). Report
+watering holds, or conflicting product instructions (`needsReview`). Clauses within the same product note are compared as separate directions. A watering hold or review-required direction bypasses the optional narrative overlay before cache/model access. Report
 watering plans and assistant answers preserve those conditions without inventing
 an amount or deadline; hold/review cases make the plan conditional on resolving
 the directions and observing the recorded restrictions.

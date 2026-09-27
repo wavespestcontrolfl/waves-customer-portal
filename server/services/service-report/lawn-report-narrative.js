@@ -25,7 +25,7 @@ const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
-const PROMPT_VERSION = 'lawn_report_v2_narrative_v8'; // v8: preserve recorded action evidence through the overlay.
+const PROMPT_VERSION = 'lawn_report_v2_narrative_v9_aftercare_water'; // Preserve action evidence and held/review-required aftercare.
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -260,7 +260,10 @@ async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
   // Every rewritten field can introduce moisture advice, including an unrelated
   // insight or treatment sentence. Preserve the complete deterministic report
   // before cache/model access unless structured evidence establishes drought.
-  if (!v2 || v2.water?.droughtSignal !== true) return v2;
+  // Held or review-required product directions also keep the whole report
+  // deterministic: prose in any field could contradict those restrictions.
+  if (!v2 || v2.water?.droughtSignal !== true
+    || v2.aftercare?.wateringHold === true || v2.aftercare?.needsReview === true) return v2;
   const facts = groundingFacts(v2, ctx);
   const cacheKey = crypto.createHash('sha256').update(`${PROMPT_VERSION}|${stableStringify(facts)}`).digest('hex');
   const hit = _cache.get(cacheKey);
