@@ -135,11 +135,13 @@ function conflictingRoutineObservations(observations = [], { treeShrubLandscapeC
   if (selected.has(noVisiblePlantStress) && ['Poor', 'Declining'].includes(treeShrubLandscapeCondition)) {
     return 'Choose a plant-stress finding when the overall landscape condition is poor or declining.';
   }
-  const rootZoneMoistureStates = catalog.tree_shrub
-    .filter(([id]) => id === 'dry-soil' || id === 'saturated-soil')
-    .map(([, label]) => label);
-  if (rootZoneMoistureStates.every((label) => selected.has(label))) {
-    return 'Choose either dry or saturated soil for the inspected root zone.';
+  for (const [family, dryId] of [['tree_shrub', 'dry-soil'], ['lawn', 'dry-root-zone']]) {
+    const rootZoneMoistureStates = catalog[family]
+      .filter(([id]) => id === dryId || id === 'saturated-soil')
+      .map(([, label]) => label);
+    if (rootZoneMoistureStates.every((label) => selected.has(label))) {
+      return 'Choose either dry or saturated soil for the inspected root zone.';
+    }
   }
   const lawnPestStates = observations
     .map((observation) => LAWN_PEST_OBSERVATION_SCOPE.get(observation))

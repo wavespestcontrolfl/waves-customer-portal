@@ -258,12 +258,14 @@ function requiresSqftForReportApplication(method, serviceLine = 'pest') {
 function shouldInsertNoActivityFinding({
   visitOutcome,
   observations = [],
+  formObservations = [],
   recommendations = [],
   concernText = '',
   activityScore = null,
 } = {}) {
   return visitOutcome === 'completed'
     && !observations.length
+    && !formObservations.length
     && !recommendations.length
     && !String(concernText || '').trim()
     // A non-zero activity rating means SOMETHING was seen — stamping "All
@@ -6802,6 +6804,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           && shouldInsertNoActivityFinding({
             visitOutcome,
             observations: reportObservations,
+            formObservations,
             recommendations: reportRecommendations,
             concernText,
             // Recurring pest closeouts carry the rating as clientPestRating;
@@ -13473,6 +13476,7 @@ module.exports = {
   completionSmsWithheldForMissingReportToken,
   completionStructuredObservationAllowlist,
   completedProtocolActionScopes,
+  shouldInsertNoActivityFinding,
   backfillExpectedMintAtCommit,
   shouldAutoInvoiceCompletion,
   parseCompletionReviewDelayMinutes,

@@ -33,6 +33,7 @@ const {
   definiteRejectionMarkerFromAttemptError,
   completionStructuredObservationAllowlist,
   completedProtocolActionScopes,
+  shouldInsertNoActivityFinding,
 } = require('../services/complete-scheduled-service');
 const completionObservationCatalog = require('../../shared/service-completion-observations.json');
 const lawnConditionCatalog = require('../../shared/lawn-condition-findings.json');
@@ -218,18 +219,33 @@ describe('customer-safe routine completion observations', () => {
     expect(result.body?.code).not.toBe('conflicting_structured_observations');
   });
 
-  test('rejects mutually exclusive dry and saturated root-zone soil observations', async () => {
-    service.service_type = 'Every 6 Weeks Tree & Shrub Care Service';
+  test.each([
+    ['tree_shrub', 'Every 6 Weeks Tree & Shrub Care Service', 'tree_shrub_6week', 'dry-soil'],
+    ['lawn', 'Every 6 Weeks Lawn Care Service', 'lawn_6week', 'dry-root-zone'],
+  ])('rejects mutually exclusive dry and saturated %s soil observations', async (family, serviceType, serviceKey, dryId) => {
+    service.service_type = serviceType;
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
-    resolveCompletionProfileForScheduledService.mockResolvedValueOnce({ serviceKey: 'tree_shrub_6week' });
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce({ serviceKey });
     const result = await complete({
-      structuredObservations: completionObservationCatalog.tree_shrub
-        .filter(([id]) => ['dry-soil', 'saturated-soil'].includes(id))
+      structuredObservations: completionObservationCatalog[family]
+        .filter(([id]) => [dryId, 'saturated-soil'].includes(id))
         .map(([, label]) => label),
     });
 
     expect(result).toMatchObject({ status: 422, body: { code: 'conflicting_structured_observations' } });
     expect(attempts.claimCompletionAttempt).toHaveBeenCalled();
+  });
+
+  test.each([
+    ['lawn', 'thin-turf'],
+    ['tree_shrub', 'yellow-foliage'],
+    ['recurring_pest', 'live-interior'],
+  ])('a structured-only %s finding prevents a synthetic clean-visit finding', (family, findingId) => {
+    const finding = completionObservationCatalog[family].find(([id]) => id === findingId)[1];
+    const visit = { visitOutcome: 'completed', observations: [], activityScore: 0 };
+    expect(shouldInsertNoActivityFinding({ ...visit, formObservations: [finding] })).toBe(false);
+    expect(shouldInsertNoActivityFinding({ ...visit, observations: [finding] })).toBe(false);
+    expect(shouldInsertNoActivityFinding(visit)).toBe(true);
   });
 
   test.each(['Poor', 'Declining'])('rejects no visible plant stress with the typed %s landscape condition', async (landscapeCondition) => {
