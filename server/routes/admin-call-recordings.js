@@ -515,6 +515,12 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
           updated_at: new Date(),
         });
       if (!relinked) return null;
+      // A promise kept by a booking for its promised slot was matched through
+      // the call's previous customer: when the customer changes it reopens,
+      // in this transaction, for the next fulfillment refresh to re-judge.
+      const promisesReopened = String(customerId || '') !== String(call.customer_id || '')
+        ? await require('../services/call-commitments').reopenSlotBookingProofs(trx, call.id)
+        : 0;
       let leadsUnlinked = 0;
       if (!customerId && call.twilio_call_sid) {
         leadsUnlinked = await trx('leads').where({ twilio_call_sid: call.twilio_call_sid }).update({ twilio_call_sid: null, updated_at: new Date() });
@@ -579,7 +585,7 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
           .whereNotExists(trx('triage_items').where('triage_items.call_log_id', call.id).whereIn('triage_items.status', ['open', 'in_progress']))
           .update({ review_status: null });
       }
-      return { timelineRows: rows, timelineCreated: created, repaired, leadsUnlinked, leadsReconciled };
+      return { timelineRows: rows, timelineCreated: created, repaired, leadsUnlinked, leadsReconciled, promisesReopened };
     });
     if (moved?.notFound) return res.status(404).json({ error: 'Customer not found' });
     if (!moved) {
@@ -608,7 +614,7 @@ router.put('/calls/:id/customer', requireAdmin, async (req, res, next) => {
       }
     }
     logger.info(`[call-recordings] call ${call.id} customer link set by operator (${customerId ? 'linked' : 'unlinked'}; timeline rows moved: ${timelineMoved})`);
-    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, timeline_rows_created: moved.timelineCreated, leads_unlinked: moved.leadsUnlinked, leads_reconciled: moved.leadsReconciled, warnings });
+    res.json({ success: true, customer_id: customerId, override, timeline_rows_moved: timelineMoved, timeline_rows_created: moved.timelineCreated, leads_unlinked: moved.leadsUnlinked, leads_reconciled: moved.leadsReconciled, promises_reopened: moved.promisesReopened, warnings });
   } catch (err) { next(err); }
 });
 

@@ -22,6 +22,7 @@ jest.mock('../services/call-commitments', () => ({
   addHumanCommitment: jest.fn(),
   listOpenCommitments: jest.fn(),
   refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })),
+  reopenSlotBookingProofs: jest.fn(() => Promise.resolve(0)),
   COMMITMENT_KINDS: ['callback', 'send_estimate', 'send_report'],
   OVERDUE_IMPLICIT_DAYS: 3,
   OVERDUE_IMPLICIT_ESTIMATE_HOURS: 24,
@@ -475,6 +476,26 @@ describe('PUT /calls/:id/customer', () => {
     expect(JSON.stringify(timeline.wheres)).toContain(CALL_ID);
     expect(require('../services/conversations').syncVoiceMessageForCall).toHaveBeenCalledWith(SID);
   });
+  test('a customer change reopens promises kept through the old customer\'s booking, in the relink transaction; a save to the same customer does not (codex #5081 r1 P2)', async () => {
+    const { reopenSlotBookingProofs } = require('../services/call-commitments');
+    reopenSlotBookingProofs.mockResolvedValueOnce(1);
+    mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
+      expect(res.status).toBe(200);
+      expect((await res.json()).promises_reopened).toBe(1);
+    });
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(reopenSlotBookingProofs).toHaveBeenCalledWith(db, CALL_ID);
+    reopenSlotBookingProofs.mockClear();
+    mockDb([{ id: CALL_ID, customer_id: CUSTOMER_ID, twilio_call_sid: SID }, { id: CUSTOMER_ID }]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/calls/${CALL_ID}/customer`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customer_id: CUSTOMER_ID }) });
+      expect(res.status).toBe(200);
+    });
+    expect(reopenSlotBookingProofs).not.toHaveBeenCalled();
+  });
+
   test('an unlink removes the call\'s derived timeline entry and reports a failed thread re-home instead of hiding it', async () => {
     const updates = mockDb([{ id: CALL_ID, customer_id: 'old-customer', twilio_call_sid: SID }]);
     require('../services/conversations').syncVoiceMessageForCall.mockRejectedValueOnce(new Error('thread busy'));

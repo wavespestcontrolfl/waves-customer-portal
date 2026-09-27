@@ -341,19 +341,22 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       .toMatchObject({ kind: 'appointment_booked', record_id: booked.id, strength: 'association' });
   });
 
-  test('a visit booked after the call FOR the stated slot keeps schedule_visit (direct); another time that day, a cancelled booking, a deadline or a technician follow-up stays a hint', async () => {
+  test('a visit booked after the call FOR the stated slot the call confirmed keeps schedule_visit (direct); another time that day, a cancelled booking, an unconfirmed slot, a deadline or a technician follow-up stays a hint; a relink reopens it', async () => {
     const [cust] = await db('customers').insert({ first_name: 'Slot', phone: '+15555550176' }).returning('id');
     cleanup.customerIds.push(cust.id);
+    // "I'll put you on the schedule for around 3" — 3 PM ET a week out (the
+    // slot must stay after the call's end, so never a fixed date), confirmed
+    // by the call's own V2 scheduling extraction.
+    const { addETDays, etDateString, parseETDateTime } = require('../utils/datetime-et');
+    const day = etDateString(addETDays(new Date(), 7));
+    const threePm = parseETDateTime(`${day}T15:00`).toISOString();
     const [call] = await db('call_log').insert({
       twilio_call_sid: 'CA' + '7'.repeat(30) + 's2', direction: 'inbound', from_phone: '+15555550176', to_phone: OUR_NUMBER,
       status: 'completed', customer_id: cust.id, created_at: new Date(Date.now() - 10 * 60 * 1000),
+      v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ scheduling: { status: 'confirmed', confirmed_start_at: threePm } }),
     }).returning('*');
     cleanup.callIds.push(call.id);
-    // "I'll put you on the schedule for around 3" — 3 PM ET a week out (the
-    // slot must stay after the call's end, so never a fixed date).
-    const { addETDays, etDateString, parseETDateTime } = require('../utils/datetime-et');
-    const day = etDateString(addETDays(new Date(), 7));
-    const promise = { kind: 'schedule_visit', due_at: parseETDateTime(`${day}T15:00`).toISOString(), due_type: 'floor' };
+    const promise = { kind: 'schedule_visit', due_at: threePm, due_type: 'floor' };
     const book = async (window_start, extra = {}) => {
       const [v] = await db('scheduled_services').insert({ scheduled_date: day, window_start, service_type: 'Rodent Trapping Service', status: 'pending', customer_id: cust.id, created_at: new Date(Date.now() - 60 * 1000), ...extra }).returning('id');
       cleanup.visitIds.push(v.id);
@@ -369,6 +372,26 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     expect(await cc.resolveFulfillment(db, { ...promise, due_type: null }, call)).toMatchObject({ record_id: atSlot.id, strength: 'direct' });
     expect(await cc.resolveFulfillment(db, { ...promise, due_type: 'deadline' }, call)).toMatchObject({ strength: 'association' });
     expect(await cc.resolveFulfillment(db, { ...promise, kind: 'technician_follow_up' }, call)).toMatchObject({ strength: 'association' });
+    // "Schedule the follow-up after the 3 PM inspection": the call confirmed
+    // no appointment at 3, so the 3 PM booking (the inspection) is only a hint.
+    await db('call_log').where({ id: call.id }).update({ ai_extraction_enriched: JSON.stringify({ scheduling: { status: 'none', confirmed_start_at: null } }) });
+    expect(await cc.resolveFulfillment(db, promise, call)).toMatchObject({ strength: 'association' });
+    await db('call_log').where({ id: call.id }).update({ ai_extraction_enriched: JSON.stringify({ scheduling: { status: 'confirmed', confirmed_start_at: threePm } }) });
+
+    // Kept through the call's customer: a relink reopens it, and only it.
+    const [kept] = await db('call_commitments').insert({
+      call_log_id: call.id, commitment_key: 'waves:schedule_visit:slot', party: 'waves', kind: 'schedule_visit', description: 'Put the caller on the schedule for 3',
+      due_at: threePm, due_type: 'floor', source: 'ai', status: 'fulfilled', fulfilled_at: new Date(),
+      fulfillment: JSON.stringify({ kind: 'appointment_booked', record_id: atSlot.id, strength: 'direct', basis: 'visit_booked_at_the_promised_time' }),
+    }).returning('id');
+    const [linked] = await db('call_commitments').insert({
+      call_log_id: call.id, commitment_key: 'waves:schedule_visit:linked', party: 'waves', kind: 'schedule_visit', description: 'Book the visit',
+      source: 'ai', status: 'fulfilled', fulfilled_at: new Date(),
+      fulfillment: JSON.stringify({ kind: 'appointment_booked', record_id: atSlot.id, strength: 'direct', basis: 'visit_booked_from_this_call' }),
+    }).returning('id');
+    expect(await cc.reopenSlotBookingProofs(db, call.id)).toBe(1);
+    expect(await db('call_commitments').where({ id: kept.id }).first('status', 'fulfillment', 'fulfilled_at')).toEqual({ status: 'open', fulfillment: null, fulfilled_at: null });
+    expect((await db('call_commitments').where({ id: linked.id }).first('status')).status).toBe('fulfilled');
   });
 
   test('an invoice on the visit booked from this call counts only when paid AFTER the call', async () => {
