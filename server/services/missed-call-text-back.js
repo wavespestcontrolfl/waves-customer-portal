@@ -88,6 +88,7 @@ const BOUNDARY = {
   TOO_OLD: 'MISSED_CALL_TOO_OLD',
   CLAIMED: 'MISSED_CALL_PHONE_CLAIMED',
   CLAIM_BUSY: 'MISSED_CALL_CLAIM_IN_FLIGHT',
+  SEND_IN_FLIGHT: 'MISSED_CALL_SEND_IN_FLIGHT',
   CHECK_FAILED: 'MISSED_CALL_CHECK_FAILED',
 };
 // Same lease length / shape as missed-call-bell.js — long enough to cover
@@ -231,16 +232,17 @@ function keepClaim(phone, outcome, claimed) {
 
 // "Still uncontacted" — checked before the lease work and again at the
 // provider boundary (owner: "only if nobody has called or texted them by
-// then"): no customer record knows the number now, we haven't called them
-// since the missed call, no later call from them was answered (by a person
-// or Sandy) or left a voicemail, and no SMS either way since the missed call
-// other than this lane's own. This lane's texts are the one-shot claim's
-// business (priorTextReason / the boundary claim), never contact — and at
-// the boundary Twilio may already have written THIS attempt's 'sending'
-// provider-handoff reservation row (gratitude coordination), which must not
-// read as someone having texted them.
-async function stillUncontacted(phone, row, dbi = db) {
-  if (await knownCallerPhoneExists(dbi, phone)) return false;
+// then"). 'contacted' when a customer record knows the number now, we have
+// called them since the missed call, a later call from them was answered
+// (by a person or Sandy) or left a voicemail, or a text went either way
+// since; 'in_flight' when the only text since is still mid-handoff (a
+// 'sending' provider reservation — staff or the voicemail lane, which may
+// yet fail and be deleted: wait for it rather than read it as contact);
+// null when clear. This lane's own texts are never contact — they are the
+// one-shot claim's business, and at the boundary Twilio may already have
+// written THIS attempt's reservation row (gratitude coordination).
+async function contactState(phone, row, dbi = db) {
+  if (await knownCallerPhoneExists(dbi, phone)) return 'contacted';
   const digits = phone.replace(/\D/g, '').slice(-10);
   if (digits.length === 10) {
     const phoneMatches = (column) => [`RIGHT(regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g'), 10) = ?`, [digits]];
@@ -258,14 +260,14 @@ async function stillUncontacted(phone, row, dbi = db) {
             .orWhereNotNull('recording_url')
             .orWhereNotNull('voicemail_callback_alerted_at'))))
       .first('id');
-    if (laterCall) return false;
+    if (laterCall) return 'contacted';
   }
-  const smsSince = await dbi('sms_log')
+  const textsSince = () => dbi('sms_log')
     .where((q) => q.where('to_phone', phone).orWhere('from_phone', phone))
     .where('created_at', '>=', row.created_at)
-    .whereRaw("COALESCE(message_type, '') <> ?", [MESSAGE_TYPE])
-    .first('id');
-  return !smsSince;
+    .whereRaw("COALESCE(message_type, '') <> ?", [MESSAGE_TYPE]);
+  if (await textsSince().whereRaw("COALESCE(status, '') <> 'sending'").first('id')) return 'contacted';
+  return (await textsSince().where('status', 'sending').first('id')) ? 'in_flight' : null;
 }
 
 // A claim this lane took at the provider boundary and never resolved: the
@@ -303,15 +305,22 @@ function claimState(claim) {
 // or null — as the early skip before any pipeline work (the atomic guarantee
 // is the boundary claim). Reads the shared claim row (this lane's own or the
 // voicemail lane's, a landline stamped there included — a landline stays a
-// landline), then the sms_log history of both lanes' message types.
+// landline), then the sms_log history of both lanes' message types. That
+// history counts real sends only: a 'sending' row is an unresolved
+// provider-handoff reservation (gratitude coordination writes one before
+// the boundary, and keeps an uncertain one for a day), and whether it went
+// out is the claim's business — a reconciled orphan the provider proved
+// unsent must not survive here as a completed text.
 async function priorTextReason(phone) {
   const found = await db('voicemail_sms_claims').where({ phone }).first('lead_id', 'outcome', 'created_at');
   const claim = found && await reconcileStaleClaim(phone, found);
   if (claim) return claimState(claim);
-  const own = await db('sms_log').where({ to_phone: phone, message_type: MESSAGE_TYPE }).first('id');
-  if (own) return 'already_sent_to_phone';
-  const logged = await db('sms_log').where({ to_phone: phone, message_type: 'voicemail_quote_link' }).first('id');
-  return logged ? 'voicemail_lead_texted' : null;
+  const sentBefore = (messageType) => db('sms_log')
+    .where({ to_phone: phone, message_type: messageType })
+    .whereRaw("COALESCE(status, '') <> 'sending'")
+    .first('id');
+  if (await sentBefore(MESSAGE_TYPE)) return 'already_sent_to_phone';
+  return (await sentBefore('voicemail_quote_link')) ? 'voicemail_lead_texted' : null;
 }
 
 // Orphan cleanup, independent of any call: a claim this lane left unresolved
@@ -390,9 +399,14 @@ async function sendWithLease(row, { fromNumber, phone }, releaseLease, settleFen
     // A resumed lease whose earlier attempt sent the text but crashed before
     // settling 'sent' is caught by priorTextReason below (the claim row, or
     // this lane's own sms_log row) — never double-texted.
-    if (!(await stillUncontacted(phone, row))) {
+    const contact = await contactState(phone, row);
+    if (contact === 'contacted') {
       await settleFenced('skipped:already_contacted');
       return { outcome: 'skipped', reason: 'already_contacted' };
+    }
+    if (contact === 'in_flight') {
+      await releaseLease();
+      return { outcome: 'pending', reason: 'contact_in_flight' };
     }
     const prior = await priorTextReason(phone);
     if (prior === 'in_flight') {
@@ -462,8 +476,12 @@ function providerBoundaryCheck(row, phone, attempt) {
       if (!textBackCoreEligible(current)) {
         return { ok: false, code: BOUNDARY.NOT_MISSED, reason: 'the call is no longer an unanswered, message-less miss' };
       }
-      if (!(await stillUncontacted(phone, row, dbi))) {
+      const contact = await contactState(phone, row, dbi);
+      if (contact === 'contacted') {
         return { ok: false, code: BOUNDARY.CONTACTED, reason: 'the caller was contacted after the missed call' };
+      }
+      if (contact === 'in_flight') {
+        return { ok: false, code: BOUNDARY.SEND_IN_FLIGHT, reason: 'another text to this number is mid-handoff', retryable: true };
       }
       const claimed = await dbi('voicemail_sms_claims')
         .insert({ phone, lead_id: null, outcome: CLAIM.DISPATCHING })
@@ -725,7 +743,7 @@ module.exports = {
     fromNumberForDialed,
     normalizePhoneE164,
     attemptForRow,
-    stillUncontacted,
+    contactState,
     priorTextReason,
     providerBoundaryCheck,
     reconcileOrphanedClaims,

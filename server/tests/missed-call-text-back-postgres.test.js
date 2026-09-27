@@ -397,17 +397,39 @@ jest.setTimeout(30000);
       expect(await database('sms_log').where({ to_phone: PHONE, status: 'sending', message_type: 'missed_call_text_back' }).first('id')).toBeTruthy();
     });
 
-    test('a staff send still mid-handoff (its own sending reservation) does count as contact', async () => {
+    test('a staff text still mid-handoff holds this send (no claim, unsettled); once it lands as sent, the call settles as contacted', async () => {
+      let staffRowId;
       sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, {
-        before: () => database('sms_log').insert({
-          direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE, message_body: 'staff reply',
-          status: 'sending', message_type: 'manual', metadata: JSON.stringify({ manual_send_reservation: true }),
-        }),
+        before: async () => {
+          [{ id: staffRowId }] = await database('sms_log').insert({
+            direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE, message_body: 'staff reply',
+            status: 'sending', message_type: 'manual', metadata: JSON.stringify({ manual_send_reservation: true }),
+          }).returning('id');
+        },
       }));
       const row = call(READY_MINUTES_AGO);
       await database('call_log').insert(row);
-      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'already_contacted' });
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'error', reason: 'MISSED_CALL_SEND_IN_FLIGHT' });
       expect(await claimRow()).toBeUndefined();
+      expect((await stored(row)).metadata.missed_call_text_settled_at).toBeUndefined();
+
+      await database('sms_log').where({ id: staffRowId }).update({ status: 'sent' });
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'already_contacted' });
+    });
+
+    test('a voicemail-lane text still mid-handoff is waited on, and this call is texted if that send fails and its reservation is removed', async () => {
+      const [{ id: reservationId }] = await database('sms_log').insert({
+        direction: 'outbound', from_phone: '+19412975749', to_phone: PHONE, message_body: 'quote link',
+        status: 'sending', message_type: 'voicemail_quote_link', metadata: JSON.stringify({ provider_handoff_reservation: true }),
+        created_at: new Date(NOW),
+      }).returning('id');
+      const row = call(READY_MINUTES_AGO);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'pending', reason: 'contact_in_flight' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+      await database('sms_log').where({ id: reservationId }).del(); // not_sent: the reservation is deleted
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
     });
 
     test('a staff text that lands after the lease stops the send at the boundary; no claim is taken', async () => {
@@ -514,6 +536,20 @@ jest.setTimeout(30000);
         await database('call_log').insert(row);
         expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'pending', reason: 'claim_in_flight' });
         expect(TwilioService.findOutboundMessageSince).not.toHaveBeenCalled();
+      });
+
+      test('an orphan that also left Twilio\'s real sending reservation behind is texted once the provider proves nothing went out', async () => {
+        const { prepareProviderHandoffReservation } = require('../services/messaging/provider-handoff-reservation');
+        const prepared = await prepareProviderHandoffReservation({
+          to: PHONE, fromNumber: '+19412975749', body: 'orphaned attempt', messageType: 'missed_call_text_back',
+        });
+        expect(prepared.handle).toBeTruthy();
+        await orphan(60);
+        TwilioService.findOutboundMessageSince.mockResolvedValueOnce({ found: false });
+        const row = call(READY_MINUTES_AGO);
+        await database('call_log').insert(row);
+        expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'sent' });
+        expect(await claimRow()).toMatchObject({ lead_id: null, outcome: CLAIM.SENT });
       });
 
       test('every sweep pass reconciles orphans on its own — no eligible call needed, gate off included', async () => {
