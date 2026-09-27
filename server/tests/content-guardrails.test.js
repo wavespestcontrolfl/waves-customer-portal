@@ -2428,6 +2428,17 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
     const hubAbsolute = 'See [fall armyworms](https://www.wavespestcontrol.com/lawn-care/fall-armyworm-outbreak/).';
     const hubResult = guardrails.evaluate({ body: hubAbsolute }, options);
     expect(hubResult.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    for (const unsafeAbsolute of [
+      'https://www.wavespestcontrol.com:8443/lawn-care/fall-armyworm-outbreak/',
+      'https://user:pass@www.wavespestcontrol.com/lawn-care/fall-armyworm-outbreak/',
+    ]) {
+      const unsafeResult = guardrails.evaluate({ body: `See [fall armyworms](${unsafeAbsolute}).` }, options);
+      expect(unsafeResult.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    }
+    const standardPort = guardrails.evaluate({
+      body: 'See [fall armyworms](https://www.wavespestcontrol.com:443/lawn-care/fall-armyworm-outbreak/).',
+    }, options);
+    expect(standardPort.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
     // No related_posts on the brief at all → no extra allowance, unchanged behavior.
     const bare = deriveSyncGuardrailOptions({}, { action_type: 'new_supporting_blog', page_type: 'supporting-blog' });
     expect(bare.allowedInternalLinks).toEqual([]);

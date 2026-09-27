@@ -5005,6 +5005,26 @@ function hubHostSet() {
   return hosts;
 }
 
+// Absolute fleet URLs share one origin contract: HTTP(S), a standard port,
+// no embedded credentials, and an explicitly allowed fleet host. Callers may
+// then compare the returned pathname without erasing unsafe origin details.
+function safeFleetUrlPath(value, allowedHosts = hubHostSet()) {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    const standardPort = !parsed.port
+      || (parsed.protocol === 'https:' && parsed.port === '443')
+      || (parsed.protocol === 'http:' && parsed.port === '80');
+    if (!/^https?:$/.test(parsed.protocol)
+      || !standardPort
+      || parsed.username
+      || parsed.password
+      || !allowedHosts.has(parsed.hostname.toLowerCase())) return null;
+    return parsed.pathname || '/';
+  } catch {
+    return null;
+  }
+}
+
 // Every internal-route candidate in the text, normalized. Shared by the
 // gate and by the refresh grandfathering pass over the prior live body.
 function collectInternalDestinations(text) {
@@ -5019,7 +5039,7 @@ function collectInternalDestinations(text) {
   const rel = new RegExp(RELATIVE_DEST_RE.source, RELATIVE_DEST_RE.flags);
   while ((m = rel.exec(s)) !== null) {
     if (attrMasked[m.index] !== s[m.index]) continue;
-    dests.push({ dest: m[1] || m[2] || m[3] || m[4], host: null });
+    dests.push({ dest: m[1] || m[2] || m[3] || m[4], host: null, safeOrigin: true });
   }
   const abs = new RegExp(HUB_URL_CANDIDATE_RE.source, HUB_URL_CANDIDATE_RE.flags);
   const hubHosts = hubHostSet();
@@ -5038,13 +5058,17 @@ function collectInternalDestinations(text) {
     try {
       const u = new URL(raw);
       if (hubHosts.has(u.hostname.toLowerCase())) {
-        dests.push({ dest: u.pathname || '/', host: u.hostname.toLowerCase() });
+        dests.push({
+          dest: u.pathname || '/',
+          host: u.hostname.toLowerCase(),
+          safeOrigin: safeFleetUrlPath(raw, hubHosts) != null,
+        });
       }
     } catch { /* malformed URL — the external gate owns it */ }
   }
   const normalized = [];
   for (const item of dests) {
-    const { dest, host } = item;
+    const { dest, host, safeOrigin } = item;
     // Resolve dot segments FIRST — browsers resolve "/images/../x/" to
     // "/x/", so the /images/ exemption must see the resolved path or a
     // dot-segment link reopens the dead-route class.
@@ -5053,7 +5077,7 @@ function collectInternalDestinations(text) {
     // Anchor-only and in-repo image references are not routes.
     if (resolved.startsWith('/images/')) continue;
     const norm = normalizeInternalPath(resolved);
-    if (norm) normalized.push({ dest, norm, host });
+    if (norm) normalized.push({ dest, norm, host, safeOrigin });
   }
   return normalized;
 }
@@ -5133,12 +5157,12 @@ function internalRouteFinding(body, allowedInternalLinks = [], exemptRouteCounts
     allowedRelatedHosts.add(`www.${bare}`);
   }
   const seenCounts = new Map();
-  for (const { dest, norm, host } of collectInternalDestinations(text)) {
+  for (const { dest, norm, host, safeOrigin } of collectInternalDestinations(text)) {
     if (relatedPaths.has(norm)) {
       // A relative candidate renders on the current publish host. An absolute
       // candidate must name that same frozen host; a path match alone must not
       // turn a hub allowance into permission for a spoke URL (or vice versa).
-      if (!host || allowedRelatedHosts.has(host)) continue;
+      if (!host || (safeOrigin && allowedRelatedHosts.has(host))) continue;
       return finding('P0', 'UNKNOWN_INTERNAL_ROUTE', `Draft links related-post path "${dest}" on host "${host}", which is not the brief's frozen publish host.`);
     }
     if (allowed.has(norm)) continue;
@@ -6656,6 +6680,7 @@ module.exports = {
   // first-party host set (hub + spoke fleet) — consumed by seo-completion-gate
   // to read absolute Waves URLs as the site-relative paths they are.
   hubHostSet,
+  safeFleetUrlPath,
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,
