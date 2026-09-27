@@ -8375,7 +8375,7 @@ async function invoiceDunningActiveToday(invoiceId, { now = new Date(), todayYmd
       // pre-visit contact at all.
       const followupConfig = require('../config/invoice-followups');
       const sendDays = new Set(followupConfig?.sendWindow?.daysOfWeek || []);
-      const today = todayYmd || etDateString();
+      const today = todayYmd || etDateString(now);
       const todayEtDow = new Date(`${today}T12:00:00Z`).getUTCDay();
       if (sendDays.has(todayEtDow)) {
         const endOfTodayEt = parseETDateTime(`${today} 23:59:59`);
