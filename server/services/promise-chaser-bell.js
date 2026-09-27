@@ -80,7 +80,10 @@ const MODULE_LOAD_AT = new Date();
 // statuses repeat-caller-bell's BOOKED_SQL treats as booked — a call that
 // resulted in an appointment is not the audit's unbooked-call pattern, even
 // if a genuinely separate promise on it is still open.
-const BOOKED_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site', 'completed'];
+// 'rescheduled' is a live booked visit that was moved (pre-push P1): the call
+// still ended booked. repeat-caller-bell's BOOKED_SQL omits it too; that's
+// a separate follow-up so this PR doesn't change a live bell.
+const BOOKED_STATUSES = ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'];
 
 // How far back each tick looks for a fresh inbound call to re-check —
 // generous enough that even a slow commitments-extraction pass (bounded by

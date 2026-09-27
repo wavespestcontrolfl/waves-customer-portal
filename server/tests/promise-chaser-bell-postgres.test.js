@@ -174,6 +174,22 @@ const OUR_NUMBER = '+19415550100';
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 
+  test('a call whose booking was later RESCHEDULED still ended booked: no ring', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+    await mockConn('scheduled_services').insert({
+      id: randomUUID(), customer_id: null, source_call_log_id: earlier.id,
+      scheduled_date: new Date(now + 2 * 86400000), service_type: 'pest_control', status: 'rescheduled',
+      created_at: earlier.created_at, updated_at: earlier.created_at,
+    });
+
+    expect(await sweepPromiseChasers()).toBe(0);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
   test('a promise made on an OUTBOUND call (Waves called the lead) rings just the same', async () => {
     // scopeCommitmentRows' own phone scope is direction-agnostic: the
     // CONTACT number of an outbound call is its to_phone.
