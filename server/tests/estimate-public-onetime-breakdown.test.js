@@ -4522,7 +4522,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('const target = ev.target instanceof Element ? ev.target : ev.target?.parentElement;');
   });
 
-  test('a no-guarantee estimate (termite work) keeps its cancel/refund terms and drops the guarantee', () => {
+  test('a neutral estimate retains payment refund details without recurring contract promises', () => {
     const html = renderPage('terms-noguarantee-token', {
       status: 'sent',
       customerName: 'Pat Customer',
@@ -4543,9 +4543,33 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toContain('class="card plan-terms-card"');
     expect(html).toContain('<h2>Cancel &amp; refunds</h2>');
-    expect(html).toContain('Cancel anytime &mdash; no contract');
+    expect(html).not.toMatch(/no contracts?|no lock-in|no long.term commitment|cancel anytime|cancellation fee/i);
+    expect(html).toContain('Your written service scope and terms apply.');
+    expect(html).toContain('setup is refundable');
+    expect(html).toContain('Annual prepay is prorated');
     expect(html).not.toContain('our guarantee');
     expect(html).not.toContain('Money-back guarantee');
+  });
+
+  test('a neutral mixed proposal keeps commercial scope without included re-service or no-contract promises', () => {
+    const html = renderPage('mixed-proposal-terms-token', {
+      id: 'mixed-proposal-terms', status: 'sent', customerName: 'Fixture Customer',
+      address: '1 Main St', monthlyTotal: 55, annualTotal: 660, onetimeTotal: 900,
+      noGuaranteeClaims: true,
+    }, {
+      proposal: { enabled: true, buildings: [{ name: 'Fixture', lineItems: [
+        { description: 'Pest Control', quantity: 1, unitPrice: 55, frequency: 'monthly' },
+        { description: 'Termite Trenching', quantity: 1, unitPrice: 900, frequency: 'one_time' },
+      ] }] },
+      result: {
+        recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 55 }] },
+        oneTime: { items: [] }, results: { pest: { apps: 4 } },
+      },
+    });
+    expect(html).toContain('Recurring exterior treatment');
+    expect(html).toContain('Termite Trenching');
+    expect(html).toContain('$900.00');
+    expect(html).not.toMatch(/re-service requests are included|no long.term contract|cancel anytime/i);
   });
 
   test('server-rendered recurring estimates surface cancel/refund/guarantee terms', () => {

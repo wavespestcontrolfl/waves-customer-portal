@@ -12,6 +12,7 @@
  */
 import { useSyncExternalStore } from 'react';
 import { etDateString } from './timezone';
+import { PLAN_TERMS_COPY } from '@estimate-copy-claims';
 
 // Estimate glass COPY release — category-scoped server-side. NOTE: only the
 // marketing COPY still rides this flag; the glass THEME is now unconditional
@@ -440,14 +441,13 @@ const GLASS_ONE_TIME_HERO_REVIEW_NO_GUARANTEE = {
 // our money-back guarantee", or a one-time service's callback/re-treatment
 // promise) falls back to the bundle pack's subline, which claims only that
 // the plan was priced from the property.
-const GUARANTEE_CLAIM_RE = /guarantee|warrant(?:y|ies)|callbacks?|re[- ]?(?:treat(?:ment|s|ed|ing)?|spray(?:s|ed|ing)?)|money[- ]?back|risk[- ]?free|satisfaction|(?:free[^.!?]*(?:re[- ]?service|service calls?)|(?:re[- ]?service|service calls?)[^.!?]*(?:free|no charge))/i;
 
-export function copyHasGuaranteeClaim(text) {
-  return GUARANTEE_CLAIM_RE.test(String(text || ''));
+export function copyHasPlanTermsClaim(text) {
+  return PLAN_TERMS_COPY.test(String(text || ''));
 }
 
 export function glassPackWithoutGuarantee(pack) {
-  if (!pack || !copyHasGuaranteeClaim(pack.heroSub)) return pack;
+  if (!pack || !copyHasPlanTermsClaim(pack.heroSub)) return pack;
   return { ...pack, heroSub: GLASS_PACKS.bundle.heroSub };
 }
 

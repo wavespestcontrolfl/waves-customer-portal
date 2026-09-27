@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
-import { applyCommercialExteriorScope, copyHasGuaranteeClaim, glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay, treeShrubPalmBulletText, withTreeShrubPalmBullet } from '../../lib/estimate-glass-copy';
+import { applyCommercialExteriorScope, copyHasPlanTermsClaim, glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay, treeShrubPalmBulletText, withTreeShrubPalmBullet } from '../../lib/estimate-glass-copy';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import { fmtMoney, fmtMoneySigned } from '../../lib/money';
 import { W, PRICE_FONT, waveGuardChipStyle } from './tokens';
@@ -768,7 +768,7 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
                   const isTreeShrubRow = glass ? glassSlug === 'tree_shrub' : serviceKey(row) === 'tree_shrub';
                   const withPalmCare = isTreeShrubRow ? withTreeShrubPalmBullet(base, row.palmCount) : base;
                   return noGuarantee
-                    ? withPalmCare.filter((line) => !copyHasGuaranteeClaim(line))
+                    ? withPalmCare.filter((line) => !copyHasPlanTermsClaim(line))
                     : withPalmCare;
                 })()}
                 collapsible={glass}

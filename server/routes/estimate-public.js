@@ -38,7 +38,8 @@ function acceptBookingGateToken(estimate) {
   return token ? `&accept_token=${encodeURIComponent(token)}` : '';
 }
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
-const { GUARANTEE_COPY, resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
+const { resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
+const { PLAN_TERMS_COPY } = require('../../shared/estimate-copy-claims.cjs');
 const {
   hasPurchasedTrenchingWarranty,
   matchingTrenchingWarrantyRow,
@@ -5604,25 +5605,25 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // card) and mode-aware so it hides in one-time mode.
   // Termite and unclassifiable estimates make no guarantee claim
   // (serviceMixMakesNoGuaranteeClaim, decided by the route from the
-  // estimate's rows): the card keeps its cancel/refund terms and drops the
-  // guarantee heading and item.
+  // estimate's rows): the card keeps the payment-option refund details but
+  // does not promise no-contract terms, anytime cancellation, or a guarantee.
   const planTermsNoGuarantee = noGuaranteeClaims;
   const planTermsCardHtml = showBillingCard ? `
   <section class="card plan-terms-card"${billingModeAttr}>
     <h2>${planTermsNoGuarantee ? 'Cancel &amp; refunds' : 'Cancel, refunds &amp; our guarantee'}</h2>
-    <p class="billing-lede">No contracts and no lock-in. Here&rsquo;s exactly where you stand if your plans change.</p>
+    <p class="billing-lede">${planTermsNoGuarantee ? 'Your written service scope and terms apply.' : 'No contracts and no lock-in. Here&rsquo;s exactly where you stand if your plans change.'}</p>
     <ul class="plan-terms-list">
-      <li class="plan-terms-item">
+      ${planTermsNoGuarantee ? '' : `<li class="plan-terms-item">
         <span class="plan-terms-term">Cancel anytime &mdash; no contract</span>
         <span class="plan-terms-detail">No long-term commitment. Stop after any visit, with no cancellation fee.</span>
-      </li>
+      </li>`}
       ${showMembershipFee && !membershipSetupWaivedForExistingCustomer ? `<li class="plan-terms-item">
         <span class="plan-terms-term">Your ${fmtMoney(membershipFee)} setup is refundable</span>
         <span class="plan-terms-detail">Change your mind? Just ask and we&rsquo;ll refund the WaveGuard setup in full.</span>
       </li>` : ''}
       ${showAnnualPrepayOption ? `<li class="plan-terms-item">
         <span class="plan-terms-term">Annual prepay is prorated</span>
-        <span class="plan-terms-detail">On the 12-month prepay plan, cancel anytime and we refund every application you haven&rsquo;t used yet, prorated.</span>
+        <span class="plan-terms-detail">${planTermsNoGuarantee ? 'Unused applications on the 12-month prepay plan are refunded on a prorated basis.' : 'On the 12-month prepay plan, cancel anytime and we refund every application you haven&rsquo;t used yet, prorated.'}</span>
       </li>` : ''}
       ${planTermsNoGuarantee ? '' : `<li class="plan-terms-item">
         <span class="plan-terms-term">Money-back guarantee</span>
@@ -5819,7 +5820,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     const price = oneTimeItemAmount(it);
     const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
     const rawDetail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
-    const detail = noGuaranteeClaims && GUARANTEE_COPY.test(rawDetail || '') ? null : rawDetail;
+    const detail = noGuaranteeClaims && PLAN_TERMS_COPY.test(rawDetail || '') ? null : rawDetail;
     const priceCell = includedByServiceCredit ? 'Included' : fmtMoney(price);
     // What the visit involves — same outcome + bullet + terms shape the
     // React OneTimeBreakdownCard renders from item.copy (one pack, both paths).
@@ -5850,7 +5851,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     : (hasOnlyMosquitoServices
       ? MOSQUITO_PERKS
       : (hasOnlyTermiteBaitServices ? TERMITE_BAIT_PERKS : PERKS)))
-    .filter((perk) => !noGuaranteeClaims || !GUARANTEE_COPY.test(perk))
+    .filter((perk) => !noGuaranteeClaims || !PLAN_TERMS_COPY.test(perk))
     .map((p) => `<li>${escapeHtml(p)}</li>`)
     .join('');
   // All four GBP profiles (owner directive 2026-07-10 — was the first three).
@@ -6056,10 +6057,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       <ul>
         <li>Recurring exterior treatment &mdash; foundation, entry points, and grounds on your scheduled cadence</li>
         <li>Interior treatment available on every visit &mdash; priced from your building, no surprise fees</li>
-        <li>Tenant-reported pests handled between visits &mdash; re-service requests are included in the plan</li>
+        ${noGuaranteeClaims ? '' : '<li>Tenant-reported pests handled between visits &mdash; re-service requests are included in the plan</li>'}
         <li>Tenants can be added to the Waves app for arrival alerts and service reports</li>
         <li>Every visit documented &mdash; time on site, areas treated, and products applied</li>
-        <li>No long-term contract &mdash; stay because it works, not because you&rsquo;re locked in</li>
+        ${noGuaranteeClaims ? '' : '<li>No long-term contract &mdash; stay because it works, not because you&rsquo;re locked in</li>'}
       </ul>
     </div>` : ''}
   </section>`;
@@ -23697,7 +23698,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
         ...basePayload.oneTimeBreakdown,
         items: (() => {
           const labeled = basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel)
-            .map((row) => noGuaranteeClaims && GUARANTEE_COPY.test(row.detail || '') ? { ...row, detail: null } : row);
+            .map((row) => noGuaranteeClaims && PLAN_TERMS_COPY.test(row.detail || '') ? { ...row, detail: null } : row);
           if (!rowCopyAllowed) return labeled;
           const copyInputs = labeled.map((row) => {
             const raw = rawContractRowFor(row, rawContractRowGroups, labeled);

@@ -88,6 +88,15 @@ describe('EstimateProposalDocument', () => {
     expect(window.__WAVES_PDF_IMAGE_FAILURES).toBe(0);
   });
 
+  it('keeps a neutral commercial document free of included re-service and no-contract promises', () => {
+    const { container } = render(<EstimateProposalDocument data={{
+      ...BASE_DATA, proposal: { ...BASE_DATA.proposal, noGuaranteeClaims: true },
+    }} token="tok-123" />);
+    expect(container.textContent).toContain('Recurring exterior treatment');
+    expect(container.textContent).toContain('$513.60');
+    expect(container.textContent).not.toMatch(/re-service requests are included|no long.term contract|guarantee/i);
+  });
+
   it('renders a residential estimate with the recurring terms and approve-online next step', () => {
     const residential = {
       ...BASE_DATA,
@@ -209,10 +218,10 @@ describe('EstimateProposalDocument', () => {
     expect(text).toContain('Free between-visit service calls');
   });
 
-  it('a no-guarantee estimate filters guarantee-bearing inclusion bullets while retaining scope and prices', () => {
+  it.each(['Termite Trenching', 'WDO Inspection', 'Unclassified Specialty Work'])('a neutral estimate with %s filters recurring terms while retaining scope and prices', (oneTimeLabel) => {
     const lines = [
       { description: 'Pest Control', quantity: 1, unitPrice: 55, amount: 55, frequency: 'monthly', frequencyLabel: 'Monthly', taxable: false },
-      { description: 'Termite Trenching', quantity: 1, unitPrice: 1200, amount: 1200, frequency: 'one_time', frequencyLabel: 'One-time', taxable: false },
+      { description: oneTimeLabel, quantity: 1, unitPrice: 1200, amount: 1200, frequency: 'one_time', frequencyLabel: 'One-time', taxable: false },
     ];
     const termite = {
       ...BASE_DATA,
@@ -234,11 +243,11 @@ describe('EstimateProposalDocument', () => {
     expect(container.textContent).not.toContain(PEST_TERMS);
     expect(container.textContent).not.toMatch(/Satisfaction guaranteed/);
     expect(container.textContent).toContain('Licensed & insured');
-    expect(container.textContent).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat/i);
+    expect(container.textContent).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat|no long.term contract|cancel anytime/i);
     expect(container.textContent).toContain('Premium non-repellent + repellent solutions');
     expect(container.textContent).toContain('Pest Control');
     expect(container.textContent).toContain('$55.00');
-    expect(container.textContent).toContain('Termite Trenching');
+    expect(container.textContent).toContain(oneTimeLabel);
     expect(container.textContent).toContain('$1,200.00');
 
     // Without the flag the same recurring plan keeps its normal terms and
@@ -283,7 +292,7 @@ describe('EstimateProposalDocument', () => {
     expect(text).toContain('$1,200.00');
     expect(text).toContain('Retained inspection scope');
     expect(text).toContain('Licensed & insured');
-    expect(text).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat/i);
+    expect(text).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat|no long.term contract|cancel anytime/i);
   });
 
   it('keeps ordinary pest-document guarantees when its rendered rows classify as pest', () => {
@@ -313,6 +322,7 @@ describe('EstimateProposalDocument', () => {
     expect(container.textContent).toContain('Pest Control');
     expect(container.textContent).toContain('$55.00');
     expect(container.textContent).toMatch(/Money-back guarantee — if we can’t solve/);
+    expect(container.textContent).toContain('No long-term contract');
   });
 
   it('applies the same inclusion filter to a mosquito stack and preserves its neutral treatment scope', () => {
@@ -337,7 +347,7 @@ describe('EstimateProposalDocument', () => {
       cta: { commercialProposal: false, commercialAutoPriced: false },
     };
     const { container } = render(<EstimateProposalDocument data={mosquito} token="tok-123" />);
-    expect(container.textContent).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat/i);
+    expect(container.textContent).not.toMatch(/callbacks?|guarantee|warrant|money[- ]back|re[- ]?treat|no long.term contract|cancel anytime/i);
     expect(container.textContent).toContain('Barrier treatment where mosquitoes actually rest');
     expect(container.textContent).toContain('Weather-aware timing');
     expect(container.textContent).toContain('Mosquito Control');

@@ -4,7 +4,7 @@ import {
   glassPackWithoutGuarantee,
   applyCommercialExteriorScope,
   commercialGlassActive,
-  copyHasGuaranteeClaim,
+  copyHasPlanTermsClaim,
   glassCopyActive,
   glassCtaMicroFor,
   glassCtaMicroForKeys,
@@ -187,12 +187,18 @@ describe('glassPackWithoutGuarantee (server noGuaranteeClaims on a recurring est
     'Re-service between visits at no charge',
     'Between-visit service calls at no charge',
     'Free re-service between recurring visits',
-  ])('recognizes guarantee-bearing customer copy: %s', (claim) => {
-    expect(copyHasGuaranteeClaim(claim)).toBe(true);
+    'Tenant-reported pests handled between visits — re-service requests are included in the plan',
+    'No long-term contract — cancel anytime',
+    'No contracts and no lock-in',
+    'No long-term commitment',
+    'Stop after any visit, without a cancellation fee',
+    'Cancel any time',
+  ])('recognizes recurring-plan terms in customer copy: %s', (claim) => {
+    expect(copyHasPlanTermsClaim(claim)).toBe(true);
   });
 
   it('leaves neutral scope detail alone', () => {
-    expect(copyHasGuaranteeClaim('Targets shaded foliage and standing water')).toBe(false);
+    expect(copyHasPlanTermsClaim('Targets shaded foliage and standing water')).toBe(false);
   });
 
   it('replaces a hero subline that promises a guarantee and keeps the rest of the pack', () => {

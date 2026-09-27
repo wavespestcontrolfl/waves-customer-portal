@@ -558,7 +558,7 @@ describe('server-rendered page', () => {
     expect(html).toContain('Review the itemized service scope and terms below. Licensed &amp; insured.');
     expect(html).toContain('class="onetime-includes-wrap"');
     expect(html).toContain('Pay on service day.');
-    expect(html).not.toMatch(/100% guaranteed|30-day callback|retreat guaranteed|backed by the Waves Guarantee/i);
+    expect(html).not.toMatch(/100% guaranteed|30-day callback|retreat guaranteed|backed by the Waves Guarantee|no contract/i);
     if (row.service === 'german_roach') {
       expect(html).toContain('Two targeted visits that treat the roaches');
       expect(html).toContain('Visit 2 about 10–14 days later');
@@ -575,7 +575,7 @@ describe('server-rendered page', () => {
     expect(copy.assurance).toBeNull();
     expect(copy.includes.length).toBeGreaterThan(0);
     expect(copy.terms).toContain('Pay on service day.');
-    expect(JSON.stringify(copy)).not.toMatch(/guarantee|callback|re[- ]?treat|risk[- ]?free/i);
+    expect(JSON.stringify(copy)).not.toMatch(/guarantee|callback|re[- ]?treat|risk[- ]?free|no contract/i);
     expect(contract.oneTimeServiceCopy.hero.sub).toBe('Review the itemized service scope and terms below. Licensed & insured.');
     // Resolving an estimate-wide exception must not mutate the shared pack.
     expect(resolveOneTimeServiceCopy(row).assurance).toMatch(/guarantee|callback/i);

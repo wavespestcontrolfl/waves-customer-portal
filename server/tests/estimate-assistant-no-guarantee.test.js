@@ -82,6 +82,25 @@ describe('estimate assistant no-guarantee context', () => {
     }
   });
 
+  test.each([true, false])('neutral policy %s governs no-contract prose in the actual assistant context', (noGuaranteeClaims) => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 55 },
+      pricingBundle: { frequencies: [{ key: 'monthly', monthly: 55, included: [{
+        service: 'pest_control', label: 'Pest Control',
+        detail: 'Exterior perimeter service. No long-term contract. Cancel any time. No lock-in. Licensed and insured.',
+      }] }] },
+      noGuaranteeClaims,
+    });
+    expect(context.services[0].detail).toContain('Exterior perimeter service.');
+    expect(context.services[0].detail).toContain('Licensed and insured.');
+    if (noGuaranteeClaims) {
+      expect(context.services[0].detail).not.toMatch(/no long.term contract|cancel any time|no lock-in/i);
+    } else {
+      expect(context.services[0].detail).toContain('No long-term contract.');
+      expect(context.services[0].detail).toContain('Cancel any time.');
+    }
+  });
+
   test('one-time rodent work cannot inherit pest callback terms', () => {
     const context = buildEstimateAssistantContext({
       estimate: { onetime_total: 200 },

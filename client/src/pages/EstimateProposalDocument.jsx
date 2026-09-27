@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { WAVES_ACCOUNT_MANAGER_FIRST_NAME, WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { fmtMoney } from '../lib/money';
 import {
-  copyHasGuaranteeClaim,
+  copyHasPlanTermsClaim,
   glassCtaMicroForKeys,
   glassRowInclusions,
   glassServiceSlug,
@@ -135,7 +135,7 @@ function Bullet({ children }) {
 
 function proposalInclusions(items, noGuarantee) {
   if (!Array.isArray(items)) return null;
-  const visible = noGuarantee ? items.filter((line) => !copyHasGuaranteeClaim(line)) : items;
+  const visible = noGuarantee ? items.filter((line) => !copyHasPlanTermsClaim(line)) : items;
   return visible.length ? visible : null;
 }
 

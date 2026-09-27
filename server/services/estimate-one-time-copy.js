@@ -26,7 +26,7 @@
 
 const PACK = require('./estimate-one-time-copy.json');
 const { hasPurchasedTrenchingWarranty, PURCHASED_TRENCHING_WARRANTY_BULLET } = require('../../shared/estimate-purchased-warranty.cjs');
-const GUARANTEE_COPY = /guarantee|warrant(?:y|ies)|callbacks?|re[- ]?(?:treat(?:ment|s|ed|ing)?|spray(?:s|ed|ing)?)|money[- ]?back|risk[- ]?free|satisfaction|(?:free[^.!?]*(?:re[- ]?service|service calls?)|(?:re[- ]?service|service calls?)[^.!?]*(?:free|no charge))/i;
+const { GUARANTEE_COPY, PLAN_TERMS_COPY, withoutPlanTermsClaims } = require('../../shared/estimate-copy-claims.cjs');
 const NO_GUARANTEE_HERO = 'Review the itemized service scope and terms below. Licensed & insured.';
 
 function searchText(item = {}) {
@@ -349,10 +349,10 @@ function resolveOneTimeServiceCopy(item = {}, { noGuaranteeClaims = false } = {}
   if (noGuaranteeClaims) {
     assurance = null;
     outcome = entry.outcomeNoGuarantee || outcome;
-    if (GUARANTEE_COPY.test(outcome || '')) outcome = 'Your service follows the written scope and terms in this estimate.';
+    if (PLAN_TERMS_COPY.test(outcome || '')) outcome = 'Your service follows the written scope and terms in this estimate.';
     lines = lines.filter((line) => (purchasedTrenchingWarranty && line === PURCHASED_TRENCHING_WARRANTY_BULLET)
-      || !GUARANTEE_COPY.test(line));
-    if (GUARANTEE_COPY.test(terms || '')) terms = 'Your written service scope and terms apply.';
+      || !PLAN_TERMS_COPY.test(line));
+    if (PLAN_TERMS_COPY.test(terms || '')) terms = withoutPlanTermsClaims(terms) || 'Your written service scope and terms apply.';
   }
   return {
     key,

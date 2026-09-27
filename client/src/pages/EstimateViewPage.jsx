@@ -73,10 +73,11 @@ import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyle
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
 import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
 import EstimateProposalDocument, { proposalMakesNoGuaranteeClaim } from './EstimateProposalDocument';
+import { withoutPlanTermsClaims } from '@estimate-copy-claims';
 import { estimateCopyFor } from '../lib/estimate-copy';
 import {
   commercialGlassActive,
-  copyHasGuaranteeClaim,
+  copyHasPlanTermsClaim,
   glassCopyActive,
   glassCtaMicroForKeys,
   glassDayLinesFor,
@@ -1977,7 +1978,7 @@ function oneTimeOutcomeWithoutGuarantee(text) {
   const sentences = withoutSuffix.match(/[^.!?]+[.!?]?/g) || [];
   return sentences
     .map((sentence) => sentence.trim())
-    .filter((sentence) => sentence && !copyHasGuaranteeClaim(sentence))
+    .filter((sentence) => sentence && !copyHasPlanTermsClaim(sentence))
     .join(' ')
     .trim() || null;
 }
@@ -1991,10 +1992,10 @@ function oneTimeCopyWithoutGuarantee(copy, item = {}) {
     includes: Array.isArray(copy.includes)
       ? copy.includes.filter((line) => (
         retainPurchasedWarranty && line === PURCHASED_TRENCHING_WARRANTY_BULLET
-      ) || !copyHasGuaranteeClaim(line))
+      ) || !copyHasPlanTermsClaim(line))
       : [],
     assurance: null,
-    terms: copyHasGuaranteeClaim(copy.terms) ? null : copy.terms,
+    terms: withoutPlanTermsClaims(copy.terms),
   };
 }
 
@@ -2083,7 +2084,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
           const isIncluded = !isQuoteRequired && item.kind === 'included';
           const showPrepayWaiverNote = !isQuoteRequired && !isDiscount && !isIncluded && isPrepayWaivedRow(item);
           const quoteNote = isQuoteRequired ? quoteRequiredReasonNote(item, item.detail || '') : '';
-          const visibleDetail = noGuarantee && copyHasGuaranteeClaim(item.detail) ? null : item.detail;
+          const visibleDetail = noGuarantee && copyHasPlanTermsClaim(item.detail) ? null : item.detail;
           return (
             <div key={`${item.service || item.label || 'item'}-${i}`} style={{
               display: 'grid', gridTemplateColumns: '1fr auto', gap: 12,
@@ -4627,7 +4628,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing', noGuarantee =
       <div style={{ display: 'grid', gap: 10 }}>
         {items.map((item, i) => {
           const amount = fmtMoney(Math.abs(Number(item.amount) || 0));
-          const visibleDetail = noGuarantee && copyHasGuaranteeClaim(item.detail) ? null : item.detail;
+          const visibleDetail = noGuarantee && copyHasPlanTermsClaim(item.detail) ? null : item.detail;
           if (lead && isTermiteInstall(item)) {
             return (
               <div key={`${item.service || item.label || 'item'}-${i}`}>

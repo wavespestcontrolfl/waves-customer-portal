@@ -21,7 +21,7 @@ const { normalizeBondTermService } = require('./estimate-converter');
 
 // Neutral categories may retain their own satisfaction wording, but cannot
 // inherit residential membership promises from saved service prose.
-const RECURRING_TERMS_COPY = /callbacks?|re[- ]?treat(?:ment|s|ed|ing)?|money[- ]?back|no[- ](?:long[- ]term[- ]|commitment[- ])?contracts?|(?:pause|cancel) anytime|free[^.!?;]*(?:re[- ]?service|service calls?)|(?:re[- ]?service|service calls?)[^.!?;]*(?:free|no charge)/i;
+const { RECURRING_TERMS_COPY, PLAN_TERMS_COPY } = require('../../shared/estimate-copy-claims.cjs');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -847,7 +847,7 @@ function buildEstimateAssistantContext({
     ? (oneTimeBillingAmount ? fmtMoney(oneTimeBillingAmount) : null)
     : normalBillingAmountText;
   const rowWithSummary = (row) => {
-    const claimPattern = noGuaranteeClaims ? GUARANTEE_COPY
+    const claimPattern = noGuaranteeClaims ? PLAN_TERMS_COPY
       : (guarantees.recurringTermsEligible ? null : RECURRING_TERMS_COPY);
     const detail = claimPattern
       ? cleanText(row.detail).split(/(?<=[.!?;])\s+/)
