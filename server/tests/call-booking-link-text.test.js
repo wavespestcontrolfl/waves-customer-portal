@@ -31,6 +31,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { isAmbiguousProviderOutcome } = require('../services/sms-auto-send');
 const {
   computeSendAt,
+  callEndFor,
   stagingIneligibleReason,
   outboundPriorContactMissing,
   outboundStagingReason,
@@ -60,6 +61,59 @@ describe('computeSendAt', () => {
       const etHour = new Date(sendAt.getTime() - 4 * 3600000).getUTCHours();
       expect(etHour).toBeLessThan(20);
     }
+  });
+});
+
+// ── callEndFor — this lane's own call-end derivation ──────────────────────
+// Deliberately does NOT use call-commitments.js's callEndedAt: that adds
+// duration on top of created_at for every inbound row (wrong for a
+// post-call/recovered row, whose created_at is already stamped after the
+// call ended) and returns the bare created_at for a plain outbound row
+// with no bridged_at (too early — no duration added at all). callEndFor
+// uses callStartedAt(call) + callDurationSeconds(call) uniformly instead,
+// since callStartedAt already backs a post-call row's own length out of
+// created_at.
+describe('callEndFor', () => {
+  test('a ring-time inbound row: end is start + duration', () => {
+    const call = { direction: 'inbound', created_at: new Date('2026-09-26T19:00:00Z'), duration_seconds: 300 }; // not flagged post-call
+    expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:05:00Z').getTime());
+  });
+
+  // codex round-9 finding: a post-call recovered row (status_callback on a
+  // TERMINAL event, or a recording-status recovery insert) stamps
+  // created_at AFTER the call ends. A real call ending at 5:55 PM ET
+  // (21:55Z) with a 5-minute duration must compute an end of 5:55 PM, not
+  // 6:05 PM — callStartedAt backs the duration out of created_at (reaching
+  // 5:50 PM), and callEndFor adds it back to reach the TRUE end (5:55 PM),
+  // never created_at's own inflated reading.
+  test('a post-call recovered row: end is the TRUE end, not created_at + duration', () => {
+    const call = {
+      direction: 'inbound', created_at: new Date('2026-09-26T21:55:00Z'), duration_seconds: 300, // 5:55 PM ET, 5 min
+      metadata: { source: 'status_callback', inserted_on_status: 'completed' }, // terminal ⇒ post-call row
+    };
+    expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T21:55:00Z').getTime()); // 5:55 PM ET — NOT 6:05 PM
+  });
+
+  test('a plain outbound row (no bridged_at): end includes the duration, never just the start', () => {
+    const call = { direction: 'outbound', created_at: new Date('2026-09-26T19:00:00Z'), duration_seconds: 180 };
+    expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:03:00Z').getTime());
+  });
+
+  test('a bridged row: end is bridged_at + duration, regardless of created_at', () => {
+    const call = {
+      direction: 'outbound', created_at: new Date('2026-09-26T18:50:00Z'), // dialing started here
+      bridged_at: new Date('2026-09-26T19:00:00Z'), duration_seconds: 240, // the answer, 10 min later
+    };
+    expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:04:00Z').getTime());
+  });
+
+  test('a missing duration falls back to the call start, never NaN or a throw', () => {
+    const call = { direction: 'inbound', created_at: new Date('2026-09-26T19:00:00Z') }; // no duration_seconds at all
+    expect(callEndFor(call).getTime()).toBe(new Date('2026-09-26T19:00:00Z').getTime());
+  });
+
+  test('no created_at at all returns null (the no_call_end_time skip)', () => {
+    expect(callEndFor({ direction: 'inbound' })).toBeNull();
   });
 });
 
@@ -212,11 +266,11 @@ describe('stage', () => {
     expect(wheres.some(([col, op]) => col === 'created_at' && op === '<=')).toBe(false);
   });
 
-  // codex pre-push P1: callEndedAt(call) can read a future instant for a
-  // post-call fallback row (a bogus/huge duration_seconds). Unclamped,
-  // computeSendAt on that future end could push send_at arbitrarily late;
-  // clamping to `now` bounds the delay instead.
-  test('a recovered row whose computed end is in the future computes send_at from `now`, not that future reading', async () => {
+  // codex pre-push P1: a bogus/huge duration_seconds can make callEndFor()
+  // read as decades in the future for any row. Unclamped, computeSendAt on
+  // that future end could push send_at arbitrarily late; clamping to `now`
+  // bounds the delay instead.
+  test('a row whose computed end is in the future (a bogus duration) computes send_at from `now`, not that future reading', async () => {
     const now = new Date('2026-09-26T15:00:00Z'); // 11:00 ET — inside the window, well before the 6pm cutoff
     const rawBindings = [];
     const conn = jest.fn(() => {
@@ -245,6 +299,40 @@ describe('stage', () => {
     expect(parsed).toBeTruthy();
     const sendAt = new Date(parsed.call_booking_link_text.send_at);
     expect(sendAt.getTime()).toBe(computeSendAt(now).getTime());
+  });
+
+  // codex round-9 finding, closed structurally by callEndFor: a post-call
+  // recovered row whose real end is 5:55 PM ET must send at 7:55 PM ET the
+  // SAME evening — never deferred to 8 AM the next morning, which is what
+  // callEndedAt's created_at + duration (reading 6:05 PM) would have done.
+  test('a recovered row ending at 5:55 PM ET sends at 7:55 PM ET the same evening, never 8 AM the next morning', async () => {
+    const now = new Date('2026-09-26T22:10:00Z'); // 6:10 PM ET — staging runs shortly after the recovered row lands
+    const rawBindings = [];
+    const conn = jest.fn(() => {
+      const chain = {};
+      ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.update = jest.fn(async () => 1);
+      return chain;
+    });
+    conn.raw = jest.fn((sql, bindings) => { rawBindings.push(bindings); return 'RAW'; });
+    const call = {
+      id: 'call-555pm', direction: 'inbound', created_at: new Date('2026-09-26T21:55:00Z'), duration_seconds: 300, // 5:55 PM ET, 5 min
+      metadata: { lead_id: 'lead-1', source: 'status_callback', inserted_on_status: 'completed' }, // post-call row
+      ai_extraction_enriched: {
+        meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
+        caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
+        property: { property_type: 'single_family' },
+        service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        sentiment_and_lead: { lead_quality: 'warm' },
+      },
+      ai_address_validation: { inServiceArea: true },
+    };
+    const decided = await stageOne(conn, call, now);
+    expect(decided).toBe('pending');
+    const parsed = rawBindings.map(([json]) => JSON.parse(json)).find((v) => v.call_booking_link_text?.status === 'pending');
+    const sendAt = new Date(parsed.call_booking_link_text.send_at);
+    expect(sendAt.getTime()).toBe(new Date('2026-09-26T23:55:00Z').getTime()); // 7:55 PM ET, same evening
   });
 });
 

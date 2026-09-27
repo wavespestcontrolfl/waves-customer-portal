@@ -54,8 +54,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
-const { callEndedAt } = require('./call-commitments');
-const { callStartedAt } = require('../utils/call-timeline');
+const { callStartedAt, callDurationSeconds } = require('../utils/call-timeline');
 const { etParts } = require('../utils/datetime-et');
 const { nextSendWindowOpenET, isWithinSendWindowET } = require('./messaging/send-window');
 const { isOpenLeadRow } = require('./lead-statuses');
@@ -213,6 +212,42 @@ async function outboundStagingReason(conn, call, leadId) {
   return outboundPriorContactMissing(call, lead) ? 'outbound_without_prior_contact' : null;
 }
 
+// This lane deliberately does NOT use call-commitments.js's callEndedAt for
+// the call's end. That function adds duration on top of created_at for
+// EVERY inbound row, including a post-call one (a status-callback or
+// recording-status recovery insert — call-timeline.js's
+// POST_CALL_ROW_SOURCES) whose created_at is already stamped after the
+// call ended — reading a call that really ended at 5:55 PM as ending at
+// 6:05 PM. And for a plain outbound row with no bridged_at, it returns the
+// bare created_at with no duration added at all — too EARLY, the opposite
+// error. Both are wrong for the 2-hour / 6 PM-cutoff rule this lane runs
+// on (codex pre-push rounds 8–9).
+//
+// callStartedAt(call) already backs a post-call row's own length out of
+// created_at, so start + duration is correct uniformly: ring-time rows
+// (created_at IS the start — start + duration is the ordinary end),
+// post-call/recovered rows (callStartedAt already subtracted the
+// duration — adding it back reaches the true end, not created_at's
+// inflated one), and plain outbound rows (start + duration, never the
+// bare start callEndedAt would return). The one row shape neither
+// function derives from created_at at all is a bridged outbound-connect
+// call, handled by its own branch below exactly as callEndedAt's is.
+function callEndFor(call) {
+  const durationMs = callDurationSeconds(call) * 1000;
+  // Outbound-connect bridge: Twilio's duration runs from the answer;
+  // created_at predates dialing.
+  if (call?.bridged_at) {
+    const bridged = new Date(call.bridged_at);
+    if (!Number.isNaN(bridged.getTime())) return new Date(bridged.getTime() + durationMs);
+  }
+  // Every other row: callStartedAt already backs the length out of a
+  // post-call (recovered / status-callback) row, so start + duration is
+  // the end for ring-time rows, post-call rows, and plain outbound rows
+  // alike (callEndedAt returns bare created_at for those, i.e. too early).
+  const start = callStartedAt(call);
+  return start ? new Date(start.getTime() + durationMs) : null;
+}
+
 // The 2-hour-after / 8am-ET-next-morning rule. A call ending at/after 6 PM
 // ET (18:00) waits for the next ET calendar day's 8 AM open — the DST-safe
 // noon-anchor nextSendWindowOpenET already computes exactly that for any
@@ -342,19 +377,16 @@ async function stageOne(conn, call, now) {
     await claimMetadata(conn, call.id, { status: 'skipped', reason, staged_at });
     return 'skipped';
   }
-  const callEnd = callEndedAt(call);
+  const callEnd = callEndFor(call);
   if (!callEnd) {
     await claimMetadata(conn, call.id, { status: 'skipped', reason: 'no_call_end_time', staged_at });
     return 'skipped';
   }
-  // Clamp to `now` (codex pre-push P1): callEndedAt() can read a FUTURE
-  // instant for a post-call fallback row whose duration_seconds hasn't
-  // caught up with reality yet (or any other skew) — computeSendAt on an
-  // unclamped future end could push send_at arbitrarily late. Clamping
-  // bounds the damage to "delayed by at most the skew," never "delayed
-  // indefinitely." Deliberately NOT changing callEndedAt itself, which
-  // other lanes (reschedule-link-promises, followup-sla-watcher) already
-  // depend on as-is.
+  // Clamp to `now` (codex pre-push P1): a skewed duration_seconds could
+  // still, in principle, push callEndFor() past the actual present —
+  // computeSendAt on an unclamped future end could then push send_at
+  // arbitrarily late. Clamping bounds the damage to "delayed by at most
+  // the skew," never "delayed indefinitely."
   const clampedEnd = callEnd.getTime() > now.getTime() ? now : callEnd;
   const send_at = computeSendAt(clampedEnd).toISOString();
   await claimMetadata(conn, call.id, { status: 'pending', lead_id: leadId, send_at, staged_at });
@@ -588,6 +620,7 @@ module.exports = {
   STAGING_GRACE_MINUTES,
   MIN_CONVERSATION_SECONDS,
   computeSendAt,
+  callEndFor,
   stagingIneligibleReason,
   outboundPriorContactMissing,
   outboundStagingReason,
