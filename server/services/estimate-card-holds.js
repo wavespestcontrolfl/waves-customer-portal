@@ -2353,10 +2353,13 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   // a receipt has to land somewhere (undeliverable-email fallback, same as
   // the consent gate / deposit twin). A transient provider error does NOT
   // fall back — the invoice stays unstamped for the admin needs-receipt path.
-  let emailDeterministicMiss = prefs?.email_enabled === false;
+  // The portal-wide switch and a missing address are read by the shared
+  // billing email authority inside the routed receipt (owner ruling
+  // 2026-09-27); either comes back as a deterministic miss.
+  let emailDeterministicMiss = false;
   let emailAttempted = false;
   let emailDelivered = false;
-  if (!receiptOptOut && !emailDeterministicMiss && (wantsEmail === true
+  if (!receiptOptOut && (wantsEmail === true
     || (wantsEmail === null && (channel === 'email' || channel === 'both' || (smsChannel && smsOptedOut))))) {
     emailAttempted = true;
     try {
@@ -2379,7 +2382,7 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
           invoiceId: invoice.id,
           source: 'no_show_fee_preference_change',
         });
-      } else if (emailResult?.error === 'No receipt recipient email') {
+      } else if (['No receipt recipient email', 'email_opted_out'].includes(emailResult?.error)) {
         emailDeterministicMiss = true;
       }
     } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt email failed', { error: e.message }); }
