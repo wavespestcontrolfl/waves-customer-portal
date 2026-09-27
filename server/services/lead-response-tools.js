@@ -69,6 +69,21 @@ async function withLockedLeadSubject(input, context, write) {
   });
 }
 
+// extracted_data keys that are staff-only: the Lead Response Agent writes the
+// customer's texts, so it never sees them. sign_host is the neighbor page's
+// "Which home had the sign?" answer (routes/lead-webhook.js), kept for the
+// office's sign-host credit.
+const AGENT_HIDDEN_EXTRACTED_KEYS = ['sign_host'];
+
+function agentVisibleExtractedData(raw) {
+  if (!raw) return null;
+  const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+  const visible = { ...data };
+  for (const key of AGENT_HIDDEN_EXTRACTED_KEYS) delete visible[key];
+  return visible;
+}
+
 async function executeLeadTool(toolName, input, context) {
   const subject = await resolveLeadSubject(input, context);
   if (subject.error) return subject;
@@ -109,7 +124,7 @@ async function executeLeadTool(toolName, input, context) {
         customerId: lead.customer_id,
         firstContactAt: lead.first_contact_at,
         responseTimeMin: lead.response_time_minutes,
-        extractedData: lead.extracted_data ? (typeof lead.extracted_data === 'string' ? JSON.parse(lead.extracted_data) : lead.extracted_data) : null,
+        extractedData: agentVisibleExtractedData(lead.extracted_data),
         triage: triageData,
         gclid: lead.gclid,
       };

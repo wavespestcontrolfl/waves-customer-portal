@@ -123,6 +123,7 @@ async function currentStepLedgerIds(row, step, channels) {
 }
 
 function terminalFollowupEmailRefusal(result) {
+  if (result?.resolved === true) return true;
   return result?.ok === false && result.retryable !== true && result.deferred !== true
     && result.deliveryOutcome !== 'uncertain' && (
       ['billing_email_not_selected', 'missing_email', 'template_unavailable'].includes(result.reason)
@@ -1086,6 +1087,15 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       const claim = selectedChannels !== null && typeof ContactLedger.claimAttempt === 'function'
         ? await ContactLedger.claimAttempt(emailLedger) : { allowed: true };
       if (claim.delivered) emailResult = { ok: true, deduped: true };
+      else if (claim.resolved) {
+        emailResult = {
+          ok: false,
+          delivered: false,
+          skipped: true,
+          resolved: true,
+          reason: claim.resolution || 'prior_email_terminally_settled',
+        };
+      }
       else if (!claim.allowed) emailResult = { ok: false, deferred: true, reason: 'prior_email_outcome_unconfirmed' };
       else {
         emailResult = mdPending
