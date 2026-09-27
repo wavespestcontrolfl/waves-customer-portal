@@ -346,7 +346,7 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
       customer: 0, property: 0, visits: 1, templates: 1, visitIds: [linkedId],
     });
     expect(await trx('scheduled_services').where({ id: linkedId }).first()).toMatchObject({
-      service_address_line1: CORRECTED.address_line1,
+      service_address_line1: '999 Stale Lane',
       lat: null, lng: null, route_order: null,
     });
     expect(await trx('scheduled_services').where({ id: independentId }).first()).toMatchObject({
@@ -354,6 +354,39 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
     });
     expect(recurringServiceAddress(await trx('scheduled_services').where({ id: parentId }).first()))
       .toMatchObject({ service_address_line1: CORRECTED.address_line1, lat: null, lng: null, zone: null });
+  });
+
+  test('clearing a frozen grouped destination preserves every appointment address snapshot', async () => {
+    const visitId = randomUUID();
+    const pendingId = randomUUID();
+    const completedId = randomUUID();
+    await trx('service_visits').insert({
+      id: visitId, customer_id: CUSTOMER_ID, property_id: PRIMARY_ID,
+      scheduled_date: '2099-10-01', stop_base_key: `${PRIMARY_ID}:2099-10-01`,
+      stop_seq: 1, status: 'open',
+    });
+    await trx('scheduled_services').insert([
+      visitRow(pendingId, {
+        visit_id: visitId, property_id: PRIMARY_ID, service_address_line1: '999 Frozen Snapshot Lane',
+        lat: 27.45, lng: -82.45, route_order: 5,
+      }),
+      visitRow(completedId, {
+        visit_id: visitId, property_id: PRIMARY_ID, status: 'completed',
+        service_address_line1: '999 Frozen Snapshot Lane', lat: 27.45, lng: -82.45,
+      }),
+    ]);
+    frozenVisitVerdict.mockResolvedValue({ frozen: true, reason: 'issued_link' });
+
+    const locked = await context({ includeProtected: true, verifyPin: false });
+    await clearMatchingPins(trx, customer, primary, {}, locked);
+
+    expect(await trx('scheduled_services').where({ id: pendingId }).first()).toMatchObject({
+      service_address_line1: '999 Frozen Snapshot Lane', lat: null, lng: null, route_order: null,
+    });
+    expect(await trx('scheduled_services').where({ id: completedId }).first()).toMatchObject({
+      service_address_line1: '999 Frozen Snapshot Lane', lat: '27.450000', lng: '-82.450000',
+    });
+    expect(frozenVisitVerdict).not.toHaveBeenCalled();
   });
 
   test('visit membership changes are part of the post-lock fence', async () => {
