@@ -28,6 +28,7 @@ const {
   isStaleClaimReviewHold,
   staleClaimReviewHoldError,
   billingReviewSummary,
+  excludeBillingReviewHeldInvoices,
 } = require("./invoice-helpers");
 
 // Customer-facing presign TTL: photo URLs mint per page-load, so the TTL must
@@ -2768,32 +2769,39 @@ async function claimDueScheduledInvoiceForSend(database, invoiceId) {
   // (customer_id, token, invoice_number, payer_id, scheduled_service_id)
   // this narrower column list silently dropped. Costs nothing to widen —
   // the worker loop below still only reads the four fields it needs.
-  const [claimed] = await database("invoices")
+  let claimQuery = database("invoices")
     .where({ id: invoiceId, status: "scheduled" })
     .whereNotNull("scheduled_send_at")
     .where("scheduled_send_at", "<=", new Date())
-    .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5))
-    // Same-trip first-application billing review (owner ruling, #5021
-    // round-3 redesign — see first-application-sibling-split.js): the
-    // automatic scheduled-send worker must never deliver an UNDELIVERED
-    // invoice whose combined total is under review. This is the ONE claim
-    // query both processScheduledSends' own loop and
-    // claimPacketInvoiceForSend's requireDue branch share, so gating it
-    // here holds every automatic send without fencing each caller
-    // separately. A parked row is simply skipped (returns null, same as
-    // "not due yet") — it is retried once the review clears, never errored.
-    //
-    // 'scheduled' is ambiguous the same way invoice-helpers.js's
-    // isInvoiceUndeliveredForBillingReview documents (Codex #5021 round-3
-    // pre-push P1, second round): a combined send that delivered its SMS
-    // leg but held/failed the email leg restores to 'scheduled' for a
-    // retry, WITH sms_sent_at already stamped — genuinely partial
-    // delivery, not undelivered, even though the row reads exactly like a
-    // never-sent queued invoice. This predicate mirrors that function's
-    // logic as a real WHERE clause (a JS predicate can't run inside SQL):
-    // block ONLY when a review is open AND no delivery leg has stamped yet.
-    .where((q) => q.whereNull("billing_review_opened_at")
-      .orWhereNotNull("sent_at").orWhereNotNull("sms_sent_at").orWhereNotNull("email_sent_at"))
+    .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5));
+  // Same-trip first-application billing review (owner ruling, #5021
+  // round-3 redesign — see first-application-sibling-split.js): the
+  // automatic scheduled-send worker must never deliver an UNDELIVERED
+  // invoice whose combined total is under review. This is the ONE claim
+  // query both processScheduledSends' own loop and
+  // claimPacketInvoiceForSend's requireDue branch share, so gating it
+  // here holds every automatic send without fencing each caller
+  // separately. A parked row is simply skipped (returns null, same as
+  // "not due yet") — it is retried once the review clears, never errored.
+  //
+  // 'scheduled' is ambiguous the same way invoice-helpers.js's
+  // isInvoiceUndeliveredForBillingReview documents (Codex #5021 round-3
+  // pre-push P1, second round): a combined send that delivered its SMS
+  // leg but held/failed the email leg restores to 'scheduled' for a
+  // retry, WITH sms_sent_at already stamped — genuinely partial
+  // delivery, not undelivered, even though the row reads exactly like a
+  // never-sent queued invoice. excludeBillingReviewHeldInvoices
+  // (invoice-helpers.js) mirrors that function's logic as a real WHERE
+  // clause (a JS predicate can't run inside SQL): block ONLY when a
+  // review is open AND no delivery leg has stamped yet. processScheduledSends'
+  // own due-selection query (invoice.js, ordered + LIMITed, feeds this same
+  // claim) applies the identical predicate BEFORE its limit — see that
+  // query's comment — so the two can never drift apart (Codex #5021
+  // pre-push finding: a due query that didn't exclude held rows kept
+  // reselecting the same held rows into its LIMIT forever, starving every
+  // later eligible invoice).
+  claimQuery = excludeBillingReviewHeldInvoices(claimQuery);
+  const [claimed] = await claimQuery
     .update({ status: "sending", updated_at: new Date(), send_claim_token: claimToken })
     .returning("*");
   return claimed || null;
@@ -6413,7 +6421,17 @@ const InvoiceService = {
         updated_at: new Date(),
       });
 
-    const due = await db("invoices")
+    // excludeBillingReviewHeldInvoices (invoice-helpers.js, shared with
+    // claimDueScheduledInvoiceForSend's own atomic claim below) is applied
+    // BEFORE the limit (Codex #5021 pre-push finding): without it, a held
+    // invoice could occupy one of the ordered LIMIT slots below, its claim
+    // would then fail (claimDueScheduledInvoiceForSend's identical
+    // predicate refuses it) and the loop simply `continue`s past it — once
+    // the earliest `limit` due invoices were all held, every run reselected
+    // those exact rows and later eligible invoices never sent. Excluding
+    // held rows here means a held invoice never takes a LIMIT slot in the
+    // first place, so eligible invoices behind it are still selected.
+    let dueQuery = db("invoices")
       .where({ status: "scheduled" })
       .whereNotNull("scheduled_send_at")
       .where("scheduled_send_at", "<=", new Date())
@@ -6421,7 +6439,9 @@ const InvoiceService = {
         q
           .whereNull("scheduled_send_attempts")
           .orWhere("scheduled_send_attempts", "<", 5),
-      )
+      );
+    dueQuery = excludeBillingReviewHeldInvoices(dueQuery);
+    const due = await dueQuery
       .orderBy("scheduled_send_at", "asc")
       .limit(limit)
       .select(

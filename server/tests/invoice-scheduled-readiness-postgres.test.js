@@ -212,6 +212,66 @@ postgres('scheduled-readiness zero-due visit invoice guard (#4131 slice 4)', () 
     expect((await read()).scheduled_send_attempts).toBe(5);
   });
 
+  test('processScheduledSends\' due-selection query excludes billing-review-held invoices BEFORE its ordered LIMIT — 25 held invoices ahead of 1 eligible one in scheduled_send_at order no longer starve it (Codex #5021 pre-push finding, invoice.js:2795)', async () => {
+    // Pre-push finding: the due-selection query (invoice.js's
+    // processScheduledSends) used to select rows into its ordered LIMIT
+    // with no billing-review predicate at all — only the atomic claim
+    // (claimDueScheduledInvoiceForSend) refused a held row, AFTER
+    // selection. The loop's own handling of that failed claim is a bare
+    // `continue` (no attempt spent, row left exactly where it was), so once
+    // the earliest `limit` due invoices were all held, every single pass
+    // reselected those same rows and any genuinely eligible invoice behind
+    // them in scheduled_send_at order was never even read, let alone sent.
+    // The fix (excludeBillingReviewHeldInvoices, invoice-helpers.js) is
+    // applied to the due query itself, so a held row never occupies a
+    // LIMIT slot in the first place.
+    const heldIds = [];
+    for (let i = 0; i < 25; i += 1) {
+      const id = randomUUID();
+      heldIds.push(id);
+      await trx('invoices').insert({
+        id, customer_id: customerId, token: randomUUID(), invoice_number: `HELD-${id.slice(0, 8)}`,
+        status: 'scheduled', total: 100, credit_applied: 0, subtotal: 100, line_items: '[]',
+        // The earliest 25 scheduled_send_at values of the batch — these
+        // are exactly what an unfiltered ORDER BY scheduled_send_at ASC
+        // LIMIT 25 would select, with nothing left over for row 26.
+        scheduled_send_at: new Date(Date.now() - (26 - i) * 60000),
+        // Open review, no delivery stamp anywhere — genuinely held per
+        // isInvoiceUndeliveredForBillingReview.
+        billing_review_opened_at: new Date(Date.now() - 3600000),
+      });
+    }
+    const eligibleId = randomUUID();
+    await trx('invoices').insert({
+      id: eligibleId, customer_id: customerId, token: randomUUID(), invoice_number: `ELIGIBLE-${eligibleId.slice(0, 8)}`,
+      status: 'scheduled', total: 100, credit_applied: 0, subtotal: 100, line_items: '[]',
+      // Due, but ordered LAST of the 26 — the slot the old unfiltered
+      // query could never reach with limit=25.
+      scheduled_send_at: new Date(Date.now() - 1000),
+    });
+
+    const sendSpy = jest.spyOn(Invoice, 'sendViaSMSAndEmail').mockResolvedValue({ ok: true });
+    try {
+      const result = await Invoice.processScheduledSends();
+
+      expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+      expect(sendSpy.mock.calls[0][0]).toBe(eligibleId);
+
+      // The 25 held rows were excluded from the due-selection query
+      // itself — never claimed, never touched, still sitting exactly
+      // where they were for the office to clear.
+      const heldRows = await trx('invoices').whereIn('id', heldIds);
+      expect(heldRows).toHaveLength(25);
+      for (const row of heldRows) {
+        expect(row.status).toBe('scheduled');
+        expect(row.send_claim_token).toBeNull();
+      }
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+
   test('a second overlapping pass off the SAME stale in-memory snapshot finds nothing due once the first moved scheduled_send_at forward — exactly one attempt spent, not a lost update or a double-spend (Codex round-5 P2 #4131)', async () => {
     // Pre-push audit P1 (still true): a JS-computed
     // Number(inv.scheduled_send_attempts || 0) + 1 derives the new value

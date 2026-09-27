@@ -455,6 +455,33 @@ function assertInvoiceVoidable(currentStatus) {
   }
 }
 
+// Knex WHERE predicate mirroring isInvoiceUndeliveredForBillingReview's
+// status semantics as real SQL (a JS predicate can't run inside a WHERE
+// clause, and this needs to run inside one twice — see below): a row is
+// excluded ONLY when a review is open AND none of the delivery stamps
+// (sent_at/sms_sent_at/email_sent_at) are set yet, exactly the
+// 'draft'/'scheduled'/'sending' fallback that function documents. The
+// status itself is never re-checked here — every caller already scopes its
+// own query to status='scheduled', which is one of the three ambiguous
+// statuses, so the delivery-stamp fallback is the only thing left to encode.
+//
+// Exported so BOTH the atomic claim (claimDueScheduledInvoiceForSend) and
+// any batch selector that feeds it under an ORDER BY + LIMIT (invoice.js's
+// processScheduledSends due query) build the predicate from this ONE place
+// and can never drift apart (Codex #5021 pre-push finding: the due query
+// used to select held rows into its ordered LIMIT and simply `continue`
+// past their failed claim — once the earliest `limit` due invoices were all
+// held, every run reselected those same rows and later eligible invoices
+// never sent). Applying this to the due-selection query too means a held
+// invoice never occupies a LIMIT slot in the first place.
+function excludeBillingReviewHeldInvoices(queryBuilder) {
+  return queryBuilder.where((q) =>
+    q.whereNull('billing_review_opened_at')
+      .orWhereNotNull('sent_at')
+      .orWhereNotNull('sms_sent_at')
+      .orWhereNotNull('email_sent_at'));
+}
+
 /**
  * The " (Visa ending 4242)" clause customer-facing payment texts append after
  * an amount. One formatter for every sender (receipt SMS, combined completion
@@ -472,6 +499,7 @@ module.exports = {
   SEND_FINALIZABLE_STATUSES,
   UNDELIVERED_INVOICE_STATUSES,
   isInvoiceUndeliveredForBillingReview,
+  excludeBillingReviewHeldInvoices,
   INVOICE_UPDATE_ALLOWED_FIELDS,
   STALE_SEND_PARK_ERROR,
   isStaleClaimReviewHold,
