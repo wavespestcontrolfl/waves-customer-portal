@@ -286,24 +286,45 @@ describe('protocols.json completionDefaultProducts + completionApplicationMethod
     expect(result.names).toEqual([]);
   });
 
-  test('pest visit 2 (German roach cleanout) and cockroach visit 1 share the roach defaults AND the same interior methods', () => {
-    const pestVisit2 = realProtocols.pest.visits.find((v) => v.visit === 2);
+  test('cockroach visit 1 carries the roach defaults with their interior protocol methods', () => {
     const cockroachVisit1 = realProtocols.cockroach.visits.find((v) => v.visit === 1);
-    expect(pestVisit2.completionDefaultProducts).toEqual(['Alpine WSG', 'Gentrol IGR', 'Advion Cockroach Gel Bait']);
     expect(cockroachVisit1.completionDefaultProducts).toEqual(['Alpine WSG', 'Gentrol IGR', 'Advion Cockroach Gel Bait']);
-
-    const expectedMethods = {
-      'alpine wsg': 'spot_treatment',
-      'gentrol igr': 'spot_treatment',
-      'advion cockroach gel bait': 'bait_placement',
-    };
     expect(resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType: 'Cockroach Control Service' }).methodsByName)
-      .toEqual(expectedMethods);
-    // Reach pest visit 2 directly via its own reason (german_roach) rather
-    // than through text matching, which is cockroach's job above.
-    expect(resolveCompletionDefaultProductNames({
-      protocols: realProtocols, serviceType: 'German roach cleanout',
-    }).methodsByName).toEqual(expectedMethods);
+      .toEqual({
+        'alpine wsg': 'spot_treatment',
+        'gentrol igr': 'spot_treatment',
+        'advion cockroach gel bait': 'bait_placement',
+      });
+  });
+
+  test('pest visit 2 carries no completion defaults — every real roach service routes to the cockroach program', () => {
+    // The pest program is prefilled by pest-default-mix.js (owner ruling
+    // 2026-09-27), so a list here could never reach the drawer.
+    expect(realProtocols.pest.visits.find((v) => v.visit === 2).completionDefaultProducts).toBeUndefined();
+    for (const serviceType of [
+      'Cockroach Treatment Service', 'German Roach Cleanout Service',
+      'German Roach Initial Service (3-Visit)', 'Initial German Roach Knockdown Service',
+    ]) {
+      const result = resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType });
+      expect(result.programKey).toBe('cockroach');
+      expect(result.matchedVisit.visit).toBe(1);
+      expect(result.names).toEqual(['Alpine WSG', 'Gentrol IGR', 'Advion Cockroach Gel Bait']);
+    }
+  });
+
+  test('the native (exterior-species) roach knockdown routes to the exterior visit and prefills nothing', () => {
+    // German interior products (gel bait, IGR, crack & crevice) must not
+    // seed an American / smoky brown / palmetto knockdown.
+    for (const args of [
+      { serviceType: 'Initial Native Roach Knockdown Service' },
+      { serviceType: 'Pest knockdown', serviceKey: 'pest_initial_palmetto_knockdown' },
+    ]) {
+      const result = resolveCompletionDefaultProductNames({ protocols: realProtocols, ...args });
+      expect(result.programKey).toBe('cockroach');
+      expect(result.matchedVisit.visit).toBe(2);
+      expect(result.source).toBe('none');
+      expect(result.names).toEqual([]);
+    }
   });
 
   test('"Cockroach Control Service" resolves to the cockroach program visit 1 (German cleanout)', () => {
