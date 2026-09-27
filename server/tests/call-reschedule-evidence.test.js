@@ -314,6 +314,10 @@ describe('rescheduleAgreementEvidence', () => {
     expect(evidence('Caller: I cannot make it Thursday at two.\nAgent: Okay, I will put you down for Thursday at two.').ok).toBe(false);
     expect(evidence('Caller: I need to ask my husband about Thursday at two.\nAgent: Okay, I will put you down for Thursday at two.').ok).toBe(false);
     expect(evidence('Agent: How about Friday at two?\nCaller: No, Thursday at two.\nAgent: Okay, I will put you down for Thursday at two.').ok).toBe(true);
+    // A caller's condition on the slot is a hedge; a polite request is not.
+    expect(evidence('Caller: If my husband agrees, Thursday at two.\nAgent: I will put you down.').ok).toBe(false);
+    expect(evidence('Caller: Can we do Thursday at two?\nAgent: I will put you down.\nCaller: Only if my husband agrees.').ok).toBe(false);
+    expect(evidence('Caller: If you could come Thursday at two, that would be great.\nAgent: I will put you down.').ok).toBe(true);
     // An objection to the day stands before the hour is named.
     expect(evidence('Agent: Would Thursday work?\nCaller: No, I cannot make it.\nAgent: Okay, we will see you Thursday at two.').ok).toBe(false);
     expect(evidence('Agent: Would Thursday work?\nCaller: Yes.\nAgent: Okay, we will see you Thursday at two.').ok).toBe(true);

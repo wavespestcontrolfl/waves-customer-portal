@@ -128,9 +128,21 @@ const COMMITMENT_MARKERS = [
 const CONDITION_WORDS = ['if', 'unless', 'as long as', 'provided', 'assuming', 'hopefully', 'should be able'];
 
 function padded(s) { return ` ${s} `; }
+// Conditions that are courtesies, not conditions on the slot: a polite
+// request ("if you could come at two") or an agent's closing offer ("if you
+// need anything, call us").
+const COURTESY_CONDITIONS = [
+  'if you could', 'if you can', 'if possible', 'if that s okay', 'if that s ok', 'if that works', 'if that s alright',
+  'if that s all right', 'if you don t mind', 'if it s okay', 'if it s ok', 'if you need anything', 'if you have any questions',
+  'if you need to', 'if anything changes', 'if there s any issues', 'if there are any issues', 'if you have any issues',
+];
+// A hedge, or a condition on the slot from either side ("if my husband
+// agrees, Thursday at two", "only if it doesn't rain").
 function hasHedgeMarker(ns) {
-  const p = padded(ns);
-  return HEDGE_MARKERS.some((m) => p.includes(m));
+  let p = padded(ns);
+  if (HEDGE_MARKERS.some((m) => p.includes(m))) return true;
+  for (const phrase of COURTESY_CONDITIONS) p = p.split(padded(phrase)).join(' ');
+  return CONDITION_WORDS.some((w) => p.includes(padded(w)));
 }
 function hasAnyMarker(ns, markers) {
   const p = padded(ns);
