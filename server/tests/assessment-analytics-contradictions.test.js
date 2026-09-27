@@ -12,6 +12,7 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/fawn-weather', () => ({ getCurrent: jest.fn(), getPressureSignals: jest.fn(() => []) }));
 jest.mock('../services/lawn-grass-context', () => ({
   loadCustomerGrassContext: jest.fn(async () => ({})),
   normalizeGrassType: jest.fn((g) => g),
@@ -81,6 +82,15 @@ const KB_PRODUCT = { id: 'kb-1', title: 'Product: Celsius WG', content: 'Celsius
 
 beforeEach(() => {
   jest.clearAllMocks();
+});
+
+test('the customer-wide technician context passes its loaded customer coordinates to weather', async () => {
+  global.__analyticsDbMock = makeDb({ customers: [{ id: 'customer', latitude: '27.14', longitude: '-82.34' }] });
+  const fawn = require('../services/fawn-weather');
+  fawn.getCurrent.mockResolvedValue({ station: 'North Port', temp_f: 81 });
+  const context = await analytics.getTechFieldContext('customer');
+  expect(fawn.getCurrent).toHaveBeenCalledWith({ latitude: 27.14, longitude: -82.34 });
+  expect(context.weather).toEqual({ station: 'North Port', temp_f: 81 });
 });
 
 test('claim_vs_data prefers the bridge pair for wiki attribution over slug match', async () => {
