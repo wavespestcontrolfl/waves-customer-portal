@@ -226,6 +226,44 @@ postgres('InvoiceService.update — unbacked document-level discount fence', () 
     expect(Number(stored.discount_amount)).toBe(100);
   });
 
+  // Codex round-2 P1: a plain literal negative line item (no discount_id at
+  // all — a supported create() shape, e.g. an ad-hoc "Courtesy discount")
+  // records its invoice_discounts audit row with discount_id=null
+  // (recordInvoiceDiscounts: `d.id || null`). A null id must never be
+  // mistaken for document-level provenance just because it has no id to
+  // match against a line — only a manual discountIds pick (which always
+  // resolves a real catalog row) can produce that shape.
+  async function fixtureWithLegitLiteralFullLineDiscount() {
+    const customerId = await insertCustomer('Synthetic literal-full-line-discount fixture');
+    const invoiceId = randomUUID();
+    await trx('invoices').insert({
+      id: invoiceId, customer_id: customerId,
+      token: randomUUID(), invoice_number: `QA-${randomUUID().slice(0, 20)}`,
+      status: 'draft', title: 'First Service Application',
+      line_items: JSON.stringify([
+        { description: 'First service application', quantity: 1, unit_price: 50, amount: 50 },
+        { description: 'Courtesy discount', quantity: 1, unit_price: -50, amount: -50 },
+      ]),
+      discount_amount: 50, subtotal: 50, total: 0,
+    });
+    await trx('invoice_discounts').insert([
+      { invoice_id: invoiceId, discount_id: null, discount_name: 'Courtesy discount', discount_dollars: 50 },
+    ]);
+    return { customerId, invoiceId };
+  }
+
+  test('a legit literal (no discount_id) line-item credit that happens to equal 100% of the subtotal still retotals normally', async () => {
+    const { invoiceId } = await fixtureWithLegitLiteralFullLineDiscount();
+    const updated = await InvoiceService.update(invoiceId, {
+      line_items: [
+        { description: 'First service application', quantity: 1, unit_price: 80, amount: 80 },
+        { description: 'Courtesy discount', quantity: 1, unit_price: -50, amount: -50 },
+      ],
+    });
+    expect(Number(updated.discount_amount)).toBe(50);
+    expect(Number(updated.total)).toBe(30);
+  });
+
   test('a legit single line-item discount that happens to equal 100% of the subtotal still retotals normally', async () => {
     const { invoiceId } = await fixtureWithLegitFullLineDiscount();
     // Resubmitted as a plain literal credit (no discount_id/discount_for) —

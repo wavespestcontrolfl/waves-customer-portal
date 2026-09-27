@@ -288,6 +288,15 @@ async function invoiceHasUnbackedDocumentDiscount(invoice, lineItems, conn) {
   // actually contributed. A row whose discount_id matches none of the
   // invoice's current negative lines is a document-level pick with no line
   // backing it, regardless of what the cents sum alone would suggest.
+  //
+  // A NULL discount_id row is never a document-level pick: create()'s
+  // manualDiscounts (the discountIds picks) always resolve a real catalog
+  // `discounts` row and record ITS id (recordInvoiceDiscounts: `d.id ||
+  // null`) — a null id only ever comes from the OTHER audit-row source, a
+  // plain literal negative line item with no discount_id/discount_for at
+  // all (Codex round-2 P1: a $50 service + a literal -$50 credit is a
+  // supported create() shape and must not be treated as document-level
+  // provenance just because it has no id to match against).
   if (conn) {
     try {
       const rows = await conn("invoice_discounts").where({ invoice_id: invoice.id });
@@ -303,7 +312,7 @@ async function invoiceHasUnbackedDocumentDiscount(invoice, lineItems, conn) {
             .filter(Boolean),
         );
         return rows.some(
-          (r) => !r.discount_id || !lineDiscountIds.has(String(r.discount_id)),
+          (r) => r.discount_id && !lineDiscountIds.has(String(r.discount_id)),
         );
       }
     } catch {
