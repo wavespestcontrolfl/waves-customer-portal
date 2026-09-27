@@ -764,6 +764,30 @@ describe('resolveName regressions', () => {
     expect(catalog.resolveName(name)).toMatchObject({ node: { level: 'entry', slug } });
   });
 
+  test.each([
+    ['Pheidole', 'ants'],
+    ['Pheidole on the pavers', 'ants'],
+    ['Archipsocus', 'small-crawlers'],
+    ['Archipsocus on the bark', 'small-crawlers'],
+  ])('genus-only input %s cannot select a species', (name, id) => {
+    expect(catalog.resolveName(name)).toMatchObject({ via: 'node', node: { level: 'group', id } });
+  });
+
+  test.each([
+    ['Pheidole megacephala', 'bigheaded-ant'],
+    ['Archipsocus nomas', 'bark-lice'],
+  ])('the complete binomial %s retains its species', (name, slug) => {
+    expect(catalog.resolveName(name)).toMatchObject({ node: { level: 'entry', slug } });
+  });
+
+  test('none of the catalog species can be selected from its bare genus', () => {
+    const genera = new Set(allEntries.filter((entry) => entry.rank === 'species')
+      .map((entry) => entry.scientific_name.split(' ')[0]));
+    for (const genus of genera) {
+      expect([genus, catalog.resolveName(genus)?.node.level]).not.toEqual([genus, 'entry']);
+    }
+  });
+
   test('a specific name inside a sentence still beats the group name inside it', () => {
     // Now that drywood-termite-frass (the "pellets" sign entry) exists, its
     // own longer alias ("drywood termite pellets") is the more specific

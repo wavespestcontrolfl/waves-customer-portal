@@ -81,7 +81,8 @@
       "generic": "an ant",
       "aliases": [
         "sugar ant",
-        "sugar ants"
+        "sugar ants",
+        "pheidole"
       ],
       "category": "insect",
       "next_photo": {
@@ -329,6 +330,9 @@
       "id": "small-crawlers",
       "label": "Silverfish, earwigs & other small crawlers",
       "generic": "a small crawling insect",
+      "aliases": [
+        "archipsocus"
+      ],
       "category": "insect",
       "next_photo": {
         "ask": "A close-up from above showing the tail end (pincers vs. bristles) next to a coin.",
