@@ -63,6 +63,7 @@ import useIsMobile from '../hooks/useIsMobile';
 import DocumentActionBar from '../components/DocumentActionBar';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
 import { useWavesShell } from '../components/brand/WavesShellContext';
+import { hasPurchasedTrenchingWarranty, PURCHASED_TRENCHING_WARRANTY_BULLET } from '@estimate-purchased-warranty';
 
 // Payment Element renders inside Stripe's iframe, so the glass theme can't
 // restyle it via CSS — when the theme is mounted the modals pass brand-tuned
@@ -1981,21 +1982,9 @@ function oneTimeOutcomeWithoutGuarantee(text) {
     .trim() || null;
 }
 
-const PURCHASED_TRENCHING_WARRANTY_BULLET = 'Annual inspection during the warranty period';
-
-function rowHasPurchasedTrenchingWarranty(item = {}) {
-  const service = String(item.service || '').toLowerCase().trim();
-  const tier = String(item.warrantyTier || '').toLowerCase().trim();
-  const adderPresent = item.warrantyAdder !== '' && item.warrantyAdder != null;
-  const adder = Number(item.warrantyAdder);
-  return ['trenching', 'termite_trenching'].includes(service)
-    && tier !== '' && tier !== 'none'
-    && adderPresent && Number.isFinite(adder) && adder >= 0;
-}
-
 function oneTimeCopyWithoutGuarantee(copy, item = {}) {
   if (!copy) return null;
-  const retainPurchasedWarranty = rowHasPurchasedTrenchingWarranty(item);
+  const retainPurchasedWarranty = hasPurchasedTrenchingWarranty(item);
   return {
     ...copy,
     outcome: oneTimeOutcomeWithoutGuarantee(copy.outcome),

@@ -9,12 +9,12 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
 const {
   oneTimeCopyKeyFor,
-  hasPurchasedTrenchingWarranty,
   resolveOneTimeServiceCopy,
   resolveOneTimeRowCopies,
   oneTimeOnlyIntelligenceCopy,
   ONE_TIME_SERVICE_COPY,
 } = require('../services/estimate-one-time-copy');
+const { hasPurchasedTrenchingWarranty } = require('../../shared/estimate-purchased-warranty.cjs');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
   attachPublicPricingContract,

@@ -25,6 +25,7 @@
 // ============================================================
 
 const PACK = require('./estimate-one-time-copy.json');
+const { hasPurchasedTrenchingWarranty, PURCHASED_TRENCHING_WARRANTY_BULLET } = require('../../shared/estimate-purchased-warranty.cjs');
 const GUARANTEE_COPY = /guarantee|warrant(?:y|ies)|callbacks?|re[- ]?(?:treat(?:ment|s|ed|ing)?|spray(?:s|ed|ing)?)|money[- ]?back|risk[- ]?free|satisfaction|(?:free[^.!?]*(?:re[- ]?service|service calls?)|(?:re[- ]?service|service calls?)[^.!?]*(?:free|no charge))/i;
 const NO_GUARANTEE_HERO = 'Review the itemized service scope and terms below. Licensed & insured.';
 
@@ -186,20 +187,6 @@ function bedBugMethod(item = {}) {
   return 'default';
 }
 
-// A termite-trenching warranty is purchased scope only when the canonical
-// pricer row carries both its normalized tier and the warranty price slice
-// (zero is valid for the included one-year tier). Labels/details are never
-// evidence: stale or hand-authored prose cannot re-enable a warranty claim.
-function hasPurchasedTrenchingWarranty(item = {}) {
-  const service = String(item.service || '').toLowerCase().trim();
-  const tier = String(item.warrantyTier || '').toLowerCase().trim();
-  const adderPresent = item.warrantyAdder !== '' && item.warrantyAdder != null;
-  const adder = Number(item.warrantyAdder);
-  return ['trenching', 'termite_trenching'].includes(service)
-    && tier !== '' && tier !== 'none'
-    && adderPresent && Number.isFinite(adder) && adder >= 0;
-}
-
 // Resolved row copy for a one-time breakdown row:
 //   { key, outcome, includes: [...], assurance|null, terms }
 // `includes` carries the assurance as its last bullet when present, so the
@@ -304,7 +291,7 @@ function resolveOneTimeServiceCopy(item = {}, { noGuaranteeClaims = false } = {}
   // tier only (repellent products default to 'none') — codex #3823 r3 P1.
   const purchasedTrenchingWarranty = key === 'termite_trenching' && hasPurchasedTrenchingWarranty(item);
   if (key === 'termite_trenching' && !purchasedTrenchingWarranty) {
-    lines = lines.filter((line) => line !== entry.warrantyBullet);
+    lines = lines.filter((line) => line !== PURCHASED_TRENCHING_WARRANTY_BULLET);
   }
   // Dethatching: debris hauling is priced separately (cleanupLevel) — the
   // bullet rides only when the row says it is included (codex #3823 r3 P1).
@@ -363,7 +350,7 @@ function resolveOneTimeServiceCopy(item = {}, { noGuaranteeClaims = false } = {}
     assurance = null;
     outcome = entry.outcomeNoGuarantee || outcome;
     if (GUARANTEE_COPY.test(outcome || '')) outcome = 'Your service follows the written scope and terms in this estimate.';
-    lines = lines.filter((line) => (purchasedTrenchingWarranty && line === entry.warrantyBullet)
+    lines = lines.filter((line) => (purchasedTrenchingWarranty && line === PURCHASED_TRENCHING_WARRANTY_BULLET)
       || !GUARANTEE_COPY.test(line));
     if (GUARANTEE_COPY.test(terms || '')) terms = 'Your written service scope and terms apply.';
   }
@@ -475,7 +462,6 @@ function resolveOneTimeRowCopies(rows = [], { noGuaranteeClaims = false } = {}) 
 module.exports = {
   ONE_TIME_SERVICE_COPY: PACK,
   GUARANTEE_COPY,
-  hasPurchasedTrenchingWarranty,
   resolveOneTimeRowCopies,
   oneTimeCopyKeyFor,
   resolveOneTimeServiceCopy,

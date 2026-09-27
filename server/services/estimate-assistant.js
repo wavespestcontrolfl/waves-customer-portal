@@ -7,7 +7,8 @@ const { loadEstimateAiSupportContext, serviceKeysFromContext, serviceFamiliesFro
 const { dispatch, rejectCall } = require('./llm/call');
 const { isMistingSystemService } = require('../utils/mosquito-misting-system');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
-const { GUARANTEE_COPY, hasPurchasedTrenchingWarranty, resolveOneTimeServiceCopy } = require('./estimate-one-time-copy');
+const { GUARANTEE_COPY, resolveOneTimeServiceCopy } = require('./estimate-one-time-copy');
+const { hasPurchasedTrenchingWarranty } = require('../../shared/estimate-purchased-warranty.cjs');
 const { serviceKeysFromText } = require('./estimate-service-lines');
 const { RECURRING_TERMS_LANES } = require('./estimate-followup-copy');
 
