@@ -92,6 +92,25 @@ const OUR_NUMBER = '+19415550100';
     expect(opts.dedupeKey).toContain(commitment.id);
   });
 
+  test('a promise made on a call AFTER the callback is never picked, even on a delayed recovery attempt', async () => {
+    // The callback itself, an hour ago — as if the durable sweep is only
+    // now getting to retry it (the scenario a delayed recovery attempt
+    // creates: SWEEP_LOOKBACK_MS allows up to 24h).
+    const back = callRow(60);
+    // A DIFFERENT, LATER call from the same number, ten minutes ago — its
+    // promise did not exist yet when `back` came in, so it must never be
+    // read as "why this caller is chasing us".
+    const laterCall = callRow(10);
+    const laterCommitment = commitmentRow(laterCall.id);
+    await mockConn('call_log').insert([back, laterCall]);
+    await mockConn('call_commitments').insert(laterCommitment);
+
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+    expect(triggerNotification).not.toHaveBeenCalled();
+    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(row.metadata.promise_chaser).toMatchObject({ status: 'skipped', reason: 'no_open_promise' });
+  });
+
   test('a promise already kept (staff reached the caller since) does not ring', async () => {
     const earlier = callRow(240);
     const commitment = commitmentRow(earlier.id);

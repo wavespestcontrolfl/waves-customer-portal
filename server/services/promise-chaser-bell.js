@@ -147,6 +147,13 @@ async function selectPromiseToRing(call, now) {
   const rows = (await commitments.listOpenCommitments(db, {
     party: 'waves', phone: call.from_phone, limit: 200, includeHints: true, now,
   })).filter((r) => SLA_KINDS.includes(r.kind) && String(r.call_log_id) !== String(call.id)
+    // Strictly PRECEDES this callback — never the current call's own row
+    // (excluded above), and never a call that arrived AFTER it either.
+    // A durable retry (the sweep) can land hours later, by which time a
+    // NEWER call on the same number may have its own open promise; without
+    // this, that later promise would wrongly read as "the reason this
+    // earlier caller is chasing us".
+    && new Date(r.call_started_at).getTime() < new Date(call.created_at).getTime()
     && (!call.customer_id || !r.customer_id || String(r.customer_id) === String(call.customer_id)));
   if (!rows.length) return { outcome: 'skip', reason: 'no_open_promise' };
 
