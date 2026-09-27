@@ -227,6 +227,45 @@ const OUR_NUMBER = '+19415550100';
     expect(row.metadata.promise_chaser).toBeUndefined();
   });
 
+  test("claiming one call never touches another call's stale claim (the OR must stay grouped)", async () => {
+    // A completely unrelated call, already settled long ago, with a stale
+    // claimed_at — exactly what an unparenthesized OR in the claim's WHERE
+    // clause would match table-wide regardless of id.
+    const unrelatedCall = callRow(600);
+    await mockConn('call_log').insert(unrelatedCall);
+    await mockConn('call_log').where({ id: unrelatedCall.id }).update({
+      metadata: JSON.stringify({ promise_chaser: { status: 'rung', claimed_at: new Date(now - 20 * 60000).toISOString() } }),
+    });
+
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(true);
+
+    const unrelatedAfter = await mockConn('call_log').where({ id: unrelatedCall.id }).first('metadata');
+    expect(unrelatedAfter.metadata.promise_chaser.status).toBe('rung');
+    expect(unrelatedAfter.metadata.promise_chaser.claimed_at).toBe(new Date(now - 20 * 60000).toISOString());
+  });
+
+  test('a retryable delivery result (no bell, no push, no thrown error) leaves the claim pending', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const back = callRow(0);
+    await mockConn('call_log').insert([earlier, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    // The real dispatcher's own shape for a swallowed bell-insert failure —
+    // no thrown exception, no `.error`, just `retryable: true`.
+    triggerNotification.mockResolvedValueOnce({ bellWritten: false, retryable: true, push: null });
+    expect(await ringPromiseChaserIfNeeded(back.twilio_call_sid)).toBe(false);
+
+    const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
+    expect(row.metadata.promise_chaser).toMatchObject({ status: 'pending' });
+  });
+
   test('a failed attempt leaves the claim pending; the durable sweep retries it with past-tense copy', async () => {
     const earlier = callRow(240);
     const commitment = commitmentRow(earlier.id);

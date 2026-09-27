@@ -87,7 +87,12 @@ async function claimAttempt(callId) {
   const token = new Date().toISOString();
   const claimed = await db('call_log').where({ id: callId })
     .whereRaw("COALESCE(metadata->'promise_chaser'->>'status', '') NOT IN ('rung', 'skipped')")
-    .whereRaw("(metadata->'promise_chaser'->>'status' IS DISTINCT FROM 'pending') OR (metadata->'promise_chaser'->>'claimed_at')::timestamptz < ?", [new Date(Date.now() - LEASE_MS)])
+    // Parenthesized as ONE fragment — knex ANDs separate whereRaw calls with
+    // plain string concatenation, so an unparenthesized top-level OR here
+    // would bind looser than the preceding ANDs and match ANY row with a
+    // stale claimed_at, including unrelated and already-terminal calls
+    // (repeat-caller-bell's own CLAIM_FREE_SQL wraps its OR the same way).
+    .whereRaw("((metadata->'promise_chaser'->>'status' IS DISTINCT FROM 'pending') OR (metadata->'promise_chaser'->>'claimed_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
     .update({
       metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('promise_chaser', ?::jsonb)",
         [JSON.stringify({ status: 'pending', claimed_at: token })]),
@@ -249,7 +254,11 @@ async function ringPromiseChaserIfNeeded(callSid, { viaSweep = false } = {}) {
       calledAtLabel: call.created_at ? `${formatETDate(new Date(call.created_at))} ${formatETTime(new Date(call.created_at))}` : null,
     }, { dedupeKey, shouldContinue: stillEligible, beforePush: stillEligible });
 
-    if (stats?.error) return false; // leave pending — retry
+    // triggerNotification never throws — a swallowed bell-insert failure or
+    // a failed push surfaces as stats.retryable (often with no stats.error
+    // at all) rather than a caught exception. Either signal leaves the
+    // claim pending; only a definitive, non-retryable outcome may settle.
+    if (stats?.error || stats?.retryable) return false; // leave pending — retry
     // Genuine delivery only — a deliberate non-send (every admin opted out,
     // the bell policy silenced the category, or stillEligible just blocked
     // a promise that closed in the race window) is still a settled, non-
