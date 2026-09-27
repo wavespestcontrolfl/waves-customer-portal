@@ -1911,11 +1911,19 @@ postgres('SMS commitments on PostgreSQL', () => {
       message_type: 'receipt', status: 'sent', created_at: after };
     const [push] = await mockPg('sms_log').insert({ ...base, id: randomUUID(), from_phone: 'push',
       metadata: JSON.stringify({ channel: 'push', providerAccepted: true }) }).returning('id');
+    // A billing App leg is sent to: null, so its proof keeps no phone (pre-push audit, #4996 r3).
+    const [billingAppLeg] = await mockPg('sms_log').insert({ ...base, id: randomUUID(), from_phone: 'push', to_phone: '',
+      metadata: JSON.stringify({ channel: 'push', providerAccepted: true, notificationEventKey: 'invoice:synthetic:receipt' }) }).returning('id');
     const [pending] = await mockPg('sms_log').insert({ ...base, id: randomUUID(), from_phone: message.to_phone }).returning('id');
+    // A delivered text to some other phone is not this customer's answer.
+    const [otherPhone] = await mockPg('sms_log').insert({ ...base, id: randomUUID(), from_phone: message.to_phone, to_phone: '+12025550177',
+      status: 'delivered' }).returning('id');
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const payments = evidence.records.filter((r) => r.type === 'payment').map((r) => r.id);
     expect(payments).toContain(push.id);
+    expect(payments).toContain(billingAppLeg.id);
     expect(payments).not.toContain(pending.id);
+    expect(payments).not.toContain(otherPhone.id);
   });
 
   test('R2 rule 3: a thank-you sent when account credit covers an invoice is not money received', async () => {

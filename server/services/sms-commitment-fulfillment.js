@@ -341,12 +341,17 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         // same notice-scope metadata stamp the generic `sms` source reads.
         // Delivered, or an App push the provider accepted (status stays
         // 'sent'; the same proof smsDelivered() admits for other notices).
+        // A text must reach the phone the customer asked from; an App push
+        // has no phone (a billing App leg is sent to: null and its proof
+        // keeps to_phone '', billing-channel-routing.js) and is the
+        // customer's own by customer_id (pre-push audit).
         excludeUnresolvedSendReservations(conn('sms_log').where({ customer_id: customerId, direction: 'outbound' })
           .where((q) => q.where('status', 'delivered').orWhere((push) => push.where('status', 'sent')
             .whereRaw("(sms_log.metadata->>'providerAccepted') = 'true'")
             .where((ch) => ch.where('from_phone', 'push').orWhereRaw("(sms_log.metadata->>'channel') = 'push'")))))
           .whereIn('message_type', PAYMENT_SMS_TYPES)
-          .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
+          .where((dest) => dest.whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
+            .orWhere('from_phone', 'push').orWhereRaw("(sms_log.metadata->>'channel') = 'push'"))
           .where('created_at', '>', after).where('created_at', '<=', now)
           .orderBy('created_at', 'desc').limit(LIMIT + 1)
           .select('id', 'status', 'message_type', 'message_body', 'created_at', 'from_phone',
