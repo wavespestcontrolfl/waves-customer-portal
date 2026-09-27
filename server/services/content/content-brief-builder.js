@@ -35,6 +35,7 @@ const factsLoader = require('../content-astro/facts-bank-loader');
 const interceptSeeder = require('./intercept-brief-seeder');
 const spokeSeeder = require('./spoke-seed-seeder');
 const categorySeeder = require('./category-seed-seeder');
+const relatedPostsSelector = require('./related-posts');
 
 // ── keyword overlap helpers for customer-cluster topic match ────────
 
@@ -449,7 +450,15 @@ class ContentBriefBuilder {
       return null;
     });
 
-    const brief = this._composeBrief({ opportunity: opp, signals, decision, existingBriefVersions, factsPack });
+    // Related-post link targets for a NEW supporting-blog brief only (see
+    // related-posts.js) — a failed lookup must not fail brief composition,
+    // it just means this brief carries no related-link allowance.
+    const relatedPosts = await this._loadRelatedPosts(opp, decision).catch((err) => {
+      logger.warn(`[brief-builder] related posts lookup failed: ${err.message}`);
+      return [];
+    });
+
+    const brief = this._composeBrief({ opportunity: opp, signals, decision, existingBriefVersions, factsPack, relatedPosts });
     if (persist) brief.id = await this._persist(brief);
     return brief;
   }
@@ -638,7 +647,29 @@ class ContentBriefBuilder {
     };
   }
 
-  _composeBrief({ opportunity, signals, decision, existingBriefVersions, factsPack = null }) {
+  /**
+   * Related-post link targets for a NEW supporting-blog brief (owner audit
+   * 2026-09-26: 115/278 blog posts link to no other post, because the
+   * writer's closed internal-link set never included any blog post). Scoped
+   * to pageType 'supporting-blog' — customer-question pages publish into the
+   * services collection, not the blog, and refresh/metadata actions have
+   * their own agents and prompts (writer-agent-config.js is the NEW-page
+   * writer only). Returns [] on anything else, so every other lane's brief
+   * shape is unchanged.
+   */
+  async _loadRelatedPosts(opportunity, decision) {
+    if (decision?.action_type !== 'new_supporting_blog') return [];
+    return relatedPostsSelector.getRelatedPostsForBrief({
+      keyword: opportunity.query || opportunity.signal_metadata?.representative_query || null,
+      service: opportunity.service || null,
+      pestEntity: opportunity.signal_metadata?.specialty_topic || null,
+      city: opportunity.city || null,
+      domains: spokeSeeder.targetSitesFor(opportunity),
+      excludePath: opportunity.page_url || null,
+    });
+  }
+
+  _composeBrief({ opportunity, signals, decision, existingBriefVersions, factsPack = null, relatedPosts = [] }) {
     const pageType = decision.page_type;
 
     // Overlay answer-engine extractability requirements for aeo_gap briefs.
@@ -907,7 +938,18 @@ class ContentBriefBuilder {
           ? { ...layered.voiceConstraints, operator_brief: operatorOverlay.operator_brief }
           : layered.voiceConstraints;
         const gateRetry = opportunity.signal_metadata?.gate_retry;
-        return gateRetry ? { ...base, retry_directives: buildRetryDirectives(gateRetry) } : base;
+        const withRetry = gateRetry ? { ...base, retry_directives: buildRetryDirectives(gateRetry) } : base;
+        // Related-post link allowance rides here (not internal_links_to_add,
+        // which is a MUST-appear checklist) — see _loadRelatedPosts. No
+        // migration: content_briefs has no dedicated column, and
+        // voice_constraints is the established jsonb extension point
+        // (operator_brief, retry_directives already live here) that
+        // round-trips through get_content_brief AND the stored-draft
+        // revalidation path (_loadReviewedBrief), so the gate allowance
+        // survives a re-check exactly like it did the first time.
+        return (decision.action_type === 'new_supporting_blog' && Array.isArray(relatedPosts) && relatedPosts.length)
+          ? { ...withRetry, related_posts: relatedPosts }
+          : withRetry;
       })(),
 
       publish_window: nextWeekday9amET().toISOString(),

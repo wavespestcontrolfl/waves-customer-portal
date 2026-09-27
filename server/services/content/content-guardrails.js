@@ -6622,6 +6622,7 @@ module.exports = {
   normalizeReferenceLabel,
   parseLinkDestination,
   eachMarkdownLink,
+  blankReferenceDefinitions,
   isThematicBreak,
   isInterruptingBlock,
   blankHiddenContent,
@@ -6654,6 +6655,20 @@ module.exports = {
   SAFE_MDX_COMPONENTS,
   ALLOWED_INTERNAL_LINKS,
   isKnownGoodInternalRoute,
+  // Consumed by content-quality-gate's related_posts_linked check (with the
+  // already-exported eachMarkdownLink, markdownReferenceDefinitions,
+  // normalizeReferenceLabel, parseLinkDestination, blankReferenceDefinitions
+  // above) so it counts
+  // REAL, RENDERED, non-image link destinations — masking non-rendered
+  // markdown and expression-string prose first, resolving reference-style
+  // links against their ACTUAL definitions, and skipping unused reference
+  // definitions and image references — instead of a naive body substring
+  // search or an unconditional destination collector, either of which a
+  // comment, an unused `[a]: /x/` definition, a reference-style image, or a
+  // longer URL sharing a prefix could satisfy without an actual clickable
+  // anchor (Codex #4984 r2+r3 P1s).
+  blankExpressionStringLiterals,
+  normalizeInternalPath,
   // deterministic pre-gate repair for unambiguous citation artifacts —
   // consumed by brief-driven-tools emit_draft; kept here beside
   // CITATION_RESIDUE_RE so stripper and detector can never drift.
