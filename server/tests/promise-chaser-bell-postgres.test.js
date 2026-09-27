@@ -1141,53 +1141,81 @@ const OUR_NUMBER = '+19415550100';
       expect(triggerNotification).toHaveBeenCalledTimes(1);
     });
 
-    test('a send_estimate reopened AFTER the callback is never re-attributed to it — no ring, even with no <kind>_edit/<kind>_reopen audit trail to fall back on (Codex #5019 r11 P2)', async () => {
+    test('a send_estimate EDITED (not merely confirmed) AFTER the callback is never re-attributed to it — no ring, even with no <kind>_edit audit trail to fall back on (Codex #5019 r11 P2, then r16 P1)', async () => {
       const earlier = callRow(240);
       const commitment = commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the quote' }); // AI, unreviewed
       const back = callRow(0);
       await mockConn('call_log').insert([earlier, back]);
       await mockConn('call_commitments').insert(commitment);
 
-      // Staff reopen/review the send_estimate commitment through the
-      // generic Call intelligence panel STRICTLY AFTER this callback —
-      // applyHumanUpdate re-stamps reviewed_at on every substantive action,
-      // but writes NO callback-style audit event for this kind (that
-      // machinery is callback-only); reviewed_at is the only durable
-      // renewal boundary a non-callback SLA kind carries.
-      const reopenedAt = new Date(now + 1000);
+      // Staff EDIT the send_estimate commitment (re-word it, change its
+      // due date, etc.) through the generic Call intelligence panel
+      // STRICTLY AFTER this callback — applyHumanUpdate's 'edit' action
+      // ALWAYS sets human_state to 'edited' (the one row-level signal that
+      // unambiguously means "genuinely restated", never a bare confirm —
+      // Codex r16 P1: confirm and reopen both land on 'confirmed' for this
+      // kind, and reviewed_at alone can't tell them apart from a genuine
+      // edit). No callback-style audit event exists for this kind either
+      // way; reviewed_at is the only durable renewal boundary it carries.
+      const editedAt = new Date(now + 1000);
       await mockConn('call_commitments').where({ id: commitment.id })
-        .update({ human_state: 'confirmed', reviewed_at: reopenedAt, updated_at: reopenedAt });
+        .update({ human_state: 'edited', reviewed_at: editedAt, updated_at: editedAt });
 
       expect(await sweepPromiseChasers()).toBe(0);
       expect(triggerNotification).not.toHaveBeenCalled();
     });
 
-    test('a send_estimate promise is not read as kept by evidence from BEFORE its own reopen — followedUpIds must apply the SAME renewal floor to every SLA kind, not just callback (Codex #5019 r12 P1)', async () => {
+    test('a send_estimate merely CONFIRMED (never edited) AFTER the callback is NOT treated as renewed — the callback still rings (Codex #5019 r16 P1)', async () => {
       const earlier = callRow(240);
-      const commitment = commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the quote' }); // AI, unreviewed initially
-      // Staff reached the lead by an ordinary outbound call — BEFORE the
-      // reopen below. Stale evidence for the ORIGINAL obligation; not
-      // proof the REOPENED one was ever followed up. Without this fix,
-      // followup-sla-watcher's own renewedFloors skipped the renewal check
-      // entirely for any kind but callback, so followedUpIds read this
-      // stale call as still-valid "kept" evidence and findPromiseToRing
-      // excluded the row before it ever reached its own renewal/precedence
-      // check — never alerting at all.
-      const reached = callRow(200, { direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, duration_seconds: 90 });
+      const commitment = commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the quote' }); // AI, unreviewed
       const back = callRow(0);
-      await mockConn('call_log').insert([earlier, reached, back]);
+      await mockConn('call_log').insert([earlier, back]);
       await mockConn('call_commitments').insert(commitment);
 
-      // Staff reopen/re-review the promise AFTER that outbound call.
-      const reopenedAt = new Date(now - 100 * 60000);
+      // Staff merely acknowledge ("Confirm") the AI's own extraction after
+      // this callback already arrived — nothing about the obligation
+      // itself changed. reviewed_at ALSO advances here (the same shared
+      // patch every applyHumanUpdate action stamps), but human_state lands
+      // on 'confirmed', not 'edited' — treating this as a renewal would
+      // wrongly suppress a genuinely still-relevant callback on nothing
+      // more than a routine acknowledgment.
+      const confirmedAt = new Date(now + 1000);
       await mockConn('call_commitments').where({ id: commitment.id })
-        .update({ human_state: 'confirmed', reviewed_at: reopenedAt, updated_at: reopenedAt });
+        .update({ human_state: 'confirmed', reviewed_at: confirmedAt, updated_at: confirmedAt });
 
       expect(await sweepPromiseChasers()).toBe(1);
       expect(triggerNotification).toHaveBeenCalledTimes(1);
     });
 
-    test('a schedule_visit reopened AFTER a matching-slot booking is not read as kept by that stale booking — the renewal floor must carry into the exact-slot match too, not just `since` (Codex #5019 r13 P1)', async () => {
+    test('a send_estimate promise is not read as kept by evidence from BEFORE its own EDIT — followedUpIds must apply the SAME renewal floor to every SLA kind, not just callback (Codex #5019 r12 P1, then r16 P1)', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the quote' }); // AI, unreviewed initially
+      // Staff reached the lead by an ordinary outbound call — BEFORE the
+      // edit below. Stale evidence for the ORIGINAL wording; not proof the
+      // EDITED obligation was ever followed up. Without the r12 fix,
+      // followup-sla-watcher's own renewedFloors skipped the renewal check
+      // entirely for any kind but callback, so followedUpIds read this
+      // stale call as still-valid "kept" evidence and findPromiseToRing
+      // excluded the row before it ever reached its own renewal/precedence
+      // check — never alerting at all. Uses an EDIT, not a bare confirm
+      // (Codex r16 P1) — human_state 'edited' is the one row-level signal
+      // that unambiguously means genuinely restated, since 'confirmed'
+      // alone must never count (see the merely-confirmed test above).
+      const reached = callRow(200, { direction: 'outbound', from_phone: OUR_NUMBER, to_phone: PHONE, duration_seconds: 90 });
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, reached, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      // Staff EDIT (re-word) the promise AFTER that outbound call.
+      const editedAt = new Date(now - 100 * 60000);
+      await mockConn('call_commitments').where({ id: commitment.id })
+        .update({ human_state: 'edited', reviewed_at: editedAt, updated_at: editedAt });
+
+      expect(await sweepPromiseChasers()).toBe(1);
+      expect(triggerNotification).toHaveBeenCalledTimes(1);
+    });
+
+    test('a schedule_visit EDITED AFTER a matching-slot booking is not read as kept by that stale booking — the renewal floor must carry into the exact-slot match too, not just `since` (Codex #5019 r13 P1, then r16 P1)', async () => {
       const customerId = randomUUID();
       await mockConn('customers').insert({ id: customerId, phone: PHONE });
       const earlier = callRow(240, { customer_id: customerId });
@@ -1212,10 +1240,11 @@ const OUR_NUMBER = '+19415550100';
         created_at: new Date(now - 200 * 60000), updated_at: new Date(now - 200 * 60000),
       });
 
-      // Staff reopen the promise AFTER that booking.
-      const reopenedAt = new Date(now - 100 * 60000);
+      // Staff EDIT the promise AFTER that booking (a bare confirm/reopen
+      // would not count — Codex r16 P1: human_state must be 'edited').
+      const editedAt = new Date(now - 100 * 60000);
       await mockConn('call_commitments').where({ id: commitment.id })
-        .update({ human_state: 'confirmed', reviewed_at: reopenedAt, updated_at: reopenedAt });
+        .update({ human_state: 'edited', reviewed_at: editedAt, updated_at: editedAt });
 
       const back = callRow(0, { customer_id: customerId });
       await mockConn('call_log').insert(back);

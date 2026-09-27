@@ -1768,12 +1768,27 @@ async function obligationRenewedAt(conn, commitment) {
   // this file; the module is fully initialized by the time this runs.
   if (commitment.kind !== 'callback') {
     if (!require('./followup-sla-watcher').SLA_KINDS.includes(commitment.kind)) return null;
-    // applyHumanUpdate writes no <kind>_edit/<kind>_reopen audit trail for
-    // these — that machinery (callback_edit/callback_reopen, below) is
-    // callback-only. The row's own reviewed_at — stamped fresh by every
-    // substantive edit or reopen action, the SAME shared patch object
-    // every applyHumanUpdate action stamps — is the only durable renewal
-    // boundary these kinds carry.
+    // ONLY human_state === 'edited' counts (Codex #5019 r16 P1) — never
+    // 'confirmed'. applyHumanUpdate's 'edit' action ALWAYS sets human_state
+    // to 'edited', for every kind, so that check alone is unambiguous. But
+    // 'confirm' AND 'reopen' both land on 'confirmed' for these kinds
+    // (unlike callback, which tells them apart via its own callback_edit /
+    // callback_reopen audit trail below) — and reviewed_at advances on
+    // EVERY one of the three, confirm included. Using reviewed_at as the
+    // boundary whenever human_state is merely 'confirmed' would treat an
+    // ordinary "yes, the AI got this right" acknowledgment as if the
+    // obligation had been restated: earlier, genuine fulfillment evidence
+    // (a quote actually sent) would stop counting as kept the moment
+    // someone later confirmed the row, producing a false "still owed"
+    // alert on the next callback — and a callback that arrived BEFORE an
+    // ordinary confirm could be wrongly excluded as "pre-renewal" even
+    // though nothing about the obligation itself ever changed. A genuine
+    // reopen-with-no-edit on these kinds is therefore NOT currently
+    // renewable this way (no row field distinguishes it from a bare
+    // confirm without a dedicated audit trail, which applyHumanUpdate does
+    // not write for these kinds) — accepted as a narrower, safer scope
+    // than risking either false direction above.
+    if (commitment.human_state !== 'edited') return null;
     const ms = [commitment.source === 'human' ? commitment.created_at : null, commitment.reviewed_at]
       .filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
     return ms.length ? new Date(Math.max(...ms)) : null;
