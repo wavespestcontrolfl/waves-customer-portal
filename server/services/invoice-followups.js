@@ -2032,7 +2032,7 @@ async function isDunningStopped(invoiceId, database = db) {
 // (billing-email-replay-eligibility.js).
 async function followupEmailStillOwed({ sequenceId, invoiceId }) {
   const seq = await db('invoice_followup_sequences').where({ id: sequenceId }).first('status');
-  if (!seq || ['paused', 'stopped'].includes(String(seq.status || ''))) return { owed: false, reason: 'sequence-not-active' };
+  if (!seq || ['paused', 'autopay_hold', 'stopped'].includes(String(seq.status || ''))) return { owed: false, reason: 'sequence-not-active' };
   if (gates.divertMicrodepositDunning) {
     const invoice = await db('invoices').where({ id: invoiceId }).first('id', 'stripe_payment_intent_id');
     if (invoice?.stripe_payment_intent_id

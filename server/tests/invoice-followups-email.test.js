@@ -740,6 +740,7 @@ describe('followupEmailStillOwed (a stored follow-up email\'s provider retry)', 
     ['active', { owed: true }],
     ['completed', { owed: true }],
     ['paused', { owed: false, reason: 'sequence-not-active' }],
+    ['autopay_hold', { owed: false, reason: 'sequence-not-active' }],
     ['stopped', { owed: false, reason: 'sequence-not-active' }],
   ])('a %s sequence answers %j', async (status, expected) => {
     gates.divertMicrodepositDunning = false;
