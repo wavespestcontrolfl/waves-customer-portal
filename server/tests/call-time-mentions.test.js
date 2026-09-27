@@ -1,5 +1,5 @@
 // Day references in labelled call transcripts. Fixtures are fictitious.
-const { parseDayMentions, extractHourMentions } = require('../services/call-time-mentions');
+const { parseDayMentions, extractHourMentions, talksTime } = require('../services/call-time-mentions');
 
 // Sat Sep 26, 2026, 11:51 AM ET.
 const STARTED = new Date('2026-09-26T15:51:18Z');
@@ -68,7 +68,18 @@ describe('extractHourMentions', () => {
     expect(hours('At two ten, 2:30, two oh five, half past two.').map(([, off]) => off)).toEqual([true, true, true, true]);
   });
 
+  test('an hour mention spans its am/pm and o\'clock', () => {
+    expect(extractHourMentions('We will see you at 2 pm sharp, or at two o clock.').map((m) => [m.pos, m.end])).toEqual([[5, 7], [10, 13]]);
+  });
+
   test('a length of time is not a clock time', () => {
     expect(hours('It takes about two hours, about two and a half hours, three to four hours. The service should last for two.')).toEqual([]);
+  });
+});
+
+describe('talksTime', () => {
+  test('an unmarked hour, a part of the day, a weekday or a month talks about when; a length or "one more thing" does not', () => {
+    for (const said of ['make that three', 'the morning is better', 'or friday', 'sometime in october', 'at 4']) expect(talksTime(said)).toBe(true);
+    for (const said of ['it takes about two hours', 'one more thing', 'may i ask', 'thank you so much']) expect(talksTime(said)).toBe(false);
   });
 });

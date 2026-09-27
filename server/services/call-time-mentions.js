@@ -163,6 +163,16 @@ const OCLOCK = new Set(['o', 'oclock']);
 // A number running into a unit of time is a length, not a clock time.
 const DURATION_UNITS = new Set(['hour', 'hours', 'hr', 'hrs', 'minute', 'minutes', 'min', 'mins']);
 const DURATION_FILLER = new Set(['and', 'a', 'half', 'or', 'to', 'through', 'quarter']);
+// Said right after an hour, part of it: "2 pm", "2 00 pm", "two o clock".
+const CLOCK_TAIL = new Set(['am', 'pm', 'o', 'clock', 'oclock', '00']);
+// Words that can only be about when: an hour from two to twelve ("one" also
+// counts things — "one more question"), noon, am/pm, a part of the day, a
+// weekday, a month ("may" is also a verb), today, tomorrow.
+const TIME_WORDS = new Set([
+  'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
+  'noon', 'midnight', 'am', 'pm', 'morning', 'afternoon', 'evening', 'today', 'tomorrow', ...WEEKDAY_NAMES,
+  ...MONTH_NAMES.filter((m) => m !== 'may'),
+]);
 // Between two hours offered as alternatives ("at two or at four", "2 pm or 3").
 const HOUR_FILLER = new Set(['at', 'around', 'about', 'am', 'pm', 'o', 'clock', 'oclock', '00']);
 const HOUR_ALTERNATIVES = new Set(['or', 'and']);
@@ -252,8 +262,8 @@ function rangeStartHour(toks, n, rangeEnd) {
 
 /**
  * Hour mentions in one turn, in spoken order: { hour24, offHour, pos, end },
- * the turn-level token span of the number and its minutes (a range's whole
- * span). A number is a clock time
+ * the turn-level token span of the number, its minutes and am/pm (a range's
+ * whole span). A number is a clock time
  * only when something marks it as one: "at", "around" or "about" before it;
  * "ish", am/pm or o'clock after it; being a range's start ("two to four",
  * "between eight and nine" — the end belongs to the range); or minutes
@@ -281,7 +291,9 @@ function extractHourMentions(turnText) {
       const period = periodAfter(toks, after);
       const marked = offHour || rangeEnd > 0 || period || OCLOCK.has(toks[after]) || HOUR_LEADS.has(toks[i - 1]) || toks[i + 1] === 'ish';
       if (!marked || runsIntoDuration(toks, after)) continue;
-      mentions.push({ hour24: period ? clockHour(n, period) : rangeStartHour(toks, n, rangeEnd), offHour, pos: offset + i, end: offset + Math.max(after, rangeEnd + 1) });
+      let end = Math.max(after, rangeEnd + 1);
+      while (CLOCK_TAIL.has(toks[end])) end += 1;
+      mentions.push({ hour24: period ? clockHour(n, period) : rangeStartHour(toks, n, rangeEnd), offHour, pos: offset + i, end: offset + end });
       i = after - 1;
     }
     offset += toks.length;
@@ -301,7 +313,15 @@ function offeredWithAnotherHour(toks, pos, end) {
     || (HOUR_ALTERNATIVES.has(toks[prev]) && hourNumber(toks[skip(prev - 1, -1)]) != null);
 }
 
+// Does this text talk about when, beyond the mentions parsed from it — an
+// hour no marker makes a clock time ("make that three"), a part of the day,
+// a weekday or month? A number running into a unit of time is a length.
+function talksTime(ns) {
+  const toks = ns.split(' ');
+  return toks.some((tok, i) => (TIME_WORDS.has(tok) || /^(?:[1-9]|1[0-2])$/.test(tok)) && !runsIntoDuration(toks, i + 1));
+}
+
 module.exports = {
   normalize, parseTurns, parseDayMentions,
-  splitTurnSentences, sentenceSpans, extractHourMentions, offeredWithAnotherHour,
+  splitTurnSentences, sentenceSpans, extractHourMentions, offeredWithAnotherHour, talksTime,
 };

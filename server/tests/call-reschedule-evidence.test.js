@@ -273,6 +273,15 @@ describe('rescheduleAgreementEvidence', () => {
     expect(evidence(`${agreed}\nCaller: Can we do three?\nAgent: We will do that.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
     expect(evidence(`${agreed}\nCaller: Make that three.\nAgent: We will do that.`)).toMatchObject({ ok: false, reason: 'slot_refused' });
     expect(evidence(`${agreed}\nCaller: Thanks, and one more thing, my name is spelled with a C.`).ok).toBe(true);
+    // Before the commitment too, from either side: an unmarked hour is a
+    // correction no mention reads.
+    expect(evidence('Agent: Would Thursday at two work?\nCaller: Make that three.\nAgent: I will put you down.'))
+      .toMatchObject({ ok: false, reason: 'slot_refused' });
+    expect(evidence('Caller: Can we do Thursday at two?\nAgent: Make that three. We will see you then.'))
+      .toMatchObject({ ok: false, reason: 'slot_refused' });
+    // Conservative by design: the caller repeating the slot after the
+    // commitment makes it the last mention, with no commitment after it.
+    expect(evidence(`${agreed}\nCaller: Thanks, Thursday at two is perfect.`).ok).toBe(false);
     expect(evidence(`${agreed} Anything else?\nCaller: Is there anything else I need to do before then?`).ok).toBe(true);
   });
 

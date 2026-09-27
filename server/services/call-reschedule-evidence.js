@@ -54,7 +54,7 @@
 const { etDateString } = require('../utils/datetime-et');
 const { etWallClockOfConfirmedStart } = require('./call-triage-flags');
 const {
-  normalize, parseTurns, parseDayMentions, splitTurnSentences, sentenceSpans, extractHourMentions, offeredWithAnotherHour,
+  normalize, parseTurns, parseDayMentions, splitTurnSentences, sentenceSpans, extractHourMentions, offeredWithAnotherHour, talksTime,
 } = require('./call-time-mentions');
 
 // Fail-closed hedge/unsettled markers, matched as padded substrings.
@@ -218,25 +218,12 @@ function answersClosingQuestion(turns, idx) {
   return agentIdx >= 0 && sentenceSpans(turns[agentIdx].raw).some((sentence) => sentence.question && isClosingQuestion(sentence.ns));
 }
 
-// Words that can only be about when: an hour from two to twelve ("one" also
-// counts things — "one more question"), noon, am/pm, a part of the day, a
-// weekday, a month ("may" is also a verb), today, tomorrow.
-const TIME_WORDS = new Set([
-  'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
-  'noon', 'midnight', 'am', 'pm', 'morning', 'afternoon', 'evening', 'today', 'tomorrow',
-  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
-  'january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
-]);
-function talksTime(ns) {
-  return ns.split(' ').some((tok) => TIME_WORDS.has(tok) || /^(?:[1-9]|1[0-2])$/.test(tok));
-}
-
 // After the agent's commitment the caller only closes the call: a caller
-// turn naming a time or day again ("make that three") or asking anything
-// but a closing question ("can we do three?") is still on the slot.
+// question other than a closing one ("can we do three?") is still on the
+// slot.
 function callerReopensSlot(turns, affirmIdx) {
-  return turns.slice(affirmIdx + 1).some((t) => !t.agent && (talksTime(t.ns)
-    || sentenceSpans(t.raw).some((sentence) => sentence.question && !isClosingQuestion(sentence.ns))));
+  return turns.slice(affirmIdx + 1).some((t) => !t.agent
+    && sentenceSpans(t.raw).some((sentence) => sentence.question && !isClosingQuestion(sentence.ns)));
 }
 
 // Words that start a new clause: "Friday doesn't work, BUT we'll see you
@@ -367,12 +354,14 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
   // appointment" or the agent's "actually, we cannot move it" after the
   // commitment — turned it down, unless it is a courtesy or a caller's "no"
   // answering the agent's closing question ("anything else?" — "No, that's
-  // all"). So does a caller question after the commitment.
+  // all"). Talk of a time after the slot's final mention that no mention
+  // parses ("make that three", "the morning is better") leaves it unsettled,
+  // and so does a caller question after the commitment.
   const laterTurns = turns.slice(anchorIdx + 1).map((t, k) => (!t.agent && answersClosingQuestion(turns, anchorIdx + 1 + k)
     ? t.ns.replace(/^(?:no|nope|nah)\b/, '') : t.ns));
   if (negatesSlotWord(dayClause, dayWord, slotEndIn(dayClause, dayWord, hourWord))
     || negatesSlotWord(hourClause, hourWord, slotEndIn(hourClause, hourWord, dayWord))
-    || [slotClauses[2], ...laterTurns].some(hasNegation) || callerReopensSlot(turns, affirmIdx)) {
+    || [slotClauses[2], ...laterTurns].some((ns) => hasNegation(ns) || talksTime(ns)) || callerReopensSlot(turns, affirmIdx)) {
     return failAt('slot_refused', affirmIdx);
   }
 
