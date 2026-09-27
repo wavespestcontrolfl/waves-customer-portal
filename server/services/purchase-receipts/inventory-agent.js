@@ -1501,6 +1501,19 @@ async function recordAttemptFailure(conn, lineId, notifyAdmin, reason = 'unknown
   return conn.transaction(async (trx) => {
     const line = await trx('purchase_receipt_lines').where({ id: lineId }).forUpdate().first();
     if (!line || line.status !== 'agent_pending') return { status: 'no_longer_pending' };
+    // A shipment handed to a person since (a later email with no items, no
+    // order number, never delivered, unreadable) already carries that
+    // person's bell: the line closes quietly rather than ringing a second
+    // "log it by hand" that could restock the same box twice (2026-09-27
+    // pre-push audit) — the same short-circuit applyDecision and
+    // drainAgentQueue take, under the same line-then-shipment lock order.
+    await lockShipment(trx, line.vendor, line.shipment_key);
+    if (await shipmentHandedOff(trx, line.vendor, line.shipment_key, line.email_id)) {
+      await trx('purchase_receipt_lines').where({ id: lineId }).update({
+        status: 'skipped', agent_decision: { kind: 'skipped', reason: 'shipment_handed_to_person' }, agent_decided_at: new Date(),
+      });
+      return { status: 'skipped' };
+    }
     const attempts = final ? Math.max(MAX_ATTEMPTS, Number(line.agent_attempts || 0) + 1) : Number(line.agent_attempts || 0) + 1;
     if (attempts < MAX_ATTEMPTS) {
       await trx('purchase_receipt_lines').where({ id: lineId }).update({ agent_attempts: attempts });
@@ -1733,6 +1746,7 @@ async function runInventoryAgent({ conn = db, llm, notifyAdmin, limit = BATCH_LI
       try {
         const failure = await recordAttemptFailure(conn, line.id, notify, err.message);
         if (failure.status === 'agent_unsure') totals.held += 1;
+        else if (failure.status === 'skipped') totals.ignored += 1;
         else totals.stillPending += 1;
       } catch (innerErr) {
         // Even recording the failure failed (e.g. the bell write itself) —

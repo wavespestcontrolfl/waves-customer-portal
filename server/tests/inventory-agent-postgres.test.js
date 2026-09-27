@@ -1305,6 +1305,26 @@ jest.setTimeout(30000);
     expect(await stockOf(product.id)).toBe(0);
   });
 
+  // 2026-09-27 pre-push audit: a final LLM failure rang "log it by hand"
+  // even after a later email handed the whole shipment to a person.
+  test('a failed attempt on a shipment handed to a person closes the line quietly — no second bell', async () => {
+    const line = await pendingLine({ agent_attempts: 2 });
+    const [other] = await mockConn('emails').insert({
+      gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'order-update@amazon.com',
+      subject: 'Delivered: 1 item', received_at: RECEIVED_AT,
+    }).returning('*');
+    await mockConn('purchase_receipt_lines').insert({
+      vendor: 'amazon', order_number: 'unknown', shipment_key: 'ship-2', line_no: 1,
+      raw_title: 'Bifen XTS Insecticide 96 oz', quantity: 2, status: 'no_order_number', email_id: other.id,
+    });
+    const result = await run({ ok: false, reason: 'llm_unavailable' });
+    expect(result).toMatchObject({ held: 0, ignored: 1 });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'skipped' });
+    expect(saved.agent_decision).toMatchObject({ reason: 'shipment_handed_to_person' });
+    expect(await bellsFor(line.id)).toHaveLength(0);
+  });
+
   test('draining a line whose shipment was handed to a person closes it quietly', async () => {
     const line = await pendingLine();
     await mockConn('purchase_receipt_lines').where({ id: line.id }).update({ agent_decision: { handoffFrom: 'needs_size' } });

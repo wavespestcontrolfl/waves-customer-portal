@@ -892,12 +892,16 @@ describe('recordAttemptFailure — attempts, then hands off to a person (LLM fai
       expect(table).toBe('purchase_receipt_lines');
       const q = {};
       q.where = () => q;
+      q.whereIn = () => q;
       q.forUpdate = () => q;
       q.first = async () => ({ ...line });
+      // The shipment hand-off check (shipmentHandedOff): no hand-off here.
+      q.select = async () => [];
       q.update = async (fields) => { line = { ...line, ...fields }; return 1; };
       return q;
     };
     trx.transaction = async (cb) => cb(trx);
+    trx.raw = async () => ({ rows: [] }); // lockShipment's advisory lock
     return { conn: trx, getLine: () => line };
   }
 
