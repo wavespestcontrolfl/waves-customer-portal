@@ -43,7 +43,9 @@ const { resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntellige
 const { PLAN_TERMS_COPY } = require('../../shared/estimate-copy-claims.cjs');
 const {
   hasPurchasedTrenchingWarranty,
+  isPreSlabTreatmentItem,
   matchingTrenchingWarrantyRow,
+  preSlabExtendedWarrantySelected,
   rawOneTimeWarrantyEvidenceItems,
   trenchingServiceIdentity,
   trenchingWarrantyDecision,
@@ -3359,26 +3361,12 @@ function isLawnCareOneTimeItem(item = {}) {
 }
 
 function isPreSlabOneTimeItem(item = {}) {
-  const raw = [item.service, item.name, item.label, item.displayName, item.detail, item.det]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase()
-    .replace(/[_-]+/g, ' ');
-  return (raw.includes('pre slab') || /\bslab pre ?treat/.test(raw))
-    && (raw.includes('termite') || raw.includes('termiticide') || raw.includes('soil treatment') || raw.includes('termidor'));
+  return isPreSlabTreatmentItem(item);
 }
 
 function preSlabCustomerCopy(items = []) {
   const preSlabItems = (Array.isArray(items) ? items : []).filter(isPreSlabOneTimeItem);
-  const hasExtendedWarranty = preSlabItems.some((item) => {
-    const raw = [item.warrantyStatus, item.detail, item.det]
-      .filter(Boolean)
-      .join(' ')
-      .toLowerCase();
-    if (item.warrantyExtendedSelected === true) return true;
-    if (raw.includes('no extended')) return false;
-    return raw.includes('extended 5') || raw.includes('5-year') || raw.includes('5yr');
-  });
+  const hasExtendedWarranty = preSlabItems.some(preSlabExtendedWarrantySelected);
   // Two slots render this copy — the one-time note inside the price card and
   // the mini-guarantee line below it. Split the service description from the
   // warranty assurance so they don't print the same sentence twice (the

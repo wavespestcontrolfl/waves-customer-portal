@@ -126,9 +126,11 @@ describe('public estimate one-time breakdown', () => {
         const answer = answerEstimateQuestionFallback('What warranty does the trenching include?', context);
         if (warrantyTier === 'none') {
           expect(answer).not.toContain('Annual inspection during the warranty period');
+          // The engine's bare "trenching" inclusion placeholder is not a service line.
+          expect(answer).not.toMatch(/\btrenching:/i);
+          expect(answer).toMatch(/do not see an estimate-wide callback or money-back guarantee/i);
         } else {
-          expect(answer).toContain('Annual inspection during the warranty period');
-          expect(answer).toContain('For Termite Treatment');
+          expect(answer).toContain('Termite Treatment: Annual inspection during the warranty period.');
         }
       }
     },

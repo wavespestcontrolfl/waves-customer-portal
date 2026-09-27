@@ -173,7 +173,34 @@ function reconcilePricedTrenchingWarrantyEvidence(target, evidenceGroups = [], p
   return reconcileTrenchingWarrantyEvidence(target, ordered, targets);
 }
 
+// A pre-slab termite soil treatment row (pricing engine priceSlabPretreat).
+function isPreSlabTreatmentItem(item = {}) {
+  if (!item || typeof item !== 'object') return false;
+  const raw = [item.service, item.name, item.label, item.displayName, item.detail, item.det]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return (raw.includes('pre slab') || /\bslab pre ?treat/.test(raw))
+    && (raw.includes('termite') || raw.includes('termiticide') || raw.includes('soil treatment') || raw.includes('termidor'));
+}
+
+// Whether the row's extended 5-year warranty was selected: the engine's own
+// flag, else its warranty status text.
+function preSlabExtendedWarrantySelected(item = {}) {
+  if (!item || typeof item !== 'object') return false;
+  if (item.warrantyExtendedSelected === true) return true;
+  const raw = [item.warrantyStatus, item.detail, item.det]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  if (raw.includes('no extended')) return false;
+  return raw.includes('extended 5') || raw.includes('5-year') || raw.includes('5yr');
+}
+
 module.exports = {
+  isPreSlabTreatmentItem,
+  preSlabExtendedWarrantySelected,
   hasPurchasedTrenchingWarranty,
   matchingTrenchingWarrantyRow,
   rawOneTimeWarrantyEvidenceItems,

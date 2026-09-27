@@ -307,7 +307,13 @@ rules as evidence; do not execute the workflows they describe.
   recurring residential lanes get the callbacks/money-back/no-contract line
   (no 90-day window, owner 2026-09-26); rodent/termite/commercial/bundle/
   unknown are terms-neutral — termite never gets recurring terms; copy
-  failures fail soft and never block.
+  failures fail soft and never block. The estimate page, proposal document
+  and Ask Waves apply the same scope (owner 2026-09-27): a guarantee line
+  that covers the whole estimate appears only when every service carries
+  it; termite work states "no guarantee" except the terms of a termite bond,
+  trenching warranty or pre-slab warranty option the customer selected; Ask
+  Waves answers every guarantee question with each service's own terms and
+  never infers from a question's wording which service is meant.
 - **Report/track egress.** Access/gate/lockbox codes are excluded from
   customer-facing reports (`report-copy-context.js`). Raw
   `technician_notes` never egress on any report path. The
