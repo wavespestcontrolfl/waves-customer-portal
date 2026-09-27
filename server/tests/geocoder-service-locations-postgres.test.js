@@ -139,7 +139,7 @@ postgres('service-location geocoder against isolated PostgreSQL', () => {
     delete process.env.GATE_GEOCODE_REVIEW;
     geocodeAddressWithStatus.mockResolvedValue({ location: PIN, permanent: false });
     mockConnection = await database.transaction();
-    for (const table of ['scheduled_services', 'customers', 'audit_log']) {
+    for (const table of ['scheduled_services', 'customers', 'customer_properties', 'audit_log']) {
       await mockConnection.raw('CREATE TEMP TABLE ?? ON COMMIT DROP AS SELECT * FROM public.?? WITH NO DATA', [table, table]);
     }
     await insertCustomer();
@@ -423,6 +423,36 @@ postgres('service-location geocoder against isolated PostgreSQL', () => {
     expect(await mockConnection('scheduled_services').where({ id: blockedPrimary }).first('lat', 'lng')).toEqual({ lat: null, lng: null });
     const secondary = await mockConnection('scheduled_services').where({ id: eligibleSecondary }).first('lat', 'lng');
     expect({ lat: Number(secondary.lat), lng: Number(secondary.lng) }).toEqual(PIN);
+  });
+
+  test('an explicit primary property link is review-owned without blocking another property', async () => {
+    const primaryId = '34000000-0000-4000-8000-000000000090';
+    const secondaryId = '34000000-0000-4000-8000-000000000091';
+    const blockedPrimary = id(901);
+    const eligibleSecondary = id(902);
+    await mockConnection('customers').where({ id: CUSTOMER }).update({ latitude: null, longitude: null });
+    await mockConnection('customer_properties').insert({
+      id: primaryId, customer_id: CUSTOMER, active: true, is_primary: true,
+      address_line1: '100 Primary Fixture Way', address_line2: null,
+      city: 'Bradenton', state: 'FL', zip: '34205', latitude: null, longitude: null,
+    });
+    await enableReviewGate();
+    await insertReview('outside_area');
+    await insertService(blockedPrimary, {
+      property_id: primaryId, service_address_line1: '999 Frozen Snapshot Lane',
+    });
+    await insertService(eligibleSecondary, {
+      property_id: secondaryId, service_address_line1: '291 Secondary Fixture Way',
+    });
+
+    const result = await sweepUngeocodedServices({ limit: 1, now: NOW, dryRun: false }, mockConnection);
+
+    expect(result).toMatchObject({ checked: 1, geocoded: 1, unresolved: 0, stale: 0, failed: 0 });
+    expect(result.stops).toEqual([{ id: eligibleSecondary, date: DAY, reason: 'coordinates_recovered' }]);
+    expect(geocodeAddressWithStatus).toHaveBeenCalledTimes(1);
+    expect(geocodeAddressWithStatus.mock.calls[0][0]).toContain('291 Secondary Fixture Way');
+    expect(await mockConnection('scheduled_services').where({ id: blockedPrimary }).first('lat', 'lng'))
+      .toEqual({ lat: null, lng: null });
   });
 
   test('an equivalently spelled verified review pin is reused without a provider lookup', async () => {
