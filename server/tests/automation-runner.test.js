@@ -50,6 +50,7 @@ function chain({ result = [], first, returning, updateResult = 1 } = {}) {
     'orderBy',
     'orderByRaw',
     'limit',
+    'forUpdate',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
@@ -296,30 +297,103 @@ describe('automation runner suppression guardrails', () => {
   // The portal-wide email switch never cancels a payment-failed email (owner
   // ruling 2026-09-26: payment emails cannot be turned off); only an
   // explicit channel choice without Email does.
+  // A payment-failed step is re-checked at the send: the first reads are the
+  // delivery pre-check, the second set is the locked provider handoff.
+  const PAYMENT_FAILED_ENROLLMENT = {
+    id: 'enrollment-1', template_key: 'payment_failed', customer_id: 'cust-1', status: 'active',
+    current_step: 0, email: 'customer@example.com', first_name: 'Sam', last_name: 'Customer',
+  };
+  function paymentFailedQueues({
+    prefs, handoffPrefs = prefs, handoffCustomer = { id: 'cust-1', email: 'customer@example.com', first_name: 'Sam', last_name: 'Customer' },
+    handoffSuppressions = [],
+  }) {
+    const handoff = {
+      customers: chain({ first: handoffCustomer }),
+      prefs: handoffPrefs instanceof Error ? chain() : chain({ first: handoffPrefs }),
+      suppressions: chain({ result: handoffSuppressions }),
+    };
+    if (handoffPrefs instanceof Error) handoff.prefs.first = jest.fn(async () => { throw handoffPrefs; });
+    const sendUpdate = chain();
+    const enrollmentUpdate = chain();
+    setDbQueues({
+      automation_enrollments: [chain({ first: PAYMENT_FAILED_ENROLLMENT }), chain({ first: PAYMENT_FAILED_ENROLLMENT }), enrollmentUpdate],
+      automation_templates: [chain({ first: { key: 'payment_failed', name: 'Payment Failed', asm_group: 'service' } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, subject: 'Payment issue',
+        html_body: '<p>Please update payment.</p>', text_body: 'Please update payment.',
+        from_email: 'automations@wavespestcontrol.com', enabled: true }] })],
+      automation_step_sends: [chain({ returning: [{ id: 'send-1' }] }), sendUpdate],
+      email_suppressions: [chain({ result: [] }), handoff.suppressions],
+      notification_prefs: [chain({ first: prefs }), handoff.prefs],
+      customers: [handoff.customers],
+    });
+    return { handoff, sendUpdate, enrollmentUpdate };
+  }
+
   test.each([
     { payment_issue_channels: null },
     { payment_issue_channels: null, email_enabled: false },
     { payment_issue_channels: ['email', 'sms'], email_enabled: false },
     { payment_issue_channels: ['email'], email_enabled: false },
   ])('a payment-failed step with Email selected or unset still sends: %j', async (prefs) => {
-    const enrollment = {
-      id: 'enrollment-1', template_key: 'payment_failed', customer_id: 'cust-1', status: 'active',
-      current_step: 0, email: 'customer@example.com', first_name: 'Sam', last_name: 'Customer',
-    };
-    setDbQueues({
-      automation_enrollments: [chain({ first: enrollment }), chain({ first: enrollment }), chain()],
-      automation_templates: [chain({ first: { key: 'payment_failed', name: 'Payment Failed', asm_group: 'service' } })],
-      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, subject: 'Payment issue',
-        html_body: '<p>Please update payment.</p>', text_body: 'Please update payment.',
-        from_email: 'automations@wavespestcontrol.com', enabled: true }] })],
-      automation_step_sends: [chain({ returning: [{ id: 'send-1' }] }), chain()],
-      email_suppressions: [chain({ result: [] })],
-      notification_prefs: [chain({ first: prefs })],
-    });
+    const { handoff } = paymentFailedQueues({ prefs });
     sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-legacy' });
 
     await expect(sendStep('enrollment-1')).resolves.toMatchObject({ sent: true, done: true });
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    // Sent inside the billing handoff: customer row, then preferences row,
+    // locked before the provider request.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(handoff.customers.forUpdate).toHaveBeenCalled();
+    expect(handoff.prefs.forUpdate).toHaveBeenCalled();
+    expect(handoff.customers.forUpdate.mock.invocationCallOrder[0])
+      .toBeLessThan(handoff.prefs.forUpdate.mock.invocationCallOrder[0]);
+    expect(handoff.prefs.forUpdate.mock.invocationCallOrder[0])
+      .toBeLessThan(sendgrid.sendOne.mock.invocationCallOrder[0]);
+  });
+
+  // A bookkeeper replaced after enrollment must not get the payment details:
+  // the enrollment is re-pointed to the current billing contact and sends on
+  // the next tick, re-rendered for them.
+  test('a billing recipient changed since enrollment is re-pointed, never emailed at the old address', async () => {
+    const prefs = { payment_issue_channels: ['email'], billing_email: 'new-books@example.com', billing_contact_name: 'Pat Books' };
+    const { sendUpdate, enrollmentUpdate } = paymentFailedQueues({ prefs: { payment_issue_channels: ['email'] }, handoffPrefs: prefs });
+
+    await expect(sendStep('enrollment-1')).resolves.toEqual({
+      sent: false, deferred: true, reason: 'billing_recipient_changed',
+    });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'blocked', failure_reason: 'Billing recipient changed since enrollment',
+    }));
+    expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      email: 'new-books@example.com', first_name: 'Pat', last_name: 'Books',
+    }));
+    expect(enrollmentUpdate.update).not.toHaveBeenCalledWith(expect.objectContaining({ status: expect.anything() }));
+  });
+
+  test('a suppression recorded before dispatch cancels the step at the handoff', async () => {
+    const { sendUpdate, enrollmentUpdate } = paymentFailedQueues({
+      prefs: { payment_issue_channels: null },
+      handoffSuppressions: [{ email: 'customer@example.com', suppression_type: 'bounce', group_key: null, status: 'active' }],
+    });
+
+    await expect(sendStep('enrollment-1')).resolves.toMatchObject({ sent: false, blocked: true });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked' }));
+    expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled' }));
+  });
+
+  test('a handoff recheck that cannot run leaves the step due instead of failing the enrollment', async () => {
+    const { sendUpdate, enrollmentUpdate } = paymentFailedQueues({
+      prefs: { payment_issue_channels: null }, handoffPrefs: new Error('connection terminated'),
+    });
+
+    await expect(sendStep('enrollment-1')).resolves.toEqual({
+      sent: false, deferred: true, reason: 'billing_recheck_failed',
+    });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
+    expect(enrollmentUpdate.update).not.toHaveBeenCalled();
   });
 
   // service_renewal is termite-bond renewal copy: an enrollment queued before

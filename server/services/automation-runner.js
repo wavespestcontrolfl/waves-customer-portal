@@ -15,7 +15,7 @@
 
 const db = require('../models/db');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
-const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
+const { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockCustomerEmail } = require('../utils/customer-comms-lock');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
@@ -93,10 +93,10 @@ function automationSuppressionReason(suppression) {
   return `Suppressed: ${suppression.suppression_type}${suppression.group_key ? ` (${suppression.group_key})` : ''}`;
 }
 
-async function activeAutomationSuppressionFor(template, email) {
+async function activeAutomationSuppressionFor(template, email, database = db) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!normalizedEmail) return null;
-  const rows = await db('email_suppressions')
+  const rows = await database('email_suppressions')
     .whereRaw('LOWER(email) = ?', [normalizedEmail])
     .where({ status: 'active' });
   return rows.find((row) => automationSuppressionMatches(template, row)) || null;
@@ -117,6 +117,82 @@ async function blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancel
   });
   logger.warn(`[automation-runner] cancelled enrollment=${enrollment.id} reason=${reason}`);
   return { sent: false, blocked: true, reason };
+}
+
+// A payment-failed notice is billing mail, so it goes only to the customer's
+// CURRENT billing recipient, never just the address snapshotted at
+// enrollment: a bookkeeper replaced since must not still get the payment
+// details (the portal email switch no longer stops these sends, owner ruling
+// 2026-09-26). Everything is re-read at the send, under the customer-comms
+// lock the preference writer takes and the customers -> notification_prefs
+// row locks admin contact and billing-address edits take (the order
+// billing-channel-email-authority.js uses), then the recipient-email lock
+// (row -> address key, the established order) for the suppression recheck,
+// and all of it is held through the provider request. A changed recipient
+// re-points the enrollment and sends on the next tick, re-rendered for the
+// new contact. A recheck that cannot run before dispatch leaves the step due
+// rather than failing the enrollment.
+async function sendPaymentFailedToCurrentBillingRecipient({ enrollment, template, recipient, sendId, dispatch }) {
+  const { getInvoiceEmailRecipients } = require('./customer-contact');
+  const normalized = (email) => String(email || '').trim().toLowerCase();
+  let refusal = null;
+  let dispatchStarted = false;
+  let res;
+  try {
+    res = await withCustomerCommsLock(db, enrollment.customer_id, async (trx) => {
+      const customer = await trx('customers').where({ id: enrollment.customer_id }).forUpdate().first();
+      const prefs = await trx('notification_prefs').where({ customer_id: enrollment.customer_id }).forUpdate().first();
+      if (!customer || customer.deleted_at) {
+        refusal = { reason: 'Customer is no longer on file', cancelReason: 'no_customer' };
+        return null;
+      }
+      if (billingChannelAllowed(prefs || {}, 'payment_issue', 'email') === false) {
+        refusal = { reason: 'Billing delivery preference excludes Email', cancelReason: 'billing_email_deselected' };
+        return null;
+      }
+      const [current] = getInvoiceEmailRecipients(customer, prefs || {})
+        .filter((entry) => String(entry.email || '').includes('@'));
+      if (!current) {
+        refusal = { reason: 'No billing email on file', cancelReason: 'no_email' };
+        return null;
+      }
+      if (normalized(current.email) !== normalized(recipient)) {
+        refusal = { recipientChanged: current };
+        return null;
+      }
+      await lockCustomerEmail(trx, recipient);
+      const suppression = await activeAutomationSuppressionFor(template, recipient, trx);
+      if (suppression) {
+        refusal = { reason: automationSuppressionReason(suppression), cancelReason: 'email_suppressed' };
+        return null;
+      }
+      dispatchStarted = true;
+      return dispatch();
+    });
+  } catch (err) {
+    if (dispatchStarted) throw err;
+    logger.warn(`[automation-runner] payment-failed recheck failed enrollment=${enrollment.id}: ${err.message}`);
+    await db('automation_step_sends').where({ id: sendId }).update({
+      status: 'failed', failure_reason: 'Billing recipient could not be rechecked', updated_at: new Date(),
+    });
+    return { sent: false, deferred: true, reason: 'billing_recheck_failed' };
+  }
+  if (!refusal) return res;
+  if (!refusal.recipientChanged) {
+    return blockSendAndCancelEnrollment({ enrollment, sendId, reason: refusal.reason, cancelReason: refusal.cancelReason });
+  }
+  const current = refusal.recipientChanged;
+  const parts = String(current.name || '').trim().split(/\s+/).filter(Boolean);
+  await db('automation_step_sends').where({ id: sendId }).update({
+    status: 'blocked', failure_reason: 'Billing recipient changed since enrollment', updated_at: new Date(),
+  });
+  await db('automation_enrollments').where({ id: enrollment.id, current_step: enrollment.current_step }).update({
+    email: String(current.email).trim(),
+    ...(parts.length ? { first_name: parts[0], last_name: parts.slice(1).join(' ') || null } : {}),
+    updated_at: new Date(),
+  });
+  logger.warn(`[automation-runner] enrollment=${enrollment.id} re-pointed to the current billing recipient`);
+  return { sent: false, deferred: true, reason: 'billing_recipient_changed' };
 }
 
 // OWNER RULING (2026-07-13, renewal-reminder.js): "renewal" language is
@@ -608,18 +684,22 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     sendId: sendRow.id, testRecipient });
   if (deliveryBlock) return deliveryBlock;
 
+  const dispatch = () => sendgrid.sendOne({
+    to: recipient,
+    fromEmail,
+    fromName: step.from_name,
+    replyTo: step.reply_to,
+    subject: testRecipient ? `[TEST] ${subject}` : subject,
+    html: html || undefined,
+    text: text || undefined,
+    categories: ['automation', `template_${template.key}`, `step_${step.step_order}`],
+    asmGroupId,
+  });
   try {
-    const res = await sendgrid.sendOne({
-      to: recipient,
-      fromEmail,
-      fromName: step.from_name,
-      replyTo: step.reply_to,
-      subject: testRecipient ? `[TEST] ${subject}` : subject,
-      html: html || undefined,
-      text: text || undefined,
-      categories: ['automation', `template_${template.key}`, `step_${step.step_order}`],
-      asmGroupId,
-    });
+    const res = template.key === 'payment_failed' && enrollment.customer_id && !testRecipient
+      ? await sendPaymentFailedToCurrentBillingRecipient({ enrollment, template, recipient, sendId: sendRow.id, dispatch })
+      : await dispatch();
+    if (res?.sent === false) return res;
 
     await db('automation_step_sends').where({ id: sendRow.id }).update({
       status: 'sent',
