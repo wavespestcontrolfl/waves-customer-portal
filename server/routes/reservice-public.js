@@ -75,6 +75,18 @@ const {
   reserviceLanesForCustomer,
   openReserviceCallbacks,
 } = require('../services/reservice-scheduler');
+const {
+  RESERVICE_PEST_CHOICES,
+  normalizeRequestPests,
+  pestLabels,
+} = require('../services/reservice-request');
+
+// GATE_RESERVICE_PEST_CHIPS (nested inside reserviceSelfServe — see
+// feature-gates.js): GET's optional pestChoices key and POST's `pests`
+// normalization. Off = byte-identical to before this gate existed.
+function pestChipsEnabled() {
+  return require('../config/feature-gates').isEnabled('reservicePestChips');
+}
 
 // Token-keyed customer data (name, availability around their address) —
 // never cacheable.
@@ -316,6 +328,12 @@ router.get('/:token', async (req, res, next) => {
         : (bookableLanes.length === 0 ? 'already_booked' : 'bookable'),
       customerFirstName: customer.first_name || null,
       lanes,
+      // Gate off: key omitted entirely — byte-identical to before this gate
+      // existed (Codex-review contract other reservice payload fields use,
+      // e.g. `rank_profile` above).
+      ...(pestChipsEnabled() && bookableLanes.length
+        ? { pestChoices: Object.fromEntries(bookableLanes.map((key) => [key, RESERVICE_PEST_CHOICES[key]])) }
+        : {}),
     };
     if (bookableLanes.length === 0) {
       return res.json({ ...base, availability: null });
@@ -442,6 +460,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
   const details = typeof req.body?.details === 'string'
     ? req.body.details.trim().slice(0, MAX_DETAILS_LENGTH)
     : '';
+  // Gate off: ignored outright, regardless of what a crafted body sends.
+  const requestedPests = pestChipsEnabled() ? normalizeRequestPests(req.body?.pests, lane) : null;
+  const requestedPestLabels = requestedPests ? pestLabels(requestedPests, lane) : [];
 
   try {
     const customer = await loadByToken(req.params.token);
@@ -514,9 +535,16 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       slot_start: slot.start_time,
       slot_end: slot.end_time,
       technician_id: slot.technician_id || null,
-      customer_notes: details
-        ? `Re-service request: ${details}`
-        : 'Re-service requested via self-serve link',
+      // Pest chips (gated) fold into the same customer-visible line the
+      // details box always produced; the plain no-pests fallbacks are
+      // untouched.
+      customer_notes: requestedPestLabels.length
+        ? (details
+          ? `Re-service request (${requestedPestLabels.join(', ')}): ${details}`
+          : `Re-service request: ${requestedPestLabels.join(', ')}`)
+        : (details
+          ? `Re-service request: ${details}`
+          : 'Re-service requested via self-serve link'),
       source: 'reservice_link',
       // Server-resolved trust context — the token IS the identity proof
       // (same bearer posture as /reschedule). No pricing, no funnel gates.
@@ -528,6 +556,14 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         serviceId: catalog.serviceId,
         serviceType: catalog.serviceType,
         durationMinutes: catalog.durationMinutes,
+        // Clean re-service request storage (migration 20260927100000) — the
+        // customer's own words (or null), always stamped from the details
+        // box; `pests` is null unless GATE_RESERVICE_PEST_CHIPS is live.
+        // createSelfBooking only writes these columns when they exist
+        // (hasColumn guard), so a deploy ahead of the migration is inert.
+        ...(details || requestedPestLabels.length ? {
+          customerRequest: { text: details || null, source: 'picker', pests: requestedPests },
+        } : {}),
       },
     });
 

@@ -9520,6 +9520,22 @@ export function typedFieldLabel(schemaType, field, values = {}) {
 // chips + optional AI-drafted recommendations. Shared by the mobile and
 // desktop renders of CompletionPanel — `variant` only switches the
 // palette/label chrome between the CP mobile tokens and the D palette.
+// Draft-restore rule for a typed activity score. A derive-mapped indicator
+// has no gauge to pin any more (owner ruling 2026-09-26), so a pin saved by
+// an older draft is dropped and the score follows the restored findings —
+// otherwise it would keep steering validation and the AI payload from a
+// picker the tech can't see. Tech-set-only indicators keep their saved pin.
+export function restoredActivityScoreState(activity, values, savedScore, savedTouched) {
+  if (activity?.deriveField) {
+    const derived = activity.deriveScores?.[String((values || {})[activity.deriveField])];
+    return { score: derived == null ? null : derived, touched: false };
+  }
+  return {
+    score: Number.isInteger(savedScore) ? savedScore : null,
+    touched: !!savedTouched,
+  };
+}
+
 export function TypedFindingsSection({
   variant,
   schema,
@@ -9662,7 +9678,15 @@ export function TypedFindingsSection({
           {detailFields.map(renderField)}
         </details>
       )}
-      {schema.activity && (
+      {/* Owner ruling 2026-09-26: the gauge is redundant with the typed
+          findings field for every indicator with a derive mapping (e.g.
+          cockroach's Activity level) — it only ever showed the same value
+          back, asking the tech to re-confirm it. Hidden here; the score
+          still auto-recomputes from deriveScores[values[deriveField]] via
+          onFieldChange (contract §4) and completion derives it server-side
+          when the tech never touches the removed picker. Tech-set-only
+          indicators (no derive field) keep the gauge unchanged. */}
+      {schema.activity && !schema.activity.deriveField && (
         <div style={{ marginBottom: 12 }}>
           <div style={fieldLabelStyle}>
             {schema.activity.label}
@@ -15233,12 +15257,18 @@ export function CompletionPanel({
       pruneRestoredFindingsValues(restoredFindings, typedFindingsSchema.fields, typedFindingsSchema.type);
       if (JSON.stringify(restoredFindings) !== prePruneFindings) restorePruned = true;
       setFindingsValues(restoredFindings);
-      setTypedActivityScore(
-        Number.isInteger(savedDraft.typedActivityScore)
-          ? savedDraft.typedActivityScore
-          : null,
+      const restoredActivity = restoredActivityScoreState(
+        typedFindingsSchema.activity,
+        restoredFindings,
+        savedDraft.typedActivityScore,
+        savedDraft.typedActivityTouched,
       );
-      setTypedActivityTouched(!!savedDraft.typedActivityTouched);
+      // A generated report built from a score this restore just replaced is
+      // stale — flag it like any other pruned input so it gets invalidated.
+      if ((Number.isInteger(savedDraft.typedActivityScore) ? savedDraft.typedActivityScore : null)
+        !== restoredActivity.score) restorePruned = true;
+      setTypedActivityScore(restoredActivity.score);
+      setTypedActivityTouched(restoredActivity.touched);
       const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
         ? savedDraft.typedNextStepChips
         : [];
@@ -15313,8 +15343,15 @@ export function CompletionPanel({
             {
               values,
               chips,
-              score: Number.isInteger(saved.score) ? saved.score : null,
-              scoreTouched: !!saved.scoreTouched,
+              ...(() => {
+                const restored = restoredActivityScoreState(
+                  schema.activity, values, saved.score, saved.scoreTouched,
+                );
+                if ((Number.isInteger(saved.score) ? saved.score : null) !== restored.score) {
+                  restorePruned = true;
+                }
+                return { score: restored.score, scoreTouched: restored.touched };
+              })(),
             },
           ];
         }),
@@ -15781,7 +15818,9 @@ export function CompletionPanel({
             type: schema.type,
             values: entry.values,
             nextStepChips: entry.chips,
-            activityScore: Number.isInteger(entry.score) ? entry.score : null,
+            activityScore: Number.isInteger(entry.score) && !schema.activity?.deriveField
+              ? entry.score
+              : null,
           };
         }),
       }
@@ -16859,11 +16898,16 @@ export function CompletionPanel({
           }
         }
       }
-      // Gauge types require a score on any completed-side outcome — the
-      // server 422s (activity_score_required) when findings are submitted
-      // without one and the derive field can't fill it.
+      // Tech-set-only gauge types (no derive field) still require a score
+      // on any completed-side outcome — the server 422s
+      // (activity_score_required) the same way. A derive-mapped type has
+      // no gauge to fill any more (owner ruling 2026-09-26): its score
+      // comes from the findings field alone, so a missing one is never a
+      // blocker here.
       const typedScoreMissing =
-        !!typedFindingsSchema.activity && typedActivityScore == null;
+        !!typedFindingsSchema.activity
+        && !typedFindingsSchema.activity.deriveField
+        && typedActivityScore == null;
       // Mirror the server's next_step_required 422 pre-submit so the tech
       // gets the same inline validation as other required fields.
       const nextStepMissing =
@@ -16979,7 +17023,11 @@ export function CompletionPanel({
             }
           }
         }
-        const companionScoreMissing = !!schema.activity && entry.score == null;
+        // Same derive-mapped exemption as the primary (owner ruling
+        // 2026-09-26): a companion gauge with a findings-derived score is
+        // never blocked here, only a tech-set-only one.
+        const companionScoreMissing =
+          !!schema.activity && !schema.activity.deriveField && entry.score == null;
         const companionNextStepMissing =
           !!schema.nextStepRequired && !entry.chips.length;
         if (
@@ -17495,7 +17543,11 @@ export function CompletionPanel({
           type: typedFindingsSchema.type,
           values: findingsValues,
         };
-        if (typedActivityScore != null) {
+        // A derive-mapped type has no gauge to pin any more (owner ruling
+        // 2026-09-26), so never submit a score the tech can't see — a
+        // pin restored from an older draft would otherwise ride along
+        // invisibly. The server derives it from the findings field.
+        if (typedActivityScore != null && !typedFindingsSchema.activity?.deriveField) {
           body.activityScore = typedActivityScore;
           body.activityScoreSource = typedActivityTouched
             ? "technician"
@@ -17544,7 +17596,7 @@ export function CompletionPanel({
             nextStepChips: entry.chips,
             // Same pin semantics as the primary: untouched-and-derived
             // submits as 'derived', any tap pins 'technician'.
-            ...(entry.score != null
+            ...(entry.score != null && !schema.activity?.deriveField
               ? {
                   activityScore: entry.score,
                   activityScoreSource: entry.scoreTouched
