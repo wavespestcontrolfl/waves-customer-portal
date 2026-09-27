@@ -88,12 +88,18 @@ const OUR_NUMBER = '+19415550100';
   // dark-period call). A caller-supplied `metadata` MERGES onto the stamp
   // rather than replacing it, so passing e.g. `{ preconnect_screen: 'gated' }`
   // never has to also repeat the stamp.
+  // processing_status defaults to 'processed' (Codex #5019 r11 P2: the
+  // sweep now also requires the call's own recording pipeline to have
+  // SETTLED, not just the call itself to have ended) — every fixture call
+  // here is presumed to have already finished processing by the time the
+  // sweep considers it, matching ordinary real-world timing; the settle
+  // tests below explicitly override this to exercise the gate itself.
   function callRow(minsAgo, extra = {}) {
     const { metadata, ...rest } = extra;
     return {
       id: randomUUID(), twilio_call_sid: `CA${randomUUID().replaceAll('-', '')}`,
       direction: 'inbound', from_phone: PHONE, to_phone: OUR_NUMBER, customer_id: null,
-      status: 'completed', answered_by: 'human', duration_seconds: 90,
+      status: 'completed', answered_by: 'human', duration_seconds: 90, processing_status: 'processed',
       metadata: { promise_chaser_eligible: true, ...(metadata || {}) },
       created_at: new Date(now - minsAgo * 60000), updated_at: new Date(now - minsAgo * 60000),
       ...rest,
@@ -447,6 +453,44 @@ const OUR_NUMBER = '+19415550100';
     // The call ends (terminal status) — now eligible, rings on this later tick.
     await mockConn('call_log').where({ id: ringing.id }).update({ status: 'completed' });
     expect(await sweepPromiseChasers()).toBe(1);
+  });
+
+  describe('processing must SETTLE before an alert (Codex #5019 r11 P2)', () => {
+    test('a terminal call still mid-processing never rings — the pipeline may still create the booking or send the estimate that keeps the promise', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const back = callRow(0, { processing_status: 'processing' }); // ended just now, pipeline still running
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      expect(await sweepPromiseChasers()).toBe(0);
+      expect(triggerNotification).not.toHaveBeenCalled();
+    });
+
+    test('once processed, the SAME call rings on the next tick', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      const back = callRow(0, { processing_status: 'processing' });
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+      expect(await sweepPromiseChasers()).toBe(0);
+
+      await mockConn('call_log').where({ id: back.id }).update({ processing_status: 'processed' });
+      expect(await sweepPromiseChasers()).toBe(1);
+    });
+
+    test('a call stuck in processing past the grace period rings anyway — a wedged pipeline cannot block this bell forever', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id);
+      // Ended ~10.5 minutes ago (past PROCESSING_SETTLE_GRACE_MS's 10
+      // minutes), still comfortably inside the 30-minute LOOKBACK_MS
+      // window — never reached a completed processing_status.
+      const stuck = callRow(12, { processing_status: 'processing' });
+      await mockConn('call_log').insert([earlier, stuck]);
+      await mockConn('call_commitments').insert(commitment);
+
+      expect(await sweepPromiseChasers()).toBe(1);
+    });
   });
 
   test("a human-typed commitment's alert reports its OWN created_at as when the promise was made, never the linked call's time; an AI-extracted one still uses the call time (Codex #5019 r8 P2)", async () => {
@@ -807,6 +851,39 @@ const OUR_NUMBER = '+19415550100';
       const row = await mockConn('promise_chaser_deliveries').where({ dedupe_key: dedupeKey }).first('dedupe_key');
       expect(row).toBeFalsy();
     });
+
+    test('fulfilled in the exact gap between the bell insert and the push — the now-stale bell is retired and the delivery fact is never written (Codex #5019 r11 P2)', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the quote' });
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+      const dedupeKey = `promise_chaser:${commitment.id}:0:${etDateString(new Date(now))}`;
+
+      triggerNotification.mockImplementationOnce(async (triggerKey, payload, opts) => {
+        // The bell write's own recheck (shouldContinue) passes — the
+        // promise is still genuinely open at this instant.
+        expect(await opts.shouldContinue()).toBe(true);
+        await mockConn('notifications').insert({
+          id: randomUUID(), recipient_type: 'admin', category: 'missed_call', title: 'fixture',
+          metadata: { triggerKey: 'promise_chaser', dedupeKey: opts.dedupeKey, payload: { commitmentId: payload?.commitmentId, callLogId: payload?.callLogId } },
+        });
+        // The estimate is genuinely sent in the exact gap between the bell
+        // write and the push.
+        await mockConn('call_commitments').where({ id: commitment.id }).update({
+          status: 'fulfilled', fulfilled_at: new Date(),
+          fulfillment: JSON.stringify({ kind: 'manual', basis: 'sent_in_race_window' }),
+        });
+        expect(await opts.beforePush()).toBe(false);
+        return { bellWritten: true, push: { sent: 0, skipped: 'superseded_before_push' } };
+      });
+
+      await sweepPromiseChasers();
+      const row = await mockConn('promise_chaser_deliveries').where({ dedupe_key: dedupeKey }).first('dedupe_key');
+      expect(row).toBeFalsy(); // never written for a bell we just took back down
+      const notif = await mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('read_at');
+      expect(notif.read_at).toBeTruthy(); // retired (marked read) — mirrors repeat-caller-bell's own supersedeMissedCallAdmin cleanup
+    });
   });
 
   test('205 non-SLA commitments on the number never crowd out the one SLA promise — the kind filter is now in the QUERY, not a client-side filter after the page (Codex #5019 r10 P2)', async () => {
@@ -959,6 +1036,27 @@ const OUR_NUMBER = '+19415550100';
 
       expect(await sweepPromiseChasers()).toBe(1);
       expect(triggerNotification).toHaveBeenCalledTimes(1);
+    });
+
+    test('a send_estimate reopened AFTER the callback is never re-attributed to it — no ring, even with no <kind>_edit/<kind>_reopen audit trail to fall back on (Codex #5019 r11 P2)', async () => {
+      const earlier = callRow(240);
+      const commitment = commitmentRow(earlier.id, { kind: 'send_estimate', description: 'Send the quote' }); // AI, unreviewed
+      const back = callRow(0);
+      await mockConn('call_log').insert([earlier, back]);
+      await mockConn('call_commitments').insert(commitment);
+
+      // Staff reopen/review the send_estimate commitment through the
+      // generic Call intelligence panel STRICTLY AFTER this callback —
+      // applyHumanUpdate re-stamps reviewed_at on every substantive action,
+      // but writes NO callback-style audit event for this kind (that
+      // machinery is callback-only); reviewed_at is the only durable
+      // renewal boundary a non-callback SLA kind carries.
+      const reopenedAt = new Date(now + 1000);
+      await mockConn('call_commitments').where({ id: commitment.id })
+        .update({ human_state: 'confirmed', reviewed_at: reopenedAt, updated_at: reopenedAt });
+
+      expect(await sweepPromiseChasers()).toBe(0);
+      expect(triggerNotification).not.toHaveBeenCalled();
     });
 
     test("the ET day in dedupeKey comes from the callback's OWN created_at, never the sweep tick's current time (Codex #5019 r18 P1)", async () => {

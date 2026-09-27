@@ -1748,14 +1748,36 @@ async function resolveFulfillment(conn, commitment, call) {
 // Direct proof marks an open AI row fulfilled. Association proof is stored
 // as a hint (status stays open, nothing is invented). Human-touched rows are
 // left to the human either way.
-// When a callback card's obligation was last (re)stated: a human-recorded
-// promise exists from the moment it was typed, and the card's audited
-// callback_edit / callback_reopen events restate it (the row's reviewed_at
-// is overwritten by every later action, so it cannot carry that history).
-// Null for anything that is not a reviewed callback card.
+// When a WAVES obligation was last (re)stated: a human-recorded promise
+// exists from the moment it was typed, and — for a callback card
+// specifically — the card's own audited callback_edit / callback_reopen
+// events restate it (the row's reviewed_at is overwritten by every later
+// action, so it cannot carry that history on its own). Every other
+// alertable SLA kind (send_estimate, schedule_visit — Codex #5019 r11 P2)
+// has no such audit trail and falls back to reviewed_at directly, below.
+// Null for anything that is not a reviewed, party:'waves' SLA commitment.
 async function obligationRenewedAt(conn, commitment) {
-  if (!commitment || commitment.kind !== 'callback' || commitment.party !== 'waves') return null;
+  if (!commitment || commitment.party !== 'waves') return null;
   if (!['confirmed', 'edited'].includes(commitment.human_state)) return null;
+  // Every OTHER alertable SLA kind (send_estimate, schedule_visit — Codex
+  // #5019 r11 P2), additive: callers outside this lane are unaffected,
+  // since none of them ever pass a non-callback row through this far
+  // (followup-sla-watcher's own renewedFloors keeps its pre-existing
+  // `kind !== 'callback'` guard before it ever calls this). A lazy require
+  // — not a top-level one — since followup-sla-watcher.js already requires
+  // this file; the module is fully initialized by the time this runs.
+  if (commitment.kind !== 'callback') {
+    if (!require('./followup-sla-watcher').SLA_KINDS.includes(commitment.kind)) return null;
+    // applyHumanUpdate writes no <kind>_edit/<kind>_reopen audit trail for
+    // these — that machinery (callback_edit/callback_reopen, below) is
+    // callback-only. The row's own reviewed_at — stamped fresh by every
+    // substantive edit or reopen action, the SAME shared patch object
+    // every applyHumanUpdate action stamps — is the only durable renewal
+    // boundary these kinds carry.
+    const ms = [commitment.source === 'human' ? commitment.created_at : null, commitment.reviewed_at]
+      .filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
+    return ms.length ? new Date(Math.max(...ms)) : null;
+  }
   const events = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
     .whereIn('action', ['callback_edit', 'callback_reopen']).select('action', 'created_at', 'metadata');
   const meta = (e) => { try { return typeof e.metadata === 'string' ? JSON.parse(e.metadata) : (e.metadata || {}); } catch { return {}; } };

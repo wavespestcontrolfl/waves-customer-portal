@@ -118,6 +118,19 @@ const LOOKBACK_MS = 30 * 60 * 1000;
 // what actually decides eligibility.
 const MAX_CALL_DURATION_MS = 4 * 60 * 60 * 1000;
 
+// How long a terminal-but-unprocessed call gets before the sweep considers
+// it settled anyway (Codex #5019 r11 P2): a terminal Twilio status does not
+// mean call-recording-processor has finished — it may still create the
+// booking or send the estimate that keeps THIS promise, and alerting first
+// would say "we still owe them a quote" the instant after we sent it.
+// Sized off the processor's own early-process delay (CALL_PROC_EARLY_PROCESS_DELAY_MS,
+// twilio-voice-webhook.js, default 2 minutes) plus a margin generous enough
+// that an ordinarily slow pass (transcription + extraction) still finishes
+// well inside it, while a genuinely STUCK pipeline can't block this bell
+// forever — comfortably inside the 30-minute LOOKBACK_MS window, so a call
+// that settles late still has most of the window left to be considered.
+const PROCESSING_SETTLE_GRACE_MS = 10 * 60 * 1000;
+
 // A `.catch()` sentinel distinguishable from every genuine obligationRenewedAt
 // result (null = never renewed, or a real Date) — never a value that value
 // could itself equal.
@@ -466,7 +479,27 @@ async function ringForCall(call, now = new Date()) {
   // findPromiseToRing already excludes it once it is truly gone.
   const delivered = Boolean(stats && (stats.bellWritten || Number(stats.push?.sent || 0) > 0
     || (!stillEligibleBlocked && (stats.suppressed || stats.policySilenced))));
-  if (delivered) {
+  // Retire a bell the FINAL check rejected — mirrors repeat-caller-bell.js's
+  // own post-dispatch cleanup exactly (Codex #5019 r11 P2): shouldContinue
+  // (the bell write) and beforePush (the push, a moment later) both run
+  // stillEligible, but nothing re-checks it again after both finish. If the
+  // promise was fulfilled in that exact gap — allowed through at the bell
+  // write, rejected by the time beforePush ran — the bell notification row
+  // already exists and stays visible forever (nothing ever marks it read),
+  // and delivered above still reads true, so the delivery fact still gets
+  // written. One more independent stillEligible() call, exactly like
+  // repeat-caller-bell's own `if (stats?.bellWritten && !await stillEligible())`,
+  // catches this: retire the now-stale bell through the SAME shared
+  // notification-service helper that bell already uses (never touched here
+  // before), and never write the fact for a bell we just took back down —
+  // the promise being truly gone is harmless to leave unsettled either way,
+  // since the next tick's own findPromiseToRing already excludes it.
+  const bellSuperseded = Boolean(stats?.bellWritten) && !(await stillEligible());
+  if (bellSuperseded) {
+    await require('./notification-service').supersedeMissedCallAdmin({ callLogId: call.id, triggerKey: 'promise_chaser' })
+      .catch((err) => logger.warn(`[promise-chaser-bell] failed to retire a superseded bell for ${dedupeKey}: ${err.message}`));
+  }
+  if (delivered && !bellSuperseded) {
     // Recorded AFTER dispatch, never before: the sweep is already
     // serialized (runExclusive, scheduler.js), so there is no concurrent
     // attempt to claim against — this is a fact about what just happened,
@@ -515,6 +548,11 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
   await db('promise_chaser_deliveries').where('delivered_at', '<', new Date(now.getTime() - DELIVERY_FACT_RETENTION_MS)).del()
     .catch((err) => logger.warn(`[promise-chaser-bell] delivery-fact housekeeping failed: ${err.message}`));
   const since = new Date(now.getTime() - LOOKBACK_MS);
+  // Lazy, not top-level (Codex #5019 r11 P2): call-recording-processor.js is
+  // a large module with its own heavy dependency graph; every other
+  // cross-file reuse in this sweep (notification-triggers.js, below) is
+  // lazy for the same reason. Cached by Node after the first tick either way.
+  const settledStatuses = [...require('./call-recording-processor').COMPLETED_STATUSES];
   let rang = 0;
   let cursor = null;
   for (;;) {
@@ -549,6 +587,21 @@ async function sweepPromiseChasers({ pageSize = 200 } = {}) {
       // applies here.
       .where('created_at', '>', new Date(since.getTime() - MAX_CALL_DURATION_MS))
       .whereRaw("COALESCE(bridged_at, created_at) + make_interval(secs => COALESCE(duration_seconds, 0)) > ?", [since])
+      // SETTLED processing only (Codex #5019 r11 P2): a terminal Twilio
+      // status (above) says the CALL ended, not that call-recording-
+      // processor has finished with it — the pipeline may still create the
+      // booking or send the estimate that keeps this exact promise. Settled
+      // means EITHER processing_status is already one of the processor's
+      // own COMPLETED_STATUSES (reused, not re-derived — processed /
+      // voicemail / spam; the retry states extraction_failed/no_transcription
+      // are deliberately NOT here, matching the processor's own posture:
+      // they are unfinished work, not done), OR the call ended long enough
+      // ago (PROCESSING_SETTLE_GRACE_MS) that a stuck pipeline can no
+      // longer hold this bell hostage — a bounded safety valve, not a
+      // second window.
+      .whereRaw(`(processing_status IN (${settledStatuses.map(() => '?').join(', ')})
+        OR (COALESCE(bridged_at, created_at) + make_interval(secs => COALESCE(duration_seconds, 0))) <= ?)`,
+        [...settledStatuses, new Date(now.getTime() - PROCESSING_SETTLE_GRACE_MS)])
       // Eligibility, not the window, is what keeps a dark-period call from
       // ringing (see module docstring) — a call the /voice webhook did not
       // stamp promise_chaser_eligible: true at arrival is never considered,
