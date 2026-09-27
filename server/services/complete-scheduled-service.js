@@ -3426,9 +3426,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
           } else if (derived) {
             typedActivityScore = derived.score;
             typedScoreSource = 'derived';
-          } else if (!typedIndicator.derive) {
-            // Tech-set-only gauge (no findings field to derive from) —
-            // still required on a completed visit.
+          } else {
+            // Tech-set-only gauge (no findings field to derive from — the
+            // derive-mapped case is handled above) — still required on a
+            // completed visit.
             return {
               status: 422,
               body: {

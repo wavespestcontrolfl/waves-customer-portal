@@ -208,9 +208,10 @@ function validateCompanionSubmission({ profile, companionFindings, primaryFindin
       } else if (derived) {
         finalScore = derived.score;
         finalScoreSource = 'derived';
-      } else if (!indicator.derive) {
-        // Tech-set-only gauge (no findings field to derive from) — still
-        // required on a completed visit.
+      } else {
+        // Tech-set-only gauge (no findings field to derive from — the
+        // derive-mapped case is handled above) — still required on a
+        // completed visit.
         return reject(422, {
           error: `${indicator.label} requires an activity score (0-5) on a completed visit (${type} companion section)`,
           code: 'companion_activity_score_required',
