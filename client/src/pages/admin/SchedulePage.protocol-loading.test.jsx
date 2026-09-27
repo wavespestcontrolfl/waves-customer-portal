@@ -320,6 +320,25 @@ describe("Job card Tank section rigs", () => {
     expect(await screen.findByText("1 tsp – 1¾ tsp")).toBeVisible();
     expect(document.body.textContent).not.toMatch(/\bml\b/i);
   });
+
+  it("reads a product whose label rate is stored in mL in spoons and fl oz", async () => {
+    fetch.mockImplementation((url) => {
+      const parsed = new URL(url, "http://localhost");
+      if (parsed.pathname.endsWith("/protocols/job-card/products")) return reply({ products: [{ id: "p3", name: "SUPERthrive", category: "biostimulant" }] });
+      if (parsed.pathname.endsWith("/protocols/job-card/mix")) {
+        // Label 1.25–5 mL per gallon dosed for the 4-gal FlowZone.
+        return reply({ enabled: true, amount: 5, amountMax: 20, unit: "ml", gallons: 4, ratePerGallon: { lo: 1.25, hi: 5, unit: "ml" }, rateVerified: true, rig: { equipmentSystemId: "sys-3", name: "FlowZone Typhoon 3.0 #1", tankCapacityGal: 4 }, sprayCheck: { verdict: "unknown", reason: "Judged on the visit day" } });
+      }
+      if (parsed.pathname.includes("/protocols/job-card/")) return reply(card);
+      return reply(fixture(url));
+    });
+    await act(async () => { render(<ProtocolPanel service={service} onClose={() => {}} />); });
+    fireEvent.change(await screen.findByPlaceholderText("Search a product to mix"), { target: { value: "super" } });
+    fireEvent.click(await screen.findByRole("button", { name: "SUPERthrive" }));
+    expect(await screen.findByText("1¼ tsp – 4 tsp")).toBeVisible();
+    expect(screen.getByText("Label rate 0.042–0.169 fl oz per gallon")).toBeVisible();
+    expect(document.body.textContent).not.toMatch(/\bml\b/i);
+  });
 });
 
 describe("Pay & Growth gate", () => {

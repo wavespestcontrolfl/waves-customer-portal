@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatMeasuredAmount, formatMeasuredRange } from "./mix-amount";
+import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "./mix-amount";
 
 const FRACTION_VALUE = { "": 0, "⅛": 0.125, "¼": 0.25, "⅜": 0.375, "½": 0.5, "⅝": 0.625, "¾": 0.75, "⅞": 0.875 };
 function spoonTeaspoons(text) {
@@ -49,6 +49,11 @@ describe("formatMeasuredAmount", () => {
     }
   });
 
+  it("keeps a shortage's signed deficit (on hand below zero)", () => {
+    expect(formatMeasuredAmount(-2.5, "fl_oz")).toBe("-2.5 fl oz");
+    expect(formatMeasuredAmount(-10, "ml")).toBe("-0.338 fl oz");
+  });
+
   it("leaves dry weights and other units as they were", () => {
     expect(formatMeasuredAmount(0.5, "oz")).toBe("14.2 g");
     expect(formatMeasuredAmount(2.5, "oz")).toBe("2.5 oz");
@@ -94,5 +99,19 @@ describe("formatMeasuredRange", () => {
 
   it("formats dry ranges without mL", () => {
     expect(formatMeasuredRange(0.24, 0.56, "oz")).toBe("6.8 g – 15.9 g");
+  });
+});
+
+describe("formatLabelRate", () => {
+  it("keeps a label's own numbers exact", () => {
+    expect(formatLabelRate(0.04, 0.08, "fl_oz")).toBe("0.04–0.08 fl oz");
+    expect(formatLabelRate(0.0725, 0.16, "fl_oz")).toBe("0.0725–0.16 fl oz");
+    expect(formatLabelRate(2, null, "oz")).toBe("2 oz");
+    expect(formatLabelRate(1, 1, "fl_oz")).toBe("1 fl oz");
+  });
+
+  it("reads a rate stored in mL or liters in fl oz, never mL", () => {
+    expect(formatLabelRate(1.25, 5, "ml")).toBe("0.042–0.169 fl oz");
+    expect(formatLabelRate(0.01, null, "l")).toBe("0.338 fl oz");
   });
 });

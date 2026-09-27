@@ -52,9 +52,9 @@ function asFlOz(amount, normalized) {
 // exact fl oz stands, so the spoon never over- or under-states the dose.
 const SPOON_TOLERANCE = 0.05;
 function liquidText(flOz) {
-  if (flOz <= 0) return "0 fl oz";
   const precise = `${plainNumber(flOz)} fl oz`;
-  if (flOz >= 1) return precise;
+  // A shortage (on hand below zero) keeps its signed deficit.
+  if (flOz <= 0 || flOz >= 1) return precise;
   const exact = flOz * TSP_PER_FL_OZ;
   const tsp = Math.floor(exact * 8 + 1e-9) / 8;
   return tsp > 0 && (exact - tsp) / exact <= SPOON_TOLERANCE ? teaspoonText(tsp) : precise;
@@ -71,6 +71,19 @@ export function formatMeasuredAmount(amount, unit) {
   if (normalized === "oz" && n > 0 && n < 1) return `${(n * G_PER_OZ).toFixed(1).replace(/\.0$/, "")} g`;
   const u = displayUnit(unit);
   return `${plainNumber(n)}${u ? ` ${u}` : ""}`;
+}
+
+/**
+ * A label's own rate as a reference line: numbers stay exact (it is not a
+ * measure), and a rate stored in mL or liters reads in fl oz instead.
+ */
+export function formatLabelRate(low, high, unit) {
+  const normalized = normalizeUnit(unit);
+  const converted = ML_UNITS.has(normalized) || L_UNITS.has(normalized);
+  const show = (value) => (converted ? plainNumber(asFlOz(Number(value), normalized)) : String(value));
+  const span = high != null && Number(high) > Number(low) ? `${show(low)}–${show(high)}` : show(low);
+  const u = converted ? "fl oz" : displayUnit(unit);
+  return `${span}${u ? ` ${u}` : ""}`;
 }
 
 /**

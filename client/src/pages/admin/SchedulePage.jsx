@@ -38,7 +38,7 @@ import { isCanonicallyMarkedProvenance } from '@pricing-regime-marker';
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import useLockBodyScroll from "../../hooks/useLockBodyScroll";
-import { formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
+import { formatLabelRate, formatMeasuredAmount, formatMeasuredRange } from "../../lib/mix-amount";
 import useModalFocus from "../../hooks/useModalFocus";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import VisitProtocol from "../../components/admin/VisitProtocol";
@@ -6715,10 +6715,6 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
   );
 }
 
-function fmtUnit(unit) {
-  return unit ? String(unit).replace(/_/g, " ") : "";
-}
-
 // Amounts a tech can measure: teaspoons under 1 fl oz, fl oz above, never mL
 // (owner rule 2026-09-27); dry weights stay oz, or g under 1 oz.
 const fmtAmount = formatMeasuredAmount;
@@ -6992,7 +6988,7 @@ function JobCardTank({ tank, serviceId, D }) {
             )}
             {mix && (mix.ratePer1000 != null || mix.ratePerGallon) && (
               <div style={{ fontSize: 12, color: D.muted }}>
-                Label rate {mix.ratePerGallon ? `${mix.ratePerGallon.lo}${mix.ratePerGallon.hi > mix.ratePerGallon.lo ? `–${mix.ratePerGallon.hi}` : ""} ${fmtUnit(mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
+                Label rate {mix.ratePerGallon ? `${formatLabelRate(mix.ratePerGallon.lo, mix.ratePerGallon.hi, mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
               </div>
             )}
             <JobCardOrderButton key={picked.id} productId={picked.id} name={picked.name} order={mix?.order} D={D} compact />
