@@ -256,6 +256,20 @@ app.use('/api/ops/digest', require('./middleware/no-store').noStore, (req, res, 
   next();
 });
 
+// Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
+// "E2: cookie-free read-depth counts") — routes/public-blog-read-depth.js.
+// The WHOLE router (no-store headers, dark-gate 404, its own per-IP limiter,
+// capped text-body parse, terminal 404) is mounted ABOVE the global cors()
+// below — which would otherwise answer an allowed-origin OPTIONS preflight
+// with 204 while the route is dark (codex P0 r1 on #5022) — and above the
+// global `/api/` limiter and body parsers, so a dark probe of any method
+// only ever sees the generic unknown-route 404 and a reader's beacons never
+// spend the budget quote-form or booking calls need. The router terminates
+// every request it receives, so nothing falls through to the request
+// logger further down. Beacons are no-cors `text/plain` POSTs whose
+// response the page never reads, so this route sets no CORS headers.
+app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'));
+
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
 app.use(cors({
@@ -435,23 +449,6 @@ app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req,
   next();
 });
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
-
-// Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
-// "E2: cookie-free read-depth counts") — routes/public-blog-read-depth.js.
-// The WHOLE router (dark-gate 404, its own per-IP limiter, no-store headers,
-// capped text-body parse) is mounted here, ABOVE the global `/api/` limiter
-// and the global body parsers below, so a reader's scroll beacons can never
-// spend the budget a customer's quote-form or booking calls need, and so a
-// dark probe gets the plain unknown-route 404 before any shared middleware
-// could answer with a revealing 429 instead. It sits BELOW the global
-// cors() above (not above it, unlike /api/public/pest-forecast): every
-// beacon origin — hub + every spoke — is already on the credentialed
-// allowlist (config/cors-origins.js derives it from the same spoke-sites
-// registry this route reads), and the request itself is a CORS "simple"
-// request (text/plain, POST, no custom headers) that the browser never
-// preflights, so cors() neither blocks it nor needs bypassing here. See the
-// router file's header comment for the full reasoning.
-app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'));
 
 app.use('/api/', limiter);
 

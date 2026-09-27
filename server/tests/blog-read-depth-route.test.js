@@ -39,9 +39,14 @@ const { notFoundBody } = require('../middleware/errors');
 let server;
 let base;
 
+const mockFellThrough = jest.fn();
+
 function appServer() {
   const app = express();
   app.use('/api/public/blog-read-depth', require('../routes/public-blog-read-depth'));
+  // Stands in for everything mounted after the router in server/index.js
+  // (the request logger among it): nothing may ever reach it.
+  app.use((req, res) => { mockFellThrough(req.method, req.originalUrl); res.status(599).end(); });
   return app;
 }
 
@@ -93,8 +98,27 @@ beforeEach(async () => {
   mockIsEnabled.mockReturnValue(true);
   mockInsert.mockClear();
   mockLoggerWarn.mockClear();
+  mockFellThrough.mockClear();
+  // Every request in this file comes from 127.0.0.1, so the per-source daily
+  // dedupe would otherwise carry over from one test to the next.
+  require('../routes/public-blog-read-depth')._private.resetDedupe();
   await startServer();
 });
+
+// Any method/path, raw http (see post() for why not fetch).
+function send(method, path, { origin } = {}) {
+  return new Promise((resolve, reject) => {
+    const headers = {};
+    if (origin !== undefined) headers.Origin = origin;
+    const req = http.request(`${base}${path}`, { method, headers }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
 
 afterEach(() => stopServer());
 
@@ -340,5 +364,96 @@ describe('no request data is logged', () => {
     expect(errorKind(timeout)).toBe('KnexTimeoutError');
     expect(errorKind({ name: 'not an error class /x/' })).toBe('error');
     expect(errorKind(undefined)).toBe('error');
+  });
+});
+
+describe('one count per source per day', () => {
+  test('a repeat beacon from the same source is answered 204 but counted once', async () => {
+    expect((await post(GOOD_BODY, { origin: SPOKE_ORIGIN })).status).toBe(204);
+    expect((await post(GOOD_BODY, { origin: SPOKE_ORIGIN })).status).toBe(204);
+    // the same site claimed via the bare or www origin is still the same beacon
+    expect((await post(GOOD_BODY, { origin: 'https://parrishpestcontrol.com' })).status).toBe(204);
+    await new Promise((r) => setImmediate(r));
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+  });
+
+  test('another milestone, post or site from the same source still counts', async () => {
+    await post(GOOD_BODY, { origin: SPOKE_ORIGIN });
+    await post({ ...GOOD_BODY, m: '75' }, { origin: SPOKE_ORIGIN });
+    await post({ ...GOOD_BODY, p: '/termite/drywood-termites/' }, { origin: SPOKE_ORIGIN });
+    await post(GOOD_BODY, { origin: HUB_ORIGIN });
+    await new Promise((r) => setImmediate(r));
+    expect(mockInsert).toHaveBeenCalledTimes(4);
+  });
+
+  test('the dedupe resets at America/New_York midnight, not UTC', () => {
+    const { firstBeaconToday } = require('../routes/public-blog-read-depth')._private;
+    const lateEt = new Date('2026-09-27T03:59:00Z'); // 11:59 PM EDT, Sep 26
+    const utcMidnight = new Date('2026-09-27T00:30:00Z'); // 8:30 PM EDT, same ET day
+    const nextEt = new Date('2026-09-27T04:01:00Z'); // 12:01 AM EDT, Sep 27
+    expect(firstBeaconToday('src', 'wavespestcontrol.com', '/termite/a/', '50', utcMidnight)).toBe(true);
+    expect(firstBeaconToday('src', 'wavespestcontrol.com', '/termite/a/', '50', lateEt)).toBe(false);
+    expect(firstBeaconToday('src', 'wavespestcontrol.com', '/termite/a/', '50', nextEt)).toBe(true);
+  });
+
+  test('past the daily cap further beacons are dropped, not counted', () => {
+    const prev = process.env.BLOG_READ_DEPTH_DEDUPE_MAX;
+    process.env.BLOG_READ_DEPTH_DEDUPE_MAX = '2';
+    try {
+      jest.isolateModules(() => {
+        const { firstBeaconToday } = require('../routes/public-blog-read-depth')._private;
+        const now = new Date('2026-09-27T16:00:00Z');
+        expect(firstBeaconToday('a', 'wavespestcontrol.com', '/termite/a/', '25', now)).toBe(true);
+        expect(firstBeaconToday('b', 'wavespestcontrol.com', '/termite/a/', '25', now)).toBe(true);
+        expect(firstBeaconToday('c', 'wavespestcontrol.com', '/termite/a/', '25', now)).toBe(false);
+      });
+    } finally {
+      if (prev === undefined) delete process.env.BLOG_READ_DEPTH_DEDUPE_MAX;
+      else process.env.BLOG_READ_DEPTH_DEDUPE_MAX = prev;
+    }
+  });
+});
+
+describe('terminal 404: nothing falls through the router', () => {
+  test.each([
+    ['GET', '/api/public/blog-read-depth'],
+    ['OPTIONS', '/api/public/blog-read-depth'],
+    ['PUT', '/api/public/blog-read-depth'],
+    ['POST', '/api/public/blog-read-depth/extra'],
+  ])('%s %s gets the generic 404 with the gate on', async (method, path) => {
+    const res = await send(method, path, { origin: SPOKE_ORIGIN });
+    expect(res.status).toBe(404);
+    expect(JSON.parse(res.text)).toEqual(notFoundBody({ method, originalUrl: path }));
+    expect(res.headers['cache-control']).toMatch(/no-store/);
+    expect(mockFellThrough).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  test('with the gate off an OPTIONS preflight is the same generic 404', async () => {
+    mockIsEnabled.mockReturnValue(false);
+    const res = await send('OPTIONS', '/api/public/blog-read-depth', { origin: SPOKE_ORIGIN });
+    expect(res.status).toBe(404);
+    expect(mockFellThrough).not.toHaveBeenCalled();
+  });
+});
+
+describe('server/index.js mount order', () => {
+  // The dark 404 must answer every request — an allowed-origin OPTIONS
+  // preflight included — so the router has to sit ahead of the global
+  // cors() (which would answer 204), the global /api/ limiter (a revealing
+  // 429) and the global JSON parser. The real app boots a server + DB, so
+  // pin the ORDER statically from the entrypoint source, as the ops-digest
+  // route does (codex P0 r1 on #5022).
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+  const at = (needle) => { const i = src.indexOf(needle); expect(i).toBeGreaterThan(-1); return i; };
+
+  test('the read-depth router precedes the global cors(), the /api/ limiter and the JSON parser', () => {
+    const mount = at("app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'));");
+    expect(mount).toBeLessThan(at('app.use(cors({'));
+    expect(mount).toBeLessThan(at("app.use('/api/', limiter);"));
+    expect(mount).toBeLessThan(at("app.use(express.json({ limit: '1mb'"));
+    expect(src.indexOf("app.use('/api/public/blog-read-depth'", mount + 1)).toBe(-1);
   });
 });

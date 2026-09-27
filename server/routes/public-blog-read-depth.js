@@ -20,26 +20,28 @@
  * probe never sees a revealing 429 (the house rule for dark GATE_* routes;
  * AGENTS.md "Public route surface").
  *
- * Mount position (server/index.js): this whole router — gate, limiter,
- * parser — is required and mounted ABOVE the global `app.use('/api/',
- * limiter)` and above the global body parsers, so a reader's scroll beacons
- * never spend the budget a customer's quote-form or booking calls need, and
- * so the dark 404 above is checked before ANY shared middleware could
- * answer instead (a global-limiter 429 while dark would reveal the route).
- * It is mounted BELOW the global `cors({ origin: allowedOrigins })`
- * (server/index.js, ~line 261): allowedOrigins is DERIVED from
- * SPOKE_SITE_KEYS (server/config/cors-origins.js), which already includes
- * the hub and every spoke — so a beacon's Origin is already on the
- * credentialed allowlist and cors() sets normal Access-Control-Allow-Origin
- * headers for it. It also does not need to sit ABOVE cors() the way
- * `/api/public/pest-forecast` does (that route needs a bare `*` for
- * third-party embed domains that are NEVER on the allowlist) — this body is
- * a CORS "simple" request (text/plain, POST, no custom headers), so the
- * browser never sends an OPTIONS preflight for cors() to answer or block in
- * the first place; the mode: 'no-cors' fetch also makes the response
- * opaque to the page regardless of what headers ride back. Net effect:
- * cors() neither blocks nor needs to be bypassed here — the position above
- * the limiter/parsers is the only requirement that matters.
+ * Mount position (server/index.js): this whole router is mounted ABOVE
+ * the global `cors({ origin: allowedOrigins })`, the global `app.use('/api/',
+ * limiter)` and the global body parsers. Above cors(), because cors() would
+ * otherwise answer an allowed-origin OPTIONS preflight with 204 while the
+ * route is dark (codex P0 r1 on #5022); above the limiter and parsers, so a
+ * reader's beacons never spend the budget quote-form or booking calls need
+ * and a dark probe only ever sees the generic 404. The router ends in a
+ * terminal 404, so no request that reaches it — any method, any subpath —
+ * falls through to the app's request logger further down (codex P1 r1).
+ * Beacons are no-cors `text/plain` POSTs whose response the page never
+ * reads, so the route sets no CORS headers.
+ *
+ * One count per source per day: anyone can send this beacon and claim any
+ * fleet Origin — an anonymous, cookie-free browser cannot be authenticated
+ * without the identifier E2 rules out, and a same-origin proxy would be just
+ * as callable. What bounds a single source instead (codex P1 r1): its
+ * network address (the limiter's own IPv6-/64-normalized key) is HMACed
+ * with a random salt that exists only in this process's memory and is
+ * replaced every America/New_York day, together with the site, path and
+ * milestone; a repeat digest the same day is dropped (204, nothing written).
+ * The address and the digest are never stored or logged, and once the salt
+ * rolls over nothing links a digest to anything.
  *
  * Storage: `blog_read_depth_daily` — one row per (day, site, path,
  * milestone), `count` incremented by an INSERT ... ON CONFLICT DO UPDATE.
@@ -50,6 +52,7 @@
  * (204, nothing written). Nothing else about the request — IP, user agent,
  * referrer, cookies, raw body — is ever stored or logged.
  */
+const crypto = require('node:crypto');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
@@ -69,6 +72,38 @@ const RATE_MAX_PER_MIN = Math.max(1, parseInt(process.env.BLOG_READ_DEPTH_RATE_M
 const PATH_RE = /^\/(lawn-care|mosquito|pest-control|seasonal|termite|tree-shrub)\/[a-z0-9]+(?:-[a-z0-9]+)*\/$/;
 const MAX_PATH_CHARS = 200;
 const MILESTONES = new Set(['25', '50', '75', '100', 'next']);
+// Past this many distinct beacons in one day, further ones are dropped
+// rather than counted: memory stays bounded and a flood can't re-count by
+// cycling entries out. Legitimate traffic is a few hundred a day.
+const DEDUPE_MAX_ENTRIES = Math.max(1, parseInt(process.env.BLOG_READ_DEPTH_DEDUPE_MAX, 10) || 200000);
+
+let dedupe = { day: null, salt: null, seen: new Set() };
+
+function etDay(now) {
+  // en-CA formats as YYYY-MM-DD
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(now);
+}
+
+// True the first time today that `sourceKey` sends this (site, path,
+// milestone); false for a repeat or once the day's cap is reached. See the
+// header comment — nothing here is persisted or logged.
+function firstBeaconToday(sourceKey, site, path, milestone, now = new Date()) {
+  const day = etDay(now);
+  if (dedupe.day !== day) dedupe = { day, salt: crypto.randomBytes(32), seen: new Set() };
+  const digest = crypto.createHmac('sha256', dedupe.salt)
+    .update(`${sourceKey}\n${site}\n${path}\n${milestone}`)
+    .digest('base64url')
+    .slice(0, 22);
+  if (dedupe.seen.has(digest) || dedupe.seen.size >= DEDUPE_MAX_ENTRIES) return false;
+  dedupe.seen.add(digest);
+  return true;
+}
+
+function resetDedupe() {
+  dedupe = { day: null, salt: null, seen: new Set() };
+}
 
 function isPlainObject(v) {
   return !!v && typeof v === 'object' && !Array.isArray(v);
@@ -172,6 +207,7 @@ router.post('/', (req, res) => {
 
   const site = resolveSite(req);
   if (!site) return res.status(204).end();
+  if (!firstBeaconToday(unauthenticatedAuthLimitKey(req), site, value.p, value.m)) return res.status(204).end();
 
   // Respond immediately — the write is never on the request's critical path.
   res.status(204).end();
@@ -184,5 +220,10 @@ router.post('/', (req, res) => {
   return undefined;
 });
 
+// Terminal: any other method or subpath ends here with the generic 404,
+// so nothing that reached this privacy router falls through to the app's
+// request logger (remote IP, referrer, user agent) further down.
+router.use((req, res) => res.status(404).json(notFoundBody(req)));
+
 module.exports = router;
-module.exports._private = { validateBody, resolveSite, errorKind, PATH_RE, MILESTONES, MAX_PATH_CHARS };
+module.exports._private = { validateBody, resolveSite, errorKind, firstBeaconToday, resetDedupe, PATH_RE, MILESTONES, MAX_PATH_CHARS };

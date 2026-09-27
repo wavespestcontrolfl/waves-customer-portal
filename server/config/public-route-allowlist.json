@@ -40,12 +40,13 @@
     {
       "router": "server/routes/public-blog-read-depth.js",
       "mount": "/api/public/blog-read-depth",
-      "reason": "Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27, \"E2: cookie-free read-depth counts\") — dark behind GATE_BLOG_READ_DEPTH (generic unknown-route 404 while off, before the limiter below, house dark-GATE_* contract), its own 120 req/min per-IP rate limiter applied after the gate check, no-store/noindex privacy headers stamped first, and a 1 KB capped express.text() body parse. Site is derived ONLY from the Origin header against the fixed spoke-fleet registry (never the body); a missing/null/unknown origin drops the beacon with 204 and no write. Stores only an aggregate daily count (day/site/path/milestone) — no cookie, IP, user agent, or referrer ever read, stored, or logged. See docs/public-route-contracts.md.",
+      "reason": "Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27, \"E2: cookie-free read-depth counts\") — dark behind GATE_BLOG_READ_DEPTH (generic unknown-route 404 while off, before the limiter below, house dark-GATE_* contract), its own 120 req/min per-IP rate limiter applied after the gate check, no-store/noindex privacy headers stamped first, and a 1 KB capped express.text() body parse. Mounted above the global cors() (a dark OPTIONS preflight gets the same 404), the global /api/ limiter and the body parsers, and ends in a terminal generic 404 so nothing falls through to the request logger. Site is derived ONLY from the Origin header against the fixed spoke-fleet registry (never the body); a missing/null/unknown origin drops the beacon with 204 and no write. One count per source per (site, path, milestone) per America/New_York day via an in-memory HMAC digest of the limiter key under a daily-rotating in-process salt (never stored or logged). Stores only an aggregate daily count (day/site/path/milestone); no cookie, user agent or referrer is read, and nothing per-visitor is stored or logged. See docs/public-route-contracts.md.",
       "routes": [
         "POST /api/public/blog-read-depth",
         "USE /api/public/blog-read-depth (express-rate-limit({ handler#8c637dbe }))",
         "USE /api/public/blog-read-depth (inline function#0943925b)",
-        "USE /api/public/blog-read-depth (inline function#af835d81)"
+        "USE /api/public/blog-read-depth (inline function#af835d81)",
+        "USE /api/public/blog-read-depth (inline function#e7d9b29e)"
       ]
     },
     {
