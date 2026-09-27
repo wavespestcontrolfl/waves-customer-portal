@@ -592,6 +592,23 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     expect(result).toEqual({ productId: TAURUS.id });
   });
 
+  test.each([
+    ['20 percent', ['We bought a jug of Taurus 10% SC']],
+    ['20%', ['We bought a jug of Taurus 10% SC']],
+    ['1 bottle', ['20%', 'We bought a jug of Taurus 10% SC']],
+  ])('a strength in a follow-up, or in a skipped turn, never borrows the product (%s)', async (prompt, turns) => {
+    const TAURUS_10_FOLLOW = { id: 'p-taurus-10-follow', name: 'Taurus 10% SC', active: true };
+    setGroundingDb({ products: [TAURUS_10_FOLLOW, ALPINE] });
+    IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+    IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(turns);
+    const result = await resolveInventoryWriteTarget({
+      toolName: 'adjust_stock', prompt,
+      preview: { product: { id: TAURUS_10_FOLLOW.id, name: TAURUS_10_FOLLOW.name } },
+      actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 5,
+    });
+    expect(result).toMatchObject({ code: 'target_clarification_required' });
+  });
+
   test.each(['?', '...'])('a punctuation-only reply (%s) is not a follow-up and borrows nothing', async (prompt) => {
     setGroundingDb({ products: [TAURUS, ALPINE] });
     IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);

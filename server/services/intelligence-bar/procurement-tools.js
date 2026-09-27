@@ -1214,10 +1214,14 @@ function isClosedVocabResidual(rawText, spans = []) {
 // ounces", "Yes", "add it"). "we got a new jug of Unlisted Chemical" is NOT
 // bare — "unlisted"/"chemical" survive — so it must stand on its own, never
 // borrowing a name from an earlier turn.
+// A strength or formulation in a follow-up ("20%", "20 percent", "SC") is
+// about WHICH product, so it can't borrow one from an earlier turn: the
+// borrowed product's own qualifiers were never checked against it.
+const FOLLOW_UP_QUALIFIER_RE = new RegExp(`%|\\b(?:percent|pct|per\\s+cent)\\b|(?:\\b|\\d)(?:${FORMULATION_CODE_ALT})\\b`, 'i');
 function isBareFollowUp(text) {
   // At least one word: a reply of only punctuation ("?", "...") says nothing
   // and never borrows a product from an earlier turn.
-  return residualWords(text, []).length > 0 && isClosedVocabResidual(text);
+  return residualWords(text, []).length > 0 && isClosedVocabResidual(text) && !FOLLOW_UP_QUALIFIER_RE.test(text);
 }
 
 // Which ACTIVE catalog products does operator text name? A product is named
