@@ -2606,7 +2606,12 @@ router.post('/:id/billing-review/clear', requireAdmin, async (req, res, next) =>
     // the ONE chokepoint for the row lock + version check + clear + bell
     // resolve, all in one transaction, shared with this module's own tests.
     const { clearBillingReview } = require('../services/first-application-sibling-split');
-    const outcome = await clearBillingReview(req.params.id, version);
+    // adminAuthenticate populates req.technicianId (never req.user) — see
+    // the followup pause/stop routes above for the same pattern. Stamped
+    // into the resolution record clearBillingReview now writes so the
+    // office has a record of who cleared it; nothing in this module reads
+    // it back.
+    const outcome = await clearBillingReview(req.params.id, version, undefined, req.technicianId || null);
     if (outcome.code === 'not_found') return res.status(404).json({ error: 'Invoice not found' });
     if (outcome.code === 'stale') {
       return res.status(409).json({

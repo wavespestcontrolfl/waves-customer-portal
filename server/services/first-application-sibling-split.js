@@ -70,6 +70,31 @@
 // either way for the alert-only case). A move that lands the diverging
 // members BACK on the same date, with the invoice never touched since the
 // review opened, clears itself (undelivered or not).
+//
+// FOLLOW-UP FIX (post-#5021, pre-push audit finding): the manual clear used
+// to null out billing_review_context entirely, so the lookup had no memory
+// that this invoice was ever reviewed and resolved — a LATER reschedule of
+// ANY OTHER member of the same estimate-accept group (findLockedFirst-
+// ApplicationInvoice still matches the same invoice by title/notes) could
+// reopen a review + hold on an invoice the office had already correctly
+// split by hand. clearBillingReview now writes a RESOLUTION record into
+// billing_review_context instead of nulling it (opened_at/reason still go
+// null — every existing hold/held/summary check gates on opened_at, never
+// on context, so this changes nothing for them): resolvedAt, the acting
+// admin (when known), the exact set of sibling scheduled_service ids this
+// review covered, and the invoice's own money fingerprint at the moment of
+// the clear. flagFirstApplicationInvoiceReviewOnDateChange checks that
+// record (isDivergenceAlreadyResolved) before opening a fresh review: a
+// later divergence is suppressed ONLY when every currently-diverging
+// sibling is one this resolution already covered AND the invoice's money
+// is byte-identical to how the office left it — a sibling this resolution
+// never saw, or ANY change to the invoice's money since (either direction;
+// the fingerprint alone can't tell "recombined" from "edited again for an
+// unrelated reason", so any change is treated as suspicious), opens a
+// fresh review exactly as if there had been no resolution at all. Auto-
+// clear (maybeAutoClearBillingReview) deliberately does NOT record a
+// resolution — realignment alone means nobody actually reviewed anything,
+// so a later divergence there must always re-open normally.
 const logger = require('./logger');
 const db = require('../models/db');
 const { isInvoiceUndeliveredForBillingReview, billingReviewVersion } = require('./invoice-helpers');
@@ -360,20 +385,79 @@ async function resolveBillingReviewAlert(trx, invoiceId) {
 // rollbackTest wrapper) so the lock, the version check, and the clear are
 // atomic — no window where a concurrent open lands between the check and
 // the write.
-async function clearBillingReview(invoiceId, expectedVersion, database = db) {
+//
+// `actorId` (optional — the clearing admin's technicians.id, when the
+// caller has one; admin-invoices.js passes req.technicianId) is stamped
+// into the resolution record below purely for the office's own record —
+// nothing in this module reads it back.
+//
+// Writes a RESOLUTION record into billing_review_context rather than
+// nulling it (see the module header's FOLLOW-UP FIX note): the exact
+// sibling ids this review covered (context.divergingSiblingIds as it
+// stood at the moment of the clear — everything the office actually had a
+// chance to look at) and the invoice's own money fingerprint as the office
+// left it. isDivergenceAlreadyResolved reads this to decide whether a
+// LATER, unrelated divergence should re-open a review at all.
+async function clearBillingReview(invoiceId, expectedVersion, database = db, actorId = null) {
   return database.transaction(async (trx) => {
     const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice) return { code: 'not_found' };
     if (!invoice.billing_review_opened_at) return { code: 'idempotent', invoice };
     if (billingReviewVersion(invoice) !== expectedVersion) return { code: 'stale', invoice };
+    let context = invoice.billing_review_context;
+    if (typeof context === 'string') {
+      try { context = JSON.parse(context); } catch { context = null; }
+    }
+    const resolution = {
+      resolvedAt: new Date().toISOString(),
+      resolvedBy: actorId || null,
+      resolvedSiblingIds: Array.isArray(context?.divergingSiblingIds) ? context.divergingSiblingIds : [],
+      resolvedInvoiceMoneyFingerprint: invoiceMoneyFingerprint(invoice),
+    };
     const [updated] = await trx('invoices')
       .where({ id: invoiceId })
       .whereNotNull('billing_review_opened_at')
-      .update({ billing_review_opened_at: null, billing_review_reason: null, billing_review_context: null })
+      .update({
+        billing_review_opened_at: null,
+        billing_review_reason: null,
+        billing_review_context: JSON.stringify(resolution),
+      })
       .returning('*');
     await resolveBillingReviewAlert(trx, invoiceId);
     return { code: 'cleared', invoice: updated };
   });
+}
+
+// Whether every member of `diverging` (the CURRENT divergence this date
+// write just found) is already covered by the invoice's last manual
+// resolution (see clearBillingReview), AND the invoice's own money is
+// exactly as the office left it at that clear. Only meaningful when no
+// review is currently open — flagFirstApplicationInvoiceReviewOnDateChange
+// checks that before calling this; a still-open review always accumulates
+// through openBillingReview instead, same as before this fix.
+//
+// Fails closed in both directions that matter: a sibling this resolution
+// never saw (a genuinely new, unresolved divergence) is never suppressed,
+// and ANY change to the invoice's money since the clear — up, down, or
+// sideways — is treated as "might be re-combined" and also never
+// suppressed. The fingerprint alone can't distinguish "this invoice looks
+// re-merged" from "this invoice was edited again for an unrelated reason",
+// and failing closed (open a fresh review) is the safe side of that
+// ambiguity — the office loses nothing but a redundant Clear click, while
+// failing open would risk silently resuming a double-billing invoice.
+function isDivergenceAlreadyResolved(invoice, diverging) {
+  let context = invoice.billing_review_context;
+  if (typeof context === 'string') {
+    try { context = JSON.parse(context); } catch { context = null; }
+  }
+  if (!context || !context.resolvedAt) return false;
+  const resolvedIds = new Set(
+    (Array.isArray(context.resolvedSiblingIds) ? context.resolvedSiblingIds : []).map(String),
+  );
+  const everyDivergingSiblingWasResolved = diverging.every((d) => resolvedIds.has(String(d.id)));
+  if (!everyDivergingSiblingWasResolved) return false;
+  return typeof context.resolvedInvoiceMoneyFingerprint === 'string'
+    && context.resolvedInvoiceMoneyFingerprint === invoiceMoneyFingerprint(invoice);
 }
 
 // The trivial auto-clear (owner ruling): EVERY sibling this review recorded
@@ -478,6 +562,16 @@ async function flagFirstApplicationInvoiceReviewOnDateChange(trx, scheduledServi
 
   const diverging = divergingSiblings(invoiceRow, members);
   if (diverging.length) {
+    // No review currently open, and the office's last manual clear already
+    // covered every sibling that's diverging right now with the invoice's
+    // money unchanged since — this is the SAME resolved situation recurring
+    // through an unrelated later reschedule, not a new mismatch. Skip
+    // rather than re-open (see isDivergenceAlreadyResolved and the module
+    // header's FOLLOW-UP FIX note). A still-open review always accumulates
+    // through openBillingReview instead, unaffected by this check.
+    if (!invoice.billing_review_opened_at && isDivergenceAlreadyResolved(invoice, diverging)) {
+      return { action: 'skipped', reason: 'already_resolved_by_manual_clear', invoiceId: invoice.id };
+    }
     return openBillingReview(trx, invoice, moved, diverging);
   }
   return maybeAutoClearBillingReview(trx, invoice, invoiceRow, members, moved);
@@ -515,4 +609,5 @@ module.exports = {
   loadLockedEstimateGroup,
   findLockedFirstApplicationInvoice,
   divergingSiblings,
+  isDivergenceAlreadyResolved,
 };

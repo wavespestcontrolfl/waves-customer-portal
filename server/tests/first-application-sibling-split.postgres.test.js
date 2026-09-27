@@ -716,4 +716,115 @@ suite('first-application-sibling-split — same-trip billing review on date chan
       expect(claimed).toBeNull();
     }));
   });
+
+  // ---------------------------------------------------------------------
+  // Follow-up fix (post-#5021 pre-push audit finding): a shared invoice the
+  // office already manually resolved (split by hand, then Clear) must not
+  // be re-held by a LATER, unrelated reschedule that pattern-matches the
+  // same invoice. clearBillingReview now records a resolution (the exact
+  // sibling ids reviewed + the invoice's own money fingerprint at the
+  // clear) instead of nulling billing_review_context, and
+  // flagFirstApplicationInvoiceReviewOnDateChange checks it before opening
+  // a fresh review. Auto-clear (realignment, nobody reviewed anything)
+  // deliberately records no such resolution.
+  // ---------------------------------------------------------------------
+  describe('follow-up fix: a manually-resolved invoice is not re-held by an unrelated later reschedule', () => {
+    test('manual clear, then the SAME sibling moves again (still diverged) — no reopen', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+
+      // The office splits the invoice by hand (no money change modeled
+      // here — the resolution's own fingerprint is taken AT the clear, so
+      // it always matches whatever the office left behind) and clears it.
+      const seen = await trx('invoices').where({ id: ids.invoiceId }).first();
+      const version = billingReviewVersion(seen);
+      const cleared = await clearBillingReview(ids.invoiceId, version, trx, 'tech-adam');
+      expect(cleared.code).toBe('cleared');
+      const clearedState = await readState(trx, ids);
+      expect(clearedState.invoice.billing_review_opened_at).toBeNull();
+      const resolvedContext = clearedState.invoice.billing_review_context;
+      expect(resolvedContext.resolvedAt).toEqual(expect.any(String));
+      expect(resolvedContext.resolvedBy).toBe('tech-adam');
+      expect(resolvedContext.resolvedSiblingIds).toEqual([ids.lawnId]);
+
+      // The SAME sibling moves again — still diverged, just a different day
+      // — an unrelated later reschedule, not a new mismatch.
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-05' });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(result.action).toBe('skipped');
+      expect(result.reason).toBe('already_resolved_by_manual_clear');
+      const finalState = await readState(trx, ids);
+      expect(finalState.invoice.billing_review_opened_at).toBeNull();
+    }));
+
+    test('manual clear, then a NEW, unresolved sibling diverges — reopens', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      const thirdId = randomUUID();
+      await trx('scheduled_services').insert({
+        id: thirdId, customer_id: ids.customerId, source_estimate_id: ids.estimateId, scheduled_date: SAME_DATE,
+        service_type: 'Tree & Shrub', status: 'confirmed', is_recurring: true, estimated_price: null,
+      });
+
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      const seen = await trx('invoices').where({ id: ids.invoiceId }).first();
+      const version = billingReviewVersion(seen);
+      const cleared = await clearBillingReview(ids.invoiceId, version, trx);
+      expect(cleared.code).toBe('cleared');
+
+      // The resolved sibling realigns (the office's own fix) — no current
+      // divergence at all right now.
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: SAME_DATE });
+
+      // A DIFFERENT, never-reviewed member of the same group diverges.
+      await trx('scheduled_services').where({ id: thirdId }).update({ scheduled_date: '2026-10-03' });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, thirdId);
+      expect(result.action).toBe('review_opened');
+      expect(result.opened).toBe(true);
+      const state = await readState(trx, ids);
+      expect(state.invoice.billing_review_opened_at).toBeTruthy();
+      expect(state.invoice.billing_review_context.divergingSiblingIds).toEqual([thirdId]);
+    }));
+
+    test('auto-clear (realignment, nobody reviewed anything), then a re-divergence reopens', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+
+      // Realigns with the invoice untouched — auto-clears, recording NO
+      // resolution (context is fully nulled, not a resolution record).
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: SAME_DATE });
+      const autoCleared = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(autoCleared.action).toBe('review_auto_cleared');
+      expect((await readState(trx, ids)).invoice.billing_review_context).toBeNull();
+
+      // The SAME sibling diverges again — must reopen normally; there is no
+      // resolution on record to suppress it (nobody manually reviewed the
+      // auto-cleared state).
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-04' });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(result.action).toBe('review_opened');
+      expect(result.opened).toBe(true);
+    }));
+
+    test('manual clear, then the invoice looks re-combined (money fingerprint changed) — reopens even for the previously-resolved sibling', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      const seen = await trx('invoices').where({ id: ids.invoiceId }).first();
+      const version = billingReviewVersion(seen);
+      await clearBillingReview(ids.invoiceId, version, trx);
+
+      // Something changes the invoice's own money AFTER the clear (e.g. a
+      // later edit that re-combines the total) — the resolution's
+      // fingerprint no longer matches.
+      await trx('invoices').where({ id: ids.invoiceId }).update({ total: 999, subtotal: 999 });
+
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-06' });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(result.action).toBe('review_opened');
+      expect(result.opened).toBe(true);
+    }));
+  });
 });
