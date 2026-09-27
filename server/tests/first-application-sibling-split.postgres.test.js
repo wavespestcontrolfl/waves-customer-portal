@@ -264,22 +264,30 @@ suite('first-application-sibling-split — periodic sweep', () => {
 
   // Real-data manual-split detection (pre-push P1 fix): the office's own
   // instructed fix — giving the moved sibling its own live invoice linked
-  // to its own scheduled_service_id, AND actually reducing the combined
-  // invoice's total to stop double-billing the sibling — must stop the
-  // alert on its own, without relying on any invoice title/notes text.
-  test('a COMPLETE manual split (own invoice + combined total reduced), both unpaid → no alert, existing alert cleared', () => rollbackTest(async (trx) => {
+  // to its own scheduled_service_id — must stop the alert on its own,
+  // without relying on any invoice title/notes text.
+  //
+  // Signal (a) alone — has_own_live_invoice — DELIBERATELY, not signal (b)
+  // (a dollar comparison against the combined invoice's total/lines):
+  // pre-push rounds 4-7 tried progressively narrower dollar reconciliation
+  // (a raw-total reduction, then a per-sibling attributable sum, then an
+  // application-only figure excluding setup fees, then accounting for
+  // plan-credit discounts) and each fix closed one gap in the invoice's
+  // open-ended composition (setup fees, rodent-bait fees, plan-credit
+  // slices, taxes, ...) only to open the next — exactly the "fall back to
+  // (a) if (b) is not reliable" contingency the task's own instructions
+  // anticipated. See the module header for the full history.
+  test('a manual split with both invoices still unpaid → no alert, and an existing alert is cleared', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
     await sweepOnce(trx, ids.estimateId);
     const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
     expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
 
-    // Office completes the FULL instructed manual split: the sibling visit
-    // gets its OWN live invoice, linked to its own scheduled_service_id —
-    // same linkage findFirstApplicationInvoiceForEstimateService uses
-    // elsewhere — AND the combined invoice is reduced by the sibling's
-    // carved-out share (153.60 - 42 = 111.60). Both invoices stay unpaid —
-    // ownership + a real reduction are the signal, not settlement.
+    // Office completes the instructed manual split: the sibling visit gets
+    // its OWN live invoice, linked to its own scheduled_service_id — same
+    // linkage findFirstApplicationInvoiceForEstimateService uses elsewhere.
+    // Both invoices stay unpaid — ownership is the signal, not settlement.
     const lawnInvoiceId = randomUUID();
     await trx('invoices').insert({
       id: lawnInvoiceId, customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
@@ -287,10 +295,6 @@ suite('first-application-sibling-split — periodic sweep', () => {
       status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
       line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
       subtotal: 42, total: 42,
-    });
-    await trx('invoices').where({ id: ids.invoiceId }).update({
-      subtotal: 111.60, total: 111.60,
-      line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 111.60, amount: 111.60 }]),
     });
 
     const [result] = await sweepOnce(trx, ids.estimateId);
@@ -302,151 +306,13 @@ suite('first-application-sibling-split — periodic sweep', () => {
     const metadata = typeof cleared.metadata === 'string' ? JSON.parse(cleared.metadata) : cleared.metadata;
     expect(metadata.autoCleared).toBe(true);
 
-    // The visit's OWN price and the invoice split amounts are never
-    // touched by the sweep — only the office's own manual edits above.
-    const pest = await trx('scheduled_services').where({ id: ids.pestId }).first();
-    expect(Number(pest.estimated_price)).toBe(153.60);
-  }));
-
-  // Codex round-6 P1: the same auto-generated invoice can ALSO bundle a
-  // one-time setup fee beside the application line (estimate-converter.js
-  // / routes/estimate-public.js). A raw-total comparison would read this
-  // correctly-completed split as still short — or even MORE than the
-  // original — since the fee inflates the total above anchor.estimated_price
-  // (which is application-only). The reduction must be measured on the
-  // application-only portion of the invoice.
-  test('a COMPLETE manual split on an invoice that ALSO carries a setup fee → clears correctly', () => rollbackTest(async (trx) => {
-    const ids = await fixture(trx);
-    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
-    // The combined invoice ALSO bills a $100 WaveGuard setup fee beside
-    // the $153.60 application — raw total 253.60, application-only 153.60.
-    await trx('invoices').where({ id: ids.invoiceId }).update({
-      subtotal: 253.60, total: 253.60,
-      line_items: JSON.stringify([
-        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 100, amount: 100 },
-        { description: 'First service application', quantity: 1, unit_price: 153.60, amount: 153.60 },
-      ]),
-    });
-    await sweepOnce(trx, ids.estimateId);
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
-    expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
-
-    // Office splits: sibling gets its own $42 invoice, and the combined
-    // invoice's APPLICATION line drops to 111.60 — the setup fee line is
-    // untouched (it was never part of the sibling's charge).
-    await trx('invoices').insert({
-      id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
-      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
-      status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
-      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
-      subtotal: 42, total: 42,
-    });
-    await trx('invoices').where({ id: ids.invoiceId }).update({
-      subtotal: 211.60, total: 211.60,
-      line_items: JSON.stringify([
-        { description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 100, amount: 100 },
-        { description: 'First service application', quantity: 1, unit_price: 111.60, amount: 111.60 },
-      ]),
-    });
-
-    const [result] = await sweepOnce(trx, ids.estimateId);
-    expect(result.action).toBe('cleared');
-    expect(result.reason).toBe('split_completed');
-
-    const cleared = await readBell(trx, dedupeKey);
-    expect(cleared.read_at).not.toBeNull();
-  }));
-
-  // Codex round-4 P1: a sibling's own live invoice is proof the office
-  // STARTED the split, never proof they FINISHED it — the combined
-  // invoice can still carry the sibling's full original charge even after
-  // a brand-new sibling invoice exists. That is an unresolved duplicate
-  // charge, and the alert must keep ringing until the combined invoice is
-  // actually reduced.
-  test('a sibling invoice is created but the COMBINED invoice total is left unchanged → still alerts', () => rollbackTest(async (trx) => {
-    const ids = await fixture(trx);
-    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
-    await sweepOnce(trx, ids.estimateId);
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId]);
-    expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
-
-    // A new $42 sibling invoice exists, but the combined $153.60 invoice
-    // is untouched — the sibling's charge is still double-billed.
-    await trx('invoices').insert({
-      id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
-      token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
-      status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
-      line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 42, amount: 42 }]),
-      subtotal: 42, total: 42,
-    });
-
-    const [result] = await sweepOnce(trx, ids.estimateId);
-    expect(result.action).toBe('alerted');
-    expect(result.divergingSiblingIds).toEqual([ids.lawnId]);
-
-    const stillOpen = await readBell(trx, dedupeKey);
-    expect(stillOpen.read_at).toBeNull();
-
-    const sharedInvoice = await trx('invoices').where({ id: ids.invoiceId }).first();
-    expect(Number(sharedInvoice.total)).toBe(153.60);
-  }));
-
-  // Codex round-5 P1: a THREE-program group (one reserved slot selling
-  // three recurring programs) where BOTH diverging siblings pick up their
-  // own invoice, but the combined invoice is only reduced enough to cover
-  // ONE of their amounts. Which sibling the partial reduction actually
-  // covers can't be attributed from the numbers alone, so BOTH stay
-  // alerted — never a silent partial clear.
-  test('a partially completed THREE-program split (two siblings, only one amount removed) keeps alerting on both', () => rollbackTest(async (trx) => {
-    const ids = await fixture(trx, { reservedPrice: 200 });
-    // A third program off the same estimate/trip, un-priced like the lawn
-    // sibling — the same "promoted parent left estimated_price NULL"
-    // pattern the module header describes.
-    const treeId = randomUUID();
-    await trx('scheduled_services').insert({
-      id: treeId, customer_id: ids.customerId, source_estimate_id: ids.estimateId, scheduled_date: SAME_DATE,
-      service_type: 'Tree & Shrub', status: 'confirmed', is_recurring: true, estimated_price: null,
-    });
-
-    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
-    await trx('scheduled_services').where({ id: treeId }).update({ scheduled_date: '2026-10-03' });
-    const [firstResult] = await sweepOnce(trx, ids.estimateId);
-    expect(firstResult.action).toBe('alerted');
-    expect(firstResult.divergingSiblingIds).toEqual([ids.lawnId, treeId].map(String).sort());
-    const dedupeKey = DEDUPE_KEY(ids.estimateId, [ids.lawnId, treeId]);
-    expect((await readBell(trx, dedupeKey)).read_at).toBeNull();
-
-    // Both siblings get their own invoice ($60 lawn, $90 tree — need $150
-    // total removed from the combined $200 invoice)...
-    await trx('invoices').insert([
-      {
-        id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: ids.lawnId,
-        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
-        status: 'draft', title: 'Lawn Care', notes: 'Hand-split from the combined first-application invoice.',
-        line_items: JSON.stringify([{ description: 'Lawn Care', quantity: 1, unit_price: 60, amount: 60 }]),
-        subtotal: 60, total: 60,
-      },
-      {
-        id: randomUUID(), customer_id: ids.customerId, scheduled_service_id: treeId,
-        token: randomUUID(), invoice_number: `WPC-TEST-${randomUUID().slice(0, 8)}`,
-        status: 'draft', title: 'Tree & Shrub', notes: 'Hand-split from the combined first-application invoice.',
-        line_items: JSON.stringify([{ description: 'Tree & Shrub', quantity: 1, unit_price: 90, amount: 90 }]),
-        subtotal: 90, total: 90,
-      },
+    // Neither original invoice's money moved — the sweep never touches it.
+    const [pest, sharedInvoice] = await Promise.all([
+      trx('scheduled_services').where({ id: ids.pestId }).first(),
+      trx('invoices').where({ id: ids.invoiceId }).first(),
     ]);
-    // ...but the combined invoice is reduced by only $60 (200 → 140), not
-    // the full $150 — an unresolved duplicate charge for the tree sibling.
-    await trx('invoices').where({ id: ids.invoiceId }).update({
-      subtotal: 140, total: 140,
-      line_items: JSON.stringify([{ description: 'First service application', quantity: 1, unit_price: 140, amount: 140 }]),
-    });
-
-    const [result] = await sweepOnce(trx, ids.estimateId);
-    expect(result.action).toBe('alerted');
-    expect(result.divergingSiblingIds).toEqual([ids.lawnId, treeId].map(String).sort());
-
-    const stillOpen = await readBell(trx, dedupeKey);
-    expect(stillOpen.read_at).toBeNull();
+    expect(Number(pest.estimated_price)).toBe(153.60);
+    expect(Number(sharedInvoice.total)).toBe(153.60);
   }));
 
   test('a voided "split" invoice does not count — still alerts (void is not a real split)', () => rollbackTest(async (trx) => {

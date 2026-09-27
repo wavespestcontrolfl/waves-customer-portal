@@ -20,14 +20,6 @@ const {
 
 const anchor = (over = {}) => ({ id: 'anchor-1', scheduled_date: '2026-10-01', completed_at: null, ...over });
 const member = (id, over = {}) => ({ id, scheduled_date: '2026-10-01', completed_at: null, estimated_price: null, ...over });
-// The combined invoice's line items, application-only (no setup fee) —
-// what applicationOnlyCents parses. `applicationAmount(200, { setupFee: 100 })`
-// adds a setup-fee line alongside it, exactly like the same invoice
-// estimate-converter.js / routes/estimate-public.js can mint.
-const applicationLineItems = (applicationAmount, { setupFee = null } = {}) => [
-  ...(setupFee != null ? [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: setupFee, amount: setupFee }] : []),
-  { description: 'First service application', quantity: 1, unit_price: applicationAmount, amount: applicationAmount },
-];
 
 describe('isInvoiceSettled', () => {
   test('paid/prepaid/void/refunded/canceled/cancelled are all settled', () => {
@@ -120,147 +112,26 @@ describe('evaluateGroupDivergence', () => {
       .toEqual({ action: 'clear', reason: 'no_group' });
   });
 
-  test('a diverging sibling with its OWN live invoice AND a MATCHING combined-invoice reduction → clear, split_completed', () => {
-    const a = anchor({ estimated_price: 153.60 });
-    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 42 });
-    const verdict = evaluateGroupDivergence({
-      anchor: a, members: [a, b], invoiceStatus: 'draft', invoiceLineItems: applicationLineItems(111.60),
-    });
+  test('a diverging sibling that already has its OWN live invoice → clear, split_completed (manual split done)', () => {
+    const a = anchor();
+    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true });
+    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, b], invoiceStatus: 'draft' });
     expect(verdict).toEqual({ action: 'clear', reason: 'split_completed' });
   });
 
-  // Codex round-4 P1: a sibling's own live invoice is proof the office
-  // STARTED the split, never proof they FINISHED it — the combined invoice
-  // can still carry the sibling's full original charge.
-  test('a diverging sibling has its OWN live invoice but the COMBINED invoice application amount is unchanged → still alerts', () => {
-    const a = anchor({ estimated_price: 153.60 });
-    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 42 });
-    const verdict = evaluateGroupDivergence({
-      anchor: a, members: [a, b], invoiceStatus: 'draft', invoiceLineItems: applicationLineItems(153.60),
-    });
-    expect(verdict.action).toBe('alert');
-    expect(verdict.diverging.map((m) => m.id)).toEqual(['b']);
-  });
-
-  test('a diverging sibling has its OWN live invoice but anchor.estimated_price is unreadable → fails closed, still alerts', () => {
-    const a = anchor({ estimated_price: null });
-    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 42 });
-    const verdict = evaluateGroupDivergence({
-      anchor: a, members: [a, b], invoiceStatus: 'draft', invoiceLineItems: applicationLineItems(42),
-    });
-    expect(verdict.action).toBe('alert');
-  });
-
-  // Codex round-6 P1: the same auto-generated invoice can ALSO bundle a
-  // one-time setup fee beside the application line. Comparing the RAW
-  // total (application + fee) against an application-only
-  // anchor.estimated_price would read a correctly-executed split as still
-  // short, or even MORE than the original — the alert would never clear.
-  test('the combined invoice ALSO carries a setup fee — a correctly reduced application amount still clears', () => {
-    const a = anchor({ estimated_price: 153.60 });
-    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 42 });
-    // Raw total (111.60 application + 100 setup fee = 211.60) is LARGER
-    // than anchor.estimated_price (153.60) — a raw-total comparison would
-    // never clear this, even though the application share was correctly split.
-    const verdict = evaluateGroupDivergence({
-      anchor: a,
-      members: [a, b],
-      invoiceStatus: 'draft',
-      invoiceLineItems: applicationLineItems(111.60, { setupFee: 100 }),
-    });
-    expect(verdict).toEqual({ action: 'clear', reason: 'split_completed' });
-  });
-
-  test('the combined invoice carries a setup fee AND the application amount is unchanged — still alerts', () => {
-    const a = anchor({ estimated_price: 153.60 });
-    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 42 });
-    const verdict = evaluateGroupDivergence({
-      anchor: a,
-      members: [a, b],
-      invoiceStatus: 'draft',
-      invoiceLineItems: applicationLineItems(153.60, { setupFee: 100 }),
-    });
-    expect(verdict.action).toBe('alert');
-  });
-
-  test('invoiceLineItems is unparseable/missing — fails closed, still alerts', () => {
-    const a = anchor({ estimated_price: 153.60 });
-    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 42 });
-    for (const bad of [null, undefined, 'not json', '[]', []]) {
-      const verdict = evaluateGroupDivergence({
-        anchor: a, members: [a, b], invoiceStatus: 'draft', invoiceLineItems: bad,
-      });
-      expect(verdict.action).toBe('alert');
-    }
-  });
-
-  test('invoiceLineItems has no recognizable application line — fails closed, still alerts', () => {
-    const a = anchor({ estimated_price: 153.60 });
-    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 42 });
-    const verdict = evaluateGroupDivergence({
-      anchor: a,
-      members: [a, b],
-      invoiceStatus: 'draft',
-      invoiceLineItems: [{ description: 'Some unrelated line', quantity: 1, unit_price: 10, amount: 10 }],
-    });
-    expect(verdict.action).toBe('alert');
-  });
-
-  test('two diverging siblings, only one split off with a MATCHING combined-invoice reduction → alerts on the still-unresolved one only', () => {
-    const a = anchor({ estimated_price: 153.60 });
-    const split = member('split-off', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 42 });
+  test('two diverging siblings, only one split off → alerts on the still-unresolved one only', () => {
+    const a = anchor();
+    const split = member('split-off', { scheduled_date: '2026-10-05', has_own_live_invoice: true });
     const unresolved = member('still-needs-split', { scheduled_date: '2026-10-09' });
-    const verdict = evaluateGroupDivergence({
-      anchor: a, members: [a, split, unresolved], invoiceStatus: 'draft', invoiceLineItems: applicationLineItems(111.60),
-    });
+    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, split, unresolved], invoiceStatus: 'draft' });
     expect(verdict.action).toBe('alert');
     expect(verdict.diverging.map((m) => m.id)).toEqual(['still-needs-split']);
   });
 
-  // Codex round-5 P1: a THREE-program group where BOTH diverging siblings
-  // have their own invoice, but the combined invoice's reduction only
-  // covers ONE of their amounts — a partial multi-sibling split must not
-  // clear EITHER sibling, since which one the partial reduction actually
-  // covers can't be attributed from the numbers alone.
-  test('three-program group: both siblings have their own invoice, but the reduction covers only ONE of their amounts → alerts on BOTH, fails closed', () => {
-    const a = anchor({ estimated_price: 200 });
-    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 60 });
-    const c = member('c', { scheduled_date: '2026-10-06', has_own_live_invoice: true, own_live_invoice_total: 90 });
-    // Only $60 was actually removed (200 - 140), but b + c together need $150.
-    const verdict = evaluateGroupDivergence({
-      anchor: a, members: [a, b, c], invoiceStatus: 'draft', invoiceLineItems: applicationLineItems(140),
-    });
-    expect(verdict.action).toBe('alert');
-    expect(verdict.diverging.map((m) => m.id).sort()).toEqual(['b', 'c']);
-  });
-
-  test('three-program group: both siblings have their own invoice, and the reduction covers their FULL combined amount → clear, split_completed', () => {
-    const a = anchor({ estimated_price: 200 });
-    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 60 });
-    const c = member('c', { scheduled_date: '2026-10-06', has_own_live_invoice: true, own_live_invoice_total: 90 });
-    const verdict = evaluateGroupDivergence({
-      anchor: a, members: [a, b, c], invoiceStatus: 'draft', invoiceLineItems: applicationLineItems(50),
-    });
-    expect(verdict).toEqual({ action: 'clear', reason: 'split_completed' });
-  });
-
-  test('a diverging sibling has its own invoice, but that invoice\'s own total is unreadable → fails closed, still alerts', () => {
-    const a = anchor({ estimated_price: 153.60 });
-    const b = member('b', {
-      scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: null,
-    });
-    const verdict = evaluateGroupDivergence({
-      anchor: a, members: [a, b], invoiceStatus: 'draft', invoiceLineItems: applicationLineItems(42),
-    });
-    expect(verdict.action).toBe('alert');
-  });
-
   test('a diverging sibling with no invoice yet (has_own_live_invoice false/undefined) still alerts', () => {
-    const a = anchor({ estimated_price: 153.60 });
+    const a = anchor();
     const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: false });
-    const verdict = evaluateGroupDivergence({
-      anchor: a, members: [a, b], invoiceStatus: 'draft', invoiceLineItems: applicationLineItems(111.60),
-    });
+    const verdict = evaluateGroupDivergence({ anchor: a, members: [a, b], invoiceStatus: 'draft' });
     expect(verdict.action).toBe('alert');
     expect(verdict.diverging.map((m) => m.id)).toEqual(['b']);
   });
