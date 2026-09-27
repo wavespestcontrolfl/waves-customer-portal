@@ -14522,6 +14522,12 @@ const CallRecordingProcessor = {
               extracted,
               call,
               phone,
+              // The voicemail itself asked not to be contacted — both DNC
+              // shapes, as the clarify-ask gate below reads them: the V2
+              // consent object and the legacy flat field (V2 off,
+              // unavailable or schema-failed still sets the flat one).
+              doNotContactRequested: v2Result?.extraction?.consent?.do_not_contact_request === true
+                || extracted.do_not_contact_request === true,
             });
           } catch (smsErr) {
             logger.warn(`[call-proc] voicemail text-back failed (non-blocking): ${smsErr.message}`);
