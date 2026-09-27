@@ -1435,8 +1435,17 @@ runs before the claim chokepoint:
   — a product exposure, a symptom after a treatment, or trouble breathing),
   never on the broad detector's other phrases (#4899).
 - `none`, or a missing / unknown topic, keeps the model's answer, which still
-  goes through the claim chokepoint. There is no regex floor on the visitor's
-  words: routing follows the model's classification only.
+  goes through the claim chokepoint and the price scrub. The broad emergency
+  detector is not consulted on this path: a flagged claim, a reassurance or
+  price talk becomes the emergency script only on qualified evidence
+  (`qualifiedEmergencyIn`) or when the model's own reply directs to emergency
+  care; otherwise a claim gets the reviewed label copy and price talk the
+  price redirect. There is no regex floor on the visitor's words: routing
+  follows the model's classification only.
+The model also returns `language` (`en` / `es`, the language of its reply,
+sent only while the gate is on); the reviewed copy follows it, and a missing
+value falls back to the Spanish-word detector on the visitor's active message,
+then the reply.
 The provider-failure fallback is unchanged (there is no model topic). Gate off:
 prompt, schema and replies are unchanged. NOT CORS-open — credentialed allowlist
 origins only (hub site)).

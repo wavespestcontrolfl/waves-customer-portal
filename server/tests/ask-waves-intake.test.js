@@ -2381,6 +2381,8 @@ describe('topic routing (GATE_ASK_WAVES_TOPIC_ROUTING)', () => {
     await processIntakeMessage({ message: 'Do you treat for roaches?' });
     const [, on] = dispatchWithFallback.mock.calls[0];
     expect(on.jsonSchema.required).toContain('topic');
+    expect(on.jsonSchema.required).toContain('language');
+    expect(on.system).toContain('LANGUAGE (the language field)');
     expect(on.system).toContain('TOPIC (the topic field)');
 
     delete process.env.GATE_ASK_WAVES_TOPIC_ROUTING;
@@ -2408,6 +2410,19 @@ describe('topic routing (GATE_ASK_WAVES_TOPIC_ROUTING)', () => {
 
   test('a Spanish safety question gets the Spanish reviewed copy', () => {
     expect(normalizeIntakeResult(withTopic('product_safety'), 'openai', '¿Es seguro para mi perro?').reply).toMatch(/instrucciones de la etiqueta/);
+  });
+
+  test.each([
+    ['reentry_timing', 'Cuanto esperar?', 'Debe esperar.'],
+    ['product_safety', 'Y para mi hija?', 'No hay problema.'],
+  ])('the reviewed copy follows the model\'s reply language, not the Spanish-word detector: %s %s', (topic, message, reply) => {
+    expect(normalizeIntakeResult(withTopic(topic, { reply, language: 'es' }), 'openai', message).reply).toMatch(/instrucciones de la etiqueta/);
+    expect(normalizeIntakeResult(withTopic(topic, { reply, language: 'en' }), 'openai', message).reply).toMatch(LABEL_COPY);
+  });
+
+  test('a none-topic claim gets the reviewed copy in the model\'s reply language', () => {
+    const out = normalizeIntakeResult(withTopic('none', { reply: 'Es totalmente seguro.', language: 'es' }), 'openai', 'Y el gato?');
+    expect(out.reply).toMatch(/instrucciones de la etiqueta/);
   });
 
   test('a safety answer keeps the model\'s quote offer', () => {
@@ -2487,6 +2502,30 @@ describe('topic routing (GATE_ASK_WAVES_TOPIC_ROUTING)', () => {
     'When can we walk on the lawn?',
   ])('with topic none the model answer stands (no regex floor, no regex emergency override): %s', (message) => {
     expect(normalizeIntakeResult(withTopic('none'), 'openai', message).reply).toBe(neutral);
+  });
+
+  test.each([
+    ['I passed out flyers for my business. Is that okay?', 'That should be fine.'],
+    ['We live at 911 Palm Ave. Can you come Tuesday?', 'That should be fine.'],
+  ])('with topic none a broad-detector phrase never turns a reassurance into the emergency script: %s', (message, reply) => {
+    expect(normalizeIntakeResult(withTopic('none', { reply }), 'openai', message).reply).toBe(reply);
+  });
+
+  test('with topic none a broad-detector phrase never turns price talk into the emergency script', () => {
+    const out = normalizeIntakeResult(withTopic('none', { reply: 'Quarterly service starts at $49 per visit.' }), 'openai', 'I passed out flyers for my business, how much is quarterly service?');
+    expect(out.reply).not.toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).not.toMatch(/\$49/);
+  });
+
+  test('with topic none qualified evidence still turns a reassurance into the emergency script', () => {
+    const out = normalizeIntakeResult(withTopic('none', { reply: 'He should be fine.' }), 'openai', 'My son swallowed some bait');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('1-800-222-1222');
+  });
+
+  test('with topic none a claim whose reply directs to 911 keeps the emergency script', () => {
+    const out = normalizeIntakeResult(withTopic('none', { reply: 'It is completely safe, but call 911 if anyone feels sick.' }), 'openai', 'Is the spray safe?');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
   });
 
   test('an unknown or missing topic is treated as none', () => {

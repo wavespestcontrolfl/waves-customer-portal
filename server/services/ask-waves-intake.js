@@ -362,17 +362,19 @@ const INTAKE_SCHEMA = {
 const TOPICS = ['medical_emergency', 'product_safety', 'reentry_timing', 'none'];
 const INTAKE_SCHEMA_WITH_TOPIC = {
   ...INTAKE_SCHEMA,
-  required: [...INTAKE_SCHEMA.required, 'topic'],
+  required: [...INTAKE_SCHEMA.required, 'topic', 'language'],
   properties: {
     ...INTAKE_SCHEMA.properties,
     topic: { type: 'string', enum: TOPICS, description: "What the visitor's newest message is about (see TOPIC in the instructions)" },
+    language: { type: 'string', enum: ['en', 'es'], description: 'The language of your reply (see LANGUAGE in the instructions)' },
   },
 };
 const TOPIC_RULES = `TOPIC (the topic field) — what the VISITOR's newest message is about, whatever you reply. Pick the first that applies:
 - "medical_emergency": a person or pet may be hurt or exposed now or recently — swallowed, inhaled, touched or got in the eyes or on the skin a pesticide, bait, spray or treatment; a sting or bite with swelling, trouble breathing, vomiting or other symptoms; feeling sick after a treatment; or asking whether to call 911, Poison Control, a doctor or a vet.
 - "product_safety": asks whether a treatment, product or chemical is safe, harmful, toxic or risky for people, children, pets, plants, bees, fish or the home.
 - "reentry_timing": asks when or whether people or pets can go back inside or outside, use the lawn or pool, touch surfaces, or how long to wait or stay away after a treatment.
-- "none": anything else — pests, pricing, scheduling, accounts, general questions.`;
+- "none": anything else — pests, pricing, scheduling, accounts, general questions.
+LANGUAGE (the language field) — "es" if your reply is in Spanish, otherwise "en".`;
 
 function cleanText(value, maxLen) {
   const text = String(value || '')
@@ -1014,6 +1016,14 @@ function qualifiedEmergencyIn(context) {
     || stripDenials(context).split(/\n+/).some((turn) => treatmentSymptom(turn) || BREATHING_EMERGENCY_RE.test(turn.replace(NEGATED_BREATHING_RE, ' ')));
 }
 
+// Reviewed copy follows the language the model says it replied in; a
+// missing language falls back to the visitor's active message, then the reply.
+function topicSpanish(modelLanguage, base, activeMessage) {
+  if (modelLanguage === 'es') return true;
+  if (modelLanguage === 'en') return false;
+  return looksSpanish(activeMessage) || looksSpanish(base.reply);
+}
+
 // Topic routing (GATE_ASK_WAVES_TOPIC_ROUTING): what the visitor asked
 // decides, not how the model worded its answer. The model's `topic` names
 // it; a medical emergency, a product-safety question or a re-entry question
@@ -1022,19 +1032,44 @@ function qualifiedEmergencyIn(context) {
 // grammar over free questions never converges, and a missed topic still has
 // its answer checked by the claim chokepoint. The regex emergency detector
 // never forces the emergency script (#4899); only qualified evidence
-// (qualifiedEmergencyIn) upgrades a safety or re-entry answer to it.
-// Anything else returns null.
-function routeByTopic(modelTopic, base, contextText, activeMessage, quoteFields) {
+// (qualifiedEmergencyIn) upgrades an answer to it.
+function routeByTopic(modelTopic, modelLanguage, base, contextText, activeMessage, quoteFields, quoteless) {
   const emergencyContext = emergencyContextOf(contextText, activeMessage);
   if (modelTopic === 'medical_emergency') return topicEmergencyScript(base, emergencyContext);
-  if (modelTopic !== 'product_safety' && modelTopic !== 'reentry_timing') return null;
+  const spanish = topicSpanish(modelLanguage, base, activeMessage);
+  if (modelTopic !== 'product_safety' && modelTopic !== 'reentry_timing') {
+    return routeNoneTopic(base, contextText, activeMessage, emergencyContext, quoteless, spanish);
+  }
   if (qualifiedEmergencyIn(foldTypography(emergencyContext))) return topicEmergencyScript(base, emergencyContext);
-  const spanish = looksSpanish(activeMessage) || looksSpanish(base.reply);
   const reply = spanish ? UNSAFE_CLAIM_REPLY_ES : UNSAFE_CLAIM_REPLY;
   // A safety question the model labeled "emergency" had its quote offer
   // cleared; the answer is no longer an emergency, so the offer comes back.
   if (base.intent === 'emergency') return { ...base, ...quoteFields, intent: 'question', reply };
   return { ...base, reply };
+}
+
+// `none` (or a missing / unknown topic): the model's answer, through the
+// claim chokepoint and the price scrub. The legacy paths' broad emergency
+// detector is not consulted — a claim, a reassurance or price talk becomes
+// the emergency script only on qualified evidence in the conversation, or
+// when the model's own reply directs to emergency care.
+function routeNoneTopic(base, contextText, activeMessage, emergencyContext, quoteless, spanish) {
+  const qualified = () => qualifiedEmergencyIn(foldTypography(emergencyContext));
+  const emergency = () => (qualified()
+    ? topicEmergencyScript(base, emergencyContext)
+    : emergencyGuidance(base, '', { trustIntent: false }));
+  if (!REVIEWED_REPLIES.has(base.reply) && intakeSafetyClaimSupplement(base.reply, contextText, activeMessage)) {
+    const script = emergency();
+    if (script) return script;
+    const intent = base.intent === 'emergency' ? 'question' : base.intent;
+    return flaggedPriceRouting(base, { ...base, intent, reply: spanish ? UNSAFE_CLAIM_REPLY_ES : UNSAFE_CLAIM_REPLY }, quoteless);
+  }
+  if (REASSURE_RE.test(foldTypography(base.reply)) && qualified()) return topicEmergencyScript(base, emergencyContext);
+  if (!PRICE_TALK_RE.test(base.reply)) return base;
+  const script = emergency();
+  if (script) return script;
+  if (base.intent === 'existing_customer') return { ...base, reply: SUPPORT_FALLBACK_RESULT.reply };
+  return scrubPriceTalk(base);
 }
 
 function normalizeIntakeResult(json, source, contextText = '', activeMessage = contextText) {
@@ -1054,8 +1089,7 @@ function normalizeIntakeResult(json, source, contextText = '', activeMessage = c
     source,
   };
   if (askWavesTopicRoutingLive()) {
-    const routed = routeByTopic(json.topic, base, contextText, activeMessage, { service_keys: serviceKeys, ready_for_quote: json.ready_for_quote === true });
-    if (routed) return routed;
+    return routeByTopic(json.topic, json.language, base, contextText, activeMessage, { service_keys: serviceKeys, ready_for_quote: json.ready_for_quote === true }, quoteless);
   }
   // Safety/emergency handling reads the model's ORIGINAL reply, before any
   // price replacement: "…not safe to ingest; call Poison Control now.
