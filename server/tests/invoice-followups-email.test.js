@@ -345,11 +345,45 @@ describe('invoice follow-up email sidecar', () => {
     }
   });
 
+  // An Email-only customer who switches to Text-only after fireTouch read
+  // the choice: the handoff's preference-change hold keeps the touch due for
+  // a re-fan-out on the current choice; the sequence is never paused on the
+  // stale Email-only snapshot.
+  test('a preference change at the handoff holds the touch instead of pausing the sequence', async () => {
+    const sequence = followupRow();
+    const sequenceUpdate = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [sequence], first: sequence })],
+      customers: [chain({ first: customer() })],
+      invoices: Array.from({ length: 5 }, () => chain({ first: invoice() })),
+      notification_prefs: [chain({ first: { invoice_channels: ['email'] } })],
+      customer_interactions: [chain(), chain()],
+      invoice_followup_sequences: [chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
+    });
+    BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => {
+      state.boundaryBlock = { code: 'BILLING_PREFERENCES_CHANGED', blocked: true, retryable: true, deferred: true,
+        deliveryOutcome: 'not_sent', reason: 'Email is not selected for this billing category' };
+      return { ok: false };
+    });
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const verdict = await withProviderHandoff(jest.fn());
+      return verdict.ok ? { sent: true } : { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
+    });
+    await InvoiceFollowUps.runPending();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const [update] = sequenceUpdate.update.mock.calls[0];
+    expect(update).not.toHaveProperty('status');
+    expect(update.next_touch_at).toEqual(new Date(Date.now() + 30 * 60 * 1000));
+    expect(require('../services/collections/contact-ledger').markSendFailed).toHaveBeenCalledWith(
+      expect.anything(), expect.not.objectContaining({ resolved: true }),
+    );
+  });
+
   test.each([
     ['a billing address changed before dispatch', { code: 'EMAIL_RECIPIENT_CHANGED', blocked: true, retryable: true, reason: 'changed' },
       { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'EMAIL_RECIPIENT_CHANGED' }],
     ['Email deselected before dispatch', { code: 'BILLING_PREFERENCES_CHANGED', blocked: true, retryable: true, deferred: true },
-      { ok: false, skipped: true, reason: 'billing_email_not_selected' }],
+      { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'BILLING_PREFERENCES_CHANGED' }],
     ['a staff do-not-contact', { code: 'SUPPRESSED_MANUAL_DNC', blocked: true, reason: 'Recipient was manually added to the do-not-contact list by an operator' },
       { ok: false, blocked: true, reason: 'Suppressed: Recipient was manually added to the do-not-contact list by an operator' }],
     ['an address suppression', { code: 'EMAIL_SUPPRESSED', blocked: true, reason: 'Suppressed: bounce' },

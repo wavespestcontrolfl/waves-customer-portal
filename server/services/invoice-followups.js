@@ -209,10 +209,12 @@ async function logFollowupEmailAttempt({
 // Where a billing email authority refusal lands in this engine's outcome
 // vocabulary (terminalFollowupEmailRefusal / settleFollowupEmailLedger). The
 // final refusals keep the reasons the sequence already settles on; anything
-// retryable is a not-sent attempt the step holds for.
+// retryable is a not-sent attempt the step holds for. That includes
+// BILLING_PREFERENCES_CHANGED: the choice moved after fireTouch snapshotted
+// selectedChannels, so the step must re-fan-out on the customer's current
+// choice rather than settle on the stale one.
 const FOLLOWUP_EMAIL_REFUSAL_REASONS = Object.freeze({
   BILLING_EMAIL_DISABLED: 'email_disabled',
-  BILLING_PREFERENCES_CHANGED: 'billing_email_not_selected',
   NO_EMAIL_RECIPIENT: 'missing_email',
   CUSTOMER_NOT_FOUND: 'customer_not_found',
   INVOICE_PAYER_BILLED: 'invoice_payer_billed',
