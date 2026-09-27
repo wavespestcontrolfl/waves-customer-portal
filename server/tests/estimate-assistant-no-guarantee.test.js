@@ -245,6 +245,58 @@ describe('estimate assistant no-guarantee context', () => {
     expect(wrongService.oneTime.items[0].purchasedTerms || []).toEqual([]);
   });
 
+  test('dual saved containers retain raw trenching purchase evidence omitted by the mapped row', () => {
+    const mapped = { service: 'trenching', label: 'Termite Trenching', amount: 1200, price: 1200,
+      warrantyTier: 'one_year_retreat' };
+    const raw = { ...mapped, warrantyAdder: 0 };
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 1200 },
+      estData: {
+        result: { oneTime: { items: [mapped] } },
+        engineResult: { oneTime: { items: [raw] } },
+      },
+      serviceMode: 'one_time',
+      noGuaranteeClaims: true,
+    });
+    expect(context.oneTime.items[0].purchasedTerms)
+      .toEqual(['Annual inspection during the warranty period']);
+  });
+
+  test.each([
+    ['none', { warrantyTier: 'none', warrantyAdder: 0 }],
+    ['null', { warrantyTier: null, warrantyAdder: null }],
+  ])('an explicit live %s decision suppresses older raw trenching warranty evidence', (_name, liveDecision) => {
+    const row = { service: 'trenching', label: 'Termite Trenching', amount: 1200, price: 1200 };
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 1200 },
+      estData: {
+        result: { oneTime: { items: [{ ...row, ...liveDecision }] } },
+        engineResult: { oneTime: { items: [{ ...row, warrantyTier: 'one_year_retreat', warrantyAdder: 0 }] } },
+      },
+      serviceMode: 'one_time',
+      noGuaranteeClaims: true,
+    });
+    expect(context.oneTime.items[0].purchasedTerms).toEqual([]);
+  });
+
+  test('ambiguous duplicate raw trenching rows cannot prove purchased terms', () => {
+    const mapped = { service: 'trenching', label: 'Termite Trenching', amount: 1200, price: 1200,
+      warrantyTier: 'one_year_retreat' };
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 1200 },
+      estData: {
+        result: { oneTime: { items: [mapped] } },
+        engineResult: { oneTime: { items: [
+          { ...mapped, warrantyAdder: 0 },
+          { ...mapped, warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 },
+        ] } },
+      },
+      serviceMode: 'one_time',
+      noGuaranteeClaims: true,
+    });
+    expect(context.oneTime.items[0].purchasedTerms || []).toEqual([]);
+  });
+
   test('a canonically priced termite bond exposes only its selected purchased term under no-guarantee policy', () => {
     const context = buildEstimateAssistantContext({
       estimate: { waveguard_tier: 'Bronze', monthly_total: 49 },
@@ -286,6 +338,78 @@ describe('estimate assistant no-guarantee context', () => {
     expect(unproven.recurringServices.flatMap((row) => row.purchasedTerms || [])).toEqual([]);
     expect(answerEstimateQuestionFallback('What re-treatment does my termite bond include?', unproven))
       .toMatch(/written service scope and terms/i);
+  });
+
+  test.each([
+    ['name-derived', { service: 'termite_bond', name: 'Termite Bond (5-Year Term)', annual: 216 }, true],
+    ['bondYears-derived', { service: 'termite_bond', name: 'Termite Bond', bondYears: 10, annual: 180 }, true],
+    ['serviceKey alias', { serviceKey: 'termite_bond', name: 'Termite Bond (1-Year Term)', annual: 240 }, true],
+    ['wrong service', { service: 'termite_bait', name: 'Termite Bond (5-Year Term)', annual: 216 }, false],
+    ['unsupported name', { service: 'termite_bond', name: 'Termite Bond (7-Year Term)', annual: 216 }, false],
+    ['unpaid', { service: 'termite_bond', name: 'Termite Bond (5-Year Term)', annual: 0 }, false],
+  ])('legacy bond normalization proves only supported purchased identities: %s', (_name, row, purchased) => {
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 18 },
+      estData: { result: { recurring: { services: [row] } } },
+      noGuaranteeClaims: true,
+    });
+    const terms = context.recurringServices.flatMap((item) => item.purchasedTerms || []);
+    expect(terms.length > 0).toBe(purchased);
+    if (purchased) expect(terms[0]).toMatch(/Purchased termite bond: (1|5|10)-year term/);
+  });
+
+  test('mixed purchased warranty answers stay scoped to the named service', () => {
+    const trenching = { service: 'trenching', label: 'Termite Trenching', amount: 1200, price: 1200,
+      warrantyTier: 'one_year_retreat', warrantyAdder: 0 };
+    const context = buildEstimateAssistantContext({
+      estimate: { monthly_total: 18, onetime_total: 1200, show_one_time_option: true },
+      estData: { result: {
+        recurring: { services: [
+          { service: 'termite_bond', name: 'Termite Bond (5-Year Term)', annual: 216 },
+        ] },
+        oneTime: { items: [trenching] },
+      } },
+      noGuaranteeClaims: true,
+    });
+
+    const trenchingAnswer = answerEstimateQuestionFallback('What warranty does the trenching include?', context);
+    expect(trenchingAnswer).toContain('For Termite Trenching');
+    expect(trenchingAnswer).toContain('Annual inspection during the warranty period');
+    expect(trenchingAnswer).not.toMatch(/5-year|re-treatment/i);
+
+    const bondAnswer = answerEstimateQuestionFallback('What warranty does the bond include?', context);
+    expect(bondAnswer).toContain('For Termite Bond');
+    expect(bondAnswer).toContain('5-year term with re-treatment coverage');
+    expect(bondAnswer).not.toContain('Annual inspection during the warranty period');
+
+    const genericAnswer = answerEstimateQuestionFallback('What warranty did I buy?', context);
+    expect(genericAnswer).toMatch(/Termite Bond:.*5-year term/s);
+    expect(genericAnswer).toMatch(/Termite Trenching:.*Annual inspection/s);
+    expect(genericAnswer).toContain('Each term applies only to the named service');
+  });
+
+  test('a named service without purchased terms cannot inherit another service warranty', () => {
+    const bond = { service: 'termite_bond', name: 'Termite Bond (5-Year Term)', annual: 216 };
+    const bondOnly = buildEstimateAssistantContext({
+      estimate: { monthly_total: 18 },
+      estData: { result: { recurring: { services: [bond] } } },
+      noGuaranteeClaims: true,
+    });
+    const missingTrenching = answerEstimateQuestionFallback('What warranty does the trenching include?', bondOnly);
+    expect(missingTrenching).not.toMatch(/5-year|re-treatment coverage/i);
+
+    const mixed = buildEstimateAssistantContext({
+      estimate: { monthly_total: 38 },
+      estData: { result: { recurring: { services: [
+        bond,
+        { service: 'rodent_bait', name: 'Rodent Bait Stations', monthly: 20 },
+      ] } } },
+      noGuaranteeClaims: true,
+    });
+    const rodent = answerEstimateQuestionFallback('What warranty does the rodent service include?', mixed);
+    expect(rodent).not.toMatch(/5-year|re-treatment coverage/i);
+    expect(answerEstimateQuestionFallback('What warranty did I buy?', mixed))
+      .toContain('5-year term with re-treatment coverage');
   });
 
   test.each([

@@ -8,9 +8,13 @@ const { dispatch, rejectCall } = require('./llm/call');
 const { isMistingSystemService } = require('../utils/mosquito-misting-system');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const { GUARANTEE_COPY, resolveOneTimeServiceCopy } = require('./estimate-one-time-copy');
-const { hasPurchasedTrenchingWarranty } = require('../../shared/estimate-purchased-warranty.cjs');
+const {
+  hasPurchasedTrenchingWarranty,
+  trenchingWarrantyDecision,
+} = require('../../shared/estimate-purchased-warranty.cjs');
 const { serviceKeysFromText } = require('./estimate-service-lines');
 const { RECURRING_TERMS_LANES } = require('./estimate-followup-copy');
+const { normalizeBondTermService } = require('./estimate-converter');
 
 // Neutral categories may retain their own satisfaction wording, but cannot
 // inherit residential membership promises from saved service prose.
@@ -146,7 +150,10 @@ function guaranteeLanesForRow(row) {
 }
 
 function termiteBondPurchasedTerms(row = {}, selectedTerms = []) {
-  const service = cleanText([row.service, row.serviceKey, row.service_key, row.key].find(Boolean)).toLowerCase();
+  const normalized = normalizeBondTermService(row);
+  const service = cleanText([
+    normalized.service, normalized.serviceKey, normalized.service_key, normalized.key,
+  ].find(Boolean)).toLowerCase();
   const keyedMatch = service.match(/^termite_bond_(1|5|10)yr$/);
   const keyedTerm = keyedMatch?.[1];
   const rawTerms = ['bondTerm', 'selectedBondTerm']
@@ -156,12 +163,15 @@ function termiteBondPurchasedTerms(row = {}, selectedTerms = []) {
     .map((value) => cleanText(value).toLowerCase());
   if (service !== 'termite_bond' && !keyedMatch) return [];
   if (rawTerms.some((value) => !/^(1|5|10)yr$/.test(value))) return [];
-  const termCandidates = [keyedTerm, ...rawTerms, row.bondYears, row.years]
+  const termCandidates = [keyedTerm, ...rawTerms, normalized.bondYears, normalized.years]
     .filter((value) => value !== undefined && value !== null && value !== '');
   const years = Number(String(termCandidates[0]).replace(/yr$/, ''));
   if (![1, 5, 10].includes(years)) return [];
   if (termCandidates.some((value) => Number(String(value).replace(/yr$/, '')) !== years)) return [];
-  const paid = [row.perTreatment, row.perApp, row.perVisit, row.monthly, row.mo, row.annual, row.amount, row.price]
+  const paid = [
+    normalized.perTreatment, normalized.perApp, normalized.perVisit, normalized.monthly,
+    normalized.mo, normalized.annual, normalized.amount, normalized.price,
+  ]
     .some((value) => Number.isFinite(Number(value)) && Number(value) > 0);
   return paid ? [`Purchased termite bond: ${years}-year term with re-treatment coverage.`] : [];
 }
@@ -389,8 +399,7 @@ function oneTimeRowsFromPricing(pricingBundle = {}) {
     });
 }
 
-function oneTimeRowsFromEstimateData(estData = {}) {
-  const result = estData.result || estData.engineResult || estData || {};
+function oneTimeRowsFromResult(result = {}) {
   const oneTime = result.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
   const nestedOneTime = result.results?.oneTime && typeof result.results.oneTime === 'object'
     ? result.results.oneTime
@@ -425,15 +434,38 @@ function oneTimeRowsFromEstimateData(estData = {}) {
         item.quoteRequired === true ? 'Quote required' : null,
         Number.isFinite(amount) && amount > 0 ? fmtMoney(amount) : null,
       ].filter(Boolean);
+      const warrantyDecision = trenchingWarrantyDecision(item);
       return {
         service: cleanText(item.service || item.key) || null,
         label: cleanText(item.label || item.displayName || item.name || item.service || 'One-time service'),
         detail: detailParts.join(' - '),
         amount: Number.isFinite(amount) && amount > 0 ? amount : null,
-        purchasedTerms: purchasedTermsForRow(item),
+        ...(warrantyDecision !== 'unset' ? { purchasedTerms: purchasedTermsForRow(item) } : {}),
         oneTime: true,
       };
     });
+}
+
+function failClosedAmbiguousOneTimeWarranties(rows = []) {
+  const counts = new Map();
+  for (const row of rows) {
+    if (!['trenching', 'termite_trenching'].includes(cleanText(row.service).toLowerCase())) continue;
+    const key = `${cleanText(row.service).toLowerCase()}|${cleanText(row.label).toLowerCase()}`;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return rows.map((row) => {
+    const key = `${cleanText(row.service).toLowerCase()}|${cleanText(row.label).toLowerCase()}`;
+    return (counts.get(key) || 0) > 1 ? { ...row, purchasedTerms: [] } : row;
+  });
+}
+
+function oneTimeRowsFromEstimateData(estData = {}) {
+  const roots = [...new Set([estData.result, estData.engineResult]
+    .filter((value) => value && typeof value === 'object'))];
+  if (!roots.length) roots.push(estData);
+  const currentRows = failClosedAmbiguousOneTimeWarranties(oneTimeRowsFromResult(roots[0]));
+  const fallbackRows = failClosedAmbiguousOneTimeWarranties(roots.slice(1).flatMap(oneTimeRowsFromResult));
+  return mergeServiceRows(currentRows, fallbackRows);
 }
 
 function frequencyHasRecurringValue(frequency = {}) {
@@ -1414,25 +1446,69 @@ function isBoraCareIntent(question = '') {
     || (/\bwood/.test(text) && /(treat|destroy|beetle|fungi|boring|decay)/.test(text));
 }
 
+function questionNamesPurchasedService(question, row = {}) {
+  const serviceText = cleanText([row.service, row.label].filter(Boolean).join(' ')).toLowerCase();
+  if (/\bbond\b/.test(serviceText)) return /\bbond\b/.test(question);
+  if (/\btrench(?:ing|ed)?\b/.test(serviceText)) {
+    return /\btrench(?:ing|ed)?\b/.test(question)
+      || (/\bannual inspection\b/.test(question)
+        && (row.purchasedTerms || []).some((term) => /\bannual inspection\b/i.test(term)));
+  }
+  return false;
+}
+
+function purchasedServiceScopeForQuestion(question, rows = []) {
+  const subtypeNamed = /\b(?:bond|trench(?:ing|ed)?|annual inspection)\b/.test(question);
+  const subtypeRows = rows.filter((row) => questionNamesPurchasedService(question, row));
+  if (subtypeNamed) return { named: true, rows: subtypeRows };
+
+  const namedKeys = new Set(serviceFamiliesFromText(question));
+  if (!namedKeys.size) return { named: false, rows: [] };
+  return {
+    named: true,
+    rows: rows.filter((row) => serviceFamiliesFromText([row.service, row.label].filter(Boolean).join(' '))
+      .some((key) => namedKeys.has(key))),
+  };
+}
+
+function purchasedServiceTermsAnswer(rows, namedService) {
+  if (rows.length === 1) {
+    const row = rows[0];
+    const scope = row.label || 'that service';
+    const prefix = namedService
+      ? `For ${scope}, this estimate includes this purchased service-specific term:`
+      : `This estimate includes this purchased service-specific term for ${scope}:`;
+    return `${prefix} ${row.purchasedTerms.join(' ')} It applies only to that service and does not create an estimate-wide callback or money-back guarantee.`;
+  }
+  const scopedTerms = rows.map((row) => `${row.label || 'Service'}: ${row.purchasedTerms.join(' ')}`).join(' ');
+  return `This estimate includes these purchased service-specific terms: ${scopedTerms} Each term applies only to the named service and does not create an estimate-wide callback or money-back guarantee.`;
+}
+
 // Answer only provenance-backed row claims before the estimate-wide neutral
 // policy. This keeps a purchased warranty or written satisfaction term usable
 // without allowing it to authorize unrelated callbacks or money-back terms.
 function writtenServiceClaimAnswer(question, context = {}, fallback = null) {
-  const rows = [
+  const allRows = [
     ...(Array.isArray(context.services) ? context.services : []),
     ...(Array.isArray(context.recurringServices) ? context.recurringServices : []),
     ...(Array.isArray(context.oneTime?.items) ? context.oneTime.items : []),
   ];
+  const seenRows = new Set();
+  const rows = allRows.filter((row) => {
+    const key = [row.service, row.label, ...(row.purchasedTerms || [])].map(cleanText).join('|').toLowerCase();
+    if (seenRows.has(key)) return false;
+    seenRows.add(key);
+    return true;
+  });
   const genericGuaranteeIntent = /\b(callbacks?|money[- ]?back|risk[- ]?free)\b/.test(question);
   if (!genericGuaranteeIntent && /\b(bond|warrant\w*|annual inspection|re-?treat\w*)\b/.test(question)) {
     const purchasedRows = rows.filter((row) => Array.isArray(row.purchasedTerms) && row.purchasedTerms.length);
-    const relevantRows = /\bbond\b/.test(question)
-      ? purchasedRows.filter((row) => /bond/.test(cleanText([row.service, row.label, ...row.purchasedTerms].join(' ')).toLowerCase()))
+    const namedScope = purchasedServiceScopeForQuestion(question, rows);
+    const relevantRows = namedScope.named
+      ? namedScope.rows.filter((row) => Array.isArray(row.purchasedTerms) && row.purchasedTerms.length)
       : purchasedRows;
     if (relevantRows.length) {
-      const terms = relevantRows.flatMap((row) => row.purchasedTerms)
-        .filter((term, index, all) => all.indexOf(term) === index);
-      return `This estimate includes this purchased service-specific term: ${terms.join(' ').replace(/[.!?]+$/, '')}. It applies only to that service and does not create an estimate-wide callback or money-back guarantee.`;
+      return purchasedServiceTermsAnswer(relevantRows, namedScope.named);
     }
   }
   if (/\bsatisfaction\b/.test(question) && !/\b(callbacks?|money[- ]?back|re-?treat\w*|risk[- ]?free)\b/.test(question)) {

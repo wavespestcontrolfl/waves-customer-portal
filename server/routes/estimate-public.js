@@ -39,7 +39,10 @@ function acceptBookingGateToken(estimate) {
 }
 const { isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const { GUARANTEE_COPY, resolveOneTimeServiceCopy, resolveOneTimeRowCopies, oneTimeOnlyIntelligenceCopy } = require('../services/estimate-one-time-copy');
-const { hasPurchasedTrenchingWarranty } = require('../../shared/estimate-purchased-warranty.cjs');
+const {
+  hasPurchasedTrenchingWarranty,
+  trenchingWarrantyDecision,
+} = require('../../shared/estimate-purchased-warranty.cjs');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
@@ -17667,11 +17670,15 @@ function normalizeOneTimeBreakdown(estData) {
         // trenching chemistry (repellent barriers get no colony-transfer
         // claim) and whether wasp nest removal was actually priced.
         chemistryType: item.chemistryType || null,
-        warrantyTier: item.warrantyTier || null,
-        warrantyAdder: item.warrantyAdder !== '' && item.warrantyAdder != null
-          && Number.isFinite(Number(item.warrantyAdder)) && Number(item.warrantyAdder) >= 0
-          ? Number(item.warrantyAdder)
-          : null,
+        ...(Object.prototype.hasOwnProperty.call(item, 'warrantyTier')
+          ? { warrantyTier: item.warrantyTier || null }
+          : {}),
+        ...(Object.prototype.hasOwnProperty.call(item, 'warrantyAdder') ? {
+          warrantyAdder: item.warrantyAdder !== '' && item.warrantyAdder != null
+            && Number.isFinite(Number(item.warrantyAdder)) && Number(item.warrantyAdder) >= 0
+            ? Number(item.warrantyAdder)
+            : null,
+        } : {}),
         nestRemovalSelected: item.nestRemovalSelected === true || Number(item?.pricingBreakdown?.removal) > 0 || !!item.removal,
         warrantyEligible: item.warrantyEligible === true,
         debrisRemovalIncluded: item.debrisRemovalIncluded === true,
@@ -23566,6 +23573,66 @@ function withCombinedLowConfidenceRange(combined, range) {
   };
 }
 
+function normalizedOneTimeRowGroups(estData = {}) {
+  const roots = [...new Set([estData.result, estData.engineResult]
+    .filter((root) => root && typeof root === 'object'))];
+  if (!roots.length) roots.push(estData);
+  return roots.map((result) => {
+    const oneTime = result.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
+    const nested = result.results?.oneTime && typeof result.results.oneTime === 'object'
+      ? result.results.oneTime
+      : {};
+    return {
+      rows: normalizeOneTimeBreakdown({ ...estData, result, engineResult: null }).items || [],
+      sourceItems: [
+        ...(Array.isArray(oneTime.items) ? oneTime.items : []),
+        ...(Array.isArray(nested.items) ? nested.items : []),
+      ],
+    };
+  });
+}
+
+function matchingRawOneTimeRow(row, rawRows = []) {
+  const service = String(row?.service || '').toLowerCase();
+  if (!service) return { row: null, ambiguous: false };
+  const candidates = rawRows.filter((raw) => String(raw?.service || raw?.key || '').toLowerCase() === service);
+  if (candidates.length < 2) return { row: candidates[0] || null, ambiguous: false };
+  const sameLabel = candidates.filter((raw) => (
+    String(raw.label || raw.displayName || raw.name || raw.service || '') === String(row.label || '')
+  ));
+  if (sameLabel.length === 1) return { row: sameLabel[0], ambiguous: false };
+  const sameAmount = sameLabel.filter((raw) => Number(raw.amount ?? raw.price ?? raw.total) === Number(row.amount));
+  if (sameAmount.length === 1) return { row: sameAmount[0], ambiguous: false };
+  return { row: null, ambiguous: true };
+}
+
+function rawContractRowFor(row, rawRowGroups = []) {
+  const [currentGroup = { rows: [], sourceItems: [] }, ...fallbackGroups] = rawRowGroups;
+  if (matchingRawOneTimeRow(row, currentGroup.sourceItems).ambiguous) return null;
+  const currentMatch = matchingRawOneTimeRow(row, currentGroup.rows);
+  if (currentMatch.ambiguous) return null;
+  const current = currentMatch.row;
+  if (trenchingWarrantyDecision(current) !== 'unset') return current;
+
+  if (fallbackGroups.some((group) => matchingRawOneTimeRow(row, group.sourceItems).ambiguous)) return current;
+  const fallbackMatches = fallbackGroups.map((group) => matchingRawOneTimeRow(row, group.rows));
+  if (fallbackMatches.some((match) => match.ambiguous)) return current;
+  const fallbackRows = fallbackMatches.map((match) => match.row).filter(Boolean);
+  if (fallbackRows.length !== 1) return current || null;
+  const fallback = fallbackRows[0];
+  if (!current || !hasPurchasedTrenchingWarranty(fallback)) return current || fallback;
+
+  const currentTier = String(current.warrantyTier || '').toLowerCase().trim();
+  const fallbackTier = String(fallback.warrantyTier || '').toLowerCase().trim();
+  if (currentTier && currentTier !== fallbackTier) return current;
+  return {
+    ...fallback,
+    ...current,
+    warrantyTier: fallback.warrantyTier,
+    warrantyAdder: fallback.warrantyAdder,
+  };
+}
+
 function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) {
   const basePayload = Array.isArray(payload.frequencies)
     ? { ...payload, frequencies: payload.frequencies.map(normalizePricingFrequencyTotals) }
@@ -23579,7 +23646,8 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // Row copy never rides a regulated certificate surface (WDO in the aligned
   // OR raw rows — the aligned breakdown can drop the WDO row): the whole
   // page stays narrative-free, not just the WDO row (codex pre-push P0).
-  const rawContractRows = normalizeOneTimeBreakdown(estData)?.items || [];
+  const rawContractRowGroups = normalizedOneTimeRowGroups(estData);
+  const rawContractRows = rawContractRowGroups.flatMap((group) => group.rows);
   const rowCopyAllowed = !hasRegulatedCertificateServiceMix([], [
     ...(basePayload.oneTimeBreakdown?.items || []),
     ...rawContractRows,
@@ -23593,17 +23661,6 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // own label/amount (codex #3823 r9 P1). Proven purchased-warranty evidence
   // also reaches the contract row so the browser's saved-copy filter uses
   // the same evidence as the server resolver.
-  const rawRowFor = (row) => {
-    const service = String(row?.service || '').toLowerCase();
-    if (!service) return null;
-    const candidates = rawContractRows.filter((raw) => String(raw?.service || '').toLowerCase() === service);
-    if (!candidates.length) return null;
-    if (candidates.length === 1) return candidates[0];
-    const sameLabel = candidates.filter((raw) => String(raw.label || '') === String(row.label || ''));
-    if (sameLabel.length === 1) return sameLabel[0];
-    const sameAmount = sameLabel.filter((raw) => raw.amount === row.amount);
-    return sameAmount.length === 1 ? sameAmount[0] : null;
-  };
   const contractPayload = basePayload.oneTimeBreakdown && Array.isArray(basePayload.oneTimeBreakdown.items)
     ? {
       ...basePayload,
@@ -23614,7 +23671,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
             .map((row) => noGuaranteeClaims && GUARANTEE_COPY.test(row.detail || '') ? { ...row, detail: null } : row);
           if (!rowCopyAllowed) return labeled;
           const copyInputs = labeled.map((row) => {
-            const raw = rawRowFor(row);
+            const raw = rawContractRowFor(row, rawContractRowGroups);
             return raw ? { ...raw, ...row } : row;
           });
           const copies = resolveOneTimeRowCopies(copyInputs, { noGuaranteeClaims });

@@ -17,4 +17,24 @@ function hasPurchasedTrenchingWarranty(item = {}) {
     && adderPresent && Number.isFinite(adder) && adder >= 0;
 }
 
-module.exports = { hasPurchasedTrenchingWarranty, PURCHASED_TRENCHING_WARRANTY_BULLET };
+// A current saved row can explicitly remove an older raw-engine warranty.
+// A tier without an adder is incomplete legacy projection data, so it may
+// still borrow the matching raw purchase evidence.
+function trenchingWarrantyDecision(item = {}) {
+  if (!item || typeof item !== 'object') return 'unset';
+  const service = String(item.service || '').toLowerCase().trim();
+  if (!['trenching', 'termite_trenching'].includes(service)) return 'unset';
+  if (hasPurchasedTrenchingWarranty(item)) return 'purchased';
+  if (Object.prototype.hasOwnProperty.call(item, 'warrantyAdder')) return 'none';
+  if (Object.prototype.hasOwnProperty.call(item, 'warrantyTier')) {
+    const tier = String(item.warrantyTier || '').toLowerCase().trim();
+    if (tier === '' || tier === 'none') return 'none';
+  }
+  return 'unset';
+}
+
+module.exports = {
+  hasPurchasedTrenchingWarranty,
+  trenchingWarrantyDecision,
+  PURCHASED_TRENCHING_WARRANTY_BULLET,
+};

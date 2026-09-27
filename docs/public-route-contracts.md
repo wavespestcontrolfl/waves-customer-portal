@@ -1478,10 +1478,16 @@ guarantees in the document without changing the current page's policy or
 prices. Generic promise suppression does not remove a row's explicitly
 purchased warranty scope, which still requires that row's sold-tier metadata.
 Projected one-time-choice rows retain verified `warrantyTier` and
-`warrantyAdder` from the same raw row used to resolve their copy. Explicit
-current row decisions remain authoritative, and ambiguous repeated service
-keys cannot borrow another row's warranty. The server and browser use the
-shared purchased-warranty evidence rule and the existing authored copy pack.
+`warrantyAdder` from the same raw row used to resolve their copy, including
+when a mapped `result` omits evidence that remains in the matching raw
+`engineResult`. Explicit current `none`/`null` decisions remain authoritative,
+and ambiguous repeated service rows cannot borrow another row's warranty.
+The server, browser, and Ask Waves use the shared purchased-warranty evidence
+rule and the existing authored copy pack. Ask Waves normalizes legacy termite
+bond aliases, names, and `bondYears` through the acceptance converter's
+canonical identity rule; on mixed estimates, named warranty questions return
+only that service's purchased term, while generic questions label each term's
+service scope.
 Ask Waves also requires separate recurring-terms eligibility: rodent,
 commercial, bundle, and unknown scope never inherit residential callbacks,
 money-back, or no-contract terms merely because the page permits a

@@ -624,6 +624,80 @@ describe('server-rendered page', () => {
     if (purchased) expect(returned).toMatchObject(rawScope);
   });
 
+  test('projected rows union raw warranty proof from the saved engine container', () => {
+    const projected = {
+      service: 'trenching', label: 'Termite Trenching', amount: 900,
+      warrantyTier: 'one_year_retreat',
+    };
+    const estData = {
+      result: { recurring: { services: [] }, oneTime: { items: [projected] } },
+      engineResult: { oneTime: { items: [{ ...projected, price: 900, warrantyAdder: 0 }] } },
+    };
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [projected] } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      estData,
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(returned).toMatchObject({ warrantyTier: 'one_year_retreat', warrantyAdder: 0 });
+    expect(returned.copy.includes).toContain('Annual inspection during the warranty period');
+  });
+
+  test.each([
+    ['none', { warrantyTier: 'none', warrantyAdder: 0 }],
+    ['null', { warrantyTier: null, warrantyAdder: null }],
+  ])('an explicit live %s warranty decision suppresses raw engine purchase proof', (_name, liveDecision) => {
+    const row = { service: 'trenching', label: 'Termite Trenching', amount: 900 };
+    const estData = {
+      result: { recurring: { services: [] }, oneTime: { items: [{ ...row, ...liveDecision }] } },
+      engineResult: { oneTime: { items: [{ ...row, price: 900, warrantyTier: 'one_year_retreat', warrantyAdder: 0 }] } },
+    };
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [{ ...row, ...liveDecision }] } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      estData,
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(hasPurchasedTrenchingWarranty(returned)).toBe(false);
+    expect(returned.copy.includes).not.toContain('Annual inspection during the warranty period');
+  });
+
+  test('ambiguous duplicate raw rows cannot lend projected warranty proof', () => {
+    const projected = {
+      service: 'trenching', label: 'Termite Trenching', amount: 900,
+      warrantyTier: 'one_year_retreat',
+    };
+    const estData = {
+      result: { recurring: { services: [] }, oneTime: { items: [projected] } },
+      engineResult: { oneTime: { items: [
+        { ...projected, price: 900, warrantyAdder: 0 },
+        { ...projected, price: 900, warrantyTier: 'three_year_repair_retreat', warrantyAdder: 117 },
+      ] } },
+    };
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [projected] } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      estData,
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(hasPurchasedTrenchingWarranty(returned)).toBe(false);
+    expect(returned.copy.includes).not.toContain('Annual inspection during the warranty period');
+  });
+
+  test('a projected row with no saved counterpart stays warranty-neutral', () => {
+    const projected = { service: 'trenching', label: 'Unmatched Trenching', amount: 900 };
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 900, items: [projected] } },
+      { status: 'sent', show_one_time_option: true, noGuaranteeClaims: true },
+      { result: { recurring: { services: [] }, oneTime: { items: [
+        { service: 'one_time_pest', label: 'General Pest Treatment', amount: 250 },
+      ] } } },
+    );
+    const returned = contract.oneTimeBreakdown.items[0];
+    expect(hasPurchasedTrenchingWarranty(returned)).toBe(false);
+    expect(returned.copy.includes).not.toContain('Annual inspection during the warranty period');
+  });
+
   test.each([
     ['unmatched label', 'Front foundation', 'Rear foundation', 900, false],
     ['same label and price', 'Other foundation', 'Other foundation', 900, false],
