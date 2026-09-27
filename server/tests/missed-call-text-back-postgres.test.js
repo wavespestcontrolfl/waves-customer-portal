@@ -351,6 +351,17 @@ jest.setTimeout(30000);
   });
 
   describe('provider boundary (providerPreSendCheck) — rechecked immediately before the handoff', () => {
+    test('a voicemail recording that attaches to the original call during provider preparation stops the send; the claim stays free for the voicemail lane', async () => {
+      const row = call(READY_MINUTES_AGO);
+      sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, {
+        before: () => database('call_log').where({ id: row.id }).update({ recording_url: 'https://example.invalid/late-recording' }),
+      }));
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'not_missed' });
+      expect(await claimRow()).toBeUndefined();
+      expect((await stored(row)).metadata.missed_call_text_outcome).toBe('skipped:not_missed');
+    });
+
     test('a staff text that lands after the lease stops the send at the boundary; no claim is taken', async () => {
       sendCustomerMessage.mockImplementationOnce(pipeline(REAL_SEND, {
         before: () => database('sms_log').insert({

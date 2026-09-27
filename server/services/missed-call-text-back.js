@@ -78,6 +78,7 @@ const CLAIM = {
 };
 // providerBoundaryCheck's refusal codes, read back off the pipeline result.
 const BOUNDARY = {
+  NOT_MISSED: 'MISSED_CALL_NO_LONGER_MISSED',
   CONTACTED: 'MISSED_CALL_ALREADY_CONTACTED',
   WINDOW: 'MISSED_CALL_WINDOW_CLOSED',
   TOO_OLD: 'MISSED_CALL_TOO_OLD',
@@ -381,15 +382,20 @@ async function sendWithLease(row, { fromNumber, phone }, releaseLease, settleFen
  * The provider-boundary predicate, passed as sendCustomerMessage's
  * providerPreSendCheck: Twilio runs it once, after every provider
  * preparation await, immediately before the SDK request. Everything that
- * can change between the lease and the handoff is decided again here —
- * still uncontacted, then the one-shot claim (taken here and nowhere
- * earlier), then, as the last step after the last await, a fresh clock
- * against the 8am-8pm window and the call's send slot. A refusal after the
- * claim leaves it to classifySendOutcome to release.
+ * can change between the lease and the handoff is decided again here — the
+ * call itself (a voicemail recording that landed late makes it the
+ * voicemail lane's), still uncontacted, then the one-shot claim (taken here
+ * and nowhere earlier), then, as the last step after the last await, a
+ * fresh clock against the 8am-8pm window and the call's send slot. A
+ * refusal after the claim leaves it to classifySendOutcome to release.
  */
 function providerBoundaryCheck(row, phone, attempt) {
   return async ({ dbi = db } = {}) => {
     try {
+      const current = await dbi('call_log').where({ id: row.id }).modify(whereNotBlockedCall).first();
+      if (!textBackCoreEligible(current)) {
+        return { ok: false, code: BOUNDARY.NOT_MISSED, reason: 'the call is no longer an unanswered, message-less miss' };
+      }
       if (!(await stillUncontacted(phone, row, dbi))) {
         return { ok: false, code: BOUNDARY.CONTACTED, reason: 'the caller was contacted after the missed call' };
       }
@@ -447,6 +453,7 @@ async function dispatchOrThrown(row, phone, body, fromNumber, attempt) {
 // providerBoundaryCheck's terminal refusals: nothing reached the provider.
 // (A claim is held only for the post-claim clock refusals; released below.)
 const BOUNDARY_SETTLES = {
+  [BOUNDARY.NOT_MISSED]: 'not_missed',
   [BOUNDARY.CONTACTED]: 'already_contacted',
   [BOUNDARY.TOO_OLD]: 'too_old',
   [BOUNDARY.CLAIMED]: 'already_sent_to_phone',
