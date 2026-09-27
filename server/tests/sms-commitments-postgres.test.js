@@ -28,7 +28,7 @@ const schema = `sms_commitments_${randomUUID().replaceAll('-', '')}`;
 const TABLES = ['customers', 'customer_properties', 'property_preferences', 'sms_log', 'call_log',
   'call_commitments', 'data_hygiene_source_extractions', 'data_hygiene_proposals', 'data_hygiene_sensitive_vault',
   'conversations', 'messages', 'notifications', 'audit_log',
-  'emails', 'email_messages', 'estimates', 'estimate_deposits', 'invoices', 'payments', 'payment_methods', 'payers', 'setup_fee_claims', 'scheduled_services', 'job_status_history', 'reschedule_log', 'system_settings', 'leads', 'messaging_audit_log'];
+  'emails', 'email_messages', 'estimates', 'estimate_deposits', 'invoices', 'payments', 'payment_methods', 'payers', 'setup_fee_claims', 'annual_prepay_terms', 'scheduled_services', 'job_status_history', 'reschedule_log', 'system_settings', 'leads', 'messaging_audit_log'];
 let mockPg;
 let admin;
 let message;
@@ -2297,6 +2297,37 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(text[reconciledPaid.id]).toContain('Payment of $125.00 by Zelle toward invoice WPC-2026-0997');
     expect(text[settling.id]).toContain('Payment of $75.00 by check toward invoice WPC-2026-0998');
     expect(text[installment.id]).toContain('Payment of $50.00 toward invoice WPC-2026-0998');
+  });
+
+  test('Codex #4996 r10: an annual-prepay invoice takes its property from the estimate its term came from, and a scoped close holds the term and that estimate', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const propertyId = context.properties[0].id;
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: propertyId,
+      status: 'accepted', service_interest: 'Pest Control' }).returning('id');
+    // No visit and no setup-fee claim: only the term ties this invoice to a property.
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-1002',
+      title: 'Annual prepay', total: 600, subtotal: 600, line_items: '[]', status: 'paid', paid_at: after }).returning('id');
+    const [term] = await mockPg('annual_prepay_terms').insert({ customer_id: message.customer_id, term_start: '2026-10-01', term_end: '2027-09-30',
+      source_estimate_id: estimate.id, prepay_invoice_id: invoice.id }).returning('id');
+    const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 600, status: 'paid', payment_date: etDateString(after),
+      created_at: after, metadata: JSON.stringify({ invoice_id: invoice.id, settled_event_at: after.toISOString() }) }).returning('id');
+    const commitment = { kind: 'other', description: 'Did my annual payment go through?', sms_context: { property_id: propertyId, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const witness = evidence.records.find((r) => r.id === payment.id);
+    expect(witness).toMatchObject({ invoice_id: invoice.id, property_id: propertyId });
+    expect(admissibleWitness(witness, commitment)).toBe(true);
+    const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
+    const verdict = { ...grounded, evidence_hash: fulfillmentFingerprint(commitment, evidence).evidenceHash };
+    const closes = () => mockPg.transaction((trx) => revalidateSmsFulfillment(trx, commitment, message, verdict, now));
+    expect(await closes()).toBe(true);
+    for (const [table, id] of [['annual_prepay_terms', term.id], ['estimates', estimate.id]]) {
+      const writer = await mockPg.transaction();
+      try {
+        await writer(table).where({ id }).forUpdate().first('id');
+        expect(await closes()).toBe(false);
+      } finally { await writer.rollback(); }
+    }
   });
 
   test('Codex #4996 r9 review: a payment naming its invoice stays on it even when another invoice\'s manual stamp shares its instant', async () => {

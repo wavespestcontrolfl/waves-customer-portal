@@ -349,10 +349,14 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .leftJoin('scheduled_services as pinv_visit', 'pinv_visit.id', 'pinv.scheduled_service_id')
           // A setup-only invoice from an estimate has no visit; its setup-fee
           // claim (one per invoice) keeps the estimate, and so the property
-          // (Codex #4996 r5). A property-scoped close holds each of these
-          // rows (holdsPaymentProperty).
+          // (Codex #4996 r5). So does an annual-prepay invoice through its
+          // term (one per invoice) and the estimate the term came from (r10).
+          // A property-scoped close holds each of these rows
+          // (holdsPaymentProperty).
           .leftJoin('setup_fee_claims as sfc', 'sfc.invoice_id', 'pinv.id')
           .leftJoin('estimates as sfc_estimate', 'sfc_estimate.id', 'sfc.estimate_id')
+          .leftJoin('annual_prepay_terms as prepay_term', 'prepay_term.prepay_invoice_id', 'pinv.id')
+          .leftJoin('estimates as prepay_estimate', 'prepay_estimate.id', 'prepay_term.source_estimate_id')
           .leftJoin('payment_methods as p_method', 'p_method.id', 'p.payment_method_id')
           .where({ 'p.customer_id': customerId })
           // A prepayment applied at completion books the visit's prepaid
@@ -370,7 +374,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .select('p.id', 'p.amount as payment_amount', 'p.base_amount_cents', 'p.surcharge_amount_cents', 'p.refund_amount',
             ...tenderColumns(conn, 'p', invoiceTender),
             conn.raw(`${settledAtSql} AS settled_at`), 'pinv.id as invoice_id', 'pinv.title', 'pinv.service_type', 'pinv.invoice_number',
-            conn.raw('COALESCE(pinv_visit.property_id, sfc_estimate.property_id) AS property_id'),
+            conn.raw('COALESCE(pinv_visit.property_id, sfc_estimate.property_id, prepay_estimate.property_id) AS property_id'),
             conn.raw('COALESCE(p.stripe_payment_intent_id, p.id::text) AS charge_key'),
             conn.raw('pinv.paid_at IS NOT NULL AS paid_in_full'))
           .as('invoice_payments'))
@@ -827,22 +831,30 @@ async function holdsLeadOwnership(trx, estimateId, customerId) {
 }
 
 // A property-scoped ask admits an invoice payment through the property of
-// the invoice's own visit or, for a setup-only invoice, of the estimate its
-// setup-fee claim names. Those rows can change under a close (a geocode
-// review repoints a visit), so they are held too, under the same no-wait
-// rule: a busy row fails the close rather than let it rest on a property
-// association that moved after the re-read (Codex #4996 r9). The invoice is
-// already held, so its visit link cannot change.
+// the invoice's own visit or, when it has none, of the estimate its
+// setup-fee claim or annual-prepay term came from. Those rows can change
+// under a close (a geocode review repoints a visit), so they are held too,
+// under the same no-wait rule: a busy row fails the close rather than let it
+// rest on a property association that moved after the re-read (Codex #4996
+// r9). The invoice is already held, so its visit link cannot change.
+const ESTIMATE_PROPERTY_LINKS = [
+  { table: 'setup_fee_claims', invoiceColumn: 'invoice_id', estimateColumn: 'estimate_id' },
+  { table: 'annual_prepay_terms', invoiceColumn: 'prepay_invoice_id', estimateColumn: 'source_estimate_id' },
+];
 async function holdsPaymentProperty(trx, invoiceId) {
   const invoice = await trx('invoices').where({ id: invoiceId }).first('scheduled_service_id');
   if (!invoice) return false;
   if (invoice.scheduled_service_id
     && !await trx('scheduled_services').where({ id: invoice.scheduled_service_id }).forUpdate().skipLocked().first('id')) return false;
-  const claim = await trx('setup_fee_claims').where({ invoice_id: invoiceId }).first('id');
-  if (!claim) return true;
-  const heldClaim = await trx('setup_fee_claims').where({ id: claim.id }).forUpdate().skipLocked().first('estimate_id');
-  if (!heldClaim) return false;
-  return !heldClaim.estimate_id || !!await trx('estimates').where({ id: heldClaim.estimate_id }).forUpdate().skipLocked().first('id');
+  // Each link row (one per invoice), then the estimate it names.
+  for (const { table, invoiceColumn, estimateColumn } of ESTIMATE_PROPERTY_LINKS) {
+    const link = await trx(table).where({ [invoiceColumn]: invoiceId }).first('id');
+    if (!link) continue;
+    const held = await trx(table).where({ id: link.id }).forUpdate().skipLocked().first(estimateColumn);
+    if (!held) return false;
+    if (held[estimateColumn] && !await trx('estimates').where({ id: held[estimateColumn] }).forUpdate().skipLocked().first('id')) return false;
+  }
+  return true;
 }
 
 // The provider runs outside the transaction. Lock its actual witness and

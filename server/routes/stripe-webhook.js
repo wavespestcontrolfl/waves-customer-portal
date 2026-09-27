@@ -1892,6 +1892,24 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         // chargeback back to paid (dispute resolution owns that row now).
         if (!['paid', 'refunded', 'disputed'].includes(existingPayment.status)) {
           await trx('payments').where({ id: existingPayment.id }).update(paymentUpdates);
+        } else if (existingPayment.status === 'paid' && eventCreated && isBankMethodType(details.paymentMethod)) {
+          // /confirm can promote a bank (ACH) row from processing to paid
+          // when it sees the PaymentIntent succeed before this event lands;
+          // it has no Stripe settlement time, so the row keeps only its
+          // initiation time and the confirm day. Stamp this event's moment
+          // and its cash-basis day, as the processing flip above does, and
+          // touch updated_at so the readers that watch the row (the
+          // billing-cron pause veto, the SMS commitment event page) see the
+          // settlement. A row already stamped (or a replay) matches nothing.
+          const settledAt = new Date(eventCreated * 1000);
+          await trx('payments').where({ id: existingPayment.id })
+            .whereRaw("COALESCE(metadata ->> 'settled_event_at', '') = ''")
+            .update({
+              updated_at: new Date(),
+              payment_date: etDateString(settledAt),
+              metadata: trx.raw(`jsonb_set(COALESCE(metadata, '{}'::jsonb), '{settled_event_at}', to_jsonb(?::text))`,
+                [settledAt.toISOString()]),
+            });
         }
         return;
       }
