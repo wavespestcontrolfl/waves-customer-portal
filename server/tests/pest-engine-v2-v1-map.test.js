@@ -97,6 +97,9 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     ['golden-silk-orbweaver', 'orb-weavers', {
       line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false,
     }, 'low'],
+    ['two-striped-walkingstick', 'irritant-walkingsticks', {
+      line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false,
+    }, 'low'],
   ])('a singleton draft %s retains its source-backed service contract at %s', (
     slug, nodeId, service, urgency,
   ) => {
@@ -128,6 +131,7 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     ['hammerhead-flatworm', 'toxic-flatworms', /do not handle it bare-handed.+wash hands/i],
     ['yellow-sac-spider', 'medical-sac-spiders', /mild pain and itching.+see a doctor/i],
     ['velvet-ant', 'allergy-risk-velvet-ants', /sting can be extremely painful.+allergic reaction/i],
+    ['two-striped-walkingstick', 'irritant-walkingsticks', /eye burning.+reaches an eye.+rinse it.+right away/i],
   ])('a draft %s retains source-backed exposure guidance at %s', (slug, nodeId, safety) => {
     const built = answerFor(slug, { approved: false });
     expect(built).toMatchObject({
@@ -211,6 +215,34 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     expect(mapToV1(built).report_contract).toMatchObject({
       safety: { stinging: true, venomous: true }, urgency: 'low',
       service: { line: 'pest', key: 'pest', label: 'General Pest Control', inspection_required: false },
+    });
+  });
+
+  test('a draft Hentz fallback shows only its shared genus metadata', () => {
+    const built = answerFor('hentz-striped-scorpion', { approved: false });
+    expect(built).toMatchObject({
+      answer: { node_id: 'allergy-risk-scorpions', subhead: 'Centruroides' },
+      entry: null,
+    });
+    expect(built.answer.subhead).not.toMatch(/hentzi/i);
+  });
+
+  test('a mixed walkingstick result cannot borrow the eye-spray fallback', () => {
+    const built = buildAnswer({
+      candidates: [
+        { ...candidate('two-striped-walkingstick', { approved: false }), confidence: 0.55 },
+        { ...candidate('carolina-mantis', { approved: false }), confidence: 0.35 },
+      ],
+      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
+      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+    });
+    expect(built).toMatchObject({
+      answer: { level: 'group', node_id: 'other-insects' }, entry: null,
+      genericSafetyLine: null,
+    });
+    expect(mapToV1(built).report_contract).toMatchObject({
+      urgency: 'low',
+      service: { line: 'none', key: null, label: 'No Treatment Needed', inspection_required: false },
     });
   });
 

@@ -67,6 +67,9 @@ neutral rash guidance. The native-toad singleton keeps neutral pet-exposure
 guidance. Cuban treefrog uncertainty stops at a dedicated child node that
 keeps its neutral skin, airway, and pet-exposure guidance; a mixed result with
 a native treefrog stops at the parent and cannot borrow those narrower facts.
+Two-striped walkingstick uncertainty likewise keeps immediate eye-rinse advice
+at a narrow defensive-spray child; a mixed insect result stays at the neutral
+parent and does not inherit that exposure warning.
 The same rule applies to the catalog-wide generic audit: shared plant-care,
 general-pest, bed-bug, no-treatment, and wildlife routing lives only on nodes
 whose represented entries all support it. Source-backed bite, sting, skin,
@@ -81,7 +84,7 @@ entry-level name; a no-treatment contract is not inferred from one candidate.
 
 - `index.json` — `catalog_version`, `section` ("pest" — this catalog does not
   yet cover the lawn or tree & shrub photo ID sections), the five
-  `categories`, the 29 `groups` and 74 `subgroups`, `look_alike_groups`
+  `categories`, the 29 `groups` and 75 `subgroups`, `look_alike_groups`
   (group-level look-alike notes,
   e.g. ants vs. termites), `legacy_slug_map` (every v1 `PEST_LIBRARY` slug →
   a v2 catalog node — see below), and `planned_slugs` (see "Cross-worker

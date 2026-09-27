@@ -2267,12 +2267,40 @@
       }
     },
     {
+      "id": "irritant-walkingsticks",
+      "group": "other-insects",
+      "label": "Defensive-spray Walkingsticks",
+      "generic": "a defensive-spray walkingstick",
+      "scientific": "Anisomorpha",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the back stripes and full body. Do not approach, touch, or handle it.",
+        "why": "Back stripes and body shape help distinguish defensive-spray walkingsticks."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "irritant": true
+          },
+          "serviceLine": "none",
+          "serviceKey": null,
+          "serviceLabel": "No Treatment Needed",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Defensive spray can cause intense eye burning. Do not handle it. If the spray reaches an eye, rinse it with plenty of water right away.",
+        "sources": [
+          "https://edis.ifas.ufl.edu/publication/IN590"
+        ]
+      }
+    },
+    {
       "id": "allergy-risk-scorpions",
       "group": "scorpions-arachnids",
       "label": "Allergy-risk Scorpions",
       "generic": "a small striped scorpion",
-      "scientific": "Centruroides hentzi",
-      "rank": "species",
+      "scientific": "Centruroides",
+      "rank": "genus",
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the body stripes and tail. Do not approach, touch, or handle it.",
         "why": "Body markings and tail shape help separate Florida scorpions."
@@ -2360,6 +2388,10 @@
       "group": "wasps-bees",
       "label": "Allergy-risk Velvet Ants",
       "generic": "a wingless wasp",
+      "aliases": [
+        "velvet ant",
+        "velvet ants"
+      ],
       "scientific": "Mutillidae",
       "rank": "family",
       "next_photo": {
@@ -2389,6 +2421,10 @@
       "group": "scorpions-arachnids",
       "label": "Centruroides Scorpions",
       "generic": "a scorpion",
+      "aliases": [
+        "bark scorpion",
+        "bark scorpions"
+      ],
       "scientific": "Centruroides",
       "rank": "genus",
       "next_photo": {

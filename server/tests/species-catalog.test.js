@@ -358,7 +358,7 @@ describe('owner approval content binding', () => {
 
 describe('index.json — groups, subgroups, next_photo', () => {
   test('every group and subgroup has an ask/why next_photo within its length caps', () => {
-    expect(index.subgroups).toHaveLength(74);
+    expect(index.subgroups).toHaveLength(75);
     for (const g of index.groups) {
       expect(g.next_photo.ask.length).toBeLessThanOrEqual(180);
       expect(g.next_photo.why.length).toBeLessThanOrEqual(160);
@@ -590,7 +590,7 @@ describe('resolveName regressions', () => {
     },
   );
 
-  test.each(['scorpion', 'scorpions', 'Centruroides'])(
+  test.each(['scorpion', 'scorpions', 'bark scorpion', 'bark scorpions', 'Centruroides'])(
     'generic %s stays at the neutral Centruroides parent', (name) => {
       expect(catalog.resolveName(name)?.node.id).toBe('centruroides-scorpions');
     },
@@ -605,12 +605,32 @@ describe('resolveName regressions', () => {
   );
 
   test('an exact species taxon reaches its entry while shared situation taxa stay neutral', () => {
+    for (const name of ['Florida bark scorpion', 'Florida bark scorpions']) {
+      expect(catalog.resolveName(name)).toMatchObject({ node: { slug: 'florida-bark-scorpion' } });
+    }
+    expect(catalog.resolveName('Hentz striped scorpion')).toMatchObject({
+      node: { slug: 'hentz-striped-scorpion' },
+    });
     expect(catalog.resolveName('Centruroides hentzi')).toMatchObject({
       via: 'scientific', node: { slug: 'hentz-striped-scorpion' },
     });
     expect(catalog.resolveName('Centruroides')?.node.id).toBe('centruroides-scorpions');
     expect(catalog.resolveName('Apis mellifera')?.node.id).toBe('bees');
   });
+
+  test.each(['velvet ant', 'velvet ants'])(
+    'bare %s stays at the velvet-ant family fallback', (name) => {
+      expect(catalog.resolveName(name)).toMatchObject({
+        via: 'node', node: { level: 'subgroup', id: 'allergy-risk-velvet-ants' },
+      });
+    },
+  );
+
+  test.each(['cow killer', 'cow killers', 'Dasymutilla occidentalis'])(
+    '%s retains the specific velvet-ant entry', (name) => {
+      expect(catalog.resolveName(name)).toMatchObject({ node: { slug: 'velvet-ant' } });
+    },
+  );
 
   test.each(['alate', 'alates'])('generic %s does not claim an ant or termite identification', (name) => {
     expect(catalog.resolveName(name)).toBeNull();
@@ -679,6 +699,9 @@ describe('resolveName regressions', () => {
 
   test('never a false substring match (the "walkingstick"/"antenna" class)', () => {
     expect(catalog.resolveName('walkingstick')).toBeNull();
+    expect(catalog.resolveName('two-striped walkingstick')).toMatchObject({
+      node: { slug: 'two-striped-walkingstick' },
+    });
     expect(catalog.resolveName('antenna')).toBeNull();
   });
 
