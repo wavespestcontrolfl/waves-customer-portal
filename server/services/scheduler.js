@@ -149,6 +149,15 @@ function classifyDepositReplayFallback(fb = {}) {
   return 'retry';
 }
 
+// Whether the inventory agent's own summary line is worth logging: any
+// outcome for a person to see, INCLUDING a run where every line is still
+// retrying (2026-09-27 review — a run that only bumped attempt counts, e.g.
+// every line hit a transient LLM failure, used to log nothing at all). A
+// truly silent tick is one where nothing happened in any of these buckets.
+function shouldLogInventoryAgentSummary(agentResult) {
+  return Boolean(agentResult.logged || agentResult.held || agentResult.ignored || agentResult.stillPending || agentResult.errors);
+}
+
 function scheduledSmsAttemptSql() {
   return `
     CASE
@@ -2502,7 +2511,7 @@ function initScheduledJobs() {
         if (gateEnvValue('GATE_INVENTORY_AGENT')) {
           const { runInventoryAgent } = require('./purchase-receipts/inventory-agent');
           const agentResult = await runInventoryAgent();
-          if (!agentResult.skipped && (agentResult.logged || agentResult.held || agentResult.ignored || agentResult.errors)) {
+          if (!agentResult.skipped && shouldLogInventoryAgentSummary(agentResult)) {
             logger.info(`[inventory-agent] ${agentResult.logged} logged, ${agentResult.held} held for a person, `
               + `${agentResult.ignored} ignored, ${agentResult.stillPending} still pending, ${agentResult.errors} error(s)`);
           }
@@ -7299,6 +7308,7 @@ module.exports = {
   scheduledDepositReceiptAllowed,
   classifyDepositReplayFallback,
   holdFinalReviewUncertainty,
+  shouldLogInventoryAgentSummary,
   recoverStaleScheduledSmsClaims,
   runContentRegistryMaintenance,
   runAutonomousOpportunityMining,
