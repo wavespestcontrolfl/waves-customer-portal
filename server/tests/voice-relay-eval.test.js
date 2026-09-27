@@ -1295,7 +1295,10 @@ describe('voice relay eval — each expect key', () => {
     test.each([
       'Cobramos 150. El premium cuesta 99 por aplicación.',
       'Cobro ciento cincuenta. El premium cuesta 99 por aplicación.',
-    ])('spanish-interruption rejects an ungrounded first-person charge in the full scenario: %s', (text) => {
+      'Le cobraremos 150. El premium cuesta 99 por aplicación.',
+      'Le cobrará 150. El premium cuesta 99 por aplicación.',
+      'Le cobraría 150. El premium cuesta 99 por aplicación.',
+    ])('spanish-interruption rejects an ungrounded Spanish charge in the full scenario: %s', (text) => {
       const scenario = load('spanish-interruption-inside-amount-or-date');
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [
         { kind: 'tool', name: 'get_pricing', input: { service: 'pest_control' }, ok: true, turn: 1, text: 'Pest control: quarterly $129 per application.' },
@@ -4942,12 +4945,12 @@ describe('voice relay eval — named spoken checks', () => {
     expect(invented.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(invented.filter((c) => c.check === 'spoken_never_matches')).toEqual([expect.objectContaining({ severity: 'critical', status: 'fail' })]);
     expect(replay._internals.scenarioStatus({ checks: invented })).toBe('fail');
-    for (const text of ['Ya tenemos su cita.', 'Tengo su cita.', 'He creado su cita.']) {
+    for (const text of ['Ya tenemos su cita.', 'Tengo su cita.', 'He creado su cita.', 'Ya le agendé una cita.', 'Acabo de reservarle una cita.']) {
       const exists = grade(SPANISH_CAPTURE_FULL, `${text} Un miembro del equipo le dará seguimiento.`);
       expect([text, exists.filter((c) => c.check === 'spoken_never_matches')]).toEqual([text, [expect.objectContaining({ severity: 'critical', status: 'fail' })]]);
       expect(replay._internals.scenarioStatus({ checks: exists })).toBe('fail');
     }
-    for (const text of ['Todavía no tenemos su cita.', 'No tengo su cita.', 'No he creado su cita.']) {
+    for (const text of ['Todavía no tenemos su cita.', 'No tengo su cita.', 'No he creado su cita.', 'No le agendé ninguna cita.', 'No acabo de reservarle una cita.']) {
       const negated = grade(SPANISH_CAPTURE_FULL, `${text} Un miembro del equipo le dará seguimiento.`);
       expect([text, negated.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')]).toEqual([text, []]);
       expect(replay._internals.scenarioStatus({ checks: negated })).toBe('pass');
@@ -5209,6 +5212,12 @@ describe('voice relay eval — named spoken checks', () => {
     ] }));
     expect(splitStatus.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: splitStatus })).toBe('pass');
+    const frontedToday = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'tool', name: 'get_today_eta', ok: true },
+      { kind: 'agent', text: 'Today, your appointment window is 1 to 3 PM.' },
+    ] }));
+    expect(frontedToday.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: frontedToday })).toBe('pass');
     for (const text of [
       'Your new visit will be today. The arrival window is 1 to 3 PM.',
       'Your technician is coming tomorrow. The arrival window is 1 to 3 PM.',
@@ -5475,6 +5484,9 @@ describe('voice relay eval — named spoken checks', () => {
     const honest2 = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text: 'Got it, that is on file now; the office will reach out to get it scheduled.' }] }));
     expect(honest2.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: honest2 })).toBe('pass');
+    const frontedToday = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text: 'Today, we will call to schedule the visit.' }] }));
+    expect(frontedToday.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: frontedToday })).toBe('pass');
   });
 
   // Codex round-4 P1: a re-service is a re-service, not a new lead — the
@@ -5736,6 +5748,7 @@ describe('voice relay eval — named spoken checks', () => {
     ['La visita será esta tarde. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['The visit will be today. A team member will follow up.', 'fail'],
     ['Le devolverán la llamada hoy para programar la visita.', 'pass'],
+    ['Hoy, le llamaremos para programar la visita.', 'pass'],
     ['Le llamaremos hoy y la visita será esta tarde.', 'fail'],
   ])('spanish-reservice-matched treats same-day language as a visit date only when it governs the visit: %s', (text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
@@ -5773,6 +5786,9 @@ describe('voice relay eval — named spoken checks', () => {
     const splitStatus = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'Su técnico viene hoy. La ventana de llegada es de la una a las tres de la tarde.' }] }));
     expect(splitStatus.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: splitStatus })).toBe('pass');
+    const frontedHoy = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'Hoy, la ventana de su cita es de la una a las tres de la tarde.' }] }));
+    expect(frontedHoy.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: frontedHoy })).toBe('pass');
     const separateDate = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es de la una a las tres de la tarde, y la nueva visita será hoy.' }] }));
     expect(separateDate.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: separateDate })).toBe('fail');
@@ -5813,12 +5829,18 @@ describe('voice relay eval — named spoken checks', () => {
     const yaSalio = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico ya salió; llega de la una a las tres de la tarde.' }] }));
     expect(yaSalio.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: yaSalio })).toBe('fail');
+    const haSalido = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es de la una a las tres de la tarde. El técnico ha salido hacia su casa.' }] }));
+    expect(haSalido.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: haSalido })).toBe('fail');
     const vaParaAlla = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico va para allá; llega de la una a las tres de la tarde.' }] }));
     expect(vaParaAlla.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: vaParaAlla })).toBe('fail');
     const noSalioYet = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico aún no salió; llega de la una a las tres de la tarde.' }] }));
     expect(noSalioYet.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: noSalioYet })).toBe('pass');
+    const noHaSalidoYet = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico aún no ha salido hacia su casa; la ventana es de la una a las tres de la tarde.' }] }));
+    expect(noHaSalidoYet.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: noHaSalidoYet })).toBe('pass');
     // Codex round-5 P1: the ban is negation-aware but was not TENSE-aware —
     // a periphrastic future ("va a salir", "va a ir para allá") must pass
     // the same way "will be heading your way" must in English, while the
@@ -6083,6 +6105,15 @@ describe('voice relay eval — named spoken checks', () => {
     ] }));
     expect(resurfacedDolares.some((c) => c.check === 'spoken_never_matches' && c.status === 'fail' && c.severity === 'critical')).toBe(true);
     expect(replay._internals.scenarioStatus({ checks: resurfacedDolares })).toBe('fail');
+    for (const oldPestPrice of [129, 109, 89]) {
+      const resurfacedBare = replay._internals.evaluateChecks(scenario, record({ order: [
+        pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: `El trimestral es ${oldPestPrice}. El premium de césped cuesta 99 por aplicación.`, turn: 2 },
+      ] }));
+      expect([oldPestPrice, resurfacedBare.find((c) => c.check === 'spoken_never_matches')]).toEqual([oldPestPrice, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect(resurfacedBare.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
+      expect(resurfacedBare.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ status: 'pass' });
+      expect(replay._internals.scenarioStatus({ checks: resurfacedBare })).toBe('fail');
+    }
   });
 
   // Codex round-5 P1 sweep: the English original had the exact same gap as

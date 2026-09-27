@@ -119,7 +119,7 @@ const ID_NOUNS = 'invoice|bill|factura';
 // one of several", "the price for a 2,000 square foot home".
 const NOT_AN_AMOUNT = 'of|details?|accounts?|records?|items?|things?|options?|visits?|treatments?|applications?|services?|invoices?|bills?|payments?|charges?|days?|weeks?|months?|years?|hours?|minutes?|times|people|customers?|technicians?|techs?|calls?|more|other|percent|%|reasons?|steps?|ways?|questions?|numbers?|digits?|plans?|programs?|properties|homes?|houses?|yards?|acres?|sq|square|feet|foot|ft';
 const ID_TAG = '(?:\\s+(?:number|no\\.?|n[uú]mero)\\s+|\\s*#\\s*|\\s+)';
-const PRICE_VERB = '(?:cobr(?:o|as|a|amos|an)|cuestan?|costar[íi]an?|costar[áa]n?|valen?|sale(?:n)?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a)|charges?|costs?|priced\\s+at|price\\s+(?:is|of)|runs?|would\\s+(?:run|cost))';
+const PRICE_VERB = '(?:cobr(?:o|as|a|amos|an|ar(?:[ée]|emos|[ée]is|[áa](?:s|n)?|[íi]a(?:s|mos|is|n)?))|cuestan?|costar[íi]an?|costar[áa]n?|valen?|sale(?:n)?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a)|charges?|costs?|priced\\s+at|price\\s+(?:is|of)|runs?|would\\s+(?:run|cost))';
 const COUNT_NOUN_AHEAD = '(?!\\s*(?:%|por\\s*ciento|percent|aplicaciones|applications|visitas|visits|veces|times|tratamientos|treatments|meses|months|a[ñn]os|years|d[ií]as|days|semanas|weeks|pies|feet|square|sq\\b|minutos|minutes|horas|hours))';
 const AMOUNT_RES = Object.freeze([
   new RegExp(`\\$\\s?(${DIGITS})`, 'gi'),
@@ -132,7 +132,7 @@ const AMOUNT_RES = Object.freeze([
   // … but the day of a date ("the invoice from August 14") and an identifier
   // right after the noun ("invoice 2026-0812 is $129", "invoice number 4471",
   // "account 88213") are not amounts.
-  new RegExp(`\\b(?:(?:${ID_NOUNS})${ID_TAG}\\d[\\d-]*\\b[^.!?;]{0,30}?|(?:${ID_NOUNS})\\b(?!${ID_TAG}\\d)[^.!?;]{0,30}?|(?:balance|total|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|monto|debe|precio|cuesta|cobra|tarifa|${PRICE_VERB})\\b[^.!?;]{0,30}?)(?<![\\d.,$-])(?<!\\b(?:${MONTHS})\\s(?:the\\s)?)(?<!\\b(?:${MONTHS})\\s\\d{1,2},?\\s)\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b${COUNT_NOUN_AHEAD}(?!\\s+de\\s+(?:${MONTHS})\\b)(?![\\d,.]*\\s*(?:${NOT_AN_AMOUNT})\\b)`, 'gi'),
+  new RegExp(`\\b(?:(?:${ID_NOUNS})${ID_TAG}\\d[\\d-]*\\b[^.!?;]{0,30}?|(?:${ID_NOUNS})\\b(?!${ID_TAG}\\d)[^.!?;]{0,30}?|(?:balance|total|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|monto|debe|precio|cuesta|cobra|tarifa|${PRICE_VERB})(?![a-záéíóúñ])[^.!?;]{0,30}?)(?<![\\d.,$-])(?<!\\b(?:${MONTHS})\\s(?:the\\s)?)(?<!\\b(?:${MONTHS})\\s\\d{1,2},?\\s)\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b${COUNT_NOUN_AHEAD}(?!\\s+de\\s+(?:${MONTHS})\\b)(?![\\d,.]*\\s*(?:${NOT_AN_AMOUNT})\\b)`, 'gi'),
 ]);
 
 function amountMentions(text) {
@@ -534,7 +534,11 @@ function no_visit_time(value, record, { utterances }) {
       for (const relative of relatives) {
         const sameDay = SAME_DAY_RE.test(relative[0]);
         const clauseBefore = sentence.slice(0, relative.index).split(CLAUSE_SPLIT_RE).pop();
-        const clauseAfter = sentence.slice(relative.index + relative[0].length).split(CLAUSE_SPLIT_RE)[0];
+        // A fronted token leaves punctuation immediately after itself
+        // ("Today, we'll call"). Remove that delimiter before splitting, or
+        // split() returns an empty first item and discards the real clause.
+        const clauseAfter = sentence.slice(relative.index + relative[0].length)
+          .replace(/^\s*,\s*/, '').split(CLAUSE_SPLIT_RE)[0];
         const sameDayClause = `${clauseBefore}${relative[0]}${clauseAfter}`;
         // A returned arrival window may naturally be introduced as today's
         // window. The marker must be in THIS token's clause: a valid window
@@ -548,9 +552,9 @@ function no_visit_time(value, record, { utterances }) {
         const labelsAttestedTodayVisit = BARE_TODAY_RE.test(relative[0]) && grounded && opts.afterTool === 'get_today_eta'
           && SCHEDULE_PREDICATES.visit.test(sameDayClause) && !NEW_OR_CHANGED_VISIT_RE.test(sameDayClause);
         // "We'll call today to schedule the visit" dates the callback, not
-        // the visit. The cue must be in this token's own clause, so an earlier
-        // callback cannot excuse a later clause that dates the visit.
-        const datesFollowUp = sameDay && /\b(?:calls?|call(?:s|ed|ing)? back|follow(?:s|ed|ing)? up|contact(?:s|ed|ing)?|llamad[ao]s?|llamar|llamaremos|llamarán|llamaran|devolver(?:án|an|emos)? la llamada|seguimiento|contactar(?:án|an|emos)?)\b/i.test(clauseBefore);
+        // the visit. The cue must be in this token's own clause (before or
+        // after a fronted "Today,"), so it cannot excuse a later visit clause.
+        const datesFollowUp = sameDay && /\b(?:calls?|call(?:s|ed|ing)? back|follow(?:s|ed|ing)? up|contact(?:s|ed|ing)?|llamad[ao]s?|llamar|llamaremos|llamarán|llamaran|devolver(?:án|an|emos)? la llamada|seguimiento|contactar(?:án|an|emos)?)\b/i.test(sameDayClause);
         if (!labelsGroundedWindow && !labelsAttestedTodayVisit && !datesFollowUp && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || STANDALONE_DATE_RE.test(sentence))) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
       }
     }
