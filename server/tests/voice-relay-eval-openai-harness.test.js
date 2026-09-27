@@ -90,6 +90,35 @@ describe('installHarness — OpenAI relay client instrumentation', () => {
     });
   });
 
+  test('a completed OpenAI round with a malformed usage object is marked incomplete, not free', async () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const h = replay.installHarness();
+    const { OpenAIRelayClient } = require('../services/voice-agent/relay-openai-client');
+    const client = new OpenAIRelayClient({
+      apiKey: 'x',
+      fetchImpl: fetchStub([
+        { type: 'response.completed', response: { id: 'r-bad-usage', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'hi' }] }], usage: {} } },
+      ]),
+    });
+    const record = {
+      modelCalls: 0, modelRounds: 0, modelErrors: [], modelAborts: 0, injected: [], interruptInFlight: false,
+      usage: { input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, rounds: 0, cacheReadRounds: 0, incompleteRounds: 0 },
+    };
+    h.state.record = record;
+    h.state.modelFailuresLeft = 0;
+
+    const msg = await client.messages.stream({ model: 'gpt-6-sol', messages: [] }, {}).finalMessage();
+
+    expect(msg.usage).toEqual({
+      input_tokens: null, cache_read_input_tokens: null, cache_creation_input_tokens: null, output_tokens: null,
+    });
+    expect(record.modelRounds).toBe(1);
+    expect(record.usage).toEqual({
+      input_tokens: 0, output_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0,
+      rounds: 0, cacheReadRounds: 0, incompleteRounds: 1,
+    });
+  });
+
   test('fixtures.modelFailures fault injection works on the OpenAI client exactly like the Anthropic one', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const h = replay.installHarness();
