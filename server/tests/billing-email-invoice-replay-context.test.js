@@ -48,6 +48,14 @@ describe('direct invoice Email replay context', () => {
     expect(buildBillingReplayContext(scheduled('invoice_send_deferred'), context, eventKey)).toBeNull();
   });
 
+  // Only a queued text whose own finalize marks the delivery may reach an
+  // invoice not yet marked sent (invoice-send-replay-eligibility). A stored
+  // Email context must never carry that exemption.
+  test('a stored context drops the queued-text delivery flag', () => {
+    const context = sanitizeBillingReplayContext({ ...expected('invoice_send_deferred'), mark_invoice_delivery: true });
+    expect(context).toEqual(expected('invoice_send_deferred'));
+  });
+
   test('collections sources still require their reservation id', () => {
     expect(sanitizeBillingReplayContext({
       ...expected('late_payment_checker'), category: 'invoice',

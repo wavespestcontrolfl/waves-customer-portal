@@ -52,25 +52,54 @@ beforeEach(() => {
   query = {};
   query.where = jest.fn(() => query);
   query.update = jest.fn(() => query);
-  query.first = jest.fn(async () => ({ id: 'existing-alert' }));
+  query.first = jest.fn(async () => storedMessage({ status: 'sent', sent_at: new Date() }));
+  query.whereNotNull = jest.fn(() => query);
   query.whereRaw = jest.fn(() => query);
+  query.whereIn = jest.fn(() => query);
+  query.forUpdate = jest.fn(() => query);
   query.returning = jest.fn(async () => [storedMessage({ status: 'sent', sent_at: new Date() })]);
   query.then = (resolve, reject) => Promise.resolve(1).then(resolve, reject);
   db.mockReturnValue(query);
   db.raw = jest.fn((sql) => sql);
   db.transaction = jest.fn(async (callback) => callback(db));
   heldDatabase = jest.fn();
+  heldDatabase.mockReturnValue(query);
+  heldDatabase.raw = db.raw;
   templates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'billing.notice' } });
   templates.activeSuppressionFor.mockResolvedValue(null);
   sendgrid.clearBlockedAddress.mockResolvedValue({ cleared: true });
-  sendgrid.sendOne.mockResolvedValue({ messageId: 'provider-2' });
+  sendgrid.sendOne.mockImplementation(async (options) => {
+    if (typeof options.providerBoundaryCheck === 'function') {
+      await options.providerBoundaryCheck({ database: options.database });
+    }
+    return { messageId: 'provider-2' };
+  });
   sendgrid.isDefiniteRejection.mockReturnValue(false);
   billingEmailReplayEligible.mockResolvedValue({ eligible: true });
   authority.dispatchUnderBillingEmailAuthority.mockImplementation(async (options) => {
-    const checked = await options.preSendCheck({ database: heldDatabase });
-    if (!checked.ok) { options.state.boundaryBlock = checked; return { ok: false }; }
-    options.state.handoffStarted = true;
-    await options.dispatch(heldDatabase);
+    const initial = await options.preSendCheck({ database: heldDatabase, providerBoundary: false });
+    if (!initial.ok) {
+      options.state.boundaryBlock = initial;
+      return { ok: false };
+    }
+    const providerBoundaryCheck = async ({ database }) => {
+      let checked;
+      try {
+        checked = await options.preSendCheck({ database, providerBoundary: true });
+      } catch (err) {
+        checked = { ok: false, code: err.code, reason: err.message, retryable: err.retryable };
+      }
+      if (!checked.ok) {
+        options.state.boundaryBlock = checked;
+        throw Object.assign(new Error(checked.reason), {
+          code: checked.code, retryable: checked.retryable, providerBoundaryBlocked: true,
+        });
+      }
+      options.state.handoffStarted = true;
+      return { ok: true };
+    };
+    await options.dispatch(heldDatabase, providerBoundaryCheck);
+    if (options.state.boundaryBlock) return { ok: false };
     options.state.providerAccepted = true;
     return { ok: true };
   });
@@ -84,9 +113,11 @@ test('replays a no-phone billing Email only after locked eligibility and reuses 
   expect(billingEmailReplayEligible).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'customer-1' }), heldDatabase);
   expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
   expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
-    to: stored.recipient_email_snapshot, html: stored.html_snapshot, text: stored.text_snapshot, database: heldDatabase,
+    to: stored.recipient_email_snapshot, html: stored.html_snapshot, text: stored.text_snapshot,
+    database: heldDatabase, providerBoundaryCheck: expect.any(Function),
   }));
   expect(billingEmailReplayEligible.mock.invocationCallOrder[0]).toBeLessThan(sendgrid.clearBlockedAddress.mock.invocationCallOrder[0]);
+  expect(billingEmailReplayEligible).toHaveBeenCalledTimes(2);
   expect(reservation.markBillingEmailReservationDelivered).toHaveBeenCalledWith(result.message);
 });
 
@@ -103,11 +134,12 @@ test.each([
   expect(query.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked', provider_retry_next_at: null }));
 });
 
-test('a stale producer reason terminates its Email without clearing provider blocks or contacting the provider', async () => {
+test('a stale producer reason terminates before provider preparation or a provider request', async () => {
   billingEmailReplayEligible.mockResolvedValue({ eligible: false, reason: 'charge-date-passed', retryable: false });
   await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, stopped: true, reason: 'charge-date-passed' });
   expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();
   expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  expect(query.update).toHaveBeenCalledWith(expect.objectContaining({ provider_handoff_phase: 'pending' }));
   expect(reservation.resolveBillingEmailReservationRefusal).toHaveBeenCalledTimes(1);
 });
 
@@ -124,10 +156,23 @@ test('a resendable refusal settles as a definitely-unsent failure, never a block
   expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
 });
 
-test('a temporary eligibility failure stays on the bounded retry schedule without dispatching', async () => {
+test('a final-boundary resendable refusal settles the started attempt as rejected without delivering its reservation', async () => {
+  billingEmailReplayEligible.mockResolvedValueOnce({ eligible: true }).mockResolvedValueOnce({
+    eligible: false, reason: 'invoice-send-not-finalized', retryable: false, resendable: true,
+  });
+  await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, stopped: true });
+  expect(query.update).toHaveBeenCalledWith(expect.objectContaining({
+    status: 'failed', provider_retry_next_at: null, provider_handoff_phase: 'rejected',
+  }));
+  expect(reservation.markBillingEmailReservationDelivered).not.toHaveBeenCalled();
+  expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
+});
+
+test('a temporary eligibility failure stays on the bounded retry schedule without a provider request', async () => {
   billingEmailReplayEligible.mockResolvedValue({ eligible: false, reason: 'billing-email-eligibility-unavailable', retryable: true });
   await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, error: expect.any(Error) });
   expect(query.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', provider_retry_next_at: expect.any(Date) }));
+  expect(query.update).toHaveBeenCalledWith(expect.objectContaining({ provider_handoff_phase: 'pending' }));
   expect(sendgrid.sendOne).not.toHaveBeenCalled();
   expect(reservation.resolveBillingEmailReservationRefusal).not.toHaveBeenCalled();
 });
@@ -179,10 +224,63 @@ test('failure saving accepted billing Email does not schedule a second provider 
   expect(query.update.mock.calls.some(([patch]) => patch.provider_retry_next_at instanceof Date)).toBe(false);
 });
 
+test('a rolled-back acceptance stamp cannot report sent or deliver the reservation', async () => {
+  query.first.mockResolvedValueOnce({ id: 'message-1' }).mockResolvedValueOnce(null);
+  await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, uncertain: true });
+  expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+  expect(reservation.markBillingEmailReservationDelivered).not.toHaveBeenCalled();
+  expect(query.update.mock.calls.some(([patch]) => patch.provider_retry_next_at instanceof Date)).toBe(false);
+});
+
 test('a reclaimed billing retry claim stops before its provider request', async () => {
   query.then = (resolve, reject) => Promise.resolve(0).then(resolve, reject);
   await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, stopped: true, reason: 'claim_lost' });
   expect(sendgrid.sendOne).not.toHaveBeenCalled();
+});
+
+test('a claim reclaimed during the final producer check cannot reach the provider', async () => {
+  query.first.mockResolvedValueOnce(null);
+
+  await expect(retryOne(storedMessage())).resolves.toEqual({
+    sent: false, stopped: true, reason: 'claim_lost',
+  });
+
+  expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+  expect(query.forUpdate).toHaveBeenCalledTimes(1);
+  expect(query.where).toHaveBeenCalledWith(expect.objectContaining({
+    id: 'message-1', status: 'queued', provider_handoff_phase: 'started',
+    send_attempt_token: 'attempt-2', provider_handoff_attempt_token: 'attempt-2',
+  }));
+  expect(reservation.markBillingEmailReservationDelivered).not.toHaveBeenCalled();
+});
+
+test('an unreadable final claim fence remains a definite retryable pre-provider failure', async () => {
+  const databaseError = new Error('claim lookup unavailable');
+  query.first.mockRejectedValueOnce(databaseError);
+
+  await expect(retryOne(storedMessage())).resolves.toMatchObject({
+    sent: false, error: { message: databaseError.message },
+  });
+
+  expect(databaseError).toMatchObject({ retryable: true });
+  expect(query.update).toHaveBeenCalledWith(expect.objectContaining({
+    status: 'failed', provider_retry_next_at: expect.any(Date), provider_handoff_phase: 'rejected',
+  }));
+  expect(reservation.markBillingEmailReservationDelivered).not.toHaveBeenCalled();
+});
+
+test('a lost marker acknowledgement before the final check restores a known-unsent retry', async () => {
+  const markerError = Object.assign(new Error('marker acknowledgement lost'), { code: 'ECONNRESET' });
+  query.update.mockRejectedValueOnce(markerError);
+
+  await expect(retryOne(storedMessage())).resolves.toMatchObject({ sent: false, error: markerError });
+
+  expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  expect(billingEmailReplayEligible).toHaveBeenCalledTimes(1);
+  expect(query.whereIn).toHaveBeenCalledWith('provider_handoff_phase', ['pending', 'started']);
+  expect(query.update).toHaveBeenLastCalledWith(expect.objectContaining({
+    status: 'failed', provider_retry_next_at: expect.any(Date), provider_handoff_phase: 'pending',
+  }));
 });
 
 test('a missed accepted-reservation stamp never requeues the provider send', async () => {
@@ -199,7 +297,7 @@ test('a failed terminal-reservation stamp does not put the email back on the sch
   expect(sendgrid.sendOne).not.toHaveBeenCalled();
   expect(query.update.mock.calls.some(([patch]) => patch.provider_retry_next_at instanceof Date)).toBe(false);
   expect(query.update).toHaveBeenCalledWith(expect.objectContaining({
-    status: 'blocked', provider_retry_exhausted_at: expect.any(Date),
+    status: 'blocked', provider_retry_exhausted_at: expect.any(Date), provider_handoff_phase: 'pending',
     error_message: `${reservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}charge-date-passed`,
   }));
 });
