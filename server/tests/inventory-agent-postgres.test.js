@@ -708,6 +708,64 @@ jest.setTimeout(30000);
     expect(saved).toMatchObject({ status: 'agent_pending', agent_attempts: 1 });
   });
 
+  // 2026-09-27 pre-push audit: the agent used to lock an existing product
+  // FOR UPDATE and only THEN take the catalog lock (createAgentAlias), while
+  // the admin alias endpoint holds the catalog lock and its insert's
+  // foreign-key check needs KEY SHARE on that same product — a lock-order
+  // deadlock. The LIKE copies above carry no foreign keys, so this test adds
+  // the real one for its duration.
+  test('the agent takes the catalog lock before any product lock — an admin alias insert for the SAME product never deadlocks against it', async () => {
+    await mockConn.raw('ALTER TABLE ??.product_aliases ADD CONSTRAINT agent_test_alias_product_fk FOREIGN KEY (product_id) REFERENCES ??.products_catalog (id)', [schema, schema]);
+    try {
+      const [product] = await mockConn('products_catalog').insert({
+        name: 'Bifen XTS', active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', inventory_on_hand: 0,
+      }).returning('*');
+      // On its last attempt, so the attempt's reason is saved on the line: a
+      // deadlock would surface there as the thrown error's message.
+      const line = await pendingLine({ raw_title: 'Bifen XTS Insecticide Concentrate 96 oz', quantity: 1, agent_attempts: 2 });
+      const decision = {
+        kind: 'existing', reason: 'looks like Bifen XTS', product_id: product.id, new_product: null,
+        reading: { size_text: '96 oz', size_number: 96, size_unit: 'oz', pack_text: null, pack_count: 1 },
+      };
+
+      let signalLocked;
+      const locked = new Promise((resolve) => { signalLocked = resolve; });
+      let release;
+      const held = new Promise((resolve) => { release = resolve; });
+      // The admin side holds the catalog lock with its transaction open until
+      // the agent is waiting, then saves an alias for the SAME product
+      // through createProductAlias (the function POST /aliases calls) — its
+      // foreign-key check needs KEY SHARE on the product row.
+      const adminInsert = mockConn.transaction(async (trx) => {
+        await inventoryOperations.lockCatalogCreate(trx);
+        signalLocked();
+        await held;
+        return inventoryOperations.createProductAlias({ productId: product.id, aliasName: 'Bifen XTS Gallon Jug', vendorId: null }, { trx });
+      });
+      await locked;
+      const agent = run({ ok: true, json: decision });
+      await waitForLockWaiter();
+      // Before the fix the agent held the product FOR UPDATE here, so the
+      // admin's insert blocked on it and Postgres aborted the agent as a
+      // deadlock victim.
+      release();
+      await expect(adminInsert).resolves.toEqual({ success: true });
+      await agent;
+
+      // The agent waited on the catalog lock instead of deadlocking; once it
+      // got it, the admin's new alias had changed the product it was shown,
+      // so it stopped cleanly as product_changed (never a deadlock error)
+      // and wrote no stock.
+      const savedLine = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+      expect(savedLine.agent_decision).toMatchObject({ reason: 'product_changed' });
+      expect(await stockOf(product.id)).toBe(0);
+
+      expect(await mockConn('product_aliases').where({ product_id: product.id, alias_name: 'Bifen XTS Gallon Jug' })).toHaveLength(1);
+    } finally {
+      await mockConn.raw('ALTER TABLE ??.product_aliases DROP CONSTRAINT IF EXISTS agent_test_alias_product_fk', [schema]);
+    }
+  });
+
   test('a real hand-off through processReceiptLine saves handoffFrom, and a gate-off drain restores that status', async () => {
     const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
     const { drainAgentQueue } = require('../services/purchase-receipts/inventory-agent');

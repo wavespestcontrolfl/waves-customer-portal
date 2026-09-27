@@ -1096,6 +1096,15 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
     const terminal = await settleTerminalKind(trx, { lineId, line, email, decision }, notifyAdmin);
     if (terminal) return terminal;
 
+    // Lock order is catalog BEFORE product, for every writer. The admin
+    // alias endpoint (createProductAlias) holds the catalog lock while its
+    // insert's foreign-key check takes KEY SHARE on the product row; locking
+    // the product FOR UPDATE first (resolveTargetProduct) and the catalog
+    // second (createAgentAlias) deadlocked against it (2026-09-27 pre-push
+    // audit). The later lockCatalogCreate calls in this transaction re-enter
+    // this same lock.
+    await inventoryOperations.lockCatalogCreate(trx);
+
     // The catalog changes (a container size, the count unit, an alias, a new
     // product) are made in a savepoint. A decision that ends in a hold or a
     // retry rolls them back, so only the held line and its bell are saved.

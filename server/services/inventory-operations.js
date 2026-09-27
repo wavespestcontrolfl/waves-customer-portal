@@ -255,7 +255,11 @@ const CATALOG_CREATE_LOCK = 'catalog:create-product';
 // every OTHER writer of a brand-new products_catalog row (the sheet-pricing
 // importer, admin-import-sheets.js) serializes against it too — one
 // caller's duplicate check must see every product another caller committed
-// before it, catalog insert or not.
+// before it, catalog insert or not. Lock order: take this BEFORE locking any
+// products_catalog row in the same transaction (the inventory agent's
+// applyDecision does) — an alias or pricing insert made under it takes KEY
+// SHARE on its product for the foreign-key check, so the reverse order can
+// deadlock.
 function lockCatalogCreate(trx) {
   return trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CATALOG_CREATE_LOCK]);
 }
