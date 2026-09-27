@@ -90,7 +90,10 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const pushPromptRequested = useRef(false);
   const bellRef = useRef(null);
   const panelRef = useRef(null);
-  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
+  // The customer shell keeps its bottom navigation through 899px, including
+  // 844px iPhone landscape. Match that breakpoint so the notification sheet
+  // clears the nav; admin retains its existing 768px layout breakpoint.
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < (type === 'customer' ? 900 : 768);
 
   const tokenKey = type === 'admin' ? 'waves_admin_token' : 'waves_token';
   const basePath = type === 'admin' ? '/admin/notifications' : '/customer-notifications';

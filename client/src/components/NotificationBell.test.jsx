@@ -495,6 +495,22 @@ describe('NotificationBell customer safe-area offsets', () => {
     }
   });
 
+  it('keeps the landscape customer sheet above the bottom navigation through 899px', async () => {
+    const original = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 844 });
+    try {
+      render(<NotificationBell type="customer" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      const panel = await screen.findByRole('dialog', { name: 'Notifications' });
+      expect(panel.style.bottom).toContain('safe-area-inset-bottom');
+      expect(panel.style.bottom).toContain('78px');
+      expect(panel.style.left).toContain('safe-area-inset-left');
+      expect(panel.style.right).toContain('safe-area-inset-right');
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: original });
+    }
+  });
+
   it('keeps the desktop floating panel inside the top, right, and bottom safe areas', async () => {
     const original = window.innerWidth;
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
