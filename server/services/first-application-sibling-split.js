@@ -143,7 +143,7 @@ async function reconcileFirstApplicationSplitOnDateChange(trx, scheduledServiceI
     .where({ customer_id: moved.customer_id, source_estimate_id: moved.source_estimate_id })
     .whereNull('recurring_parent_id')
     .forUpdate()
-    .select('id', 'scheduled_date', 'estimated_price', 'completed_at', 'recurring_template_overrides');
+    .select('id', 'scheduled_date', 'estimated_price', 'primary_line_price', 'completed_at', 'recurring_template_overrides');
   if (members.length < 2) return { action: 'skipped', reason: 'no_siblings' };
 
   const InvoiceService = require('./invoice');
@@ -276,7 +276,7 @@ async function reconcileFirstApplicationSplitOnDateChange(trx, scheduledServiceI
       continue;
     }
     remaining = roundMoney(remaining - share);
-    splits.push({ id: sib.id, amount: share });
+    splits.push({ id: sib.id, amount: share, primaryLinePriceSet: sib.primary_line_price != null });
   }
 
   if (declines.length) {
@@ -323,7 +323,18 @@ async function reconcileFirstApplicationSplitOnDateChange(trx, scheduledServiceI
     return { action: 'skipped', reason: 'invoice_changed_concurrently', invoiceId: invoice.id };
   }
 
-  await trx('scheduled_services').where({ id: invoiceRow.id }).update({ estimated_price: remaining });
+  // invoice.js's buildScheduledServiceInvoiceLines PREFERS a populated
+  // primary_line_price over estimated_price when reminting a row's own
+  // invoice line — updating estimated_price alone would leave a remint
+  // (e.g. after this invoice is later voided) billing the stale, pre-split
+  // structured price instead of the reduced/carved-out figure, double-
+  // billing against the sibling's own separate charge (Codex pre-push P0).
+  // Keep both in lockstep, exactly like estimate-converter.js's own
+  // price-change write, and ONLY when it was already populated.
+  await trx('scheduled_services').where({ id: invoiceRow.id }).update({
+    estimated_price: remaining,
+    ...(invoiceRow.primary_line_price != null ? { primary_line_price: remaining } : {}),
+  });
   for (const split of splits) {
     // Stamp explicit provenance ALONGSIDE the price, not the price alone:
     // completion (complete-scheduled-service.js) must never infer "this row
@@ -338,6 +349,8 @@ async function reconcileFirstApplicationSplitOnDateChange(trx, scheduledServiceI
     // reduction actually happened.
     await trx('scheduled_services').where({ id: split.id }).update({
       estimated_price: split.amount,
+      // Same lockstep reconciliation as the invoice-holding row above.
+      ...(split.primaryLinePriceSet ? { primary_line_price: split.amount } : {}),
       recurring_template_overrides: trx.raw(
         "COALESCE(recurring_template_overrides, '{}'::jsonb) || ?::jsonb",
         [JSON.stringify({ [SPLIT_PROVENANCE_KEY]: invoice.id })],

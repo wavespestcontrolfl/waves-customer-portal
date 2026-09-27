@@ -145,6 +145,28 @@ suite('first-application-sibling-split — same-trip resplit on date change', ()
     expect(Number(state.lawn.estimated_price)).toBe(56.4);
   }));
 
+  test('a populated primary_line_price is kept in lockstep with estimated_price — invoice.js prefers it on remint and a stale value would double-bill', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    // Both rows carry a structured primary_line_price at accept time,
+    // same shape estimate-converter.js writes.
+    await trx('scheduled_services').where({ id: ids.pestId }).update({ primary_line_price: 153.60 });
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ primary_line_price: null, scheduled_date: '2026-10-02' });
+    const result = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('split');
+
+    const state = await readState(trx, ids);
+    // buildScheduledServiceInvoiceLines prefers primary_line_price over
+    // estimated_price when it's populated — a stale $153.60 here would
+    // remint the FULL combined total on a later void, on top of the
+    // sibling's own separate $56.40.
+    expect(Number(state.pest.primary_line_price)).toBe(97.2);
+    expect(Number(state.pest.estimated_price)).toBe(97.2);
+    // The lawn row never had a primary_line_price to begin with — split
+    // must not invent one where the row's own pricing was never structured.
+    expect(state.lawn.primary_line_price).toBeNull();
+    expect(Number(state.lawn.estimated_price)).toBe(56.4);
+  }));
+
   test('the invoice-holding (reserved) row moves instead → same split, from the other direction', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     await trx('scheduled_services').where({ id: ids.pestId }).update({ scheduled_date: '2026-10-05' });
