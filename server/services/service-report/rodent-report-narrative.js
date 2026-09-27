@@ -56,7 +56,8 @@ const {
 // v4: + visitStage, so the first visit of a rodent trapping program reads as
 // the setup it is instead of a routine re-check (owner 2026-08-02).
 // v5: validate appointment date, window, and time claims through the shared guard.
-const PROMPT_VERSION = 'typed_report_narrative_v5';
+// v6: preserve grounded care timing without exempting appointment promises.
+const PROMPT_VERSION = 'typed_report_narrative_v6';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -1346,7 +1347,7 @@ function ungroundedClaims(rawText, facts) {
   problems.push(...contextualCountProblems(normalizeWordNumbers(text), facts));
   problems.push(...unsupportedActivityClaims(text, facts));
   problems.push(...nextVisitProblems(text, facts, {
-    relativeDateExemptions: mandatoryCareCopy(facts.todaysResult || {}),
+    groundedCareExemptions: mandatoryCareCopy(facts.todaysResult || {}),
   }));
   problems.push(...ungroundedDomainTerms(text, facts));
   problems.push(...typedCountProblems(normalizeWordNumbers(text), facts));

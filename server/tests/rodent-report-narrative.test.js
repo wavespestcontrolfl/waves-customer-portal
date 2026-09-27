@@ -437,6 +437,8 @@ test('grounded relative care timing survives without authorizing a relative appo
     'We will visit tomorrow.',
     'Your service is scheduled for tomorrow.',
     'We will be there tomorrow.',
+    'We are returning tomorrow.',
+    'The technician returns tomorrow.',
   ]) {
     const appointmentArgs = {
       ...args,
@@ -465,6 +467,23 @@ test('grounded relative care timing survives without authorizing a relative appo
   });
   expect(out).toContain(summary);
   expect(out).toContain('Contact us tomorrow if activity returns.');
+
+  const timedCare = 'Contact us at 8 AM if activity returns.';
+  const timedArgs = {
+    ...args,
+    typedReport: {
+      ...args.typedReport,
+      todaysResult: { ...args.typedReport.todaysResult, nextStep: timedCare },
+    },
+  };
+  const timedFacts = groundingFacts(timedArgs);
+  const timedSummary = summary.replace('Contact us tomorrow if activity returns.', timedCare);
+  expect(ungroundedClaims(timedSummary, timedFacts)).toEqual([]);
+  const timedOut = await applyRodentReportNarrative(timedArgs, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary: timedSummary } }),
+  });
+  expect(timedOut).toContain(timedSummary);
+  expect(timedOut).toContain(timedCare);
 
   const dottedArgs = input();
   dottedArgs.typedReport = {

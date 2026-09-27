@@ -1,5 +1,6 @@
-// Strict validation for typed-report appointment copy. Every temporal fact in
-// this lane describes the authoritative next visit.
+// Strict validation for typed-report appointment copy. Temporal facts describe
+// the authoritative next visit unless they are copied from ratified,
+// non-appointment customer care.
 
 const MERIDIEM_TEXT = String.raw`[ap]\.?m\.?`;
 const CLOCK_HOUR_WORDS = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
@@ -12,7 +13,7 @@ const DATE_TEXT_RE = new RegExp(`\\b(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_DATE_T
 const CLOCK_TIME_RE = new RegExp(String.raw`(?<![\d:])${EXACT_TIME_TEXT}(?![a-z\d:])`, 'gi');
 const WORD_CLOCK_TIME_RE = new RegExp(String.raw`\b(?:${CLOCK_HOUR_WORDS})(?:\s*${MERIDIEM_TEXT}|\s+o[’']clock)\b`, 'gi');
 const RELATIVE_APPOINTMENT_DATE_RE = new RegExp(`\\b(?:tomorrow|tonight|next\\s+(?:day|week|month)|(?:next|this)\\s+(?:${WEEKDAY_NAMES}))\\b`, 'gi');
-const APPOINTMENT_CARE_RE = /\b(?:next|upcoming)\s+(?:visit|appointment|service|follow[-\s]?up)\b|\b(?:arrival|appointment|visit|service)\s+(?:is|will\s+be|scheduled|booked|set)\b|\b(?:will|[’']ll)\s+(?:visit|return|arrive|be\s+(?:back|there)|come\s+back|check\s+back|follow[-\s]+up)\b/i;
+const APPOINTMENT_CARE_RE = /\b(?:next|upcoming)\s+(?:visit|appointment|service|follow[-\s]?up)\b|\b(?:arrival|appointment|visit|service)\s+(?:is|will\s+be|scheduled|booked|set)\b|\b(?:will|[’']ll)\s+(?:visit|return|arrive|be\s+(?:back|there)|come\s+back|check\s+back|follow[-\s]+up)\b|\b(?:i|we|(?:the|our)\s+(?:technician|tech|team|crew|specialist))\s+(?:(?:am|is|are)\s+(?:returning|arriving|coming\s+back|checking\s+back|following[-\s]+up)|(?:returns?|arrives?|come(?:s)?\s+back|check(?:s)?\s+back|follow(?:s)?[-\s]+up))\b/i;
 
 function normalizeWindowText(value) {
   return String(value || '').replace(/\s*([ap])\.?m\.?(?![a-z])/gi, ' $1M')
@@ -40,11 +41,20 @@ function clockWindowProblems(text, facts) {
 // Every window, month-day, weekday, relative date, and exact clock time must
 // match the typed report's authoritative appointment facts.
 function nextVisitProblems(text, facts, options = {}) {
-  const problems = clockWindowProblems(text, facts);
+  // Apply one exemption boundary before every date/window/clock scan. A
+  // ratified care sentence may contain any of those temporal forms, while an
+  // appointment-shaped next step must remain visible to every validator.
+  const validationText = (options.groundedCareExemptions || []).reduce((copy, sentence) => {
+    const groundedCare = String(sentence || '').trim();
+    return groundedCare && !APPOINTMENT_CARE_RE.test(groundedCare)
+      ? copy.replaceAll(groundedCare, ' ')
+      : copy;
+  }, String(text));
+  const problems = clockWindowProblems(validationText, facts);
   const expected = facts.nextVisit || {};
   const expectedDate = new RegExp(`^(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})$`, 'i')
     .exec(String(expected.date).trim());
-  for (const match of String(text).matchAll(new RegExp(DATE_TEXT_RE.source, 'gi'))) {
+  for (const match of validationText.matchAll(new RegExp(DATE_TEXT_RE.source, 'gi'))) {
     const [, , month, day, year] = match;
     const ok = expectedDate
       && month.slice(0, 3).toLowerCase() === expectedDate[2].slice(0, 3).toLowerCase()
@@ -53,18 +63,12 @@ function nextVisitProblems(text, facts, options = {}) {
     if (!ok) problems.push(`ungrounded_date:${match[0].trim()}`);
   }
   const [, expectedWeekday = ''] = expectedDate || [];
-  for (const match of String(text).matchAll(new RegExp(`\\b(${WEEKDAY_NAMES})\\b`, 'gi'))) {
+  for (const match of validationText.matchAll(new RegExp(`\\b(${WEEKDAY_NAMES})\\b`, 'gi'))) {
     if (match[1].toLowerCase() !== expectedWeekday.toLowerCase()) {
       problems.push(`ungrounded_weekday:${match[1]}`);
     }
   }
-  const relativeDateText = (options.relativeDateExemptions || []).reduce((copy, sentence) => {
-    const groundedCare = String(sentence || '').trim();
-    return groundedCare && !APPOINTMENT_CARE_RE.test(groundedCare)
-      ? copy.replaceAll(groundedCare, ' ')
-      : copy;
-  }, String(text));
-  for (const match of relativeDateText.matchAll(new RegExp(RELATIVE_APPOINTMENT_DATE_RE.source, 'gi'))) {
+  for (const match of validationText.matchAll(new RegExp(RELATIVE_APPOINTMENT_DATE_RE.source, 'gi'))) {
     problems.push(`ungrounded_relative_date:${match[0].toLowerCase()}`);
   }
   return problems;
