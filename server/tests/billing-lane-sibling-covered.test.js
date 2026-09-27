@@ -133,7 +133,13 @@ describe('siblingCoveredCompletionPrediction', () => {
     expect(prediction).toBeNull();
   });
 
-  test('does not read a refunded sibling invoice as covered — that stays a manual-billing alert', async () => {
+  // Codex round 5 P2: a refunded/terminal match is NOT collapsed to null
+  // any more — resolveScheduledServiceCharge (the mint-side resolver
+  // sharing this same lookup) always refuses this exact shape with a 409,
+  // so leaving the caller's naive positive prediction in place offered a
+  // Charge button that could never succeed. A `sibling_needs_review`
+  // prediction (amount: null) tells staff to go resolve it instead.
+  test('surfaces a sibling_needs_review prediction for a refunded sibling invoice — never a false "covered" or a stale positive amount', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
       invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', invoice_number: 'WPC-2026-0505', status: 'refunded', total: 153.6 },
       liveBeside: null,
@@ -141,7 +147,37 @@ describe('siblingCoveredCompletionPrediction', () => {
     const dbConn = fakeDbConn({ byId: { 'svc-pest': { id: 'svc-pest', service_type: 'Quarterly Pest Control' } } });
 
     const prediction = await siblingCoveredCompletionPrediction({ svc: LAWN_SVC, dbConn });
-    expect(prediction).toBeNull();
+    expect(prediction).toEqual({
+      kind: 'sibling_needs_review',
+      amount: null,
+      conflictStampedPrice: false,
+      invoiceId: 'inv-1',
+      invoiceNumber: 'WPC-2026-0505',
+      invoiceStatus: 'refunded',
+    });
+  });
+
+  // Codex round 5 P2: the canceled-acceptance-invoice-with-setup-fee shape
+  // (siblingInvoiceCoverageVerdict's `canceledSetupFee`) is also
+  // needs_review with NO invoice at all — must still surface the review
+  // prediction, not null, and not throw on the missing invoice.
+  test('surfaces a sibling_needs_review prediction for a canceled acceptance invoice with no live replacement (no invoice on the verdict)', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: null,
+      liveBeside: null,
+      canceledSetupFee: { id: 'inv-3', invoice_number: 'WPC-2026-0400', status: 'canceled' },
+    });
+    const dbConn = fakeDbConn();
+
+    const prediction = await siblingCoveredCompletionPrediction({ svc: LAWN_SVC, dbConn });
+    expect(prediction).toEqual({
+      kind: 'sibling_needs_review',
+      amount: null,
+      conflictStampedPrice: false,
+      invoiceId: null,
+      invoiceNumber: null,
+      invoiceStatus: null,
+    });
   });
 
   test('never covers a visit against its OWN invoice (not a sibling)', async () => {
@@ -161,10 +197,21 @@ describe('siblingCoveredCompletionPrediction', () => {
     expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
   });
 
-  test('fails toward null when the shared lookup throws', async () => {
+  // Codex round 5 P2: a lookup FAILURE is treated exactly like needs_review,
+  // not collapsed to null — resolveScheduledServiceCharge refuses to mint
+  // for 'error' too, so the naive positive prediction must not survive
+  // untouched here either.
+  test('surfaces a sibling_needs_review prediction (never null) when the shared lookup throws', async () => {
     findFirstApplicationInvoiceForEstimateService.mockRejectedValue(new Error('db down'));
     const prediction = await siblingCoveredCompletionPrediction({ svc: LAWN_SVC, dbConn: fakeDbConn() });
-    expect(prediction).toBeNull();
+    expect(prediction).toEqual({
+      kind: 'sibling_needs_review',
+      amount: null,
+      conflictStampedPrice: false,
+      invoiceId: null,
+      invoiceNumber: null,
+      invoiceStatus: null,
+    });
   });
 });
 

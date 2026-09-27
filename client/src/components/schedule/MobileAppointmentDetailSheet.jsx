@@ -256,6 +256,12 @@ export default function MobileAppointmentDetailSheet({
   const siblingCoveredInvoice = service.billingLane?.prediction?.kind === 'covered_sibling_invoice'
     ? service.billingLane.prediction
     : null;
+  // Codex round 5 P2: the sibling lookup came back needs_review/error
+  // (billing-lane.js siblingCoveredCompletionPrediction) — the mint
+  // resolver refuses to charge this visit for EITHER reason, so it must
+  // never preview a $ amount or offer Charge; the billing-lane card tells
+  // staff to resolve it on Customer 360.
+  const siblingNeedsReview = service.billingLane?.prediction?.kind === 'sibling_needs_review';
   // Callbacks (re-services) are free for recurring/WaveGuard customers — don't
   // preview the monthlyRate fallback (mirrors the completion panel + checkout).
   // For an unpriced visit, monthlyRate is only ever the right fallback for a
@@ -338,13 +344,13 @@ export default function MobileAppointmentDetailSheet({
   // self-pay flow regardless of a payer stamp.
   const isPayerBilled = !hasOwnPrice && (predictionKind === 'payer' || !!service.billedToPayer);
   const hasChargeableAmount = total > 0 && !coveredByMembership && !prepaidCovered
-    && !siblingCoveredInvoice && !isPayerBilled;
+    && !siblingCoveredInvoice && !isPayerBilled && !siblingNeedsReview;
   // Fully prepay-covered visits collect nothing, so the line items and total
   // read $0.00 — the monthlyRate fallback figure looks like a bill due when
   // the customer already paid the year up front. Partially prepaid visits
   // (prepaidAmt < total) keep the real figures and the checkout path.
-  const displayBasePrice = (prepaidCovered || siblingCoveredInvoice) ? 0 : baseServicePrice;
-  const displayTotal = (prepaidCovered || siblingCoveredInvoice) ? 0 : total;
+  const displayBasePrice = (prepaidCovered || siblingCoveredInvoice || siblingNeedsReview) ? 0 : baseServicePrice;
+  const displayTotal = (prepaidCovered || siblingCoveredInvoice || siblingNeedsReview) ? 0 : total;
   // Invoice already attached to this visit (accept-minted first-visit
   // setup+application invoice, or a tech pre-mint). It's what completion /
   // Charge-now actually collects, so surface its breakdown — the per-visit
@@ -563,6 +569,11 @@ export default function MobileAppointmentDetailSheet({
             {siblingCoveredInvoice.siblingServiceType ? ` on the ${siblingCoveredInvoice.siblingServiceType} visit` : ''} — no charge needed
           </div>
         )}
+        {!coveredByMembership && !isPrepaid && siblingNeedsReview && (
+          <div className="text-center mt-2" style={{ fontSize: 12, color: '#92400E' }}>
+            Combined-trip invoice needs review — resolve on Customer 360 before charging
+          </div>
+        )}
         {isPrepaid && seriesCtx && seriesCtx.totalCoveredVisits > 1 && (
           <div className="mt-3 rounded-sm border border-hairline border-zinc-200 bg-zinc-50" style={{ padding: '10px 14px' }}>
             <div className="flex items-center justify-between gap-3">
@@ -721,6 +732,11 @@ export default function MobileAppointmentDetailSheet({
               {!prepaidCovered && siblingCoveredInvoice && (
                 <span className="text-ink-secondary block" style={{ fontSize: 12 }}>
                   Covered by invoice {siblingCoveredInvoice.invoiceNumber || 'on file'}
+                </span>
+              )}
+              {!prepaidCovered && siblingNeedsReview && (
+                <span className="block" style={{ fontSize: 12, color: '#92400E' }}>
+                  Needs review on Customer 360
                 </span>
               )}
             </span>

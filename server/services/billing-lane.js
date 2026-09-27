@@ -908,10 +908,29 @@ async function coveringSiblingInvoice(svc, dbConn) {
  *
  * Read-only and advisory, like predictCompletionBilling: it never mints,
  * voids, or changes what completion charges. Returns null (fail toward the
- * ordinary unbilled-gap verdict, never toward a false "covered") when there
- * is no source estimate to look a sibling up from, the lookup errors, or
- * the only match is a refunded/void/canceled invoice — those stay
- * completion's own manual-billing alert, not a quiet "nothing to see".
+ * ordinary unbilled-gap verdict, never toward a false "covered") only when
+ * there is no source estimate to look a sibling up from, or the lookup
+ * finds no relevant match at all ('none').
+ *
+ * A 'needs_review' or 'error' verdict is NOT collapsed to null (codex round
+ * 5 P2) — the caller in admin-schedule.js only ever asks this question when
+ * the visit's OWN naive prediction is already a positive 'invoice' /
+ * 'auto_charge' / 'prepaid' (the lingering per-application fee, an unpriced
+ * row's rate fallback, …). Returning null there left that positive
+ * prediction standing untouched, so the sheet offered "Charge $97.20" for a
+ * visit resolveScheduledServiceCharge (the SAME lookup, mint-side) always
+ * refuses with a 409 the instant the old acceptance invoice comes back
+ * refunded/terminal (needs_review) or the lookup itself fails (error) —
+ * a Charge button that can never succeed. Surfacing a `sibling_needs_review`
+ * prediction instead (amount: null, so nothing here or in checkout reads it
+ * as chargeable — see BillingLaneCard / MobileAppointmentDetailSheet /
+ * MobileCheckoutSheet) tells the office to go resolve it on Customer 360
+ * instead. 'error' gets the exact same treatment as 'needs_review': the
+ * mint resolver refuses BOTH identically (only 'covered' and 'none' let it
+ * proceed), so collapsing 'error' to null would reopen the same "Charge
+ * offered, 409 on click" gap this fix exists to close — a transient lookup
+ * failure should read as "go check", never as a silent, incorrectly
+ * positive fee.
  *
  * `dbConn` is caller-owned (day/week schedule feeds pass their `db`), kept
  * as an explicit param so this module stays DB-free for pure unit tests
@@ -919,8 +938,19 @@ async function coveringSiblingInvoice(svc, dbConn) {
  */
 async function siblingCoveredCompletionPrediction({ svc, dbConn } = {}) {
   if (!svc?.source_estimate_id || !svc?.customer_id || !svc?.scheduled_date || !dbConn) return null;
-  const inv = await coveringSiblingInvoice(svc, dbConn);
-  if (!inv) return null;
+  const verdict = await siblingInvoiceCoverageVerdict(svc, dbConn);
+  if (verdict.status === 'needs_review' || verdict.status === 'error') {
+    return {
+      kind: 'sibling_needs_review',
+      amount: null,
+      conflictStampedPrice: false,
+      invoiceId: verdict.invoice?.id || null,
+      invoiceNumber: verdict.invoice?.invoice_number || null,
+      invoiceStatus: verdict.invoice?.status || null,
+    };
+  }
+  if (verdict.status !== 'covered') return null;
+  const inv = verdict.invoice;
 
   let siblingVisit = null;
   try {

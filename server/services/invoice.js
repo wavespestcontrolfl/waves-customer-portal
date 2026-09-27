@@ -1596,7 +1596,14 @@ async function buildScheduledServiceInvoiceLines(
   // the same provenance signal.
   const authoritativeZero = primaryBaseKnown
     && hasAuthoritativeZeroPrice(scheduled.estimated_price, scheduled.primary_line_price);
-  const storedNetAmount = Number(scheduled.estimated_price) > 0 || authoritativeZero
+  // Whether storedNetAmount below actually came from a stamped price on this
+  // row (a real positive estimated_price, or the provenance-backed genuine
+  // $0) versus the fee/rate fallback another caller resolved because this
+  // row was NEVER priced. Only the stamped case is trustworthy enough to
+  // reconcile the replay DOWN to (below) — the fallback case is the ground
+  // truth net either way, so it must reconcile in BOTH directions.
+  const storedNetIsAuthoritative = Number(scheduled.estimated_price) > 0 || authoritativeZero;
+  const storedNetAmount = storedNetIsAuthoritative
     ? roundMoney(scheduled.estimated_price)
     : roundMoney(fallbackAmount);
   const replayNetAmount = roundMoney(
@@ -1618,6 +1625,30 @@ async function buildScheduledServiceInvoiceLines(
       discount_dollars: adjustment,
       use_stored_discount: true,
       stored_discount_source: "scheduled_service",
+    });
+  } else if (
+    // Codex round 5 P1: with no authoritative net on this row, a stale
+    // positive primary_line_price left over from a different pricing
+    // regime (e.g. a per-application row that was never priced but still
+    // carries an old primary_line_price) fed a replay total BELOW the
+    // fee/rate fallback another caller resolved as the intended net —
+    // the checkout preview shows the fallback (e.g. a $97.20 acceptance
+    // fee) while the minted invoice only totaled the stale $50 primary
+    // line, because the reconciliation above only ever corrected DOWNWARD.
+    // fallbackAmount is the ground truth here (nothing stamped on the row
+    // to contradict it), so top the replay UP to match it too.
+    !storedNetIsAuthoritative
+    && hasNumericValue(storedNetAmount)
+    && replayNetAmount < storedNetAmount
+  ) {
+    const adjustment = roundMoney(storedNetAmount - replayNetAmount);
+    lineItems.push({
+      client_id: `scheduled_price_topup_${scheduledServiceId}`,
+      description: "Scheduled price adjustment",
+      quantity: 1,
+      unit_price: adjustment,
+      amount: adjustment,
+      category: null,
     });
   }
 

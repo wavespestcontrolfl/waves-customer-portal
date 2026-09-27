@@ -15739,7 +15739,14 @@ async function resolveScheduledServiceCharge({
   const primaryLinePrice = svc?.primary_line_price ?? null;
   const hasOwnPrice = (estimatedPrice != null && Number(estimatedPrice) > 0)
     || hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice);
-  if (perApplicationBilling && !hasOwnPrice && svc && dbConn) {
+  // Codex round 5 P2: a callback's base charge is always zeroed by
+  // completionInvoiceAmount below (isCallback short-circuits to 0 before
+  // perApplicationBilling is even consulted), so this lookup can never
+  // change what a callback bills — it can only 409 a legitimate positive
+  // checkout extra because an UNRELATED old acceptance invoice (for the
+  // trip the callback can never rebill) comes back needs_review. Exclude
+  // callbacks the same way always-free service types already are.
+  if (perApplicationBilling && !isCallback && !hasOwnPrice && svc && dbConn) {
     let verdict;
     try {
       verdict = await siblingInvoiceCoverageVerdict(svc, dbConn);

@@ -50,6 +50,13 @@ function predictionLine(prediction) {
       const invoiceRef = prediction.invoiceNumber ? ` invoice ${prediction.invoiceNumber}` : ' an invoice';
       return { color: GREEN, text: `On completion: no charge —${invoiceRef} already covers this${sibling} (same trip).` };
     }
+    // Codex round 5 P2: the same-trip sibling invoice this visit would
+    // otherwise defer to is refunded/terminal (or the lookup itself
+    // failed) — resolveScheduledServiceCharge refuses to charge this visit
+    // either way, so this must read as "go resolve it," never as a $ amount
+    // due or a false "covered."
+    case 'sibling_needs_review':
+      return { color: WARN.ink, text: 'On completion: this visit’s combined-trip invoice needs review before charging — resolve it on Customer 360.' };
     case 'no_charge':
       return { color: MUTED, text: 'On completion: nothing bills for this visit.' };
     default:

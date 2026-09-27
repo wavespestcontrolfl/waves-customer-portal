@@ -514,3 +514,48 @@ describe('MobileAppointmentDetailSheet sibling-covered first-application visit',
     expect(screen.queryByRole('button', { name: /Review & checkout/i })).not.toBeInTheDocument();
   });
 });
+
+// Codex round 5 P2: the sibling lookup came back needs_review/error
+// (billing-lane.js siblingCoveredCompletionPrediction) — the mint resolver
+// (resolveScheduledServiceCharge) refuses to charge this visit either way,
+// so the sheet must never preview a $ amount or offer "Review & checkout"
+// for it, and must point staff to Customer 360 instead.
+describe('MobileAppointmentDetailSheet sibling invoice needs-review visit', () => {
+  const NEEDS_REVIEW_SERVICE = {
+    ...BASE_SERVICE,
+    id: 'svc-lawn',
+    serviceType: 'Every 6 Weeks Lawn Care',
+    serviceTypeDisplay: 'Every 6 Weeks Lawn Care',
+    waveguardTier: 'Silver',
+    estimatedPrice: null,
+    monthlyRate: 74.7,
+    customerId: 'cust-1',
+    billingLane: {
+      mode: 'per_application',
+      source: 'explicit',
+      monthlyRate: 74.7,
+      prediction: {
+        kind: 'sibling_needs_review',
+        amount: null,
+        conflictStampedPrice: false,
+        invoiceId: 'inv-1',
+        invoiceNumber: 'WPC-2026-0505',
+        invoiceStatus: 'refunded',
+      },
+      unbilledGap: null,
+    },
+  };
+
+  it('never offers "Review & checkout" for a visit the mint resolver always refuses with a 409', () => {
+    render(<MobileAppointmentDetailSheet service={NEEDS_REVIEW_SERVICE} onClose={() => {}} />);
+    expect(screen.queryByRole('button', { name: /Review & checkout/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Review visit details/i })).toBeInTheDocument();
+  });
+
+  it('points staff to Customer 360 instead of previewing a $ amount or a false "covered"', () => {
+    render(<MobileAppointmentDetailSheet service={NEEDS_REVIEW_SERVICE} onClose={() => {}} />);
+    expect(screen.getAllByText(/Customer 360/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/\$74\.70/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/no charge needed/i)).not.toBeInTheDocument();
+  });
+});

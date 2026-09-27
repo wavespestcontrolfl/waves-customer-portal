@@ -135,6 +135,35 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
     expect(mockMint).not.toHaveBeenCalled();
   });
 
+  // Codex round 5 P2: a callback's base charge is always zeroed by
+  // completionInvoiceAmount regardless of what the sibling lookup would
+  // have said (isCallback short-circuits before perApplicationBilling is
+  // even consulted) — so the lookup can only ever 409 a checkout extra
+  // for a trip the callback itself can never rebill. Excluded the same
+  // way always-free service types already are: the lookup must never run
+  // for a callback, and a positive extra must mint normally even when the
+  // (unconsulted) sibling verdict would have been needs_review/error.
+  test('a callback never runs the sibling lookup — a checkout extra mints normally even though the (unconsulted) verdict would refuse', async () => {
+    mockDb.__svcRow = { ...SVC_ROW, is_callback: true };
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'refunded', total: 153.6 },
+      liveBeside: null,
+    });
+    mockMint.mockImplementation(async ({ buildCreateParams }) => {
+      buildCreateParams();
+      throw new Error('stop-after-capture');
+    });
+    const { req, res, next } = makeReqRes({
+      extraLineItems: [{ description: 'Extra treatment', quantity: 1, unit_price: 40, amount: 40 }],
+    });
+    await handler(req, res, next);
+
+    expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalledWith(409);
+    expect(mockMint).toHaveBeenCalledTimes(1);
+    expect(next).toHaveBeenCalledTimes(1);
+  });
+
   test('a definitive "none" verdict still mints the established fee normally', async () => {
     findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
     mockMint.mockImplementation(async ({ buildCreateParams }) => {

@@ -298,6 +298,15 @@ export default function MobileCheckoutSheet({
   // predictionAmount, making this sheet preview a positive, chargeable
   // total the mint endpoint's payer guard then refuses outright.
   const payerBilled = !!service.billedToPayer || predictionKind === 'payer';
+  // Codex round 5 P2: this visit's combined-trip invoice needs manual
+  // review (billing-lane.js siblingCoveredCompletionPrediction — a
+  // refunded/terminal match, or the lookup itself failing) — the mint
+  // resolver (resolveScheduledServiceCharge, admin-schedule.js) refuses to
+  // mint ANYTHING for it, base OR extras, with a 409, so Charge must stay
+  // disabled here even after an operator stacks a checkout extra on top of
+  // the (already $0) base — servicesSubtotal alone would otherwise turn
+  // positive from the extra and read as chargeable.
+  const siblingNeedsReview = !hasOwnPrice && predictionKind === 'sibling_needs_review';
   const openVisitInvoice = !payerBilled && inv && inv.open && inv.total > 0 ? inv : null;
   // A processing invoice is money already in flight (e.g. a pending ACH
   // debit) — the payment routes reject it, so block charging outright
@@ -360,7 +369,8 @@ export default function MobileCheckoutSheet({
   // Scoped to `!hasOwnPrice`: a visit with its OWN stamped price is an
   // existing, separately-tested self-pay flow this must not disable.
   const nothingToCharge = priceRefreshBlocksCharge || totalBeforePrepaid <= 0 || !!processingVisitInvoice
-    || (!hasOwnPrice && payerBilled && !invoicePreview);
+    || (!hasOwnPrice && payerBilled && !invoicePreview)
+    || (siblingNeedsReview && !invoicePreview);
 
   // One-line card-on-file note for the tech. Shows the first non-expired
   // method (server orders default first); if every method is expired, says
@@ -581,6 +591,8 @@ export default function MobileCheckoutSheet({
               ? 'Payment processing — nothing to collect'
               : priceRefreshBlocksCharge
                 ? 'Price needs a refresh — reopen this visit'
+                : siblingNeedsReview && !invoicePreview
+                ? 'Needs review on Customer 360 — can’t charge here'
                 : nothingToCharge
                 ? 'No charge — complete from job'
                 : discountGroupConflict
