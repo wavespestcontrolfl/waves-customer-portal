@@ -319,5 +319,34 @@ describe('resolveScheduledServiceCharge', () => {
       })).toBe(97.2);
       expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
     });
+
+    // Codex pre-push P1 (round 3): completion-pricing's discount engine
+    // freezes a fully-discounted application at a genuine $0 net by
+    // stamping a positive primary_line_price alongside the $0
+    // estimated_price (pinned for real by completion-pricing.postgres.test.js's
+    // "fully discounted application stays zero" case). This resolver must
+    // treat that as the visit's OWN price — never fall into the
+    // sibling-coverage lookup (unrelated) or the acceptance fee (wrong).
+    test('a provenance-backed $0 (a positive primary_line_price on the row) bills nothing — never the sibling lookup, never the fee', async () => {
+      expect(await resolveScheduledServiceCharge({
+        estimatedPrice: 0, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
+        perApplicationFee: 97.2, serviceType: 'Every 6 Weeks Lawn Care',
+        svc: { ...SVC, primary_line_price: 100 }, dbConn: DB_CONN,
+      })).toBe(0);
+      expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
+    });
+
+    // Without a positive primary_line_price on the row, a bare stamped 0 is
+    // the DIFFERENT, indistinguishable-from-null shape (the sibling-covered
+    // same-trip PROMOTED row leaves both columns null) and keeps deferring
+    // exactly as before this change.
+    test('a bare stamped $0 with no primary_line_price still defers to the sibling lookup / fee, unchanged', async () => {
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+      expect(await resolveScheduledServiceCharge({
+        estimatedPrice: 0, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application',
+        perApplicationFee: 97.2, serviceType: 'Every 6 Weeks Lawn Care', svc: SVC, dbConn: DB_CONN,
+      })).toBe(97.2);
+      expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalled();
+    });
   });
 });

@@ -147,6 +147,24 @@ function membershipDuesCoverVisit({
     && Number(monthlyRate || 0) > 0;
 }
 
+// Codex pre-push P1 (round 3): a stamped 0 estimated_price is NOT always
+// "unpriced" — completion-pricing's discount engine (services/completion-pricing.js
+// discountedVisit) freezes a fully-discounted application at a genuine $0 net
+// by patching BOTH primary_line_price (the pre-discount gross base) and
+// estimated_price (the post-discount net) together, and that supported shape
+// is pinned by completion-pricing.postgres.test.js and
+// discount-stack-pricing-provenance-postgres.test.js. A bare 0 with NO
+// primary_line_price on the row is a genuinely different, indistinguishable-
+// from-null shape: the sibling-covered same-trip PROMOTED row
+// (estimate-converter.js reservedAcceptPerVisitSplit) leaves BOTH columns
+// null, never 0-with-a-base. `primaryLinePrice` is the provenance signal —
+// every "does this visit have its own price" gate below shares this ONE
+// predicate so the two can never be told apart in one spot and conflated in
+// another.
+function hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice) {
+  return Number(estimatedPrice) === 0 && primaryLinePrice != null && Number(primaryLinePrice) > 0;
+}
+
 // Per-application customers bill the explicit visit price, else the
 // acceptance-stamped per_application_fee — NEVER the customer-level
 // monthly_rate: a multi-service accept intentionally leaves both the fee and
@@ -155,6 +173,11 @@ function membershipDuesCoverVisit({
 // no amount returns 0, the auto-invoice gate declines it, and the visit is
 // billed manually. Legacy (non-per-app) rows keep the monthly_rate fallback
 // the WaveGuard-membership flows depend on.
+//
+// `primaryLinePrice` (optional — every EXISTING caller keeps working
+// byte-identically without it): a provenance-backed $0 (see
+// hasAuthoritativeZeroPrice above) returns 0 here directly, never the fee/
+// rate fallback — a fully-discounted application must stay free.
 function completionInvoiceAmount({
   estimatedPrice,
   isCallback,
@@ -162,8 +185,10 @@ function completionInvoiceAmount({
   perApplicationFee,
   monthlyRate,
   billingMode,
+  primaryLinePrice = null,
 }) {
   if (estimatedPrice != null && Number(estimatedPrice) > 0) return Number(estimatedPrice);
+  if (hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)) return 0;
   if (isCallback) return 0;
   if (perApplicationBilling) {
     return Number(perApplicationFee) > 0 ? Number(perApplicationFee) : 0;
@@ -222,6 +247,10 @@ function predictCompletionBilling({
   prepaidMethod,
   annualCoverageValidated,
   billingMode,
+  // Provenance signal for a genuine $0 (see hasAuthoritativeZeroPrice above)
+  // — optional, every existing caller keeps its current prediction without
+  // it.
+  primaryLinePrice = null,
   duesCollectedThisMonth = false,
   // GATE_COMPLETION_AUTOPAY_CHARGE (owner ruling 2026-08-26/27): with the
   // gate on, ANY autopay customer's collectible self-pay completion invoice
@@ -230,7 +259,8 @@ function predictCompletionBilling({
   // default keeps this function's predictions byte-identical when off.
   completionAutopayChargeEnabled = false,
 }) {
-  const hasVisitPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
+  const hasVisitPrice = (estimatedPrice != null && Number(estimatedPrice) > 0)
+    || hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice);
   // no_charge is two different worlds and the office must be able to tell
   // them apart. A callback / always-free type / renewal-owned visit is
   // SUPPOSED to bill nothing. An unpriced self-pay visit bills nothing only
@@ -254,6 +284,7 @@ function predictCompletionBilling({
       perApplicationFee,
       monthlyRate,
       billingMode,
+      primaryLinePrice,
     });
     const resolvedPayerAmount = payerAmount > 0
       ? payerAmount
@@ -331,10 +362,19 @@ function predictCompletionBilling({
     }
     const amount = completionInvoiceAmount({
       estimatedPrice, isCallback, perApplicationBilling: true, perApplicationFee, monthlyRate, billingMode,
+      primaryLinePrice,
     });
     // Per-application lane with no fee on file — the acceptance fee never
     // got stamped. A money gap, not a free visit.
     if (!(amount > 0)) {
+      // A provenance-backed $0 (see hasAuthoritativeZeroPrice) is a
+      // deliberately free application, never a money gap — 'fully_discounted'
+      // is NOT in UNBILLED_MONEY_GAP_REASONS, and 'no_charge' (never
+      // 'invoice'/'auto_charge') keeps unbilledCompletionGap's willMint===false
+      // path from reading it as a stalled mint either.
+      if (hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)) {
+        return { kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' };
+      }
       // A POSITIVE out-of-band prepayment (cash/Zelle stamped through
       // /:id/prepaid) on an unpriced visit is what completion calls covered
       // — prepaid_amount > 0 AND >= the $0 amount — so it is paid, not a
@@ -380,6 +420,7 @@ function predictCompletionBilling({
   // actually mints for this customer).
   const amount = completionInvoiceAmount({
     estimatedPrice, isCallback, perApplicationBilling: false, perApplicationFee, monthlyRate, billingMode,
+    primaryLinePrice,
   });
   if (covered) {
     return { kind: 'covered_membership', amount: null, grossAmount: amount, conflictStampedPrice: hasVisitPrice };
@@ -390,6 +431,11 @@ function predictCompletionBilling({
   if (!(amount > 0)) {
     if (isCallback || isAlwaysFreeServiceType(serviceType)) {
       return noCharge(isCallback ? 'callback' : 'always_free_service_type');
+    }
+    // Same provenance-backed-zero exemption as the per_application branch
+    // above — never a money gap.
+    if (hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice)) {
+      return { kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' };
     }
     // Mirrors completion's prepaidCovered (prepaid_amount > 0 AND >= the
     // amount): a positive cash/Zelle prepayment stamped on an unpriced visit
@@ -777,11 +823,25 @@ async function sameTripFirstApplicationBreakdown({ svc, invoiceTotal, dbConn } =
 //                                                                  visit charge alone and silently drop the fee
 //   { status: 'error' }                                        — the lookup itself failed
 //   { status: 'none' }                                         — no relevant match at all
-async function siblingInvoiceCoverageVerdict(svc, dbConn) {
+//
+// `lockRows` (codex pre-push P1, round 3): a transactional MINT recheck
+// passes this so the underlying lookup's FOR UPDATE OF i (see
+// findFirstApplicationInvoiceForEstimateService) holds the matched invoice
+// row(s) to commit — the read-only schedule prediction and every
+// non-transactional caller leave it false (unchanged, a plain snapshot
+// read; passing it there would take a lock this function never releases
+// outside a transaction).
+async function siblingInvoiceCoverageVerdict(svc, dbConn, { lockRows = false } = {}) {
   let result;
   try {
     const { findFirstApplicationInvoiceForEstimateService } = require('./estimate-first-application-invoice');
-    result = await findFirstApplicationInvoiceForEstimateService(svc, dbConn);
+    // Every existing (non-transactional) caller keeps the exact byte-identical
+    // 2-arg call — only a `lockRows: true` recheck passes the 3rd argument at
+    // all, so a call-shape assertion in an existing test never has to know
+    // about this option.
+    result = lockRows
+      ? await findFirstApplicationInvoiceForEstimateService(svc, dbConn, { lockRows: true })
+      : await findFirstApplicationInvoiceForEstimateService(svc, dbConn);
   } catch {
     return { status: 'error' };
   }
@@ -951,6 +1011,7 @@ function unbilledCompletionGap({ prediction, hasChargeableMethod = null, willMin
 
 module.exports = {
   BILLING_MODES,
+  hasAuthoritativeZeroPrice,
   UNBILLED_MONEY_GAP_REASONS,
   unbilledCompletionGap,
   MONTHLY_LANE_SQL,

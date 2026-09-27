@@ -4998,7 +4998,7 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
       })
       .where('ss.scheduled_date', '<=', horizon)
       .select(
-        'ss.id', 'ss.customer_id', 'ss.status', 'ss.estimated_price', 'ss.is_callback', 'ss.service_type',
+        'ss.id', 'ss.customer_id', 'ss.status', 'ss.estimated_price', 'ss.primary_line_price', 'ss.is_callback', 'ss.service_type',
         'ss.prepaid_amount', 'ss.prepaid_method', 'ss.annual_prepay_term_id', 'ss.is_recurring',
         'ss.source_estimate_id', 'ss.scheduled_date', 'ss.recurring_parent_id', 'ss.recurring_pattern',
         'c.billing_mode', 'c.waveguard_tier', 'c.monthly_rate', 'c.autopay_enabled',
@@ -5042,6 +5042,7 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
         billingMode: v.billing_mode || null,
         autopayActive,
         estimatedPrice: v.estimated_price != null ? Number(v.estimated_price) : null,
+        primaryLinePrice: v.primary_line_price,
         monthlyRate: v.monthly_rate,
         perApplicationFee: v.per_application_fee,
         isRecurring: !!v.is_recurring,

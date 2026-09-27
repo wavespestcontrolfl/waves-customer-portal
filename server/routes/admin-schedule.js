@@ -44,7 +44,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoveredCompletionPrediction, siblingInvoiceCoverageVerdict, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, hasAuthoritativeZeroPrice, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoveredCompletionPrediction, siblingInvoiceCoverageVerdict, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -5869,6 +5869,7 @@ router.get('/', async (req, res, next) => {
           billingMode: s.billing_mode || null,
           autopayActive,
           estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+          primaryLinePrice: s.primary_line_price,
           serviceKey: s.service_key_snapshot || null,
           serviceCategorySnapshot: s.service_category_snapshot || null,
           excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
@@ -6436,6 +6437,7 @@ router.get('/week', async (req, res, next) => {
             billingMode: s.billing_mode || null,
             autopayActive,
             estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+            primaryLinePrice: s.primary_line_price,
             serviceKey: s.service_key_snapshot || null,
             serviceCategorySnapshot: s.service_category_snapshot || null,
             excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
@@ -15712,9 +15714,31 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // (base or extras) rather than treat it as a priceable $0. Only a
 // definitive 'none' (genuinely no relevant sibling invoice at all) falls
 // through to the established fee.
-async function resolveScheduledServiceCharge({ estimatedPrice, isCallback, monthlyRate, billingMode, perApplicationFee, serviceType, svc = null, dbConn = null }) {
+async function resolveScheduledServiceCharge({
+  estimatedPrice, isCallback, monthlyRate, billingMode, perApplicationFee, serviceType, svc = null, dbConn = null,
+  // codex pre-push P1 (round 3): the sibling-coverage verdict this resolver
+  // reads is a plain, unlocked snapshot — a concurrent refund/restoration
+  // can invalidate it before the invoice this verdict gated is actually
+  // created. Callers that go on to mint pass `onVerdict` to capture the
+  // status THIS call resolved (only invoked when the lookup actually ran),
+  // then re-run siblingInvoiceCoverageVerdict with `lockRows: true` inside
+  // the mint's own locked transaction (scheduled-invoice-mint.js
+  // recheckInTrx) and refuse the mint if it changed. Optional — every
+  // existing caller (read-only previews, unit tests) is unaffected.
+  onVerdict = null,
+}) {
   const perApplicationBilling = billingMode === 'per_application' && !isAlwaysFreeServiceType(serviceType);
-  const hasOwnPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
+  // codex pre-push P1 (round 3): a provenance-backed $0 (completion-pricing's
+  // discount engine froze a fully-discounted application at a genuine $0
+  // net, stamping a positive primary_line_price alongside it — see
+  // hasAuthoritativeZeroPrice, billing-lane.js) is this visit's OWN price,
+  // never "unpriced" — it must never fall into the sibling-coverage lookup
+  // below (unrelated to that provenance) or the per-application fee
+  // fallback either. `svc?.primary_line_price` is undefined/absent for
+  // every existing pure/unit-test caller, so this is a no-op for them.
+  const primaryLinePrice = svc?.primary_line_price ?? null;
+  const hasOwnPrice = (estimatedPrice != null && Number(estimatedPrice) > 0)
+    || hasAuthoritativeZeroPrice(estimatedPrice, primaryLinePrice);
   if (perApplicationBilling && !hasOwnPrice && svc && dbConn) {
     let verdict;
     try {
@@ -15722,6 +15746,7 @@ async function resolveScheduledServiceCharge({ estimatedPrice, isCallback, month
     } catch {
       verdict = { status: 'error' };
     }
+    if (onVerdict) onVerdict(verdict.status);
     if (verdict.status === 'covered') return 0;
     if (verdict.status !== 'none') {
       return {
@@ -15740,7 +15765,42 @@ async function resolveScheduledServiceCharge({ estimatedPrice, isCallback, month
     perApplicationFee,
     monthlyRate,
     billingMode,
+    primaryLinePrice,
   });
+}
+
+// Builds the `recheckInTrx` mintScheduledServiceInvoiceWithDeposit runs
+// under its OWN advisory lock + row locks, right before creating the
+// invoice (codex pre-push P1, round 3): resolveScheduledServiceCharge's
+// sibling-coverage verdict is a plain, unlocked snapshot read before that
+// transaction even opens — a concurrent refund can invalidate a 'covered'
+// verdict (an extras-only invoice then mints for a trip whose fee was never
+// billed) or a concurrent restoration can invalidate a 'none' verdict (a
+// second base charge mints beside the sibling's). Re-running the SAME
+// lookup with `lockRows: true` — so it holds the matched invoice row(s) to
+// commit rather than reading a snapshot again — and refusing on ANY status
+// change closes both directions. `priorStatus` is undefined when the
+// resolver never consulted the lookup at all (an explicit/authoritative
+// own price, an always-free type, a callback, or no svc/dbConn) — no
+// recheck needed then, so this returns null and the caller passes no
+// `recheckInTrx`.
+function siblingCoverageRecheckInTrx(svc, priorStatus) {
+  if (priorStatus == null) return null;
+  return async (trx) => {
+    let recheck;
+    try {
+      recheck = await siblingInvoiceCoverageVerdict(svc, trx, { lockRows: true });
+    } catch {
+      recheck = { status: 'error' };
+    }
+    if (recheck.status !== priorStatus) {
+      const e = new Error('This visit’s combined-trip coverage changed while charging — refresh and try again.');
+      e.status = 409;
+      e.statusCode = 409;
+      e.code = 'SIBLING_COVERAGE_CHANGED';
+      throw e;
+    }
+  };
 }
 
 // Pure: should the Mark-prepaid request even attempt a receipt? Series prepays
@@ -15786,6 +15846,7 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     .orderBy('created_at', 'desc')
     .first();
   if (existing) return { invoice: existing, reused: true };
+  let siblingVerdictStatus;
   const amount = await resolveScheduledServiceCharge({
     estimatedPrice: svc.estimated_price,
     isCallback: svc.is_callback,
@@ -15795,6 +15856,7 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     serviceType: svc.service_type,
     svc,
     dbConn: db,
+    onVerdict: (status) => { siblingVerdictStatus = status; },
   });
   if (amount && typeof amount === 'object' && amount.refused) {
     return { invoice: null, reason: amount.reason };
@@ -15806,6 +15868,7 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
   });
   return mintScheduledServiceInvoiceWithDeposit({
     svc,
+    recheckInTrx: siblingCoverageRecheckInTrx(svc, siblingVerdictStatus),
     buildCreateParams: () => ({
       customerId: svc.customer_id,
       scheduledServiceId: svc.id,
@@ -16465,6 +16528,7 @@ router.post('/:id/invoice', async (req, res, next) => {
     // admin-dispatch.js. Honour an explicit positive price if one was set;
     // an explicit per_application lane bills its acceptance fee; otherwise
     // the visit is $0.
+    let siblingVerdictStatus;
     const rawAmount = await resolveScheduledServiceCharge({
       estimatedPrice: svc.estimated_price,
       isCallback: svc.is_callback,
@@ -16474,6 +16538,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       serviceType: svc.service_type,
       svc,
       dbConn: db,
+      onVerdict: (status) => { siblingVerdictStatus = status; },
     });
     // A sibling-coverage lookup that couldn't confirm 'covered' ('error' /
     // 'needs_review') refuses BEFORE any extras are even parsed (codex
@@ -16579,6 +16644,7 @@ router.post('/:id/invoice', async (req, res, next) => {
     // price on top of it.
     const minted = await mintScheduledServiceInvoiceWithDeposit({
       svc,
+      recheckInTrx: siblingCoverageRecheckInTrx(svc, siblingVerdictStatus),
       // In-lock ownership recheck: substantial async work happens between
       // the authorized SELECT at the top of this route and the mint
       // transaction — re-verify (row-locked) that the visit is still this
@@ -24809,6 +24875,7 @@ router._test = {
   clearAppointmentDiscountCatalogFields,
   appointmentDiscountInputChanged,
   resolveScheduledServiceCharge,
+  siblingCoverageRecheckInTrx,
   shouldAttemptPrepaidReceipt,
   sendPrepaidReceiptForInvoice,
   voidConversionInvoicesRestoringCredits,

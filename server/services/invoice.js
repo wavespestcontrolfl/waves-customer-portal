@@ -1572,7 +1572,22 @@ async function buildScheduledServiceInvoiceLines(
   // callback-reconciliation shape this guards (a stale gross primary_line_price
   // beside a genuinely-zero estimated_price AND a genuinely-zero fallbackAmount)
   // is unaffected — both sides still resolve to 0 there.
-  const storedNetAmount = Number(scheduled.estimated_price) > 0
+  //
+  // Codex pre-push P1 (round 3): that same bare-0 check ALSO caught the
+  // opposite, supported shape — completion-pricing's discount engine froze
+  // a fully-discounted application at a genuine $0 net (a positive
+  // primary_line_price gross base stamped alongside it — see
+  // hasAuthoritativeZeroPrice, billing-lane.js), which is exactly
+  // `primaryBaseKnown` above. Treating it as "no price, use the fallback"
+  // let a positive fallbackAmount (e.g. the per-application fee another
+  // caller resolved for a DIFFERENT reason) reconcile a real $0 invoice
+  // back up to that fee. completion-pricing.postgres.test.js's "fully
+  // discounted application stays zero" pins this with fallbackAmount
+  // matching (0) — this guard is for a caller whose fallback does NOT.
+  const authoritativeZero = primaryBaseKnown
+    && Number(scheduled.estimated_price) === 0
+    && Number(scheduled.primary_line_price) > 0;
+  const storedNetAmount = Number(scheduled.estimated_price) > 0 || authoritativeZero
     ? roundMoney(scheduled.estimated_price)
     : roundMoney(fallbackAmount);
   const replayNetAmount = roundMoney(

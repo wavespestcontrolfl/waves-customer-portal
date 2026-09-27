@@ -147,6 +147,96 @@ describe('POST /:id/invoice — sibling-lookup refusal (codex round-2 P1)', () =
     expect(mockMint).toHaveBeenCalledTimes(1);
     expect(next).toHaveBeenCalledTimes(1);
   });
+
+  // Codex pre-push P1 (round 3): resolveScheduledServiceCharge's verdict is
+  // read on a plain connection BEFORE mintScheduledServiceInvoiceWithDeposit
+  // opens its locked transaction — a concurrent refund/restoration can
+  // invalidate it before the invoice is actually created. The route must
+  // pass a `recheckInTrx` that re-runs the SAME lookup (lockRows: true, so
+  // it holds the matched row to commit) and refuses the mint if the status
+  // changed.
+  describe('recheckInTrx — the sibling verdict is re-proven inside the mint lock', () => {
+    test('passes a recheckInTrx for a "none" verdict, which re-runs the lookup WITH lockRows: true', async () => {
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+      mockMint.mockImplementation(async ({ buildCreateParams }) => {
+        buildCreateParams();
+        throw new Error('stop-after-capture');
+      });
+      const { req, res, next } = makeReqRes({});
+      await handler(req, res, next);
+
+      const { recheckInTrx } = mockMint.mock.calls[0][0];
+      expect(typeof recheckInTrx).toBe('function');
+      findFirstApplicationInvoiceForEstimateService.mockClear();
+      // Unchanged verdict ('none' again) — the recheck proceeds silently.
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+      const fakeTrx = {};
+      await expect(recheckInTrx(fakeTrx)).resolves.toBeUndefined();
+      expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'svc-lawn' }), fakeTrx, { lockRows: true },
+      );
+    });
+
+    test('refuses the mint when a concurrent refund flips "none" to a live sibling match ("covered") under the lock', async () => {
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+      mockMint.mockImplementation(async ({ buildCreateParams }) => {
+        buildCreateParams();
+        throw new Error('stop-after-capture');
+      });
+      const { req, res, next } = makeReqRes({});
+      await handler(req, res, next);
+      const { recheckInTrx } = mockMint.mock.calls[0][0];
+
+      // A sibling invoice was restored between the pre-lock read and the
+      // locked recheck — the verdict is now 'covered'.
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+        invoice: { id: 'inv-restored', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+        liveBeside: null,
+      });
+      await expect(recheckInTrx({})).rejects.toMatchObject({
+        status: 409, code: 'SIBLING_COVERAGE_CHANGED',
+      });
+    });
+
+    test('refuses the mint when a concurrent refund flips "covered" to "none" under the lock', async () => {
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+        invoice: { id: 'inv-1', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+        liveBeside: null,
+      });
+      mockMint.mockImplementation(async ({ buildCreateParams }) => {
+        buildCreateParams();
+        throw new Error('stop-after-capture');
+      });
+      // A 'covered' base resolves to 0 — an operator-added extra is needed
+      // for the route's "nothing chargeable" gate to let the mint through
+      // at all (the base alone would 400 before ever reaching it).
+      const { req, res, next } = makeReqRes({
+        extraLineItems: [{ description: 'Extra treatment', quantity: 1, unit_price: 40, amount: 40 }],
+      });
+      await handler(req, res, next);
+      const { recheckInTrx } = mockMint.mock.calls[0][0];
+
+      // The covering sibling invoice was refunded between the pre-lock read
+      // and the locked recheck.
+      findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+      await expect(recheckInTrx({})).rejects.toMatchObject({
+        status: 409, code: 'SIBLING_COVERAGE_CHANGED',
+      });
+    });
+
+    test('no recheckInTrx at all when the visit has its own explicit price (the sibling lookup never ran)', async () => {
+      mockDb.__svcRow = { ...SVC_ROW, estimated_price: 150 };
+      mockMint.mockImplementation(async ({ buildCreateParams }) => {
+        buildCreateParams();
+        throw new Error('stop-after-capture');
+      });
+      const { req, res, next } = makeReqRes({});
+      await handler(req, res, next);
+
+      expect(findFirstApplicationInvoiceForEstimateService).not.toHaveBeenCalled();
+      expect(mockMint.mock.calls[0][0].recheckInTrx).toBeNull();
+    });
+  });
 });
 
 // mintOrReuseScheduledServiceInvoice backs the Mark-prepaid / prepaid-receipt
@@ -175,5 +265,25 @@ describe('mintOrReuseScheduledServiceInvoice — sibling-lookup refusal', () => 
     const result = await mintOrReuseScheduledServiceInvoice(SVC);
     expect(result).toEqual({ invoice: null, reason: 'sibling_invoice_needs_review' });
     expect(mockMint).not.toHaveBeenCalled();
+  });
+
+  test('a "none" verdict mints and passes a recheckInTrx that re-proves coverage under the lock', async () => {
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({ invoice: null, liveBeside: null });
+    mockMint.mockImplementation(async ({ buildCreateParams }) => {
+      buildCreateParams();
+      return { invoice: { id: 'inv-new' }, reused: false };
+    });
+    const result = await mintOrReuseScheduledServiceInvoice(SVC);
+    expect(result).toEqual({ invoice: { id: 'inv-new' }, reused: false });
+    const { recheckInTrx } = mockMint.mock.calls[0][0];
+    expect(typeof recheckInTrx).toBe('function');
+
+    findFirstApplicationInvoiceForEstimateService.mockClear();
+    findFirstApplicationInvoiceForEstimateService.mockResolvedValue({
+      invoice: { id: 'inv-restored', scheduled_service_id: 'svc-pest', status: 'sent', total: 153.6 },
+      liveBeside: null,
+    });
+    await expect(recheckInTrx({})).rejects.toMatchObject({ code: 'SIBLING_COVERAGE_CHANGED' });
+    expect(findFirstApplicationInvoiceForEstimateService).toHaveBeenCalledWith(SVC, {}, { lockRows: true });
   });
 });

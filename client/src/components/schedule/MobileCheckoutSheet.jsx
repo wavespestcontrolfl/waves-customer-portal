@@ -295,7 +295,20 @@ export default function MobileCheckoutSheet({
   // invoice prediction shape (predictionFromAttachedInvoice, admin-schedule.js)
   // legitimately never carries grossAmount — that's not a legacy/stale
   // payload, so it must not be refused as one.
-  const priceRefreshBlocksCharge = priceNeedsRefresh && !invoicePreview;
+  //
+  // codex pre-push P2 (round 3): `invoicePreview` is null for a SETTLED
+  // (paid/prepaid) or refunded attached invoice too — predictionFromAttachedInvoice
+  // still returns `source: 'attached_invoice'` for both (it excludes only
+  // void/canceled/cancelled, DEAD_ATTACHED_INVOICE_STATUSES), so an unpriced
+  // visit with a recorded prepayment and one of those invoices satisfied the
+  // OLD `!invoicePreview` guard alone and was shown "Price needs a refresh"
+  // permanently, although the payload was current. Key the exemption on the
+  // server's own `source` field instead of the invoicePreview subset — a
+  // canceled/void attached invoice (source absent, predictCompletionBilling's
+  // ordinary prediction applies instead) is UNCHANGED and still refused when
+  // stale.
+  const attachedInvoicePrediction = service.billingLane?.prediction?.source === 'attached_invoice';
+  const priceRefreshBlocksCharge = priceNeedsRefresh && !invoicePreview && !attachedInvoicePrediction;
   // amountDue (total − credit_applied), never the gross — the charge paths
   // collect the amount due. And when the recorded prepayment was already
   // consumed by this invoice (prepaidApplied), its total is already net, so

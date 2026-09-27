@@ -78,11 +78,19 @@ const RECEIPT_REASON_TEXT = {
     'The prepayment was recorded, but a new card payment session started for this visit, so no receipt was sent. Try again.',
   not_collectible:
     'This visit’s invoice can’t be marked paid right now, so no receipt was sent — the prepayment was recorded.',
+  // Codex pre-push P2 (round 3): resolveScheduledServiceCharge's
+  // sibling-coverage refusals (admin-schedule.js) — the prepayment always
+  // saves first, so these tell the operator what to do next rather than
+  // leave them on the generic fallback below.
+  sibling_invoice_needs_review:
+    'The prepayment was recorded, but this visit’s combined-trip invoice needs a human look before a receipt goes out — reconcile it from Customer 360, then resend the receipt.',
+  sibling_lookup_failed:
+    'The prepayment was recorded, but we couldn’t confirm whether this visit’s combined-trip invoice already covers it, so no receipt was sent yet — refresh and try again in a moment.',
   send_failed:
     'The prepayment was recorded, but the receipt couldn’t be sent just now. You can resend it from the invoice.',
   error: 'The prepayment was recorded, but the receipt couldn’t be sent just now.',
 };
-function receiptReasonText(receipt) {
+export function receiptReasonText(receipt) {
   const base = RECEIPT_REASON_TEXT[receipt?.reason]
     || 'The prepayment was recorded, but no receipt was sent.';
   if (receipt?.reason === 'not_paid_in_full' && receipt?.balance != null) {

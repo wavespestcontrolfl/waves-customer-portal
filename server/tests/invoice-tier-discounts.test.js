@@ -436,6 +436,45 @@ describe('invoice tier discounts', () => {
     expect(invoice.total).toBe(137.2);
   });
 
+  // Codex pre-push P1 (round 3): the OPPOSITE, supported shape from the test
+  // above — completion-pricing's discount engine froze a fully-discounted
+  // application at a genuine $0 net, stamping a positive primary_line_price
+  // (the pre-discount gross base) alongside estimated_price: 0. A caller
+  // whose fallbackAmount does NOT also happen to be 0 (unlike
+  // completion-pricing.postgres.test.js's own "fully discounted application
+  // stays zero" case, which passes fallbackAmount: 0 and so never actually
+  // exercises this guard) must not reconcile this real $0 invoice back up
+  // toward that fallback.
+  test('a provenance-backed $0 (positive primary_line_price, 0 estimated_price) stays zero even against a positive fallback', async () => {
+    setupDb({
+      customer: { id: 'customer-1', waveguard_tier: null, property_type: 'residential' },
+      scheduledServices: [{
+        id: 'scheduled-1',
+        service_type: 'Quarterly Pest Control',
+        estimated_price: 0,
+        primary_line_price: 100,
+      }],
+    });
+
+    const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService('scheduled-1', {
+      // A different caller's positive fallback (e.g. the per-application
+      // fee resolveScheduledServiceCharge would fall to for an UNPRICED
+      // visit) — this visit is NOT unpriced, so it must never win.
+      fallbackAmount: 97.2,
+      fallbackDescription: 'Quarterly Pest Control',
+    });
+
+    expect(scheduledInvoice.lineItems.reduce((sum, item) => sum + Number(item.amount), 0)).toBe(0);
+
+    const invoice = await InvoiceService.create({
+      customerId: 'customer-1',
+      title: 'Quarterly Pest Control',
+      lineItems: scheduledInvoice.lineItems,
+      trustedStoredDiscountSources: ['scheduled_service'],
+    });
+    expect(invoice.total).toBe(0);
+  });
+
   test('scheduled invoice creation hydrates service date and type', async () => {
     const ctx = setupDb({
       customer: { id: 'customer-1', waveguard_tier: 'Bronze', property_type: 'residential' },

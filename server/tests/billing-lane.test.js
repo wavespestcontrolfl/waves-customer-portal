@@ -280,6 +280,61 @@ describe('predictCompletionBilling', () => {
     expect(predictCompletionBilling({ ...memberBase, billingMode: null, estimatedPrice: 100 }))
       .toEqual({ kind: 'covered_membership', amount: null, grossAmount: 100, conflictStampedPrice: true });
   });
+
+  // Codex pre-push P1 (round 3): completion-pricing's discount engine
+  // freezes a fully-discounted application at a genuine $0 net by stamping
+  // BOTH primary_line_price (the pre-discount gross base) and
+  // estimated_price (the post-discount net) together — pinned for real by
+  // completion-pricing.postgres.test.js's "fully discounted application
+  // stays zero" case. A bare estimatedPrice: 0 with NO primaryLinePrice is
+  // the DIFFERENT, indistinguishable-from-null shape (the sibling-covered
+  // same-trip PROMOTED row leaves both columns null) and must keep
+  // deferring to the fee fallback exactly as before — this predicate is
+  // the ONE thing that tells the two apart.
+  describe('a provenance-backed $0 (primaryLinePrice on the row) stays free — never the fee/rate fallback', () => {
+    test('per_application: a fully-discounted application predicts no charge, never the acceptance fee', () => {
+      const perApp = {
+        ...memberBase, lane: 'per_application', billingMode: 'per_application',
+        estimatedPrice: 0, primaryLinePrice: 100, perApplicationFee: 97.2, monthlyRate: null,
+      };
+      expect(predictCompletionBilling(perApp))
+        .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
+      // Without primaryLinePrice (the parity fixture's own shape — a bare
+      // stamped 0, no provenance), the SAME estimatedPrice: 0 still defers
+      // to the acceptance fee exactly as before this change.
+      expect(predictCompletionBilling({ ...perApp, primaryLinePrice: null }))
+        .toEqual({ kind: 'auto_charge', amount: 97.2, grossAmount: 97.2, conflictStampedPrice: false });
+    });
+
+    test('self-pay/membership lane: a fully-discounted visit predicts no charge, never the monthly rate', () => {
+      const selfPay = {
+        ...memberBase, lane: null, billingMode: 'per_visit', autopayActive: false,
+        estimatedPrice: 0, primaryLinePrice: 62.5, monthlyRate: 74.7, isRecurring: false,
+      };
+      expect(predictCompletionBilling(selfPay))
+        .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'fully_discounted' });
+    });
+
+    test('a primaryLinePrice of 0 (or missing) is NOT provenance — a bare stamped 0 defers to the fallback', () => {
+      const perApp = {
+        ...memberBase, lane: 'per_application', billingMode: 'per_application',
+        estimatedPrice: 0, perApplicationFee: 97.2, monthlyRate: null,
+      };
+      expect(predictCompletionBilling({ ...perApp, primaryLinePrice: 0 }))
+        .toEqual({ kind: 'auto_charge', amount: 97.2, grossAmount: 97.2, conflictStampedPrice: false });
+      expect(predictCompletionBilling(perApp))
+        .toEqual({ kind: 'auto_charge', amount: 97.2, grossAmount: 97.2, conflictStampedPrice: false });
+    });
+
+    test('a POSITIVE estimatedPrice always wins, provenance or not', () => {
+      const perApp = {
+        ...memberBase, lane: 'per_application', billingMode: 'per_application',
+        estimatedPrice: 40, primaryLinePrice: 100, perApplicationFee: 97.2, monthlyRate: null,
+      };
+      expect(predictCompletionBilling(perApp))
+        .toEqual({ kind: 'auto_charge', amount: 40, grossAmount: 40, conflictStampedPrice: false });
+    });
+  });
 });
 
 // Mid-month autopay lapse after the cron already collected the month's dues:

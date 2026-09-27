@@ -366,4 +366,72 @@ describe('MobileCheckoutSheet unpriced-visit billingLane.prediction fallback', (
     // $214 invoice total, $60 prepaid credited once.
     expect(screen.getByRole('button', { name: 'Charge $154.00' })).toBeInTheDocument();
   });
+
+  // Codex pre-push P2 (round 3): predictionFromAttachedInvoice returns
+  // `source: 'attached_invoice'` (never grossAmount) for a SETTLED
+  // (paid/prepaid) or refunded invoice too, but `invoicePreview` above is
+  // null for both (openVisitInvoice/processingVisitInvoice exclude
+  // settled/uncollectible statuses) — the OLD `!invoicePreview` exemption
+  // alone missed this subset, so an unpriced visit with a recorded
+  // prepayment and a settled or refunded attached invoice was shown
+  // "Price needs a refresh" permanently even though the payload was
+  // current. Keying the exemption on the prediction's own `source` field
+  // fixes both.
+  it.each(['paid', 'refunded'])(
+    'does not show the missing-grossAmount refresh guard for a %s attached invoice',
+    (status) => {
+      render(
+        <MobileCheckoutSheet
+          service={{
+            ...BASE_SERVICE,
+            ...ATTACHED_INVOICE_FIELDS,
+            checkoutInvoiceStatus: status,
+            waveguardTier: null,
+            estimatedPrice: null,
+            prepaidAmount: 60,
+            prepaidMethod: 'cash',
+            billingLane: {
+              mode: 'per_application',
+              source: 'explicit',
+              monthlyRate: null,
+              // Same shape predictionFromAttachedInvoice always returns for
+              // a non-dead attached invoice — never grossAmount.
+              prediction: { kind: 'prepaid', amount: 0, conflictStampedPrice: false, source: 'attached_invoice' },
+            },
+          }}
+          onClose={() => {}}
+        />,
+      );
+      expect(screen.queryByRole('button', { name: /price needs a refresh/i })).not.toBeInTheDocument();
+    },
+  );
+
+  // Canceled/void is the one attached-invoice status predictionFromAttachedInvoice
+  // itself treats as dead (DEAD_ATTACHED_INVOICE_STATUSES) — its prediction
+  // falls through to the ordinary predictCompletionBilling shape with NO
+  // `source: 'attached_invoice'`, so a missing grossAmount there is a real
+  // legacy/stale signal and must still be refused, unchanged by this fix.
+  it('still shows the refresh guard for a canceled attached invoice (source is not attached_invoice)', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          ...ATTACHED_INVOICE_FIELDS,
+          checkoutInvoiceStatus: 'canceled',
+          waveguardTier: null,
+          estimatedPrice: null,
+          prepaidAmount: 60,
+          prepaidMethod: 'cash',
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            prediction: { kind: 'invoice', amount: 40, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole('button', { name: /price needs a refresh/i })).toBeDisabled();
+  });
 });

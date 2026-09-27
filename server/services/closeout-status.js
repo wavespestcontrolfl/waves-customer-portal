@@ -564,6 +564,7 @@ function deriveBillingExpectation(inputs) {
     billingMode: customer.billing_mode || null,
     autopayActive: inputs.autopayActive === true,
     estimatedPrice: visit.estimated_price != null ? Number(visit.estimated_price) : null,
+    primaryLinePrice: visit.primary_line_price,
     monthlyRate: customer.monthly_rate,
     perApplicationFee: customer.per_application_fee,
     isRecurring: visit.is_recurring === true,
