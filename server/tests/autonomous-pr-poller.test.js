@@ -2529,6 +2529,31 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     expect(indexNow.submit).not.toHaveBeenCalled();
   });
 
+  test('a superseded PR from an older claim leaves the poll set without touching the current owner', async () => {
+    const staleRun = makeRun({ action_type: 'refresh_existing_page', queue_claim_id: 'claim-old' });
+    const currentOwner = {
+      id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: 'claim-current',
+      bucket: 'citability_backfill',
+      signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:new' } },
+    };
+    const updates = setupDb({ pending: [staleRun], queue: [currentOwner] });
+    gh.getPr.mockResolvedValue({
+      head: { ref: 'content/stale-claim', sha: 'stale-head' },
+      number: 42, state: 'open', merged: false,
+    });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
+    expect(gh.closePr).not.toHaveBeenCalled();
+    expect(gh.retireBranch).not.toHaveBeenCalled();
+    expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
+    expect(runUpdates(updates)).toContainEqual(expect.objectContaining({
+      table: 'autonomous_runs',
+      updates: expect.objectContaining({ skip_reason: 'superseded_by_review_queue_action' }),
+    }));
+  });
+
   test('operator action landing between tick-start and finalize (closed PR): superseded, never failed', async () => {
     const updates = setupDb({
       pending: [makeRun()],

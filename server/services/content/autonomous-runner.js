@@ -3221,6 +3221,31 @@ class AutonomousRunner {
         runs += 1;
         opps += 1;
       } else {
+        // The publish may have persisted its PR-bearing terminal run before
+        // both opportunity park writes failed. That is durable current-claim
+        // evidence, so restore the exact poller park instead of skipping the
+        // queue row and orphaning the PR/branch.
+        let pendingPrQuery = db('autonomous_runs')
+          .where({ opportunity_id: row.id, outcome: 'completed_pending_review' })
+          .whereIn('skip_reason', ['astro_pr_pending_merge', 'metadata_pr_pending_merge'])
+          .whereNotNull('astro_pr_url');
+        pendingPrQuery = row.claim_id == null
+          ? pendingPrQuery.whereNull('queue_claim_id')
+          : pendingPrQuery.where('queue_claim_id', row.claim_id);
+        const pendingPr = await pendingPrQuery.first('id', 'skip_reason', 'astro_pr_url');
+        if (pendingPr) {
+          const restored = await db('opportunity_queue')
+            .where({ id: row.id, status: 'claimed', skip_reason: 'named_competitor_publishing' })
+            .where('claimed_at', row.claimed_at)
+            .where('claim_id', row.claim_id ?? null)
+            .whereRaw("jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')")
+            .update({
+              status: 'pending_review', skip_reason: pendingPr.skip_reason,
+              updated_at: new Date(),
+            });
+          opps += Number(restored) > 0 ? 1 : 0;
+          continue;
+        }
         const retired = await db('opportunity_queue')
           .where({ id: row.id, status: 'claimed', skip_reason: 'named_competitor_publishing' })
           .where('claimed_at', row.claimed_at)

@@ -1994,10 +1994,21 @@ async function pollRun(run, { allowMerge = true } = {}) {
 
     if (run.action_type === 'refresh_existing_page' && run.opportunity_id) {
       const row = await db('opportunity_queue').where('id', run.opportunity_id)
-        .first('bucket', 'signal_metadata');
+        .first('bucket', 'status', 'skip_reason', 'claim_id', 'signal_metadata');
       const { pageEditSuperseded } = require('./opportunity-queue')._internals;
       if (row?.bucket === 'citability_backfill' && pageEditSuperseded(row)) {
-        return await retireSupersededCitabilityPr(run, { ...pr, number: prNumber }, gh);
+        if (!sameQueueClaim(row, run)) return await supersedeRun(run, row);
+        if (row.status === 'pending_review' && row.skip_reason === pendingSkipReasonForRun(run)) {
+          return await retireSupersededCitabilityPr(run, { ...pr, number: prNumber }, gh);
+        }
+        // Approval recovery owns this short-lived claimed state. It may have
+        // already persisted the PR-bearing run while both queue park writes
+        // failed, so do not annotate that current owner away before the
+        // janitor restores the park for terminal retirement.
+        if (row.status === 'claimed' && row.skip_reason === 'named_competitor_publishing') {
+          return { pending: true, transient: true, reason: 'citability_retirement_queue_recovery_pending' };
+        }
+        return await supersedeRun(run, row);
       }
     }
     if (pr.merged || pr.merged_at) {

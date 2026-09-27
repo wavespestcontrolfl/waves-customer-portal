@@ -3756,6 +3756,40 @@ describe('approveAndPublishNamedCompetitor — superseded in-flight approval', (
     ]));
   });
 
+  test('crash recovery restores a persisted current-claim PR park for supersession retirement', async () => {
+    jest.resetModules();
+    const approvalClaimedAt = new Date('2026-09-27T01:35:00Z');
+    const updates = [];
+    const dbMock = jest.fn((table) => {
+      const filters = {};
+      const q = {
+        where: jest.fn((a, b) => { if (typeof a === 'object') Object.assign(filters, a); else filters[a] = b; return q; }),
+        whereIn: jest.fn(() => q), whereNotNull: jest.fn(() => q), whereNull: jest.fn(() => q), whereRaw: jest.fn(() => q),
+        first: jest.fn(async () => (table === 'autonomous_runs' && filters.outcome === 'completed_pending_review'
+          ? { id: 'run-pr', skip_reason: 'astro_pr_pending_merge', astro_pr_url: 'https://github.com/waves/pull/42' }
+          : null)),
+        update: jest.fn(async (patch) => { updates.push({ table, patch }); return 1; }),
+      };
+      return q;
+    });
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+
+    const result = await runner._retireSupersededStuckApprovals([{
+      id: 'opp-cite', bucket: 'citability_backfill', claim_id: 'claim-current', claimed_at: approvalClaimedAt,
+      signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:2' } },
+    }], 'crash recovery');
+
+    expect(result).toEqual({ ids: ['opp-cite'], runs: 0, opps: 1 });
+    expect(updates).toEqual([expect.objectContaining({
+      table: 'opportunity_queue',
+      patch: expect.objectContaining({ status: 'pending_review', skip_reason: 'astro_pr_pending_merge' }),
+    })]);
+    expect(updates[0].patch.status).not.toBe('skipped');
+  });
+
   test('a superseded non-PR park atomically retires the current run and queue row', async () => {
     jest.resetModules();
     const claimedAt = new Date('2026-09-27T01:45:00Z');
