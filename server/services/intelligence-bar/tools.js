@@ -2436,9 +2436,11 @@ async function resolveTechnicianByName(name) {
 // The catalog's WaveGuard member discounts, by their stable keys — never
 // inferred from shared attributes, so an unrelated Bronze promotion can
 // never pose as one. The discount engine's own eligibility then picks the
-// row that fits this service (the Termite Inspection row names
-// wdo_inspection), in the catalog's priority order.
-const MEMBER_DISCOUNT_KEYS = ['waveguard_member_wdo', 'waveguard_member'];
+// row that fits this service. The free-WDO member row is left out: a WDO
+// inspection bills from its project's inspection fee, which never reads the
+// visit's price, so a $0 booking would still be invoiced (owner 2026-09-27:
+// WDO stays out until that fee honors the member perk).
+const MEMBER_DISCOUNT_KEYS = ['waveguard_member'];
 
 // Live recurring coverage: a future, not-terminal recurring visit — the
 // "or recurring customers" half of the owner's rule (2026-09-27).
@@ -2476,6 +2478,10 @@ async function memberOneOffDiscount({ customer, catalogRow, listPrice, conn = db
   // An inactive customer is no member, whatever tier a cancellation left on
   // the row (the wind-down gate can retain it) — isActivePlanCustomer's rule.
   if (!customer || customer.active === false) return null;
+  // WDO bills from the project's inspection fee, not the visit (see
+  // MEMBER_DISCOUNT_KEYS) — a line discount here would promise what the
+  // invoice ignores.
+  if (catalogRow.service_key === 'wdo_inspection') return null;
   const rows = await conn('discounts')
     .whereIn('discount_key', MEMBER_DISCOUNT_KEYS)
     .where({ is_active: true, show_in_invoices: true })
@@ -2646,9 +2652,8 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
     // P2) — conn defaults to db, so the unlocked preflight pass is unchanged.
     conn,
   });
-  // $0 is a real price only when a member discount made the visit free (the
-  // catalog's free WDO for members); a $0 list price is no price at all.
-  const priced = Number(pricing.finalPrice) > 0 || (pricing.primaryDiscount && Number(pricing.finalPrice) === 0);
+  // A $0 price is no price at all.
+  const priced = Number(pricing.finalPrice) > 0;
   if (!priced) return { price: null, source: null, catalogRow, pricing: null };
   return { price: Number(pricing.finalPrice), source: stated ? 'stated' : 'catalog', catalogRow, pricing };
 }

@@ -784,7 +784,7 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       });
       // Only the catalog's member rows, by stable key — an unrelated Bronze
       // promotion can never pose as the member discount.
-      expect(memberListing.whereIn).toHaveBeenCalledWith('discount_key', ['waveguard_member_wdo', 'waveguard_member']);
+      expect(memberListing.whereIn).toHaveBeenCalledWith('discount_key', ['waveguard_member']);
     });
 
     test('a discount that was never pinned is refused even when the net price still matches (Codex r2 on #5093, P1)', async () => {
@@ -844,18 +844,16 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       expect(db.transaction).not.toHaveBeenCalled();
     });
 
-    test('the catalog\'s own member row wins by priority: a WDO inspection is free for members — a real $0, nothing invoiced', async () => {
+    test('a WDO inspection gets no automatic member discount — it bills from the project fee, which never reads the visit price (owner 2026-09-27)', async () => {
       const wdo = { ...ONE_TIME_PEST, id: 'svc-wdo', name: 'WDO Inspection Service', service_key: 'wdo_inspection', base_price: '250.00', category: 'termite' };
-      const insertChain = wireMember({ rows: [wdo], listed: [WDO_FREE, GENERIC], picked: WDO_FREE });
-      const result = await book({
-        service_type: 'WDO Inspection Service', _booking_price: 0, _booking_service_id: 'svc-wdo',
-        _booking_list_price: 250, _booking_discount_id: 'disc-wdo', _booking_discount_name: 'WaveGuard Member Discount (Termite Inspection)',
-        _booking_discount_type: 'percentage', _booking_discount_amount: 100,
+      wireDb({
+        customers: [chain({ first: jest.fn().mockResolvedValue(MEMBER) })],
+        services: [catalog([wdo])],
+        discounts: [listing([WDO_FREE, GENERIC])],
+        scheduled_services: [chain()],
       });
-      expect(result.success).toBe(true);
-      expect(insertChain.insert.mock.calls[0][0]).toMatchObject({
-        estimated_price: 0, primary_line_price: 250, create_invoice_on_complete: false, line_discount_id: 'disc-wdo', line_discount_dollars: 250,
-      });
+      const result = await ibBookingProposal('cust-1', 'WDO Inspection Service', undefined);
+      expect(result).toMatchObject({ price: 250, discountId: null });
     });
 
     test('a recurring customer with no tier or rate qualifies through live recurring coverage (the "or recurring customers" half)', async () => {

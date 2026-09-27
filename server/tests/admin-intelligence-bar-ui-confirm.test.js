@@ -1077,25 +1077,6 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
     });
   });
 
-  test('create_appointment for a member\'s free WDO inspection: the card shows $0.00 as free, nothing invoiced', async () => {
-    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
-    mockIbBookingProposal.mockResolvedValueOnce({
-      price: 0, source: 'catalog', serviceId: 'svc-wdo', serviceName: 'WDO Inspection Service',
-      listPrice: 250, discountName: 'WaveGuard Member Discount (Termite Inspection)', discountPercent: 100,
-    });
-    scriptModelTurns([
-      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'WDO Inspection Service' } }],
-      [{ type: 'text', text: 'Proposed.' }],
-    ]);
-
-    await withServer(async (baseUrl) => {
-      const { body } = await postQuery(baseUrl, { prompt: 'book a WDO inspection', context: 'schedule' });
-      const stored = mockCreatePendingAction.mock.calls[0][0];
-      expect(stored.params._booking_price).toBe(0);
-      expect(body.pendingActions[0].params.price).toBe('$0.00 — free: catalog price $250.00 less 100% WaveGuard Member Discount (Termite Inspection); nothing is invoiced');
-    });
-  });
-
   test('create_appointment with no price for a dues-billed member: the card says so', async () => {
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
     scriptModelTurns([

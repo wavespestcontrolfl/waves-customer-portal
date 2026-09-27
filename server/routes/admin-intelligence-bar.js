@@ -732,8 +732,6 @@ function confirmationDisplayParams(toolName, params, preview) {
     let priceLine = null;
     if (pinnedPrice && pinnedPrice.amount == null) {
       priceLine = 'none on the visit — billed by the customer\'s plan or per-application fee, or a free visit type';
-    } else if (pinnedPrice && Number(pinnedPrice.amount) === 0) {
-      priceLine = `$0.00 — free: ${discounted}; nothing is invoiced`;
     } else if (pinnedPrice) {
       const basis = pinnedPrice.source === 'stated' ? 'as stated' : (discounted || `catalog price, ${pinnedPrice.service_name}`);
       priceLine = `${money(pinnedPrice.amount)} (${basis}) — invoiced when the visit is completed`;
