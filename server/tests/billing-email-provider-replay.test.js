@@ -68,17 +68,27 @@ test.each([null, {}, 'bad-context'])('a present invalid contract %j cannot fall 
 test('runs eligibility and provider dispatch on the held authority database', async () => {
   const heldDatabase = jest.fn();
   const order = [];
-  billingEmailReplayEligible.mockImplementationOnce(async () => { order.push('eligibility'); return { eligible: true }; });
-  const dispatch = jest.fn(async () => { order.push('dispatch'); });
+  billingEmailReplayEligible.mockImplementation(async () => { order.push('eligibility'); return { eligible: true }; });
+  const dispatch = jest.fn(async (database, providerBoundaryCheck) => {
+    expect(database).toBe(heldDatabase);
+    order.push('provider-preparation');
+    expect(await providerBoundaryCheck({ database })).toEqual({ ok: true });
+    order.push('provider-request');
+  });
   dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
     expect(options.input).toMatchObject({ customerId: 'cust-1', invoiceId: 'inv-1',
       metadata: { billingDeliveryCategory: 'invoice', notificationEventKey: context.notificationEventKey } });
     expect(options.recipientEmail).toBe('casey@example.com');
     // The retried row's own template decides the suppression recheck.
     expect(options.templateKey).toBe('billing.notice');
-    expect(await options.preSendCheck({ database: heldDatabase })).toEqual({ ok: true });
-    options.state.handoffStarted = true;
-    await options.dispatch(heldDatabase);
+    expect(await options.preSendCheck({ database: heldDatabase, providerBoundary: false })).toEqual({ ok: true });
+    const providerBoundaryCheck = async ({ database }) => {
+      const verdict = await options.preSendCheck({ database, providerBoundary: true });
+      if (verdict.ok === true) options.state.handoffStarted = true;
+      else options.state.boundaryBlock = verdict;
+      return verdict;
+    };
+    await options.dispatch(heldDatabase, providerBoundaryCheck);
     options.state.providerAccepted = true;
   });
 
@@ -86,20 +96,70 @@ test('runs eligibility and provider dispatch on the held authority database', as
   await expect(runBillingEmailProviderReplayHandoff(stored, dispatch))
     .resolves.toEqual({ handled: true, allowed: true });
   expect(EmailTemplateLibrary.readStoredBillingReplayContext).toHaveBeenCalledWith(stored);
+  expect(billingEmailReplayEligible).toHaveBeenCalledTimes(2);
   expect(billingEmailReplayEligible).toHaveBeenCalledWith(context, heldDatabase);
-  expect(dispatch).toHaveBeenCalledWith(heldDatabase);
-  expect(order).toEqual(['eligibility', 'dispatch']);
+  expect(dispatch).toHaveBeenCalledWith(heldDatabase, expect.any(Function));
+  expect(order).toEqual(['eligibility', 'provider-preparation', 'eligibility', 'provider-request']);
+});
+
+test('keeps original recipient authority while sending a corrected bounce destination at the final boundary', async () => {
+  const heldDatabase = jest.fn();
+  const correctedCheck = jest.fn(async () => ({ ok: true }));
+  const dispatch = jest.fn(async (database, providerBoundaryCheck) => {
+    expect(database).toBe(heldDatabase);
+    expect(await providerBoundaryCheck({ database })).toEqual({ ok: true });
+  });
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    expect(options.recipientEmail).toBe('casey@example.net');
+    expect(options.authorityRecipientEmail).toBe('casey@example.com');
+    expect(await options.preSendCheck({ database: heldDatabase, providerBoundary: false })).toEqual({ ok: true });
+    const providerBoundaryCheck = async ({ database }) => {
+      const verdict = await options.preSendCheck({ database, providerBoundary: true });
+      options.state.handoffStarted = verdict.ok === true;
+      return verdict;
+    };
+    await options.dispatch(heldDatabase, providerBoundaryCheck);
+    options.state.providerAccepted = true;
+  });
+
+  await expect(runBillingEmailProviderReplayHandoff(message(), dispatch, {
+    recipientEmail: ' Casey@Example.Net ',
+    authorityRecipientEmail: ' Casey@Example.Com ',
+    providerBoundaryCheck: correctedCheck,
+  })).resolves.toEqual({ handled: true, allowed: true });
+  expect(billingEmailReplayEligible).toHaveBeenCalledTimes(2);
+  expect(correctedCheck).toHaveBeenCalledTimes(1);
+  expect(dispatch).toHaveBeenCalledWith(heldDatabase, expect.any(Function));
+});
+
+test('a resendable eligibility refusal carries BILLING_REPLAY_RESENDABLE as its code', async () => {
+  const { BILLING_REPLAY_RESENDABLE } = require('../services/billing-email-provider-replay');
+  billingEmailReplayEligible.mockResolvedValueOnce({
+    eligible: false, reason: 'invoice-send-not-finalized', retryable: false, resendable: true,
+  });
+  let verdict;
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    verdict = await options.preSendCheck({ database: jest.fn() });
+  });
+  await runBillingEmailProviderReplayHandoff(message(), jest.fn());
+  expect(verdict).toEqual({ ok: false, code: BILLING_REPLAY_RESENDABLE, reason: 'invoice-send-not-finalized', retryable: false });
 });
 
 test('propagates a provider error for the retry owner to classify', async () => {
   const providerError = new Error('provider outcome unknown');
   dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
-    expect(await options.preSendCheck({ database: jest.fn() })).toEqual({ ok: true });
-    options.state.handoffStarted = true;
-    await options.dispatch(jest.fn());
+    const database = jest.fn();
+    await options.dispatch(database, async () => {
+      expect(await options.preSendCheck({ database, providerBoundary: true })).toEqual({ ok: true });
+      options.state.handoffStarted = true;
+      return { ok: true };
+    });
   });
   await expect(runBillingEmailProviderReplayHandoff(
-    message(), async () => { throw providerError; },
+    message(), async (database, providerBoundaryCheck) => {
+      await providerBoundaryCheck({ database });
+      throw providerError;
+    },
   )).rejects.toBe(providerError);
 });
 

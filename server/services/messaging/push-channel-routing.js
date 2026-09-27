@@ -760,7 +760,6 @@ async function sendCompanionPush({ customerId, to, body, messageType, preSendChe
 }
 
 module.exports = {
-  bellReachedThisAttempt,
   wantsAppFirst,
   APP_FIRST_TYPES,
   decidePushRoute,

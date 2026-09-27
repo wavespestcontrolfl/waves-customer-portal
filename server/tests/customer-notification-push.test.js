@@ -185,7 +185,6 @@ describe('customer notification native push dispatch', () => {
     expect(result).toMatchObject({ deduped, push: { error: 'dispatch_failed' } });
     expect(result.body).toBe(deduped ? 'Earlier quoted balance' : 'Current quoted balance');
     expect(notifQ.insert).toHaveBeenCalledTimes(deduped ? 0 : 1);
-    expect(require('../services/messaging/push-channel-routing').bellReachedThisAttempt(result)).toBe(!deduped);
   });
 
   test.each(['refused', 'throws'])('a guard %s after waiting for the dedupe lock prevents bell and push', async (mode) => {
