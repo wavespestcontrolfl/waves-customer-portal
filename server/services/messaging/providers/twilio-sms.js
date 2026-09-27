@@ -228,18 +228,18 @@ async function sendViaTwilioOnce(input, {
       return { sent: false, blocked: true, provider: input.channel === 'push' ? 'push' : 'twilio', deliveryOutcome: 'not_sent', code: 'DELIVERY_SUPPRESSED', error: result.error || result.sid, validator: 'delivery_guard' };
     }
     if (result.appUnavailable) {
-      return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', appUnavailable: true, error: result.error || 'push_unavailable' };
+      return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', appUnavailable: true, error: result.error || 'push_unavailable', ...(result.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (result.appPending) {
-      return { sent: false, blocked: true, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'PUSH_IN_FLIGHT', error: 'push_in_flight', retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString() };
+      return { sent: false, blocked: true, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'PUSH_IN_FLIGHT', error: 'push_in_flight', retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString(), ...(result.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (result.appRetryable) {
       if (Number.isFinite(result.retryAfterMs)) {
         const retryAfterMs = Math.max(60000, result.retryAfterMs);
         return { sent: false, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'APP_PROVIDER_RETRY', error: result.error,
-          retryable: true, deferred: true, retryAfterMs, nextAllowedAt: new Date(Date.now() + retryAfterMs).toISOString() };
+          retryable: true, deferred: true, retryAfterMs, nextAllowedAt: new Date(Date.now() + retryAfterMs).toISOString(), ...(result.bellPersisted ? { bellPersisted: true } : {}) };
       }
-      return { sent: false, blocked: true, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'APP_DELIVERY_HOLD', error: result.error, retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString() };
+      return { sent: false, blocked: true, provider: 'push', deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain', code: 'APP_DELIVERY_HOLD', error: result.error, retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString(), ...(result.bellPersisted ? { bellPersisted: true } : {}) };
     }
     if (result.preSendBlocked || (result.guardBlocked && result.code)) {
       return {
