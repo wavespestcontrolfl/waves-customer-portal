@@ -92,6 +92,10 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   // Codex P2). buildLeadConsultationSmsLine passes this same requiredVars
   // list to getTemplate at render time.
   lead_consultation_link: Object.freeze(['consultation_url']),
+  // Missed-call text-back: "call back anytime at <the line they dialed>" is
+  // the one fact the text carries; missed-call-text-back.js passes this same
+  // list to getTemplate at render time.
+  missed_call_text_back: Object.freeze(['callback_clause']),
 });
 
 function validateTemplateBody(body, variables, templateKey = null) {
