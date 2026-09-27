@@ -212,6 +212,8 @@ describe('custom action credential screening', () => {
     'Opened rear gate and serviced station 2468',
     'Unlocked side door on 09/27/2026',
     'Unlocked side door after servicing station 8842',
+    'Opened rear gate by using 2 hands',
+    'Opened rear gate after using 2 oz around the hinge',
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
   });
@@ -320,6 +322,8 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     'Opened rear gate and serviced station 2468',
     'Unlocked side door on 09/27/2026',
     'Unlocked side door after servicing station 8842',
+    'Opened rear gate by using 2 hands',
+    'Opened rear gate after using 2 oz around the hinge',
   ])('publishes bounded material, date, unit-id, and fertilizer details: %s', (action) => {
     const parsed = technicianReportCustomerCopy(`WHAT WE DID\n${action}.\nWHAT WE FOUND\nLight activity near the lanai.`);
     expect(parsed.body).toContain(action);
