@@ -7,50 +7,20 @@
  * this snapshot: a visit later moved to another property must not re-scope
  * a notice already delivered (Codex #4816 r49).
  *
- * appointmentId, when present, is authoritative (the send names its own
- * visit directly). Otherwise, `invoiceId` resolves the visit THROUGH the
- * invoice it is a receipt for (invoices.scheduled_service_id) — a plain
- * payment-receipt SMS (InvoiceService.sendReceipt) carries no appointmentId
- * of its own, so without this a property-scoped settlement question could
- * never be answered by an ordinary receipt (Codex round 1 P2, #4996). With
- * no visit at all, the estimate (a deposit receipt) stamps its property
- * alone (Codex #4996 r2): `scopeEstimateId`, which send-customer-message.js
- * keeps when its withheld-link rewrite clears the annual-offer guard's
- * `estimateId` (r3), else a direct caller's `estimateId`.
- *
- * Never throws: a failed lookup stamps the visit without a property (or
- * nothing at all), which cannot vouch for a property-scoped promise, and the
- * send goes on.
+ * Never throws: a failed lookup stamps the visit without a property, which
+ * cannot vouch for a property-scoped promise, and the send goes on.
  */
 const db = require('../../models/db');
 
-async function noticeScope(appointmentId, { invoiceId, estimateId, scopeEstimateId, conn = db } = {}) {
-  let visitId = appointmentId || null;
-  if (!visitId && invoiceId) {
-    try {
-      visitId = (await conn('invoices').where({ id: invoiceId }).first('scheduled_service_id'))?.scheduled_service_id || null;
-    } catch {
-      visitId = null;
-    }
-  }
-  const estimate = scopeEstimateId || estimateId;
-  if (!visitId) return estimate ? estimateScope(estimate, conn) : {};
+async function noticeScope(appointmentId, conn = db) {
+  if (!appointmentId) return {};
   let propertyId = null;
   try {
-    propertyId = (await conn('scheduled_services').where({ id: visitId }).first('property_id'))?.property_id || null;
+    propertyId = (await conn('scheduled_services').where({ id: appointmentId }).first('property_id'))?.property_id || null;
   } catch {
     propertyId = null;
   }
-  return { scheduled_service_id: String(visitId), ...(propertyId ? { property_id: String(propertyId) } : {}) };
-}
-
-async function estimateScope(estimateId, conn) {
-  try {
-    const propertyId = (await conn('estimates').where({ id: estimateId }).first('property_id'))?.property_id;
-    return propertyId ? { property_id: String(propertyId) } : {};
-  } catch {
-    return {};
-  }
+  return { scheduled_service_id: String(appointmentId), ...(propertyId ? { property_id: String(propertyId) } : {}) };
 }
 
 module.exports = { noticeScope };

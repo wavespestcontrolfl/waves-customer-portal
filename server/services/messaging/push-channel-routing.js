@@ -479,7 +479,7 @@ async function repairPushProof({ appNotification, body, customerId, notification
   }
 }
 
-async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, estimateId, scopeEstimateId, requestNotification, billingDeliveryCategory }) {
+async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory }) {
   let deliveryOutcome = 'not_sent';
   let acceptedResult = null;
   try {
@@ -488,9 +488,8 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     const fresh = await hasFreshPushDevice(customerId);
     // The visit and its send-time property, kept on the proof row and on the
     // stored notification, so a repaired proof restores the delivered scope
-    // (Codex #4816 r49) — whether the send named the visit or it came from
-    // the invoice or estimate the notice is about (Codex #4996 r2).
-    const proofScope = await require('./notice-scope').noticeScope(appointmentId, { invoiceId, estimateId, scopeEstimateId });
+    // (Codex #4816 r49).
+    const proofScope = await require('./notice-scope').noticeScope(appointmentId);
     let appNotification = null;
     if (explicitPushOnly) {
       let presentation = pushPresentation(messageType);
@@ -534,7 +533,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       deliveryOutcome = 'uncertain';
       appNotification = await require('../notification-service').notifyCustomer(customerId, category, title, body, {
         link, dedupeKey: notificationEventKey, awaitPush: true, appointmentId,
-        ...(Object.keys(proofScope).length ? { metadata: { proof_scope: proofScope } } : {}),
+        ...(appointmentId ? { metadata: { proof_scope: proofScope } } : {}),
         pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true },
       });
       if (appNotification?.push?.reason === 'push_in_flight') return { delivered: false, pending: true, deliveryOutcome: 'uncertain', reason: 'push_in_flight' };

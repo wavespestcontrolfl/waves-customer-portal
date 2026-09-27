@@ -386,12 +386,6 @@ describe('Twilio messaging provider adapter', () => {
     expect(outcome).toMatchObject({ sent: true, withheldLinksRewritten: ['est-1'] });
   });
 
-  test('Codex #4996 r3: forwards the notice-scope estimate apart from the guard\'s estimateId', async () => {
-    await sendViaTwilio(baseInput({ estimateId: null, scopeEstimateId: 'est-1' }));
-    expect(TwilioService.sendSMS).toHaveBeenCalledWith('+15551230000', 'Hello from Waves',
-      expect.objectContaining({ estimateId: null, scopeEstimateId: 'est-1' }));
-  });
-
   test('round 8 P1: no withheldLinkPolicy on the input forwards undefined — the default (refuse) applies downstream', async () => {
     await sendViaTwilio(baseInput());
     expect(TwilioService.sendSMS).toHaveBeenCalledWith(

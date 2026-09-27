@@ -1247,19 +1247,17 @@ describe('fulfillment proof', () => {
   });
 });
 
-describe('R2 payment evidence (owner ruling 2026-09-25): a payment receipt or paid invoice/payments row closes a settlement question; a staff "done" reply never does', () => {
+describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid invoice/payments row, a deposit) closes a settlement question; a staff "done" reply never does', () => {
   const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
   const invoicePaid = { id: 'invoice-1', ref: 'payment:invoice-1', type: 'payment', payment_source: 'invoice',
     paid_at: '2040-03-11T15:00:00Z', text: 'Invoice Quarterly paid 2040-03-11' };
   const ledgerPaid = { id: 'pay-1', ref: 'payment:pay-1', type: 'payment', payment_source: 'ledger',
     created_at: '2040-03-11T15:00:00Z', text: 'Payment of $200.00 recorded 2040-03-11' };
-  const receiptSms = { id: 'sms-1', ref: 'payment:sms-1', type: 'payment', payment_source: 'sms', status: 'delivered',
-    message_type: 'receipt', created_at: '2040-03-11T15:00:00Z', text: 'Payment received, thank you. Invoice WPC-1: $125.00' };
 
   test('rule 2: a payment is admissible for a settlement-worded `other` ask, and even an unrelated one — the model always decides (rule 1)', () => {
     const paymentOther = { kind: 'other', description: 'What is the Zelle number?', sms_context: ctx };
     const unrelatedOther = { kind: 'other', description: 'My son should be there for the visit', sms_context: ctx };
-    for (const witness of [invoicePaid, ledgerPaid, receiptSms]) {
+    for (const witness of [invoicePaid, ledgerPaid]) {
       expect(admissibleWitness(witness, paymentOther)).toBe(true);
       expect(admissibleWitness(witness, unrelatedOther)).toBe(true);
     }
@@ -1310,27 +1308,6 @@ describe('R2 payment evidence (owner ruling 2026-09-25): a payment receipt or pa
     // Unscoped: every leg, linked or not, is admitted.
     expect(admissibleWitness(invoiceUnlinked, unscopedAsk)).toBe(true);
     expect(admissibleWitness(ledgerPaid, unscopedAsk)).toBe(true);
-  });
-
-  test('rule 7: a delivered receipt-family SMS answers a receipt request the same way it answers a settlement question', async () => {
-    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
-    const receiptAsk = { kind: 'other', description: 'Can you send me the receipt?', sms_context: ctx };
-    expect(admissibleWitness(receiptSms, receiptAsk)).toBe(true);
-    await verifySmsFulfillment(receiptAsk, { records: [receiptSms], failures: [] });
-    const prompt = dispatchWithFallback.mock.calls.at(-1)[1].text;
-    expect(prompt).toContain('a delivered receipt text or receipt email does answer a request for that receipt');
-    expect(prompt).toContain('"witness_refs":["payment:sms-1"]');
-  });
-
-  test('pre-push rule 7: an accepted App-push receipt reaches the provider with app_push_accepted, never its phone number', async () => {
-    const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
-    const receipt = { id: 'sms-9', ref: 'payment:sms-9', type: 'payment', payment_source: 'sms', status: 'sent', message_type: 'receipt',
-      from_phone: 'push', provider_accepted: true, push_channel: true, created_at: '2040-03-10T16:00:00Z', text: 'Payment received, thank you.' };
-    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
-    await verifySmsFulfillment(commitment, { records: [receipt], failures: [] });
-    const prompt = dispatchWithFallback.mock.calls.at(-1)[1].text;
-    expect(prompt).toContain('"app_push_accepted":true');
-    expect(prompt).not.toContain('from_phone');
   });
 
   test('rule 9 / Codex round 1 P1-B: a ledger record carries only amount, date and the structured method — never a free-text key', async () => {

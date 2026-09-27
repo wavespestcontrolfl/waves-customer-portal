@@ -495,13 +495,9 @@ async function sendCustomerMessageCore(input) {
       // Pre-push audit P1: the rewrite policy means "never refuse this
       // message on the estimate's account, only strip its links" — so the
       // explicit id is dropped whether or not a link was found. A link-free
-      // receipt for a withheld estimate must still go out. The estimate
-      // stays the notice's SCOPE (its property is stamped at send,
-      // messaging/notice-scope.js) under a key the guard never reads
-      // (Codex #4996 r3).
-      // A fanned-out billing leg arrives with the id already moved to the
-      // scope (dispatchBillingChannels below) and keeps it.
-      Object.assign(sendInput, { scopeEstimateId: sendInput.scopeEstimateId || sendInput.estimateId, estimateId: null, estimateIds: [] });
+      // receipt for a withheld estimate must still go out.
+      sendInput.estimateId = null;
+      sendInput.estimateIds = [];
       if (rewritten.rewrittenIds.length) {
         sendInput.body = rewritten.text;
         withheldLinksRewritten = rewritten.rewrittenIds;
@@ -544,8 +540,7 @@ async function sendCustomerMessageCore(input) {
     // reaches annualOfferGuardVerdict, refusing an owed receipt when its
     // offer is withheld.
     return BillingRouting.dispatchBillingChannels(
-      { ...input, body: sendInput.body, estimateId: sendInput.estimateId, estimateIds: sendInput.estimateIds,
-        scopeEstimateId: sendInput.scopeEstimateId },
+      { ...input, body: sendInput.body, estimateId: sendInput.estimateId, estimateIds: sendInput.estimateIds },
       contactState.prefs, sendCustomerMessageCore,
     );
   }

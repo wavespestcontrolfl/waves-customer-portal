@@ -1048,25 +1048,8 @@ describe('explicit billing channel combinations', () => {
       expect(Twilio.sendSMS).toHaveBeenCalledWith(
         null,
         rewrittenBody,
-        expect.objectContaining({ explicitPushOnly: true, estimateId: null, estimateIds: [], scopeEstimateId: 'est-1' }),
+        expect.objectContaining({ explicitPushOnly: true, estimateId: null, estimateIds: [] }),
       );
-    } finally {
-      rewriteSpy.mockRestore();
-    }
-  });
-
-  test('Codex #4996 r3: a Text + App deposit receipt keeps its estimate as the notice scope on both legs', async () => {
-    // The Text leg re-runs the rewrite on its own recursive pass; the scope
-    // the top-level pass kept must survive that second clearing.
-    prefs.payment_receipt_channels = ['sms', 'push'];
-    const AnnualGuard = require('../services/estimate-annual-guard');
-    const rewriteSpy = jest.spyOn(AnnualGuard, 'rewriteWithheldEstimateLinks')
-      .mockResolvedValue({ text: 'Your deposit was received.', rewrittenIds: [] });
-    try {
-      await sendCustomerMessage({ ...input, estimateId: 'est-1', body: 'Your deposit was received.' });
-      const legs = Twilio.sendSMS.mock.calls.map(([, , options]) => options);
-      expect(legs.map((options) => options.explicitPushOnly === true).sort()).toEqual([false, true]);
-      for (const options of legs) expect(options).toMatchObject({ estimateId: null, scopeEstimateId: 'est-1' });
     } finally {
       rewriteSpy.mockRestore();
     }
