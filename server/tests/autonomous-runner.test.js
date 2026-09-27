@@ -3656,6 +3656,133 @@ describe('approveAndPublishNamedCompetitor — superseded in-flight approval', (
       .toContain('page ownership moved');
     expect(wheres).toContainEqual({ table: 'opportunity_queue', args: ['claimed_at', approvalClaimedAt] });
   });
+
+  test('crash recovery binds the terminal approval run to the superseded row current claim', async () => {
+    jest.resetModules();
+    const approvalClaimedAt = new Date('2026-09-27T01:30:00Z');
+    const outsideWheres = [];
+    const updates = [];
+    const trx = jest.fn((table) => {
+      const q = {
+        where: jest.fn((...args) => { outsideWheres.push({ table, args }); return q; }),
+        whereRaw: jest.fn(() => q),
+        first: jest.fn(async () => (table === 'autonomous_runs' ? { reviewer_notes: 'approved' } : null)),
+        update: jest.fn(async (patch) => { updates.push({ table, patch }); return 1; }),
+      };
+      return q;
+    });
+    const dbMock = jest.fn((table) => {
+      const q = {
+        where: jest.fn((...args) => { outsideWheres.push({ table, args }); return q; }),
+        whereNull: jest.fn(() => q),
+        first: jest.fn(async () => ({ id: 'run-current', reviewer_notes: 'approved' })),
+      };
+      return q;
+    });
+    dbMock.transaction = jest.fn(async (callback) => callback(trx));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+
+    const result = await runner._retireSupersededStuckApprovals([{
+      id: 'opp-cite', bucket: 'citability_backfill', claim_id: 'claim-current', claimed_at: approvalClaimedAt,
+      signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+    }], 'crash recovery');
+
+    expect(result).toEqual({ ids: ['opp-cite'], runs: 1, opps: 1 });
+    expect(outsideWheres).toContainEqual({ table: 'autonomous_runs', args: ['queue_claim_id', 'claim-current'] });
+    expect(updates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ table: 'opportunity_queue', patch: expect.objectContaining({ status: 'skipped' }) }),
+      expect.objectContaining({ table: 'autonomous_runs', patch: expect.objectContaining({ outcome: 'skipped_gate_fail' }) }),
+    ]));
+  });
+
+  test('a superseded non-PR park atomically retires the current run and queue row', async () => {
+    jest.resetModules();
+    const claimedAt = new Date('2026-09-27T01:45:00Z');
+    const updates = [];
+    const locked = {
+      id: 'opp-cite', bucket: 'citability_backfill', status: 'claimed', claimed_at: claimedAt,
+      claim_id: 'claim-current', signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+    };
+    const trx = jest.fn((table) => {
+      const q = {
+        where: jest.fn(() => q), forUpdate: jest.fn(() => q),
+        first: jest.fn(async () => locked),
+        update: jest.fn(async (patch) => { updates.push({ table, patch }); return 1; }),
+      };
+      return q;
+    });
+    trx.raw = jest.fn(async () => ({}));
+    const dbMock = jest.fn();
+    dbMock.transaction = jest.fn(async (callback) => callback(trx));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    const queue = {
+      getById: jest.fn(async () => locked),
+      pendingReview: jest.fn(), skip: jest.fn(),
+    };
+    const run = {
+      id: 'run-current', opportunity_id: 'opp-cite', action_type: 'refresh_existing_page',
+      queue_claim_id: 'claim-current', outcome: 'completed_pending_review', skip_reason: 'gate_infrastructure_error',
+    };
+
+    await runner._pendingReviewClaimOrThrow(queue, 'opp-cite', 'gate_infrastructure_error', { claimToken: claimedAt }, 'refresh_existing_page', run);
+
+    expect(run).toMatchObject({ outcome: 'skipped_gate_fail', skip_reason: 'superseded_by_ordinary_page_edit' });
+    expect(queue.pendingReview).not.toHaveBeenCalled();
+    expect(updates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ table: 'opportunity_queue', patch: expect.objectContaining({ status: 'skipped' }) }),
+      expect.objectContaining({ table: 'autonomous_runs', patch: expect.objectContaining({ outcome: 'skipped_gate_fail' }) }),
+    ]));
+  });
+
+  test('a superseded current-claim PR stays parked for terminal PR retirement', async () => {
+    jest.resetModules();
+    const claimedAt = new Date('2026-09-27T01:50:00Z');
+    const updates = [];
+    const locked = {
+      id: 'opp-cite-pr', bucket: 'citability_backfill', status: 'claimed', claimed_at: claimedAt,
+      claim_id: 'claim-current', signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:2' } },
+    };
+    const trx = jest.fn((table) => {
+      const q = {
+        where: jest.fn(() => q), forUpdate: jest.fn(() => q),
+        first: jest.fn(async () => locked),
+        update: jest.fn(async (patch) => { updates.push({ table, patch }); return 1; }),
+      };
+      return q;
+    });
+    trx.raw = jest.fn(async () => ({}));
+    const dbMock = jest.fn();
+    dbMock.transaction = jest.fn(async (callback) => callback(trx));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    const queue = { getById: jest.fn(async () => locked), pendingReview: jest.fn(), skip: jest.fn() };
+    const run = {
+      id: 'run-current-pr', opportunity_id: 'opp-cite-pr', action_type: 'refresh_existing_page',
+      queue_claim_id: 'claim-current', astro_pr_url: 'https://github.com/waves/pull/42',
+      outcome: 'completed_pending_review', skip_reason: 'astro_pr_pending_merge',
+    };
+
+    await runner._pendingReviewClaimOrThrow(
+      queue, 'opp-cite-pr', 'astro_pr_pending_merge', { claimToken: claimedAt }, 'refresh_existing_page', run,
+    );
+
+    expect(run).toMatchObject({ outcome: 'completed_pending_review', skip_reason: 'astro_pr_pending_merge' });
+    expect(updates).toEqual([
+      expect.objectContaining({
+        table: 'opportunity_queue',
+        patch: expect.objectContaining({ status: 'pending_review', skip_reason: 'astro_pr_pending_merge' }),
+      }),
+    ]);
+    expect(queue.pendingReview).not.toHaveBeenCalled();
+  });
 });
 
 // R10-5 (Codex): approving an OLD named-competitor run by --id must not publish a

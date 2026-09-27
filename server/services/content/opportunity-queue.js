@@ -145,13 +145,16 @@ async function supersedeCitabilityBackfillsForPage(trx, { pageUrl, ordinaryDedup
       // astro_pr_retired_at can be stamped before that bookkeeping commits;
       // treating the PR as absent in that window changes the queue state and
       // prevents the poller's claim/status CAS from ever converging.
-      hasParkedPr = Boolean(await trx('autonomous_runs')
+      let parkedRun = trx('autonomous_runs')
         .where('opportunity_id', row.id)
         .where('outcome', 'completed_pending_review')
         .whereIn('skip_reason', ['astro_pr_pending_merge', 'metadata_pr_pending_merge'])
         .whereNotNull('astro_pr_url')
-        .whereNull('published_url')
-        .first('id'));
+        .whereNull('published_url');
+      parkedRun = row.claim_id == null
+        ? parkedRun.whereNull('queue_claim_id')
+        : parkedRun.where('queue_claim_id', row.claim_id);
+      hasParkedPr = Boolean(await parkedRun.first('id'));
     }
     const terminal = row.status === 'pending' || (row.status === 'pending_review' && !hasParkedPr);
     await trx('opportunity_queue').where('id', row.id).update({
@@ -169,6 +172,20 @@ async function supersedeCitabilityBackfillsForPage(trx, { pageUrl, ordinaryDedup
       } : {}),
       updated_at: now,
     });
+    if (terminal && row.status === 'pending_review') {
+      let runs = trx('autonomous_runs')
+        .where('opportunity_id', row.id)
+        .where('outcome', 'completed_pending_review');
+      runs = row.claim_id == null
+        ? runs.whereNull('queue_claim_id')
+        : runs.where('queue_claim_id', row.claim_id);
+      await runs.update({
+        outcome: 'skipped_gate_fail',
+        skip_reason: PAGE_EDIT_SUPERSEDED_REASON,
+        completed_at: now,
+        updated_at: now,
+      });
+    }
   }
   return matched.length;
 }

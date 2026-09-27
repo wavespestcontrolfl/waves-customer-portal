@@ -500,6 +500,7 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
       { id: 'review', bucket: 'citability_backfill', status: 'pending_review', page_url: 'https://wavespestcontrol.com/blog/termite-guide#faq', signal_metadata: { evidence: 'review' } },
       { id: 'review-open', bucket: 'citability_backfill', status: 'pending_review', page_url: 'https://wavespestcontrol.com/blog/termite-guide#open', signal_metadata: { evidence: 'open-pr' } },
       { id: 'review-retiring', bucket: 'citability_backfill', status: 'pending_review', page_url: 'https://wavespestcontrol.com/blog/termite-guide#retiring', signal_metadata: { evidence: 'retired-pr-pending-bookkeeping' } },
+      { id: 'review-historical', bucket: 'citability_backfill', status: 'pending_review', claim_id: 'claim-new', page_url: 'https://wavespestcontrol.com/blog/termite-guide#historical', signal_metadata: { evidence: 'old-claim-pr' } },
       { id: 'spoke', bucket: 'citability_backfill', status: 'pending', page_url: 'https://sarasota.wavespestcontrol.com/blog/termite-guide/', signal_metadata: {} },
     ];
     const trx = jest.fn((table) => {
@@ -512,8 +513,13 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
         whereRaw: jest.fn(() => q),
         forUpdate: jest.fn(() => q),
         select: jest.fn(async () => rows),
-        first: jest.fn(async () => (table === 'autonomous_runs' && ['review-open', 'review-retiring'].includes(id)
-          ? { id: `run-${id}` } : undefined)),
+        first: jest.fn(async () => {
+          if (table !== 'autonomous_runs') return undefined;
+          if (['review-open', 'review-retiring'].includes(id)) return { id: `run-${id}` };
+          if (id === 'review-historical'
+            && !q.where.mock.calls.some((call) => call[0] === 'queue_claim_id' && call[1] === 'claim-new')) return { id: 'run-old-claim' };
+          return undefined;
+        }),
         update: jest.fn(async (patch) => {
           Object.assign(rows.find((row) => row.id === id), patch);
           return 1;
@@ -529,7 +535,7 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
       now: new Date('2026-09-26T16:00:00Z'),
     });
 
-    expect(count).toBe(5);
+    expect(count).toBe(6);
     expect(rows.find((row) => row.id === 'pending')).toMatchObject({
       status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit',
     });
@@ -542,6 +548,9 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
     // astro_pr_retired_at. The still-parked run remains authoritative until
     // the poller atomically retires the queue row and run bookkeeping.
     expect(rows.find((row) => row.id === 'review-retiring').status).toBe('pending_review');
+    expect(rows.find((row) => row.id === 'review-historical')).toMatchObject({
+      status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit',
+    });
     expect(internals.pageEditSuperseded(rows.find((row) => row.id === 'claimed'))).toBe(true);
     expect(internals.pageEditSuperseded(rows.find((row) => row.id === 'review'))).toBe(true);
     expect(internals.pageEditSuperseded(rows.find((row) => row.id === 'spoke'))).toBe(false);
@@ -557,6 +566,9 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
     expect(retiringQuery.where).toHaveBeenCalledWith('outcome', 'completed_pending_review');
     expect(retiringQuery.whereIn).toHaveBeenCalledWith('skip_reason', ['astro_pr_pending_merge', 'metadata_pr_pending_merge']);
     expect(retiringQuery.whereNull).not.toHaveBeenCalledWith('astro_pr_retired_at');
+    const historicalQuery = trx.mock.results.find((result) => result.value.first
+      && result.value.where.mock.calls.some((call) => call[0] === 'opportunity_id' && call[1] === 'review-historical')).value;
+    expect(historicalQuery.where).toHaveBeenCalledWith('queue_claim_id', 'claim-new');
   });
 });
 describe('defer() — cap/gate-retry deferral back to pending (exceptions-only review queue)', () => {
