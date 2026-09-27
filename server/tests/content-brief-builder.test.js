@@ -535,7 +535,7 @@ describe('_composeBrief related_posts (owner audit 2026-09-26)', () => {
 });
 
 describe('_loadRelatedPosts gating', () => {
-  test('compose preserves a lookup failure sentinel instead of treating it as a confirmed empty corpus', async () => {
+  test('compose propagates a related-post lookup failure before persistence or writer dispatch', async () => {
     const queue = require('../services/content/opportunity-queue');
     const router = require('../services/content/decision-router');
     const opportunity = {
@@ -564,9 +564,8 @@ describe('_loadRelatedPosts gating', () => {
       builder._countExistingBriefs = jest.fn().mockResolvedValue(0);
       builder._loadFactsPack = jest.fn().mockResolvedValue(null);
       builder._loadRelatedPosts = jest.fn().mockRejectedValue(new Error('candidate query unavailable'));
-      const brief = await builder.compose(opportunity.id, { persist: false });
-      expect(brief.voice_constraints.related_posts).toBeUndefined();
-      expect(brief.voice_constraints.related_posts_status).toBe('lookup_failed');
+      await expect(builder.compose(opportunity.id, { persist: false }))
+        .rejects.toThrow('candidate query unavailable');
     } finally {
       getById.mockRestore();
       route.mockRestore();

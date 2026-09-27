@@ -462,23 +462,17 @@ class ContentBriefBuilder {
     });
 
     // Related-post link targets for a NEW supporting-blog brief only (see
-    // related-posts.js). Composition may continue after an infrastructure
-    // error, but the brief must retain that failure so the publish gate can
-    // distinguish it from a confirmed zero-candidate topic and fail closed.
+    // related-posts.js). A lookup error is infrastructure, so composition
+    // rejects before the writer can spend an attempt on an unpublishable brief.
     // Freeze the current canonical routing decision on the persisted brief.
     // In particular, a spoke queued while enabled but composed while the
     // network is disabled must stay hub-only if the flag is later re-enabled.
     const publishTargetSites = decision.action_type === 'new_supporting_blog'
       ? resolvedPublishTargetSites(opp)
       : null;
-    let relatedPostsStatus = 'complete';
-    const relatedPosts = await this._loadRelatedPosts(opp, decision, publishTargetSites).catch((err) => {
-      logger.warn(`[brief-builder] related posts lookup failed: ${err.message}`);
-      relatedPostsStatus = 'lookup_failed';
-      return [];
-    });
+    const relatedPosts = await this._loadRelatedPosts(opp, decision, publishTargetSites);
 
-    const brief = this._composeBrief({ opportunity: opp, signals, decision, existingBriefVersions, factsPack, relatedPosts, relatedPostsStatus, publishTargetSites });
+    const brief = this._composeBrief({ opportunity: opp, signals, decision, existingBriefVersions, factsPack, relatedPosts, relatedPostsStatus: 'complete', publishTargetSites });
     if (persist) brief.id = await this._persist(brief);
     return brief;
   }
