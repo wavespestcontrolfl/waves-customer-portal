@@ -107,6 +107,9 @@ const REFUSAL_MARKERS = [
   ' leave it where it is ', ' keep it where it is ', ' instead ',
   ' cancel it ', ' cancel the appointment ', ' cancel my appointment ', ' cancel the visit ', ' cancel my visit ',
   ' hold off ', ' leave it unchanged ', ' leave it the same ', ' keep it the same ', ' leave it alone ', ' leave it be ',
+  // A comparison between times leaves which one open to the last-mention
+  // rule ("Thursday rather than Friday at two").
+  ' rather than ',
   // A conflict with the slot ("I have another appointment then").
   ' another appointment ', ' other appointment ', ' conflict ', ' unavailable ', ' busy then ', ' busy that ',
 ];
@@ -353,9 +356,10 @@ function callerRepliesToSlot(turns, refs, slot, runStart, anchorIdx) {
   };
   const replies = !turns[runStart].agent && runStart < anchorIdx ? [read(runStart).replace(/^(?:no|nope|nah)\b/, '')] : [];
   for (let idx = runStart + 1; idx <= anchorIdx; idx += 1) {
-    let prev = idx - 1;
-    while (prev >= 0 && !talksAboutTime(prev)) prev -= 1;
-    if (turns[idx].agent || prev < 0 || !onlySlot(prev)) continue;
+    // A reply answers the agent turn right before it: another agent turn
+    // since the slot ("Do you want text reminders?") changed the subject.
+    const prev = turns.slice(0, idx).map((t) => t.agent).lastIndexOf(true);
+    if (turns[idx].agent || prev < 0 || !talksAboutTime(prev) || !onlySlot(prev)) continue;
     const counters = mentionsIn(idx).length > 0 && !mentionsIn(idx).some((m) => namesSlot(m, slot));
     const text = counters ? turns[idx].ns : read(idx);
     // A reply to the agent putting the slot to the caller must accept it; one
@@ -366,11 +370,12 @@ function callerRepliesToSlot(turns, refs, slot, runStart, anchorIdx) {
   return replies;
 }
 
-// The caller's answer after turn `afterIdx`, if it accepts the slot the agent
-// put to them; else -1.
+// The caller's answer right after the agent put the slot to them at turn
+// `afterIdx`, if it accepts; else -1. Another agent turn first changes the
+// subject ("Do you want text reminders?" — "Yes" answers that).
 function acceptingAnswer(turns, afterIdx) {
-  const idx = turns.findIndex((t, i) => i > afterIdx && !t.agent);
-  return idx >= 0 && accepts(turns[idx].ns) ? idx : -1;
+  const next = turns[afterIdx + 1];
+  return next && !next.agent && accepts(next.ns) ? afterIdx + 1 : -1;
 }
 
 // Is the slot still open on the caller's side at the commitment: a caller
@@ -386,7 +391,7 @@ function callerLeavesSlotOpen(turns, refs, slot, anchorIdx, affirmIdx) {
       && sentenceSpans(t.raw).some((sentence) => sentence.question);
   };
   const lastProposal = turns.map((t, idx) => (proposes(t, idx) ? idx : -1)).reduce((a, b) => Math.max(a, b), -1);
-  return lastProposal >= 0 && !turns.slice(lastProposal + 1, affirmIdx).some((t) => !t.agent && accepts(t.ns));
+  return lastProposal >= 0 && acceptingAnswer(turns, lastProposal) < 0;
 }
 
 // Words that start a new clause: "Friday doesn't work, BUT we'll see you

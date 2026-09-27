@@ -44,7 +44,7 @@ function joinMeridiem(s) {
 // stated year is kept, so the mention names that year only. A fraction of a
 // unit ("1/2 hour") is a length, not a date.
 function spellNumericDates(s) {
-  return s.replace(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2}|\d{4}))?\b(?!\s*(?:hours?|hrs?|minutes?|mins?|miles?|inch(?:es)?|cups?|gallons?|ounces?|oz|pounds?|lbs?|acres?)\b)/gi,
+  return s.replace(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2}|\d{4}))?\b(?!\s*(?:hours?|hrs?|minutes?|mins?|days?|weeks?|months?|years?|miles?|inch(?:es)?|cups?|gallons?|ounces?|oz|pounds?|lbs?|acres?)\b)/gi,
     (whole, mo, d, yr) => {
       const month = Number(mo);
       const day = Number(d);
@@ -108,9 +108,13 @@ const DAY_FORMS = [
     && { dates: [dayAfterCall(started, RELATIVE_DAYS[toks[i]])], kind: toks[i], len: 1 },
   (toks, i, started) => toks[i] === 'next' && WEEKDAY_NAMES.includes(toks[i + 1])
     && { dates: weekdayDates(toks[i + 1], started, true), kind: 'next_weekday', len: 2, weekday: WEEKDAY_NAMES.indexOf(toks[i + 1]) },
-  // "This Thursday": the nearest one only.
-  (toks, i, started) => toks[i] === 'this' && WEEKDAY_NAMES.includes(toks[i + 1])
-    && { dates: weekdayDates(toks[i + 1], started).slice(0, 1), kind: 'weekday', len: 2, weekday: WEEKDAY_NAMES.indexOf(toks[i + 1]) },
+  // "This Thursday", "this coming Thursday", "coming Thursday": the nearest one only.
+  (toks, i, started) => {
+    const len = (toks[i] === 'this' ? 1 : 0) + (toks[i + (toks[i] === 'this' ? 1 : 0)] === 'coming' ? 1 : 0);
+    const name = toks[i + len];
+    return len > 0 && WEEKDAY_NAMES.includes(name)
+      && { dates: weekdayDates(name, started).slice(0, 1), kind: 'weekday', len: len + 1, weekday: WEEKDAY_NAMES.indexOf(name) };
+  },
   (toks, i, started) => WEEKDAY_NAMES.includes(toks[i])
     && { dates: weekdayDates(toks[i], started), kind: 'weekday', len: 1, weekday: WEEKDAY_NAMES.indexOf(toks[i]) },
   // "October 8", "October 8th"
@@ -169,10 +173,12 @@ function parseDayMentions(turnText, started) {
     if (!hit) continue;
     // A stated year after a month and day ("December 24th, 2027") names that
     // year's date only.
-    const year = hit.kind === 'month_day' && /^20\d{2}$/.test(toks[i + hit.len] || '') ? toks[i + hit.len] : null;
+    // "December 24th, 2027", "December 24th of 2027", "in 2027".
+    const yearAt = i + hit.len + (['of', 'in'].includes(toks[i + hit.len]) ? 1 : 0);
+    const year = hit.kind === 'month_day' && /^20\d{2}$/.test(toks[yearAt] || '') ? toks[yearAt] : null;
     const week = hit.weekday != null ? weekOfWeekday(toks, i, i + hit.len, hit.dates, started) : null;
     const dates = year ? [`${year}${hit.dates[0].slice(4)}`] : (week ? week.dates : hit.dates);
-    const end = i + hit.len + (year ? 1 : 0) + (week ? week.after : 0);
+    const end = (year ? yearAt + 1 : i + hit.len) + (week ? week.after : 0);
     mentions.push({ candidates: new Set(dates), kind: hit.kind, pos: week ? i - week.before : i, end, ...(hit.weekday != null ? { weekday: hit.weekday } : {}) });
     i = end - 1;
   }
@@ -271,8 +277,8 @@ const MINUTES_TO = new Set(['five', 'ten', 'twenty', 'quarter', '5', '10', '20',
 function rangeEndAfter(toks, i, after) {
   let j = after;
   while (HOUR_FILLER.has(toks[j])) j += 1;
-  // "At ten to two" is a time a few minutes before two, not a range from ten.
-  if (toks[j] === 'to' && toks[i - 1] === 'at' && MINUTES_TO.has(toks[i])) return -1;
+  // "Ten to two" is a time a few minutes before two, not a range from ten.
+  if (toks[j] === 'to' && MINUTES_TO.has(toks[i])) return -1;
   const joined = toks[j] === 'to' || toks[j] === 'through' || (toks[j] === 'and' && toks[i - 1] === 'between');
   return joined && hourNumber(toks[j + 1]) != null ? j + 1 : -1;
 }
@@ -381,7 +387,8 @@ function offeredWithAnotherHour(toks, pos, end) {
 // "next week", "another day", "back an hour") is another time too.
 const RELATIVE_DAY_PHRASES = [
   'next week', 'week later', 'weeks later', 'following week', 'week after', 'next month', 'month later', 'another day',
-  'different day', 'later that week', 'later in the week', 'earlier in the week', 'next weekend', 'the weekend', 'day later', 'days later',
+  'different day', 'different time', 'another time', 'other time', 'later that week', 'later in the week', 'earlier in the week',
+  'next weekend', 'the weekend', 'day later', 'days later',
   // An offset from the agreed slot ("move it back an hour", "a day earlier").
   'hour later', 'hours later', 'hour earlier', 'hours earlier', 'back an hour', 'up an hour', 'forward an hour', 'half an hour later',
   'half an hour earlier', 'half hour later', 'half hour earlier', 'day earlier', 'days earlier', 'week earlier',

@@ -434,6 +434,23 @@ describe('rescheduleAgreementEvidence', () => {
     expect(evidence('Caller: Can we move my visit?\nAgent: We will see you Thursday at two, and if you need anything, call us.').ok).toBe(true);
   });
 
+  // Codex #5071 round 4.
+  test('round 4: minutes-to, "this coming", "different time", a changed subject, "of 2027", "rather than", "1/2 day"', () => {
+    for (const target of ['2026-09-24T10:00:00-04:00', '2026-09-24T14:00:00-04:00']) {
+      expect(evidence('Caller: Can we do Thursday ten to two?\nAgent: We will see you Thursday ten to two.', target).ok).toBe(false);
+    }
+    expect(rescheduleAgreementEvidence({ transcript: 'Caller: Can we do this coming Thursday at two?\nAgent: We will see you this coming Thursday at two.',
+      confirmedStartAt: '2026-10-08T14:00:00-04:00', callStartedAt: '2026-09-27T15:00:00Z' }).ok).toBe(false);
+    expect(rescheduleAgreementEvidence({ transcript: 'Caller: Can we do this coming Thursday at two?\nAgent: We will see you this coming Thursday at two.',
+      confirmedStartAt: '2026-10-01T14:00:00-04:00', callStartedAt: '2026-09-27T15:00:00Z' }).ok).toBe(true);
+    expect(evidence('Caller: Can you move me to Thursday at two?\nAgent: We will see you Thursday at two.\nCaller: Actually I need a different time.').ok).toBe(false);
+    expect(evidence('Agent: Would Thursday at two work?\nAgent: Do you want text reminders?\nCaller: Yes.\nAgent: We will see you Thursday at two.').ok).toBe(false);
+    expect(evidence('Caller: Can we do December 24th of 2027 at two?\nAgent: We will see you December 24th of 2027 at two.', '2026-12-24T14:00:00-05:00').ok).toBe(false);
+    expect(evidence('Caller: Can we move it?\nAgent: We will see you Thursday rather than Friday at two.', '2026-09-25T14:00:00-04:00').ok).toBe(false);
+    expect(rescheduleAgreementEvidence({ transcript: 'Caller: It takes 1/2 day, right? Can you move it?\nAgent: We will move you at two.',
+      confirmedStartAt: '2027-01-02T14:00:00-05:00', callStartedAt: '2027-01-01T15:00:00Z' }).ok).toBe(false);
+  });
+
   test('an unlabeled transcript line fails closed rather than trusting turn order', () => {
     const r = evidence('Hello, this is a call with no speaker labels.');
     expect(r).toMatchObject({ ok: false, reason: 'unparseable_transcript' });
