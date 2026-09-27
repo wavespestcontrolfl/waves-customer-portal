@@ -105,10 +105,12 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
       table.jsonb('categories');
       table.string('provider_message_id');
       table.string('send_attempt_token');
+      table.string('provider_handoff_attempt_token');
       table.string('provider_handoff_phase');
       table.string('status');
       table.text('error_message');
       table.timestamp('provider_retry_exhausted_at', { useTz: true });
+      table.timestamp('provider_retry_next_at', { useTz: true });
       table.timestamp('sent_at', { useTz: true });
       table.timestamp('delivered_at', { useTz: true });
       table.timestamp('opened_at', { useTz: true });
@@ -251,6 +253,75 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
     stored = await mockDatabase('collections_contact_ledger').where({ id: reservation.id }).first();
     expect(stored.invoice_ids).toEqual(winner.invoiceIds);
     expect(stored.metadata).toMatchObject({ amount: winner.metadata.amount, delivered: true });
+  });
+
+  async function requoteFixture() {
+    const customerId = randomUUID();
+    const invoiceIds = [randomUUID(), randomUUID()];
+    const eventKey = `previsit-balance:${randomUUID()}`;
+    const email = ledger({ customerId, invoiceId: invoiceIds[0], eventKey,
+      source: 'previsit_balance_reminder', metadata: { amount: 100 } });
+    email.invoice_ids = JSON.stringify(invoiceIds);
+    const replay = { schema_version: 1, customer_id: customerId, category: 'billing',
+      source_entry_point: 'previsit_balance_reminder', notificationEventKey: eventKey,
+      collections_ledger_id: email.id, invoice_ids: invoiceIds, rendered_amount: '100.00',
+      appointment_id: randomUUID(), appointment_date: '2030-06-10', appointment_rendered_on: '2030-06-09',
+      appointment_service_type: 'Pest Control' };
+    const stopped = message(replay, { status: 'failed', provider_retry_exhausted_at: new Date(),
+      send_attempt_token: 'old-attempt', provider_handoff_attempt_token: 'old-attempt',
+      provider_handoff_phase: 'pending',
+      error_message: `${Reservation.BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX}previsit-quote-changed` });
+    await mockDatabase('collections_contact_ledger').insert(email);
+    await mockDatabase('email_messages').insert(stopped);
+    return { customerId, invoiceIds, email, stopped };
+  }
+
+  test('changed-quote repair permits one fresh smaller quote without reopening its reclaimed attempt', async () => {
+    const { customerId, invoiceIds, email, stopped } = await requoteFixture();
+    const { reminderProgress } = require('../services/billing-reminder-delivery');
+    const [progress] = await reminderProgress(customerId, 'previsit_balance_reminder', ['email']);
+    expect(progress.complete).toBe(false);
+    expect(progress.resolved.size).toBe(0);
+    expect(progress.delivered.size).toBe(0);
+    expect(progress.entries[0].metadata.send_failed).toBe(true);
+    const ContactLedger = require('../services/collections/contact-ledger');
+    const claims = await Promise.all([1, 2].map(() => ContactLedger.claimAttempt({
+      ...progress.entries[0], reused: true,
+    }, { invoiceIds: [invoiceIds[1]], metadata: { amount: 60 } })));
+    expect(claims.filter((claim) => claim.allowed)).toHaveLength(1);
+    await expect(Reservation.releaseBillingEmailReservationForRequote(stopped, mockDatabase)).resolves.toBe(false);
+    const current = await mockDatabase('collections_contact_ledger').where({ id: email.id }).first();
+    expect(current.metadata).toMatchObject({ send_failed: false, amount: 60 });
+    expect(current.metadata.resolved).not.toBe(true);
+    expect(current.invoice_ids).toEqual([invoiceIds[1]]);
+    const retired = await mockDatabase('email_messages').where({ id: stopped.id }).first();
+    expect(retired.error_message).toBe('Billing email old quote retired: previsit-quote-changed');
+    expect(require('../services/email-template-library').shouldRetryExistingMessage(retired)).toBe(true);
+    expect(retired.provider_handoff_phase).toBe('pending');
+    expect(retired.provider_handoff_attempt_token).toBe(retired.send_attempt_token);
+  });
+
+  test('a failed repair acknowledgement rolls back the release and remains repairable', async () => {
+    const { email, stopped } = await requoteFixture();
+    await mockDatabase.schema.alterTable('email_messages', (table) => table.renameColumn('updated_at', 'hidden_updated_at'));
+    try {
+      await expect(Reservation.releaseBillingEmailReservationForRequote(stopped, mockDatabase)).resolves.toBe(false);
+      const held = await mockDatabase('collections_contact_ledger').where({ id: email.id }).first();
+      expect(held.metadata.send_failed).not.toBe(true);
+      const unrepaired = await mockDatabase('email_messages').where({ id: stopped.id }).first();
+      expect(unrepaired.error_message).toBe(stopped.error_message);
+    } finally {
+      await mockDatabase.schema.alterTable('email_messages', (table) => table.renameColumn('hidden_updated_at', 'updated_at'));
+    }
+    await expect(Reservation.releaseBillingEmailReservationForRequote(stopped, mockDatabase)).resolves.toBe(true);
+  });
+
+  test('an old quote marker cannot release a newer Email claim', async () => {
+    const { email, stopped } = await requoteFixture();
+    await mockDatabase('email_messages').where({ id: stopped.id }).update({ status: 'queued', send_attempt_token: 'new-attempt' });
+    await expect(Reservation.releaseBillingEmailReservationForRequote(stopped, mockDatabase)).resolves.toBe(false);
+    const held = await mockDatabase('collections_contact_ledger').where({ id: email.id }).first();
+    expect(held.metadata.send_failed).not.toBe(true);
   });
 
   test('progress repairs accepted and terminal evidence while unknown attempts stay held', async () => {

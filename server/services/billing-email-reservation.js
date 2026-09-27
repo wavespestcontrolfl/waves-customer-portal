@@ -5,6 +5,7 @@ const logger = require('./logger');
 const ContactLedger = require('./collections/contact-ledger');
 const { readStoredBillingReplayContext } = require('./email-template-library');
 const BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX = 'Billing email terminal refusal: ';
+const BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX = 'Billing email re-quote required: ';
 const LEDGER_SOURCE_BY_ENTRY_POINT = Object.freeze({
   invoice_followup_sequence: 'invoice_followups',
 });
@@ -73,6 +74,43 @@ function hasTerminalRefusalEvidence(message) {
     && String(message.error_message || '').startsWith(BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX);
 }
 
+function hasRequoteRefusalEvidence(message) {
+  return message?.status === 'failed' && !!message.provider_retry_exhausted_at
+    && !message.provider_retry_next_at && !hasAcceptedEvidence(message)
+    && ['pending', 'rejected'].includes(message.provider_handoff_phase)
+    && !!message.send_attempt_token && message.provider_handoff_attempt_token === message.send_attempt_token
+    && String(message.error_message || '').startsWith(BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX);
+}
+
+// Stop the frozen snapshot while allowing a fresh rendering to claim both
+// ledgers. Consume the repair marker atomically: repeating an old repair must
+// not release a newer reservation that has already been reclaimed.
+async function releaseBillingEmailReservationForRequote(message, database = db) {
+  if (!hasRequoteRefusalEvidence(message)) return false;
+  try {
+    return await database.transaction(async (trx) => {
+      const current = await trx('email_messages')
+        .where({ id: message.id, send_attempt_token: message.send_attempt_token }).forUpdate().first();
+      if (!hasRequoteRefusalEvidence(current)) return false;
+      const context = replayContext(current);
+      if (!context || context.source_entry_point !== 'previsit_balance_reminder') return false;
+      const released = await ContactLedger.markSendFailed(
+        { id: context.collections_ledger_id }, {}, { database: trx, match: reservationMatch(context) },
+      );
+      if (!released) return false;
+      await trx('email_messages').where({ id: current.id }).update({
+        error_message: String(current.error_message).replace(BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX,
+          'Billing email old quote retired: '),
+        updated_at: new Date(),
+      });
+      return true;
+    });
+  } catch (err) {
+    logger.warn(`[billing-email-reservation] changed-quote release failed: ${err.message}`);
+    return false;
+  }
+}
+
 function metadataOf(row) {
   if (typeof row?.metadata !== 'string') return row?.metadata || {};
   try { return JSON.parse(row.metadata) || {}; } catch { return {}; }
@@ -98,12 +136,17 @@ async function repairAcceptedBillingEmailReservations(rows, database = db) {
     for (const message of messages) {
       const accepted = hasAcceptedEvidence(message);
       const terminal = hasTerminalRefusalEvidence(message);
-      if (!accepted && !terminal) continue;
+      const requote = hasRequoteRefusalEvidence(message);
+      if (!accepted && !terminal && !requote) continue;
       const context = replayContext(message);
       const candidate = context && byLedgerId.get(String(context.collections_ledger_id));
       if (!candidate) continue;
       if (accepted) {
         if (await markBillingEmailReservationDelivered(message, database)) repaired.add(String(candidate.id));
+      } else if (requote) {
+        if (await releaseBillingEmailReservationForRequote(message, database)) {
+          candidate.metadata = { ...metadataOf(candidate), send_failed: true };
+        }
       } else if (await resolveBillingEmailReservationRefusal(message, database)) {
         candidate.metadata = { ...metadataOf(candidate), send_failed: true,
           resolved: true, resolution: 'email_terminal_refusal' };
@@ -118,8 +161,10 @@ async function repairAcceptedBillingEmailReservations(rows, database = db) {
 
 module.exports = {
   BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX,
+  BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX,
   hasAcceptedEvidence,
   markBillingEmailReservationDelivered,
   resolveBillingEmailReservationRefusal,
+  releaseBillingEmailReservationForRequote,
   repairAcceptedBillingEmailReservations,
 };

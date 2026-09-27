@@ -438,15 +438,16 @@ describe('quotedBalanceStillOwed (provider handoff recheck of the quoted balance
   const { quotedBalanceStillOwed } = require('../services/previsit-balance-reminder');
   const live = { id: 'inv-9', customer_id: 'cust-1', status: 'sent', total: '96.60', payer_id: null };
 
-  function boundaryDb(rows, visit = { ...VISIT, status: 'confirmed' }) {
+  function boundaryDb(rows, visit = { ...VISIT, status: 'confirmed' }, activity = []) {
     return (table) => {
       if (table === 'scheduled_services') return chain({ first: visit });
       if (table === 'invoices') return chain({ result: rows });
+      if (table === 'activity_log') return chain({ result: activity });
       throw new Error(`Unexpected table ${table}`);
     };
   }
-  function invoicesDb(rows, visit) {
-    db.mockImplementation(boundaryDb(rows, visit));
+  function invoicesDb(rows, visit, activity) {
+    db.mockImplementation(boundaryDb(rows, visit, activity));
   }
   const check = () => quotedBalanceStillOwed({
     visit: VISIT, quotedInvoices: [{ id: 'inv-9', due: 96.6 }], quotedDuesCents: 0,
@@ -455,6 +456,17 @@ describe('quotedBalanceStillOwed (provider handoff recheck of the quoted balance
   test('passes while every quoted invoice still owes exactly the quoted amount', async () => {
     invoicesDb([live]);
     await expect(check()).resolves.toEqual({ ok: true });
+  });
+
+  test.each([
+    ['invoice reminder', { last_reminder_at: new Date() }, []],
+    ['follow-up sequence', { followup_last_touch_at: new Date() }, []],
+    ['legacy late-payment reminder', {}, [{ metadata: { invoiceId: 'inv-9' } }]],
+  ])('holds the leg after a recent %s touch', async (_label, invoicePatch, activity) => {
+    invoicesDb([{ ...live, ...invoicePatch }], undefined, activity);
+    await expect(check()).resolves.toMatchObject({
+      ok: false, code: 'PREVISIT_QUOTE_CHANGED', retryable: true,
+    });
   });
 
   test.each([

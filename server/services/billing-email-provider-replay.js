@@ -3,6 +3,9 @@ const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-
 const { billingEmailReplayEligible } = require('./messaging/billing-email-replay-eligibility');
 
 const BILLING_REPLAY_TEMPLATES = new Set(['billing.notice', 'billing.receipt_notice']);
+const PREVISIT_SUPERSEDED_REASONS = new Set([
+  'previsit-quote-changed', 'balance-reminder-copy-stale', 'balance-reminder-visit-changed',
+]);
 
 function clean(value) {
   return String(value || '').trim();
@@ -62,7 +65,9 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch) {
       const verdict = await billingEmailReplayEligible(context, database);
       return verdict?.eligible === true ? { ok: true } : {
         ok: false,
-        code: 'BILLING_REPLAY_INELIGIBLE',
+        code: context.source_entry_point === 'previsit_balance_reminder'
+          && PREVISIT_SUPERSEDED_REASONS.has(verdict?.reason)
+          ? 'BILLING_REPLAY_REQUOTE_REQUIRED' : 'BILLING_REPLAY_INELIGIBLE',
         reason: verdict?.reason || 'Billing replay is no longer eligible',
         retryable: verdict?.retryable === true,
       };

@@ -58,6 +58,7 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
       table.uuid('id').primary(); table.uuid('customer_id'); table.integer('payer_id');
       table.text('status'); table.decimal('total'); table.decimal('credit_applied');
       table.uuid('scheduled_service_id'); table.date('due_date'); table.timestamp('created_at');
+      table.timestamp('last_reminder_at');
     });
     await mockPg.schema.createTable('invoice_followup_sequences', (table) => {
       table.uuid('invoice_id'); table.text('status'); table.timestamp('last_touch_at'); table.timestamp('next_touch_at');
@@ -65,6 +66,9 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     await mockPg.schema.createTable('annual_prepay_terms', (table) => {
       table.uuid('id').primary(); table.uuid('customer_id').notNullable(); table.uuid('prepay_invoice_id').notNullable();
       table.text('status'); table.date('term_start'); table.date('first_visit_date');
+    });
+    await mockPg.schema.createTable('activity_log', (table) => {
+      table.uuid('customer_id'); table.text('action'); table.timestamp('created_at'); table.jsonb('metadata');
     });
   }, 30000);
 
@@ -78,6 +82,7 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     await mockPg('invoices').delete();
     await mockPg('invoice_followup_sequences').delete();
     await mockPg('annual_prepay_terms').delete();
+    await mockPg('activity_log').delete();
   });
 
   afterAll(async () => {
@@ -193,6 +198,37 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     await expect(billingEmailReplayEligible(meta, mockPg))
       .resolves.toMatchObject({ eligible: false, reason: 'previsit-quote-changed', retryable: false });
     await expect(check({ database: mockPg })).resolves.toMatchObject({ ok: false, code: 'PREVISIT_QUOTE_CHANGED' });
+  });
+
+  test.each(['invoice reminder', 'follow-up touch', 'legacy activity'])(
+    'replay excludes recent %s even with collections policy disabled', async (touch) => {
+      delete process.env.GATE_COLLECTIONS_POLICY;
+      const meta = await previsitFixture();
+      await expect(billingEmailReplayEligible(meta, mockPg)).resolves.toEqual({ eligible: true });
+      const touchedAt = new Date();
+      if (touch === 'invoice reminder') {
+        await mockPg('invoices').where({ id: meta.invoice_ids[0] }).update({ last_reminder_at: touchedAt });
+      } else if (touch === 'follow-up touch') {
+        await mockPg('invoice_followup_sequences').insert({ invoice_id: meta.invoice_ids[0], status: 'active', last_touch_at: touchedAt });
+      } else {
+        await mockPg('activity_log').insert({ customer_id: customerId, action: 'late_payment_reminder',
+          created_at: touchedAt, metadata: { invoiceId: meta.invoice_ids[0] } });
+      }
+      await expect(billingEmailReplayEligible(meta, mockPg))
+        .resolves.toMatchObject({ eligible: false, reason: 'previsit-quote-changed' });
+      await expect(billingEmailReplayEligible({ ...meta, invoice_ids: [meta.invoice_ids[1]], rendered_amount: '60.00' }, mockPg))
+        .resolves.toEqual({ eligible: true });
+    },
+  );
+
+  test('touches older than 72 hours remain eligible', async () => {
+    const meta = await previsitFixture();
+    const old = new Date(Date.now() - 73 * 3600 * 1000);
+    await mockPg('invoices').where({ id: meta.invoice_ids[0] }).update({ last_reminder_at: old });
+    await mockPg('invoice_followup_sequences').insert({ invoice_id: meta.invoice_ids[0], status: 'active', last_touch_at: old });
+    await mockPg('activity_log').insert({ customer_id: customerId, action: 'late_payment_reminder',
+      created_at: old, metadata: { invoiceId: meta.invoice_ids[1] } });
+    await expect(billingEmailReplayEligible(meta, mockPg)).resolves.toEqual({ eligible: true });
   });
 
   test('a one-time upcoming visit refuses reminder copy even when its quoted debt is still recurring', async () => {

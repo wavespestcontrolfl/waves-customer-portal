@@ -241,7 +241,7 @@ async function previsitQuoteRefusal(meta, database) {
   // Reuse the initial selector so a due-date extension or a reassignment
   // away from a recurring visit removes the invoice from this rail.
   const invoices = ids.length
-    ? (await require('../previsit-balance-reminder').overdueRecurringInvoices(meta.customer_id, new Date(), database))
+    ? (await require('../previsit-balance-reminder').freshOverdueRecurringInvoices(meta.customer_id, new Date(), database))
       .filter((invoice) => ids.includes(String(invoice.id)))
     : [];
   if (invoices.length !== ids.length) return refused('previsit-quote-changed');
