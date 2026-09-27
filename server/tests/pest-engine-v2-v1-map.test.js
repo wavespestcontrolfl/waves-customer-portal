@@ -195,13 +195,35 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     });
   });
 
+  test('mixed Centruroides species keep only their shared scorpion guidance', () => {
+    const built = buildAnswer({
+      candidates: [
+        { ...candidate('hentz-striped-scorpion', { approved: false }), confidence: 0.55 },
+        { ...candidate('florida-bark-scorpion', { approved: false }), confidence: 0.35 },
+      ],
+      disagreed: false, disagreementNode: null, escalationTriggered: false, openaiAnswered: false,
+      openaiStoodInAlone: false, qualityUsable: true, qualityIssue: 'none', subjectConflict: false, currentMonth: 6,
+    });
+    expect(built).toMatchObject({
+      answer: { level: 'subgroup', node_id: 'centruroides-scorpions' }, entry: null,
+      genericSafetyLine: expect.stringMatching(/stings can be painful.+allergic reaction/i),
+    });
+    expect(mapToV1(built).report_contract).toMatchObject({
+      safety: { stinging: true, venomous: true }, urgency: 'low',
+      service: { line: 'pest', key: 'pest', label: 'General Pest Control', inspection_required: false },
+    });
+  });
+
   test('every universally routed actual fallback preserves its catalog contract', () => {
     const entries = catalog.listEntries();
-    const nodeIds = new Set();
-    for (const entry of entries) nodeIds.add(answerFor(entry.slug, { approved: false }).answer.node_id);
-    expect(nodeIds.size).toBeGreaterThanOrEqual(87);
+    const answersByNode = new Map();
+    for (const entry of entries) {
+      const built = answerFor(entry.slug, { approved: false });
+      if (!answersByNode.has(built.answer.node_id)) answersByNode.set(built.answer.node_id, built);
+    }
+    expect(answersByNode.size).toBeGreaterThanOrEqual(87);
 
-    for (const nodeId of nodeIds) {
+    for (const [nodeId, built] of answersByNode) {
       const descendants = entries.filter((entry) => catalog.lineage(entry.slug).some((rung) => rung.id === nodeId));
       const contracts = descendants.map((entry) => ({
         line: entry.service.line, key: entry.service.key, label: entry.service.label,
@@ -209,7 +231,7 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
       }));
       // These established nodes intentionally choose a more conservative
       // urgency, a referral-oriented label, or both.
-      const mapped = mapToV1(answerFor(descendants[0].slug, { approved: false }));
+      const mapped = mapToV1(built);
       const actual = { ...mapped.report_contract.service, urgency: mapped.urgency };
       const sharedIdentity = ['line', 'key', 'label'].every((field) => (
         new Set(contracts.map((contract) => JSON.stringify(contract[field]))).size === 1

@@ -1766,7 +1766,8 @@
         "sources": [
           "https://en.wikipedia.org/wiki/Centruroides_gracilis"
         ]
-      }
+      },
+      "parent": "centruroides-scorpions"
     },
     {
       "id": "regulated-land-snails",
@@ -2187,8 +2188,8 @@
       "id": "pet-risk-garden-caterpillars",
       "group": "caterpillars-moths",
       "parent": "garden-caterpillars",
-      "label": "Pet-risk Garden Caterpillars",
-      "generic": "a garden caterpillar",
+      "label": "Milkweed-fed Caterpillars",
+      "generic": "a milkweed-feeding caterpillar",
       "scientific": "Danaus",
       "rank": "genus",
       "next_photo": {
@@ -2269,9 +2270,9 @@
       "id": "allergy-risk-scorpions",
       "group": "scorpions-arachnids",
       "label": "Allergy-risk Scorpions",
-      "generic": "a scorpion",
-      "scientific": "Centruroides",
-      "rank": "genus",
+      "generic": "a small striped scorpion",
+      "scientific": "Centruroides hentzi",
+      "rank": "species",
       "next_photo": {
         "ask": "Use camera zoom from a safe distance to show the body stripes and tail. Do not approach, touch, or handle it.",
         "why": "Body markings and tail shape help separate Florida scorpions."
@@ -2292,7 +2293,8 @@
         "sources": [
           "https://en.wikipedia.org/wiki/Centruroides_hentzi"
         ]
-      }
+      },
+      "parent": "centruroides-scorpions"
     },
     {
       "id": "toxic-flatworms",
@@ -2379,6 +2381,36 @@
         "safety_line": "The sting can be extremely painful. See a doctor if you have a strong allergic reaction.",
         "sources": [
           "https://en.wikipedia.org/wiki/Dasymutilla_occidentalis"
+        ]
+      }
+    },
+    {
+      "id": "centruroides-scorpions",
+      "group": "scorpions-arachnids",
+      "label": "Centruroides Scorpions",
+      "generic": "a scorpion",
+      "scientific": "Centruroides",
+      "rank": "genus",
+      "next_photo": {
+        "ask": "Use camera zoom from a safe distance to show the body markings, pincers, and tail. Do not approach, touch, or handle it.",
+        "why": "Body markings and overall size help separate Florida scorpion species."
+      },
+      "generic_guidance": {
+        "compatibility": {
+          "safety": {
+            "stinging": true,
+            "venomous": true
+          },
+          "serviceLine": "pest",
+          "serviceKey": "pest",
+          "serviceLabel": "General Pest Control",
+          "inspectionRequired": false,
+          "urgency": "low"
+        },
+        "safety_line": "Scorpion stings can be painful. See a doctor if you have a strong allergic reaction.",
+        "sources": [
+          "https://en.wikipedia.org/wiki/Centruroides_gracilis",
+          "https://en.wikipedia.org/wiki/Centruroides_hentzi"
         ]
       }
     }

@@ -24,7 +24,7 @@ ant; we can't yet tell you which kind"):
 - **Group** (`ants`, `termites`, `spiders`, `snakes`, 29 total) — "we're sure
   it's an ant". Every group has a `generic` label and a `next_photo`: the one
   photo that would narrow it further.
-- **Subgroup** (`fire-ants`, `widow-spiders`, `venomous-snakes`, 73 total,
+- **Subgroup** (`fire-ants`, `widow-spiders`, `venomous-snakes`, 74 total,
   optional) — a narrower "we're sure it's a fire ant" stop between group and
   entry, for groups where that middle rung matters. Also has its own
   `generic` label and `next_photo`.
@@ -81,7 +81,7 @@ entry-level name; a no-treatment contract is not inferred from one candidate.
 
 - `index.json` — `catalog_version`, `section` ("pest" — this catalog does not
   yet cover the lawn or tree & shrub photo ID sections), the five
-  `categories`, the 29 `groups` and 73 `subgroups`, `look_alike_groups`
+  `categories`, the 29 `groups` and 74 `subgroups`, `look_alike_groups`
   (group-level look-alike notes,
   e.g. ants vs. termites), `legacy_slug_map` (every v1 `PEST_LIBRARY` slug →
   a v2 catalog node — see below), and `planned_slugs` (see "Cross-worker

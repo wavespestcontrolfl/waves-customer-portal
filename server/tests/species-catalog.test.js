@@ -358,7 +358,7 @@ describe('owner approval content binding', () => {
 
 describe('index.json — groups, subgroups, next_photo', () => {
   test('every group and subgroup has an ask/why next_photo within its length caps', () => {
-    expect(index.subgroups).toHaveLength(73);
+    expect(index.subgroups).toHaveLength(74);
     for (const g of index.groups) {
       expect(g.next_photo.ask.length).toBeLessThanOrEqual(180);
       expect(g.next_photo.why.length).toBeLessThanOrEqual(160);
@@ -583,6 +583,18 @@ describe('resolveName regressions', () => {
     expect(catalog.resolveName('native ladybug')).toMatchObject({ node: { slug: 'lady-beetle' } });
     expect(catalog.resolveName('Asian ladybug')).toMatchObject({ node: { slug: 'asian-lady-beetle' } });
   });
+
+  test.each(['garden caterpillar', 'garden caterpillars'])(
+    'generic %s stays at the shared garden-caterpillar node', (name) => {
+      expect(catalog.resolveName(name)?.node.id).toBe('garden-caterpillars');
+    },
+  );
+
+  test.each(['scorpion', 'scorpions', 'Centruroides'])(
+    'generic %s stays at the neutral Centruroides parent', (name) => {
+      expect(catalog.resolveName(name)?.node.id).toBe('centruroides-scorpions');
+    },
+  );
 
   test.each(['alate', 'alates'])('generic %s does not claim an ant or termite identification', (name) => {
     expect(catalog.resolveName(name)).toBeNull();
