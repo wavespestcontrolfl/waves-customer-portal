@@ -746,6 +746,17 @@ async function sameTripFirstApplicationBreakdown({ svc, invoiceTotal, dbConn } =
 // case is already handled by the attached-invoice prediction) and is not
 // one of the resolved/dead statuses closeout-status.js itself treats as a
 // manual-billing alert rather than a settled cover.
+//
+// THIS is the one sibling-coverage determination every caller should share —
+// the schedule sheet's prediction (siblingCoveredCompletionPrediction below),
+// Charge Now / the prepaid receipt's own resolver (resolveScheduledServiceCharge,
+// admin-schedule.js), and completion itself (complete-scheduled-service.js
+// re-checks findFirstApplicationInvoiceForEstimateService directly) all
+// resolve "is a sibling's invoice already covering this trip?" through this
+// function (or the raw lookup it wraps) so they cannot disagree. A future
+// split-provenance exemption (e.g. a marker that some visits are NOT subject
+// to sibling coverage) belongs HERE, gating the `inv` match below, so every
+// caller inherits the exemption in one place instead of drifting.
 async function coveringSiblingInvoice(svc, dbConn) {
   let result;
   try {
@@ -895,6 +906,7 @@ module.exports = {
   predictCompletionBilling,
   monthlyDuesCollected,
   siblingCoveredCompletionPrediction,
+  coveringSiblingInvoice,
   sameTripFirstApplicationBreakdown,
   verifyExtendedCompletionAnchor,
   attachedInvoiceAutoChargeLikely,

@@ -44,7 +44,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoveredCompletionPrediction, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, completionInvoiceAmount, monthlyDuesCollected, attachedInvoiceAutoChargeLikely, unbilledCompletionGap, UNBILLED_MONEY_GAP_REASONS, siblingCoveredCompletionPrediction, coveringSiblingInvoice, sameTripFirstApplicationBreakdown } = require('../services/billing-lane');
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
@@ -15642,11 +15642,39 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
 // not completionInvoiceAmount's own contract, so an explicit estimatedPrice
 // still wins on this resolver exactly as it always has (unchanged for
 // isCallback too — only the always-free-TYPE fallback is narrowed here).
-function resolveScheduledServiceCharge({ estimatedPrice, isCallback, monthlyRate, billingMode, perApplicationFee, serviceType }) {
+//
+// Sibling-covered same-trip visit (codex pre-push P1): a same-day combined
+// per-application accept invoices the RESERVED sibling row for the whole
+// trip and deliberately leaves THIS, the PROMOTED row, unpriced — but the
+// customer can still carry an established per_application_fee from an
+// earlier accept (estimate-converter.js reservedAcceptPerVisitSplit / "an
+// already-per_application customer accepting an ADD-ON keeps their
+// established fee"), so the ordinary fee fallback below would mint an
+// unrelated charge for a trip that is already billed on the sibling's
+// invoice — Charge Now would even stack it under an operator-added
+// checkout extra, though the checkout sheet only ever previewed the extra.
+// Ask coveringSiblingInvoice (billing-lane.js) — the SAME sibling-coverage
+// determination siblingCoveredCompletionPrediction reads for the schedule
+// sheet's own prediction, so this resolver, the sheet, and completion
+// itself (which re-checks findFirstApplicationInvoiceForEstimateService
+// directly before minting) can never disagree — before ever falling back
+// to the fee. `svc`/`dbConn` are optional so a caller that hasn't been
+// updated (or a pure unit test) still gets the unchanged, DB-free
+// precedence; an unreadable svc/dbConn or a lookup failure fails toward
+// the existing fee, never toward a false $0.
+async function resolveScheduledServiceCharge({ estimatedPrice, isCallback, monthlyRate, billingMode, perApplicationFee, serviceType, svc = null, dbConn = null }) {
+  const perApplicationBilling = billingMode === 'per_application' && !isAlwaysFreeServiceType(serviceType);
+  const hasOwnPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
+  if (perApplicationBilling && !hasOwnPrice && svc && dbConn) {
+    try {
+      const covering = await coveringSiblingInvoice(svc, dbConn);
+      if (covering) return 0;
+    } catch { /* fails toward the fee below */ }
+  }
   return completionInvoiceAmount({
     estimatedPrice,
     isCallback,
-    perApplicationBilling: billingMode === 'per_application' && !isAlwaysFreeServiceType(serviceType),
+    perApplicationBilling,
     perApplicationFee,
     monthlyRate,
     billingMode,
@@ -15689,13 +15717,15 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     .orderBy('created_at', 'desc')
     .first();
   if (existing) return { invoice: existing, reused: true };
-  const amount = resolveScheduledServiceCharge({
+  const amount = await resolveScheduledServiceCharge({
     estimatedPrice: svc.estimated_price,
     isCallback: svc.is_callback,
     monthlyRate: svc.cust_monthly_rate,
     billingMode: svc.cust_billing_mode || null,
     perApplicationFee: svc.cust_per_application_fee,
     serviceType: svc.service_type,
+    svc,
+    dbConn: db,
   });
   if (!(amount > 0)) return { invoice: null, reason: 'no_chargeable_amount' };
   const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService(svc.id, {
@@ -16363,13 +16393,15 @@ router.post('/:id/invoice', async (req, res, next) => {
     // admin-dispatch.js. Honour an explicit positive price if one was set;
     // an explicit per_application lane bills its acceptance fee; otherwise
     // the visit is $0.
-    const amount = resolveScheduledServiceCharge({
+    const amount = await resolveScheduledServiceCharge({
       estimatedPrice: svc.estimated_price,
       isCallback: svc.is_callback,
       monthlyRate: svc.cust_monthly_rate,
       billingMode: svc.cust_billing_mode || null,
       perApplicationFee: svc.cust_per_application_fee,
       serviceType: svc.service_type,
+      svc,
+      dbConn: db,
     });
 
     // Mobile checkout sheet can append extra services + discount lines before

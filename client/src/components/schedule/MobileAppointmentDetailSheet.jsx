@@ -293,7 +293,15 @@ export default function MobileAppointmentDetailSheet({
   const timeWindow = formatWindow(service);
   const hrs = durationHrs(service);
 
-  const coveredByMembership = !!tier && (rawPrice === 0 || rawPrice == null);
+  // The server's covered_sibling_invoice prediction is authoritative and
+  // must win over this tier/price heuristic (codex pre-push P2): a
+  // sibling-covered per-application visit can still carry a WaveGuard tier
+  // (e.g. an established per_application member's combined same-day
+  // accept), and without this exclusion the CTA area below said "Covered
+  // by WaveGuard {tier}" while BillingLaneCard, reading the same
+  // prediction, said a sibling invoice covers it — two different reasons
+  // for the same $0 on one screen.
+  const coveredByMembership = !!tier && (rawPrice === 0 || rawPrice == null) && !siblingCoveredInvoice;
   const prepaidAmt = service.prepaidAmount != null ? Number(service.prepaidAmount) : null;
   const isPrepaid = prepaidAmt != null && prepaidAmt > 0;
   const prepaidCovered = usingUnpricedPrediction

@@ -275,6 +275,22 @@ describe('MobileAppointmentDetailSheet sibling-covered first-application visit',
     expect(screen.getAllByText(/Covered by invoice WPC-2026-0505/i).length).toBeGreaterThan(0);
   });
 
+  // Codex pre-push P2: SIBLING_COVERED_SERVICE carries a real WaveGuard
+  // tier (an established per_application member's combined same-day
+  // accept) AND an unpriced row — exactly the shape the legacy
+  // coveredByMembership heuristic (any tier + no price) also matches. The
+  // authoritative server prediction (covered_sibling_invoice) must win: the
+  // CTA area must say a sibling invoice covers it, never "Covered by
+  // WaveGuard", or this sheet contradicts BillingLaneCard on the same
+  // screen (both read the SAME prediction).
+  it('prefers the sibling-invoice prediction over the tier heuristic in the CTA area', () => {
+    render(<MobileAppointmentDetailSheet service={SIBLING_COVERED_SERVICE} onClose={() => {}} />);
+    expect(screen.queryByText(/Covered by WaveGuard/i)).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/Covered by invoice WPC-2026-0505 on the Quarterly Pest Control visit — no charge needed/i),
+    ).toBeInTheDocument();
+  });
+
   // Codex pre-push P1: a legacy customer with NO explicit billing_mode still
   // gets the monthlyRate fallback from the Charge Now mint endpoint's OWN
   // gate (resolveScheduledServiceCharge checks the RAW billing_mode column,
