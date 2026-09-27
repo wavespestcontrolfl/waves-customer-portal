@@ -385,6 +385,15 @@ function buildNameIndices() {
     for (const part of taxonNames.split('/')) {
       if (!part.trim()) continue;
       scientificPairs.push([part, e.slug]);
+      // A stage annotation is still the same taxon. Index its bare binomial
+      // too, so an adult and larval entry sharing one species resolve the
+      // unqualified name to their common ancestor. Keep explicit stage
+      // names pointed at the corresponding entry.
+      const binomial = part.trim().replace(/ \((?:adult|larva|larvae|nymph)\)$/, '');
+      scientificPairs.push([binomial, e.slug]);
+      scientificPairs.push(...e.stages
+        .filter((stage) => /^[A-Z][a-z]+ [a-z][a-z-]+$/.test(binomial) && /^(adult|larva|larvae|nymph)$/.test(stage))
+        .map((stage) => [`${binomial} ${stage}`, e.slug]));
       // A grouped entry may name one representative species followed by
       // "and others". The leading binomial is still an exact taxon name.
       scientificPairs.push(representativeTaxonPair(part.trim(), e.slug));

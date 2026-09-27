@@ -69,13 +69,22 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
   test('a direct v1 mapping still uses its established compatibility service and urgency', () => {
     const mapped = mapToV1(answerFor('fire-ant'));
     expect(mapped).toMatchObject({ species_slug: 'fire-ant', service_line: 'pest', urgency: 'high' });
-    expect(mapped.report_contract.service).toMatchObject({ key: 'pest', label: 'General Pest Control' });
+    expect(mapped.report_contract.service).toMatchObject({ key: 'pest', label: 'General Pest Control', inspection_required: false });
   });
 
   test('a named entry with no v1 identity retains the unmatched consultation service', () => {
     const mapped = mapToV1(answerFor('carpenter-bee'));
     expect(mapped.species_slug).toBeNull();
-    expect(mapped.report_contract.service).toMatchObject({ key: null, label: 'Pest Consultation' });
+    expect(mapped.report_contract.service).toMatchObject({ key: null, label: 'Pest Consultation', inspection_required: true });
+  });
+
+  test('the real v2-only Sri Lankan weevil stays on the inspection-first unmatched path', () => {
+    const mapped = mapToV1(answerFor('sri-lankan-weevil'));
+    expect(mapped).toMatchObject({ species_slug: null, service_line: 'tree_shrub', urgency: 'low' });
+    expect(mapped.report_contract).toMatchObject({
+      identification: { slug: null, category: 'insect' },
+      service: { line: 'tree_shrub', key: null, label: 'Pest Consultation', inspection_required: true },
+    });
   });
 });
 

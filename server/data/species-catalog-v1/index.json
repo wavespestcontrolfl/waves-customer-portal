@@ -502,7 +502,7 @@
       "scientific": "Latrodectus",
       "rank": "genus",
       "next_photo": {
-        "ask": "A close-up of the underside of the abdomen from a few feet away — don't handle it.",
+        "ask": "From a safe distance, use camera zoom on the underside only if it is already visible. Do not approach, disturb, or handle the spider.",
         "why": "The hourglass shape and color (red vs. tan) tell black widow from brown widow."
       }
     },
@@ -550,7 +550,7 @@
       "scientific": "several families",
       "rank": "group",
       "next_photo": {
-        "ask": "A close-up of the waist and the nest material (mud tube vs. burrow) from a few feet away.",
+        "ask": "From a safe distance, use camera zoom to show the waist and nest material (mud tube vs. burrow) without approaching or disturbing it.",
         "why": "Waist shape and nest type separate mud daubers from cicada killers and other solitary wasps."
       }
     },
@@ -574,7 +574,7 @@
       "scientific": "several families",
       "rank": "group",
       "next_photo": {
-        "ask": "A close-up of the spines or hairs and the color pattern, without touching it.",
+        "ask": "From a safe distance, use camera zoom to show the spines or hairs and color pattern. Do not approach, touch, or handle it.",
         "why": "Spine density and color tell a merely fuzzy caterpillar from one with venomous spines."
       }
     },

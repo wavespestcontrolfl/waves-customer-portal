@@ -377,6 +377,18 @@ describe('name collisions', () => {
     expect(result.node).toMatchObject({ level: 'subgroup', id: 'bees' });
   });
 
+  test('a shared adult and larval binomial resolves stage-neutral while qualified names stay specific', () => {
+    expect(catalog.resolveName('Syntomeida epilais')).toMatchObject({
+      via: 'scientific', node: { level: 'group', id: 'caterpillars-moths' },
+    });
+    expect(catalog.resolveName('Syntomeida epilais adult')).toMatchObject({
+      via: 'scientific', node: { slug: 'polka-dot-wasp-moth' },
+    });
+    expect(catalog.resolveName('Syntomeida epilais larva')).toMatchObject({
+      via: 'scientific', node: { slug: 'oleander-caterpillar' },
+    });
+  });
+
   test('a plain "honey bee" never assumes a swarm; the specific situation still resolves', () => {
     for (const q of ['honey bee', 'honey bees', 'I found honey bees']) {
       expect(catalog.resolveName(q).node).toMatchObject({ level: 'subgroup', id: 'bees' });
@@ -678,6 +690,11 @@ describe('loader API surface', () => {
   test.each([
     ['little-fire-ant', 'group', 'ants', /Do not approach, disturb, handle/i],
     ['honey-bee-wall-colony', 'subgroup', 'bees', /without approaching or disturbing/i],
+    ['puss-caterpillar', 'subgroup', 'stinging-caterpillars', /Do not approach, touch, or handle/i],
+    ['io-moth-caterpillar', 'subgroup', 'stinging-caterpillars', /Do not approach, touch, or handle/i],
+    ['saddleback-caterpillar', 'subgroup', 'stinging-caterpillars', /Do not approach, touch, or handle/i],
+    ['black-widow', 'subgroup', 'widow-spiders', /Do not approach, disturb, or handle/i],
+    ['mud-dauber', 'subgroup', 'solitary-wasps', /without approaching or disturbing/i],
   ])('the actual draft %s fallback never asks the customer to approach or handle it', (slug, level, nodeId, distanceRule) => {
     const { buildAnswer, resolveCandidate } = require('../services/photo-id-v2/pest-engine');
     expect(catalog.getEntry(slug).review.status).toBe('draft');

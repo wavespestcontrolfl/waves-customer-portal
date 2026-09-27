@@ -1080,7 +1080,7 @@ function mapToV1(built) {
       safety: v1SafetyFallback(namedEntry),
       serviceLine: namedService.line,
       ...namedServiceIdentity,
-      inspectionRequired: !!namedService.inspection_first,
+      inspectionRequired: inheritIdentityOnly ? !!namedService.inspection_first : true,
       urgency: namedEntry.urgency,
     },
     generic: {
