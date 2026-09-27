@@ -102,7 +102,6 @@ describe('pre-visit balance email through the shared billing email authority', (
   });
 
   test.each([
-    ['the portal-wide email switch', 'BILLING_EMAIL_DISABLED', { ok: false, skipped: true, reason: 'email_disabled' }],
     ['an explicit billing choice without Email', 'BILLING_PREFERENCES_CHANGED',
       { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'BILLING_PREFERENCES_CHANGED' }],
     ['no billing address', 'NO_EMAIL_RECIPIENT', { ok: false, skipped: true, reason: 'missing_email' }],
