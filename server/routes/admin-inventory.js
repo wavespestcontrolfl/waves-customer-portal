@@ -2802,9 +2802,16 @@ router.post('/aliases', async (req, res, next) => {
   try {
     const { productId, aliasName, vendorId } = req.body;
     if (!productId || !aliasName) return res.status(400).json({ error: 'productId and aliasName required' });
-    await db('product_aliases').insert({
-      product_id: productId, alias_name: aliasName, vendor_id: vendorId || null,
-    }).onConflict(['alias_name', 'vendor_id']).ignore();
+    // Serialized against the inventory agent's own createAgentAlias under the
+    // SAME catalog-create lock (item 2, 2026-09-27 round 7 review) — the two
+    // writers never insert the same alias side by side, and `(alias_name,
+    // vendor_id)` uniqueness alone can't catch a collision when either row
+    // carries a NULL vendor_id.
+    const result = await inventoryOperations.createProductAlias({ productId, aliasName, vendorId });
+    if (!result.success) {
+      const other = await db('products_catalog').where({ id: result.conflict.product_id }).first('name');
+      return res.status(409).json({ error: `"${aliasName}" is already an alias of ${other?.name || 'another product'}` });
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -3331,38 +3338,11 @@ router.post('/', async (req, res, next) => {
     }
     assertSupportedInventoryUnit(inventoryUnit);
 
-    const product = await db.transaction(async (trx) => {
-      const [inserted] = await trx('products_catalog').insert({
-        name, category: category || null, subcategory: subcategory || null,
-        active_ingredient: activeIngredient || 'Unknown - pending SDS',
-        epa_reg_number: epaRegNumber || 'N/A',
-        moa_group: moaGroup || null,
-        default_unit: defaultUnit || 'oz',
-        container_size: unitSize || null,
-        formulation: formulation || 'unspecified',
-        inventory_on_hand: initialStock,
-        inventory_unit: inventoryUnit || null,
-        low_stock_threshold: lowStock,
-      }).returning('*');
-
-      if (initialStock != null) {
-        await trx('product_inventory_movements').insert({
-          product_id: inserted.id,
-          movement_type: 'correction',
-          quantity: initialStock,
-          unit: inventoryUnit,
-          stock_before: 0,
-          stock_after: initialStock,
-          metadata: {
-            source: 'admin_product_create',
-            reason: 'Initial stock',
-            delta: initialStock,
-            adjustedBy: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || null,
-          },
-        });
-      }
-      return inserted;
-    });
+    const product = await inventoryOperations.createCatalogProduct({
+      name, category, subcategory, activeIngredient, epaRegNumber, formulation, moaGroup,
+      defaultUnit, unitSize, inventoryOnHand, inventoryUnit, lowStockThreshold,
+    }, { actorId: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || null });
+    if (!product) return res.status(409).json({ error: 'An active product with this name already exists' });
 
     res.status(201).json(product);
   } catch (err) { next(err); }
