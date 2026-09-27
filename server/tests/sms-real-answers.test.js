@@ -436,6 +436,78 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     expect(result.factsBlock).toContain('Tuesday, September 29: 9:00 AM - 11:00 AM');
   });
 
+  test('gate on: a cancellation message fetches OPEN TIMES even though the upstream scheduling classifier says false (pre-push audit)', async () => {
+    // hasSchedulingIntent() upstream is scoped to ordinary "when are you
+    // coming" messages and does NOT fire for "cancel my service" — but the
+    // cancellation rule needs real skip/reschedule times regardless.
+    process.env[GATE] = 'true';
+    const getAvailableSlots = jest.fn(async () => ({
+      zone: 'Venice Zone',
+      days: [{ date: '2026-09-29', fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }],
+    }));
+    mockDraftDeps({ getAvailableSlots });
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+
+    const result = await drafter.generateGroundedDraft({
+      client: {},
+      context: { summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [] },
+      inboundMessage: 'I want to cancel my service',
+      intent: { intent: 'cancel_request' },
+      schedulingIntent: false,
+      city: 'Venice',
+      voiceProfile: null,
+    });
+
+    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
+    expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
+  });
+
+  test('gate on: a complaint-shaped message (raw text match) also fetches OPEN TIMES despite schedulingIntent:false', async () => {
+    process.env[GATE] = 'true';
+    const getAvailableSlots = jest.fn(async () => ({
+      zone: 'Venice Zone',
+      days: [{ date: '2026-09-29', fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }],
+    }));
+    mockDraftDeps({ getAvailableSlots });
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+
+    const result = await drafter.generateGroundedDraft({
+      client: {},
+      context: { summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [] },
+      inboundMessage: 'I still have ants everywhere',
+      intent: { intent: 'general_customer_sms_needs_review' },
+      schedulingIntent: false,
+      city: 'Venice',
+      voiceProfile: null,
+    });
+
+    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-1' });
+    expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
+  });
+
+  test('gate on: an ordinary non-scheduling, non-cancel/complaint message never fetches OPEN TIMES', async () => {
+    process.env[GATE] = 'true';
+    const getAvailableSlots = jest.fn();
+    mockDraftDeps({ getAvailableSlots });
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+
+    const result = await drafter.generateGroundedDraft({
+      client: {},
+      context: { summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [] },
+      inboundMessage: 'Thanks so much!',
+      intent: { intent: 'gratitude_reply' },
+      schedulingIntent: false,
+      city: 'Venice',
+      voiceProfile: null,
+    });
+
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(result.factsBlock).not.toContain('OPEN TIMES');
+  });
+
   test('a frozen presetFactsBlock (sealed-exam replay) never triggers a live OPEN TIMES fetch', async () => {
     process.env[GATE] = 'true';
     const getAvailableSlots = jest.fn();

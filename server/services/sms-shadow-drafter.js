@@ -957,9 +957,26 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // fetch is skipped for a frozen replay too — a live availability read
   // against a historical message would grade the draft on today's calendar,
   // not the one it actually saw.
+  //
+  // Pre-push audit P1: `schedulingIntent` alone is the UPSTREAM webhook's
+  // hasSchedulingIntent() classifier, which is scoped to ordinary "when are
+  // you coming" scheduling messages — it does NOT fire for "cancel my
+  // service" or a complaint ("I still have ants"). But the real-answers
+  // rules ALSO need real OPEN TIMES for exactly those two categories
+  // (cancellation skip/reschedule offers, unconditionally; a complaint's
+  // free re-service offer, when GATE_SMS_AGENT_COMPLAINTS is on) — without
+  // this, the model would be told to offer specific times it was never
+  // given and would either invent one (a FACT DISCIPLINE violation) or defer
+  // instead of answering. Reuses the SAME cancel/complaint detection this
+  // file's own save-the-sale routing already applies to intent + raw text
+  // (SAVE_SALE_INTENT_RE / SAVE_SALE_TEXT_RE), so the two decisions can't
+  // drift apart.
+  const needsOpenTimes = Boolean(schedulingIntent)
+    || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
+    || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''));
   const openTimesBlock = presetFactsBlock
     ? null
-    : await fetchOpenTimesBlock({ city, customerId: context?.customer?.id || null, schedulingIntent });
+    : await fetchOpenTimesBlock({ city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes });
   const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
