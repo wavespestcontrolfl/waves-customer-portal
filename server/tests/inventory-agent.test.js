@@ -281,6 +281,54 @@ describe('validateReading — a count is whole items', () => {
   });
 });
 
+describe('classifyDecision — a new product\'s category must be one the listing states (Codex round 11)', () => {
+  const allowedCategories = new Set(['insecticide', 'fertilizer', 'rodent_trap', 'supplies']);
+  const decide = (rawTitle, name, category, reading) => classifyDecision({
+    kind: 'new_product', reason: 'not in the catalog',
+    new_product: { name, category, active_ingredient: null, epa_reg_no: null }, reading,
+  }, ctx({ rawTitle, allowedCategories }));
+  const oz = (n) => ({ size_text: `${n} oz`, size_number: n, size_unit: 'oz', pack_count: 1 });
+
+  test('a category the title contradicts is held: "Bifen XTS Insecticide" is never saved as fertilizer', () => {
+    expect(decide('Bifen XTS Insecticide 96 oz', 'Bifen XTS', 'fertilizer', oz(96)))
+      .toMatchObject({ kind: 'unsure', reason: expect.stringMatching(/doesn't state the category/) });
+    expect(decide('Bifen XTS Insecticide 96 oz', 'Bifen XTS', 'insecticide', oz(96)))
+      .toMatchObject({ kind: 'new_product', newProduct: { category: 'insecticide' } });
+  });
+
+  test('a title that states no category at all is held, whatever the model picked', () => {
+    expect(decide('Demand CS 8 oz', 'Demand CS', 'insecticide', oz(8))).toMatchObject({ kind: 'unsure' });
+  });
+
+  test('an N-P-K grade states fertilizer; a rat trap states rodent_trap; "supplies" is never stated', () => {
+    expect(decide('LESCO 16-4-8 Turf 50 lb', 'LESCO 16-4-8 Turf', 'fertilizer', { size_text: '50 lb', size_number: 50, size_unit: 'lb', pack_count: 1 }))
+      .toMatchObject({ kind: 'new_product' });
+    const count = { size_text: '4 Count', size_number: 4, size_unit: 'each', pack_count: 1 };
+    expect(decide('Victor Snap Rat Trap 4 Count', 'Victor Snap Rat Trap', 'rodent_trap', count)).toMatchObject({ kind: 'new_product' });
+    expect(decide('Victor Snap Rat Trap 4 Count', 'Victor Snap Rat Trap', 'supplies', count)).toMatchObject({ kind: 'unsure' });
+  });
+});
+
+describe('inventoryUnitForNewProduct — the stock unit is also a valid application unit (Codex round 11)', () => {
+  test('kilograms are kept in grams; valid weights keep their own unit; volumes are fl_oz', () => {
+    expect(inventoryUnitForNewProduct('kg')).toBe('g');
+    expect(inventoryUnitForNewProduct('g')).toBe('g');
+    expect(inventoryUnitForNewProduct('lb')).toBe('lb');
+    expect(inventoryUnitForNewProduct('oz')).toBe('oz');
+    expect(inventoryUnitForNewProduct('gal')).toBe('fl_oz');
+    expect(inventoryUnitForNewProduct('each')).toBe('each');
+  });
+
+  test('a kilogram title validates, keeping its read amount in kg for adjustStock to convert', () => {
+    const decision = classifyDecision({
+      kind: 'new_product', reason: 'not in the catalog',
+      new_product: { name: 'LESCO Turf Fertilizer', category: 'fertilizer', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '2 kg', size_number: 2, size_unit: 'kg', pack_count: 1 },
+    }, ctx({ rawTitle: 'LESCO Turf Fertilizer 2 kg', lineQuantity: 3, allowedCategories: new Set(['fertilizer']) }));
+    expect(decision).toMatchObject({ kind: 'new_product', amount: 6, unit: 'kg', newProduct: { inventoryUnit: 'g' } });
+  });
+});
+
 describe('containerAgreement — measured and count containers', () => {
   test('the per-unit size equals the container: the pack multiplies containers', () => {
     expect(containerAgreement(78, 2, 78)).toBe(156);
@@ -519,14 +567,14 @@ describe('classifyDecision — new_product', () => {
       new_product: { name: 'New Chemical', category: 'insecticide', active_ingredient: 'Some Confident-Sounding Chemical Name', epa_reg_no: null },
       reading: { size_text: '32 oz', size_number: 32, size_unit: 'oz', pack_count: 1 },
     };
-    const decision = classifyDecision(raw, ctx({ rawTitle: 'New Chemical 32 oz', allowedCategories }));
+    const decision = classifyDecision(raw, ctx({ rawTitle: 'New Chemical Insecticide 32 oz', allowedCategories }));
     expect(decision.newProduct.activeIngredient).toBeUndefined();
   });
 
   test('a liquid size derives inventory_unit fl_oz even when the title reads gallons', () => {
     const raw = { kind: 'new_product', new_product: { name: 'New Liquid', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
       reading: { size_text: '1 gal', size_number: 1, size_unit: 'gal', pack_count: 1 } };
-    const decision = classifyDecision(raw, ctx({ rawTitle: 'New Liquid 1 gal', allowedCategories }));
+    const decision = classifyDecision(raw, ctx({ rawTitle: 'New Liquid Insecticide 1 gal', allowedCategories }));
     expect(decision).toMatchObject({ newProduct: { inventoryUnit: 'fl_oz' } });
   });
 
@@ -569,7 +617,7 @@ describe('classifyDecision — new_product', () => {
   test('a category outside the allowed set -> unsure', () => {
     const raw = { kind: 'new_product', new_product: { name: 'New Chemical', category: 'made up category', active_ingredient: null, epa_reg_no: null },
       reading: { size_text: '32 oz', size_number: 32, size_unit: 'oz', pack_count: 1 } };
-    const decision = classifyDecision(raw, ctx({ rawTitle: 'New Chemical 32 oz', allowedCategories }));
+    const decision = classifyDecision(raw, ctx({ rawTitle: 'New Chemical Insecticide 32 oz', allowedCategories }));
     expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
   });
 
@@ -577,7 +625,7 @@ describe('classifyDecision — new_product', () => {
     const raw = { kind: 'new_product', new_product: { name: 'New Chemical', category: 'insecticide', active_ingredient: null, epa_reg_no: '99999-99999' },
       reading: { size_text: '78 oz', size_number: 78, size_unit: 'oz', pack_count: 1 } };
     // The model's echoed epa_reg_no ('99999-99999') is NOT in the title, so it's discarded.
-    const decision = classifyDecision(raw, ctx({ rawTitle: 'New Chemical 78 oz. (QGCY) EPA# - 53883-279', allowedCategories }));
+    const decision = classifyDecision(raw, ctx({ rawTitle: 'New Chemical Insecticide 78 oz. (QGCY) EPA# - 53883-279', allowedCategories }));
     // The listing's own number is only carried for a person to confirm from
     // the label; nothing sets it on the product (2026-09-27 pre-push audit).
     expect(decision.newProduct.listingEpaRegNumber).toBe('53883-279');
@@ -599,15 +647,17 @@ describe('classifyDecision — new_product', () => {
 // product. The title's own ANCHOR (the last identity word before its first
 // size/pack marker) must fall inside the proposed name's own span.
 describe('classifyDecision — new_product: the name must COVER the title\'s own anchor word, not just lift manufacturer/brand words ahead of it (item 1, 2026-09-27 round 10)', () => {
-  const allowedCategories = new Set(['insecticide']);
-  const nameFor = (rawTitle, name, reading) => classifyDecision({
+  const allowedCategories = new Set(['insecticide', 'rodent_trap']);
+  // Every title here states its category (Codex round 11: a new product's
+  // category must be one the listing states), so only the anchor decides.
+  const nameFor = (rawTitle, name, reading, category = 'insecticide') => classifyDecision({
     kind: 'new_product', reason: 'not in the catalog',
-    new_product: { name, category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+    new_product: { name, category, active_ingredient: null, epa_reg_no: null },
     reading,
   }, ctx({ rawTitle, allowedCategories }));
   const ozReading = (n) => ({ size_text: `${n} oz`, size_number: n, size_unit: 'oz', pack_count: 1 });
 
-  const title = 'Syngenta Professional Products Demand CS 8 oz';
+  const title = 'Syngenta Professional Products Demand CS Insecticide 8 oz';
 
   test('the manufacturer\'s own name alone never reaches the anchor — held', () => {
     const decision = nameFor(title, 'Syngenta Professional Products', ozReading(8));
@@ -625,12 +675,12 @@ describe('classifyDecision — new_product: the name must COVER the title\'s own
   });
 
   test('a count-item noun ("Trap") is not an identity word either — the anchor is the real word before it', () => {
-    const decision = nameFor('Victor Rat Trap 12 Count', 'Victor Rat Trap', { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_count: 1 });
+    const decision = nameFor('Victor Rat Trap 12 Count', 'Victor Rat Trap', { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_count: 1 }, 'rodent_trap');
     expect(decision).toMatchObject({ kind: 'new_product', status: 'logged' });
   });
 
   test('a size-first title has no identity word before its first size claim — no anchor, always unsure', () => {
-    const decision = nameFor('96 oz Bifen XTS', 'Bifen XTS', ozReading(96));
+    const decision = nameFor('96 oz Bifen XTS Insecticide', 'Bifen XTS', ozReading(96));
     expect(decision).toMatchObject({ kind: 'unsure', status: 'agent_unsure' });
   });
 });

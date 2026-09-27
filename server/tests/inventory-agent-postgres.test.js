@@ -367,16 +367,50 @@ jest.setTimeout(30000);
     const line = await pendingLine({ raw_title: 'Snap Trap Rat Trap 12 Count', quantity: 1 });
     const decision = {
       kind: 'new_product', reason: 'not in the catalog', product_id: null,
-      new_product: { name: 'Snap Trap Rat Trap', category: 'supplies', active_ingredient: null, epa_reg_no: null },
+      // "Rat Trap" in the title states rodent_trap (Codex round 11: a new
+      // product's category must be one the listing states).
+      new_product: { name: 'Snap Trap Rat Trap', category: 'rodent_trap', active_ingredient: null, epa_reg_no: null },
       reading: { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_text: null, pack_count: 1 },
     };
-    await mockConn('products_catalog').insert({ name: 'Category Seed', active: true, category: 'supplies' });
+    await mockConn('products_catalog').insert({ name: 'Category Seed', active: true, category: 'rodent_trap' });
     const result = await run({ ok: true, json: decision });
     expect(result).toMatchObject({ logged: 1 });
     const created = await mockConn('products_catalog').where({ name: 'Snap Trap Rat Trap' }).first();
     expect(created).toMatchObject({ inventory_unit: 'each', default_unit: 'each' });
     expect(await stockOf(created.id)).toBe(12);
     expect((await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).status).toBe('logged');
+  });
+
+  // Codex round 11: kilograms aren't an application unit, so a kg product
+  // is kept in grams (and the restock converted) — visit completion would
+  // otherwise refuse every visit that applies it.
+  test('a new product sold in kilograms is stocked and applied in grams', async () => {
+    const line = await pendingLine({ raw_title: 'LESCO Turf Fertilizer 2 kg', quantity: 3, shipment_key: 'ship-kg' });
+    await mockConn('products_catalog').insert({ name: 'Category Seed', active: true, category: 'fertilizer' });
+    const result = await run({ ok: true, json: {
+      kind: 'new_product', reason: 'not in the catalog', product_id: null,
+      new_product: { name: 'LESCO Turf Fertilizer', category: 'fertilizer', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '2 kg', size_number: 2, size_unit: 'kg', pack_text: null, pack_count: 1 },
+    } });
+    expect(result).toMatchObject({ logged: 1 });
+    const created = await mockConn('products_catalog').where({ name: 'LESCO Turf Fertilizer' }).first();
+    expect(created).toMatchObject({ inventory_unit: 'g', default_unit: 'g', container_size: '2 kg' });
+    expect(await stockOf(created.id)).toBeCloseTo(6000, 0); // 3 x 2 kg
+    expect((await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).status).toBe('logged');
+  });
+
+  test('a new product whose listing states no category is held for a person, whatever the model picked', async () => {
+    const line = await pendingLine({ raw_title: 'Demand CS 8 oz', quantity: 1, shipment_key: 'ship-no-category' });
+    const result = await run({ ok: true, json: {
+      kind: 'new_product', reason: 'not in the catalog', product_id: null,
+      new_product: { name: 'Demand CS', category: 'insecticide', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '8 oz', size_number: 8, size_unit: 'oz', pack_text: null, pack_count: 1 },
+    } });
+    expect(result).toMatchObject({ logged: 0, held: 1 });
+    const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
+    expect(saved).toMatchObject({ status: 'agent_unsure' });
+    expect(saved.agent_decision.reason).toMatch(/doesn't state the category/);
+    expect(await mockConn('products_catalog').where({ name: 'Demand CS' })).toHaveLength(0);
   });
 
   test('the logged bell warns to cancel a live restock request instead of receiving it', async () => {
