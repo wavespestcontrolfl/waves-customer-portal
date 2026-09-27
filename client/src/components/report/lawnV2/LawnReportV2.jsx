@@ -562,7 +562,7 @@ export function LawnInsightCards({ insights = [], limit = 3 }) {
   if (!top.length) return null;
   return (
     <Card>
-      <CardTitle sub="Your technician’s key findings from today’s inspection, ranked by priority — what we found, why it matters, and the treatment plan for each.">Priority Findings & Action Plan</CardTitle>
+      <CardTitle sub="Findings from this report, ranked by priority — what was observed, why it matters, and any recorded work or next steps.">Priority Findings & Action Plan</CardTitle>
       {/* minmax(0, 1fr) for the same reason as the diagnosis rows: an auto track
           sized to the headline's longest word + the status pill blew past the
           card on a 320px phone. */}
