@@ -9,7 +9,7 @@
  * (this same function, run against the real shared db module before the
  * script does anything else) is for.
  */
-const { assertReadOnly, amazonReplayItems, siteOneReplayItems } = require('../../ops/agents/inventory-agent-replay');
+const { assertReadOnly, parseSince } = require('../../ops/agents/inventory-agent-replay');
 
 function mockDb(behavior) {
   return { raw: jest.fn(behavior) };
@@ -48,65 +48,20 @@ describe('assertReadOnly', () => {
   });
 });
 
-// The replay decides SiteOne lines with the same invoice evidence the live
-// agent reads (2026-09-27 pre-push audit): each item keeps its email id and
-// the invoice's own line number, and the lines the live sweep never hands
-// the agent are left out.
-describe('siteOneReplayItems', () => {
-  const email = { id: 'email-1' };
-
-  test('keeps the email id and each line\'s own invoice line number', () => {
-    const invoice = { lines: [
-      { title: 'TAURUS SC 78OZ', quantity: 2, lineNo: 1, uom: 'EA' },
-      { title: 'DEMAND CS 8OZ', quantity: 1, lineNo: 3, uom: 'EA' },
-    ] };
-    expect(siteOneReplayItems(email, invoice)).toEqual([
-      { vendor: 'siteone', title: 'TAURUS SC 78OZ', quantity: 2, emailId: 'email-1', lineNo: 1, heldAs: null },
-      { vendor: 'siteone', title: 'DEMAND CS 8OZ', quantity: 1, emailId: 'email-1', lineNo: 3, heldAs: null },
-    ]);
+// Codex round 2 on #5080: a bare --since date is Eastern midnight (the
+// portal is Eastern-only), never UTC midnight; an unreadable one refuses.
+describe('parseSince', () => {
+  test('a bare date is Eastern midnight, in daylight and standard time alike', () => {
+    expect(parseSince('2026-06-01').toISOString()).toBe('2026-06-01T04:00:00.000Z');
+    expect(parseSince('2026-01-15').toISOString()).toBe('2026-01-15T05:00:00.000Z');
   });
 
-  test('leaves out zero-quantity lines and flags the lines the sweep holds for a person', () => {
-    const invoice = { lines: [
-      { title: 'NOT SHIPPED', quantity: 0, lineNo: 1, uom: 'EA' },
-      { title: 'RETURNED BAIT', quantity: -1, lineNo: 2, uom: 'EA' },
-      { title: 'CASE OF 4', quantity: 1, lineNo: 3, uom: 'CS' },
-      { title: 'TAURUS SC 78OZ', quantity: 1, lineNo: 4, uom: 'EA' },
-    ] };
-    expect(siteOneReplayItems(email, invoice).map((item) => [item.title, item.heldAs])).toEqual([
-      ['RETURNED BAIT', 'returned'], ['CASE OF 4', 'unverified'], ['TAURUS SC 78OZ', null],
-    ]);
-    expect(siteOneReplayItems(email, { ...invoice, problem: 'unverified' }).every((item) => item.heldAs)).toBe(true);
+  test('a full timestamp keeps its own offset; no value means everything', () => {
+    expect(parseSince('2026-06-01T12:00:00Z').toISOString()).toBe('2026-06-01T12:00:00.000Z');
+    expect(parseSince(null).toISOString()).toBe('2000-01-01T00:00:00.000Z');
   });
 
-  test('a pending or unreadable invoice yields nothing', () => {
-    expect(siteOneReplayItems(email, null)).toEqual([]);
-    expect(siteOneReplayItems(email, { pending: true, lines: [] })).toEqual([]);
-  });
-});
-
-// An Amazon line the live sweep holds for a person is never decided by the
-// replay (2026-09-27 pre-push audit): an explicitly invalid quantity (null)
-// is not a quantity of 1.
-describe('amazonReplayItems', () => {
-  test('a null quantity or a missing order number is held, exactly as the sweep holds it', () => {
-    expect(amazonReplayItems({ orderNumber: '111-2222222-3333333', items: [
-      { title: 'Taurus SC Termiticide 78 oz', quantity: 2 },
-      { title: 'Bifen XTS Insecticide 96 oz', quantity: null },
-    ] })).toEqual([
-      { vendor: 'amazon', title: 'Taurus SC Termiticide 78 oz', quantity: 2, heldAs: null },
-      { vendor: 'amazon', title: 'Bifen XTS Insecticide 96 oz', quantity: 0, heldAs: 'unverified' },
-    ]);
-    expect(amazonReplayItems({ orderNumber: null, items: [{ title: 'Taurus SC Termiticide 78 oz', quantity: 1 }] }))
-      .toEqual([{ vendor: 'amazon', title: 'Taurus SC Termiticide 78 oz', quantity: 1, heldAs: 'no_order_number' }]);
-  });
-
-  test('an unparsed email yields nothing', () => {
-    expect(amazonReplayItems(null)).toEqual([]);
-  });
-
-  test('an itemless Delivered email is one no_items placeholder held for a person, as the live lane records it', () => {
-    expect(amazonReplayItems({ orderNumber: '111-2222222-3333333', items: [] }, { subject: 'Delivered: 2 Lawn & Garden items' }))
-      .toEqual([{ vendor: 'amazon', title: 'Delivered: 2 Lawn & Garden items', quantity: 1, heldAs: 'no_items' }]);
+  test('an unreadable value refuses to run', () => {
+    expect(() => parseSince('June first')).toThrow(/is not a date/);
   });
 });

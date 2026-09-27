@@ -252,6 +252,33 @@ async function classifyUnderLock(item, trx) {
   return locked;
 }
 
+// What a recorded line becomes, given its classification — the one
+// decision processReceiptLine makes, pulled out so the read-only replay tool
+// (ops/agents/inventory-agent-replay.js) hands the agent exactly the lines
+// this lane would:
+//   - a person-facing hold (holdAs: a return, an unverified invoice, …)
+//     applies once a product matched; an unmatched held line keeps its own
+//     classification;
+//   - otherwise, with the agent on, one of the three statuses it resolves
+//     is handed off instead of held for a person: no bell (agent_pending
+//     isn't in sweep.js's HELD_REASONS), no movement, product_id kept when
+//     the matcher already found one (needs_size/size_mismatch). A holdAs or
+//     forcedStatus line never is, even when its classification landed on
+//     one of those three — those callers asked for a specific person-facing
+//     hold, and the agent never overrides that. handoffFrom (the status the
+//     line would have held under) rides along in agent_decision so a later
+//     gate-off never strands it: inventory-agent.js's drainAgentQueue reads
+//     it back, or restores 'unmatched' when it's missing (a defensive
+//     default; every hand-off sets it);
+//   - otherwise the classification itself.
+function lineDisposition(found, { forcedStatus, holdAs } = {}, { agentOn = false } = {}) {
+  if (holdAs && found.productId) return { status: holdAs, productId: found.productId, product: found.product };
+  if (!forcedStatus && !holdAs && AGENT_HANDOFF_STATUSES.includes(found.status) && agentOn) {
+    return { status: 'agent_pending', productId: found.productId, product: found.product, handoffFrom: found.status };
+  }
+  return found;
+}
+
 /**
  * @param {{vendor, email, orderNumber, shipmentKey, item, lineNo, forcedStatus, holdAs, ringBell}} params
  *   vendor: a SOURCES key ('amazon' | 'siteone').
@@ -281,27 +308,8 @@ async function processReceiptLine({ vendor, email, orderNumber, shipmentKey, ite
   return conn.transaction(async (trx) => {
     await lockShipment(trx, vendor, shipmentKey);
     if (await shipmentHandedOff(trx, vendor, shipmentKey, email.id)) return { ...HANDED_TO_PERSON };
-    let classified = forcedStatus ? { status: forcedStatus, productId: null, product: null } : await classifyUnderLock(item, trx);
-    if (holdAs && classified.productId) {
-      classified = { status: holdAs, productId: classified.productId, product: classified.product };
-    } else if (!forcedStatus && !holdAs && AGENT_HANDOFF_STATUSES.includes(classified.status) && gateEnvValue(AGENT_GATE)) {
-      // Hand off to the inventory agent instead of holding it for a person:
-      // no bell (agent_pending isn't in sweep.js's HELD_REASONS), no
-      // movement, product_id kept when the deterministic matcher already
-      // found one (needs_size/size_mismatch). A holdAs or forcedStatus line
-      // never reaches here even when its own classification landed on one
-      // of these three statuses — those callers asked for a specific
-      // person-facing hold (a return, an unreadable invoice, …) and the
-      // agent never overrides that.
-      //
-      // handoffFrom (the ORIGINAL status this line would have held under)
-      // rides along in agent_decision so a later gate-off never strands the
-      // line: inventory-agent.js's drainAgentQueue reads it back to restore
-      // the line to the status it would have held under without the agent,
-      // or 'unmatched' when it's missing (a defensive default; every write
-      // here sets it).
-      classified = { status: 'agent_pending', productId: classified.productId, product: classified.product, handoffFrom: classified.status };
-    }
+    const found = forcedStatus ? { status: forcedStatus, productId: null, product: null } : await classifyUnderLock(item, trx);
+    const classified = lineDisposition(found, { forcedStatus, holdAs }, { agentOn: gateEnvValue(AGENT_GATE) });
     const claim = await claimLine(trx, {
       ...key, email_id: email.id, raw_title: item.title, quantity: item.quantity, product_id: classified.productId,
       received_qty: classified.receivedQty ?? null, received_unit: classified.receivedUnit ?? null, status: classified.status,
@@ -382,7 +390,7 @@ async function logQueuedLine(trx, { line, email }) {
 }
 
 module.exports = {
-  classifyItem, processReceiptLine, logQueuedLine, lockShipment, shipmentHandedOff, SOURCES, UNKNOWN_ORDER,
+  classifyItem, processReceiptLine, lineDisposition, logQueuedLine, lockShipment, shipmentHandedOff, SOURCES, UNKNOWN_ORDER,
   findPossibleDuplicateMovement,
   // Title-size-claim and pack-marker parsing primitives, reused (not
   // duplicated) by inventory-agent.js's deterministic reading validation —
