@@ -746,7 +746,7 @@ const OUR_NUMBER = '+19415550100';
     });
   });
 
-  test('a call for a promise another call is actively dispatching right now defers rather than racing it', async () => {
+  test('a call for a promise another call is actively dispatching right now defers rather than racing it, and gives its own lease straight back', async () => {
     const earlier = callRow(240);
     const commitment = commitmentRow(earlier.id);
     // A genuinely SEPARATE call (the lead hung up and called right back)
@@ -762,13 +762,56 @@ const OUR_NUMBER = '+19415550100';
     expect(triggerNotification).not.toHaveBeenCalled();
 
     const row = await mockConn('call_log').where({ id: back.id }).first('metadata');
-    // Deferred, not settled — its OWN claim stays pending at the normal
-    // LEASE_MS retry cadence, by which point the other attempt has settled.
     expect(row.metadata.promise_chaser).toMatchObject({ status: 'pending', commitmentId: commitment.id });
+    // claimAttempt already wrote a FRESH claimed_at before this defer ran
+    // — releasing it back to null (rather than leaving it artificially
+    // fresh) is what keeps two staggered callers for the same promise from
+    // endlessly re-freshing and deferring to each other (Codex #5019 r14):
+    // this row is eligible for the very next sweep tick, and it can never
+    // look "active" to a THIRD call's own cross-check in the meantime.
+    expect(row.metadata.promise_chaser.claimed_at).toBeNull();
 
     // The other call's own claim is untouched — this call never wrote to it.
     const otherRow = await mockConn('call_log').where({ id: activelyDispatching.id }).first('metadata');
     expect(otherRow.metadata.promise_chaser.claimed_at).toBe(activelyDispatching.metadata.promise_chaser.claimed_at);
+  });
+
+  test('two staggered callers for the same promise never lock each other out — once the first genuinely settles, the deferred one rings on its very next retry', async () => {
+    const earlier = callRow(240);
+    const commitment = commitmentRow(earlier.id);
+    const callA = callRow(2);
+    const callB = callRow(0);
+    await mockConn('call_log').insert([earlier, callA, callB]);
+    await mockConn('call_commitments').insert(commitment);
+
+    // A arrives first and hits a genuine retryable failure — its own
+    // lease stays fresh (a real failure DOES warrant the normal backoff).
+    triggerNotification.mockResolvedValueOnce({ retryable: true, push: { sent: 0, failed: 1, deliveredSubscriptionIds: [] } });
+    expect(await ringPromiseChaserIfNeeded(callA.twilio_call_sid)).toBe(false);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+
+    // B arrives moments later (staggered) and defers, seeing A's still-
+    // fresh lease — B's own lease is released immediately rather than
+    // sitting fresh, so B is never the reason A's OWN eventual retry (or
+    // a THIRD caller) sees a false "active" signal.
+    expect(await ringPromiseChaserIfNeeded(callB.twilio_call_sid)).toBe(false);
+    expect(triggerNotification).toHaveBeenCalledTimes(1); // never reached dispatch
+    const bRow = await mockConn('call_log').where({ id: callB.id }).first('metadata');
+    expect(bRow.metadata.promise_chaser.claimed_at).toBeNull();
+
+    // A's own attempt later settles (simulating its own retry finishing).
+    await mockConn('call_log').where({ id: callA.id }).update({
+      metadata: { promise_chaser: { status: 'rung', commitmentId: commitment.id, claimed_at: new Date().toISOString(), at: new Date().toISOString() } },
+    });
+
+    // B's own claim was released, so it needs no LEASE_MS backoff at all —
+    // the very next sweep tick retries it immediately and it correctly
+    // settles 'already_rung_today' rather than deferring again or ringing
+    // a second time.
+    expect(await sweepPromiseChasers()).toBe(0);
+    expect(triggerNotification).toHaveBeenCalledTimes(1); // still just A's
+    const bSettled = await mockConn('call_log').where({ id: callB.id }).first('metadata');
+    expect(bSettled.metadata.promise_chaser).toMatchObject({ status: 'skipped', reason: 'already_rung_today' });
   });
 
   test("a second call for the same promise inherits the first call's partial-push history and never re-buzzes those devices", async () => {

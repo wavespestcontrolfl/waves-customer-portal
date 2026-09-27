@@ -203,6 +203,28 @@ async function recordProgress(callId, token, extra) {
     });
 }
 
+// Gives this attempt's OWN just-taken lease back immediately, on a defer
+// (cross.activeElsewhere) — claimAttempt has ALREADY written a fresh
+// claimed_at by the time that check runs, so a bare "leave it as is"
+// would make THIS row look freshly active to the very next row that
+// checks the same promise, and to itself on the sweep's own fresh-lease
+// exclusion — two staggered callers for the same promise could then keep
+// re-freshing each other's leases and deferring to one another
+// indefinitely, losing the alert altogether (Codex #5019 r14). Clearing
+// claimed_at back to null (never a fresh token) makes this row eligible
+// for the very next sweep tick — a defer is expected to resolve in
+// seconds, not the full LEASE_MS backoff a genuine failure warrants — and
+// invisible to any OTHER row's own activeElsewhere check in the meantime.
+async function releaseClaim(callId, token) {
+  await db('call_log').where({ id: callId })
+    .whereRaw("metadata->'promise_chaser'->>'claimed_at' = ?", [token])
+    .update({
+      metadata: db.raw(
+        "jsonb_set(COALESCE(metadata,'{}'::jsonb), '{promise_chaser}', COALESCE(metadata->'promise_chaser', '{}'::jsonb) || '{\"claimed_at\": null}'::jsonb, true)",
+      ),
+    });
+}
+
 // Stamps which promise THIS pending claim is targeting, the moment
 // selectPromiseToRing picks one — before any cross-call check runs, so a
 // concurrent call's OWN check can see us. Merged into the sub-object
@@ -579,7 +601,14 @@ async function ringPromiseChaserIfNeeded(callSid, { viaSweep = false } = {}) {
       await settle(call.id, token, 'skipped', 'already_rung_today', promise.id);
       return false;
     }
-    if (cross.activeElsewhere) return false; // another call owns this promise right now — defer, the sweep retries
+    if (cross.activeElsewhere) {
+      // Defer — but give this row's own just-taken lease back immediately
+      // rather than leaving it artificially fresh (see releaseClaim): the
+      // sweep's very next tick can retry it, and no OTHER row's own check
+      // mistakes it for an active dispatcher in the meantime.
+      await releaseClaim(call.id, token);
+      return false;
+    }
 
     const existingWithCrossDelivered = {
       ...existing,
