@@ -228,6 +228,26 @@ suite('first-application-sibling-split — same-trip resplit on date change', ()
     expect(state.lawn.estimated_price).toBeNull();
   }));
 
+  test('a discount/credit line on the invoice declines the resplit — never write the GROSS remaining onto estimated_price', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    const withDiscount = [
+      { description: 'First service application', quantity: 1, unit_price: 153.60, amount: 153.60 },
+      { description: 'Accepted plan credit', quantity: 1, unit_price: -20, amount: -20, _kind: 'discount' },
+    ];
+    await trx('invoices').where({ id: ids.invoiceId }).update({ line_items: JSON.stringify(withDiscount), total: 133.60 });
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const result = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('declined');
+    expect(result.reason).toBe('discount_or_credit_present');
+    const state = await readState(trx, ids);
+    // No money moved anywhere — the reserved row keeps its ORIGINAL gross
+    // price, never a "remaining" figure computed net of a discount it
+    // never accounted for.
+    expect(state.lawn.estimated_price).toBeNull();
+    expect(Number(state.pest.estimated_price)).toBe(153.6);
+    expect(Number(state.invoice.total)).toBe(133.6);
+  }));
+
   test('an already-itemized invoice (per-member lines from itemizeFirstApplication) declines rather than treating one member line as the combined total', () => rollbackTest(async (trx) => {
     const ids = await fixture(trx);
     // What itemizeFirstApplication (GATE_VISIT_CLOSEOUT) produces: one line

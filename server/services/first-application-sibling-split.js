@@ -95,6 +95,24 @@ function hasPositiveSetupFeeLine(lineItems) {
   });
 }
 
+// Any negative line (a discount or credit — `_kind: 'discount'`, a plain
+// literal credit, or a deposit-credit line the caller's own check missed)
+// means the invoice's TOTAL is already net of something this module's math
+// never accounts for: `remaining` below only ever subtracts a sibling's
+// share from the GROSS base-application line, then writes that gross figure
+// straight onto the reserved row's estimated_price. A later remint from
+// that price alone (e.g. after the invoice is voided) would recreate the
+// full gross charge and silently drop the discount (codex pre-push P0).
+// Decline rather than guess how to net it out — same posture as the
+// deposit-credit and setup-fee checks above.
+function hasNegativeAdjustmentLine(lineItems) {
+  return lineItems.some((li) => {
+    const qty = li?.quantity != null ? Number(li.quantity) : 1;
+    const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
+    return Number.isFinite(amt) && amt < 0;
+  });
+}
+
 /**
  * Called after ANY write that changes scheduled_date on a top-of-series (or
  * one-time) scheduled_services row, inside the SAME transaction as that
@@ -175,6 +193,11 @@ async function reconcileFirstApplicationSplitOnDateChange(trx, scheduledServiceI
   if (hasPositiveSetupFeeLine(lineItems)) {
     logger.warn(`[first-application-sibling-split] estimate ${moved.source_estimate_id}: declining resplit — invoice ${invoice.id} carries a one-time setup-fee line`);
     return { action: 'declined', reason: 'setup_fee_present', invoiceId: invoice.id };
+  }
+
+  if (hasNegativeAdjustmentLine(lineItems)) {
+    logger.warn(`[first-application-sibling-split] estimate ${moved.source_estimate_id}: declining resplit — invoice ${invoice.id} carries a discount/credit line`);
+    return { action: 'declined', reason: 'discount_or_credit_present', invoiceId: invoice.id };
   }
 
   const { lineIsBaseApplication } = InvoiceService;
