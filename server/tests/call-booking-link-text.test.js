@@ -1242,6 +1242,55 @@ describe('neverSendRecheck', () => {
     await expect(check({ dbi: sameNumberDifferentFormat })).resolves.toEqual({ ok: true });
   });
 
+  // codex #5018 r14 P1: consentedDestination's EARLIER check (this hook's
+  // own opening lines) judges the STALE `call` — a reprocess can correct
+  // the spoken alternate number or withdraw its explicit sms_consent_given
+  // (to undefined, never necessarily an explicit `false` — stagingIneligibleReason's
+  // own sms_consent_refused entry only catches THAT, not this) between that
+  // check and this hook's own call_log reload. Sending on stale consent
+  // evidence would violate the TCPA-consent-before-SMS invariant, so the
+  // SAME check must re-run against the FRESH row too.
+  test('consent for a spoken alternate destination withdrawn on reprocess blocks the send, even though the earlier (stale) check passed', async () => {
+    const SPOKEN_DESTINATION = '+19415559999'; // never the ANI — only the spoken-number consent branch can cover it
+    const callWithSpokenConsent = {
+      ...CALL_FOR_RECHECK,
+      ai_extraction_enriched: { caller: { phone_e164: SPOKEN_DESTINATION }, consent: { sms_consent_given: true } },
+    };
+    const check = neverSendRecheck(callWithSpokenConsent, 'lead-1', SPOKEN_DESTINATION);
+    const withdrawnConsent = {
+      ...FRESH_CALL_LOG,
+      ai_extraction_enriched: {
+        ...FRESH_CALL_LOG.ai_extraction_enriched,
+        caller: { ...FRESH_CALL_LOG.ai_extraction_enriched.caller, phone_e164: SPOKEN_DESTINATION },
+        // Withdrawn to undefined, not `false` — never trips the earlier,
+        // broader sms_consent_refused staging check, which is the whole
+        // point: this narrower recheck must catch it independently.
+        consent: { ...FRESH_CALL_LOG.ai_extraction_enriched.consent, sms_consent_given: undefined },
+      },
+    };
+    const conn = dbi({ lead: { ...OPEN, phone: SPOKEN_DESTINATION }, freshCall: withdrawnConsent });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: false, code: 'destination_not_consented' });
+  });
+
+  test('consent for a spoken alternate destination still explicit on the fresh row proceeds', async () => {
+    const SPOKEN_DESTINATION = '+19415559999';
+    const callWithSpokenConsent = {
+      ...CALL_FOR_RECHECK,
+      ai_extraction_enriched: { caller: { phone_e164: SPOKEN_DESTINATION }, consent: { sms_consent_given: true } },
+    };
+    const check = neverSendRecheck(callWithSpokenConsent, 'lead-1', SPOKEN_DESTINATION);
+    const stillConsented = {
+      ...FRESH_CALL_LOG,
+      ai_extraction_enriched: {
+        ...FRESH_CALL_LOG.ai_extraction_enriched,
+        caller: { ...FRESH_CALL_LOG.ai_extraction_enriched.caller, phone_e164: SPOKEN_DESTINATION },
+        consent: { ...FRESH_CALL_LOG.ai_extraction_enriched.consent, sms_consent_given: true },
+      },
+    };
+    const conn = dbi({ lead: { ...OPEN, phone: SPOKEN_DESTINATION }, freshCall: stillConsented });
+    await expect(check({ dbi: conn })).resolves.toEqual({ ok: true });
+  });
+
   test('booked since the call started blocks the send', async () => {
     // metadata.created_customer_id matches the lead's customer_id — THIS
     // call's own legacy path minted it, isolating this test from the new

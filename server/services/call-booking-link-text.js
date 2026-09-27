@@ -1101,6 +1101,16 @@ function neverSendRecheck(call, leadId, destinationPhone) {
       // explicitly non-consenting is caught here too, never reinvented.
       const staleReason = stagingIneligibleReason(freshCall, extractionOf(freshCall), leadId);
       if (staleReason) return { ok: false, code: staleReason };
+      // Re-verified against the FRESH extraction, not the stale `call` the
+      // earlier check above (line ~1042) judged (codex #5018 r14 P1): a
+      // reprocess can correct the spoken alternate number, or withdraw its
+      // explicit sms_consent_given, between that earlier check and this
+      // hook's own reload — stagingIneligibleReason's own sms_consent_
+      // refused entry only catches an EXPLICIT false for the call's
+      // general eligibility, never this narrower "is THIS destination
+      // number itself consented" question. Sending on stale consent
+      // evidence would violate the TCPA-consent-before-SMS invariant.
+      if (!consentedDestination(freshCall, extractionOf(freshCall), destinationPhone)) return { ok: false, code: 'destination_not_consented' };
       const callStart = callStartedAt(call) || new Date(call.created_at);
       if (await bookedSinceCall(dbi, lead.customer_id, callStart)) return { ok: false, code: 'booked_since_call' };
       if (await linkSentRecently(dbi, leadId, new Date())) return { ok: false, code: 'link_sent_recently' };

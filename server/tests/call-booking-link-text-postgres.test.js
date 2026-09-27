@@ -507,6 +507,45 @@ postgres('call-booking-link-text against PostgreSQL', () => {
     expect(row.processing_token).toBeNull(); // the concurrent reprocess claim never landed during the handoff
   });
 
+  // codex #5018 r14 P1: consentedDestination's own check must re-run
+  // against the FRESH extraction, not the stale one dispatchIneligibleReason
+  // already cleared — a reprocess withdrawing a spoken alternate number's
+  // consent (to null, not an explicit `false`) between there and the
+  // handoff must still block the send.
+  test('a reprocess withdrawing consent for the spoken destination between dispatch and the handoff blocks the send', async () => {
+    const SPOKEN_DESTINATION = '+15555550888';
+    const leadId = await insertLead(mockPg, { phone: SPOKEN_DESTINATION });
+    const send_at = new Date(NOW.getTime() - 60 * 60 * 1000).toISOString();
+    const callId = await insertCall(mockPg, {
+      // from_phone deliberately NOT the destination — only the spoken-
+      // number consent branch (never the ANI-implied one) can cover it.
+      from_phone: '+15555550100',
+      ai_extraction_enriched: {
+        ...eligibleExtraction(),
+        caller: { phone_e164: SPOKEN_DESTINATION },
+        consent: { sms_consent_given: true },
+      },
+      metadata: { lead_id: leadId, call_booking_link_text: { status: 'claimed', lead_id: leadId, send_at, original_send_at: send_at } },
+    });
+    buildLeadConsultationSmsLine.mockResolvedValue({ url: 'https://portal.example.com/inspection/tok-8', line: 'Pick a time.\n\n', phone: SPOKEN_DESTINATION });
+    sendCustomerMessage.mockImplementation(async ({ withSmsHandoff, providerPreSendCheck }) => {
+      // Simulates a reprocess landing in the gap between dispatch's own
+      // (stale) consent check and this handoff's own reload — withdrawn
+      // to null, never an explicit `false`, the exact shape the earlier,
+      // broader sms_consent_refused staging check cannot catch.
+      await mockPg('call_log').where({ id: callId }).update({
+        ai_extraction_enriched: JSON.stringify({ ...eligibleExtraction(), caller: { phone_e164: SPOKEN_DESTINATION }, consent: {} }),
+      });
+      const verdict = await withSmsHandoff((trx) => providerPreSendCheck({ dbi: trx }));
+      return verdict.ok ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMtest0000000000000000000000008' } : { sent: false, ...verdict };
+    });
+
+    const call = await mockPg('call_log').where({ id: callId }).first();
+    const result = await callBookingLinkText.dispatchClaimedCall(mockPg, call, NOW);
+
+    expect(result).toEqual({ sent: false, skipped: 'destination_not_consented' });
+  });
+
   test('dispatchClaimedCall skips booked_since_call against a real scheduled_services row created after the call', async () => {
     const customerId = randomUUID();
     await mockPg('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Customer', phone: '+15555550222', address_line1: '1 Example St', city: 'Bradenton', zip: '34205' });
