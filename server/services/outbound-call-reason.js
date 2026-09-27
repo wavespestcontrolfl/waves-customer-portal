@@ -78,6 +78,19 @@ const NON_CONTACT_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_num
 // Natures that mean "not a customer or prospect contacting us about service"
 // — returning such a call never earns a text (owner ruling 2026-09-09).
 const NON_SERVICE_NATURES = new Set([...NON_CONTACT_NATURES, 'other', 'job_applicant']);
+// call_log.disposition non-service verdicts (codex pre-push r6 P1): an
+// OLDER inbound row from before V2 call_nature extraction shipped has no
+// nature at all (COALESCE above reads it as '', which passes the nature
+// filter) but can still carry a DEFINITIVE terminal disposition from
+// server/services/call-disposition.js's decideDisposition ruling it a
+// non-service contact. No exported subset of TERMINAL_DISPOSITIONS exists
+// there (call-self-audit.js's own local LEAD_LOSING list is the closest
+// precedent — same pattern, a different purpose, and it also lists
+// voicemail_processed/cancellation_processed, which ARE service contacts,
+// so it is not reusable here). This module's own test file cross-checks
+// every literal below against the live TERMINAL_DISPOSITIONS enum so a
+// rename there fails a test instead of drifting silently.
+const NON_SERVICE_DISPOSITIONS = ['vendor_logged', 'wrong_number_closed', 'spam_discarded', 'no_action_needed'];
 const LOOKBACK_MS = 48 * 60 * 60 * 1000;
 
 function last10(phone) {
@@ -251,6 +264,14 @@ async function existsQualifyingInboundCall({ phoneLast10, before }) {
   // NON_SERVICE_NATURES is this file's own documented "never earns a text"
   // set (owner ruling 2026-09-09), reused rather than a narrower copy.
   const natures = [...NON_SERVICE_NATURES];
+  // NON_SERVICE_DISPOSITIONS (codex pre-push r6 P1): an OLDER inbound row
+  // predating V2 call_nature extraction has no nature at all — the
+  // COALESCE above reads it as '', which PASSES the nature filter — but it
+  // can still carry a DEFINITIVE terminal call_log.disposition
+  // (server/services/call-disposition.js) ruling it a non-service contact.
+  // Both exclusions apply together; neither alone is sufficient for every
+  // call's vintage.
+  const dispositions = [...NON_SERVICE_DISPOSITIONS];
   const row = await whereNotSandboxCall(db('call_log')
     .where('direction', 'inbound')
     .where('created_at', '<', before))
@@ -258,6 +279,10 @@ async function existsQualifyingInboundCall({ phoneLast10, before }) {
     .whereRaw(
       `COALESCE(lower(trim(ai_extraction_enriched->>'call_nature')), '') NOT IN (${natures.map(() => '?').join(',')})`,
       natures,
+    )
+    .whereRaw(
+      `COALESCE(disposition, '') NOT IN (${dispositions.map(() => '?').join(',')})`,
+      dispositions,
     )
     .first('id');
   return !!row;
@@ -468,6 +493,7 @@ module.exports = {
   QUOTE_FORM_CHANNELS,
   NON_CONTACT_NATURES,
   NON_SERVICE_NATURES,
+  NON_SERVICE_DISPOSITIONS,
   VISIT_IN_PROGRESS_WINDOW_MS,
   TEXT_SCAN_LIMIT,
   resolveOutboundCallReason,

@@ -2289,44 +2289,138 @@ describe('hasRealTwoWayConversation lives ONLY at the clarify-draft site, not in
 // hasPriorContact with NO customer evidence at all — only the phone-based
 // call/text/lead probes, missing the "existing customer" signal the owner
 // ruling names outright.
-describe('outboundPriorContactCustomerId (owner ruling 2026-09-26: knownCaller.id counts too, never a same-call creation)', () => {
+describe('outboundPriorContactCustomerId (owner ruling 2026-09-26: knownCaller.id counts too, never a same-call creation, never a customer created after the call)', () => {
   const { outboundPriorContactCustomerId } = CallRecordingProcessor._test;
+  const CALL_STARTED = new Date('2026-09-26T15:00:00Z');
+  const BEFORE_CALL = new Date('2026-09-01T00:00:00Z');
+  const AFTER_CALL = new Date('2026-09-27T00:00:00Z');
 
-  test('prelinked call.customer_id is used when present', () => {
+  test('prelinked call.customer_id is used when its row predates the call', () => {
     expect(outboundPriorContactCustomerId({
       call: { customer_id: 'cust-1' }, knownCaller: null, callMeta: {},
+      before: CALL_STARTED, callCustomerCreatedAt: BEFORE_CALL,
     })).toBe('cust-1');
   });
 
-  test('a not-prelinked call falls back to knownCaller.id (the phone pre-lookup)', () => {
+  test('a not-prelinked call falls back to knownCaller.id (the phone pre-lookup) when its row predates the call', () => {
     expect(outboundPriorContactCustomerId({
-      call: { customer_id: null }, knownCaller: { id: 'cust-2' }, callMeta: {},
+      call: { customer_id: null }, knownCaller: { id: 'cust-2', createdAt: BEFORE_CALL }, callMeta: {},
+      before: CALL_STARTED,
     })).toBe('cust-2');
   });
 
   test('neither source present → null (falls through to the phone-based probes)', () => {
-    expect(outboundPriorContactCustomerId({ call: { customer_id: null }, knownCaller: null, callMeta: {} })).toBeNull();
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: null }, knownCaller: null, callMeta: {}, before: CALL_STARTED,
+    })).toBeNull();
   });
 
-  test('a customer THIS call itself created (call.customer_id matches the created_customer_id stamp) never counts', () => {
+  test('a customer THIS call itself created (call.customer_id matches the created_customer_id stamp) never counts, even though its row necessarily predates `before`', () => {
     expect(outboundPriorContactCustomerId({
       call: { customer_id: 'cust-new' }, knownCaller: null, callMeta: { created_customer_id: 'cust-new' },
+      before: CALL_STARTED, callCustomerCreatedAt: BEFORE_CALL,
     })).toBeNull();
   });
 
   test('a customer THIS call itself created still never counts even when it also surfaces as knownCaller (a reprocess rediscovering its own creation)', () => {
     expect(outboundPriorContactCustomerId({
-      call: { customer_id: null }, knownCaller: { id: 'cust-new' }, callMeta: { created_customer_id: 'cust-new' },
+      call: { customer_id: null }, knownCaller: { id: 'cust-new', createdAt: BEFORE_CALL }, callMeta: { created_customer_id: 'cust-new' },
+      before: CALL_STARTED,
     })).toBeNull();
   });
 
-  test('a DIFFERENT customer than the one this call created still counts on either source', () => {
+  test('a DIFFERENT customer than the one this call created still counts on either source, when it predates the call', () => {
     expect(outboundPriorContactCustomerId({
       call: { customer_id: 'cust-old' }, knownCaller: null, callMeta: { created_customer_id: 'cust-new' },
+      before: CALL_STARTED, callCustomerCreatedAt: BEFORE_CALL,
     })).toBe('cust-old');
     expect(outboundPriorContactCustomerId({
-      call: { customer_id: null }, knownCaller: { id: 'cust-old' }, callMeta: { created_customer_id: 'cust-new' },
+      call: { customer_id: null }, knownCaller: { id: 'cust-old', createdAt: BEFORE_CALL }, callMeta: { created_customer_id: 'cust-new' },
+      before: CALL_STARTED,
     })).toBe('cust-old');
+  });
+
+  // Codex pre-push r6 P1: a customer match must predate the call it is
+  // being offered as evidence for — a form submitted mid-call, an
+  // unrelated later signup on the same number, or a different reprocess
+  // must fall through to the timestamp-bounded probes instead.
+  test('a customer created BEFORE the call counts (call.customer_id and knownCaller.id both)', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: 'cust-1' }, knownCaller: null, callMeta: {},
+      before: CALL_STARTED, callCustomerCreatedAt: BEFORE_CALL,
+    })).toBe('cust-1');
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: null }, knownCaller: { id: 'cust-2', createdAt: BEFORE_CALL }, callMeta: {},
+      before: CALL_STARTED,
+    })).toBe('cust-2');
+  });
+
+  test('a customer created AFTER the call does NOT count — falls through to null so the timestamp-bounded probes decide', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: 'cust-1' }, knownCaller: null, callMeta: {},
+      before: CALL_STARTED, callCustomerCreatedAt: AFTER_CALL,
+    })).toBeNull();
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: null }, knownCaller: { id: 'cust-2', createdAt: AFTER_CALL }, callMeta: {},
+      before: CALL_STARTED,
+    })).toBeNull();
+  });
+
+  test('a candidate with no readable created_at (a lookup failure) fails closed, never counted', () => {
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: 'cust-1' }, knownCaller: null, callMeta: {},
+      before: CALL_STARTED, callCustomerCreatedAt: null,
+    })).toBeNull();
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: null }, knownCaller: { id: 'cust-2', createdAt: null }, callMeta: {},
+      before: CALL_STARTED,
+    })).toBeNull();
+  });
+
+  test('the same-call-created exclusion still applies even when the customer predates `before` due to a stale/incorrect before value', () => {
+    // Belt-and-suspenders: the created_customer_id stamp exclusion is
+    // checked FIRST and independently of the timing check.
+    expect(outboundPriorContactCustomerId({
+      call: { customer_id: 'cust-new' }, knownCaller: null, callMeta: { created_customer_id: 'cust-new' },
+      before: AFTER_CALL, callCustomerCreatedAt: BEFORE_CALL,
+    })).toBeNull();
+  });
+});
+
+// Codex pre-push r6 P1 on PR #5012: the dropped-call "sorry we got cut off"
+// text is an independent send path from the booking-confirmation leg — it
+// never consulted the disclaimed-number hold (callback_number_needed: the
+// caller said the dialed/ANI number isn't theirs and gave no callback of
+// their own), so the text could still go to that exact number. This was a
+// PRE-EXISTING gap on BOTH directions, not outbound-specific — the fix
+// applies unconditionally at the one shared send site. The actual send
+// decision only runs inside the full processRecording pipeline (transcription,
+// extraction, DB), which this suite does not execute live, so this pins the
+// source shape: the check exists, sits between the no-ANI check and the
+// real send branch (never after — a held number must never dispatch), and
+// is not gated behind any direction check of its own (the surrounding
+// smsAni ternary already runs both directions in the SAME block).
+describe('dropped-call text honors the disclaimed-number hold, both directions (codex pre-push r6 P1)', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  const blockStart = src.indexOf('if (droppedMidIntake && leadId) {');
+  const noAniIdx = src.indexOf("smsOutcome = { sent: false, skipped: 'no_usable_ani' };", blockStart);
+  const holdIdx = src.indexOf('genuineNewProspect && callbackNumberNeededHoldActive', blockStart);
+  const realSendIdx = src.indexOf('sendDroppedCallAddressRequest({', blockStart);
+
+  test('the block, the no-ANI check, the hold check, and the real send all exist, in that order', () => {
+    expect(blockStart).toBeGreaterThan(-1);
+    expect(noAniIdx).toBeGreaterThan(blockStart);
+    expect(holdIdx).toBeGreaterThan(noAniIdx);
+    expect(realSendIdx).toBeGreaterThan(holdIdx);
+  });
+
+  test('the hold check is not wrapped in its own isOutboundCall/direction branch — it applies to whichever direction reached this shared block', () => {
+    const between = src.slice(noAniIdx, holdIdx);
+    expect(between).not.toContain('isOutboundCall');
+  });
+
+  test('a held number is skipped with an explicit callback_number_needed code, never a silent fall-through to the real send', () => {
+    expect(src).toContain("smsOutcome = { sent: false, skipped: 'callback_number_needed' };");
   });
 });
 

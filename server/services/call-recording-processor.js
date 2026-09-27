@@ -992,17 +992,31 @@ function hasRealTwoWayConversation(transcription) {
 // never prelinked but whose dialed number still matches an existing
 // customer (codex pre-push r2 P2: that case reached hasPriorContact with
 // NO customer evidence at all, missing the "existing customer" signal the
-// owner ruling names outright). Either source is excluded when it is a
-// customer THIS call's own earlier pass created (call_log.metadata's
-// created_customer_id stamp, Step 3's creation branch) — a cold call must
-// not qualify itself as "an existing customer" on reprocess (codex pre-push
-// r1 P1, the same provenance question the newsletter-rebuild guard applies
-// elsewhere in this file), and a fresh phone lookup on the SAME reprocess
-// pass would just as easily rediscover that same just-created row.
-function outboundPriorContactCustomerId({ call, knownCaller, callMeta } = {}) {
+// owner ruling names outright). A candidate is excluded when EITHER:
+//   - it is a customer THIS call's own earlier pass created (call_log.
+//     metadata's created_customer_id stamp, Step 3's creation branch) — a
+//     cold call must not qualify itself as "an existing customer" on
+//     reprocess (codex pre-push r1 P1, the same provenance question the
+//     newsletter-rebuild guard applies elsewhere in this file), and a
+//     fresh phone lookup on the SAME reprocess pass would just as easily
+//     rediscover that same just-created row; OR
+//   - its OWN row postdates `before` (codex pre-push r6 P1) — a customer
+//     created AFTER this call started (a web form submitted mid-call, a
+//     different reprocess, an unrelated later signup on the same number)
+//     is not evidence the caller contacted Waves before THIS call; the
+//     timestamp-bounded probes (existsQualifyingInboundCall etc., all
+//     `< before`) are the ones that get to decide such a case, same as
+//     everyone else. A candidate with no readable created_at (a lookup
+//     failure) fails closed — never counted.
+function outboundPriorContactCustomerId({ call, knownCaller, callMeta, before, callCustomerCreatedAt } = {}) {
   const createdByThisCall = (id) => !!id && String(callMeta?.created_customer_id || '') === String(id);
-  if (call?.customer_id && !createdByThisCall(call.customer_id)) return call.customer_id;
-  if (knownCaller?.id && !createdByThisCall(knownCaller.id)) return knownCaller.id;
+  const predatesCall = (createdAt) => !!createdAt && !!before && new Date(createdAt).getTime() < new Date(before).getTime();
+  if (call?.customer_id && !createdByThisCall(call.customer_id) && predatesCall(callCustomerCreatedAt)) {
+    return call.customer_id;
+  }
+  if (knownCaller?.id && !createdByThisCall(knownCaller.id) && predatesCall(knownCaller.createdAt)) {
+    return knownCaller.id;
+  }
   return null;
 }
 
@@ -1422,6 +1436,14 @@ function summarizeKnownCaller(customer) {
     // whichever customer Step 3's canonical resolution retains before the
     // proof authorizes a booking stamp (codex P1: resolveOnFileAddressAuthority).
     id: customer.id,
+    // The row's OWN creation time (codex pre-push r6 P1): outboundPriorContactCustomerId
+    // needs it to prove this customer PREDATES the outbound call — a match
+    // created mid-call (a form submitted while the agent was on the line)
+    // or by a later reprocess must not count as prior contact. Left as
+    // `undefined` when absent (never coerced to null), matching `id`
+    // above — outboundPriorContactCustomerId's own predatesCall() already
+    // treats any falsy value as "fails closed".
+    createdAt: customer.created_at,
     accountType,
     // Fail-open booking inputs: an established customer with an address already
     // on file (Google-verified at signup) shouldn't be re-blocked for not
@@ -9456,13 +9478,33 @@ const CallRecordingProcessor = {
         // knownCaller.id (the phone pre-lookup) as a fallback for a row
         // that was never prelinked but whose number still matches an
         // existing customer — either excluded when it's a customer THIS
-        // call's own earlier pass created (codex pre-push r1 P1 + r2 P2).
+        // call's own earlier pass created (codex pre-push r1 P1 + r2 P2),
+        // OR when that customer's OWN row postdates this call (codex
+        // pre-push r6 P1). Same `before` bound the timestamp-scoped probes
+        // (existsQualifyingInboundCall etc.) use — callStartedAt(call), the
+        // call-timeline's own start time, falling back to the row's
+        // created_at (the same pattern extractCallData's callStartedAt
+        // option already uses above).
         let callMeta = call.metadata;
         if (typeof callMeta === 'string') { try { callMeta = JSON.parse(callMeta); } catch { callMeta = {}; } }
+        const outboundEligibilityBefore = callStartedAt(call) || call.created_at || new Date();
+        // knownCaller already carries its own row's createdAt (the phone
+        // pre-lookup read it); call.customer_id is a bare id with no row
+        // attached at this point, so read it directly here — a single
+        // indexed PK lookup, best-effort (a read failure just excludes
+        // that candidate, matching every other fail-closed path here).
+        let callCustomerCreatedAt = null;
+        if (call.customer_id) {
+          callCustomerCreatedAt = String(call.customer_id) === String(knownCaller?.id || '')
+            ? knownCaller.createdAt
+            : (await db('customers').where({ id: call.customer_id }).first('created_at').catch(() => null))?.created_at || null;
+        }
         outboundReturnMessagesEligible = await require('./outbound-call-reason').hasPriorContact({
-          customerId: outboundPriorContactCustomerId({ call, knownCaller, callMeta }),
+          customerId: outboundPriorContactCustomerId({
+            call, knownCaller, callMeta, callCustomerCreatedAt, before: outboundEligibilityBefore,
+          }),
           phone: contactPhone,
-          before: call.created_at || new Date(),
+          before: outboundEligibilityBefore,
         });
       } catch (eligErr) {
         logger.warn(`[call-proc] outbound return-message eligibility check failed (fail-closed) for ${maskSid(callSid)}: ${eligErr.message}`);
@@ -14520,8 +14562,19 @@ const CallRecordingProcessor = {
             const smsAni = isOutboundCall(call)
               ? resolveCallContactPhone(call)
               : firstExternalPhone(call.from_phone);
+            // callback_number_needed (codex pre-push r6 P1 — a pre-existing
+            // gap on BOTH directions, not outbound-specific): the caller
+            // told us the ANI/dialed number isn't theirs and gave no
+            // callback of their own, so smsAni above is exactly the
+            // disclaimed number — the SAME hold the booking-confirmation
+            // leg already honors (callbackNumberNeededBlocksSms, set onto
+            // callbackNumberNeededHoldActive at the decision point above)
+            // must also cover this independent send path. The review card
+            // still opens either way; only the text is held.
             if (genuineNewProspect && !smsAni) {
               smsOutcome = { sent: false, skipped: 'no_usable_ani' };
+            } else if (genuineNewProspect && callbackNumberNeededHoldActive) {
+              smsOutcome = { sent: false, skipped: 'callback_number_needed' };
             } else if (genuineNewProspect) {
               // Inner catch: the review card below MUST still open when the
               // send path throws — a failed text plus no card is exactly the

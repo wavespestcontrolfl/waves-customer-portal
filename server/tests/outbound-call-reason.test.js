@@ -27,6 +27,7 @@ const {
   VISIT_IN_PROGRESS_WINDOW_MS,
   TEXT_SCAN_LIMIT,
   NON_SERVICE_NATURES,
+  NON_SERVICE_DISPOSITIONS,
   resolveOutboundCallReason,
   visitInProgress,
   nonServiceCaller,
@@ -72,14 +73,19 @@ function installDb(byTable = {}) {
       // existsQualifyingInboundCall's call_log query (identified by its own
       // whereRaw nature clause — latestInboundCall's JS-side filtering
       // elsewhere in this file never adds one): apply the recorded nature
-      // exclusion for real (codex pre-push r5 P1), reusing _private.callNature
-      // so the mock's extraction matches the module's own.
+      // AND disposition exclusions for real (codex pre-push r5 P1 + r6
+      // P1), reusing _private.callNature so the mock's extraction matches
+      // the module's own.
       if (table === 'call_log') {
         const natureClause = q.raws.find((r) => String(r[0]).includes('call_nature'));
-        if (natureClause) {
-          const excluded = natureClause[1];
+        const dispositionClause = q.raws.find((r) => String(r[0]).includes('disposition'));
+        if (natureClause || dispositionClause) {
           const rows = state.byTable.call_log || [];
-          return rows.filter((r) => !excluded.includes(_private.callNature(r)));
+          return rows.filter((r) => {
+            if (natureClause && natureClause[1].includes(_private.callNature(r))) return false;
+            if (dispositionClause && dispositionClause[1].includes(String(r.disposition || ''))) return false;
+            return true;
+          });
         }
       }
       return state.byTable[table] || [];
@@ -456,6 +462,35 @@ describe('hasPriorContact', () => {
   test('a genuine new_lead-natured call still counts as prior contact', async () => {
     installDb({ call_log: [{ id: 'in-lead', ai_extraction_enriched: { call_nature: 'new_lead' } }] });
     await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+  });
+
+  // Codex pre-push r6 P1: an OLDER inbound row from before V2 call_nature
+  // extraction shipped has no nature at all (COALESCE reads '', which
+  // passes the nature filter) but can still carry a DEFINITIVE
+  // call_log.disposition (server/services/call-disposition.js) ruling it
+  // a non-service contact.
+  test.each(['vendor_logged', 'wrong_number_closed', 'spam_discarded', 'no_action_needed'])(
+    'a disposition-only (no V2 nature) %s history does NOT count as prior contact',
+    async (disposition) => {
+      installDb({ call_log: [{ id: 'in-old-disposition', disposition }] });
+      await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(false);
+    },
+  );
+
+  test('a null-nature row with a SERVICE disposition still counts as prior contact', async () => {
+    installDb({ call_log: [{ id: 'in-old-booked', disposition: 'booked' }] });
+    await expect(hasPriorContact({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+  });
+
+  test('the call probe reuses only literals that are live members of call-disposition.js\'s TERMINAL_DISPOSITIONS enum (never a drifted copy)', () => {
+    const { TERMINAL_DISPOSITIONS } = require('../services/call-disposition');
+    expect(NON_SERVICE_DISPOSITIONS.length).toBeGreaterThan(0);
+    for (const d of NON_SERVICE_DISPOSITIONS) {
+      expect(TERMINAL_DISPOSITIONS).toContain(d);
+    }
+    // And NOT a service disposition — 'booked' proves the two sets are
+    // genuinely disjoint, not one accidentally aliasing the other.
+    expect(NON_SERVICE_DISPOSITIONS).not.toContain('booked');
   });
 
   test('a prior substantive inbound text counts, and the probe never caps rows at TEXT_SCAN_LIMIT (codex pre-push r1 P2)', async () => {
