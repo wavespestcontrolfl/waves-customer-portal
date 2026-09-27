@@ -35,12 +35,16 @@ Normal completion records actual use. The shared reviewed-area calculation is
 in PR #5050; palm counts/individual canopy measurements and calibrated scoops
 must never be substituted with bed area or tank capacity.
 
-Dependencies: draft child of #5049 at `27af8bdd749b32e8ff77e479492f090d1640e354`;
+Dependencies: built on #5049 at `27af8bdd749b32e8ff77e479492f090d1640e354`;
 its latest removal of speculative seasonal/rate configuration is preserved.
 Only the consumed T&S identity metadata extends its name entries.
-The unchanged `mix-amount.js` is the exact
-canonical formatter from #5015 (415340c8242b945e7f35d9317cd8b5858b441da3).
-Reconcile #5015 and retarget this child to main before #5049 is squash-merged.
+`mix-amount.js` extends the canonical formatter from #5015
+(415340c8242b945e7f35d9317cd8b5858b441da3) with an opt-in truck-measure mode:
+cup ranges round inward, single cup amounts round down, quarter teaspoons are
+preferred with eighths only when needed. Existing inventory displays keep their
+default behavior. Reconcile this extension when #5015 lands.
+The draft was retargeted to main before any parent merge so the repository's
+required PR verification can run; it still depends on #5049 and #5050.
 The owner merges; this lane stops before merge.
 
 ## Evidence
@@ -50,6 +54,9 @@ The owner merges; this lane stops before merge.
   across three tank sizes exercised without horizontal overflow or page errors.
 - Snapshot expansion: two owned spreaders only; switching to push shows 092807.
   Merit expansion: soil kit only. Talus hold and label link verified in place.
+- Final preview caught large oil doses rounding up in the inherited formatter.
+  Dedicated truck-measure tests now pin 1¼ / 5 / 140¾ fl oz for the 1% oil
+  reference, with approximation marks; range bounds stay inside their sources.
 - Screenshots reviewed in-session. Native attachment unavailable with installed
   gh 2.90.0; no screenshot attachments are claimed.
 - 259 focused server tests passed after reconciling #5049's latest changes,

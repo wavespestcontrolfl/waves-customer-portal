@@ -32,8 +32,8 @@ function ProductDetails({ product, equipment, mode }) {
 function amountFor(product, gallons) {
   if (!product.mix) return product.summary;
   return product.mix[0] === product.mix[1]
-    ? formatMeasuredAmount(product.mix[0] * gallons, 'fl oz')
-    : formatMeasuredRange(product.mix[0] * gallons, product.mix[1] * gallons, 'fl oz');
+    ? formatMeasuredAmount(product.mix[0] * gallons, 'fl oz', { truckMeasures: true })
+    : formatMeasuredRange(product.mix[0] * gallons, product.mix[1] * gallons, 'fl oz', { truckMeasures: true });
 }
 
 export default function TreeShrubFieldGuide({ guide, mode = 'admin' }) {

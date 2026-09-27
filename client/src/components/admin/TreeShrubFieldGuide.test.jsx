@@ -25,9 +25,11 @@ test('expands one product at a time and never offers the soil kit for granules',
 
 test('truck amounts switch with equipment and palm quantities remain pounds', () => {
   render(<TreeShrubFieldGuide guide={guide} mode="tech" />);
-  expect(screen.getByText('5.12 fl oz')).toBeTruthy();
+  expect(screen.getByText('≈ 5 fl oz')).toBeTruthy();
   fireEvent.change(screen.getByLabelText('Mix size'), { target: { value: 'bg' } });
-  expect(screen.getByText('1.28 fl oz')).toBeTruthy();
+  expect(screen.getByText('≈ 1¼ fl oz')).toBeTruthy();
+  fireEvent.change(screen.getByLabelText('Mix size'), { target: { value: 'rig' } });
+  expect(screen.getByText('≈ 140¾ fl oz')).toBeTruthy();
   expect(screen.getByText('3.8 lb')).toBeTruthy();
   expect(screen.queryByText(/6x only|9x only|Look for scale/)).toBeNull();
 });
