@@ -231,6 +231,62 @@ async function createRestockRequest(productId, raw, options = {}) {
   });
 }
 
+/**
+ * The ONE "add a product" write, shared by the admin "add product" route
+ * (admin-inventory.js POST /) and the purchase-receipt inventory agent
+ * (purchase-receipts/inventory-agent.js) — so a catalog row created from a
+ * purchase line never diverges from the admin insert's defaults (unknown
+ * active ingredient / EPA reg placeholder, formulation, active=true via the
+ * column default). Callers validate their own inputs first (the admin
+ * route's 400s stay in the route); this just performs the insert and the
+ * optional initial-stock movement, unchanged from the route's prior inline
+ * version. options.trx runs on an already-open transaction; options.source
+ * / options.actorId label the initial movement the same way adjustStock's
+ * do.
+ */
+async function createCatalogProduct(fields, options = {}) {
+  const {
+    name, category, subcategory, activeIngredient, epaRegNumber, formulation, moaGroup,
+    defaultUnit, unitSize, inventoryOnHand, inventoryUnit, lowStockThreshold, bestVendor, autoReorderEnabled,
+  } = fields;
+  const initialStock = numberOrNull(inventoryOnHand);
+  const run = async (trx) => {
+    const [inserted] = await trx('products_catalog').insert({
+      name, category: category || null, subcategory: subcategory || null,
+      active_ingredient: activeIngredient || 'Unknown - pending SDS',
+      epa_reg_number: epaRegNumber || 'N/A',
+      moa_group: moaGroup || null,
+      default_unit: defaultUnit || 'oz',
+      container_size: unitSize || null,
+      formulation: formulation || 'unspecified',
+      inventory_on_hand: initialStock,
+      inventory_unit: inventoryUnit || null,
+      low_stock_threshold: numberOrNull(lowStockThreshold),
+      ...(bestVendor !== undefined ? { best_vendor: bestVendor || null } : {}),
+      ...(autoReorderEnabled !== undefined ? { auto_reorder_enabled: Boolean(autoReorderEnabled) } : {}),
+    }).returning('*');
+
+    if (initialStock != null) {
+      await trx('product_inventory_movements').insert({
+        product_id: inserted.id,
+        movement_type: 'correction',
+        quantity: initialStock,
+        unit: inventoryUnit,
+        stock_before: 0,
+        stock_after: initialStock,
+        metadata: {
+          source: options.source || 'admin_product_create',
+          reason: 'Initial stock',
+          delta: initialStock,
+          adjustedBy: options.actorId || null,
+        },
+      });
+    }
+    return inserted;
+  };
+  return options.trx ? run(options.trx) : db.transaction(run);
+}
+
 async function loadRequest(requestId, conn = db, lock = false) {
   let query = conn('product_restock_requests').where({ id: requestId }).select('*', conn.raw('updated_at::text as row_version'));
   if (lock) query = query.forUpdate();
@@ -329,4 +385,4 @@ async function updateRestockRequest(requestId, raw, options = {}) {
 }
 
 module.exports = { previewStockAdjustment, adjustStock, previewRestockRequest, createRestockRequest,
-  previewRestockAction, updateRestockRequest, productIdentity };
+  previewRestockAction, updateRestockRequest, productIdentity, createCatalogProduct };

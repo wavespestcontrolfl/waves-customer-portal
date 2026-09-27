@@ -2961,6 +2961,16 @@ const gates = {
   // explicit offset, read by gateEnvTimestamp) set, independently of this
   // gate, or the lane does nothing (see sweep.js).
   purchaseReceiptRestock: gateEnvValue('GATE_PURCHASE_RECEIPT_RESTOCK'),
+  // Inventory agent (server/services/purchase-receipts/inventory-agent.js):
+  // an LLM-backed resolver for a purchase-receipt line the deterministic
+  // classifier held as unmatched/needs_size/size_mismatch — every proposal
+  // it makes is checked by deterministic code before anything is written
+  // (see the module header). Ships DARK: off unless set (gateEnvValue),
+  // read at call time by receipt-processor.js's hand-off and by the
+  // scheduler's post-sweep run — a flip needs no redeploy. Gate off leaves
+  // GATE_PURCHASE_RECEIPT_RESTOCK's behavior byte-for-byte unchanged: those
+  // three statuses stay held for a person exactly as before this lane.
+  inventoryAgent: gateEnvValue('GATE_INVENTORY_AGENT'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

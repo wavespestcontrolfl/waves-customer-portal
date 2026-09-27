@@ -2487,10 +2487,24 @@ function initScheduledJobs() {
       await runExclusive('purchase-receipt-restock', async () => {
         const { runPurchaseReceiptRestockSweep, summarize } = require('./purchase-receipts/sweep');
         const result = await runPurchaseReceiptRestockSweep();
-        if (result.skipped) return;
-        const { logged, held, errors } = summarize(result);
-        if (logged || held || errors) {
-          logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s)`);
+        if (!result.skipped) {
+          const { logged, held, errors } = summarize(result);
+          if (logged || held || errors) {
+            logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s)`);
+          }
+        }
+        // Inventory agent (GATE_INVENTORY_AGENT): resolves lines the sweep
+        // above just handed off as agent_pending (unmatched/needs_size/
+        // size_mismatch, see receipt-processor.js). Same runExclusive lock,
+        // right after the sweep, so it never races another tick over the
+        // same lines. Self-gated (also cheap to check twice).
+        if (gateEnvValue('GATE_INVENTORY_AGENT')) {
+          const { runInventoryAgent } = require('./purchase-receipts/inventory-agent');
+          const agentResult = await runInventoryAgent();
+          if (!agentResult.skipped && (agentResult.logged || agentResult.held || agentResult.errors)) {
+            logger.info(`[inventory-agent] ${agentResult.logged} logged, ${agentResult.held} held for a person, `
+              + `${agentResult.stillPending} still pending, ${agentResult.errors} error(s)`);
+          }
         }
       });
     } catch (err) {

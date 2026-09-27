@@ -64,6 +64,11 @@ const SUMMARY_BUCKETS = {
   logged: 'logged', possible_duplicate: 'possibleDuplicate', unmatched: 'unmatched',
   size_mismatch: 'sizeMismatch', needs_size: 'needsSize', no_items: 'noItems', no_order_number: 'noOrderNumber',
   returned: 'returned', unverified: 'unverified', unreadable: 'unreadable',
+  // GATE_INVENTORY_AGENT hand-off (receipt-processor.js): queued for the
+  // agent, not held for a person — no bell (not in HELD_REASONS below), so
+  // it's its own bucket rather than counted as "held for a person" in
+  // summarize()'s one log line.
+  agent_pending: 'agentPending',
 };
 
 // Why a held line wasn't added — the second sentence of its bell.
@@ -90,9 +95,9 @@ function emptySummary() {
 
 // Counts for the scheduler's one log line.
 function summarize(result) {
-  const held = Object.values(SUMMARY_BUCKETS).filter((bucket) => bucket !== 'logged' && bucket !== 'unmatched')
+  const held = Object.values(SUMMARY_BUCKETS).filter((bucket) => !['logged', 'unmatched', 'agentPending'].includes(bucket))
     .reduce((sum, bucket) => sum + result[bucket].length, result.undelivered.length);
-  return { logged: result.logged.length, held, errors: result.errors.length };
+  return { logged: result.logged.length, held, errors: result.errors.length, agentPending: result.agentPending.length };
 }
 
 function adminNotifier(notify) {

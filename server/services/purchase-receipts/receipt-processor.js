@@ -65,11 +65,18 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
+const { gateEnvValue } = require('../../config/feature-gates');
 const { matchTitleToProduct } = require('./product-matcher');
 const { parsePackSize } = require('../product-costing');
 const { convertInventoryQuantity } = require('../inventory-units');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const { adjustStock } = require('../inventory-operations');
+
+// GATE_INVENTORY_AGENT (inventory-agent.js): read at call time here too, so
+// a flip needs no redeploy. Off, these three statuses are held for a
+// person exactly as before this lane existed.
+const AGENT_GATE = 'GATE_INVENTORY_AGENT';
+const AGENT_HANDOFF_STATUSES = ['unmatched', 'needs_size', 'size_mismatch'];
 
 // Vendor -> the product_inventory_movements.metadata.source its restocks carry.
 const SOURCES = { amazon: 'amazon_delivery', siteone: 'siteone_invoice' };
@@ -270,6 +277,16 @@ async function processReceiptLine({ vendor, email, orderNumber, shipmentKey, ite
     let classified = forcedStatus ? { status: forcedStatus, productId: null, product: null } : await classifyUnderLock(item, trx);
     if (holdAs && classified.productId) {
       classified = { status: holdAs, productId: classified.productId, product: classified.product };
+    } else if (!forcedStatus && !holdAs && AGENT_HANDOFF_STATUSES.includes(classified.status) && gateEnvValue(AGENT_GATE)) {
+      // Hand off to the inventory agent instead of holding it for a person:
+      // no bell (agent_pending isn't in sweep.js's HELD_REASONS), no
+      // movement, product_id kept when the deterministic matcher already
+      // found one (needs_size/size_mismatch). A holdAs or forcedStatus line
+      // never reaches here even when its own classification landed on one
+      // of these three statuses — those callers asked for a specific
+      // person-facing hold (a return, an unreadable invoice, …) and the
+      // agent never overrides that.
+      classified = { status: 'agent_pending', productId: classified.productId, product: classified.product };
     }
     const claim = await claimLine(trx, {
       ...key, email_id: email.id, raw_title: item.title, quantity: item.quantity, product_id: classified.productId,
@@ -329,4 +346,12 @@ async function performLoggedMovement(trx, { vendor, claim, classified, orderNumb
   return { status: 'logged', product, receivedQty, receivedUnit, movement: result.movement, hasOpenRestockRequest: Boolean(liveRequest) };
 }
 
-module.exports = { classifyItem, processReceiptLine, lockShipment, SOURCES, UNKNOWN_ORDER };
+module.exports = {
+  classifyItem, processReceiptLine, lockShipment, SOURCES, UNKNOWN_ORDER,
+  findPossibleDuplicateMovement,
+  // Title-size-claim parsing primitives, reused (not duplicated) by
+  // inventory-agent.js's deterministic reading validation — see this
+  // module's header for what each one does.
+  TITLE_SIZE_RE, SIZE_UNITS, sizeUnit, parseSizeNumber, sizesAgree, round4,
+  AGENT_HANDOFF_STATUSES,
+};
