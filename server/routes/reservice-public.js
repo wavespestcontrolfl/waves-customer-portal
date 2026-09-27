@@ -93,6 +93,7 @@ const TOKEN_RE = /^[a-f0-9]{64}$/;
 // Customer-facing note length cap ("what's going on") — flows into the
 // visit's dispatch notes via createSelfBooking's customer_notes handling.
 const MAX_DETAILS_LENGTH = 400;
+const LOCATION_REVIEW_ERROR = 'We need to confirm your service address before we can schedule this re-service online. Text or call us and we’ll take care of it.';
 
 router.use(rateLimit({
   windowMs: 60 * 1000,
@@ -127,8 +128,36 @@ async function loadByToken(token) {
     .whereNull('deleted_at')
     .first(
       'id', 'first_name', 'last_name', 'active', 'waveguard_tier', 'monthly_rate',
-      'address_line1', 'city', 'state', 'zip', 'latitude', 'longitude', 'phone'
+      'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude', 'phone'
     );
+}
+
+// createSelfBooking consults the address-bound staff review only when a
+// returning customer's stored coordinate pair is missing. Mirror that exact
+// boundary on this surface: a matching permanent review block must not be
+// turned into another list of slots that commit will refuse, while a complete
+// stored pair and the dark review gate retain the existing flow.
+async function reserviceLocationReviewRequired(customer) {
+  const hasStoredPair = ['latitude', 'longitude'].every((field) => customer?.[field] != null
+    && String(customer[field]).trim() !== ''
+    && Number.isFinite(Number(customer[field]))
+    && Number(customer[field]) !== 0);
+  if (hasStoredPair) return false;
+  const reviewed = await require('../services/customer-geocode-review').reviewedServiceLocation({
+    customer_id: customer.id,
+    service_address_line1: customer.address_line1 || null,
+    service_address_line2: customer.address_line2 || null,
+    service_address_city: customer.city || null,
+    service_address_state: customer.state || null,
+    service_address_zip: customer.zip || null,
+  });
+  return reviewed?.permanent === true
+    && !reviewed.location
+    && reviewed.reason === 'address_review_required';
+}
+
+function locationReviewFailure() {
+  return { error: LOCATION_REVIEW_ERROR, code: 'LOCATION_REVIEW_REQUIRED' };
 }
 
 // The booking window mirrors the public /book funnel's config-driven range —
@@ -285,7 +314,6 @@ router.get('/:token', async (req, res, next) => {
     if (bookableLanes.length === 0) {
       return res.json({ ...base, availability: null });
     }
-
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
@@ -300,6 +328,9 @@ router.get('/:token', async (req, res, next) => {
     const browseLanes = requestedLane ? [requestedLane] : bookableLanes;
     if (capacityEnabled() && browseLanes.length > 1) {
       return res.json({ ...base, availability: null });
+    }
+    if (await reserviceLocationReviewRequired(customer)) {
+      return res.json({ ...base, availability: null, location_review_required: true });
     }
     const browseDuration = Math.max(...browseLanes.map((lane) => laneCatalog[lane].durationMinutes));
 
@@ -347,6 +378,9 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const browseLanes = requestedLane ? [requestedLane] : bookableLanes;
     if (capacityEnabled() && browseLanes.length > 1) {
       return res.status(400).json({ error: 'Choose a service before searching for times.' });
+    }
+    if (await reserviceLocationReviewRequired(customer)) {
+      return res.status(409).json(locationReviewFailure());
     }
 
     const booking = require('./booking');
@@ -428,6 +462,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       });
     }
     const catalog = laneCatalog[lane];
+    if (await reserviceLocationReviewRequired(customer)) {
+      return res.status(409).json(locationReviewFailure());
+    }
 
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
@@ -506,6 +543,13 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           alreadyBooked: booked,
         });
       }
+      // A matching staff review can land after the pre-check or while the
+      // booking transaction waits on its fences. It is an address recovery
+      // state, not a slot race: do not rebuild the same geocoded offers that
+      // createSelfBooking is required to reject.
+      if (result.code === 'LOCATION_CHANGED_RETRY') {
+        return res.status(409).json(locationReviewFailure());
+      }
       // Any other 409 out of the transaction is a slot-level race
       // (SLOT_TAKEN / DAY_FULL) — refresh the list so the page recovers in
       // one step, the same shape the pre-check above answers with.
@@ -563,6 +607,7 @@ router._test = {
   loadLaneCatalog,
   resolveLaneState,
   buildAvailabilityForCustomer,
+  reserviceLocationReviewRequired,
 };
 
 module.exports = router;

@@ -3667,7 +3667,7 @@ async function createSelfBooking(payload = {}) {
       // rationale. One call, no branch, under the tech-day advisory lock
       // already held above (rung 1) — never a second locking scheme. The
       // certified fit (undefined when the check didn't run) is applied onto
-      // the row below via persistBookCapacityOrder once it has an id.
+      // the row below once it has an id.
       const capacityCommitFit = await assertBookCapacityCommit({
         trx, technicianId: technician_id, date: slotDateStr,
         windowStart: slot_start, windowEnd: endTime, durationMinutes: duration,
@@ -3795,10 +3795,11 @@ async function createSelfBooking(payload = {}) {
           .where({ id: scheduledRow.id })
           .update({ notes: trx.raw("COALESCE(notes, '') || ' — booked beside an existing pest plan; kept as a one-off visit (no second series seeded)'") });
       }
-      // Applies assertBookCapacityCommit's certified route order (see
-      // persistBookCapacityOrder above the transaction) now that the row has
-      // an id — a no-op when the check didn't run.
-      await persistBookCapacityOrder(trx, capacityCommitFit, scheduledRow.id);
+      // Apply the certified order only after the candidate has a stored id.
+      if (capacityCommitFit) {
+        const { persistArrivalOrder } = require('../services/scheduling/arrival-route');
+        await persistArrivalOrder(trx, capacityCommitFit, scheduledRow.id);
+      }
       // Visit groups (visit-group-scope.md §2): the primary self-booked row
       // stamps at scheduling, same as the seeded series rows below.
       // Gate-checked + best-effort + self-refusing inside maybeGroupRow
@@ -5884,24 +5885,6 @@ async function assertBookCapacityCommit({ trx, technicianId, date, windowStart, 
   });
 }
 
-// Persists assertBookCapacityCommit's certified route order onto the
-// just-inserted row — the SAME mechanism every other capacity commit path
-// uses to apply its own certified fit (arrival-route.js's persistArrivalOrder;
-// see slot-reservation.js's `if (capacityFit) await persistArrivalOrder(...)`
-// after its own inserts/updates), never re-derived here. `fit` is undefined
-// when assertBookCapacityCommit didn't run (gate off, no technician) — a
-// plain no-op, matching every other gate-off path in this transaction.
-// persistArrivalOrder itself only writes rows whose route_order actually
-// differs (`route_order IS DISTINCT FROM`), so calling it whenever a fit
-// exists is always safe, including when the certified order matches what
-// was already going to be stored. A separate function (not inlined) so the
-// transaction's own complexity carries only the one unconditional call.
-async function persistBookCapacityOrder(trx, fit, scheduledServiceId) {
-  if (!fit) return;
-  const { persistArrivalOrder } = require('../services/scheduling/arrival-route');
-  await persistArrivalOrder(trx, fit, scheduledServiceId);
-}
-
 // Public shape for a self_booked_appointments row — an EXPLICIT allow-list,
 // never `self_booked_appointments.*`. The raw row now persists the full
 // attribution capture (gclid, _fbc/_fbp, full referrer, and landing_url —
@@ -6385,9 +6368,6 @@ module.exports._internals = {
   // Commit-time whole-route capacity re-check (GATE_BOOK_CAPACITY_COMMIT),
   // exported for direct unit coverage of the gate/argument-passing contract.
   assertBookCapacityCommit,
-  // Applies the certified fit's route order onto the newly inserted row —
-  // exported for direct unit coverage (Codex #4992 r1 P1).
-  persistBookCapacityOrder,
   MAX_BOOKING_HORIZON_DAYS,
   mintCaptureToken,
   verifyCaptureToken,

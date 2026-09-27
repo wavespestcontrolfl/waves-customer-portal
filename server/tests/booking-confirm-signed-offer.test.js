@@ -319,6 +319,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   };
   const SENTINEL = 'stop-after-scheduled-services-insert';
   let capturedScheduledInsert;
+  let returnScheduledInsert;
   let fencedCustomer;
   let loadedCustomer;
 
@@ -369,7 +370,11 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
         // empty here, so the probe passes and the flow reaches the insert.
         select: () => b,
         orderBy: () => Promise.resolve([]),
-        insert: (row) => { capturedScheduledInsert = row; throw new Error(SENTINEL); },
+        insert: (row) => {
+          capturedScheduledInsert = row;
+          if (!returnScheduledInsert) throw new Error(SENTINEL);
+          return { returning: async () => [{ ...row, id: 'scheduled-1' }] };
+        },
       };
       return b;
     }
@@ -481,6 +486,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
   beforeEach(() => {
     jest.clearAllMocks();
     capturedScheduledInsert = undefined;
+    returnScheduledInsert = false;
     fencedCustomer = { ...CUST };
     loadedCustomer = { ...CUST };
     mockOwnershipTables();
@@ -600,6 +606,33 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       expect(recurringServiceAddress(row)).toMatchObject({ lat: exactPin.lat, lng: exactPin.lng, service_address_line1: CUST.address_line1 });
     } finally {
       geocodeSpy.mockRestore(); capacitySpy.mockRestore(); conflictSpy.mockRestore();
+      if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
+      if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
+      else process.env.GATE_BOOK_CAPACITY_COMMIT = savedCommit;
+    }
+  });
+
+  test('the booking persists its certified route order after inserting the candidate in the same transaction', async () => {
+    const savedCapacity = process.env.GATE_SCHEDULING_CAPACITY;
+    const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
+    returnScheduledInsert = true;
+    const arrivalRoute = require('../services/scheduling/arrival-route');
+    const fit = { feasible: true, routeOrder: ['earlier', '__candidate__', 'later'] };
+    const capacitySpy = jest.spyOn(arrivalRoute, 'checkArrivalPlacement').mockResolvedValue(fit);
+    const persistSpy = jest.spyOn(arrivalRoute, 'persistArrivalOrder').mockImplementation(async () => {
+      expect(capturedScheduledInsert).toBeDefined();
+      throw new Error(SENTINEL);
+    });
+    const conflictSpy = jest.spyOn(require('../services/scheduling/occupancy'), 'findConflictingVisits').mockResolvedValue([]);
+    try {
+      await runToScheduledInsert();
+      expect(persistSpy).toHaveBeenCalledTimes(1);
+      expect(persistSpy).toHaveBeenCalledWith(capacitySpy.mock.calls[0][0].conn, fit, 'scheduled-1');
+    } finally {
+      capacitySpy.mockRestore(); persistSpy.mockRestore(); conflictSpy.mockRestore();
       if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
       else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
       if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;

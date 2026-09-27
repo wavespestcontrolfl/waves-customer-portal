@@ -10,7 +10,7 @@
 // its shift, and — Codex #4992 r1 P1 — when evaluateArrivalPlacement
 // certifies feasibility through its clockOrder/storedOrderStale fallback
 // (a corrected order, not the day's STALE stored route_order values),
-// persistBookCapacityOrder actually applies that corrected order onto the
+// the shared persistArrivalOrder applies that corrected order onto the
 // rows instead of leaving the stale one in place.
 let mockConn;
 jest.mock('../models/db', () => {
@@ -26,7 +26,8 @@ jest.mock('../services/geocoder', () => ({
 }));
 
 const knex = require('knex');
-const { assertBookCapacityCommit, persistBookCapacityOrder } = require('../routes/booking')._internals;
+const { assertBookCapacityCommit } = require('../routes/booking')._internals;
+const { persistArrivalOrder } = require('../services/scheduling/arrival-route');
 const { findConflictingVisits } = require('../services/scheduling/occupancy');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { geocodeAddress } = require('../services/geocoder');
@@ -141,7 +142,7 @@ describeDb('createSelfBooking commit-time capacity re-check on real PostgreSQL',
       status: 'confirmed', estimated_duration_minutes: CANDIDATE.durationMinutes,
       lat: CANDIDATE.lat, lng: CANDIDATE.lng,
     }).returning('id');
-    await persistBookCapacityOrder(mockConn, fit, candidateId);
+    await persistArrivalOrder(mockConn, fit, candidateId);
 
     const rows = await mockConn('scheduled_services')
       .whereIn('id', [NORTH, candidateId, SOUTH]).select('id', 'route_order');
