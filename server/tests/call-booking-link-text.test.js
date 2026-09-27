@@ -37,6 +37,7 @@ const {
   dispatchClaimedCall,
   claimForDispatch,
   stage,
+  stageOne,
   sweep,
   STAGING_GRACE_MINUTES,
 } = require('../services/call-booking-link-text');
@@ -210,6 +211,41 @@ describe('stage', () => {
     expect(now.getTime() - graceWhere[2].getTime()).toBe(STAGING_GRACE_MINUTES * 60 * 1000);
     expect(wheres.some(([col, op]) => col === 'created_at' && op === '<=')).toBe(false);
   });
+
+  // codex pre-push P1: callEndedAt(call) can read a future instant for a
+  // post-call fallback row (a bogus/huge duration_seconds). Unclamped,
+  // computeSendAt on that future end could push send_at arbitrarily late;
+  // clamping to `now` bounds the delay instead.
+  test('a recovered row whose computed end is in the future computes send_at from `now`, not that future reading', async () => {
+    const now = new Date('2026-09-26T15:00:00Z'); // 11:00 ET — inside the window, well before the 6pm cutoff
+    const rawBindings = [];
+    const conn = jest.fn(() => {
+      const chain = {};
+      ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.update = jest.fn(async () => 1);
+      return chain;
+    });
+    conn.raw = jest.fn((sql, bindings) => { rawBindings.push(bindings); return 'RAW'; });
+    const call = {
+      id: 'call-recovered', direction: 'inbound', created_at: new Date(now.getTime() - 60000), duration_seconds: 999999999,
+      metadata: { lead_id: 'lead-1' },
+      ai_extraction_enriched: {
+        meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
+        caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
+        property: { property_type: 'single_family' },
+        service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        sentiment_and_lead: { lead_quality: 'warm' },
+      },
+      ai_address_validation: { inServiceArea: true },
+    };
+    const decided = await stageOne(conn, call, now);
+    expect(decided).toBe('pending');
+    const parsed = rawBindings.map(([json]) => JSON.parse(json)).find((v) => v.call_booking_link_text?.status === 'pending');
+    expect(parsed).toBeTruthy();
+    const sendAt = new Date(parsed.call_booking_link_text.send_at);
+    expect(sendAt.getTime()).toBe(computeSendAt(now).getTime());
+  });
 });
 
 // ── outbound "return call" evidence ───────────────────────────────────────
@@ -295,15 +331,29 @@ describe('dispatchClaimedCall', () => {
   const OPEN_LEAD = { id: 'lead-1', status: 'new', converted_at: null, phone: '+19415550100', first_name: 'Jamie',
     customer_id: null, estimate_id: null, is_commercial: false, deleted_at: null };
 
-  function makeDb({ lead = OPEN_LEAD, bookedSince = null, consultationCodes = [], smsWithLink = null,
-    callLogUpdate = jest.fn(async () => 1), activityInsert = jest.fn(async () => {}) } = {}) {
+  // `visitCreatedAt`, when given, makes the scheduled_services stub a REAL
+  // comparison against whatever lower-bound date the code under test
+  // actually queries with (captured via the `where('created_at', '>=', X)`
+  // call) — rather than a canned true/false — so a test can prove the bound
+  // is callStartedAt(call) and not some other instant. `bookedSince` (a
+  // canned row/null) still works for tests that don't care about the exact
+  // bound.
+  function makeDb({ lead = OPEN_LEAD, bookedSince = null, visitCreatedAt = null, consultationCodes = [], smsWithLink = null,
+    callLogUpdate = jest.fn(async () => 1), activityInsert = jest.fn(async () => {}), capture = {} } = {}) {
     const conn = jest.fn((table) => {
       const chain = {};
-      ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify']
+      ['whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'limit', 'modify']
         .forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.where = jest.fn((...args) => {
+        if (table === 'scheduled_services' && args[0] === 'created_at') capture.bookedSinceBound = args[2];
+        return chain;
+      });
       chain.first = jest.fn(async () => {
         if (table === 'leads') return lead;
-        if (table === 'scheduled_services') return bookedSince;
+        if (table === 'scheduled_services') {
+          if (visitCreatedAt) return visitCreatedAt.getTime() >= capture.bookedSinceBound.getTime() ? { id: 'visit-1' } : null;
+          return bookedSince;
+        }
         if (table === 'sms_log') return smsWithLink;
         return undefined;
       });
@@ -389,6 +439,31 @@ describe('dispatchClaimedCall', () => {
   test('booked since the call (any time after call end) blocks the send', async () => {
     const conn = makeDb({ lead: { ...OPEN_LEAD, customer_id: 'cust-1' }, bookedSince: { id: 'visit-1' } });
     const result = await dispatchClaimedCall(conn, CALL, NOW);
+    expect(result.skipped).toBe('booked_since_call');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a visit created during the call (after it started, before it ended) is caught as booked since the call', async () => {
+    const callDuring = { ...CALL, direction: 'inbound', created_at: new Date('2026-09-26T15:00:00Z'), duration_seconds: 300 }; // 15:00–15:05
+    const visitCreatedAt = new Date('2026-09-26T15:02:00Z'); // mid-call
+    const conn = makeDb({ lead: { ...OPEN_LEAD, customer_id: 'cust-1' }, visitCreatedAt });
+    const result = await dispatchClaimedCall(conn, callDuring, NOW);
+    expect(result.skipped).toBe('booked_since_call');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  // codex pre-push P1: a "recovered" post-call fallback row's created_at is
+  // stamped AFTER the call ends, and a bogus/huge duration_seconds makes
+  // callEndedAt(call) read as decades in the future. bookedSinceCall's
+  // lower bound must be the call's actual START (callStartedAt), never that
+  // reading — otherwise a visit created minutes after the real
+  // conversation falls BEFORE the bogus future bound and escapes
+  // detection, texting a link to someone who already booked.
+  test('a visit created after the real call end, but long before callEndedAt\'s bogus future reading, is still caught', async () => {
+    const recovered = { ...CALL, direction: 'inbound', created_at: new Date('2026-09-26T15:00:00Z'), duration_seconds: 999999999 };
+    const visitCreatedAt = new Date('2026-09-26T15:10:00Z'); // minutes after the real call, decades before callEndedAt's reading
+    const conn = makeDb({ lead: { ...OPEN_LEAD, customer_id: 'cust-1' }, visitCreatedAt });
+    const result = await dispatchClaimedCall(conn, recovered, NOW);
     expect(result.skipped).toBe('booked_since_call');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });

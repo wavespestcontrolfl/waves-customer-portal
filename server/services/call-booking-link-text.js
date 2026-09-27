@@ -347,7 +347,16 @@ async function stageOne(conn, call, now) {
     await claimMetadata(conn, call.id, { status: 'skipped', reason: 'no_call_end_time', staged_at });
     return 'skipped';
   }
-  const send_at = computeSendAt(callEnd).toISOString();
+  // Clamp to `now` (codex pre-push P1): callEndedAt() can read a FUTURE
+  // instant for a post-call fallback row whose duration_seconds hasn't
+  // caught up with reality yet (or any other skew) — computeSendAt on an
+  // unclamped future end could push send_at arbitrarily late. Clamping
+  // bounds the damage to "delayed by at most the skew," never "delayed
+  // indefinitely." Deliberately NOT changing callEndedAt itself, which
+  // other lanes (reschedule-link-promises, followup-sla-watcher) already
+  // depend on as-is.
+  const clampedEnd = callEnd.getTime() > now.getTime() ? now : callEnd;
+  const send_at = computeSendAt(clampedEnd).toISOString();
   await claimMetadata(conn, call.id, { status: 'pending', lead_id: leadId, send_at, staged_at });
   return 'pending';
 }
@@ -391,11 +400,18 @@ async function recordDecision(conn, call, entry, { logActivity = true } = {}) {
   }).catch((err) => logger.warn(`[call-booking-link-text] activity_log write failed for call ${call.id} (${err.code || err.name || 'error'})`));
 }
 
-// A booking landing for this lead's own customer record, any time after the
-// call ended — the "nothing got booked" condition is re-checked here, at
-// dispatch time, which is by construction always at least 2 hours after the
-// call (see computeSendAt), satisfying the owner's 2-hour staff-first window
-// as a side effect of the schedule itself.
+// A booking landing for this lead's own customer record, any time at or
+// after the call STARTED — the owner's rule is "no visit was set on the
+// call, and nothing got booked after it," and the call's own duration is
+// squarely "on the call." `since` must be callStartedAt(call), never
+// callEndedAt() (codex pre-push P1): callEndedAt can read a FUTURE instant
+// for a post-call fallback row, and a too-late lower bound could miss a
+// booking made in the gap between the real end and that bogus future one —
+// sending a link to someone who already booked, which is worse than a
+// delayed or missed send. The dispatch-time call site is by construction
+// always at least 2 hours after the call (see computeSendAt), satisfying
+// the owner's 2-hour staff-first window as a side effect of the schedule
+// itself regardless of which instant this lower bound anchors on.
 async function bookedSinceCall(conn, customerId, since) {
   if (!customerId) return false;
   const row = await conn('scheduled_services').where({ customer_id: customerId })
@@ -437,8 +453,8 @@ const DISPATCH_CHECKS = [
   ({ lead }) => (!lead.phone || !isUsPhone(lead.phone) ? 'lead_phone_unusable' : null),
   ({ call, lead }) => (outboundPriorContactMissing(call, lead) ? 'outbound_without_prior_contact' : null),
   async ({ conn, call, lead }) => {
-    const callEnd = callEndedAt(call) || new Date(call.created_at);
-    return (await bookedSinceCall(conn, lead.customer_id, callEnd)) ? 'booked_since_call' : null;
+    const callStart = callStartedAt(call) || new Date(call.created_at);
+    return (await bookedSinceCall(conn, lead.customer_id, callStart)) ? 'booked_since_call' : null;
   },
   async ({ conn, leadId, now }) => ((await linkSentRecently(conn, leadId, now)) ? 'link_sent_recently' : null),
   // Re-run the full stage-time predicate against the row as it stands now —
