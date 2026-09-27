@@ -163,7 +163,6 @@ describe('sendMicrodepositVerificationEmail', () => {
   });
 
   test.each([
-    ['BILLING_EMAIL_DISABLED', { ok: false, skipped: true, reason: 'email_disabled' }],
     ['NO_EMAIL_RECIPIENT', { ok: false, skipped: true, reason: 'missing_email' }],
     ['INVOICE_PAYER_BILLED', { ok: false, skipped: true, reason: 'invoice_payer_billed' }],
     ['BILLING_PREFERENCES_CHANGED',
@@ -195,7 +194,6 @@ describe('sendMicrodepositVerificationEmail', () => {
   });
 
   test.each([
-    ['a fresh Email opt-out', { code: 'BILLING_EMAIL_DISABLED' }, { ok: false, skipped: true, reason: 'email_disabled' }],
     ['a staff do-not-contact', { code: 'SUPPRESSED_MANUAL_DNC', reason: 'manual_dnc' },
       { ok: false, blocked: true, reason: 'Suppressed: manual_dnc' }],
     ['a changed recipient', { code: 'EMAIL_RECIPIENT_CHANGED' },

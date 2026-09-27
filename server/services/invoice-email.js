@@ -596,16 +596,15 @@ async function inspectionCreditMemoForInvoice(invoice) {
 
 // A routed receipt's refusal, classified like every other billing sender's
 // (billing-email-sender.js) and reported in the vocabulary its callers (the
-// receipt delivery queue, the no-show fee receipt) already settle on: the
-// switch, no address and an unselected Email at the first read are their
-// expected skips, a suppression is a blocked send, and anything else (a
+// receipt delivery queue, the no-show fee receipt) already settle on: no
+// address and an unselected Email at the first read are their expected
+// skips, a suppression is a blocked send, and anything else (a
 // choice or recipient that moved at the handoff, an invoice no longer this
 // customer's to be paid for, a recheck that could not run) is an aborted
 // handoff the durable owner retries.
 function routedReceiptRefusal(block, { atHandoff = false } = {}) {
   const refusal = billingEmailRefusal(block);
   if (refusal.blocked) return { ok: false, error: refusal.reason, blocked: true };
-  if (refusal.reason === 'email_disabled') return { ok: false, error: 'email_opted_out' };
   if (refusal.reason === 'missing_email') return { ok: false, error: 'No receipt recipient email' };
   if (block.code === 'BILLING_PREFERENCES_CHANGED' && !atHandoff) {
     return { ok: false, skipped: true, error: 'billing_email_not_selected', code: 'billing_email_not_selected' };
