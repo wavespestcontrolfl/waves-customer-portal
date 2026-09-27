@@ -23,11 +23,17 @@ jest.mock('../services/sms-auto-send', () => ({
   isRealProviderSend: jest.fn((r) => !!r?.sent && !!r?.providerMessageId),
   isAmbiguousProviderOutcome: jest.fn(() => false),
 }));
+// hasPriorContact (codex #5012) always queries the real db singleton, never
+// a passed-in conn — mocked at the module boundary so these unit tests
+// exercise this lane's OWN wiring (what it passes in, how it reacts to the
+// answer) without depending on outbound-call-reason.js's own DB probes.
+jest.mock('../services/outbound-call-reason', () => ({ hasPriorContact: jest.fn() }));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const { buildLeadConsultationSmsLine } = require('../services/lead-consultation-link');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { hasPriorContact } = require('../services/outbound-call-reason');
 const { isAmbiguousProviderOutcome } = require('../services/sms-auto-send');
 const {
   computeSendAt,
@@ -730,56 +736,70 @@ describe('stage', () => {
 });
 
 // ── outbound "return call" evidence ───────────────────────────────────────
+// codex #5012 P1: replaced this lane's own first_contact_at comparison with
+// the canonical, shared hasPriorContact probe (outbound-call-reason.js) —
+// mocked at the module boundary since it always queries the real db
+// singleton, never a passed-in conn.
 describe('outboundPriorContactMissing / outboundStagingReason', () => {
   const callEnd = new Date('2026-09-26T18:00:00Z');
-  test('an inbound call never needs prior-contact evidence', () => {
-    expect(outboundPriorContactMissing({ direction: 'inbound', created_at: callEnd }, null)).toBe(false);
-  });
-  test('an outbound call to a lead that already existed (contacted us first) is fine', () => {
-    const lead = { first_contact_at: new Date('2026-09-20T12:00:00Z') };
-    expect(outboundPriorContactMissing({ direction: 'outbound', created_at: callEnd }, lead)).toBe(false);
-  });
-  test('an outbound call to a lead minted by this same call (or later) is not a return call', () => {
-    const mintedNow = { direction: 'outbound', created_at: callEnd };
-    expect(outboundPriorContactMissing(mintedNow, { first_contact_at: callEnd })).toBe(true);
-    expect(outboundPriorContactMissing(mintedNow, null)).toBe(true);
-  });
-  test('outboundStagingReason never queries the database for an inbound call', async () => {
-    const conn = jest.fn();
-    const reason = await outboundStagingReason(conn, { direction: 'inbound', created_at: callEnd }, 'lead-1');
+
+  beforeEach(() => { hasPriorContact.mockReset(); });
+
+  test('an inbound call never needs prior-contact evidence — hasPriorContact is never called', async () => {
+    expect(await outboundPriorContactMissing({ direction: 'inbound', created_at: callEnd })).toBe(false);
+    expect(hasPriorContact).not.toHaveBeenCalled();
+    const reason = await outboundStagingReason({ direction: 'inbound', created_at: callEnd });
     expect(reason).toBeNull();
-    expect(conn).not.toHaveBeenCalled();
-  });
-  test('outboundStagingReason skips a genuinely cold outbound call', async () => {
-    const chain = { where: jest.fn(() => chain), first: jest.fn(async () => ({ first_contact_at: callEnd })) };
-    const conn = jest.fn(() => chain);
-    const reason = await outboundStagingReason(conn, { direction: 'outbound', created_at: callEnd }, 'lead-1');
-    expect(reason).toBe('outbound_without_prior_contact');
+    expect(hasPriorContact).not.toHaveBeenCalled();
   });
 
-  // codex pre-push P1 regression: a post-call fallback row (Studio Flow's
-  // /call-status on a TERMINAL event, or a recording-status recovery
-  // insert — call-timeline.js's POST_CALL_ROW_SOURCES) stamps created_at
-  // AFTER the call ends, while call-recording-processor.js's own
-  // leadFirstContactAt backs the call's own length out of created_at via
-  // the SAME callStartedAt() to set a newly minted lead's first_contact_at.
-  // Comparing against created_at directly (instead of callStartedAt) would
-  // read that lead as having contacted us BEFORE this very call.
-  test('a terminal status_callback row: comparing against created_at (not callStartedAt) would wrongly pass a same-call mint', () => {
+  test('an outbound call with prior inbound contact proceeds (hasPriorContact resolves true)', async () => {
+    hasPriorContact.mockResolvedValue(true);
+    const call = { direction: 'outbound', created_at: callEnd, to_phone: '+19415550100' };
+    expect(await outboundPriorContactMissing(call)).toBe(false);
+    expect(await outboundStagingReason(call)).toBeNull();
+  });
+
+  test('an outbound call to a manual/cold lead (no prior contact at all) is skipped', async () => {
+    hasPriorContact.mockResolvedValue(false);
+    const call = { direction: 'outbound', created_at: callEnd, to_phone: '+19415550100' };
+    expect(await outboundPriorContactMissing(call)).toBe(true);
+    expect(await outboundStagingReason(call)).toBe('outbound_without_prior_contact');
+  });
+
+  test('hasPriorContact is called with the dialed contact number, and a customerId only when it predates this call', async () => {
+    hasPriorContact.mockResolvedValue(true);
+    const predating = { direction: 'outbound', created_at: callEnd, to_phone: '+19415550100', customer_id: 'cust-old', metadata: {} };
+    await outboundPriorContactMissing(predating);
+    expect(hasPriorContact).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-old', phone: '+19415550100' }));
+
+    hasPriorContact.mockClear();
+    // The legacy call-created-customer path stamps BOTH customer_id and
+    // metadata.created_customer_id in the same transaction — this call
+    // itself just minted 'cust-new', so it proves nothing about PRIOR
+    // contact and must never be passed to hasPriorContact's own automatic
+    // customerId-true branch.
+    const mintedNow = { direction: 'outbound', created_at: callEnd, to_phone: '+19415550100', customer_id: 'cust-new', metadata: { created_customer_id: 'cust-new' } };
+    await outboundPriorContactMissing(mintedNow);
+    expect(hasPriorContact).toHaveBeenCalledWith(expect.objectContaining({ customerId: null }));
+  });
+
+  // codex pre-push P1 regression, preserved from the original first_contact_at
+  // check: `before` is callStartedAt(call), never the later created_at of a
+  // post-call fallback row (Studio Flow's /call-status on a TERMINAL event,
+  // or a recording-status recovery insert — call-timeline.js's
+  // POST_CALL_ROW_SOURCES).
+  test('before is callStartedAt(call), not the later created_at of a post-call fallback row', async () => {
+    hasPriorContact.mockResolvedValue(true);
     const created_at = new Date('2026-09-26T18:10:00Z'); // stamped after the call ended
     const duration_seconds = 300; // 5 minutes
     const call = {
-      direction: 'outbound', created_at, duration_seconds,
+      direction: 'outbound', created_at, duration_seconds, to_phone: '+19415550100',
       metadata: { source: 'status_callback', inserted_on_status: 'completed' }, // terminal ⇒ post-call row
     };
-    // The lead's first_contact_at, as leadFirstContactAt(call) would ACTUALLY
-    // stamp it: created_at minus the call's own duration.
-    const first_contact_at = new Date(created_at.getTime() - duration_seconds * 1000);
-    expect(outboundPriorContactMissing(call, { first_contact_at })).toBe(true);
-    // The bug this guards: first_contact_at (18:05) is indeed BEFORE
-    // created_at (18:10), so a naive created_at comparison would call this
-    // a return call — it is not; callStartedAt(call) is 18:05 too.
-    expect(first_contact_at.getTime()).toBeLessThan(created_at.getTime());
+    await outboundPriorContactMissing(call);
+    const [[arg]] = hasPriorContact.mock.calls;
+    expect(arg.before.getTime()).toBe(created_at.getTime() - duration_seconds * 1000); // NOT created_at itself
   });
 });
 
@@ -1109,16 +1129,18 @@ describe('dispatchClaimedCall', () => {
   });
 
   test('a cold outbound call (no prior inbound contact) blocks the send', async () => {
+    hasPriorContact.mockResolvedValue(false);
     const outboundCall = { ...CALL, direction: 'outbound' };
-    const conn = makeDb({ lead: { ...OPEN_LEAD, first_contact_at: outboundCall.created_at } });
+    const conn = makeDb();
     const result = await dispatchClaimedCall(conn, outboundCall, NOW);
     expect(result.skipped).toBe('outbound_without_prior_contact');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('an outbound RETURN call (lead contacted us first) still sends', async () => {
+    hasPriorContact.mockResolvedValue(true);
     const outboundCall = { ...CALL, direction: 'outbound' };
-    const conn = makeDb({ lead: { ...OPEN_LEAD, first_contact_at: new Date('2026-09-20T12:00:00Z') } });
+    const conn = makeDb();
     const result = await dispatchClaimedCall(conn, outboundCall, NOW);
     expect(result.sent).toBe(true);
   });

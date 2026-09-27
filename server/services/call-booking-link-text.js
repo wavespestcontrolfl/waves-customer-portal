@@ -264,36 +264,47 @@ function metadataPatch(conn, value) {
 }
 
 // "an outbound return call to someone who contacted us first" (owner rule)
-// means the lead's OWN record already existed before THIS outbound call was
-// placed — an earlier inbound contact created it. A cold outbound call that
-// itself minted the lead (or one created after) is not a return call,
-// whatever the transcript's content classifies as (codex pre-push P1: the
-// V2 call_nature classifier judges the CONVERSATION, not who called whom
-// first, so a cold outbound pitch a caller responds to warmly can still
-// read as 'new_lead'). Shared by staging (its own lead fetch) and dispatch
-// (reusing the lead row it already fetched for other checks) so the two
-// never apply a different standard.
+// means GENUINE prior contact, not merely a lead record that happens to
+// predate this call. This lane used to compare the lead's own
+// first_contact_at against the call — replaced (codex #5012 P1) by the
+// canonical, shared probe every other outbound-return-message lane already
+// uses: hasPriorContact (outbound-call-reason.js) checks an actual
+// customer relationship, a real prior inbound CALL, a real prior inbound
+// TEXT, or any lead record at all with a matching phone before `before` —
+// unbounded, not the 48h lookback resolveOutboundCallReason's own reason
+// classifier uses for a different question. Reused verbatim rather than
+// reimplemented (CLAUDE.md rule 15).
 //
-// Compares against callStartedAt(call), NOT call.created_at (codex pre-push
-// P1): call-recording-processor.js's own leadFirstContactAt stamps a newly
-// minted lead's first_contact_at from callStartedAt(call) too, and for a
-// post-call fallback row (status callback / recording-status recovery —
-// call-timeline.js's POST_CALL_ROW_SOURCES) created_at is stamped AFTER the
-// call ends while callStartedAt backs the call's own length out of it.
-// Comparing first_contact_at against the later created_at on such a row
-// would read a lead THIS SAME call minted as having contacted us first.
-function outboundPriorContactMissing(call, lead) {
-  if (!String(call.direction || '').startsWith('outbound')) return false;
-  const firstContact = lead?.first_contact_at || lead?.created_at;
-  if (!firstContact) return true;
-  const callAt = callStartedAt(call) || new Date(call.created_at);
-  return new Date(firstContact).getTime() >= callAt.getTime();
+// customerId is passed ONLY when it predates THIS call
+// (customerPredatesThisCall's own rule, already used elsewhere in this
+// file for the owner's existing-customer never-rule) — a customer_id this
+// call itself just minted (the legacy call-created-customer path) proves
+// nothing about PRIOR contact and would otherwise short-circuit
+// hasPriorContact's own customerId branch to an automatic true. phone is
+// the call's own contact number (resolveCallContactPhone(call, null), no
+// extracted-phone override) — the exact number this call actually used,
+// never a dictated callback the caller has not necessarily always held.
+// before is callStartedAt(call), NOT call.created_at (codex pre-push P1,
+// preserved from the original check): a post-call fallback row (status
+// callback / recording-status recovery — call-timeline.js's
+// POST_CALL_ROW_SOURCES) stamps created_at AFTER the call ends, while
+// callStartedAt backs the call's own length out of it — comparing against
+// the later created_at would read evidence recorded DURING this same call
+// as having preceded it.
+async function outboundPriorContactMissing(call) {
+  if (!String(call?.direction || '').startsWith('outbound')) return false;
+  const { hasPriorContact } = require('./outbound-call-reason');
+  const { resolveCallContactPhone } = require('./call-recording-processor');
+  const has = await hasPriorContact({
+    customerId: customerPredatesThisCall(call) ? call.customer_id : null,
+    phone: resolveCallContactPhone(call, null),
+    before: callStartedAt(call) || new Date(call.created_at),
+  });
+  return !has;
 }
 
-async function outboundStagingReason(conn, call, leadId) {
-  if (!String(call.direction || '').startsWith('outbound')) return null;
-  const lead = leadId ? await conn('leads').where({ id: leadId }).first('first_contact_at', 'created_at') : null;
-  return outboundPriorContactMissing(call, lead) ? 'outbound_without_prior_contact' : null;
+async function outboundStagingReason(call) {
+  return (await outboundPriorContactMissing(call)) ? 'outbound_without_prior_contact' : null;
 }
 
 // This lane deliberately does NOT use call-commitments.js's callEndedAt for
@@ -616,7 +627,7 @@ async function stageOne(conn, call, now, boundary = null) {
   }
   const leadId = linkage.leadId;
   const extraction = extractionOf(call);
-  const reason = stagingIneligibleReason(call, extraction, leadId) || (await outboundStagingReason(conn, call, leadId));
+  const reason = stagingIneligibleReason(call, extraction, leadId) || (await outboundStagingReason(call));
   if (reason) {
     await claimMetadata(conn, call.id, { status: 'skipped', reason, staged_at });
     return 'skipped';
@@ -756,7 +767,7 @@ const DISPATCH_CHECKS = [
   ({ lead }) => (lead.estimate_id ? 'estimate_linked' : null),
   ({ lead }) => (lead.is_commercial === true ? 'commercial_lead' : null),
   ({ lead }) => (!lead.phone || !isUsPhone(lead.phone) ? 'lead_phone_unusable' : null),
-  ({ call, lead }) => (outboundPriorContactMissing(call, lead) ? 'outbound_without_prior_contact' : null),
+  async ({ call }) => ((await outboundPriorContactMissing(call)) ? 'outbound_without_prior_contact' : null),
   async ({ conn, call, lead }) => {
     const callStart = callStartedAt(call) || new Date(call.created_at);
     return (await bookedSinceCall(conn, lead.customer_id, callStart)) ? 'booked_since_call' : null;
