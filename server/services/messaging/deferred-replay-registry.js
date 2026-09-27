@@ -1564,24 +1564,44 @@ async function partialFanoutReplayOutcome(meta, result) {
       logger.warn(`[deferred-replay] partial-fanout in-flight stamp failed for invoice ${meta.invoice_id}: ${err.message}`);
     }
   }
-  // Only intervene in the exact overshadow shape described above — every
-  // other outcome (a genuinely fully-accepted fan-out, a replay hold, an
-  // unfinished Text's own retryable/uncertain state) already passes
-  // through billingDispatchOutcome correctly and must keep its own
-  // code/reason/retry timing (e.g. APP_PROVIDER_RETRY's retryAfterMs).
-  if (!accepted(result)) return result;
+  const { isReplayHold } = require('./billing-channel-routing');
   const pending = legs.filter((leg) => !accepted(leg));
-  if (!pending.length) return result;
   // An uncertain leg means we don't know whether it already went out — the
   // SAME rule invoice.js's own enqueue-time check follows (a whole-notice
   // replay would retry it too, risking a double-send): ANY uncertain leg
-  // blocks auto-retry entirely, surfaced via the log line below, never
-  // silently retried — even when another leg here IS genuinely retryable.
-  const uncertain = pending.filter((leg) => leg?.deliveryOutcome === 'uncertain');
+  // blocks auto-retry, whatever the representative outcome says. Checked
+  // BEFORE the representative early return below: an uncertain Email next
+  // to a retryable Text failure is represented by the retryable Text, and
+  // passing that through would retry the whole notice, uncertain leg
+  // included. A replay hold (PUSH_IN_FLIGHT, APP_PROVIDER_RETRY,
+  // APP_DELIVERY_HOLD) is labelled uncertain but is a deliberate retry the
+  // push dedupe protects, so it does not count.
+  const uncertain = pending.filter((leg) => leg?.deliveryOutcome === 'uncertain' && !isReplayHold(leg));
   if (uncertain.length) {
     logger.warn(`[deferred-replay] invoice ${meta.invoice_id} partial-fanout replay leg outcome uncertain (${uncertain.map((leg) => leg.code || leg.channel).join(', ')}) — not auto-retried (a replay would retry it too, risking a double-send)`);
-    return result;
+    // An accepted representative finishes the row (its accepted legs were
+    // stamped above). Anything else must never reach the scheduler as
+    // retryable; this non-retryable outcome lands on its blocked/terminal
+    // path for staff review.
+    if (accepted(result)) return result;
+    return {
+      channelResults,
+      notificationEventKey: result.notificationEventKey,
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'uncertain',
+      retryable: false,
+      code: 'PARTIAL_FANOUT_LEG_UNCERTAIN',
+      reason: `Billing leg delivery is uncertain, so the notice is not auto-retried: ${uncertain.map((leg) => leg.code || leg.channel).join(', ')}`,
+    };
   }
+  // Otherwise only intervene in the exact overshadow shape described above:
+  // every other outcome (a genuinely fully-accepted fan-out, a replay hold,
+  // an unfinished Text's own retryable state) already passes through
+  // billingDispatchOutcome correctly and must keep its own code/reason/retry
+  // timing (e.g. APP_PROVIDER_RETRY's retryAfterMs).
+  if (!accepted(result)) return result;
+  if (!pending.length) return result;
   const retryable = pending.filter((leg) => leg?.retryable === true || leg?.deferred === true);
   if (!retryable.length) return result;
   return {

@@ -354,6 +354,42 @@ describe('deferred-replay registry', () => {
       expect(update.mock.calls[0][0]).toHaveProperty('sms_sent_at');
     });
 
+    // Pre-push audit P1 (d32b278f8c): the uncertainty rule must hold even
+    // when the representative outcome is NOT accepted — an uncertain Email
+    // next to a retryable Text failure is represented by the retryable Text.
+    test('an uncertain Email next to a retryable Text failure is never retried: a non-retryable blocked outcome', async () => {
+      mockNoDurableEvidence();
+      const fallback = jest.fn(async () => ({
+        sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'BILLING_CHANNEL_FAILED', notificationEventKey: 'invoice:inv-1:sent',
+        channelResults: {
+          email: { sent: false, deliveryOutcome: 'uncertain', code: 'EMAIL_PROVIDER_TIMEOUT' },
+          sms: { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'BILLING_CHANNEL_FAILED' },
+        },
+      }));
+      const result = await dispatchDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', partial_fanout_retry: true,
+      }, fallback);
+      expect(result).toMatchObject({
+        sent: false, blocked: true, deliveryOutcome: 'uncertain', retryable: false, code: 'PARTIAL_FANOUT_LEG_UNCERTAIN',
+      });
+    });
+
+    test('an App replay hold labelled uncertain (PUSH_IN_FLIGHT) is a deliberate retry, never the uncertainty block', async () => {
+      mockNoDurableEvidence();
+      const hold = {
+        sent: false, blocked: true, provider: 'push', deliveryOutcome: 'uncertain', code: 'PUSH_IN_FLIGHT',
+        retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString(),
+      };
+      const fallback = jest.fn(async () => ({
+        ...hold, notificationEventKey: 'invoice:inv-1:sent',
+        channelResults: { push: hold, sms: { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'BILLING_CHANNEL_FAILED' } },
+      }));
+      const result = await dispatchDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', partial_fanout_retry: true,
+      }, fallback);
+      expect(result).toMatchObject({ code: 'PUSH_IN_FLIGHT', retryable: true, deferred: true });
+    });
+
     test('an uncertain leg blocks auto-retry entirely, even alongside a genuinely accepted Text leg — never silently retried (would risk a double-send)', async () => {
       mockNoDurableEvidence();
       const fallback = jest.fn(async () => ({
@@ -389,11 +425,13 @@ describe('deferred-replay registry', () => {
     test('an outcome that already correctly surfaces Text\'s own pending state (Email accepted, Text retryable) passes through untouched, preserving its own code/retryAfterMs', async () => {
       mockNoDurableEvidence();
       const fallback = jest.fn(async () => ({
-        sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'APP_PROVIDER_RETRY', retryAfterMs: 90000,
+        // The real adapter's APP_PROVIDER_RETRY shape (providers/twilio-sms.js):
+        // labelled uncertain, but a deferred replay hold.
+        sent: false, deliveryOutcome: 'uncertain', retryable: true, deferred: true, code: 'APP_PROVIDER_RETRY', retryAfterMs: 90000,
         notificationEventKey: 'invoice:inv-1:sent',
         channelResults: {
           email: { sent: true, deliveryOutcome: 'accepted' },
-          push: { sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'APP_PROVIDER_RETRY', retryAfterMs: 90000 },
+          push: { sent: false, deliveryOutcome: 'uncertain', retryable: true, deferred: true, code: 'APP_PROVIDER_RETRY', retryAfterMs: 90000 },
         },
       }));
       const result = await dispatchDeferredReplay('invoice_send_deferred', {

@@ -201,6 +201,26 @@ postgres('invoice_send_deferred partial-fanout replay: leg-retry guard + durable
     expect((await fixture.knex('invoices').where({ id: invoice.id }).first()).sms_sent_at).not.toBeNull();
   });
 
+  test('an uncertain Email next to a retryable Text failure: the row is blocked for review, never rescheduled', async () => {
+    const { customerId, invoice } = await seedCustomerAndInvoice();
+    const { row, notificationEventKey } = await queuePartialFanoutRetry({ customerId, invoiceId: invoice.id });
+
+    mockSendCustomerMessage.mockResolvedValue({
+      sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'BILLING_CHANNEL_FAILED', notificationEventKey,
+      channelResults: {
+        email: { sent: false, deliveryOutcome: 'uncertain', code: 'EMAIL_PROVIDER_TIMEOUT' },
+        sms: { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'BILLING_CHANNEL_FAILED' },
+      },
+    });
+
+    await tick();
+
+    const blocked = await fixture.knex('sms_log').where({ id: row.id }).first();
+    expect(blocked.status).toBe('blocked');
+    expect(blocked.metadata.provider_retry_code).toBeUndefined();
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
   test('an uncertain leg blocks auto-retry entirely: the row is NOT rescheduled for another attempt, even though Text also accepted', async () => {
     const { customerId, invoice } = await seedCustomerAndInvoice();
     const { row, notificationEventKey } = await queuePartialFanoutRetry({ customerId, invoiceId: invoice.id });
