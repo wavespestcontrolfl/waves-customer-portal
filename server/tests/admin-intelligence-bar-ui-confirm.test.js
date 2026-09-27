@@ -1041,6 +1041,47 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
     });
   });
 
+  test('create_appointment for a member\'s one-off: the card names the member discount and the list price it came off (owner 2026-09-27)', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingProposal.mockResolvedValueOnce({
+      price: 212.5, source: 'catalog', serviceId: 'svc-otp', serviceName: 'One-Time Pest Control Service',
+      listPrice: 250, discountName: 'WaveGuard Member Discount', discountPercent: 15,
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'One-Time Pest Control Service', time_window: '9:00 AM' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book a one-time pest visit at 9', context: 'schedule' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params._booking_price).toBe(212.5);
+      expect(body.pendingActions[0].params.price).toBe('$212.50 (catalog price $250.00 less 15% WaveGuard Member Discount) — invoiced when the visit is completed');
+      // A timed booking texts its confirmation — the contract says so.
+      const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
+      expect(labels).toContainEqual(expect.stringMatching(/^Customer will be texted a booking confirmation/));
+    });
+  });
+
+  test('create_appointment for a member\'s free WDO inspection: the card shows $0.00 as free, nothing invoiced', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingProposal.mockResolvedValueOnce({
+      price: 0, source: 'catalog', serviceId: 'svc-wdo', serviceName: 'WDO Inspection Service',
+      listPrice: 250, discountName: 'WaveGuard Member Discount (Termite Inspection)', discountPercent: 100,
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'WDO Inspection Service' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book a WDO inspection', context: 'schedule' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params._booking_price).toBe(0);
+      expect(body.pendingActions[0].params.price).toBe('$0.00 — free: catalog price $250.00 less 100% WaveGuard Member Discount (Termite Inspection); nothing is invoiced');
+    });
+  });
+
   test('create_appointment with no price for a dues-billed member: the card says so', async () => {
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
     scriptModelTurns([

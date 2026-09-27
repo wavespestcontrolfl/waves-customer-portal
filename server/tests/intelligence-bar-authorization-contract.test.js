@@ -203,12 +203,20 @@ test('schedule moves/cancels are NOT marked as contacting the customer; sends an
   expect(buildContract({ toolName: 'create_appointment', params: {}, displayParams: {} }).notifies_customer).toBe(false);
 });
 
-test('create_appointment: card bookings are credit-free by construction; reminders register for later (no text now)', () => {
+test('create_appointment: card bookings are credit-free by construction; a windowless one texts nothing until a time is set', () => {
   const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
   const labels = c.effects.map((e) => e.label);
   expect(labels).toContainEqual(expect.stringMatching(/^No inspection credit is redeemed by this booking/));
-  expect(labels).toContainEqual(expect.stringMatching(/reminder rows .*no confirmation text is sent now/));
+  expect(labels).toContainEqual(expect.stringMatching(/placeholder reminder rows: with no time set, no confirmation or reminder text goes out/));
   expect(c.notifies_customer).toBe(false);
+});
+
+test('create_appointment with a time texts the booking confirmation, as on the Schedule screen (owner 2026-09-27)', () => {
+  const c = buildContract({ toolName: 'create_appointment', params: { customer_id: 'c1', time_window: '9:00 AM' }, displayParams: { customer_id: 'c1', date: '2026-09-02' }, preview: { proposal: true, inspection_credit: { amount: 0 } } });
+  const labels = c.effects.map((e) => e.label);
+  expect(labels).toContainEqual(expect.stringMatching(/^Customer will be texted a booking confirmation, as on the Schedule screen/));
+  expect(labels).toContainEqual(expect.stringMatching(/^Registers the 72h\/24h reminder rows/));
+  expect(c.notifies_customer).toBe(true);
 });
 
 test('dynamic legacy jobs disclose launch, spend, variable writes, and internal comms explicitly', () => {

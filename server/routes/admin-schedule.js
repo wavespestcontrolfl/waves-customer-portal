@@ -1537,6 +1537,8 @@ const {
   frozenCapsFromRow,
   resolveStoredDiscountCaps,
   pruneObsoleteFrozenAddonCaps,
+  stampPrimaryLineDiscount,
+  capsSnapshotFromPricing,
 } = require('../services/booking/visit-financial-stamps');
 const { anchorSoleProperty } = require('../services/customer-properties');
 
@@ -2834,29 +2836,6 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       serviceCategoryFilter: appointmentDiscount.service_category_filter || null,
       maxDiscountDollars: appointmentDiscount.max_discount_dollars != null ? Number(appointmentDiscount.max_discount_dollars) : null,
     } : null,
-  };
-}
-
-// The caps a CREATE-time booking priced against (GitHub Codex round 1,
-// PRRT_kwDOR3YQi86kllyD): pricing.primaryDiscount / pricing.addonLines[i]
-// .discount already carry the catalog's max_discount_dollars, resolved
-// live once per request by resolveLineDiscount — the SAME set every
-// seeded child/booster in this request shares (a due-add-on subset never
-// changes which catalog cap a given discount_id maps to), so one snapshot
-// built here is reused across the parent + every child/booster's own
-// stampPricingRegimeMarker call, matching resolveStoredDiscountCaps'
-// { line, addons } shape exactly.
-function capsSnapshotFromPricing(pricing) {
-  const addons = {};
-  for (const line of pricing?.addonLines || []) {
-    if (line.discount?.discountId != null) addons[line.discount.discountId] = line.discount.maxDiscountDollars ?? null;
-  }
-  // Round 4: the line slot is keyed to its own discount id (matching
-  // resolveStoredDiscountCaps' { id, cap } shape) — see that function's
-  // own comment for why a bare cap number is no longer trustworthy.
-  return {
-    line: { id: pricing?.primaryDiscount?.discountId ?? null, cap: pricing?.primaryDiscount?.maxDiscountDollars ?? null },
-    addons,
   };
 }
 
@@ -8146,11 +8125,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (pricing.appointmentDiscount && cols.discount_service_key_filter) insertData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
       if (pricing.appointmentDiscount && cols.discount_service_category_filter) insertData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
       if (pricing.appointmentDiscount && cols.discount_max_dollars) insertData.discount_max_dollars = pricing.appointmentDiscount.maxDiscountDollars ?? null;
-      if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) insertData.line_discount_id = pricing.primaryDiscount.discountId;
-      if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) insertData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
-      if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) insertData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
-      if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) insertData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
-      if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) insertData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
+      stampPrimaryLineDiscount(insertData, pricing, cols);
       // Pricing-regime provenance (GATE_DISCOUNT_STACKING) — lets a later
       // extension's own restack tell a null primary_line_price genuinely
       // means "no primary" apart from a legacy/unstructured row (see

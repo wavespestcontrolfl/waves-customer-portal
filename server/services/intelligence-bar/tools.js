@@ -17,6 +17,8 @@ const { applyAssignable, assertAssignableTechnician } = require('../technician-e
 const { createDefaultCustomerRows } = require('../customer-default-rows');
 const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
 const { resolveBillingLane } = require('../billing-lane');
+const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
+const { discountStackingLive } = require('../../config/feature-gates');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed, dateOnlyString,
   windowDurationMinutes, deriveWindowEnd,
@@ -300,7 +302,7 @@ The first call returns a PREVIEW (before/after facts) and nothing changes; the o
     description: `Create a new scheduled service appointment.
 service_type examples (catalog names): "Quarterly Pest Control Service", "Bi-Monthly Lawn Care Service", "Seasonal Mosquito Control Service", "Bi-Monthly Tree & Shrub Care Service", "Waves Assessment". Quarterly Tree & Shrub is retired for new sales (existing quarterly plans only).
 time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".
-price: the visit price in dollars when the user states one. A stated price needs service_type to be the exact catalog name. Omit price to use the catalog price for service_type; the confirmation card shows the price either way. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.`,
+price: the visit price in dollars when the user states one. A stated price needs service_type to be the exact catalog name. Omit price to use the catalog price for service_type (a WaveGuard member's one-off gets the member discount); the confirmation card shows the price either way. A booking with a time texts the customer a confirmation, as the Schedule screen does. When neither exists and the customer's billing needs a price on the visit, the tool asks for one — ask the user and propose again with price. Free visit types (appointment, estimate, re-service, follow-up) never carry a price.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -2431,6 +2433,34 @@ async function resolveTechnicianByName(name) {
   return matches[0] || null;
 }
 
+// The WaveGuard member discount a member's one-off catalog service carries
+// (owner 2026-09-27: "members or recurring customers get 15% off"). Every
+// customer with a live recurring series is a member under the discount
+// engine's own Bronze floor (tier, or active monthly-rate member), so its
+// eligibility check IS that rule. The catalog's member rows are the
+// percentage, non-tier rows with a Bronze floor, taken in the catalog's own
+// priority order: a service-specific one first (a WDO inspection is free
+// for members), else the generic 15% WaveGuard Member Discount.
+async function memberOneOffDiscount({ customer, catalogRow, listPrice, conn = db }) {
+  const rows = await conn('discounts')
+    .where({
+      is_active: true, show_in_invoices: true, requires_waveguard_tier: 'Bronze',
+      discount_type: 'percentage', is_waveguard_tier_discount: false,
+    })
+    .where((q) => q.whereNull('service_key_filter').orWhere('service_key_filter', catalogRow.service_key || ''))
+    .orderBy('priority', 'asc')
+    .orderBy('id', 'asc')
+    .select('*');
+  const DiscountEngine = require('../discount-engine');
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const failures = await DiscountEngine.manualEligibilityFailures(row, customer, {
+      subtotal: listPrice, serviceKey: catalogRow.service_key || null, serviceCategory: catalogRow.category || null,
+    }, conn);
+    if (!failures.length) return row;
+  }
+  return null;
+}
+
 // The booking's price, the way a Schedule-screen booking gets one (owner
 // 2026-09-27: the Intelligence Bar books like the Schedule screen, it does
 // not send the operator there). Both paths run the Schedule POST's own
@@ -2509,15 +2539,40 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, conn = db 
   // Lazy: the route module is large and requires services that require this
   // module (same avoid-a-route-load-cycle pattern as schedule-tools).
   const { buildAppointmentPricing } = require('../../routes/admin-schedule');
+  // A member's one-off catalog service carries the member discount, as a
+  // line discount through the same builder a picked discount rides on the
+  // Schedule screen. Not for a stated price (the operator's own number), a
+  // recurring plan row (a dues member's is covered above), or the one-time
+  // mosquito line (its lot ladder already prices members as recurring
+  // customers).
+  const memberDiscount = !stated && catalogRow.billing_type !== 'recurring' && Number(catalogDefault) > 0
+    ? await memberOneOffDiscount({ customer, catalogRow, listPrice: Number(catalogDefault), conn })
+    : null;
   const pricing = await buildAppointmentPricing({
     serviceRecord: catalogRow,
     serviceType,
     serviceId: catalogRow.id,
     primaryLinePrice: stated ? statedPrice : catalogDefault,
+    ...(memberDiscount ? { primaryLineDiscount: { discountId: memberDiscount.id } } : {}),
     customer,
   });
-  if (!(Number(pricing.finalPrice) > 0)) return { price: null, source: null, catalogRow, pricing: null };
+  // $0 is a real price only when a member discount made the visit free (the
+  // catalog's free WDO for members); a $0 list price is no price at all.
+  const priced = Number(pricing.finalPrice) > 0 || (pricing.primaryDiscount && Number(pricing.finalPrice) === 0);
+  if (!priced) return { price: null, source: null, catalogRow, pricing: null };
   return { price: Number(pricing.finalPrice), source: stated ? 'stated' : 'catalog', catalogRow, pricing };
+}
+
+// A discounted booking's line-discount columns and pricing-regime marker,
+// through the same shared stamps the Schedule create writes. Only a
+// discounted booking pays for the column read.
+async function bookingDiscountStamps(trx, pricing) {
+  if (!pricing?.primaryDiscount) return {};
+  const cols = await trx('scheduled_services').columnInfo();
+  const stamps = {};
+  stampPrimaryLineDiscount(stamps, pricing, cols);
+  if (discountStackingLive()) stampPricingRegimeMarker(stamps, cols, capsSnapshotFromPricing(pricing));
+  return stamps;
 }
 
 // Cent-exact comparison of two booking prices (null = no price).
@@ -2537,6 +2592,9 @@ const BOOKING_PRICE_CHANGED_ERROR = 'This visit\'s price or catalog service chan
 // with a fee, free-by-design visit types, and every PRICED booking pass.
 // Returns the model-facing refusal, or null when the booking bills or is free.
 function ibBookingBillingRefusal(customer, serviceType, price) {
+  // A stamped $0 comes only from a member discount that makes the visit free
+  // (ibBookingPricing) — intentionally free, never a money gap.
+  if (price === 0) return null;
   const { recurringWithoutBillableAmount } = require('../../routes/admin-schedule');
   const priced = Number(price) > 0;
   // Below its recurring early return, the gate asks a question that does not
@@ -2573,11 +2631,15 @@ async function ibBookingProposal(customerId, serviceType, statedPrice) {
   if (booking.error) return { error: booking.error };
   const refusal = ibBookingBillingRefusal(customer, serviceType, booking.price);
   if (refusal) return { error: refusal };
+  const discount = booking.pricing?.primaryDiscount || null;
   return {
     price: booking.price,
     source: booking.source,
     serviceId: booking.catalogRow?.id || null,
     serviceName: booking.catalogRow?.name || null,
+    listPrice: discount ? Number(booking.pricing.primaryBase) : null,
+    discountName: discount?.discountName || null,
+    discountPercent: discount && discount.discountType === 'percentage' ? Number(discount.discountAmount) : null,
   };
 }
 
@@ -2754,6 +2816,7 @@ async function createAppointment(input, actionContext = {}) {
     // Re-asserted FOR SHARE on the writing trx: the name/id resolution above
     // ran before this transaction opened.
     await assertAssignableTechnician(technician_id, { conn: trx, date: dateStr });
+    const discountStamps = await bookingDiscountStamps(trx, lockedBooking.pricing);
     const [created] = await trx('scheduled_services').insert({
       customer_id,
       // Sole-active-property anchor for the visit-group stamp below —
@@ -2778,8 +2841,9 @@ async function createAppointment(input, actionContext = {}) {
       ...(lockedBooking.price != null ? {
         estimated_price: lockedBooking.price,
         primary_line_price: lockedBooking.pricing.primaryBase,
-        create_invoice_on_complete: true,
+        create_invoice_on_complete: lockedBooking.price > 0,
       } : {}),
+      ...discountStamps,
       created_at: new Date(),
       updated_at: new Date(),
     }).returning('*');
@@ -2893,10 +2957,10 @@ async function createAppointment(input, actionContext = {}) {
 
   // Register the durable confirmation/reminder row synchronously with the
   // insert, like the canonical admin create path (admin-schedule POST) —
-  // without it the 72h/24h reminder cron never sees the visit. Registration
-  // only: sendConfirmation:false marks the confirmation not-applicable
-  // (mirroring an admin-created visit with the "Send confirmation SMS"
-  // checkbox off), so no SMS goes out — sends stay operator-initiated.
+  // without it the 72h/24h reminder cron never sees the visit. The booking
+  // confirmation text goes out exactly as a Schedule-screen booking's does
+  // (owner 2026-09-27): registered deferred here, sent after the result is
+  // built (below), and the card discloses it.
   //
   // Windowless creates ("put this customer on Friday") register at the
   // canonical date+08:00 slot time — the convention the reminder DB sync
@@ -2913,13 +2977,16 @@ async function createAppointment(input, actionContext = {}) {
   // Best-effort like the admin path: a registration failure must not fail
   // the already-committed insert (registerAppointment also self-alerts).
   let reminderWarning = null;
+  const AppointmentReminders = require('../appointment-reminders');
   try {
-    const AppointmentReminders = require('../appointment-reminders');
+    // The Schedule create's own options: fromCommittedRow reads the time
+    // from the committed row, and a windowless booking's row is a
+    // non-delivering placeholder (it never texts an 08:00 nobody chose).
     await AppointmentReminders.registerAppointment(
       appointment.id, customer_id,
       `${dateStr}T${win.start || '08:00'}`,
       service_type, 'admin_ib',
-      { sendConfirmation: false, closeReminderWindows: !win.start },
+      { sendConfirmation: true, deferConfirmation: true, closeReminderWindows: !win.start, fromCommittedRow: true },
     );
   } catch (err) {
     logger.error(`[intelligence-bar] reminder registration failed for appointment ${appointment.id}: ${err.message}`);
@@ -2930,6 +2997,19 @@ async function createAppointment(input, actionContext = {}) {
 
   // Ids only — customer names/phones/addresses never go to logs (PII rule).
   logger.info(`[intelligence-bar] Created appointment ${appointment.id} for customer ${customer_id} on ${dateStr}`);
+
+  // The booking confirmation text, deferred past the result exactly as the
+  // Schedule create defers it (the landline lookup + send are slow). A
+  // failed registration has no row to send from, so nothing is attempted.
+  if (!reminderWarning) {
+    setImmediate(async () => {
+      try {
+        await AppointmentReminders.sendConfirmation(appointment.id);
+      } catch (err) {
+        logger.error(`[intelligence-bar] booking confirmation failed for appointment ${appointment.id}: ${err.message}`);
+      }
+    });
+  }
 
   // One `warning` key — both the reminder failure and the occupancy advisory
   // must survive when they coincide (the card renders result.warning).

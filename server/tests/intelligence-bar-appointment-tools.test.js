@@ -31,6 +31,7 @@ jest.mock('../sockets', () => ({
 }));
 jest.mock('../services/appointment-reminders', () => ({
   registerAppointment: jest.fn().mockResolvedValue({ id: 'rem-1' }),
+  sendConfirmation: jest.fn().mockResolvedValue(true),
 }));
 // Partial mock: real ET helpers throughout, but sameDayWindowElapsed is a spy
 // so the same-day elapsed-window guard is deterministic regardless of the wall
@@ -105,6 +106,11 @@ function wireDb(queues) {
     if (table === 'services' && !queues.services) {
       return { where() { return this; }, whereIn() { return this; }, select: () => Promise.resolve([]) };
     }
+    // The member one-off discount lookup (owner 2026-09-27): no member
+    // discount rows unless a test queues its own.
+    if (table === 'discounts' && !queues.discounts) {
+      return { where() { return this; }, orderBy() { return this; }, select: () => Promise.resolve([]) };
+    }
     const q = queues[table];
     if (!q || q.length === 0) throw new Error(`Unexpected db('${table}') call`);
     return q.shift();
@@ -124,6 +130,9 @@ beforeEach(() => {
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: jest.fn(() => 'now()') };
 });
+// A booking defers its confirmation text past the result (setImmediate), so
+// let every test's deferred work finish before the next test clears mocks.
+afterEach(async () => { await new Promise((resolve) => setImmediate(resolve)); });
 
 describe('create_appointment', () => {
   test('rejects a garbage date with a clear tool error before any DB call', async () => {
@@ -174,7 +183,7 @@ describe('create_appointment', () => {
     });
   });
 
-  test('registers the durable reminder row with the insert — registration only, no confirmation SMS', async () => {
+  test('registers the durable reminder row with the insert and texts the booking confirmation, as the Schedule screen does (owner 2026-09-27)', async () => {
     wireDb({
       customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }),
         chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) }) /* locked liveness re-read inside the booking trx (GH r10 P1) */],
@@ -187,13 +196,17 @@ describe('create_appointment', () => {
     });
 
     expect(result.success).toBe(true);
-    // Canonical admin-create semantics: durable row for the 72h/24h cron,
-    // sendConfirmation:false so NO SMS goes out (sends stay operator-initiated).
-    // A REAL start time was given, so the reminder windows stay armed.
+    // The Schedule create's own registration: durable row for the 72h/24h
+    // cron, the confirmation deferred past the response, the time read from
+    // the committed row. A REAL start time was given, so the windows stay armed.
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
       'appt-1', 'cust-1', '2099-01-15T09:00', 'Pest Control', 'admin_ib',
-      { sendConfirmation: false, closeReminderWindows: false },
+      { sendConfirmation: true, deferConfirmation: true, closeReminderWindows: false, fromCommittedRow: true },
     );
+    // ...and the confirmation text goes out after the result is built.
+    expect(AppointmentReminders.sendConfirmation).not.toHaveBeenCalled();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(AppointmentReminders.sendConfirmation).toHaveBeenCalledWith('appt-1');
   });
 
   test('windowless create registers at the canonical 08:00 slot time with BOTH reminder windows pre-closed', async () => {
@@ -215,7 +228,7 @@ describe('create_appointment', () => {
     });
     expect(AppointmentReminders.registerAppointment).toHaveBeenCalledWith(
       'appt-1', 'cust-1', '2099-01-15T08:00', 'Pest Control', 'admin_ib',
-      { sendConfirmation: false, closeReminderWindows: true },
+      { sendConfirmation: true, deferConfirmation: true, closeReminderWindows: true, fromCommittedRow: true },
     );
   });
 
@@ -231,6 +244,9 @@ describe('create_appointment', () => {
     });
     expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('reminder registration failed'));
+    // No reminder row → no confirmation is attempted.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(AppointmentReminders.sendConfirmation).not.toHaveBeenCalled();
   });
 
   test('success log carries ids only — never the customer name (no-PII-in-logs rule)', async () => {
@@ -638,11 +654,89 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
     expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 1200, create_invoice_on_complete: true, service_id: 'svc-tl' });
   });
 
-  test('a member\'s one-off catalog service is priced too, exactly as the Schedule screen books it', async () => {
-    const insertChain = wirePriced({ customer: { ...PER_VISIT, ...MEMBER_BILLING }, rows: [ONE_TIME_PEST] });
-    const result = await book({ _booking_price: 250, _booking_service_id: 'svc-otp' });
-    expect(result.success).toBe(true);
-    expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ estimated_price: 250, create_invoice_on_complete: true });
+  describe('a member\'s one-off carries the WaveGuard member discount (owner 2026-09-27: "members or recurring customers get 15% off")', () => {
+    const MEMBER = { ...PER_VISIT, ...MEMBER_BILLING, waveguard_tier: 'Gold', active: true };
+    const GENERIC = {
+      id: 'disc-member', discount_key: 'waveguard_member', name: 'WaveGuard Member Discount', discount_type: 'percentage',
+      amount: '15.00', requires_waveguard_tier: 'Bronze', service_key_filter: null, is_active: true, show_in_invoices: true, max_discount_dollars: null,
+    };
+    const WDO_FREE = {
+      id: 'disc-wdo', discount_key: 'waveguard_member_wdo', name: 'WaveGuard Member Discount (Termite Inspection)', discount_type: 'percentage',
+      amount: '100.00', requires_waveguard_tier: 'Bronze', service_key_filter: 'wdo_inspection', is_active: true, show_in_invoices: true, max_discount_dollars: null,
+    };
+    // Preflight + locked reads: the member-row list, then the builder's own
+    // load of the picked row (resolveLineDiscount → loadInvoiceDiscount).
+    const listing = (rows) => chain({ orderBy: jest.fn().mockReturnThis(), select: jest.fn().mockResolvedValue(rows) });
+    const discountsQueue = (listed, picked) => [
+      listing(listed), chain({ first: jest.fn().mockResolvedValue(picked) }),
+      listing(listed), chain({ first: jest.fn().mockResolvedValue(picked) }),
+    ];
+    const LINE_DISCOUNT_COLS = {
+      line_discount_id: {}, line_discount_name: {}, line_discount_type: {}, line_discount_amount: {}, line_discount_dollars: {},
+    };
+    const wireMember = ({ rows, listed, picked, customer = MEMBER }) => {
+      const insertChain = chain();
+      insertChain.returning.mockImplementation(async () => [{ id: 'appt-1', ...insertChain.insert.mock.calls[0][0] }]);
+      wireDb({
+        customers: [chain({ first: jest.fn().mockResolvedValue(customer) }), chain({ first: jest.fn().mockResolvedValue(customer) })],
+        services: [catalog(rows), catalog(rows)],
+        discounts: discountsQueue(listed, picked),
+        // probe, the stamp helper's column read, then the insert
+        scheduled_services: [chain(), chain({ columnInfo: jest.fn().mockResolvedValue(LINE_DISCOUNT_COLS) }), insertChain],
+      });
+      return insertChain;
+    };
+
+    test('15% off the catalog price, stamped as the line discount the Schedule create writes', async () => {
+      const insertChain = wireMember({ rows: [ONE_TIME_PEST], listed: [GENERIC], picked: GENERIC });
+      const result = await book({ _booking_price: 212.5, _booking_service_id: 'svc-otp' });
+      expect(result).toMatchObject({ success: true, price: 212.5 });
+      expect(insertChain.insert.mock.calls[0][0]).toMatchObject({
+        estimated_price: 212.5,
+        primary_line_price: 250,
+        create_invoice_on_complete: true,
+        line_discount_id: 'disc-member',
+        line_discount_name: 'WaveGuard Member Discount',
+        line_discount_type: 'percentage',
+        line_discount_amount: 15,
+        line_discount_dollars: 37.5,
+      });
+    });
+
+    test('the catalog\'s own member row wins by priority: a WDO inspection is free for members — a real $0, nothing invoiced', async () => {
+      const wdo = { ...ONE_TIME_PEST, id: 'svc-wdo', name: 'WDO Inspection Service', service_key: 'wdo_inspection', base_price: '250.00', category: 'termite' };
+      const insertChain = wireMember({ rows: [wdo], listed: [WDO_FREE, GENERIC], picked: WDO_FREE });
+      const result = await book({ service_type: 'WDO Inspection Service', _booking_price: 0, _booking_service_id: 'svc-wdo' });
+      expect(result.success).toBe(true);
+      expect(insertChain.insert.mock.calls[0][0]).toMatchObject({
+        estimated_price: 0, primary_line_price: 250, create_invoice_on_complete: false, line_discount_id: 'disc-wdo', line_discount_dollars: 250,
+      });
+    });
+
+    test('a stated price is the operator\'s own number: no member discount is looked up or applied', async () => {
+      const insertChain = wirePriced({ customer: MEMBER, rows: [ONE_TIME_PEST] });
+      const result = await book({ price: 180, _booking_price: 180, _booking_service_id: 'svc-otp' });
+      expect(result.success).toBe(true);
+      const payload = insertChain.insert.mock.calls[0][0];
+      expect(payload).toMatchObject({ estimated_price: 180 });
+      expect(payload).not.toHaveProperty('line_discount_id');
+    });
+
+    test('a non-member gets the list price — the member rows fail the discount engine\'s own eligibility', async () => {
+      const insertChain = chain();
+      insertChain.returning.mockImplementation(async () => [{ id: 'appt-1', ...insertChain.insert.mock.calls[0][0] }]);
+      wireDb({
+        customers: [chain({ first: jest.fn().mockResolvedValue(PER_VISIT) }), chain({ first: jest.fn().mockResolvedValue(PER_VISIT) })],
+        services: [catalog([ONE_TIME_PEST]), catalog([ONE_TIME_PEST])],
+        discounts: [listing([GENERIC]), listing([GENERIC])],
+        scheduled_services: [chain(), insertChain],
+      });
+      const result = await book({ _booking_price: 250, _booking_service_id: 'svc-otp' });
+      expect(result.success).toBe(true);
+      const payload = insertChain.insert.mock.calls[0][0];
+      expect(payload).toMatchObject({ estimated_price: 250 });
+      expect(payload).not.toHaveProperty('line_discount_id');
+    });
   });
 
   test('the one-time mosquito default comes from the Schedule screen\'s lot ladder, not the flat catalog price', async () => {
