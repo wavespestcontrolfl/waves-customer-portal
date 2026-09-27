@@ -498,17 +498,20 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
       { id: 'pending', bucket: 'citability_backfill', status: 'pending', page_url: '/blog/termite-guide/?seed=1', signal_metadata: { evidence: 'pending' } },
       { id: 'claimed', bucket: 'citability_backfill', status: 'claimed', page_url: 'https://www.wavespestcontrol.com/blog/termite-guide/', signal_metadata: { evidence: 'claimed' } },
       { id: 'review', bucket: 'citability_backfill', status: 'pending_review', page_url: 'https://wavespestcontrol.com/blog/termite-guide#faq', signal_metadata: { evidence: 'review' } },
+      { id: 'review-open', bucket: 'citability_backfill', status: 'pending_review', page_url: 'https://wavespestcontrol.com/blog/termite-guide#open', signal_metadata: { evidence: 'open-pr' } },
       { id: 'spoke', bucket: 'citability_backfill', status: 'pending', page_url: 'https://sarasota.wavespestcontrol.com/blog/termite-guide/', signal_metadata: {} },
     ];
-    const trx = jest.fn(() => {
+    const trx = jest.fn((table) => {
       let id = null;
       const q = {
-        where: jest.fn((a, b) => { if (a === 'id') id = b; return q; }),
+        where: jest.fn((a, b) => { if (a === 'id' || a === 'opportunity_id') id = b; return q; }),
         whereIn: jest.fn(() => q),
         whereNotNull: jest.fn(() => q),
+        whereNull: jest.fn(() => q),
         whereRaw: jest.fn(() => q),
         forUpdate: jest.fn(() => q),
         select: jest.fn(async () => rows),
+        first: jest.fn(async () => (table === 'autonomous_runs' && id === 'review-open' ? { id: 'run-open' } : undefined)),
         update: jest.fn(async (patch) => {
           Object.assign(rows.find((row) => row.id === id), patch);
           return 1;
@@ -524,12 +527,15 @@ describe('citability page ownership after a gate-off ordinary refresh', () => {
       now: new Date('2026-09-26T16:00:00Z'),
     });
 
-    expect(count).toBe(3);
+    expect(count).toBe(4);
     expect(rows.find((row) => row.id === 'pending')).toMatchObject({
       status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit',
     });
     expect(rows.find((row) => row.id === 'claimed').status).toBe('claimed');
-    expect(rows.find((row) => row.id === 'review').status).toBe('pending_review');
+    expect(rows.find((row) => row.id === 'review')).toMatchObject({
+      status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit',
+    });
+    expect(rows.find((row) => row.id === 'review-open').status).toBe('pending_review');
     expect(internals.pageEditSuperseded(rows.find((row) => row.id === 'claimed'))).toBe(true);
     expect(internals.pageEditSuperseded(rows.find((row) => row.id === 'review'))).toBe(true);
     expect(internals.pageEditSuperseded(rows.find((row) => row.id === 'spoke'))).toBe(false);

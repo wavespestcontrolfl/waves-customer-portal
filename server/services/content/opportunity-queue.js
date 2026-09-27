@@ -139,7 +139,16 @@ async function supersedeCitabilityBackfillsForPage(trx, { pageUrl, ordinaryDedup
       try { metadata = JSON.parse(metadata); } catch { metadata = {}; }
     }
     metadata = metadata && typeof metadata === 'object' ? metadata : {};
-    const pending = row.status === 'pending';
+    let hasOpenPr = false;
+    if (row.status === 'pending_review') {
+      hasOpenPr = Boolean(await trx('autonomous_runs')
+        .where('opportunity_id', row.id)
+        .whereNotNull('astro_pr_url')
+        .whereNull('astro_pr_retired_at')
+        .whereNull('published_url')
+        .first('id'));
+    }
+    const terminal = row.status === 'pending' || (row.status === 'pending_review' && !hasOpenPr);
     await trx('opportunity_queue').where('id', row.id).update({
       signal_metadata: JSON.stringify({
         ...metadata,
@@ -148,7 +157,7 @@ async function supersedeCitabilityBackfillsForPage(trx, { pageUrl, ordinaryDedup
           marked_at: now.toISOString(),
         },
       }),
-      ...(pending ? {
+      ...(terminal ? {
         status: 'skipped',
         skip_reason: PAGE_EDIT_SUPERSEDED_REASON,
         completed_at: now,
