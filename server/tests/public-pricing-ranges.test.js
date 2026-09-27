@@ -194,8 +194,9 @@ describe('public pricing ranges', () => {
 
     // The published LOW is the list-price typical minimum — a WaveGuard
     // bundle discount must never lower it.
+    // Smallest typical home (10th percentile, light landscaping), list price.
     const listMin = Math.min(...sp.pricePestControl(
-      { footprint: 1000, propertyType: 'single_family' },
+      { footprint: 1450, propertyType: 'single_family', features: { shrubs: 'light', trees: 'light', complexity: 'simple' } },
       { frequency: 'quarterly' },
     ).tiers.map((t) => t.perApp));
     expect(pest.low).toBe(Math.floor(listMin));

@@ -1416,7 +1416,10 @@ scheduling, before WaveGuard bundle discounts, recurring-customer perks,
 and advertised waivers), not an envelope of every possible quote — a
 larger or more complex property, a heavier infestation, a bigger scope, or
 emergency/after-hours service can quote above the published high, and the
-payload's `disclaimer` says so. Consumed by the Astro build for the
+payload's `disclaimer` says so. "Typical" is sized from the estimator's own
+property lookups: the middle 80% (10th-90th percentile) of the residential
+homes in `property_lookups` for house, lot, and turf size, with the
+landscaping, pool-cage, and water-proximity mix those homes show. Consumed by the Astro build for the
 agent-readable /pricing.md surface and directly by AI agents (both
 surfaces read this same computed payload — neither carries its own copy
 of the sweep). Exact per-property pricing stays on POST
@@ -1427,7 +1430,7 @@ from the tier sweep the same way the lawn row above dropped its retired
 6x column), and `notes` reads "6 or 9 applications per year by tier"
 instead of the old 4/6/9 wording; since the 2026-09-27 typical-job
 narrowing above, the published low is Standard's list-price floor on a
-typical lot (`low` ≈ $40), not a bundle-discounted value.
+typical lot (`low` ≈ $36), not a bundle-discounted value.
 `/api/public/credentials` (+ `/api/public/credentials/:slug`) (read-only
 canonical FDACS / license / insurance numbers — no auth, no token, public
 `Cache-Control`. Consumed by the Astro content build; intentionally public

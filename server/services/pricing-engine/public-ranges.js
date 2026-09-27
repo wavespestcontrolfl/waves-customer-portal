@@ -25,12 +25,24 @@
 // - commercial is custom-quoted and excluded from the sweep.
 const constants = require('./constants');
 const sp = require('./service-pricing');
+const { calculatePerimeter } = require('./property-calculator');
 
-// Typical single-family home footprints (sq ft) — NOT the brackets' extremes.
-const TYPICAL_HOMES = [1500, 2000, 2500, 3000, 3500];
-// Wider span for general pest and termite monitoring: the owner judged the
-// 1,500-3,500 sq ft span too tight for those two rows (2026-09-27).
-const WIDE_TYPICAL_HOMES = [1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000];
+// Typical SW Florida residential property, as measured by the estimator's own
+// property lookups: the 10th/25th/50th/75th/90th percentiles of the 1,022
+// residential homes in property_lookups.enriched_snapshot (2026-06-12 to
+// 2026-09-26, mostly Manatee and Sarasota) — the middle 80% of the homes we
+// quote. Owner ruling 2026-09-27: size ranges to the homes we service.
+// Re-derive these from property_lookups if the service area shifts.
+const TYPICAL_HOMES = [1450, 1750, 2150, 2750, 3450]; // homeSqFt
+const MEDIAN_HOME = 2150;
+const TYPICAL_LOTS = [5400, 7000, 8900, 12700, 22500]; // lotSqFt
+const TYPICAL_TURF = [1200, 2200, 3450, 5500, 11500]; // estimatedTurfSf
+// ~95% of those homes have light or moderate shrubs, trees, and landscaping
+// (heavy is 5-12%); 43% have a pool cage.
+const TYPICAL_LANDSCAPES = [
+  { shrubs: 'light', trees: 'light', complexity: 'simple' },
+  { shrubs: 'moderate', trees: 'moderate', complexity: 'moderate' },
+];
 
 function sweepValues(inputs, fn, pick) {
   const values = [];
@@ -87,13 +99,10 @@ function buildRows() {
   const maxWaveGuardPct = Math.round(
     Math.max(...Object.values(constants.WAVEGUARD.tiers).map((t) => t.discount || 0)) * 100);
 
-  // Bare and heavy-feature residential profiles — the pest pricer adds
-  // charges for heavy shrubs/trees and pool cages, ordinary auto-priced
-  // inputs for a typical home (not custom-quote territory).
-  const PEST_PROFILES = [
-    { property: {} },
-    { property: { features: { shrubs: 'heavy', trees: 'moderate', poolCage: true } } },
-  ];
+  // Typical landscaping, with and without a pool cage.
+  const PEST_PROFILES = TYPICAL_LANDSCAPES
+    .flatMap((features) => [features, { ...features, poolCage: true }])
+    .map((features) => ({ property: { features } }));
   add('general_pest_quarterly', () => rangeRow({
     key: 'general_pest_quarterly',
     name: 'General Pest Control (WaveGuard recurring)',
@@ -102,7 +111,7 @@ function buildRows() {
     // per-application prices sit below quarterly, so quarterly-only would
     // overstate the low end of an advertised option.
     values: sweepValues(
-      WIDE_TYPICAL_HOMES.flatMap((f) => PEST_PROFILES.map((p) => ({ f, p }))),
+      TYPICAL_HOMES.flatMap((f) => PEST_PROFILES.map((p) => ({ f, p }))),
       ({ f, p }) => sp.pricePestControl({ footprint: f, propertyType: 'single_family', ...p.property }, { frequency: 'quarterly' }),
       (r) => (r.tiers || []).map((t) => t.perApp)),
     notes: `Quarterly, bi-monthly, or monthly cadence; priced by home size, landscaping, and property features — larger, more complex homes price higher. WaveGuard bundle tiers discount qualifying recurring services up to ${maxWaveGuardPct}%. A one-time $${Math.round(constants.PEST.initialFee)} initial service fee applies to standalone pest service only — waived when bundled with another recurring service or with annual prepay.`,
@@ -164,7 +173,7 @@ function buildRows() {
     // Typical scope: 1-3 rooms, light/moderate severity, chemical method,
     // ready prep, single-family occupancy — the auto-priced typical job.
     values: sweepValues(
-      [1500, 2000, 3000].flatMap((footprint) =>
+      TYPICAL_HOMES.flatMap((footprint) =>
         [1, 2, 3].flatMap((rooms) =>
           ['light', 'moderate'].map((severity) => ({ footprint, rooms, severity })))),
       ({ footprint, rooms, severity }) => sp.priceBedBugTreatment(
@@ -178,16 +187,24 @@ function buildRows() {
   // pressure multiplier (trees, pool, irrigation) raises per-application
   // prices above a bare-lot sweep on a typical home.
   const MOSQUITO_PROFILES = [
-    {},
+    { trees: 'light' },
     { trees: 'moderate', pool: true, irrigation: true },
   ];
+  // 82% of looked-up homes have no water, a neighborhood retention pond, or
+  // an adjacent lake — the property lookup's graduated water multipliers for
+  // those (calcMosquitoWaterMult in routes/property-lookup-v2.js). Pond,
+  // canal, and wetland frontage price higher.
+  const TYPICAL_MOSQUITO_WATER_MULTS = [1.0, 1.25, 1.3];
   add('mosquito_program', () => rangeRow({
     key: 'mosquito_program',
     name: 'Mosquito Program',
     unit: 'per application',
     values: sweepValues(
-      [5000, 8000, 12000, 20000, 30000].flatMap((lotSqFt) => MOSQUITO_PROFILES.map((features) => ({ lotSqFt, features }))),
-      ({ lotSqFt, features }) => sp.priceMosquito({ footprint: 2000, lotSqFt, features }, {}),
+      TYPICAL_LOTS.flatMap((lotSqFt) => MOSQUITO_PROFILES.flatMap((features) =>
+        TYPICAL_MOSQUITO_WATER_MULTS.map((mosquitoWaterMult) => ({ lotSqFt, features, mosquitoWaterMult })))),
+      ({ lotSqFt, features, mosquitoWaterMult }) => sp.priceMosquito(
+        { footprint: MEDIAN_HOME, lotSqFt, features },
+        { modifiers: { mosquitoWaterMult } }),
       (r) => (r.tiers || []).map((t) => t.perVisit)),
     notes: `Seasonal (${Number((constants.MOSQUITO.tierVisits || {}).seasonal9) || 9} applications/yr) or monthly (${Number((constants.MOSQUITO.tierVisits || {}).monthly12) || 12} applications/yr) program; priced by treatable area and mosquito pressure — larger lots and heavier pressure (trees, pool, irrigation, waterfront) price higher. WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%. Optional add-ons bill annually per unit: mosquito stations $${Math.round(constants.MOSQUITO.addOns.in2CareStation.price)} each, Bti dunks $${Math.round(constants.MOSQUITO.addOns.dunkTablet.price)} each.`,
   }));
@@ -322,7 +339,7 @@ function buildRows() {
     name: 'Termite Bait Monitoring',
     unit: 'per application',
     values: sweepValues(
-      WIDE_TYPICAL_HOMES.flatMap((f) => TERMITE_BAIT_PROFILES.map((opts) => ({ f, opts }))),
+      TYPICAL_HOMES.flatMap((f) => TERMITE_BAIT_PROFILES.map((opts) => ({ f, opts }))),
       ({ f, opts }) => sp.priceTermiteBait({ footprint: f }, opts),
       (r) => (r.quoteRequired ? NaN : r.perApp)),
     notes: `Quarterly station-check applications; priced by home size and structural complexity. WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
@@ -371,7 +388,7 @@ function buildRows() {
         { atticSqFt: 2000 },
         { surfaceLinearFt: 50, surfaceHeightFt: 2 },
       ],
-      (opts) => sp.priceBoraCare({ footprint: 2500 }, opts),
+      (opts) => sp.priceBoraCare({ footprint: MEDIAN_HOME }, opts),
       (r) => (r.quoteRequired ? NaN : r.price)),
     notes: 'Borate treatment for exposed wood; priced by treated attic and surface area — larger areas price higher at the same per-area rates.',
   }));
@@ -380,12 +397,16 @@ function buildRows() {
     key: 'termite_trenching',
     name: 'Termite Trenching (liquid barrier)',
     unit: 'per job',
-    // Typical perimeter x every product, at standard scheduling.
+    // Typical homes' perimeters (the engine's own footprint-to-perimeter
+    // estimate at typical landscape complexity) x every product, at
+    // standard scheduling.
     values: sweepValues(
-      [180, 220, 260].flatMap((perimeterLF) =>
-        Object.keys(constants.SPECIALTY.trenching.products).map((productKey) => ({ perimeterLF, productKey }))),
-      ({ perimeterLF, productKey }) => sp.priceTrenching({ footprint: 2500 }, {
-        perimeterLF, productKey, applicationRate: 'standard', trenchDepthFt: 1, warrantyTier: 'none', concretePct: 0.2, labelConfirmed: true,
+      TYPICAL_HOMES.flatMap((footprint) =>
+        TYPICAL_LANDSCAPES.flatMap(({ complexity }) =>
+          Object.keys(constants.SPECIALTY.trenching.products).map((productKey) => ({ footprint, complexity, productKey })))),
+      ({ footprint, complexity, productKey }) => sp.priceTrenching({ footprint }, {
+        perimeterLF: calculatePerimeter(footprint, complexity),
+        productKey, applicationRate: 'standard', trenchDepthFt: 1, warrantyTier: 'none', concretePct: 0.2, labelConfirmed: true,
       }),
       (r) => (r.quoteRequired || !Number.isFinite(r.price) ? NaN : r.price)),
     notes: 'Priced by treated perimeter and product; longer measured perimeters, deeper trenching, a higher application rate, added warranty terms, and greater concrete coverage price higher; exact footage measured on site.',
@@ -422,7 +443,7 @@ function buildRows() {
     name: 'Lawn Care Program',
     unit: 'per application',
     values: sweepValues(
-      [3000, 5000, 8000].flatMap((sq) =>
+      TYPICAL_TURF.flatMap((sq) =>
         Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
           LAWN_TIER_KEYS.map((tier) => ({ sq, track, tier })))),
       ({ sq, track, tier }) => sp.priceLawnCare({ lawnSqFt: sq }, { track, tier }),
@@ -435,7 +456,7 @@ function buildRows() {
     name: 'One-Time Lawn Treatment',
     unit: 'per treatment',
     values: sweepValues(
-      [3000, 5000, 8000].flatMap((sq) =>
+      TYPICAL_TURF.flatMap((sq) =>
         ['weed', 'fungicide', 'pest', 'fert'].flatMap((treatmentType) =>
           Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
             LAWN_TIER_KEYS.map((tier) => ({ sq, treatmentType, track, tier }))))),
@@ -452,7 +473,7 @@ function buildRows() {
     // turf-pest treatment (chinch bugs, sod webworms, armyworms, grubs)
     // priced via the one-time lawn 'pest' multiplier as its own line.
     values: sweepValues(
-      [3000, 5000, 8000].flatMap((sq) =>
+      TYPICAL_TURF.flatMap((sq) =>
         Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
           LAWN_TIER_KEYS.map((tier) => ({ sq, track, tier })))),
       ({ sq, track, tier }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType: 'pest', track, tier, isRecurringCustomer: false }),
@@ -468,7 +489,7 @@ function buildRows() {
     // typical auto-priced job; St. Augustine, heavier cleanup, and harder
     // access price higher or are review-gated.
     values: sweepValues(
-      [4000, 6000, 8000].flatMap((sq) =>
+      TYPICAL_TURF.flatMap((sq) =>
         ['bermuda', 'zoysia'].flatMap((grassType) =>
           ['none', 'light'].map((cleanupLevel) => ({ sq, grassType, cleanupLevel })))),
       ({ sq, grassType, cleanupLevel }) =>
@@ -482,8 +503,8 @@ function buildRows() {
     name: 'One-Time Mosquito Treatment',
     unit: 'per treatment',
     values: sweepValues(
-      [8000, 12000, 20000],
-      (lotSqFt) => sp.priceOneTimeMosquito({ footprint: 2000, lotSqFt }, {}),
+      TYPICAL_LOTS,
+      (lotSqFt) => sp.priceOneTimeMosquito({ footprint: MEDIAN_HOME, lotSqFt }, {}),
       (r) => (r.quoteRequired ? NaN : r.price)),
     notes: `Priced by treatable area — larger properties price higher by area increment. One-time add-ons per unit: mosquito stations $${Math.round(constants.ONE_TIME.mosquito.stationAddOn)} each, Bti dunks $${Math.round(constants.ONE_TIME.mosquito.dunkAddOn)} each. A recurring mosquito plan prices lower.`,
   }));
@@ -509,7 +530,7 @@ function buildRows() {
     // Both pricing modes: estimated area (65% reduction) and exact-area
     // (measured, or recurring-lawn customers) on typical turf areas.
     values: sweepValues(
-      [3000, 5000, 8000].flatMap((sq) =>
+      TYPICAL_TURF.flatMap((sq) =>
         ['eighth', 'quarter'].flatMap((depth) => [false, true].map((exactArea) => ({ sq, depth, exactArea })))),
       ({ sq, depth, exactArea }) => sp.priceTopDressing(sq, depth, exactArea),
       (r) => r.price),
@@ -519,8 +540,8 @@ function buildRows() {
   // Auto-priced residential shapes: a bare lot and a planted/treed property
   // (bed area + tree count + access) at a typical scope.
   const TREE_SHRUB_PROFILES = [
-    { property: { footprint: 2000 }, options: {} },
-    { property: { footprint: 2000, bedArea: 4000 }, options: { treeCount: 6, access: 'moderate' } },
+    { property: { footprint: MEDIAN_HOME }, options: {} },
+    { property: { footprint: MEDIAN_HOME, bedArea: 4000 }, options: { treeCount: 6, access: 'moderate' } },
   ];
   add('tree_shrub_care', () => rangeRow({
     key: 'tree_shrub_care',
@@ -530,7 +551,7 @@ function buildRows() {
     // directive 2026-09-24: stop offering quarterly tree & shrub care) — so
     // it is never swept here.
     values: sweepValues(
-      [8000, 12000, 15000].flatMap((lot) =>
+      TYPICAL_LOTS.flatMap((lot) =>
         ['standard', 'enhanced'].flatMap((tier) =>
           TREE_SHRUB_PROFILES.map((p) => ({ lot, tier, p })))),
       ({ lot, tier, p }) => sp.priceTreeShrub({ ...p.property, lotSqFt: lot }, { ...p.options, tier }),
