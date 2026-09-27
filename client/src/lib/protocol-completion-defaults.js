@@ -8,12 +8,12 @@
 //
 // This is the generic sibling of lib/pest-default-mix.js: the SERVER
 // resolves which products a visit gets (protocols.json visit-level
-// completionDefaultProducts → services.default_products → none — see
-// server/services/completion-product-defaults.js), already mapped to
-// active catalog rows; this module only maps that response onto the
-// CompletionPanel's already-loaded catalog and turns it into selection
-// rows, exactly like lawnPlanSelections / pestDefaultMixSelections do for
-// their own sources.
+// completionDefaultProducts → none — see server/services/completion-
+// product-defaults.js), already mapped to active catalog rows, each with
+// its own protocol-specified application method when the visit's lineMeta
+// names one; this module only maps that response onto the CompletionPanel's
+// already-loaded catalog and turns it into selection rows, exactly like
+// lawnPlanSelections / pestDefaultMixSelections do for their own sources.
 //
 // Programs the client already prefills through their OWN mechanism stay
 // out of this hook's way, so a visit is never seeded twice from two
@@ -30,16 +30,11 @@ const OWNED_ELSEWHERE_PROGRAM_KEYS = new Set(['lawn', 'pest']);
 // True when GET /admin/dispatch/:serviceId/default-products returned
 // products this hook should seed — a non-empty list from a program no
 // other client mechanism already owns, AND from the curated protocol
-// visit specifically (source: 'protocol_visit'). The services.
-// default_products FALLBACK is deliberately not auto-applied here: it is
-// frequently stale (the pest_general_* rows still say "Demand CS" /
-// "Advion Gel" — the reason the owner ruling added the curated list in
-// the first place) and the owner has reviewed it for exactly the
-// programs that carry completionDefaultProducts, not the rest. A program
-// the owner hasn't curated yet (mosquito, termite, tree & shrub, rodent,
-// bed bug, palm) simply seeds nothing until protocols.json gets its own
-// list — the response is still useful for the endpoint's own callers/
-// reporting, just not for this auto-seed.
+// visit specifically (source: 'protocol_visit' — the only non-empty
+// source the resolver returns; 'excluded_lawn' and 'none' both answer no
+// products). A program the owner hasn't curated yet (mosquito, termite,
+// tree & shrub, rodent, bed bug, palm) simply seeds nothing until
+// protocols.json gets its own completionDefaultProducts list.
 export function shouldApplyProtocolCompletionDefaults(response) {
   if (!response || typeof response !== 'object') return false;
   if (response.source !== 'protocol_visit') return false;
@@ -52,9 +47,16 @@ export function shouldApplyProtocolCompletionDefaults(response) {
 // server always agree on which row this is) and builds each selection
 // through the caller's own buildSelectedProduct, so rate-prefill,
 // application-method inference, and every other per-row derivation stay
-// identical to a manual "add product" tap. A server product with no
-// matching CLIENT catalog row (a permissions gap, a load that raced the
-// fetch) is skipped, never guessed.
+// identical to a manual "add product" tap — EXCEPT the method itself,
+// which the protocol visit's own lineMeta can override (item.
+// completionApplicationMethod — e.g. Alpine WSG's crack-and-crevice work
+// -> 'spot_treatment', never the catalog-inferred 'perimeter_spray',
+// which would wrongly demand linear footage for an interior placement).
+// Passed into buildSelectedProduct itself, not patched onto its result
+// after the fact, so every derivation THAT method drives (rate, area
+// unit/value) is computed consistently from the start. A server product
+// with no matching CLIENT catalog row (a permissions gap, a load that
+// raced the fetch) is skipped, never guessed.
 export function protocolCompletionDefaultSelections(response, clientProducts, buildSelectedProduct) {
   if (!shouldApplyProtocolCompletionDefaults(response) || typeof buildSelectedProduct !== 'function') return [];
   const rows = Array.isArray(clientProducts) ? clientProducts : [];
@@ -63,7 +65,7 @@ export function protocolCompletionDefaultSelections(response, clientProducts, bu
     const product = rows.find((row) => String(row.id) === String(item?.id));
     if (!product) continue;
     selections.push({
-      ...buildSelectedProduct(product),
+      ...buildSelectedProduct(product, { applicationMethodOverride: item?.completionApplicationMethod || undefined }),
       // Provenance flag only — no visible tag renders from it today (the
       // product-card UI has no cheap per-line badge slot), but it lets a
       // later change key off "this row came from the protocol default"

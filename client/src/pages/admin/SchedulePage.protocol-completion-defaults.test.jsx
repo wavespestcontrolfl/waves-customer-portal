@@ -44,16 +44,20 @@ function cockroachService(overrides = {}) {
 
 // The server's GET /admin/dispatch/:serviceId/default-products response
 // for a cockroach_control visit (server/services/completion-product-
-// defaults.js): the owner's three curated defaults, resolved by id.
+// defaults.js): the owner's three curated defaults, resolved by id, each
+// carrying its protocol-specified completionApplicationMethod (Codex r2
+// P1, PR #5049) — Alpine WSG and Gentrol IGR have no catalog
+// application_method, so without this override the client would infer
+// 'perimeter_spray' and wrongly demand linear footage for interior work.
 const cockroachDefaultsResponse = {
   serviceId: 'cockroach-visit-1',
   programKey: 'cockroach',
   matchedVisit: { visit: 1, reason: 'cockroach_control', matched: true },
   source: 'protocol_visit',
   products: [
-    { id: 'c1', name: 'Alpine WSG', category: 'Insecticide', formulation: null, defaultRatePer1000: null, rateUnit: 'oz', defaultRate: '0.5-1', defaultUnit: 'oz', applicationMethod: null, epaRegNumber: null, protocolRate: null, protocolRateUnit: null, protocolAmount: null, protocolAmountUnit: null, zone: null, source: { programKey: 'cockroach', visit: 1, origin: 'protocol_visit' } },
-    { id: 'c2', name: 'Gentrol IGR', category: 'IGR', formulation: null, defaultRatePer1000: null, rateUnit: null, defaultRate: null, defaultUnit: null, applicationMethod: null, epaRegNumber: null, protocolRate: null, protocolRateUnit: null, protocolAmount: null, protocolAmountUnit: null, zone: null, source: { programKey: 'cockroach', visit: 1, origin: 'protocol_visit' } },
-    { id: 'c3', name: 'Advion Cockroach Gel Bait', category: 'Bait', formulation: null, defaultRatePer1000: null, rateUnit: null, defaultRate: null, defaultUnit: null, applicationMethod: null, epaRegNumber: null, protocolRate: null, protocolRateUnit: null, protocolAmount: null, protocolAmountUnit: null, zone: null, source: { programKey: 'cockroach', visit: 1, origin: 'protocol_visit' } },
+    { id: 'c1', name: 'Alpine WSG', category: 'Insecticide', formulation: null, defaultRatePer1000: null, rateUnit: 'oz', defaultRate: '0.5-1', defaultUnit: 'oz', applicationMethod: null, completionApplicationMethod: 'spot_treatment', epaRegNumber: null, source: { programKey: 'cockroach', visit: 1, origin: 'protocol_visit' } },
+    { id: 'c2', name: 'Gentrol IGR', category: 'IGR', formulation: null, defaultRatePer1000: null, rateUnit: null, defaultRate: null, defaultUnit: null, applicationMethod: null, completionApplicationMethod: 'spot_treatment', epaRegNumber: null, source: { programKey: 'cockroach', visit: 1, origin: 'protocol_visit' } },
+    { id: 'c3', name: 'Advion Cockroach Gel Bait', category: 'Bait', formulation: null, defaultRatePer1000: null, rateUnit: null, defaultRate: null, defaultUnit: null, applicationMethod: 'bait_placement', completionApplicationMethod: 'bait_placement', epaRegNumber: null, source: { programKey: 'cockroach', visit: 1, origin: 'protocol_visit' } },
   ],
   unresolved: [],
 };
@@ -420,4 +424,41 @@ it('removing ONE seeded row and restoring keeps only the other two — the remov
   expect(screen.getByText('Advion Cockroach Gel Bait')).toBeTruthy();
   // The deliberately removed one never comes back.
   expect(screen.queryByText('Gentrol IGR')).toBeNull();
+});
+
+it('seeded Alpine WSG / Gentrol IGR carry the protocol\'s spot_treatment method (not the catalog-inferred perimeter_spray) and never demand linear footage; Advion keeps bait_placement (Codex r2 P1, PR #5049)', async () => {
+  stubFetchWithImmediateDefaults();
+  await act(async () => {
+    render(
+      <CompletionPanel
+        service={cockroachService()}
+        products={cockroachCatalog}
+        onClose={() => {}}
+        onSubmit={vi.fn().mockResolvedValue({})}
+      />,
+    );
+  });
+  await screen.findByText('Alpine WSG');
+
+  const alpineRow = screen.getByText('Alpine WSG').closest('div');
+  const gentrolRow = screen.getByText('Gentrol IGR').closest('div');
+  const advionRow = screen.getByText('Advion Cockroach Gel Bait').closest('div');
+
+  // Alpine WSG and Gentrol IGR have no catalog application_method, so
+  // without the protocol's own completionApplicationMethod override the
+  // seed would land them on the catalog-inferred 'perimeter_spray'
+  // (Codex r2 P1) instead of the German-roach protocol's interior method.
+  expect(within(alpineRow).getByDisplayValue('Spot treatment')).toBeTruthy();
+  expect(within(gentrolRow).getByDisplayValue('Spot treatment')).toBeTruthy();
+  // Advion already resolves to bait_placement via its own catalog category
+  // — the lineMeta override matches it rather than disturbing it.
+  expect(within(advionRow).getByDisplayValue('Bait')).toBeTruthy();
+
+  // 'perimeter_spray' is the ONLY method that demands linear footage,
+  // client-side (requiresLinearFt) and at server submit
+  // (requiresLinearFtForReportApplication) — none of these three rows may
+  // render that input.
+  expect(within(alpineRow).queryByPlaceholderText('Linear ft')).toBeNull();
+  expect(within(gentrolRow).queryByPlaceholderText('Linear ft')).toBeNull();
+  expect(within(advionRow).queryByPlaceholderText('Linear ft')).toBeNull();
 });

@@ -15,7 +15,10 @@
  * VISIT itself (server/config/protocols.json) and is the first source
  * here. The lineMeta hints stay exactly what they already were — the
  * job-card / protocol-actions tap-to-apply reference — untouched by this
- * module.
+ * module, except for one addition (below): a lineMeta line whose
+ * catalogProductHints names a curated default can also carry
+ * `completionApplicationMethod`, which this resolver hands back per
+ * product so the seed can override the catalog's own inferred method.
  *
  * `completionDefaultProducts` is a PLAIN ARRAY OF CATALOG NAME STRINGS,
  * nothing else (pre-push audit P2, PR #5049 r1: a seasonal-window shape
@@ -30,16 +33,31 @@
  * seasonal pest rotation is a possible LATER PR, built when a visit
  * actually needs it, not ahead of time.
  *
+ * Application method (Codex r2, PR #5049): Alpine WSG and Gentrol IGR
+ * carry no products_catalog.application_method, so the client's own
+ * defaultApplicationMethodForLine infers 'perimeter_spray' for them by
+ * default — wrong for the German-roach protocol, which applies both
+ * INSIDE (crack-and-crevice / IGR point-source), and 'perimeter_spray'
+ * demands linear footage the tech never measured for an interior
+ * placement. The visit's own lineMeta already carries scope: 'interior'
+ * for these lines; `completionApplicationMethod` on that same lineMeta
+ * entry (one of the drawer's own method dropdown values — see the
+ * `<select>` in SchedulePage.jsx's Products Applied section) is the fix:
+ * exercised protocol data, not a new free-form schema. Advion Cockroach
+ * Gel Bait already resolves correctly (category 'Bait' -> bait_placement
+ * via the catalog's own category match) but carries the key too, for
+ * consistency and in case a future catalog edit blanks its category.
+ *
  * Precedence (per visit):
  *   1. protocols.json visit.completionDefaultProducts (curated, ordered)
  *      — today that's pest visit 2 (German roach cleanout) and the
  *      cockroach program's visit 1, both flat roach lists.
- *   2. services.default_products (legacy JSONB name list) — a fallback
- *      for services the owner hasn't curated yet; frequently stale (the
- *      pest_general_* rows still say "Demand CS" / "Advion Gel"), so a
- *      curated list always wins when one exists.
- *   3. empty — no default products, tech starts from a blank list (today's
- *      behavior everywhere else).
+ *   2. empty — no curated list, tech starts from a blank list (today's
+ *      behavior everywhere else; also lawn, which is always excluded).
+ *      There is deliberately no services.default_products fallback here
+ *      (Codex r2 P2): the client only ever seeds source 'protocol_visit'
+ *      (lib/protocol-completion-defaults.js), so a second, unreachable
+ *      source was dead code — removed rather than kept "just in case".
  *
  * Lawn is never touched: it already has its own governed protocol-defaults
  * mechanism (lawn-completion-defaults.js / GATE_LAWN_COMPLETION_DEFAULTS)
@@ -56,26 +74,14 @@
  * resolveCatalogProductForName): same inputs, same output, no I/O — so the
  * precedence rules are unit-testable without a database.
  * resolveCompletionProductDefaults is the DB-backed orchestrator the route
- * calls; it is fail-soft end to end — any failure (missing row, DB error,
- * malformed default_products) resolves to an empty product list, and a
- * completion can always proceed with no products prefilled.
+ * calls; it is fail-soft end to end — any failure (missing row, DB error)
+ * resolves to an empty product list, and a completion can always proceed
+ * with no products prefilled.
  */
 
 const { matchServiceProtocol } = require('./protocol-matcher');
 
 // -- name parsing / dedupe (pure) --------------------------------------
-
-// services.default_products is a JSONB array of product name strings, but
-// can arrive as a JSON string, a comma-separated string, or already an
-// array — mirrors admin-projects.js's parseDefaultProductNames.
-function parseDefaultProductNames(value) {
-  let parsed = value;
-  if (typeof parsed === 'string') {
-    try { parsed = JSON.parse(parsed); } catch { parsed = parsed.split(','); }
-  }
-  if (!Array.isArray(parsed)) return [];
-  return parsed.map((item) => String(item || '').trim()).filter(Boolean);
-}
 
 // Case-insensitive dedupe that preserves first-seen order and casing —
 // order matters (it is display order on the completion form).
@@ -136,13 +142,37 @@ function resolveCatalogProductForName(name, catalogRows = []) {
   return candidates[0].row;
 }
 
+// -- lineMeta application-method lookup (pure) --------------------------
+
+// The lineMeta entry whose catalogProductHints names this product is the
+// visit's own record of how it's actually applied there (scope +
+// completionApplicationMethod) — a name can appear in more than one
+// line's hints (rare), so the FIRST line naming it wins, matching
+// dedupeNames' own first-seen rule.
+function completionApplicationMethodForName(visit, name) {
+  const lineMeta = visit?.lineMeta;
+  if (!lineMeta || typeof lineMeta !== 'object') return null;
+  const target = normalizeName(name);
+  if (!target) return null;
+  for (const meta of Object.values(lineMeta)) {
+    if (!meta || !Array.isArray(meta.catalogProductHints)) continue;
+    if (!meta.catalogProductHints.some((hint) => normalizeName(hint) === target)) continue;
+    return typeof meta.completionApplicationMethod === 'string' && meta.completionApplicationMethod
+      ? meta.completionApplicationMethod
+      : null;
+  }
+  return null;
+}
+
 // -- visit resolution + precedence (pure) ------------------------------
 
 // Resolves which protocol visit a service maps to and, from it, the
-// ordered product NAMES to prefill (before any catalog lookup). Pure:
-// given the same protocols.json + inputs, always the same output.
+// ordered product NAMES to prefill (before any catalog lookup), plus each
+// name's protocol-specified application method (methodsByName, keyed
+// lower-case). Pure: given the same protocols.json + inputs, always the
+// same output.
 function resolveCompletionDefaultProductNames({
-  protocols, serviceType, serviceKey = null, month = null, fallbackDefaultProducts = null,
+  protocols, serviceType, serviceKey = null, month = null,
 } = {}) {
   let match = null;
   try {
@@ -158,25 +188,25 @@ function resolveCompletionDefaultProductNames({
   // (lawn-completion-defaults.js) — this resolver must never seed a
   // second, conflicting product list for it.
   if (programKey === 'lawn') {
-    return { programKey, matchedVisit, source: 'excluded_lawn', names: [] };
+    return { programKey, matchedVisit, source: 'excluded_lawn', names: [], methodsByName: {} };
   }
 
   const protocolNames = dedupeNames(visit?.completionDefaultProducts);
   if (protocolNames.length) {
-    return { programKey, matchedVisit, source: 'protocol_visit', names: protocolNames };
+    const methodsByName = {};
+    for (const name of protocolNames) {
+      const method = completionApplicationMethodForName(visit, name);
+      if (method) methodsByName[name.toLowerCase()] = method;
+    }
+    return { programKey, matchedVisit, source: 'protocol_visit', names: protocolNames, methodsByName };
   }
 
-  const fallbackNames = dedupeNames(parseDefaultProductNames(fallbackDefaultProducts));
-  if (fallbackNames.length) {
-    return { programKey, matchedVisit, source: 'service_default_products', names: fallbackNames };
-  }
-
-  return { programKey, matchedVisit, source: 'none', names: [] };
+  return { programKey, matchedVisit, source: 'none', names: [], methodsByName: {} };
 }
 
 // -- line shaping --------------------------------------------------------
 
-function shapeCompletionProductLine(row, resolved) {
+function shapeCompletionProductLine(row, resolved, name) {
   return {
     id: row.id,
     name: row.name,
@@ -187,9 +217,17 @@ function shapeCompletionProductLine(row, resolved) {
     defaultRate: row.default_rate ?? null,
     defaultUnit: row.default_unit || null,
     applicationMethod: row.application_method || null,
+    // The protocol visit's own method for this line (e.g. Alpine WSG's
+    // crack-and-crevice work -> 'spot_treatment') — overrides the client's
+    // catalog-inferred default, which otherwise falls to 'perimeter_spray'
+    // for a product with no catalog application_method and wrongly
+    // demands linear footage for an interior placement. null when the
+    // lineMeta names none (the catalog's own default_application_method
+    // — or the client's own inference — applies unchanged).
+    completionApplicationMethod: resolved.methodsByName?.[String(name || '').toLowerCase()] || null,
     epaRegNumber: row.epa_reg_number || null,
-    // Where the name came from — the curated protocol list or the legacy
-    // service default_products fallback — for client display/telemetry.
+    // Where the name came from — always the curated protocol list today
+    // (source: 'protocol_visit') — for client display/telemetry.
     source: {
       programKey: resolved.programKey,
       visit: resolved.matchedVisit?.visit ?? null,
@@ -261,8 +299,8 @@ function emptyResult(serviceId) {
 // service_key/service_type/month, resolves the default product NAMES
 // (pure, above), then resolves each name to an active catalog row.
 // Fail-soft throughout — this must never block a completion: any error
-// (missing row, DB error, malformed default_products) resolves to an
-// empty product list rather than throwing.
+// (missing row, DB error) resolves to an empty product list rather than
+// throwing.
 async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {}) {
   const empty = emptyResult(serviceId);
   if (!db || !serviceId) return empty;
@@ -271,10 +309,6 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
       .where({ id: serviceId })
       .first('id', 'customer_id', 'service_id', 'service_type', 'service_key_snapshot', 'scheduled_date');
     if (!scheduled) return empty;
-
-    const serviceRow = scheduled.service_id
-      ? await db('services').where({ id: scheduled.service_id }).first('id', 'default_products').catch(() => null)
-      : null;
 
     // Month only matters for month-keyed programs (lawn, tree & shrub) —
     // neither carries completionDefaultProducts today, but resolve it
@@ -290,7 +324,6 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
       serviceType: scheduled.service_type,
       serviceKey: scheduled.service_key_snapshot || null,
       month,
-      fallbackDefaultProducts: serviceRow?.default_products,
     });
 
     if (!resolved.names.length) {
@@ -306,7 +339,7 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
     for (const name of resolved.names) {
       const row = resolveCatalogProductForName(name, catalogRows);
       if (!row) { unresolved.push(name); continue; }
-      products.push(shapeCompletionProductLine(row, resolved));
+      products.push(shapeCompletionProductLine(row, resolved, name));
     }
 
     return {
@@ -323,5 +356,4 @@ module.exports = {
   resolveCatalogProductForName,
   resolveCompletionProductDefaults,
   monthFromDateColumn,
-  parseDefaultProductNames,
 };

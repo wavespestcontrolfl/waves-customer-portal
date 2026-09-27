@@ -1244,21 +1244,24 @@
             "treatmentApplied": true,
             "catalogProductHints": [
               "Advion Cockroach Gel Bait"
-            ]
+            ],
+            "completionApplicationMethod": "bait_placement"
           },
           "Crack-and-crevice treatment": {
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
               "Alpine WSG"
-            ]
+            ],
+            "completionApplicationMethod": "spot_treatment"
           },
           "Insect growth regulator point-source or aerosol where label allows": {
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
               "Gentrol IGR"
-            ]
+            ],
+            "completionApplicationMethod": "spot_treatment"
           }
         },
         "material_cost": "inventory",
@@ -1617,21 +1620,24 @@
             "treatmentApplied": true,
             "catalogProductHints": [
               "Advion Cockroach Gel Bait"
-            ]
+            ],
+            "completionApplicationMethod": "bait_placement"
           },
           "Use non-repellent crack-and-crevice treatment where label allows": {
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
               "Alpine WSG"
-            ]
+            ],
+            "completionApplicationMethod": "spot_treatment"
           },
           "Apply IGR point-source or aerosol where label allows": {
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
               "Gentrol IGR"
-            ]
+            ],
+            "completionApplicationMethod": "spot_treatment"
           }
         },
         "material_cost": "inventory",

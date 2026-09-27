@@ -16174,8 +16174,16 @@ export function CompletionPanel({
   }
   // One construction path for a selected-product row — the picker
   // (addProduct) and the default pest tank-mix seed build identical rows.
-  function buildSelectedProduct(product) {
-    const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
+  function buildSelectedProduct(product, { applicationMethodOverride } = {}) {
+    // The protocol visit's own method for this line (e.g. Alpine WSG's
+    // crack-and-crevice work on the German-roach protocol) wins over the
+    // catalog-inferred default — Codex r2, PR #5049: Alpine WSG and
+    // Gentrol IGR carry no catalog application_method, so the inferred
+    // default falls to 'perimeter_spray' and wrongly demands linear
+    // footage for an interior placement. Passed in by the protocol
+    // completion-defaults seed only; every other caller is unaffected.
+    const applicationMethod = applicationMethodOverride
+      || defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
       serviceTypeForArea,

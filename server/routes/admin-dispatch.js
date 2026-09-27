@@ -3081,16 +3081,19 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
 // GET /api/admin/dispatch/:serviceId/default-products (owner ruling
 // 2026-09-26): the Complete Service drawer's product list, for a non-lawn
 // spray/granule/bait service, prefilled from the service's protocol visit
-// (server/config/protocols.json visit.completionDefaultProducts) or,
-// failing that, the service library's default_products — see
-// server/services/completion-product-defaults.js for the precedence and
-// catalog-name resolution. Read-only and fail-soft: any resolution error
-// answers an empty product list (never 500s the drawer open).
+// (server/config/protocols.json visit.completionDefaultProducts) — see
+// server/services/completion-product-defaults.js for the resolution and
+// each product's protocol-specified application method. Read-only and
+// fail-soft: any resolution error answers an empty product list (never
+// 500s the drawer open). No services.default_products fallback (Codex r2
+// P2, PR #5049): the client only ever seeds source 'protocol_visit', so a
+// second, unreachable source was dead code and was removed.
 //
 // Response: { serviceId, programKey, matchedVisit: {visit, reason, matched},
-//   source: 'protocol_visit' | 'service_default_products' | 'excluded_lawn' | 'none',
+//   source: 'protocol_visit' | 'excluded_lawn' | 'none',
 //   products: [{ id, name, category, formulation, defaultRatePer1000,
-//     rateUnit, defaultRate, defaultUnit, applicationMethod, epaRegNumber,
+//     rateUnit, defaultRate, defaultUnit, applicationMethod,
+//     completionApplicationMethod, epaRegNumber,
 //     source: { programKey, visit, origin } }],
 //   unresolved: ['<name with no matching active catalog row>'] }
 router.get('/:serviceId/default-products', async (req, res, next) => {

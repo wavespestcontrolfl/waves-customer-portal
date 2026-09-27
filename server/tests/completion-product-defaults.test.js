@@ -51,7 +51,7 @@ function fakeDb(tables) {
 
 // ---- pure precedence resolution (resolveCompletionDefaultProductNames) ----
 
-describe('resolveCompletionDefaultProductNames precedence', () => {
+describe('resolveCompletionDefaultProductNames', () => {
   const protocols = {
     pest: {
       visits: [
@@ -65,11 +65,8 @@ describe('resolveCompletionDefaultProductNames precedence', () => {
     lawn: { st_augustine: { visits: [{ visit: 1, month: 'Jan', completionDefaultProducts: ['Should never surface'] }] } },
   };
 
-  test('protocol visit hints win over the services.default_products fallback', () => {
-    const result = resolveCompletionDefaultProductNames({
-      protocols, serviceType: 'General Pest Control (Quarterly)',
-      fallbackDefaultProducts: ['Demand CS', 'Advion Gel'],
-    });
+  test('a curated visit resolves source protocol_visit with its ordered names', () => {
+    const result = resolveCompletionDefaultProductNames({ protocols, serviceType: 'General Pest Control (Quarterly)' });
     expect(result.source).toBe('protocol_visit');
     expect(result.programKey).toBe('pest');
     expect(result.matchedVisit.visit).toBe(1);
@@ -85,30 +82,18 @@ describe('resolveCompletionDefaultProductNames precedence', () => {
     }
   });
 
-  test('falls back to services.default_products when the matched visit has no curated list', () => {
-    const noListProtocols = { pest: { visits: [{ visit: 1, month: 'Any' }] } };
-    const result = resolveCompletionDefaultProductNames({
-      protocols: noListProtocols, serviceType: 'General Pest Control (Monthly)',
-      fallbackDefaultProducts: JSON.stringify(['Demand CS', 'Advion Gel']),
-    });
-    expect(result.source).toBe('service_default_products');
-    expect(result.names).toEqual(['Demand CS', 'Advion Gel']);
-  });
-
-  test('no curated list and no fallback resolves to empty, not an error', () => {
+  test('no curated list on the matched visit resolves to empty, not an error (no services.default_products fallback — Codex r2 P2, PR #5049)', () => {
     const noListProtocols = { pest: { visits: [{ visit: 1, month: 'Any' }] } };
     const result = resolveCompletionDefaultProductNames({
       protocols: noListProtocols, serviceType: 'General Pest Control (Monthly)',
     });
     expect(result.source).toBe('none');
     expect(result.names).toEqual([]);
+    expect(result.methodsByName).toEqual({});
   });
 
   test('lawn is always excluded, even if a visit somehow carries the field', () => {
-    const result = resolveCompletionDefaultProductNames({
-      protocols, serviceType: 'St. Augustine Lawn Care', month: 1,
-      fallbackDefaultProducts: ['Should never surface either'],
-    });
+    const result = resolveCompletionDefaultProductNames({ protocols, serviceType: 'St. Augustine Lawn Care', month: 1 });
     expect(result.programKey).toBe('lawn');
     expect(result.source).toBe('excluded_lawn');
     expect(result.names).toEqual([]);
@@ -134,6 +119,72 @@ describe('resolveCompletionDefaultProductNames precedence', () => {
     const dupeProtocols = { pest: { visits: [{ visit: 1, month: 'Any', completionDefaultProducts: ['Taurus SC', 'taurus sc', 'Alpine WSG'] }] } };
     const result = resolveCompletionDefaultProductNames({ protocols: dupeProtocols, serviceType: 'General Pest Control (Quarterly)' });
     expect(result.names).toEqual(['Taurus SC', 'Alpine WSG']);
+  });
+});
+
+// ---- lineMeta completionApplicationMethod (Codex r2 P1, PR #5049) ----
+//
+// Alpine WSG and Gentrol IGR carry no products_catalog.application_method,
+// so the client's own defaultApplicationMethodForLine infers
+// 'perimeter_spray' for them — wrong for German-roach work, which applies
+// both INSIDE, and 'perimeter_spray' demands linear footage the tech never
+// measured for an interior placement. A lineMeta line's own
+// completionApplicationMethod (one of the drawer's own method dropdown
+// values) is the resolver's per-product override.
+describe('resolveCompletionDefaultProductNames methodsByName', () => {
+  const protocolsWithMethods = {
+    cockroach: {
+      visits: [{
+        visit: 1, month: 'Any',
+        completionDefaultProducts: ['Advion Cockroach Gel Bait', 'Alpine WSG', 'Gentrol IGR'],
+        lineMeta: {
+          'Apply cockroach gel bait in targeted placements': {
+            scope: 'interior', treatmentApplied: true,
+            catalogProductHints: ['Advion Cockroach Gel Bait'],
+            completionApplicationMethod: 'bait_placement',
+          },
+          'Use non-repellent crack-and-crevice treatment where label allows': {
+            scope: 'interior', treatmentApplied: true,
+            catalogProductHints: ['Alpine WSG'],
+            completionApplicationMethod: 'spot_treatment',
+          },
+          'Apply IGR point-source or aerosol where label allows': {
+            scope: 'interior', treatmentApplied: true,
+            catalogProductHints: ['Gentrol IGR'],
+            completionApplicationMethod: 'spot_treatment',
+          },
+        },
+      }],
+    },
+  };
+
+  test('each curated name resolves the method named on the lineMeta line whose catalogProductHints names it', () => {
+    const result = resolveCompletionDefaultProductNames({ protocols: protocolsWithMethods, serviceType: 'Cockroach Control Service' });
+    expect(result.methodsByName).toEqual({
+      'advion cockroach gel bait': 'bait_placement',
+      'alpine wsg': 'spot_treatment',
+      'gentrol igr': 'spot_treatment',
+    });
+  });
+
+  test('a curated name with no matching lineMeta line (or no completionApplicationMethod on it) is simply absent from methodsByName', () => {
+    const protocols = {
+      cockroach: {
+        visits: [{
+          visit: 1, month: 'Any',
+          completionDefaultProducts: ['Unnamed Product'],
+          lineMeta: { 'Some line': { catalogProductHints: ['Something else'], completionApplicationMethod: 'spot_treatment' } },
+        }],
+      },
+    };
+    const result = resolveCompletionDefaultProductNames({ protocols, serviceType: 'Cockroach Control Service' });
+    expect(result.methodsByName).toEqual({});
+  });
+
+  test('a visit with no lineMeta at all resolves an empty methodsByName, never throws', () => {
+    const protocols = { cockroach: { visits: [{ visit: 1, month: 'Any', completionDefaultProducts: ['Alpine WSG'] }] } };
+    const result = resolveCompletionDefaultProductNames({ protocols, serviceType: 'Cockroach Control Service' });
+    expect(result.methodsByName).toEqual({});
   });
 });
 
@@ -216,15 +267,14 @@ describe('monthFromDateColumn feeding a real month-keyed program (tree & shrub)'
 
 // ---- real protocols.json: the owner-ruling lists actually landed ----
 
-describe('protocols.json completionDefaultProducts (owner rulings 2026-09-26/27)', () => {
+describe('protocols.json completionDefaultProducts + completionApplicationMethod (owner rulings 2026-09-26/27, Codex r2)', () => {
   test('pest visit 1 (recurring/one-time general pest) carries NO completionDefaultProducts — owned by pest-default-mix.js', () => {
     // Owner ruling 2026-09-27 (pre-push audit): keep the pest 4-oz house
     // mix (lib/pest-default-mix.js) for now; a seasonal pest rotation with
     // per-window rates is parked for a later PR. Resolving through this
-    // module for a plain recurring pest visit must fall through to the
-    // services.default_products fallback (or empty) exactly like any
-    // other program the owner hasn't curated yet — never invent a pest
-    // default here.
+    // module for a plain recurring pest visit resolves to empty, exactly
+    // like any other program the owner hasn't curated yet — never invent
+    // a pest default here.
     const visit1 = realProtocols.pest.visits.find((v) => v.visit === 1);
     expect(visit1.completionDefaultProducts).toBeUndefined();
     const result = resolveCompletionDefaultProductNames({
@@ -236,11 +286,24 @@ describe('protocols.json completionDefaultProducts (owner rulings 2026-09-26/27)
     expect(result.names).toEqual([]);
   });
 
-  test('pest visit 2 (German roach cleanout) and cockroach visit 1 share the roach defaults', () => {
+  test('pest visit 2 (German roach cleanout) and cockroach visit 1 share the roach defaults AND the same interior methods', () => {
     const pestVisit2 = realProtocols.pest.visits.find((v) => v.visit === 2);
     const cockroachVisit1 = realProtocols.cockroach.visits.find((v) => v.visit === 1);
     expect(pestVisit2.completionDefaultProducts).toEqual(['Alpine WSG', 'Gentrol IGR', 'Advion Cockroach Gel Bait']);
     expect(cockroachVisit1.completionDefaultProducts).toEqual(['Alpine WSG', 'Gentrol IGR', 'Advion Cockroach Gel Bait']);
+
+    const expectedMethods = {
+      'alpine wsg': 'spot_treatment',
+      'gentrol igr': 'spot_treatment',
+      'advion cockroach gel bait': 'bait_placement',
+    };
+    expect(resolveCompletionDefaultProductNames({ protocols: realProtocols, serviceType: 'Cockroach Control Service' }).methodsByName)
+      .toEqual(expectedMethods);
+    // Reach pest visit 2 directly via its own reason (german_roach) rather
+    // than through text matching, which is cockroach's job above.
+    expect(resolveCompletionDefaultProductNames({
+      protocols: realProtocols, serviceType: 'German roach cleanout',
+    }).methodsByName).toEqual(expectedMethods);
   });
 
   test('"Cockroach Control Service" resolves to the cockroach program visit 1 (German cleanout)', () => {
@@ -324,7 +387,15 @@ describe('resolveCompletionProductDefaults (fake db)', () => {
       ],
     },
     cockroach: {
-      visits: [{ visit: 1, month: 'Any', completionDefaultProducts: ['Alpine WSG', 'Gentrol IGR', 'Advion Cockroach Gel Bait'] }],
+      visits: [{
+        visit: 1, month: 'Any',
+        completionDefaultProducts: ['Alpine WSG', 'Gentrol IGR', 'Advion Cockroach Gel Bait'],
+        lineMeta: {
+          'Crack-and-crevice treatment': { catalogProductHints: ['Alpine WSG'], completionApplicationMethod: 'spot_treatment' },
+          'IGR point-source': { catalogProductHints: ['Gentrol IGR'], completionApplicationMethod: 'spot_treatment' },
+          'Gel bait': { catalogProductHints: ['Advion Cockroach Gel Bait'], completionApplicationMethod: 'bait_placement' },
+        },
+      }],
     },
     lawn: { st_augustine: { visits: [{ visit: 1, month: 'Jan' }] } },
   };
@@ -332,22 +403,20 @@ describe('resolveCompletionProductDefaults (fake db)', () => {
   function catalogTables() {
     return {
       products_catalog: [
-        { id: 'p1', name: 'Alpine WSG', category: 'Insecticide', formulation: 'WSG', application_method: 'perimeter_spray', default_rate_per_1000: null, rate_unit: 'oz', default_rate: '0.5-1', default_unit: 'oz', epa_reg_number: '432-1333', active: true },
-        { id: 'p2', name: 'Gentrol IGR', category: 'IGR', formulation: 'Aerosol', application_method: 'spot_treatment', default_rate_per_1000: null, rate_unit: null, default_rate: null, default_unit: null, epa_reg_number: '2724-529', active: true },
+        { id: 'p1', name: 'Alpine WSG', category: 'Insecticide', formulation: 'WSG', application_method: null, default_rate_per_1000: null, rate_unit: 'oz', default_rate: '0.5-1', default_unit: 'oz', epa_reg_number: '432-1333', active: true },
+        { id: 'p2', name: 'Gentrol IGR', category: 'IGR', formulation: 'Aerosol', application_method: null, default_rate_per_1000: null, rate_unit: null, default_rate: null, default_unit: null, epa_reg_number: '2724-529', active: true },
         { id: 'p3', name: 'Advion Cockroach Gel Bait', category: 'Bait', formulation: 'Gel', application_method: 'bait_placement', default_rate_per_1000: null, rate_unit: null, default_rate: null, default_unit: null, epa_reg_number: '352-746', active: true },
         { id: 'p4', name: 'Taurus SC', category: 'Insecticide', formulation: 'SC', application_method: 'perimeter_spray', default_rate_per_1000: 0.8, rate_unit: 'fl_oz', default_rate: null, default_unit: null, epa_reg_number: '53883-279', active: true },
         { id: 'p6', name: 'LESCO 90/10 Nonionic Surfactant', category: 'Adjuvant', formulation: 'Liquid', application_method: null, default_rate_per_1000: null, rate_unit: 'fl_oz/gal', default_rate: '0.2', default_unit: 'fl_oz/gal', epa_reg_number: null, active: true },
       ],
       product_aliases: [],
       scheduled_services: [],
-      services: [],
     };
   }
 
   test('protocol hints win: pest visit 1 resolves Taurus SC / Talak / LESCO 90/10 (Talak unresolved — not in fixture catalog)', async () => {
     const tables = catalogTables();
-    tables.scheduled_services = [{ id: 'svc-1', service_id: 'lib-pest', service_type: 'General Pest Control (Quarterly)', service_key_snapshot: 'pest_general_quarterly', scheduled_date: '2026-10-01' }];
-    tables.services = [{ id: 'lib-pest', default_products: JSON.stringify(['Demand CS', 'Advion Gel']) }];
+    tables.scheduled_services = [{ id: 'svc-1', service_id: null, service_type: 'General Pest Control (Quarterly)', service_key_snapshot: 'pest_general_quarterly', scheduled_date: '2026-10-01' }];
     const db = fakeDb(tables);
 
     const result = await resolveCompletionProductDefaults({ db, serviceId: 'svc-1', protocols });
@@ -359,25 +428,21 @@ describe('resolveCompletionProductDefaults (fake db)', () => {
     expect(result.unresolved).toEqual(['Atticus Talak 7.9 F']);
   });
 
-  test('default_products fallback resolves and aliases "Advion Gel" to the current catalog name', async () => {
+  test('no curated list resolves to empty products, source none — no services.default_products fallback query at all', async () => {
     const tables = catalogTables();
-    tables.scheduled_services = [{ id: 'svc-2', service_id: 'lib-none', service_type: 'Some Untracked Pest Visit With No Protocol Match At All', service_key_snapshot: null, scheduled_date: '2026-10-01' }];
-    // No completionDefaultProducts anywhere for this made-up service type —
-    // route it through a protocols object with no matching program data.
-    tables.services = [{ id: 'lib-none', default_products: JSON.stringify(['Advion Gel']) }];
+    tables.scheduled_services = [{ id: 'svc-2', service_id: null, service_type: 'Some Untracked Pest Visit With No Protocol Match At All', service_key_snapshot: null, scheduled_date: '2026-10-01' }];
     const db = fakeDb(tables);
     const emptyProtocols = { pest: { visits: [{ visit: 1, month: 'Any' }] } };
 
     const result = await resolveCompletionProductDefaults({ db, serviceId: 'svc-2', protocols: emptyProtocols });
-    expect(result.source).toBe('service_default_products');
-    expect(result.products.map((p) => p.name)).toEqual(['Advion Cockroach Gel Bait']);
+    expect(result.source).toBe('none');
+    expect(result.products).toEqual([]);
     expect(result.unresolved).toEqual([]);
   });
 
-  test('cockroach program resolves its three defaults by catalog id, with a "source" stamp', async () => {
+  test('cockroach program resolves its three defaults by catalog id, each carrying its lineMeta application method', async () => {
     const tables = catalogTables();
-    tables.scheduled_services = [{ id: 'svc-3', service_id: 'lib-roach', service_type: 'Cockroach Control Service', service_key_snapshot: 'cockroach_control', scheduled_date: '2026-10-01' }];
-    tables.services = [{ id: 'lib-roach', default_products: JSON.stringify(['Alpine WSG', 'Advion Gel', 'Gentrol IGR']) }];
+    tables.scheduled_services = [{ id: 'svc-3', service_id: null, service_type: 'Cockroach Control Service', service_key_snapshot: 'cockroach_control', scheduled_date: '2026-10-01' }];
     const db = fakeDb(tables);
 
     const result = await resolveCompletionProductDefaults({ db, serviceId: 'svc-3', protocols });
@@ -386,12 +451,32 @@ describe('resolveCompletionProductDefaults (fake db)', () => {
     const byName = Object.fromEntries(result.products.map((p) => [p.name, p]));
     expect(Object.keys(byName).sort()).toEqual(['Advion Cockroach Gel Bait', 'Alpine WSG', 'Gentrol IGR'].sort());
     expect(byName['Advion Cockroach Gel Bait'].source).toEqual({ programKey: 'cockroach', visit: 1, origin: 'protocol_visit' });
+    // The two products with no catalog application_method get the
+    // protocol's own interior method — never the catalog-inferred
+    // 'perimeter_spray' that would demand linear footage indoors.
+    expect(byName['Alpine WSG'].completionApplicationMethod).toBe('spot_treatment');
+    expect(byName['Gentrol IGR'].completionApplicationMethod).toBe('spot_treatment');
+    // Advion already resolves correctly via its catalog category (Bait)
+    // but the lineMeta stamps the same method for consistency.
+    expect(byName['Advion Cockroach Gel Bait'].completionApplicationMethod).toBe('bait_placement');
+    expect(byName['Advion Cockroach Gel Bait'].applicationMethod).toBe('bait_placement');
+  });
+
+  test('a product whose lineMeta names no completionApplicationMethod carries null, not a guess', async () => {
+    const tables = catalogTables();
+    tables.scheduled_services = [{ id: 'svc-5', service_id: null, service_type: 'Cockroach Control Service', service_key_snapshot: 'cockroach_control', scheduled_date: '2026-10-01' }];
+    const db = fakeDb(tables);
+    const noMethodProtocols = {
+      cockroach: { visits: [{ visit: 1, month: 'Any', completionDefaultProducts: ['Alpine WSG'] }] },
+    };
+
+    const result = await resolveCompletionProductDefaults({ db, serviceId: 'svc-5', protocols: noMethodProtocols });
+    expect(result.products[0].completionApplicationMethod).toBeNull();
   });
 
   test('lawn is excluded end to end: no products, source excluded_lawn', async () => {
     const tables = catalogTables();
-    tables.scheduled_services = [{ id: 'svc-4', service_id: 'lib-lawn', service_type: 'St. Augustine Lawn Care', service_key_snapshot: null, scheduled_date: '2026-01-15' }];
-    tables.services = [{ id: 'lib-lawn', default_products: JSON.stringify(['Should never surface']) }];
+    tables.scheduled_services = [{ id: 'svc-4', service_id: null, service_type: 'St. Augustine Lawn Care', service_key_snapshot: null, scheduled_date: '2026-01-15' }];
     const db = fakeDb(tables);
 
     const result = await resolveCompletionProductDefaults({ db, serviceId: 'svc-4', protocols });
