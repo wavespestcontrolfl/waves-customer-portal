@@ -30,6 +30,8 @@ const reviewStore = require('../services/customer-geocode-review');
 const { addressKey } = require('../services/customer-properties');
 const { resolveCustomerGeocodeReview } = require('../services/customer-geocode-review-actions');
 const dispatch = require('../services/dispatch-assignment');
+const { buildDispatchJobUpdatePayload } = jest.requireActual('../services/dispatch-assignment');
+const { sweepUngeocodedServices } = require('../services/geocoder-service-locations');
 const PIN = { latitude: 27.4981235, longitude: -82.5748125 };
 const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
 
@@ -220,10 +222,13 @@ const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
     await act({ action: 'outside_service_area', source: 'county_records' });
 
     expect(Number((await review()).latitude)).toBe(PIN.latitude);
-    expect(Number((await customer()).latitude)).toBe(staleCustomerPin.latitude);
-    expect(Number((await customer()).longitude)).toBe(staleCustomerPin.longitude);
+    expect((await customer()).latitude).toBeNull();
+    expect((await customer()).longitude).toBeNull();
     expect((await primary()).latitude).toBeNull();
     expect(await visit()).toMatchObject({ lat: null, lng: null, route_order: null });
+    await expect(buildDispatchJobUpdatePayload(visitId, ACTOR_ID)).resolves.toMatchObject({
+      lat: null, lng: null,
+    });
   });
 
   test('outside-area does not bind a previous address review pin to the current address', async () => {
@@ -244,6 +249,21 @@ const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
       CORRECTED.address_line1, CORRECTED.address_line2, CORRECTED.city, CORRECTED.state, CORRECTED.zip,
     ]);
     expect(await visit()).toMatchObject({ lat: null, lng: null, route_order: null });
+
+    const priorRouteGate = process.env.GATE_ROUTE_REORDER;
+    const priorRepairGate = process.env.GATE_ROUTE_REORDER_REPAIR;
+    process.env.GATE_ROUTE_REORDER = 'true';
+    process.env.GATE_ROUTE_REORDER_REPAIR = 'true';
+    try {
+      await expect(sweepUngeocodedServices({
+        dryRun: false, now: new Date('2099-09-30T16:00:00.000Z'),
+      }, mockConnection)).resolves.toMatchObject({ checked: 0, geocoded: 0 });
+    } finally {
+      if (priorRouteGate === undefined) delete process.env.GATE_ROUTE_REORDER;
+      else process.env.GATE_ROUTE_REORDER = priorRouteGate;
+      if (priorRepairGate === undefined) delete process.env.GATE_ROUTE_REORDER_REPAIR;
+      else process.env.GATE_ROUTE_REORDER_REPAIR = priorRepairGate;
+    }
   });
 
   test.each(['outside_service_area', 'revoke'])('%s broadcasts every cleared visit after commit', async action => {

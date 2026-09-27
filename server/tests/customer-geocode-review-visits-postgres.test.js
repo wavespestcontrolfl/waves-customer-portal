@@ -346,13 +346,14 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
       customer: 0, property: 0, visits: 1, templates: 1, visitIds: [linkedId],
     });
     expect(await trx('scheduled_services').where({ id: linkedId }).first()).toMatchObject({
+      service_address_line1: CORRECTED.address_line1,
       lat: null, lng: null, route_order: null,
     });
     expect(await trx('scheduled_services').where({ id: independentId }).first()).toMatchObject({
       lat: '27.450000', lng: '-82.450000', route_order: 6,
     });
     expect(recurringServiceAddress(await trx('scheduled_services').where({ id: parentId }).first()))
-      .toMatchObject({ lat: null, lng: null, zone: null });
+      .toMatchObject({ service_address_line1: CORRECTED.address_line1, lat: null, lng: null, zone: null });
   });
 
   test('visit membership changes are part of the post-lock fence', async () => {
