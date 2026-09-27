@@ -977,7 +977,9 @@ it('a row converted to per-gallon joins the tank, and clearing the tank frees it
 // saying what actually went out, so the seed gives way (Codex r5 P1).
 it('gallons replace a seeded pest-mix total', async () => {
   const pest = { ...service, serviceType: 'Quarterly Pest Control', completionProfile: { serviceKey: 'pest', requiresProducts: true }, waveguardTier: null };
-  const surfactant = { id: 'mix-surf', name: 'Non-ionic surfactant', category: 'adjuvant', default_unit: 'fl_oz/gal', default_rate: '0.5' };
+  // The house mix's exact surfactant identity (owner ruling 2026-09-26,
+  // lib/pest-default-mix — supersedes the generic 2026-08-29 placeholder).
+  const surfactant = { id: 'mix-surf', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant', default_unit: 'fl_oz/gal', default_rate: '0.5' };
   render(<CompletionPanel service={pest} products={[surfactant]} onClose={() => {}} onSubmit={submit} />);
   // Seeded at the house total of 0.25, with a per-gallon rate.
   await waitFor(() => expect(totals()).toHaveLength(1));

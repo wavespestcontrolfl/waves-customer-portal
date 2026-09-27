@@ -81,7 +81,8 @@ function billingNotificationEventKey(input) {
 // notice. SUPPRESSION_LOOKUP_FAILED is the same kind of schedulable hold for
 // an explicit Email/App leg whose suppression state could not be read, and
 // BILLING_EMAIL_PREPARATION_HOLD for a retryable Email refusal before the
-// provider handoff (billing-channel-email.js). BILLING_TEXT_DEDUPE_UNAVAILABLE
+// provider handoff, or a definite SendGrid rejection after it
+// (billing-channel-email.js). BILLING_TEXT_DEDUPE_UNAVAILABLE
 // is the same kind of schedulable hold for an explicit Text leg whose dedupe
 // state (the advisory-lock check, or the prior-accepted-send lookup) could
 // not be read. BILLING_TEXT_LEG_IN_FLIGHT is the Text leg's own
@@ -128,7 +129,7 @@ function billingLegDeliveryState(channel, result = {}) {
   if (channel === 'push' && result.deliveryOutcome === 'not_sent'
     && result.reason === 'app_event_already_visible') return 'deduped';
   if (result.deliveryOutcome === 'accepted') return result.deduped ? 'deduped' : 'delivered';
-  if (channel === 'email' && result.ok === true && result.deliveryOutcome === undefined) return 'delivered';
+  if (channel === 'email' && result.ok === true && result.deliveryOutcome === undefined) return result.deduped ? 'deduped' : 'delivered';
   return channel === 'push' && result.bellPersisted === true ? 'delivered' : null;
 }
 

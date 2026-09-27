@@ -591,7 +591,7 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
         logger.warn(`[bounce-recovery] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
       }
       authorityRefusal = fence?.reason || 'visit_summary_unavailable';
-    } else if (billingReplay.isBillingEmailProviderReplay(bouncedMessage)) {
+    } else if (billingReplay.isBillingEmailTemplateRetry(bouncedMessage)) {
       const handoff = await billingReplay.runBillingEmailProviderReplayHandoff(
         bouncedMessage,
         dispatchToProvider,
@@ -822,7 +822,7 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
         updated_at: new Date(),
         metadata: jsonbMerge({ suppression_reason: sendResult.reason }),
       });
-      if (billingReplay.isBillingEmailProviderReplay(bouncedMessage)) {
+      if (billingReplay.isBillingEmailTemplateRetry(bouncedMessage)) {
         await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId,
           status: sendResult.reason === 'corrected_owned_by_other'
             ? 'corrected_owned_by_other' : 'billing_replay_reauthorization_required', candidate });

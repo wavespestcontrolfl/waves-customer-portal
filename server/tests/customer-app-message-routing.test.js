@@ -1177,6 +1177,37 @@ describe('explicit billing channel combinations', () => {
 // providerPreparationCheck and invoked exactly as the Email authority does
 // (channel:'email', database: the locked trx) — see invoice.js's
 // checkInvoiceDeliveryPreconditions for the shared check.
+// #4843 gate checklist: a definite SendGrid rejection after the handoff comes
+// back from the billing Email adapter as its blocked replay hold. The
+// messaging wrapper must keep that code, or producers (which replay only
+// REPLAY_HOLD_CODES) would drop an Email-only notice again.
+describe('billing Email replay hold survives the messaging wrapper', () => {
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-01-05T12:00:00-05:00'));
+  });
+  afterEach(() => jest.useRealTimers());
+
+  test('an Email-only notice rejected by SendGrid stays a replay hold for its producer', async () => {
+    prefs.billing_channels = ['email'];
+    const nextAllowedAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    sendBillingChannelEmail.mockResolvedValueOnce({
+      sent: false, provider: 'email', providerMessageId: null, deliveryOutcome: 'not_sent', blocked: true,
+      code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: 'EMAIL_PROVIDER_ERROR', reason: 'SendGrid 429: rejected',
+      retryable: true, providerRejected: true, deferred: true, nextAllowedAt,
+    });
+    const result = await sendCustomerMessage({
+      to: '+19415550142', body: 'Your payment is due soon.', channel: 'sms', audience: 'customer',
+      purpose: 'billing', customerId, entryPoint: 'autopay_pre_charge_reminder',
+      metadata: { original_message_type: 'autopay_pre_charge', billingDeliveryCategory: 'billing',
+        notificationEventKey: 'precharge:qa:2026-01-06' },
+    });
+    expect(result.channelResults.email).toMatchObject({
+      sent: false, blocked: true, code: 'BILLING_EMAIL_PREPARATION_HOLD', deferred: true, retryable: true, nextAllowedAt,
+    });
+    expect(require('../services/messaging/billing-channel-routing').isReplayHold(result)).toBe(true);
+  });
+});
+
 describe('invoice_send_via_sms explicit billing Email leg (send-customer-message.js billingEmailPreSendCheck guard)', () => {
   // Mirrors the shape InvoiceService.sendViaSMS actually sends to
   // sendCustomerMessage — entryPoint/purpose/audience gate both the

@@ -4837,9 +4837,25 @@ function initScheduledJobs() {
       Promise.resolve().then(() => require('./missed-call-bell').sweepMissedCalls()),
       Promise.resolve().then(() => require('./repeat-caller-bell').sweepRepeatCallers()),
       Promise.resolve().then(() => require('./missed-call-text-back').sweepMissedCallTextBacks()),
+      // The promise-chaser bell's ONE path: a stateless, idempotent sweep
+      // (see that file's docstring — eligibility is now a per-call stamp,
+      // not a boot-time boundary, so this require is lazy like the other
+      // three sweeps here). Wrapped in the cross-instance cron lock ON ITS
+      // OWN — a Railway deploy overlap or a slow prior tick could otherwise
+      // have two instances paging the same window at once (Codex #5019 r16
+      // P2); the other three sweeps here are already fleet-safe through
+      // their own atomic claims and stay unwrapped and uncoupled from this
+      // one — a held lease elsewhere is a quiet skip (runExclusive resolves,
+      // never rejects, on a skip), so it needs no special handling in the
+      // results.forEach below.
+      // Gate-checked BEFORE the lock (codex r9 P2): dark means no lock, no
+      // connection, no job_health row, the same conjunction the sweep checks.
+      (isEnabled('promiseChaserBell') && isEnabled('callCommitments'))
+        ? runExclusive('promise-chaser-bell', () => require('./promise-chaser-bell').sweepPromiseChasers())
+        : Promise.resolve(0),
     ]);
     results.forEach((result, index) => {
-      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller', 'missed-call-text-back'][index]} sweep failed: ${result.reason.message}`);
+      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller', 'missed-call-text-back', 'promise-chaser'][index]} sweep failed: ${result.reason.message}`);
     });
   }, { timezone: 'America/New_York' });
 
