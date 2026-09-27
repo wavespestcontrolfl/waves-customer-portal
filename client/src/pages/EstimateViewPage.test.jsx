@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
+import { setGlassDefault } from '../lib/estimate-glass-copy';
 import EstimateViewPage, { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, estimateHasRegulatedCertificateSurface, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 vi.mock('react-router-dom', () => ({ useParams: () => ({ token: 'mixed-termite-token' }) }));
@@ -11,6 +12,7 @@ vi.mock('../lib/stripeLoader', () => ({ loadStripeSdk: vi.fn(async () => null) }
 
 afterEach(() => {
   cleanup();
+  setGlassDefault(false);
   vi.unstubAllGlobals();
 });
 
