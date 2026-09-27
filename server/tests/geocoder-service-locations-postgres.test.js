@@ -455,6 +455,33 @@ postgres('service-location geocoder against isolated PostgreSQL', () => {
       .toEqual({ lat: null, lng: null });
   });
 
+  test('a verified primary pin is not copied onto a divergent frozen appointment address', async () => {
+    const primaryId = '34000000-0000-4000-8000-000000000093';
+    const serviceId = id(903);
+    const providerPin = { lat: 27.61, lng: -82.61 };
+    await mockConnection('customers').where({ id: CUSTOMER }).update({ latitude: PIN.lat, longitude: PIN.lng });
+    await mockConnection('customer_properties').insert({
+      id: primaryId, customer_id: CUSTOMER, active: true, is_primary: true,
+      address_line1: '100 Primary Fixture Way', address_line2: null,
+      city: 'Bradenton', state: 'FL', zip: '34205', latitude: PIN.lat, longitude: PIN.lng,
+    });
+    await enableReviewGate();
+    await insertReview('verified');
+    await insertService(serviceId, {
+      property_id: primaryId, service_address_line1: '999 Frozen Snapshot Lane',
+    });
+    geocodeAddressWithStatus.mockResolvedValue({ location: providerPin, permanent: false });
+
+    const result = await sweepUngeocodedServices({ limit: 1, now: NOW, dryRun: false }, mockConnection);
+
+    expect(result).toMatchObject({ checked: 1, geocoded: 1, unresolved: 0, stale: 0, failed: 0 });
+    expect(geocodeAddressWithStatus).toHaveBeenCalledWith(expect.stringContaining('999 Frozen Snapshot Lane'));
+    const service = await mockConnection('scheduled_services').where({ id: serviceId }).first('lat', 'lng');
+    expect({ lat: Number(service.lat), lng: Number(service.lng) }).toEqual(providerPin);
+    expect(await mockConnection('audit_log').where({ resource_id: serviceId }).first('metadata'))
+      .toMatchObject({ metadata: expect.objectContaining({ source: 'verified_service_address_geocode' }) });
+  });
+
   test('an equivalently spelled verified review pin is reused without a provider lookup', async () => {
     const serviceId = id(92);
     const reviewedAddress = ['100 Primary Fixture Street', 'Apartment 4', 'Bradenton', 'FL', '34205'];
