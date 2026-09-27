@@ -97,7 +97,7 @@ jest.setTimeout(30000);
     expect(result).toMatchObject({ logged: 1, held: 0, stillPending: 0, errors: 0 });
 
     const created = await mockConn('products_catalog').where({ name: 'Bifen XTS' }).first();
-    expect(created).toMatchObject({ active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', best_vendor: 'Amazon' });
+    expect(created).toMatchObject({ active: true, category: 'insecticide', container_size: '96 oz', inventory_unit: 'oz', default_unit: 'oz', best_vendor: 'Amazon' });
     expect(await stockOf(created.id)).toBe(192); // 2 ordered x 96 oz
 
     const alias = await mockConn('product_aliases').where({ product_id: created.id }).first();
@@ -265,6 +265,22 @@ jest.setTimeout(30000);
     expect(saved).toMatchObject({ status: 'skipped', movement_id: null });
     expect(saved.agent_decision).toMatchObject({ reason: 'received_before_cutoff' });
     expect(await bellsFor(line.id)).toHaveLength(0);
+  });
+
+  test('a new count product is created with each as both its stock and application unit', async () => {
+    const line = await pendingLine({ raw_title: 'Snap Trap Rat Trap 12 Count', quantity: 1 });
+    const decision = {
+      kind: 'new_product', reason: 'not in the catalog', product_id: null,
+      new_product: { name: 'Snap Trap Rat Trap', category: 'supplies', active_ingredient: null, epa_reg_no: null },
+      reading: { size_text: '12 Count', size_number: 12, size_unit: 'each', pack_text: null, pack_count: 1 },
+    };
+    await mockConn('products_catalog').insert({ name: 'Category Seed', active: true, category: 'supplies' });
+    const result = await run({ ok: true, json: decision });
+    expect(result).toMatchObject({ logged: 1 });
+    const created = await mockConn('products_catalog').where({ name: 'Snap Trap Rat Trap' }).first();
+    expect(created).toMatchObject({ inventory_unit: 'each', default_unit: 'each' });
+    expect(await stockOf(created.id)).toBe(12);
+    expect((await mockConn('purchase_receipt_lines').where({ id: line.id }).first()).status).toBe('logged');
   });
 
   test('a needs_size line: the model reads the title\'s size, the catalog container is set once, and the line logs', async () => {

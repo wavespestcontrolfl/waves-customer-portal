@@ -636,6 +636,10 @@ async function applyDecision(conn, { lineId, vendor, shipmentKey, email, decisio
         epaRegNumber: decision.newProduct.epaRegNumber || undefined,
         unitSize: decision.newProduct.containerSize,
         inventoryUnit: decision.newProduct.inventoryUnit,
+        // The application unit matches the stock unit, so a visit recording
+        // usage ("each" for traps and stations) converts and deducts; the
+        // admin insert's default 'oz' can't convert to 'each'.
+        defaultUnit: decision.newProduct.inventoryUnit,
         bestVendor: VENDOR_BEST[vendor] || null,
         autoReorderEnabled: false,
       }, {
