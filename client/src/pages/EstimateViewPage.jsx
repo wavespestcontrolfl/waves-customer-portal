@@ -5508,11 +5508,15 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       return null;
     }
   });
+  // The footer's "Backed by the Waves Guarantee" covers the whole estimate,
+  // so it needs every service to carry the plan terms: the server's
+  // noEstimateWideGuarantee (a rodent, commercial, termite or unknown service
+  // anywhere), on the page or on the document it renders.
   const footerNoGuaranteeClaims = data === null
     ? null
     : (pdfDocumentMode && data?.documentRender === true
-        ? proposalMakesNoGuaranteeClaim(data)
-        : data?.estimate?.noGuaranteeClaims === true);
+        ? proposalMakesNoGuaranteeClaim(data) || data?.proposal?.noEstimateWideGuarantee === true
+        : data?.estimate?.noGuaranteeClaims === true || data?.estimate?.noEstimateWideGuarantee === true);
   useLayoutEffect(() => {
     setFooterNoGuarantee?.(footerNoGuaranteeClaims);
     return () => setFooterNoGuarantee?.(false);

@@ -60,23 +60,48 @@ function proposalMakesNoGuaranteeClaim(proposal, estimateId = null) {
   }
 }
 
-// Whether a proposal document may print the canned IPM/callback sentence.
-// It is a recurring residential pest term (AGENTS.md estimate truth scope),
-// so only a residential proposal (never an authored, enabled one) whose every
-// row is pest work qualifies. Rodent, commercial, mixed, termite and unknown
-// scope stay terms-neutral.
-function proposalCallbackTermsEligible(proposal, estimateId = null) {
+function proposalRows(proposal) {
+  const list = (value) => (Array.isArray(value) ? value : []);
+  return [
+    ...list(proposal?.buildings).flatMap((building) => list(building?.lineItems)),
+    ...list(proposal?.correctiveWork),
+    ...list(proposal?.programs),
+  ];
+}
+
+function proposalRowLanes(row) {
+  const { serviceKeysFromText } = require('./estimate-service-lines');
+  return serviceKeysFromText(row?.service, row?.serviceKey, row?.description, row?.label, row?.name);
+}
+
+// Whether a guarantee line may cover the whole proposal document: a
+// residential proposal (never an authored, enabled one, which is commercial)
+// whose every printed row is in a recurring residential lane (pest, lawn,
+// mosquito, tree & shrub, palm). Rodent, commercial, mixed-with-neutral,
+// termite and unknown scope stay terms-neutral (AGENTS.md estimate truth
+// scope).
+function proposalCarriesPlanTerms(proposal, estimateId = null) {
   if (!proposal || typeof proposal !== 'object' || proposal.enabled === true) return false;
   if (proposalMakesNoGuaranteeClaim(proposal, estimateId)) return false;
-  const { serviceKeysFromText } = require('./estimate-service-lines');
-  const list = (value) => (Array.isArray(value) ? value : []);
-  const rows = [
-    ...list(proposal.buildings).flatMap((building) => list(building?.lineItems)),
-    ...list(proposal.correctiveWork),
-    ...list(proposal.programs),
-  ];
+  const { RECURRING_TERMS_LANES } = require('./estimate-followup-copy');
+  const rows = proposalRows(proposal);
   return rows.length > 0 && rows.every((row) => {
-    const lanes = serviceKeysFromText(row?.service, row?.serviceKey, row?.description, row?.label, row?.name);
+    const lanes = proposalRowLanes(row);
+    return lanes.length === 1 && RECURRING_TERMS_LANES.includes(lanes[0]);
+  });
+}
+
+// Whether the PDF may print its canned IPM/callback sentence, a recurring
+// residential PEST term: the proposal carries the plan terms, every row is
+// pest work, and at least one line is a scheduled recurring visit.
+function proposalCallbackTermsEligible(proposal, estimateId = null) {
+  if (!proposalCarriesPlanTerms(proposal, estimateId)) return false;
+  const rows = proposalRows(proposal);
+  const recurringVisit = (Array.isArray(proposal.buildings) ? proposal.buildings : [])
+    .flatMap((building) => (Array.isArray(building?.lineItems) ? building.lineItems : []))
+    .some((item) => item?.frequency && item.frequency !== 'one_time');
+  return recurringVisit && rows.every((row) => {
+    const lanes = proposalRowLanes(row);
     return lanes.length === 1 && lanes[0] === 'pest';
   });
 }
@@ -274,6 +299,7 @@ module.exports = {
   estimateIsPriceLocked,
   estimateSoldAsAnnualPrepay,
   proposalCallbackTermsEligible,
+  proposalCarriesPlanTerms,
   proposalMakesNoGuaranteeClaim,
   resolveLivePricing,
   resolveProposalBillingContext,

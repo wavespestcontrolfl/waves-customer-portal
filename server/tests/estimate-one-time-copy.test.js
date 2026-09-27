@@ -293,6 +293,25 @@ describe('resolveOneTimeServiceCopy', () => {
     expect(copies.map((c) => (c ? c.key : null))).toEqual(['rodent_exclusion', null, null, 'wasp', 'one_time_lawn', 'one_time_lawn']);
   });
 
+  test('one saved row never lends its sold scope to a sibling job (Codex #4982)', () => {
+    // Front and rear wasp jobs; only the front one bought nest removal, and
+    // the saved result holds just that row. It enriches its own job only.
+    const contract = attachPublicPricingContract(
+      { frequencies: [], oneTimeBreakdown: { total: 300, items: [
+        { service: 'wasp', label: 'Front wasp nest treatment', amount: 150 },
+        { service: 'wasp', label: 'Rear wasp nest treatment', amount: 150 },
+      ] } },
+      {},
+      { result: { oneTime: { specItems: [
+        { service: 'wasp', name: 'Front wasp nest treatment', price: 150, pricingBreakdown: { subtotal: 150, removal: 75 } },
+      ] } } },
+    );
+    const [front, rear] = contract.oneTimeBreakdown.items;
+    expect(front.copy.includes).toContain(ONE_TIME_SERVICE_COPY.wasp.removalBullet);
+    expect(rear.copy.includes).toContain(ONE_TIME_SERVICE_COPY.wasp.noRemovalBullet);
+    expect(rear.copy.includes).not.toContain(ONE_TIME_SERVICE_COPY.wasp.removalBullet);
+  });
+
   test('one-time lawn copy is neutral across turf basis and treatment type (fertilization is not described as a corrective treatment)', () => {
     const lawn = ONE_TIME_SERVICE_COPY.one_time_lawn;
     expect(`${lawn.outcome} ${lawn.includes.join(' ')}`).not.toMatch(/chinch|weed|fungus/i);

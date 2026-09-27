@@ -4626,6 +4626,24 @@ describe('public estimate one-time breakdown', () => {
     else expect(html).not.toContain('Basic 1-yr warranty');
   });
 
+  test('a rodent plan keeps its cancel/refund terms but no estimate-wide guarantee item', () => {
+    const html = renderPage('terms-rodent-token', {
+      status: 'sent', customerName: 'Pat Customer', address: '123 Main St',
+      monthlyTotal: 40, annualTotal: 480, onetimeTotal: 0, tier: 'Bronze',
+      noEstimateWideGuarantee: true,
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Rodent Bait Stations', mo: 40 }] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('class="card plan-terms-card"');
+    expect(html).toContain('<h2>Cancel &amp; refunds</h2>');
+    expect(html).not.toContain('Money-back guarantee');
+    expect(html).not.toContain('our guarantee');
+  });
+
   test('server-rendered recurring estimates surface cancel/refund/guarantee terms', () => {
     const html = renderPage('terms-token', {
       status: 'sent',

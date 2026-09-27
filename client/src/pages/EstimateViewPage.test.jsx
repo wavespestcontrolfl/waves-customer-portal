@@ -640,6 +640,61 @@ describe('mixed-estimate approval microcopy', () => {
     expect(screen.queryByText(/Written estimate scope and terms apply/i)).not.toBeInTheDocument();
   });
 
+  it('neutralizes the footer when not every service carries the plan terms (a rodent plan)', async () => {
+    // noGuaranteeClaims stays false (no termite work), but the server marks
+    // the estimate noEstimateWideGuarantee: rodent carries no money-back plan
+    // terms, so no guarantee line covers the whole estimate.
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        glassDefault: false,
+        estimate: {
+          customerFirstName: 'Casey',
+          address: '1 Rodent Plan Way',
+          serviceCategory: 'rodent',
+          acceptance: { mode: 'standard_slot_pick' },
+          defaultServiceMode: 'recurring',
+          isOneTimeOnly: false,
+          showOneTimeOption: false,
+          billByInvoice: false,
+          membership: null,
+          intelligence: null,
+          noEstimateWideGuarantee: true,
+        },
+        pricing: {
+          services: [{
+            key: 'rodent_bait',
+            label: 'Rodent Bait Stations',
+            isRecurring: true,
+            isPest: false,
+            frequencies: [{
+              key: 'standard', label: 'Standard', monthly: 40, annual: 480,
+              included: [{ key: 'service', label: 'Recurring service' }], addOns: [],
+            }],
+            copy: { priceWording: {} },
+          }],
+          askChips: [],
+          defaultServiceMode: 'recurring',
+          renderFlags: {},
+        },
+        cta: {
+          canAccept: true,
+          terminalState: null,
+          quoteRequired: false,
+          reviewBeforeBooking: false,
+        },
+      }),
+    })));
+
+    render(<WavesShell><EstimateViewPage /></WavesShell>);
+
+    await screen.findByText('1 Rodent Plan Way');
+    const footer = within(screen.getByRole('contentinfo'));
+    expect(await footer.findByText(/Written estimate scope and terms apply/i)).toBeInTheDocument();
+    expect(footer.queryByText(/Backed by the Waves Guarantee/i)).not.toBeInTheDocument();
+  });
+
   it('keeps the footer neutral during initial and next-token loads, then restores ordinary shell copy on unmount', async () => {
     const deferred = [];
     vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/data')

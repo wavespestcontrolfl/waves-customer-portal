@@ -218,6 +218,20 @@ describe('GET /:token/data — noGuaranteeClaims', () => {
     expect(row.detail).toBe(expected);
   });
 
+  test.each([
+    ['rodent bait only', [{ name: 'Rodent Bait Stations', mo: 40 }], true],
+    ['pest + lawn', [{ name: 'Pest Control', mo: 55 }, { name: 'Lawn Care', mo: 60 }], false],
+  ])('%s: the page-wide guarantee decision follows every service', async (_name, services, neutral) => {
+    const base = estimateRow();
+    const body = await dataFor(estimateRow({
+      id: `est-planterms-${services.length}-${neutral}`, token: `plantermsdecision${services.length}${neutral}token`, onetime_total: 0,
+      estimate_data: { ...base.estimate_data, result: { recurring: { discount: 0, services }, oneTime: { items: [], membershipFee: 0 } } },
+    }));
+    expect(body.estimate).not.toHaveProperty('noGuaranteeClaims');
+    if (neutral) expect(body.estimate.noEstimateWideGuarantee).toBe(true);
+    else expect(body.estimate).not.toHaveProperty('noEstimateWideGuarantee');
+  });
+
   test('termite bait monitoring is flagged', async () => {
     const base = estimateRow();
     const body = await dataFor(estimateRow({

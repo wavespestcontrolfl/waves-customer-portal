@@ -5598,9 +5598,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // estimate's rows): the card keeps the payment-option refund details but
   // does not promise no-contract terms, anytime cancellation, or a guarantee.
   const planTermsNoGuarantee = noGuaranteeClaims;
+  // The guarantee heading and item cover the whole plan, so they need every
+  // service to carry the plan terms (a rodent or commercial service does not).
+  const planTermsNoMoneyBack = planTermsNoGuarantee || estimate?.noEstimateWideGuarantee === true;
   const planTermsCardHtml = showBillingCard ? `
   <section class="card plan-terms-card"${billingModeAttr}>
-    <h2>${planTermsNoGuarantee ? 'Cancel &amp; refunds' : 'Cancel, refunds &amp; our guarantee'}</h2>
+    <h2>${planTermsNoMoneyBack ? 'Cancel &amp; refunds' : 'Cancel, refunds &amp; our guarantee'}</h2>
     <p class="billing-lede">${planTermsNoGuarantee ? 'Your written service scope and terms apply.' : 'No contracts and no lock-in. Here&rsquo;s exactly where you stand if your plans change.'}</p>
     <ul class="plan-terms-list">
       ${planTermsNoGuarantee ? '' : `<li class="plan-terms-item">
@@ -5615,7 +5618,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <span class="plan-terms-term">Annual prepay is prorated</span>
         <span class="plan-terms-detail">${planTermsNoGuarantee ? 'Unused applications on the 12-month prepay plan are refunded on a prorated basis.' : 'On the 12-month prepay plan, cancel anytime and we refund every application you haven&rsquo;t used yet, prorated.'}</span>
       </li>` : ''}
-      ${planTermsNoGuarantee ? '' : `<li class="plan-terms-item">
+      ${planTermsNoMoneyBack ? '' : `<li class="plan-terms-item">
         <span class="plan-terms-term">Money-back guarantee</span>
         <span class="plan-terms-detail">If a covered problem comes back between visits, we re-treat free. If we can&rsquo;t solve it, we refund your most recent service payment.</span>
       </li>`}
@@ -8847,6 +8850,9 @@ async function handleEstimateView(req, res, next) {
       // The page's guarantee rule, decided from the same normalized rows the
       // React view reads (renderPage only sees this view and the data).
       noGuaranteeClaims: estimateMakesNoGuaranteeClaim(estData, pricingBundleForView),
+      // A guarantee line covering the whole estimate needs every service to
+      // carry the plan terms (estimateCarriesPlanTerms).
+      noEstimateWideGuarantee: !estimateCarriesPlanTerms(estData, pricingBundleForView),
       status: estimate.status === 'accepted'
         ? estimate.status
         : (pageQuoteRequirement.quoteRequired ? 'quote_required' : estimate.status),
@@ -20033,9 +20039,11 @@ function serviceMixMakesNoGuaranteeClaim(recurringServices = [], oneTimeItems = 
   return classified === 0;
 }
 
-function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
-  // Mapped pricing can omit a raw one-time line. Classify both persisted
-  // roots, just as recurring rows do, without changing displayed totals.
+// Every service row the estimate's guarantee decisions read. Mapped pricing
+// can omit a raw one-time line, so both persisted roots are classified, just
+// as recurring rows are, without changing displayed totals. Null when an
+// inputs-only replay fails: callers fail closed.
+function guaranteeServiceRows(estData = {}, pricingBundle = {}) {
   const roots = [estData?.result, estData?.engineResult]
     .filter((root) => root && typeof root === 'object');
   if (!roots.length) {
@@ -20048,16 +20056,55 @@ function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
       try { roots.push(generateEstimate(engineInputs)); }
       catch (err) {
         logger.warn(`[estimate-data] guarantee classification replay failed: ${err.message}`);
-        return true;
+        return null;
       }
     }
   }
-  const oneTimeItems = [
-    ...roots.flatMap((result) => normalizeOneTimeBreakdown({ ...estData, result }).items),
-    ...(pricingBundle?.oneTimeBreakdown?.items || []),
-    ...guaranteeProposalRows(estData),
-  ];
-  return serviceMixMakesNoGuaranteeClaim(roots.flatMap(guaranteeRecurringRows), oneTimeItems);
+  return {
+    recurring: roots.flatMap(guaranteeRecurringRows),
+    oneTime: [
+      ...roots.flatMap((result) => normalizeOneTimeBreakdown({ ...estData, result }).items),
+      ...(pricingBundle?.oneTimeBreakdown?.items || []),
+      ...guaranteeProposalRows(estData),
+    ],
+  };
+}
+
+function estimateMakesNoGuaranteeClaim(estData = {}, pricingBundle = {}) {
+  const rows = guaranteeServiceRows(estData, pricingBundle);
+  return rows ? serviceMixMakesNoGuaranteeClaim(rows.recurring, rows.oneTime) : true;
+}
+
+// Whether a guarantee line may cover the whole estimate: every service
+// carries the recurring residential terms (callbacks, the money-back
+// guarantee). Each recurring and one-time row is residential pest, lawn,
+// mosquito or tree & shrub (palm included). Rodent, commercial, termite or
+// unclassifiable work anywhere, or an authored (commercial) proposal, means
+// no estimate-wide guarantee line (AGENTS.md estimate truth scope).
+const PLAN_TERMS_CATEGORIES = new Set(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub']);
+function serviceMixCarriesPlanTerms(recurringServices = [], oneTimeItems = []) {
+  if (serviceMixMakesNoGuaranteeClaim(recurringServices, oneTimeItems)) return false;
+  let services = 0;
+  for (const svc of (Array.isArray(recurringServices) ? recurringServices : [])) {
+    if (!svc || typeof svc !== 'object') continue;
+    const key = String(recurringServiceKey(svc) || '');
+    if (NON_SERVICE_RECURRING_KEY_RX.test(key)) continue;
+    if (svc.isCommercial === true || key.startsWith('commercial_')
+      || !PLAN_TERMS_CATEGORIES.has(categoryForRecurringServiceKey(key))) return false;
+    services += 1;
+  }
+  for (const item of (Array.isArray(oneTimeItems) ? oneTimeItems : [])) {
+    if (!item || typeof item !== 'object' || isNonServiceOneTimeItem(item)) continue;
+    if (!PLAN_TERMS_CATEGORIES.has(serviceCategoryForOneTimeItem(item))) return false;
+    services += 1;
+  }
+  return services > 0;
+}
+
+function estimateCarriesPlanTerms(estData = {}, pricingBundle = {}) {
+  if (estData?.proposal?.enabled === true) return false;
+  const rows = guaranteeServiceRows(estData, pricingBundle);
+  return rows ? serviceMixCarriesPlanTerms(rows.recurring, rows.oneTime) : false;
 }
 
 // Optional service-category scope for the glass release: CSV env, e.g.
@@ -23616,13 +23663,22 @@ function matchingRawOneTimeRow(row, rawRows = [], targetRows = [row]) {
     return matchingTrenchingWarrantyRow(row, rawRows, targetRows);
   }
   const candidates = rawRows.filter((raw) => oneTimeServiceIdentity(raw) === service);
-  if (candidates.length < 2) return { row: candidates[0] || null, ambiguous: false };
-  const sameLabel = candidates.filter((raw) => (
-    String(raw.label || raw.displayName || raw.name || raw.service || '') === String(row.label || '')
-  ));
-  if (sameLabel.length === 1) return { row: sameLabel[0], ambiguous: false };
-  const sameAmount = sameLabel.filter((raw) => Number(raw.amount ?? raw.price ?? raw.total) === Number(row.amount));
-  if (sameAmount.length === 1) return { row: sameAmount[0], ambiguous: false };
+  if (!candidates.length) return { row: null, ambiguous: false };
+  const peers = targetRows.filter((target) => oneTimeServiceIdentity(target) === service);
+  // One job and one raw row of the service pair directly. Otherwise identity
+  // decides, one to one: a raw row enriches a job only when the label (then
+  // label and amount) singles out both, so one raw row never lends its sold
+  // scope to a sibling job (front and rear wasp jobs, one with nest removal).
+  if (candidates.length === 1 && peers.length <= 1) return { row: candidates[0], ambiguous: false };
+  const rawLabel = (raw) => String(raw.label || raw.displayName || raw.name || raw.service || '');
+  const amountOf = (item) => Number(item.amount ?? item.price ?? item.total);
+  const label = String(row.label || '');
+  const sameLabel = candidates.filter((raw) => rawLabel(raw) === label);
+  const peersSameLabel = peers.filter((peer) => String(peer.label || '') === label);
+  if (sameLabel.length === 1 && peersSameLabel.length <= 1) return { row: sameLabel[0], ambiguous: false };
+  const sameAmount = sameLabel.filter((raw) => amountOf(raw) === Number(row.amount));
+  const peersSameAmount = peersSameLabel.filter((peer) => Number(peer.amount) === Number(row.amount));
+  if (sameAmount.length === 1 && peersSameAmount.length <= 1) return { row: sameAmount[0], ambiguous: false };
   return { row: null, ambiguous: true };
 }
 
@@ -26782,7 +26838,7 @@ async function composeEstimateDataPayload(estimate, {
       || (commercialGlassEnabled && estimateDataForIntelligence?.proposal?.enabled === true)) {
       try {
         const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
-        const { proposalMakesNoGuaranteeClaim, resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+        const { proposalCarriesPlanTerms, proposalMakesNoGuaranteeClaim, resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
         const proposalBilling = await resolveProposalBillingContext(estimate);
         const proposalForView = normalizeProposal(estimate, {
           recurringMode: proposalBilling?.billsPerApplication === true ? 'per_application' : 'legacy',
@@ -26792,6 +26848,7 @@ async function composeEstimateDataPayload(estimate, {
           enabled: proposalForView.enabled === true,
           synthesized: proposalForView.synthesized === true,
           noGuaranteeClaims: proposalMakesNoGuaranteeClaim(proposalForView, estimate.id),
+          ...(proposalCarriesPlanTerms(proposalForView, estimate.id) ? {} : { noEstimateWideGuarantee: true }),
           // Drives the commercial inclusions/terms stacks client-side — see
           // proposalPestRecurringOnly's truth-scope classification.
           pestRecurringOnly: proposalPestRecurringOnly(proposalForView, estimate),
@@ -27207,6 +27264,7 @@ async function composeEstimateDataPayload(estimate, {
         // guaranteed" wherever they'd make an estimate-wide claim. Present
         // only when true so every other response stays byte-identical.
         ...(noGuaranteeClaims ? { noGuaranteeClaims: true } : {}),
+        ...(estimateCarriesPlanTerms(estimateDataForIntelligence, pricingBundle) ? {} : { noEstimateWideGuarantee: true }),
         notes: estimate.notes || null,
         licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
         showOneTimeOption: !!estimate.show_one_time_option,
@@ -27740,6 +27798,8 @@ module.exports.serviceCategoryForOneTimeChoice = serviceCategoryForOneTimeChoice
 module.exports.serviceCategoryForOneTimeItem = serviceCategoryForOneTimeItem;
 module.exports.serviceMixMakesNoGuaranteeClaim = serviceMixMakesNoGuaranteeClaim;
 module.exports.estimateMakesNoGuaranteeClaim = estimateMakesNoGuaranteeClaim;
+module.exports.estimateCarriesPlanTerms = estimateCarriesPlanTerms;
+module.exports.serviceMixCarriesPlanTerms = serviceMixCarriesPlanTerms;
 module.exports.guaranteeRecurringRows = guaranteeRecurringRows;
 module.exports.guaranteeProposalRows = guaranteeProposalRows;
 module.exports.oneTimeInvoiceLabelForCategory = oneTimeInvoiceLabelForCategory;

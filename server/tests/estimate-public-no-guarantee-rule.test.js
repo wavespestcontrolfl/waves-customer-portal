@@ -14,11 +14,30 @@ const {
   normalizeOneTimeBreakdown,
   guaranteeRecurringRows,
   guaranteeProposalRows,
+  serviceMixCarriesPlanTerms,
 } = require('../routes/estimate-public');
 
 const PEST = [{ name: 'Pest Control', mo: 55 }];
 const { generateEstimate } = require('../services/pricing-engine');
 const charge = (service, label, amount) => ({ service, label, amount, kind: 'charge' });
+
+describe('serviceMixCarriesPlanTerms (a guarantee line covering the whole estimate)', () => {
+  const rec = (name) => ({ name, mo: 50 });
+  const one = (service, label) => ({ service, label, amount: 150, kind: 'charge' });
+  test.each([
+    ['pest', [rec('Pest Control')], [], true],
+    ['pest + lawn', [rec('Pest Control'), rec('Lawn Care')], [], true],
+    ['pest + a one-time flea treatment', [rec('Pest Control')], [one('flea', 'Flea Treatment')], true],
+    ['rodent', [rec('Rodent Bait Stations')], [], false],
+    ['pest + rodent', [rec('Pest Control'), rec('Rodent Bait Stations')], [], false],
+    ['commercial pest', [rec('Commercial Pest Control')], [], false],
+    ['pest + termite bait', [rec('Pest Control'), rec('Termite Bait Monitoring')], [], false],
+    ['one-time rodent trapping', [], [one('rodent_trapping', 'Rodent Trapping')], false],
+    ['nothing', [], [], false],
+  ])('%s', (_name, recurring, oneTime, expected) => {
+    expect(serviceMixCarriesPlanTerms(recurring, oneTime)).toBe(expected);
+  });
+});
 
 describe('serviceMixMakesNoGuaranteeClaim', () => {
   test('a pest-only plan keeps its guarantee claims', () => {

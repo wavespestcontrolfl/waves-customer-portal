@@ -33,6 +33,7 @@ const {
   estimateBillsPerApplication,
   estimateSoldAsAnnualPrepay,
   proposalCallbackTermsEligible,
+  proposalCarriesPlanTerms,
   proposalMakesNoGuaranteeClaim,
   resolveProposalBillingContext,
   _resetPerApplicationColumnsProbeForTests,
@@ -130,7 +131,7 @@ describe('proposalMakesNoGuaranteeClaim', () => {
 });
 
 describe('proposalCallbackTermsEligible', () => {
-  const building = (...descriptions) => ({ name: 'Home', lineItems: descriptions.map((description) => ({ description, amount: 55 })) });
+  const building = (...descriptions) => ({ name: 'Home', lineItems: descriptions.map((description) => ({ description, amount: 55, frequency: 'quarterly' })) });
 
   it('allows the canned callback sentence only on an all-pest residential proposal', () => {
     mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false);
@@ -140,6 +141,25 @@ describe('proposalCallbackTermsEligible', () => {
     expect(proposalCallbackTermsEligible({ enabled: false, buildings: [] }, 'e1')).toBe(false);
     // An authored (enabled) proposal is commercial: terms-neutral.
     expect(proposalCallbackTermsEligible({ enabled: true, buildings: [building('Quarterly Pest Control')] }, 'e1')).toBe(false);
+    mockEstimateMakesNoGuaranteeClaim.mockReset();
+  });
+
+  it('needs a scheduled recurring pest line: a one-time pest job has no visits to call back between', () => {
+    mockEstimateMakesNoGuaranteeClaim.mockReturnValue(false);
+    const oneTime = { enabled: false, buildings: [{ name: 'Home', lineItems: [{ description: 'Pest Control', frequency: 'one_time', amount: 150 }] }] };
+    const recurring = { enabled: false, buildings: [{ name: 'Home', lineItems: [{ description: 'Pest Control', frequency: 'quarterly', amount: 120 }] }] };
+    const pestLawn = { enabled: false, buildings: [{ name: 'Home', lineItems: [
+      { description: 'Pest Control', frequency: 'quarterly', amount: 120 },
+      { description: 'Lawn Care', frequency: 'monthly', amount: 60 },
+    ] }] };
+    expect(proposalCallbackTermsEligible(oneTime, 'e1')).toBe(false);
+    expect(proposalCallbackTermsEligible(recurring, 'e1')).toBe(true);
+    // Pest + lawn carries the plan terms, but the canned sentence is pest's.
+    expect(proposalCarriesPlanTerms(pestLawn, 'e1')).toBe(true);
+    expect(proposalCallbackTermsEligible(pestLawn, 'e1')).toBe(false);
+    expect(proposalCarriesPlanTerms({ enabled: false, buildings: [{ name: 'Home', lineItems: [
+      { description: 'Rodent Bait Stations', frequency: 'monthly', amount: 40 },
+    ] }] }, 'e1')).toBe(false);
     mockEstimateMakesNoGuaranteeClaim.mockReset();
   });
 

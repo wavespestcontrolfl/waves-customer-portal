@@ -1587,6 +1587,15 @@ selected. Where no estimate-wide terms apply, Ask Waves answers every
 guarantee question with one per-service list under these rules, never infers
 from a question's wording which service is meant, and never serves a model
 answer that makes a plan-terms claim.
+`/data`'s optional `estimate.noEstimateWideGuarantee: true` (and the same
+field on a document `proposal`) is set when not every service carries the
+recurring residential terms: a rodent, commercial, termite or unclassifiable
+service anywhere, or an authored (commercial) proposal
+(`estimateCarriesPlanTerms` / `proposalCarriesPlanTerms`). Absent otherwise.
+Guarantee lines that cover the whole estimate follow it: the shell footer's
+"Backed by the Waves Guarantee" and the legacy plan-terms card's guarantee
+heading and item. It is a superset of `noGuaranteeClaims` below, which still
+governs row-level copy.
 `/data`'s optional `estimate.noGuaranteeClaims: true` (copy-audit follow-up
 to #4874, 2026-09-26; termite gets no generic estimate-wide guarantee)
 is the page's guarantee decision, `serviceMixMakesNoGuaranteeClaim` in this

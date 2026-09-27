@@ -227,6 +227,28 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     expect(text).toContain('callback guarantee between scheduled visits');
   });
 
+  test('a one-time-only pest proposal has no scheduled visits: no canned callback guarantee', async () => {
+    const oneTime = {
+      id: 'synthesized-one-time-pest',
+      customer_name: 'Pat Example',
+      address: '123 Palm Way',
+      monthly_total: 0,
+      annual_total: 0,
+      onetime_total: 189,
+      estimate_data: {
+        proposal: {
+          enabled: false,
+          buildings: [{ name: 'Service location', lineItems: [
+            { description: 'One-Time Pest Control', unitPrice: 189, frequency: 'one_time', taxable: false },
+          ] }],
+        },
+      },
+    };
+    const text = extractPdfText(await buildEstimateProposalPDFBuffer(oneTime, { billsPerApplication: false }));
+    expect(text).toContain('One-Time Pest Control');
+    expect(text).not.toContain('callback guarantee between scheduled visits');
+  });
+
   test('the email attachment entry point applies the same no-guarantee policy', async () => {
     const mixed = {
       ...STRUCTURED_ESTIMATE,
