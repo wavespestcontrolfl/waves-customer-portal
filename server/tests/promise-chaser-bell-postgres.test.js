@@ -288,6 +288,24 @@ const OUR_NUMBER = '+19415550100';
     expect(payload.commitmentId).toBe(commitmentUnlinked.id); // never commitmentOther
   });
 
+  test("an UNLINKED caller never surfaces a customer-linked promise until the call is linked to that same customer", async () => {
+    const customerB = randomUUID();
+    const earlierLinked = callRow(180, { customer_id: customerB });
+    const commitment = commitmentRow(earlierLinked.id);
+    const back = callRow(0); // not linked yet: processing hasn't run
+    await mockConn('customers').insert([{ id: customerB, phone: PHONE }]);
+    await mockConn('call_log').insert([earlierLinked, back]);
+    await mockConn('call_commitments').insert(commitment);
+
+    expect(await sweepPromiseChasers()).toBe(0);
+    expect(triggerNotification).not.toHaveBeenCalled();
+
+    // The pipeline links the callback to the same customer; the next tick rings.
+    await mockConn('call_log').where({ id: back.id }).update({ customer_id: customerB });
+    expect(await sweepPromiseChasers()).toBe(1);
+    expect(triggerNotification.mock.calls[0][1].commitmentId).toBe(commitment.id);
+  });
+
   test("a push-only admin isn't double-pushed on the second tick — the SAME dedupeKey (push tag) carries across dispatches even with no bell to check against", async () => {
     const earlier = callRow(240);
     const commitment = commitmentRow(earlier.id);

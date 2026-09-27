@@ -122,10 +122,14 @@ async function findPromiseToRing(call, now) {
   // outbound call, the caller ID on an inbound one), so a promise Waves
   // made calling the lead counts exactly like one made on an inbound call.
   // Never this call's own row, which the recording pipeline has not even
-  // extracted yet. When the CURRENT caller is a known customer, a promise
-  // whose own call belongs to a DIFFERENT customer (a shared or reassigned
-  // number) is excluded — an unlinked call on the same number stays
-  // eligible.
+  // extracted yet. A promise whose own call belongs to a customer counts
+  // only when THIS call is linked to that same customer, in both directions
+  // (pre-push P1: the old one-way guard let an unlinked caller on a shared
+  // or reassigned number surface another customer's promise). A promise on
+  // an unlinked (lead) call stays eligible for any caller on the number.
+  // An existing customer's callback isn't lost: the recording pipeline
+  // links the call within minutes, and a later tick inside the 30-minute
+  // window re-reads the link and rings then.
   const rows = (await commitments.listOpenCommitments(db, {
     party: 'waves', phone: call.from_phone, limit: 200, includeHints: true, now,
   })).filter((r) => SLA_KINDS.includes(r.kind) && String(r.call_log_id) !== String(call.id)
@@ -136,7 +140,7 @@ async function findPromiseToRing(call, now) {
     // that later promise would wrongly read as "the reason this earlier
     // caller is chasing us".
     && new Date(r.call_started_at).getTime() < new Date(call.created_at).getTime()
-    && (!call.customer_id || !r.customer_id || String(r.customer_id) === String(call.customer_id)));
+    && (!r.customer_id || String(r.customer_id) === String(call.customer_id || '')));
   if (!rows.length) return null;
 
   // Scope to calls that ended UNBOOKED (the rule's own trigger) — a call
