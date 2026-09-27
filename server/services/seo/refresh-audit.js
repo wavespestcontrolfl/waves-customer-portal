@@ -66,7 +66,7 @@ function hostRegistrableSql(col) {
 // bind placeholders (same trick as gsc-opportunity-miner). `col` is an internal
 // literal, never user input.
 function canonPathSql(col) {
-  return `regexp_replace(regexp_replace(split_part(${col}, chr(63), 1), '^[a-z]+://[^/]+', ''), '/+$', '')`;
+  return `regexp_replace(regexp_replace(split_part(split_part(${col}, chr(63), 1), chr(35), 1), '^[a-z]+://[^/]+', ''), '/+$', '')`;
 }
 
 function findInflightPageEdit(runner, { path, targetDomain }) {

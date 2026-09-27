@@ -3075,6 +3075,34 @@ class AutonomousRunner {
   // affiliate post (owner ruling 2026-08-31). Approval stamps
   // trust_build_approved_by/at — the marker the PR poller's affiliate belt
   // requires before auto-merging a head that carries <AffiliateLink>.
+  async _retireSupersededApprovalClaim(opportunityId, run, approvalClaimedAt, message) {
+    await db.transaction(async (trx) => {
+      const now = new Date();
+      const queueRows = await trx('opportunity_queue')
+        .where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
+        .where('claimed_at', approvalClaimedAt)
+        .whereRaw("jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')")
+        .update({
+          status: 'skipped',
+          skip_reason: 'superseded_by_ordinary_page_edit',
+          completed_at: now,
+          updated_at: now,
+        });
+      if (Number(queueRows) !== 1) throw new Error('superseded approval queue retirement CAS lost');
+      const current = await trx('autonomous_runs').where({ id: run.id }).first('reviewer_notes');
+      const runRows = await trx('autonomous_runs')
+        .where({ id: run.id, outcome: 'publishing_named_competitor' })
+        .update({
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'superseded_by_ordinary_page_edit',
+          reviewer_notes: [current?.reviewer_notes ?? run.reviewer_notes, message].filter(Boolean).join(' | ').slice(0, 4000),
+          completed_at: now,
+          updated_at: now,
+        });
+      if (Number(runRows) !== 1) throw new Error('superseded approval run retirement CAS lost');
+    });
+  }
+
   async approveAndPublishNamedCompetitor(opportunityId, { runId = null, approvedBy = 'operator', expectedDraftSha = null } = {}) {
     if (!opportunityId) { const e = new Error('opportunityId required'); e.statusCode = 400; throw e; }
     // Serialize with runDaily / runCatchUp / admin run-now behind the engine
@@ -3250,6 +3278,7 @@ class AutonomousRunner {
       .update({ outcome: 'publishing_named_competitor', updated_at: new Date() });
     if (!runClaimed) {
       await db('opportunity_queue').where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
+        .where('claimed_at', approvalClaimedAt)
         .update({ status: 'pending_review', skip_reason: parkedKind, updated_at: new Date() }).catch(() => {});
       const e = new Error(`This ${parkedKind} run is already being published`); e.statusCode = 409; throw e;
     }
@@ -3258,6 +3287,7 @@ class AutonomousRunner {
       await db('autonomous_runs').where({ id: run.id, outcome: 'publishing_named_competitor' })
         .update({ outcome: 'completed_pending_review', skip_reason: parkedKind, updated_at: new Date() }).catch(() => {});
       await db('opportunity_queue').where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
+        .where('claimed_at', approvalClaimedAt)
         .update({ status: 'pending_review', skip_reason: parkedKind, updated_at: new Date() }).catch(() => {});
     };
 
@@ -3280,7 +3310,11 @@ class AutonomousRunner {
         queue_claimed_at: approvalClaimedAt,
       });
     } catch (err) {
-      await revertClaims(); // let the operator retry
+      if (err.code === 'PAGE_EDIT_SUPERSEDED') {
+        await this._retireSupersededApprovalClaim(opportunityId, run, approvalClaimedAt, err.message);
+      } else {
+        await revertClaims(); // let the operator retry
+      }
       throw err;
     }
 

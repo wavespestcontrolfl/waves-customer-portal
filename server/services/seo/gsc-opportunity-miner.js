@@ -4568,16 +4568,7 @@ class GscOpportunityMiner {
       // mineAll passes the transaction that already holds the shared page-edit
       // advisory lock. Direct persistAll calls are script/test entry points and
       // do not arbitrate page ownership, so they must not mutate backfill rows.
-      if (trx && (result.rowCount ?? 0) > 0
-        && o.bucket !== 'citability_backfill'
-        && o.page_url
-        && GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(o.action_type)) {
-        const { supersedeCitabilityBackfillsForPage } = require('../content/opportunity-queue')._internals;
-        await supersedeCitabilityBackfillsForPage(runner, {
-          pageUrl: o.page_url,
-          ordinaryDedupeKey: o.dedupe_key,
-        });
-      }
+      await supersedeBackfillsForPersistedPageEdit(runner, o, result, Boolean(trx));
       // ?? not || — a frozen-row conflict legitimately reports rowCount 0
       // (the WHERE guard skipped the update) and must not count as persisted.
       count += result.rowCount ?? 0;
@@ -4838,6 +4829,18 @@ class GscOpportunityMiner {
       .update({ status: 'expired', updated_at: new Date() });
     return result;
   }
+}
+
+async function supersedeBackfillsForPersistedPageEdit(runner, opportunity, result, ownsPageEditLock) {
+  if (!ownsPageEditLock || (result.rowCount ?? 0) < 1
+    || opportunity.bucket === 'citability_backfill'
+    || !opportunity.page_url
+    || !GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(opportunity.action_type)) return;
+  const { supersedeCitabilityBackfillsForPage } = require('../content/opportunity-queue')._internals;
+  await supersedeCitabilityBackfillsForPage(runner, {
+    pageUrl: opportunity.page_url,
+    ordinaryDedupeKey: opportunity.dedupe_key,
+  });
 }
 
 function sinceDate(days) {

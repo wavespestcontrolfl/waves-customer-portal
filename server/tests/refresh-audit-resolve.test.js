@@ -105,6 +105,12 @@ describe('operator refresh — citability kill-switch reservations', () => {
     });
   }
 
+  test('the shared path predicate strips fragments as well as query strings', () => {
+    const sql = RefreshAudit._identity.canonPathSql('page_url');
+    expect(sql).toContain('chr(63)');
+    expect(sql).toContain('chr(35)');
+  });
+
   test.each(['pending', 'claimed', 'pending_review'])(
     'gate on: an existing %s citability edit reserves the operator page',
     async (status) => {

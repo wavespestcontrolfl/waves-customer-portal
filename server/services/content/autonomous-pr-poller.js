@@ -1843,14 +1843,11 @@ async function verifyClosedPrRetirement(run, pr, gh) {
 // row and run. The page-edit advisory lock is the same lock used by the
 // producer and refresh merge path, so a supersession and this close cannot
 // cross at the write boundary.
-async function retireSupersededCitabilityPr(run, pr, gh) {
-  const queue = require('./opportunity-queue')._internals;
-  const pendingReason = pendingSkipReasonForRun(run);
+async function closeSupersededCitabilityPr(run, pr, gh, queue, pendingReason) {
   let current = null;
-  let queueRow = null;
   const state = await db.transaction(async (trx) => {
     await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
-    queueRow = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate()
+    const queueRow = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate()
       .first('id', 'status', 'skip_reason', 'claim_id', 'bucket', 'signal_metadata');
     if (!queueRow || !sameQueueClaim(queueRow, run)
       || queueRow.bucket !== 'citability_backfill' || !queue.pageEditSuperseded(queueRow)
@@ -1863,16 +1860,10 @@ async function retireSupersededCitabilityPr(run, pr, gh) {
     else if (current.state !== 'closed') return 'state_changed';
     return 'closed';
   });
+  return { state, current };
+}
 
-  if (state === 'merged') {
-    return finalizeMerged(run, pr.number, {
-      autoMerged: false,
-      mergeSha: current.merge_commit_sha || null,
-      mergedAt: current.merged_at || null,
-    });
-  }
-  if (state !== 'closed') return { pending: true, transient: true, reason: `citability_retirement_${state}` };
-
+async function finalizeSupersededCitabilityRetirement(run, pr, gh, queue, pendingReason) {
   // Re-read after close: a concurrent merge wins, while an incomplete close
   // or branch deletion stays in the pending set and converges next tick.
   const closed = await gh.getPr(pr.number);
@@ -1928,6 +1919,21 @@ async function retireSupersededCitabilityPr(run, pr, gh) {
   }
   logger.warn(`[autonomous-pr-poller] retired superseded citability PR #${pr.number} for run ${run.id}`);
   return { skipped: true, retired: true, reason: 'citability_backfill_superseded' };
+}
+
+async function retireSupersededCitabilityPr(run, pr, gh) {
+  const queue = require('./opportunity-queue')._internals;
+  const pendingReason = pendingSkipReasonForRun(run);
+  const { state, current } = await closeSupersededCitabilityPr(run, pr, gh, queue, pendingReason);
+  if (state === 'merged') {
+    return finalizeMerged(run, pr.number, {
+      autoMerged: false,
+      mergeSha: current.merge_commit_sha || null,
+      mergedAt: current.merged_at || null,
+    });
+  }
+  if (state !== 'closed') return { pending: true, transient: true, reason: `citability_retirement_${state}` };
+  return finalizeSupersededCitabilityRetirement(run, pr, gh, queue, pendingReason);
 }
 
 async function pollRun(run, { allowMerge = true } = {}) {

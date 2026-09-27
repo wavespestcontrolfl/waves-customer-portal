@@ -3617,6 +3617,46 @@ describe('_queueHasClaimable (catch-up probe)', () => {
   });
 });
 
+describe('approveAndPublishNamedCompetitor — superseded in-flight approval', () => {
+  test('terminally retires both claims instead of restoring an unreviewable pending_review row', async () => {
+    jest.resetModules();
+    const updates = [];
+    const wheres = [];
+    const trx = jest.fn((table) => {
+      const q = {
+        where: jest.fn((...args) => { wheres.push({ table, args }); return q; }),
+        whereRaw: jest.fn(() => q),
+        first: jest.fn(async () => (table === 'autonomous_runs' ? { reviewer_notes: 'approved by owner' } : null)),
+        update: jest.fn(async (patch) => { updates.push({ table, patch }); return 1; }),
+      };
+      return q;
+    });
+    const dbMock = jest.fn();
+    dbMock.transaction = jest.fn(async (callback) => callback(trx));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+
+    const approvalClaimedAt = new Date('2026-09-27T01:30:00Z');
+    await runner._retireSupersededApprovalClaim('opp-cite', { id: 'run-cite' }, approvalClaimedAt, 'page ownership moved');
+
+    expect(updates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'opportunity_queue',
+        patch: expect.objectContaining({ status: 'skipped', skip_reason: 'superseded_by_ordinary_page_edit' }),
+      }),
+      expect.objectContaining({
+        table: 'autonomous_runs',
+        patch: expect.objectContaining({ outcome: 'skipped_gate_fail', skip_reason: 'superseded_by_ordinary_page_edit' }),
+      }),
+    ]));
+    expect(updates.find((u) => u.table === 'autonomous_runs').patch.reviewer_notes)
+      .toContain('page ownership moved');
+    expect(wheres).toContainEqual({ table: 'opportunity_queue', args: ['claimed_at', approvalClaimedAt] });
+  });
+});
+
 // R10-5 (Codex): approving an OLD named-competitor run by --id must not publish a
 // stale draft once a requeue + re-run has parked a NEWER run for the opportunity.
 describe('approveAndPublishNamedCompetitor — stale named-competitor run guard', () => {
