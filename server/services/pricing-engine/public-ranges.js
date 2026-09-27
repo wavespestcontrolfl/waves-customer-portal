@@ -149,10 +149,9 @@ function buildRows() {
     key: 'german_roach_initial',
     name: 'German Roach Initial Service (3-Visit)',
     unit: 'per program',
-    // Agent-selectable initial series; the pricer applies the
-    // recurring-customer perk INTERNALLY — sold only inside a recurring
-    // plan, so the flag is always swept rather than fixed.
-    values: sweepValues([false, true],
+    // Agent-selectable initial series at list price; the pricer applies the
+    // recurring-customer perk internally, so it is never swept.
+    values: sweepValues([false],
       (isRecurringCustomer) => sp.priceGermanRoachInitial({ isRecurringCustomer }),
       (r) => r.price),
     notes: 'One program price covering the 3-visit initial series for German roach activity within a recurring plan; heavy infestations use the cleanout program.',
