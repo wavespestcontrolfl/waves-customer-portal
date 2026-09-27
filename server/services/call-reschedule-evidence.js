@@ -226,8 +226,8 @@ function namesSlot(m, slot) {
 // Where the call's final slot was first put on the table: for days and for
 // hours, the earliest mention naming it since the agent last spoke of
 // another (a caller's counter-proposal in between is an objection to weigh,
-// not the agent moving on); the later of the two.
-function slotRunStart(turns, dayRefs, hourRefs, slot) {
+// not the agent moving on). [earlier, later] of the two.
+function slotRunStarts(turns, dayRefs, hourRefs, slot) {
   const runStart = (refs) => {
     let start = refs.length - 1;
     for (let k = refs.length - 2; k >= 0; k -= 1) {
@@ -236,7 +236,7 @@ function slotRunStart(turns, dayRefs, hourRefs, slot) {
     }
     return refs[start].turnIdx;
   };
-  return Math.max(runStart(dayRefs), runStart(hourRefs));
+  return [runStart(dayRefs), runStart(hourRefs)].sort((a, b) => a - b);
 }
 
 // A turn's text outside the day and hour mentions parsed from it.
@@ -373,21 +373,26 @@ function rescheduleAgreementEvidence({ transcript, confirmedStartAt, callStarted
   const slotClauses = [dayClause.toks.join(' '), hourClause.toks.join(' '), turns[anchorIdx].ns.split(' ').slice(cut).join(' ')];
   // An objection in the caller's reply to the slot ("No, I cannot make it",
   // "I need to ask my husband", "How about three?") stands, however the agent
-  // then repeats the slot.
-  const callerMeanwhile = callerRepliesToSlot(turns, [...dayRefs, ...hourRefs], slot, slotRunStart(turns, dayRefs, hourRefs, slot), anchorIdx);
+  // then repeats the slot. From when both its day and hour were on the table
+  // every objection counts; from when the first of them was, an explicit
+  // refusal or condition ("Would Thursday work?" — "No, I cannot make it")
+  // does, while a bare "no" there too often answers something else.
+  const [firstRaised, bothRaised] = slotRunStarts(turns, dayRefs, hourRefs, slot);
+  const callerMeanwhile = callerRepliesToSlot(turns, [...dayRefs, ...hourRefs], slot, bothRaised, anchorIdx);
+  const callerEarlier = callerRepliesToSlot(turns, [...dayRefs, ...hourRefs], slot, firstRaised, anchorIdx);
 
   // A hedge or unsettled condition in the clauses stating the slot ("if we
   // have space, Thursday at two"), or anywhere from the turn completing it
   // onward, however politely acknowledged, means the slot was not agreed. The
   // same marker earlier in the call, before the slot was settled, is fine.
-  if ([...slotClauses.slice(0, 2), ...callerMeanwhile, ...turns.slice(anchorIdx).map((t) => t.ns)].some(hasHedgeMarker)) return failAt('hedge_on_slot');
+  if ([...slotClauses.slice(0, 2), ...callerEarlier, ...turns.slice(anchorIdx).map((t) => t.ns)].some(hasHedgeMarker)) return failAt('hedge_on_slot');
 
   // A refusal in the clause that states the slot ("I cannot make it Thursday
   // at two", "Thursday at two won't work") or anywhere after its final
   // mention, however politely acknowledged ("okay"), means the slot was not
   // agreed. A refusal in an earlier clause turns down another option
   // ("Friday doesn't work, but we'll see you Thursday at two").
-  if ([...slotClauses, ...callerMeanwhile, ...turns.slice(anchorIdx + 1).map((t) => t.ns)].some(hasRefusalMarker)) return failAt('slot_refused');
+  if ([...slotClauses, ...callerEarlier, ...turns.slice(anchorIdx + 1).map((t) => t.ns)].some(hasRefusalMarker)) return failAt('slot_refused');
 
   // Does an agent turn put a question to the caller: the slot stated as one
   // ("would Thursday at two work? Please let me know"), or any question but
