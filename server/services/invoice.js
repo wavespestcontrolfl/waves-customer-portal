@@ -3,7 +3,7 @@ const { isDeepStrictEqual } = require("node:util");
 const db = require("../models/db");
 const logger = require("./logger");
 const TaxCalculator = require("./tax-calculator");
-const { REPLAY_HOLD_CODES } = require("./messaging/billing-channel-routing");
+const { REPLAY_HOLD_CODES, isReplayHold } = require("./messaging/billing-channel-routing");
 const DiscountEngine = require("./discount-engine");
 const {
   percentageDiscountDollars,
@@ -5544,8 +5544,13 @@ const InvoiceService = {
       const nonAcceptedLegs = acceptedChannelResults && anyChannelAccepted
         ? Object.entries(acceptedChannelResults).filter(([, leg]) => !legAccepted(leg))
         : [];
-      const uncertainLegs = nonAcceptedLegs.filter(([, leg]) => leg?.deliveryOutcome === "uncertain");
-      const retryableLegs = nonAcceptedLegs.filter(([, leg]) => leg?.deliveryOutcome !== "uncertain"
+      // A deferred replay hold (PUSH_IN_FLIGHT, APP_PROVIDER_RETRY,
+      // APP_DELIVERY_HOLD) is labelled uncertain but is a deliberate retry
+      // the push dedupe protects: it queues the notice like any retryable
+      // leg, the same exemption the replay side applies
+      // (deferred-replay-registry.js partialFanoutReplayOutcome).
+      const uncertainLegs = nonAcceptedLegs.filter(([, leg]) => leg?.deliveryOutcome === "uncertain" && !isReplayHold(leg));
+      const retryableLegs = nonAcceptedLegs.filter(([, leg]) => (leg?.deliveryOutcome !== "uncertain" || isReplayHold(leg))
         && (leg?.retryable === true || leg?.deferred === true));
       const pendingChannel = retryableLegs[0] || uncertainLegs[0] || nonAcceptedLegs[0] || null;
 

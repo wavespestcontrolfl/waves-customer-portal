@@ -693,6 +693,29 @@ describe('invoice SMS provider handoff', () => {
       expect(smsLogInserts).toHaveLength(0);
     });
 
+    // Pre-push audit P1 (a1d7913edb): a deferred App replay hold is labelled
+    // uncertain but is a deliberate, dedupe-protected retry, so it must
+    // queue the notice like any retryable leg, never drop the App delivery.
+    test('an App replay hold labelled uncertain (PUSH_IN_FLIGHT) after an accepted Email queues the whole notice at the hold time', async () => {
+      const smsLogInserts = [];
+      const { mock } = invoiceQueryDb({ smsLogInserts });
+      db.mockImplementation(mock);
+      const nextAllowedAt = new Date(Date.now() + 60000).toISOString();
+      const hold = {
+        sent: false, blocked: true, provider: 'push', deliveryOutcome: 'uncertain', code: 'PUSH_IN_FLIGHT',
+        retryable: true, deferred: true, nextAllowedAt,
+      };
+      sendCustomerMessage.mockImplementation(async () => ({
+        ...hold, channelResults: { email: { sent: true, deliveryOutcome: 'accepted' }, push: hold },
+      }));
+
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+
+      expect(result).toMatchObject({ sent: true, pendingChannel: 'push', pendingChannelCode: 'PUSH_IN_FLIGHT', pendingChannelQueued: true });
+      expect(smsLogInserts).toHaveLength(1);
+      expect(new Date(smsLogInserts[0].scheduled_for).toISOString()).toBe(nextAllowedAt);
+    });
+
     test('a retryable pending Text leg queues the WHOLE notice once; invoice finalized; no claim restore', async () => {
       const smsLogInserts = [];
       const { mock } = invoiceQueryDb({ smsLogInserts });
