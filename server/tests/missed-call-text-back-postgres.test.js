@@ -753,6 +753,12 @@ jest.setTimeout(30000);
     expect(await sweepMissedCallTextBacks()).toEqual({ sent: 1, offered: 1 });
   });
 
+  test('a status callback that rewrote updated_at a minute ago does not hide a call still inside its slot from the sweep', async () => {
+    const row = call(25, { updated_at: new Date(NOW - 60 * 1000) }); // ended ~25 min ago, slot open ~10 more minutes
+    await database('call_log').insert(row);
+    expect(await sweepMissedCallTextBacks()).toEqual({ sent: 1, offered: 1 });
+  });
+
   test('a late status callback that rewrote updated_at on an hours-old call does not give it a fresh slot', async () => {
     const row = call(3 * 60, { updated_at: new Date(NOW - 6 * 60 * 1000) }); // ended ~3h ago, row touched 6 minutes ago
     await database('call_log').insert(row);

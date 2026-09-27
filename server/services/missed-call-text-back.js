@@ -723,7 +723,11 @@ async function sweepMissedCallTextBacks({ limit = 50 } = {}) {
       .whereRaw("COALESCE(metadata->>'missed_call_text_settled_at', '') = ''")
       .whereRaw("(COALESCE(metadata->>'missed_call_text_leased_at', '') = '' OR (metadata->>'missed_call_text_leased_at')::timestamptz < ?)", [new Date(now - LEASE_MS)])
       .where('created_at', '>', new Date(now - MAX_CALL_AGE_MS))
-      .whereRaw('COALESCE(updated_at, created_at) < ?', [new Date(now - VOICEMAIL_GRACE_MS)])
+      // Past the voicemail grace since the call ENDED (callEndedAt's clock:
+      // created_at + duration, capped by updated_at) — never updated_at
+      // alone, which a late or repeated status callback rewrites and would
+      // hide the row until its send slot had closed.
+      .whereRaw('LEAST(created_at + make_interval(secs => GREATEST(COALESCE(duration_seconds, 0), 0)), COALESCE(updated_at, created_at)) < ?', [new Date(now - VOICEMAIL_GRACE_MS)])
       .modify((q) => {
         if (cursor) q.whereRaw('(created_at, id) > (?, ?)', [cursor.sweep_created_at, cursor.id]);
       })
