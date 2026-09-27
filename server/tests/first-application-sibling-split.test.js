@@ -112,9 +112,9 @@ describe('evaluateGroupDivergence', () => {
       .toEqual({ action: 'clear', reason: 'no_group' });
   });
 
-  test('a diverging sibling with its OWN live invoice AND the combined invoice reduced → clear, split_completed', () => {
+  test('a diverging sibling with its OWN live invoice AND a MATCHING combined-invoice reduction → clear, split_completed', () => {
     const a = anchor({ estimated_price: 153.60 });
-    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true });
+    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 42 });
     const verdict = evaluateGroupDivergence({
       anchor: a, members: [a, b], invoiceStatus: 'draft', invoiceTotal: 111.60,
     });
@@ -126,7 +126,7 @@ describe('evaluateGroupDivergence', () => {
   // can still carry the sibling's full original charge.
   test('a diverging sibling has its OWN live invoice but the COMBINED invoice total is unchanged → still alerts', () => {
     const a = anchor({ estimated_price: 153.60 });
-    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true });
+    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 42 });
     const verdict = evaluateGroupDivergence({
       anchor: a, members: [a, b], invoiceStatus: 'draft', invoiceTotal: 153.60,
     });
@@ -136,22 +136,60 @@ describe('evaluateGroupDivergence', () => {
 
   test('a diverging sibling has its OWN live invoice but anchor.estimated_price is unreadable → fails closed, still alerts', () => {
     const a = anchor({ estimated_price: null });
-    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true });
+    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 42 });
     const verdict = evaluateGroupDivergence({
       anchor: a, members: [a, b], invoiceStatus: 'draft', invoiceTotal: 42,
     });
     expect(verdict.action).toBe('alert');
   });
 
-  test('two diverging siblings, only one split off with the combined invoice reduced → alerts on the still-unresolved one only', () => {
+  test('two diverging siblings, only one split off with a MATCHING combined-invoice reduction → alerts on the still-unresolved one only', () => {
     const a = anchor({ estimated_price: 153.60 });
-    const split = member('split-off', { scheduled_date: '2026-10-05', has_own_live_invoice: true });
+    const split = member('split-off', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 42 });
     const unresolved = member('still-needs-split', { scheduled_date: '2026-10-09' });
     const verdict = evaluateGroupDivergence({
       anchor: a, members: [a, split, unresolved], invoiceStatus: 'draft', invoiceTotal: 111.60,
     });
     expect(verdict.action).toBe('alert');
     expect(verdict.diverging.map((m) => m.id)).toEqual(['still-needs-split']);
+  });
+
+  // Codex round-5 P1: a THREE-program group where BOTH diverging siblings
+  // have their own invoice, but the combined invoice's reduction only
+  // covers ONE of their amounts — a partial multi-sibling split must not
+  // clear EITHER sibling, since which one the partial reduction actually
+  // covers can't be attributed from the numbers alone.
+  test('three-program group: both siblings have their own invoice, but the reduction covers only ONE of their amounts → alerts on BOTH, fails closed', () => {
+    const a = anchor({ estimated_price: 200 });
+    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 60 });
+    const c = member('c', { scheduled_date: '2026-10-06', has_own_live_invoice: true, own_live_invoice_total: 90 });
+    // Only $60 was actually removed (200 - 140), but b + c together need $150.
+    const verdict = evaluateGroupDivergence({
+      anchor: a, members: [a, b, c], invoiceStatus: 'draft', invoiceTotal: 140,
+    });
+    expect(verdict.action).toBe('alert');
+    expect(verdict.diverging.map((m) => m.id).sort()).toEqual(['b', 'c']);
+  });
+
+  test('three-program group: both siblings have their own invoice, and the reduction covers their FULL combined amount → clear, split_completed', () => {
+    const a = anchor({ estimated_price: 200 });
+    const b = member('b', { scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: 60 });
+    const c = member('c', { scheduled_date: '2026-10-06', has_own_live_invoice: true, own_live_invoice_total: 90 });
+    const verdict = evaluateGroupDivergence({
+      anchor: a, members: [a, b, c], invoiceStatus: 'draft', invoiceTotal: 50,
+    });
+    expect(verdict).toEqual({ action: 'clear', reason: 'split_completed' });
+  });
+
+  test('a diverging sibling has its own invoice, but that invoice\'s own total is unreadable → fails closed, still alerts', () => {
+    const a = anchor({ estimated_price: 153.60 });
+    const b = member('b', {
+      scheduled_date: '2026-10-05', has_own_live_invoice: true, own_live_invoice_total: null,
+    });
+    const verdict = evaluateGroupDivergence({
+      anchor: a, members: [a, b], invoiceStatus: 'draft', invoiceTotal: 42,
+    });
+    expect(verdict.action).toBe('alert');
   });
 
   test('a diverging sibling with no invoice yet (has_own_live_invoice false/undefined) still alerts', () => {

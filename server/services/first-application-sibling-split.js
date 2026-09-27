@@ -176,13 +176,24 @@ function divergingSiblings(anchor, members) {
     && dateOnly(m.scheduled_date) !== anchorDate);
 }
 
+// Cents, or null when unreadable — every money comparison below fails
+// closed on null rather than coercing an unreadable value into 0. null and
+// undefined are explicitly unreadable (Number(null) is 0, a real finite
+// number, which would otherwise silently poison "unset" into "zero-priced"
+// instead of "unknown").
+function toCents(value) {
+  if (value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n * 100) : null;
+}
+
 // The pure detection predicate: given the group's anchor row (carrying its
-// own estimated_price — see combinedChargeAdjusted below), every member row
-// (each optionally carrying has_own_live_invoice — loadGroupMembers stamps
-// this from a real invoices.scheduled_service_id lookup), the shared
-// invoice's current status, and its current total, decide whether to
-// alert, clear a standing alert, or do nothing. No DB access — the sweep
-// and every unit test call this the same way.
+// own estimated_price — see groupFullyAccountedFor below), every member row
+// (each optionally carrying has_own_live_invoice + own_live_invoice_total —
+// loadGroupMembers stamps these from a real invoices.scheduled_service_id
+// lookup), the shared invoice's current status, and its current total,
+// decide whether to alert, clear a standing alert, or do nothing. No DB
+// access — the sweep and every unit test call this the same way.
 function evaluateGroupDivergence({
   anchor, members, invoiceStatus, invoiceTotal,
 }) {
@@ -199,21 +210,42 @@ function evaluateGroupDivergence({
   // A diverging sibling's own live invoice is proof the office STARTED the
   // split, but never proof they FINISHED it (Codex round-4 P1): a brand-new
   // sibling invoice can exist while the combined invoice still carries that
-  // sibling's full original charge — an unresolved duplicate charge. Require
-  // the combined invoice's CURRENT total to be strictly LESS than the
-  // anchor's own originally-stamped price as real evidence the combined
-  // charge was actually reduced. anchor.estimated_price IS the full
-  // same-day combined total at acceptance (reservedAcceptPerVisitSplit's
-  // `reservedPrice` — see estimate-converter.js, "its price is the route's
-  // same-day total"), so a lower current invoice total is direct evidence
-  // something was carved back out of it. Unreadable/missing evidence (no
-  // anchor.estimated_price, or a non-finite invoiceTotal) FAILS CLOSED —
-  // never treated as adjusted, so a diverging sibling's own invoice alone
-  // never clears the alert.
-  const combinedChargeAdjusted = Number.isFinite(Number(anchor.estimated_price))
-    && Number.isFinite(Number(invoiceTotal))
-    && Number(invoiceTotal) < Number(anchor.estimated_price);
-  const unresolved = diverging.filter((m) => !(m.has_own_live_invoice && combinedChargeAdjusted));
+  // sibling's full original charge — an unresolved duplicate charge. And a
+  // group-wide "SOME reduction happened" check is not enough either (Codex
+  // round-5 P1): in a 3+ program group, creating both siblings' own
+  // invoices but removing only ONE sibling's charge from the combined
+  // invoice must not clear either of them — a partial reduction, or an
+  // unrelated discount, must never be read as proof for a specific
+  // sibling. So the WHOLE set of diverging siblings that have their own
+  // invoice is only treated as resolved TOGETHER when the combined
+  // invoice's reduction (anchor.estimated_price − its CURRENT total —
+  // anchor.estimated_price IS the full same-day combined total at
+  // acceptance, reservedAcceptPerVisitSplit's `reservedPrice`; see
+  // estimate-converter.js, "its price is the route's same-day total")
+  // covers AT LEAST the SUM of every one of those siblings' own invoice
+  // totals — real evidence the specific amount that moved out was actually
+  // removed, never merely SOME positive reduction. Unreadable/missing
+  // evidence (no anchor.estimated_price, no invoiceTotal, or an unreadable
+  // own_live_invoice_total on any sibling counted in the sum) FAILS CLOSED
+  // and keeps the ENTIRE group alerting — this never guesses which
+  // specific sibling(s) a partial reduction covers.
+  const withOwnInvoice = diverging.filter((m) => m.has_own_live_invoice);
+  const reductionCents = (() => {
+    const anchorCents = toCents(anchor.estimated_price);
+    const totalCents = toCents(invoiceTotal);
+    return anchorCents != null && totalCents != null ? anchorCents - totalCents : null;
+  })();
+  const sumOwnInvoiceCents = withOwnInvoice.reduce((sum, m) => {
+    if (sum === null) return null;
+    const cents = toCents(m.own_live_invoice_total);
+    return cents != null ? sum + cents : null;
+  }, 0);
+  const groupFullyAccountedFor = withOwnInvoice.length > 0
+    && reductionCents != null && sumOwnInvoiceCents != null
+    && reductionCents >= sumOwnInvoiceCents;
+  const unresolved = groupFullyAccountedFor
+    ? diverging.filter((m) => !m.has_own_live_invoice)
+    : diverging;
   if (!unresolved.length) {
     return { action: 'clear', reason: 'split_completed' };
   }
@@ -343,16 +375,21 @@ async function loadCandidates(conn, { limit = SWEEP_LIMIT } = {}) {
   return [...matched, ...staleRows];
 }
 
-// Every member of the estimate group, each stamped with has_own_live_invoice:
-// true when a LIVE invoice is linked to that member's OWN
-// scheduled_service_id — the real-data signal that the office has already
-// hand-split that visit off the shared invoice (see the module header).
-// "Live" excludes the FULL canonical canceled vocabulary
-// (InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES: void, refunded,
-// canceled, cancelled — pre-push P1: void alone let a canceled "split"
-// invoice falsely clear the alert while the sibling still has no real
-// replacement charge), not just 'void'. Cheap and bounded: one extra query
-// keyed on this small group's own ids.
+// Every member of the estimate group, each stamped with:
+//   has_own_live_invoice: true when a LIVE invoice is linked to that
+//     member's OWN scheduled_service_id — the real-data signal that the
+//     office has already hand-split that visit off the shared invoice
+//     (see the module header). "Live" excludes the FULL canonical
+//     canceled vocabulary (InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES:
+//     void, refunded, canceled, cancelled — pre-push P1: void alone let a
+//     canceled "split" invoice falsely clear the alert while the sibling
+//     still has no real replacement charge), not just 'void'.
+//   own_live_invoice_total: the SUM of that member's own live invoice(s)'
+//     totals (null when has_own_live_invoice is false) — read by
+//     evaluateGroupDivergence's groupFullyAccountedFor check (Codex
+//     round-5 P1) to verify the combined invoice's reduction actually
+//     covers what moved out, not merely that a sibling invoice exists.
+// Cheap and bounded: one extra query keyed on this small group's own ids.
 async function loadGroupMembers(conn, { customerId, sourceEstimateId }) {
   const members = await conn('scheduled_services')
     .where({ customer_id: customerId, source_estimate_id: sourceEstimateId })
@@ -360,12 +397,34 @@ async function loadGroupMembers(conn, { customerId, sourceEstimateId }) {
     .orderBy('id')
     .select('id', 'scheduled_date', 'completed_at', 'estimated_price');
   if (!members.length) return members;
-  const ownInvoiceIds = await conn('invoices')
+  const ownInvoiceRows = await conn('invoices')
     .whereIn('scheduled_service_id', members.map((m) => m.id))
     .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
-    .pluck('scheduled_service_id');
-  const ownInvoiceSet = new Set(ownInvoiceIds.map(String));
-  return members.map((m) => ({ ...m, has_own_live_invoice: ownInvoiceSet.has(String(m.id)) }));
+    .select('scheduled_service_id', 'total');
+  // A member could in principle carry more than one live invoice of its
+  // own (e.g. a second hand-corrected mint) — sum them, since every one of
+  // them is real money charged for that visit outside the combined one.
+  const ownTotalsByMember = new Map();
+  for (const row of ownInvoiceRows) {
+    const key = String(row.scheduled_service_id);
+    const cents = toCents(row.total);
+    // An unreadable individual row's amount still marks the member as
+    // having its own invoice (has_own_live_invoice), but poisons the SUM
+    // to null — groupFullyAccountedFor then fails closed rather than
+    // silently undercounting what moved out.
+    const prior = ownTotalsByMember.has(key) ? ownTotalsByMember.get(key) : 0;
+    ownTotalsByMember.set(key, prior === null || cents === null ? null : prior + cents);
+  }
+  return members.map((m) => {
+    const key = String(m.id);
+    const hasOwn = ownTotalsByMember.has(key);
+    const cents = hasOwn ? ownTotalsByMember.get(key) : null;
+    return {
+      ...m,
+      has_own_live_invoice: hasOwn,
+      own_live_invoice_total: cents != null ? cents / 100 : null,
+    };
+  });
 }
 
 // Marks read (with an autoCleared stamp) every standing alert for this
