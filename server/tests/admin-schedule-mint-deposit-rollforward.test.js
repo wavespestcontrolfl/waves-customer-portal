@@ -346,6 +346,46 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
   // the recheck at a time — the loser's recheck (or resolver snapshot) then
   // sees the winner's freshly committed invoice and refuses instead of
   // minting beside it.
+  // Codex round-6 P1 (pre-push): a sibling-coverage verdict — both the
+  // resolver's pre-lock read and this transaction's own recheckInTrx —
+  // classifies coverage against `svc.scheduled_date`. A reschedule between
+  // that read and this lock invalidates it exactly like a moved customer or
+  // estimate: both lookups would classify the OLD day's siblings, letting
+  // an extras-only invoice mint on a now-uncovered visit. The locked
+  // svc row now carries scheduled_date and is compared the same
+  // unconditional way as customer_id/source_estimate_id.
+  describe('reschedule guard (scheduled_date moved under the lock)', () => {
+    const datedSvc = { ...svc, scheduled_date: '2026-09-27' };
+
+    it('409s SCHEDULED_BILLING_SOURCE_MOVED when the locked scheduled_date differs from the caller snapshot', async () => {
+      programTransactions(makeTrx({ lockedSvcRow: { scheduled_date: '2026-10-04' } }));
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({ svc: datedSvc, buildCreateParams }),
+      ).rejects.toMatchObject({ status: 409, code: 'SCHEDULED_BILLING_SOURCE_MOVED' });
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    it('mints normally when the locked scheduled_date matches', async () => {
+      programTransactions(makeTrx({ lockedSvcRow: { scheduled_date: '2026-09-27' } }));
+      mockPending.mockResolvedValueOnce(null);
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1' });
+
+      const result = await mintScheduledServiceInvoiceWithDeposit({ svc: datedSvc, buildCreateParams });
+      expect(result.invoice).toEqual({ id: 'inv-1' });
+    });
+
+    it('a caller snapshot with no scheduled_date field never trips the guard (legacy/pure callers)', async () => {
+      programTransactions(makeTrx({ lockedSvcRow: { scheduled_date: '2026-10-04' } }));
+      mockPending.mockResolvedValueOnce(null);
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1' });
+
+      // `svc` (module-level fixture) carries no scheduled_date at all.
+      const result = await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams });
+      expect(result.invoice).toEqual({ id: 'inv-1' });
+    });
+  });
+
   describe('estimate ledger lock precedes the caller recheck', () => {
     it('acquires the estimate-scoped ledger lock BEFORE calling recheckInTrx', async () => {
       programTransactions(makeTrx());

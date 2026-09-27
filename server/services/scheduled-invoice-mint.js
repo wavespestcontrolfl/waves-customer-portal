@@ -37,6 +37,27 @@ function priceMovedBetween(callerSvc, lockedSvc, col) {
   return cents(callerSvc[col]) !== cents(lockedSvc[col]);
 }
 
+// Codex round-6 P1 (pre-push): a sibling-coverage recheck reads coverage
+// off the CALLER's pre-lock `svc.scheduled_date` (siblingCoverageRecheckInTrx,
+// admin-schedule.js — the sibling lookup matches on customer + estimate +
+// scheduled_date). If the visit is rescheduled to a different day between
+// the resolver's initial read and this locked transaction, both the
+// original verdict AND the "re-proven" recheck classify coverage against
+// the STALE day's siblings — a sibling invoice that genuinely covered the
+// OLD date says nothing about the visit's real new day, so an extras-only
+// invoice could mint on a now-uncovered visit. Same undefined-means-
+// not-selected contract as priceMovedBetween: a caller whose `svc` never
+// carried scheduled_date (none do today, but future pure/unit callers
+// might) skips the check rather than false-refusing.
+function scheduledDateMovedBetween(callerSvc, lockedSvc) {
+  if (callerSvc.scheduled_date === undefined) return false;
+  const dateOnly = (v) => {
+    if (v == null) return null;
+    return (v instanceof Date ? v.toISOString() : String(v)).slice(0, 10);
+  };
+  return dateOnly(callerSvc.scheduled_date) !== dateOnly(lockedSvc.scheduled_date);
+}
+
 // The ONE advisory-lock namespace every scheduled-service invoice writer
 // keys on. Key derivation must stay byte-identical across the writers or
 // they silently stop contending — import these helpers, never re-declare
@@ -203,7 +224,7 @@ async function mintScheduledServiceInvoiceWithDeposit({
         const lockedSvc = await acquireScheduledMintLockChain(trx, {
           scheduledServiceId: svc.id,
           assertEligibleInTrx,
-          visitColumns: ['id', 'customer_id', 'source_estimate_id', 'estimated_price', 'primary_line_price'],
+          visitColumns: ['id', 'customer_id', 'source_estimate_id', 'estimated_price', 'primary_line_price', 'scheduled_date'],
         });
         if (!lockedSvc) {
           const e = new Error('Scheduled service not found');
@@ -211,8 +232,16 @@ async function mintScheduledServiceInvoiceWithDeposit({
           throw e;
         }
         if (String(lockedSvc.customer_id) !== String(svc.customer_id)
-          || String(lockedSvc.source_estimate_id || '') !== String(sourceEstimateId || '')) {
-          const e = new Error('Scheduled service billing owner or estimate changed while minting');
+          || String(lockedSvc.source_estimate_id || '') !== String(sourceEstimateId || '')
+          // Codex round-6 P1: a sibling-coverage verdict (both the
+          // resolver's pre-lock read and this transaction's own recheck)
+          // classifies coverage against `svc.scheduled_date` — a reschedule
+          // between that read and this lock invalidates it exactly like a
+          // moved customer/estimate does, so it belongs in the SAME
+          // unconditional refusal (never bypassed by allowPriceMovement,
+          // matching customer/estimate above).
+          || scheduledDateMovedBetween(svc, lockedSvc)) {
+          const e = new Error('Scheduled service billing owner, estimate, or date changed while minting');
           e.status = 409;
           e.statusCode = 409;
           e.code = 'SCHEDULED_BILLING_SOURCE_MOVED';
