@@ -72,4 +72,34 @@ describe('ScheduleCustomerSidebar unpriced-visit billingLane.prediction fallback
     expect(screen.getAllByText('$0.00').length).toBeGreaterThan(0);
     expect(screen.queryByText('$100.00')).toBeNull();
   });
+
+  // Codex pre-push P1: `service?.estimatedPrice != null` reads a stamped 0
+  // as an authoritative "$0 visit" too — 0 != null is true — so it must use
+  // the SAME positive-price precedence as completionInvoiceAmount /
+  // resolveScheduledServiceCharge (server/services/billing-lane.js,
+  // server/routes/admin-schedule.js) and defer to the prediction exactly
+  // like an absent price does.
+  it('defers a stamped estimatedPrice of 0 to the acceptance-fee prediction, never previewing $0', async () => {
+    render(
+      <ScheduleCustomerSidebar
+        service={{
+          id: 'v0',
+          customerId: 'c1',
+          customerName: 'Test Customer',
+          status: 'confirmed',
+          estimatedPrice: 0,
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: null,
+            prediction: { kind: 'invoice', amount: 97.2, grossAmount: 97.2, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText('Total')).toBeTruthy());
+    expect(screen.getAllByText('$97.20').length).toBeGreaterThan(0);
+    expect(screen.queryByText('$0.00')).toBeNull();
+  });
 });

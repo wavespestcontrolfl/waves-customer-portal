@@ -156,8 +156,19 @@ export default function ScheduleCustomerSidebar({
   // balance still due — so it reads as $0 here, matching the detail sheet
   // and CompletionPanel (codex pre-push P1: displayed the prepaid figure
   // itself as "Total" above the Take-payment action).
-  const basePrice = service?.estimatedPrice != null
-    ? Number(service.estimatedPrice)
+  // Positive-price precedence — matches completionInvoiceAmount /
+  // predictCompletionBilling (server/services/billing-lane.js), which both
+  // treat `estimatedPrice != null && Number(estimatedPrice) > 0` as "this
+  // visit has its own authoritative price," never a bare != null. A
+  // stamped 0 means the SAME server resolver already fell through to the
+  // per-application fee / rate for this row's own prediction, so a $0
+  // estimatedPrice must defer to the prediction exactly like a null one
+  // does (mirrors the MobileCheckoutSheet / detail-sheet / CompletionPanel
+  // fix — codex pre-push P1).
+  const rawPrice = service?.estimatedPrice != null ? Number(service.estimatedPrice) : null;
+  const hasOwnPrice = rawPrice != null && rawPrice > 0;
+  const basePrice = hasOwnPrice
+    ? rawPrice
     : service?.billingLane
       ? (service.billingLane.prediction?.kind === 'prepaid'
         ? 0

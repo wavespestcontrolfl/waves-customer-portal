@@ -406,6 +406,35 @@ describe('MobileAppointmentDetailSheet sibling-covered first-application visit',
     expect(screen.queryByText(/Covered by WaveGuard/i)).not.toBeInTheDocument();
   });
 
+  // Codex pre-push P1: `rawPrice != null` reads a stamped estimatedPrice of
+  // 0 as an authoritative "$0 visit" too — 0 != null is true — so this must
+  // use the SAME positive-price precedence as completionInvoiceAmount /
+  // resolveScheduledServiceCharge (server/services/billing-lane.js,
+  // server/routes/admin-schedule.js) rather than defer to the prediction
+  // only when the price is entirely absent.
+  it('an estimatedPrice of 0 defers to the acceptance-fee prediction exactly like null does', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...BASE_SERVICE,
+          estimatedPrice: 0,
+          waveguardTier: 'Silver',
+          monthlyRate: 74.7,
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: 74.7,
+            prediction: { kind: 'invoice', amount: 97.2, grossAmount: 97.2, conflictStampedPrice: false },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getAllByText(/\$97\.20/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/\$0\.00/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Review & checkout/i })).toBeInTheDocument();
+  });
+
   // A 'prepaid' kind means completion mints nothing new — its `amount` is
   // what was ALREADY collected (informational), never a balance still due.
   it('reads a fully-covered "prepaid" prediction as no new charge, not a bill for the prepaid figure', () => {

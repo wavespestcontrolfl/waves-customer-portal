@@ -89,6 +89,18 @@ export default function MobileCheckoutSheet({
 
   const tier = service.waveguardTier ? String(service.waveguardTier).toLowerCase() : null;
   const rawPrice = service.estimatedPrice != null ? Number(service.estimatedPrice) : null;
+  // Positive-price precedence — matches completionInvoiceAmount /
+  // predictCompletionBilling (server/services/billing-lane.js), which both
+  // treat `estimatedPrice != null && Number(estimatedPrice) > 0` as "this
+  // visit has its own authoritative price," never a bare != null. A
+  // stamped 0 means the SAME server resolver already fell through to the
+  // per-application fee / rate for this row's own prediction — so a $0
+  // rawPrice must defer to the prediction exactly like a null one does
+  // (codex pre-push P1: estimatedPrice: 0 with a $97.20 fee and a $40
+  // checkout extra previewed $40 here while the mint endpoint created
+  // $137.20 — the sheet read its own $0 as authoritative instead of
+  // consulting the prediction).
+  const hasOwnPrice = rawPrice != null && rawPrice > 0;
   // Declared here (not at its old spot further down) so the gross-fallback
   // safety check right below can read it before `price` is computed.
   const prepaidAmount = service.prepaidAmount != null ? Math.max(0, Number(service.prepaidAmount) || 0) : 0;
@@ -141,12 +153,12 @@ export default function MobileCheckoutSheet({
   // against it), so the legacy fallback stays exactly as safe as before.
   const predictionAmount = service.billingLane?.prediction?.amount;
   const predictionGrossAmount = service.billingLane?.prediction?.grossAmount;
-  const usingUnpricedPrediction = rawPrice == null && !service.isCallback;
+  const usingUnpricedPrediction = !hasOwnPrice && !service.isCallback;
   const priceNeedsRefresh = usingUnpricedPrediction
     && predictionGrossAmount == null
     && predictionAmount != null
     && prepaidAmount > 0;
-  const price = rawPrice != null
+  const price = hasOwnPrice
     ? rawPrice
     : (service.isCallback
       ? 0

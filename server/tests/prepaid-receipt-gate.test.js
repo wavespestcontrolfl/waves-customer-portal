@@ -7,6 +7,7 @@ const {
   resolveScheduledServiceCharge,
 } = require('../routes/admin-schedule')._test;
 const { findFirstApplicationInvoiceForEstimateService } = require('../services/estimate-first-application-invoice');
+const { predictCompletionBilling } = require('../services/billing-lane');
 
 afterEach(() => {
   jest.clearAllMocks();
@@ -109,6 +110,62 @@ describe('resolveScheduledServiceCharge', () => {
     expect(await resolveScheduledServiceCharge({
       estimatedPrice: null, isCallback: true, monthlyRate: 74.7, billingMode: 'per_application', perApplicationFee: 97.2,
     })).toBe(0);
+  });
+
+  // Codex pre-push P1 (client-side finding, verified against the server):
+  // estimatedPrice: 0 must fall through to the acceptance fee exactly like
+  // null does — `!= null` alone is true for 0, so a naive check would read
+  // a stamped 0 as an authoritative "$0 visit" and skip the fee fallback
+  // entirely. This resolver already guards with `estimatedPrice != null &&
+  // Number(estimatedPrice) > 0` (hasOwnPrice), matching
+  // completionInvoiceAmount's own precedence.
+  test('a zero estimatedPrice falls through to the acceptance fee, same as null', async () => {
+    expect(await resolveScheduledServiceCharge({
+      estimatedPrice: 0, isCallback: false, monthlyRate: 74.7, billingMode: 'per_application', perApplicationFee: 97.2,
+    })).toBe(97.2);
+  });
+
+  // Parity test (pre-push P1): the schedule sheet's preview reads
+  // billingLane.prediction, produced by predictCompletionBilling — the
+  // Charge Now / prepaid-receipt mint reads resolveScheduledServiceCharge.
+  // Both must resolve the SAME fixture (estimatedPrice: 0, a $97.20
+  // acceptance fee, a $40 checkout extra) to the SAME total, or the
+  // checkout sheet's preview can promise a different amount than the mint
+  // actually creates. Before the client fix, MobileCheckoutSheet read its
+  // own `rawPrice` (0) as authoritative and previewed $40 (extra only)
+  // while this fixture's real base is $97.20 — this test pins the two
+  // server-side sources of truth themselves, never re-derived on the
+  // client, to $137.20 either way.
+  test('preview (predictCompletionBilling) and mint (resolveScheduledServiceCharge) agree on the same fixture', async () => {
+    const fixture = {
+      estimatedPrice: 0, isCallback: false, monthlyRate: null, billingMode: 'per_application',
+      perApplicationFee: 97.2, serviceType: 'Quarterly Pest Control',
+    };
+    const EXTRA = 40;
+
+    // "Preview" — what the schedule payload hands the client as
+    // billingLane.prediction; grossAmount is the fee a checkout sheet
+    // stacks extras on top of.
+    const prediction = predictCompletionBilling({
+      ...fixture,
+      lane: 'per_application',
+      autopayActive: false,
+      isRecurring: false,
+      payerBilled: false,
+      prepaidAmount: null,
+      prepaidMethod: null,
+    });
+    expect(prediction.grossAmount).toBe(97.2);
+    expect(prediction.grossAmount + EXTRA).toBe(137.2);
+
+    // "Mint" — the base the Charge Now endpoint actually resolves before
+    // adding the same extraLineItems total.
+    const mintBase = await resolveScheduledServiceCharge(fixture);
+    expect(mintBase).toBe(97.2);
+    expect(mintBase + EXTRA).toBe(137.2);
+
+    // Same fixture, same precedence, same total either way.
+    expect(mintBase).toBe(prediction.grossAmount);
   });
 
   test('an explicit non-monthly, non-per_application lane still never falls back to the lingering monthly rate', async () => {

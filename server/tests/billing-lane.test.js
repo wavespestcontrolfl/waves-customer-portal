@@ -173,6 +173,20 @@ describe('predictCompletionBilling', () => {
       .toEqual({ kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'no_amount_on_file' });
   });
 
+  // Codex pre-push P1 (client-side finding, verified against the server):
+  // a stamped estimatedPrice of 0 must resolve exactly like null — hasVisitPrice
+  // gates on `estimatedPrice != null && Number(estimatedPrice) > 0`, the SAME
+  // precedence completionInvoiceAmount and resolveScheduledServiceCharge
+  // (admin-schedule.js) both use — never a bare != null, which reads 0 as an
+  // authoritative "$0 visit" and skips the acceptance-fee fallback.
+  test('a zero estimatedPrice falls through to the per-application fee, same as null', () => {
+    const perApp = { ...memberBase, lane: 'per_application', billingMode: 'per_application', perApplicationFee: 98, monthlyRate: null };
+    expect(predictCompletionBilling({ ...perApp, estimatedPrice: 0 }))
+      .toEqual({ kind: 'auto_charge', amount: 98, grossAmount: 98, conflictStampedPrice: false });
+    expect(predictCompletionBilling({ ...perApp, estimatedPrice: null }))
+      .toEqual({ kind: 'auto_charge', amount: 98, grossAmount: 98, conflictStampedPrice: false });
+  });
+
   test('per-application honors always-free service types (Codex r1)', () => {
     const perApp = { ...memberBase, lane: 'per_application', billingMode: 'per_application', perApplicationFee: 98, monthlyRate: null };
     expect(predictCompletionBilling({ ...perApp, serviceType: 'Pest Control Re-Service' }))

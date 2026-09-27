@@ -237,6 +237,16 @@ export default function MobileAppointmentDetailSheet({
 
   const tier = service.waveguardTier ? String(service.waveguardTier).toLowerCase() : null;
   const rawPrice = service.estimatedPrice != null ? Number(service.estimatedPrice) : null;
+  // Positive-price precedence — matches completionInvoiceAmount /
+  // predictCompletionBilling (server/services/billing-lane.js), which both
+  // treat `estimatedPrice != null && Number(estimatedPrice) > 0` as "this
+  // visit has its own authoritative price," never a bare != null. A
+  // stamped 0 means the SAME server resolver already fell through to the
+  // per-application fee / rate for this row's own prediction, so a $0
+  // rawPrice must defer to the prediction exactly like a null one does
+  // (mirrors the MobileCheckoutSheet / CompletionPanel fix — codex
+  // pre-push P1).
+  const hasOwnPrice = rawPrice != null && rawPrice > 0;
   // Sibling-covered first-application visit (a combined per-application
   // accept — server/services/billing-lane.js siblingCoveredCompletionPrediction):
   // this visit is deliberately unpriced because a same-day sibling's invoice
@@ -272,8 +282,8 @@ export default function MobileAppointmentDetailSheet({
   // double-netting misclassified a partially-prepaid visit as fully
   // covered, hiding a real remaining balance).
   const predictionKind = service.billingLane?.prediction?.kind || null;
-  const usingUnpricedPrediction = rawPrice == null && !service.isCallback;
-  const price = rawPrice != null
+  const usingUnpricedPrediction = !hasOwnPrice && !service.isCallback;
+  const price = hasOwnPrice
     ? rawPrice
     : (service.isCallback || predictionKind === 'prepaid'
       ? 0
