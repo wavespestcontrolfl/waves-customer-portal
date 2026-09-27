@@ -1231,40 +1231,7 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Default recurring pest template for quarterly, bimonthly, and monthly visits. Keep interior treatment targeted.",
-        "completionDefaultProducts": [
-          {
-            "months": [1, 2, 3],
-            "products": [
-              { "name": "Atticus Talak 7.9 F", "ratePerGal": 0.5, "rateUnit": "fl_oz/gal", "typicalGallons": 3, "zone": "band" },
-              { "name": "LESCO 90/10 Nonionic Surfactant", "ratePerGal": 0.05, "rateUnit": "fl_oz/gal", "typicalGallons": 3 }
-            ]
-          },
-          {
-            "months": [4, 5],
-            "products": [
-              { "name": "Alpine WSG", "ratePerGal": 10, "rateUnit": "g/gal", "typicalGallons": 1, "zone": "foundation" },
-              { "name": "Atticus Talak 7.9 F", "ratePerGal": 0.5, "rateUnit": "fl_oz/gal", "typicalGallons": 2, "zone": "band" },
-              { "name": "LESCO 90/10 Nonionic Surfactant", "ratePerGal": 0.05, "rateUnit": "fl_oz/gal", "typicalGallons": 2 }
-            ]
-          },
-          {
-            "months": [6, 7, 8, 9],
-            "products": [
-              { "name": "Taurus SC", "ratePerGal": 0.8, "rateUnit": "fl_oz/gal", "typicalGallons": 1, "zone": "band" },
-              { "name": "Alpine WSG", "ratePerGal": 10, "rateUnit": "g/gal", "typicalGallons": 0.5, "zone": "spots" },
-              { "name": "Onslaught Fastcap", "ratePerGal": 0.5, "rateUnit": "fl_oz/gal", "typicalGallons": 1, "zone": "eaves" }
-            ]
-          },
-          {
-            "months": [10, 11, 12],
-            "products": [
-              { "name": "Alpine WSG", "ratePerGal": 10, "rateUnit": "g/gal", "typicalGallons": 1, "zone": "foundation" },
-              { "name": "Atticus Talak 7.9 F", "ratePerGal": 0.5, "rateUnit": "fl_oz/gal", "typicalGallons": 2, "zone": "band" },
-              { "name": "LESCO 90/10 Nonionic Surfactant", "ratePerGal": 0.05, "rateUnit": "fl_oz/gal", "typicalGallons": 2 }
-            ]
-          }
-        ]
+        "notes": "Default recurring pest template for quarterly, bimonthly, and monthly visits. Keep interior treatment targeted."
       },
       {
         "visit": 2,

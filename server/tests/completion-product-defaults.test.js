@@ -4,19 +4,13 @@ const {
   resolveCompletionProductDefaults,
   resolveSeasonalWindow,
   isSeasonalWindowList,
-  applyTaurusYearlySwap,
-  countTaurusApplicationsThisYear,
+  monthFromDateColumn,
 } = require('../services/completion-product-defaults');
 const realProtocols = require('../config/protocols.json');
 
 // -- a minimal fake knex: only the chain shapes this module actually calls
-// (where/whereIn/whereRaw/join/count/first/select, with select/first/count
-// returning real Promises so the module's own .catch(...) works unmodified).
-// Synthetic rows/names only. Non-aliased tables (scheduled_services,
-// services, products_catalog, product_aliases) behave exactly as the
-// original fixture; `join` + `whereRaw` + `count` only matter for the
-// Taurus-count query (service_products/service_records, alias-prefixed
-// keys post-join).
+// (where/whereIn/first/select, with select/first returning real Promises so
+// the module's own .catch(...) works unmodified). Synthetic rows/names only.
 function fakeDb(tables) {
   function pick(row, cols) {
     if (!cols.length) return { ...row };
@@ -24,35 +18,17 @@ function fakeDb(tables) {
     cols.forEach((col) => { out[col] = row[col]; });
     return out;
   }
-  return function db(tableExpr) {
-    const [tableName, alias] = String(tableExpr).split(/\s+as\s+/i);
-    let rows = (tables[tableName] || []).map((row) => ({ ...row }));
+  return function db(table) {
+    let rows = [...(tables[table] || [])];
     const builder = {
-      join(joinExpr, leftCol, rightCol) {
-        const [joinTable, joinAliasRaw] = String(joinExpr).split(/\s+as\s+/i);
-        const joinAlias = joinAliasRaw || joinTable;
-        const joinRows = tables[joinTable] || [];
-        const [, leftField] = leftCol.split('.');
-        const [rightAlias, rightField] = rightCol.split('.');
-        rows = rows.flatMap((row) => {
-          const rowKey = rightAlias === alias ? row[rightField] : row[rightCol] ?? row[rightField];
-          const match = joinRows.find((jr) => jr[leftField] === rowKey);
-          if (!match) return [];
-          const merged = {};
-          for (const [k, v] of Object.entries(row)) merged[alias ? `${alias}.${k}` : k] = v;
-          for (const [k, v] of Object.entries(match)) merged[`${joinAlias}.${k}`] = v;
-          return [merged];
-        });
-        return builder;
-      },
-      where(condOrCol, maybeVal) {
-        if (typeof condOrCol === 'function') {
+      where(cond) {
+        if (typeof cond === 'function') {
           const collected = {};
           const ctx = {
             where(c) { collected.and = c; return ctx; },
             orWhereNull(col) { collected.orNull = col; return ctx; },
           };
-          condOrCol.call(ctx);
+          cond.call(ctx);
           rows = rows.filter((row) => {
             const andMatch = collected.and
               ? Object.entries(collected.and).every(([k, v]) => row[k] === v) : true;
@@ -61,37 +37,12 @@ function fakeDb(tables) {
           });
           return builder;
         }
-        if (typeof condOrCol === 'object' && condOrCol !== null) {
-          rows = rows.filter((row) => Object.entries(condOrCol).every(([k, v]) => row[k] === v));
-          return builder;
-        }
-        rows = rows.filter((row) => row[condOrCol] === maybeVal);
+        rows = rows.filter((row) => Object.entries(cond).every(([k, v]) => row[k] === v));
         return builder;
       },
       whereIn(col, values) {
         rows = rows.filter((row) => values.includes(row[col]));
         return builder;
-      },
-      whereRaw(sql, params = []) {
-        if (/lower\(/i.test(sql)) {
-          const col = sql.match(/lower\(([\w.]+)\)/i)[1];
-          rows = rows.filter((row) => String(row[col] || '').toLowerCase() === params[0]);
-        } else if (/extract\(year/i.test(sql)) {
-          const col = sql.match(/extract\(year from ([\w.]+)\)/i)[1];
-          rows = rows.filter((row) => {
-            const d = row[col] instanceof Date ? row[col] : new Date(row[col]);
-            return d.getUTCFullYear() === Number(params[0]);
-          });
-        } else if (/!~\*/.test(sql)) {
-          const col = sql.match(/([\w.]+)\s*!~\*/)[1];
-          const re = new RegExp(params[0], 'i');
-          rows = rows.filter((row) => !re.test(String(row[col] || '')));
-        }
-        return builder;
-      },
-      count(spec) {
-        const key = (String(spec || '')).split(/\s+as\s+/i)[1] || 'count';
-        return { first: () => Promise.resolve({ [key]: rows.length }) };
       },
       first(...cols) { return Promise.resolve(rows[0] ? pick(rows[0], cols) : undefined); },
       select(...cols) { return Promise.resolve(rows.map((row) => pick(row, cols))); },
@@ -243,8 +194,6 @@ describe('protocol-specified rate/amount object entries', () => {
       services: [],
       products_catalog: [{ id: 'p5', name: 'Atticus Talak 7.9 F', category: 'Insecticide', formulation: 'SC', application_method: 'perimeter_spray', default_rate_per_1000: null, rate_unit: 'fl_oz', default_rate: null, default_unit: null, epa_reg_number: '91234-145', active: true }],
       product_aliases: [],
-      service_products: [],
-      service_records: [],
     });
     const result = await resolveCompletionProductDefaults({ db, serviceId: 'svc-rate', protocols });
     expect(result.products).toHaveLength(1);
@@ -271,178 +220,114 @@ describe('protocol-specified rate/amount object entries', () => {
   });
 });
 
-describe('applyTaurusYearlySwap (pure)', () => {
-  const entries = [
-    { name: 'Taurus SC', ratePerGal: 0.8, rateUnit: 'fl_oz/gal', typicalGallons: 1, zone: 'band' },
-    { name: 'Alpine WSG', ratePerGal: 10, rateUnit: 'g/gal', typicalGallons: 0.5, zone: 'spots' },
-  ];
-
-  test('below the label max (0 or 1 this year), Taurus stays and no note is added', () => {
-    for (const count of [0, 1]) {
-      const { entries: out, notes } = applyTaurusYearlySwap(entries, count);
-      expect(out).toEqual(entries);
-      expect(notes).toEqual([]);
-    }
+// ---- calendar month from a DATE column (pre-push audit P1) ----
+//
+// scheduled_date is a DATE column with no time-of-day. The bug: building
+// `new Date(value)` and reading it back through an America/New_York
+// formatter (etParts) reads UTC midnight as still the PREVIOUS day in ET,
+// so the 1st of a month resolved the LAST day of the PRIOR month's
+// window. monthFromDateColumn reads the calendar parts directly — a
+// 'YYYY-MM-DD' string prefix, or getUTCMonth() on a Date the pg driver
+// built at UTC midnight — exactly like recap-payload.js's
+// formatServiceDate, never through an ET conversion.
+describe('monthFromDateColumn (pre-push audit P1: no ET shift on month/year boundaries)', () => {
+  test.each([
+    ['2026-10-01', 10],
+    ['2026-01-01', 1],
+    ['2026-12-01', 12],
+    ['2026-06-15', 6],
+  ])('a %s string date column resolves month %i, not the day before', (dateString, expectedMonth) => {
+    expect(monthFromDateColumn(dateString)).toBe(expectedMonth);
   });
 
-  test('at or above the label max (2+), Taurus swaps for Alpine WSG (10 g/gal x 1 gal, foundation) with a note', () => {
-    for (const count of [2, 3]) {
-      const { entries: out, notes } = applyTaurusYearlySwap(entries, count);
-      expect(out.find((e) => e.name === 'Taurus SC')).toBeUndefined();
-      const swapped = out.filter((e) => e.name === 'Alpine WSG');
-      expect(swapped).toHaveLength(2); // the original Alpine WSG line PLUS the swap-in
-      expect(swapped.some((e) => e.ratePerGal === 10 && e.typicalGallons === 1 && e.zone === 'foundation')).toBe(true);
-      expect(notes[0]).toMatch(/Taurus SC used/);
-      expect(notes[0]).toMatch(new RegExp(`${count}`));
-    }
+  test.each([
+    [new Date('2026-10-01T00:00:00.000Z'), 10],
+    [new Date('2026-01-01T00:00:00.000Z'), 1],
+    [new Date('2026-12-01T00:00:00.000Z'), 12],
+  ])('a Date object built at UTC midnight for the 1st of the month resolves that month, not the ET-shifted previous one', (dateValue, expectedMonth) => {
+    // The exact shape node-pg hands back for a DATE column: a JS Date at
+    // UTC midnight. new Date(...).toLocaleString with timeZone
+    // 'America/New_York' would read this as 8pm the PREVIOUS day — the
+    // bug this function exists to avoid.
+    expect(monthFromDateColumn(dateValue)).toBe(expectedMonth);
   });
 
-  test('never swaps or notes when Taurus is not even in the list', () => {
-    const noTaurus = [{ name: 'Alpine WSG', ratePerGal: 10 }];
-    const { entries: out, notes } = applyTaurusYearlySwap(noTaurus, 5);
-    expect(out).toEqual(noTaurus);
-    expect(notes).toEqual([]);
-  });
-
-  test('never blocks: an unusable count (NaN/undefined) is treated as "no swap"', () => {
-    expect(applyTaurusYearlySwap(entries, NaN).entries).toEqual(entries);
-    expect(applyTaurusYearlySwap(entries, undefined).entries).toEqual(entries);
+  test('null/undefined/unparseable resolves to null, never throws', () => {
+    expect(monthFromDateColumn(null)).toBeNull();
+    expect(monthFromDateColumn(undefined)).toBeNull();
+    expect(monthFromDateColumn('not a date')).toBeNull();
+    expect(monthFromDateColumn(new Date('invalid'))).toBeNull();
   });
 });
 
-describe('countTaurusApplicationsThisYear', () => {
-  function fixture() {
-    return {
-      service_records: [
-        { id: 'rec-1', customer_id: 'cust-1', service_date: '2026-03-10', service_type: 'Quarterly Pest Control' },
-        { id: 'rec-2', customer_id: 'cust-1', service_date: '2026-06-10', service_type: 'Quarterly Pest Control' },
-        { id: 'rec-3', customer_id: 'cust-1', service_date: '2025-06-10', service_type: 'Quarterly Pest Control' }, // last year — excluded
-        { id: 'rec-4', customer_id: 'cust-2', service_date: '2026-06-10', service_type: 'Quarterly Pest Control' }, // different customer — excluded
-        { id: 'rec-5', customer_id: 'cust-1', service_date: '2026-07-10', service_type: 'Termite Pretreatment (Trench)' }, // termite — excluded
-      ],
-      service_products: [
-        { id: 'sp-1', service_record_id: 'rec-1', product_name: 'Taurus SC' },
-        { id: 'sp-2', service_record_id: 'rec-2', product_name: 'Taurus SC' },
-        { id: 'sp-3', service_record_id: 'rec-3', product_name: 'Taurus SC' },
-        { id: 'sp-4', service_record_id: 'rec-4', product_name: 'Taurus SC' },
-        { id: 'sp-5', service_record_id: 'rec-5', product_name: 'Taurus SC' },
-        { id: 'sp-6', service_record_id: 'rec-1', product_name: 'Alpine WSG' }, // different product — excluded
-      ],
-    };
+describe('resolveCompletionProductDefaults: month-boundary dates select the right seasonal window', () => {
+  // A synthetic seasonal protocol (the generic mechanism — no real program
+  // carries this shape today; pest's own seasonal rotation is parked for a
+  // later PR per the owner ruling of 2026-09-27). Two adjacent windows so a
+  // one-day month-boundary error is unambiguous, not a coincidental match.
+  const seasonalProtocols = {
+    rodent: {
+      visits: [{
+        visit: 1, month: 'Any',
+        completionDefaultProducts: [
+          { months: [7, 8, 9], products: ['Summer product'] },
+          { months: [10, 11, 12], products: ['Fall/winter product'] },
+        ],
+      }],
+    },
+  };
+
+  function scheduledServiceDb(scheduledDate) {
+    return fakeDb({
+      scheduled_services: [{ id: 'svc-boundary', service_id: null, service_type: 'Rodent Monitoring', service_key_snapshot: null, scheduled_date: scheduledDate }],
+      services: [],
+      products_catalog: [],
+      product_aliases: [],
+    });
   }
 
-  test('counts only this customer, this calendar year, non-termite Taurus SC applications', async () => {
-    const db = fakeDb(fixture());
-    const count = await countTaurusApplicationsThisYear(db, 'cust-1', { asOfDate: new Date('2026-08-01T12:00:00Z') });
-    expect(count).toBe(2); // rec-1 + rec-2 only
+  test('October 1st (string date) resolves the Oct-Dec window, not Jul-Sep', async () => {
+    const result = await resolveCompletionProductDefaults({ db: scheduledServiceDb('2026-10-01'), serviceId: 'svc-boundary', protocols: seasonalProtocols });
+    expect(result.unresolved).toEqual(['Fall/winter product']);
   });
 
-  test('counts 0 and 1 correctly (the plain-info range, never blocking)', async () => {
-    const tables = fixture();
-    tables.service_records = tables.service_records.filter((r) => r.id === 'rec-1');
-    tables.service_products = tables.service_products.filter((p) => p.service_record_id === 'rec-1');
-    const oneDb = fakeDb(tables);
-    expect(await countTaurusApplicationsThisYear(oneDb, 'cust-1', { asOfDate: new Date('2026-08-01T12:00:00Z') })).toBe(1);
-
-    const zeroDb = fakeDb({ service_records: [], service_products: [] });
-    expect(await countTaurusApplicationsThisYear(zeroDb, 'cust-1', { asOfDate: new Date('2026-08-01T12:00:00Z') })).toBe(0);
-  });
-
-  test('excludes termite/pre-slab/trench services from the count', async () => {
-    const db = fakeDb(fixture());
-    // rec-5 is a Termite Pretreatment (Trench) with a Taurus SC line — must
-    // never count toward the perimeter-pest label rotation.
-    const count = await countTaurusApplicationsThisYear(db, 'cust-1', { asOfDate: new Date('2026-08-01T12:00:00Z') });
-    expect(count).toBe(2);
-  });
-
-  test('fail-soft: no db, no customerId, or a throwing query all resolve to 0', async () => {
-    expect(await countTaurusApplicationsThisYear(null, 'cust-1')).toBe(0);
-    expect(await countTaurusApplicationsThisYear(fakeDb(fixture()), null)).toBe(0);
-    const throwingDb = () => ({ join() { throw new Error('boom'); } });
-    expect(await countTaurusApplicationsThisYear(throwingDb, 'cust-1')).toBe(0);
-  });
-});
-
-describe('resolveCompletionProductDefaults end to end: seasonal window + Taurus swap', () => {
-  test('a June visit with 2 prior Taurus applications this year swaps Taurus for Alpine WSG and reports the count/note', async () => {
-    const db = fakeDb({
-      scheduled_services: [{ id: 'svc-swap', customer_id: 'cust-1', service_id: null, service_type: 'Quarterly Pest Control', service_key_snapshot: null, scheduled_date: '2026-06-15' }],
-      services: [],
-      products_catalog: [
-        { id: 'p1', name: 'Alpine WSG', category: 'Insecticide', formulation: 'WSG', application_method: 'perimeter_spray', default_rate_per_1000: null, rate_unit: 'oz', default_rate: '0.5-1', default_unit: 'oz', epa_reg_number: '432-1333', active: true },
-        { id: 'p4', name: 'Taurus SC', category: 'Insecticide', formulation: 'SC', application_method: 'perimeter_spray', default_rate_per_1000: 0.8, rate_unit: 'fl_oz', default_rate: null, default_unit: null, epa_reg_number: '53883-279', active: true },
-        { id: 'p7', name: 'Onslaught Fastcap', category: 'Insecticide', formulation: 'SC', application_method: 'perimeter_spray', default_rate_per_1000: null, rate_unit: null, default_rate: null, default_unit: null, epa_reg_number: '499-561', active: true },
-      ],
-      product_aliases: [],
-      service_records: [
-        { id: 'rec-1', customer_id: 'cust-1', service_date: '2026-01-10', service_type: 'Quarterly Pest Control' },
-        { id: 'rec-2', customer_id: 'cust-1', service_date: '2026-04-10', service_type: 'Quarterly Pest Control' },
-      ],
-      service_products: [
-        { id: 'sp-1', service_record_id: 'rec-1', product_name: 'Taurus SC' },
-        { id: 'sp-2', service_record_id: 'rec-2', product_name: 'Taurus SC' },
-      ],
+  test('October 1st as a UTC-midnight Date object still resolves Oct-Dec, not the ET-shifted Sep 30', async () => {
+    const result = await resolveCompletionProductDefaults({
+      db: scheduledServiceDb(new Date('2026-10-01T00:00:00.000Z')), serviceId: 'svc-boundary', protocols: seasonalProtocols,
     });
-
-    const result = await resolveCompletionProductDefaults({ db, serviceId: 'svc-swap', protocols: realProtocols });
-    expect(result.programKey).toBe('pest');
-    expect(result.taurusYearCount).toBe(2);
-    expect(result.notes[0]).toMatch(/Taurus SC used 2/);
-    const names = result.products.map((p) => p.name);
-    expect(names).not.toContain('Taurus SC');
-    // Two Alpine WSG entries this window (the swap-in AND the window's own
-    // spots-zone Alpine line) collapse to ONE catalog row, since both
-    // resolve to the same product id — the drawer gets one row, not two.
-    expect(names.filter((n) => n === 'Alpine WSG')).toHaveLength(1);
-    expect(names).toContain('Onslaught Fastcap');
+    expect(result.unresolved).toEqual(['Fall/winter product']);
   });
 
-  test('a June visit with fewer than 2 prior Taurus applications keeps Taurus and reports the lower count', async () => {
-    const db = fakeDb({
-      scheduled_services: [{ id: 'svc-noswap', customer_id: 'cust-2', service_id: null, service_type: 'Quarterly Pest Control', service_key_snapshot: null, scheduled_date: '2026-06-15' }],
-      services: [],
-      products_catalog: [
-        { id: 'p1', name: 'Alpine WSG', active: true },
-        { id: 'p4', name: 'Taurus SC', active: true },
-        { id: 'p7', name: 'Onslaught Fastcap', active: true },
-      ],
-      product_aliases: [],
-      service_records: [],
-      service_products: [],
-    });
-    const result = await resolveCompletionProductDefaults({ db, serviceId: 'svc-noswap', protocols: realProtocols });
-    expect(result.taurusYearCount).toBe(0);
-    expect(result.notes).toEqual([]);
-    expect(result.products.map((p) => p.name)).toContain('Taurus SC');
+  test('January 1st resolves neither window (no Jan-Mar window in this fixture) — proves the month read is exact, not off by one into December', async () => {
+    const result = await resolveCompletionProductDefaults({ db: scheduledServiceDb('2026-01-01'), serviceId: 'svc-boundary', protocols: seasonalProtocols });
+    // Neither window covers January — an off-by-one bug reading this as
+    // December would have wrongly matched the Oct-Dec window instead.
+    expect(result.source).toBe('none');
+    expect(result.products).toEqual([]);
+    expect(result.unresolved).toEqual([]);
   });
 });
 
 // ---- real protocols.json: the owner-ruling lists actually landed ----
 
 describe('protocols.json completionDefaultProducts (owner rulings 2026-09-26/27)', () => {
-  test('pest visit 1 is a 4-window seasonal rotation, not a flat list (owner 2026-09-27)', () => {
+  test('pest visit 1 (recurring/one-time general pest) carries NO completionDefaultProducts — owned by pest-default-mix.js', () => {
+    // Owner ruling 2026-09-27 (pre-push audit): keep the pest 4-oz house
+    // mix (lib/pest-default-mix.js) for now; a seasonal pest rotation with
+    // per-window rates is parked for a later PR. Resolving through this
+    // module for a plain recurring pest visit must fall through to the
+    // services.default_products fallback (or empty) exactly like any
+    // other program the owner hasn't curated yet — never invent a pest
+    // default here.
     const visit1 = realProtocols.pest.visits.find((v) => v.visit === 1);
-    expect(isSeasonalWindowList(visit1.completionDefaultProducts)).toBe(true);
-    expect(visit1.completionDefaultProducts).toHaveLength(4);
-    const monthsCovered = visit1.completionDefaultProducts.flatMap((w) => w.months);
-    expect(monthsCovered.slice().sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
-  });
-
-  test.each([
-    [1, ['Atticus Talak 7.9 F', 'LESCO 90/10 Nonionic Surfactant']],
-    [3, ['Atticus Talak 7.9 F', 'LESCO 90/10 Nonionic Surfactant']],
-    [4, ['Alpine WSG', 'Atticus Talak 7.9 F', 'LESCO 90/10 Nonionic Surfactant']],
-    [5, ['Alpine WSG', 'Atticus Talak 7.9 F', 'LESCO 90/10 Nonionic Surfactant']],
-    [6, ['Taurus SC', 'Alpine WSG', 'Onslaught Fastcap']],
-    [9, ['Taurus SC', 'Alpine WSG', 'Onslaught Fastcap']],
-    [10, ['Alpine WSG', 'Atticus Talak 7.9 F', 'LESCO 90/10 Nonionic Surfactant']],
-    [12, ['Alpine WSG', 'Atticus Talak 7.9 F', 'LESCO 90/10 Nonionic Surfactant']],
-  ])('month %i resolves the right seasonal window products', (month, expectedNames) => {
+    expect(visit1.completionDefaultProducts).toBeUndefined();
     const result = resolveCompletionDefaultProductNames({
-      protocols: realProtocols, serviceType: 'General Pest Control (Quarterly)', month,
+      protocols: realProtocols, serviceType: 'General Pest Control (Quarterly)',
     });
-    expect(result.names).toEqual(expectedNames);
+    expect(result.programKey).toBe('pest');
+    expect(result.matchedVisit.visit).toBe(1);
+    expect(result.source).toBe('none');
+    expect(result.names).toEqual([]);
   });
 
   test('pest visit 2 (German roach cleanout) and cockroach visit 1 share the roach defaults', () => {
@@ -460,12 +345,17 @@ describe('protocols.json completionDefaultProducts (owner rulings 2026-09-26/27)
     expect(result.names).toEqual(['Alpine WSG', 'Gentrol IGR', 'Advion Cockroach Gel Bait']);
   });
 
-  test('other curated-less programs (tree & shrub, mosquito, termite) carry no field yet', () => {
-    for (const visitList of Object.values({ tree_shrub: realProtocols.tree_shrub.visits, mosquito: realProtocols.mosquito.visits, termite: realProtocols.termite.visits })) {
+  test('other curated-less programs (pest visit 1, tree & shrub, mosquito, termite) carry no field yet', () => {
+    for (const visitList of Object.values({
+      tree_shrub: realProtocols.tree_shrub.visits,
+      mosquito: realProtocols.mosquito.visits,
+      termite: realProtocols.termite.visits,
+    })) {
       for (const visit of visitList) {
         expect(visit.completionDefaultProducts).toBeUndefined();
       }
     }
+    expect(realProtocols.pest.visits.find((v) => v.visit === 1).completionDefaultProducts).toBeUndefined();
   });
 });
 

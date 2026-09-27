@@ -197,3 +197,39 @@ it('does NOT seed on top of a restored draft’s own products', async () => {
   expect(screen.queryByText('Gentrol IGR')).toBeNull();
   expect(screen.queryByText('Advion Cockroach Gel Bait')).toBeNull();
 });
+
+it('does NOT re-seed when a restored draft deliberately saved an EMPTY product list (pre-push audit P1)', async () => {
+  // The tech removed every prefilled default before the drawer closed, and
+  // the draft saved that empty list. selectedProducts.length is falsy
+  // either way ("never seeded yet" and "restored empty on purpose" look
+  // identical to that check alone) — restoreDraft() must mark the ref done
+  // itself so the seed effect can never mistake one for the other.
+  const visit = cockroachService();
+  localStorage.setItem(`waves_completion_draft_${visit.id}`, JSON.stringify({
+    serviceId: visit.id,
+    savedAt: Date.now(),
+    notes: 'Removed every default product on purpose',
+    selectedProducts: [],
+  }));
+  stubFetchWithImmediateDefaults();
+  await act(async () => {
+    render(
+      <CompletionPanel
+        service={visit}
+        products={cockroachCatalog}
+        onClose={() => {}}
+        onSubmit={vi.fn().mockResolvedValue({})}
+      />,
+    );
+  });
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(screen.getByPlaceholderText(/Notes about this service/).value).toBe('Removed every default product on purpose'));
+  // Give the seed effect a tick — it must NOT fire now that the draft
+  // (empty) has been restored.
+  await act(async () => { await Promise.resolve(); });
+
+  expect(screen.queryByText('Alpine WSG')).toBeNull();
+  expect(screen.queryByText('Gentrol IGR')).toBeNull();
+  expect(screen.queryByText('Advion Cockroach Gel Bait')).toBeNull();
+});

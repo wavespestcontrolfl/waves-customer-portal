@@ -5,9 +5,7 @@
  * should start PREFILLED with the visit's default products (label-default
  * rates, tech adjusts) for any non-lawn service that uses sprays, granules,
  * or baits — "the default products used are Alpine WSG, Gentrol IGR, and
- * the Advion cockroach gel — these need to be defaults", extended the same
- * day to the general recurring/one-time pest visit (Taurus SC + Atticus
- * Talak 7.9 F + LESCO 90/10 Nonionic Surfactant).
+ * the Advion cockroach gel — these need to be defaults".
  *
  * Design pivot (owner, same day): do NOT prefill from every
  * `treatmentApplied` protocol lineMeta hint — a visit can carry several
@@ -19,38 +17,38 @@
  * job-card / protocol-actions tap-to-apply reference — untouched by this
  * module.
  *
- * Owner ruling 2026-09-27 (rotation): a visit's completionDefaultProducts
- * can be either
- *   - a plain array of entries (back-compat — cockroach and pest visit 2
- *     stay this shape: not seasonal), or
- *   - an array of SEASONAL WINDOWS: [{ months: [1,2,3], products: [...] }, …]
- *     — `months` are 1-12 in America/New_York, matched against the
- *     scheduled visit's own month.
- * Either way, each product entry is a plain name string OR an object
+ * Owner ruling 2026-09-27: a visit's completionDefaultProducts can be
+ * either a plain array of entries, or an array of SEASONAL WINDOWS
+ * ([{ months: [1,2,3], products: [...] }, …] — `months` are 1-12,
+ * matched against the scheduled visit's own month). Either way, each
+ * product entry is a plain name string OR an object
  * `{ name, ratePerGal, rateUnit, typicalGallons, zone }` — the protocol
  * (not the catalog) then owns the mix rate/volume. zone is a display hint
  * only ('foundation' | 'band' | 'eaves' | 'spots'), never enforced.
- * Everything here is a DEFAULT, never a validation error — "don't block
- * anything yet" (owner, 2026-09-27).
+ *
+ * PEST is NOT curated here (owner ruling 2026-09-27, pre-push audit): the
+ * general recurring/one-time pest visit keeps its existing house mix —
+ * lib/pest-default-mix.js on the client (Taurus SC + Atticus Talak 7.9 F +
+ * LESCO 90/10 Nonionic Surfactant, fixed totals) — and a seasonal pest
+ * rotation with per-window rates is parked for a later PR. This module's
+ * seasonal-window + rate-object support is generic and stays (it is what
+ * pest visit 2 and the cockroach program's flat roach list already prove
+ * out with synthetic-data tests), but no pest visit carries
+ * completionDefaultProducts today, so pest visits resolve through the
+ * services.default_products fallback or empty, same as any other
+ * uncurated program.
  *
  * Precedence (per visit):
  *   1. protocols.json visit.completionDefaultProducts (curated, ordered;
- *      seasonal-window-resolved when the visit uses that shape)
+ *      seasonal-window-resolved when the visit uses that shape) — today
+ *      that's pest visit 2 (German roach cleanout) and the cockroach
+ *      program's visit 1, both flat roach lists.
  *   2. services.default_products (legacy JSONB name list) — a fallback
  *      for services the owner hasn't curated yet; frequently stale (the
  *      pest_general_* rows still say "Demand CS" / "Advion Gel"), so a
  *      curated list always wins when one exists.
  *   3. empty — no default products, tech starts from a blank list (today's
  *      behavior everywhere else).
- *
- * Taurus SC yearly rotation (owner 2026-09-27, label: 0.06% max 2x per
- * customer per calendar year for perimeter pest): whenever the resolved
- * program is 'pest', this customer's Taurus SC application count for the
- * current calendar year is always computed and returned as
- * `taurusYearCount` (so the drawer can show "Taurus this year: N of 2" as
- * plain info — never a block). At 2 or more, a Taurus SC entry in the
- * resolved product list is swapped for Alpine WSG (10 g/gal x 1 gal,
- * foundation) and a plain-English note is added to `notes`.
  *
  * Lawn is never touched: it already has its own governed protocol-defaults
  * mechanism (lawn-completion-defaults.js / GATE_LAWN_COMPLETION_DEFAULTS)
@@ -64,17 +62,16 @@
  * substituted with a guess.
  *
  * Pure with respect to its resolution logic (resolveCompletionDefaultProductNames,
- * resolveSeasonalProductEntries, applyTaurusYearlySwap, resolveCatalogProductForName):
- * same inputs, same output, no I/O — so the precedence, seasonal, and swap
- * rules are unit-testable without a database. resolveCompletionProductDefaults
- * is the DB-backed orchestrator the route calls; it is fail-soft end to
- * end — any failure (missing row, DB error, malformed default_products)
- * resolves to an empty product list, and a completion can always proceed
- * with no products prefilled.
+ * resolveSeasonalWindow, resolveCatalogProductForName): same inputs, same
+ * output, no I/O — so the precedence and seasonal rules are unit-testable
+ * without a database. resolveCompletionProductDefaults is the DB-backed
+ * orchestrator the route calls; it is fail-soft end to end — any failure
+ * (missing row, DB error, malformed default_products) resolves to an
+ * empty product list, and a completion can always proceed with no
+ * products prefilled.
  */
 
 const { matchServiceProtocol } = require('./protocol-matcher');
-const { etParts } = require('../utils/datetime-et');
 
 // -- name parsing / dedupe (pure) --------------------------------------
 
@@ -92,8 +89,8 @@ function parseDefaultProductNames(value) {
 
 // A raw completionDefaultProducts entry is a name string OR an object
 // naming the protocol's own mix rate/volume — normalize to one shape so
-// every downstream step (dedupe, swap, catalog resolution, line shaping)
-// only has one representation to handle.
+// every downstream step (dedupe, catalog resolution, line shaping) only
+// has one representation to handle.
 function normalizeProductEntry(raw) {
   if (raw == null) return null;
   if (typeof raw === 'string') {
@@ -135,7 +132,11 @@ function dedupeEntries(rawEntries) {
 // True when every element of the list is a seasonal window ({ months,
 // products }), the NEW shape a visit's completionDefaultProducts can take
 // (owner ruling 2026-09-27) — as opposed to a plain, non-seasonal entry
-// list (the shape cockroach and pest visit 2 keep).
+// list (the shape pest visit 2 and cockroach keep today). Generic support
+// only — no visit ships with this shape yet (pest's own seasonal rotation
+// is parked for a later PR), but it is proven out with synthetic-data
+// tests so a future protocols.json entry can use it without a resolver
+// change.
 function isSeasonalWindowList(value) {
   return Array.isArray(value) && value.length > 0 && value.every((entry) => (
     entry && typeof entry === 'object' && Array.isArray(entry.months) && Array.isArray(entry.products)
@@ -162,33 +163,6 @@ function resolveRawCompletionDefaultProducts(visit, month) {
     return window ? window.products : [];
   }
   return raw;
-}
-
-// -- Taurus SC yearly rotation (pure swap; DB count lives below) --------
-
-const TAURUS_NAME_RE = /^taurus\s*sc$/i;
-// Label: 0.06% max 2x per customer per calendar year for perimeter pest.
-const TAURUS_LABEL_MAX_PER_YEAR = 2;
-// The swap-in entry (owner 2026-09-27) — same shape as any other product
-// entry, so it flows through catalog resolution and line shaping unchanged.
-const TAURUS_SWAP_ENTRY = { name: 'Alpine WSG', ratePerGal: 10, rateUnit: 'g/gal', typicalGallons: 1, zone: 'foundation' };
-
-// Swaps a Taurus SC entry for Alpine WSG once this customer has hit the
-// label's yearly max — pure (the count is passed in, not queried here) so
-// the swap rule itself is unit-testable without a database. Never removes
-// Taurus if it isn't actually in the list; never blocks — this only ever
-// changes what's PREFILLED, per the owner's "don't block anything" ruling.
-function applyTaurusYearlySwap(entries, taurusYearCount) {
-  if (!Number.isFinite(taurusYearCount) || taurusYearCount < TAURUS_LABEL_MAX_PER_YEAR) {
-    return { entries, notes: [] };
-  }
-  const hasTaurus = (entries || []).some((entry) => TAURUS_NAME_RE.test(entry.name));
-  if (!hasTaurus) return { entries, notes: [] };
-  const swapped = entries.map((entry) => (TAURUS_NAME_RE.test(entry.name) ? { ...TAURUS_SWAP_ENTRY } : entry));
-  return {
-    entries: swapped,
-    notes: [`Taurus SC used ${taurusYearCount}× this year (label max ${TAURUS_LABEL_MAX_PER_YEAR}× at 0.06%) — Alpine WSG prefilled instead`],
-  };
 }
 
 // -- catalog name resolution (pure) ------------------------------------
@@ -237,8 +211,7 @@ function resolveCatalogProductForName(name, catalogRows = []) {
 // -- visit resolution + precedence (pure) ------------------------------
 
 // Resolves which protocol visit a service maps to and, from it, the
-// ordered product ENTRIES to prefill (before any catalog lookup or the
-// Taurus swap, which needs a DB count and runs in the orchestrator below).
+// ordered product ENTRIES to prefill (before any catalog lookup).
 // Pure: given the same protocols.json + inputs, always the same output.
 function resolveCompletionDefaultProductNames({
   protocols, serviceType, serviceKey = null, month = null, fallbackDefaultProducts = null,
@@ -361,31 +334,27 @@ async function loadActiveCatalogWithAliases(db) {
   return rows.map((row) => ({ ...row, aliases: aliasesByProduct[row.id] || [] }));
 }
 
-// This customer's Taurus SC application count for the current calendar
-// year (ET), excluding termite/pre-slab/trench services (Taurus's OWN
-// perimeter-pest label rotation is a separate count from whatever a
-// termite tech applies) — service_products has no product_id column
-// (verified against every migration that touches the table), so the match
-// is by name, matching how every completion writes it (product_name is
-// always the catalog row's exact name at the time of completion).
-// Fail-soft: any DB error resolves to 0, never blocks or throws.
-async function countTaurusApplicationsThisYear(db, customerId, { asOfDate = new Date() } = {}) {
-  if (!db || !customerId) return 0;
-  try {
-    const { year } = etParts(asOfDate);
-    const result = await db('service_products as sp')
-      .join('service_records as sr', 'sr.id', 'sp.service_record_id')
-      .where('sr.customer_id', customerId)
-      .whereRaw('lower(sp.product_name) = ?', ['taurus sc'])
-      .whereRaw('extract(year from sr.service_date) = ?', [year])
-      .whereRaw("sr.service_type !~* ?", ['termite|pre-?slab|trench'])
-      .count('* as count')
-      .first()
-      .catch(() => ({ count: 0 }));
-    return Number(result?.count || 0);
-  } catch {
-    return 0;
+// The visit's calendar month (1-12) from scheduled_services.scheduled_date
+// — a DATE column, no time-of-day. Pre-push audit P1: building `new
+// Date(value)` and reading it back through an America/New_York formatter
+// (etParts) shifts the month back a day at every month/year boundary,
+// because a bare 'YYYY-MM-DD' (or a driver-built Date at UTC midnight)
+// reads as UTC midnight, which is still the PREVIOUS day in ET — the 1st
+// of the month read the LAST day of the prior month's window. A DATE
+// column has no timezone of its own; read its calendar parts directly
+// (string prefix, or getUTCMonth() on the Date the pg driver built at UTC
+// midnight) exactly as recap-payload.js's formatServiceDate does, never
+// through an ET conversion.
+function monthFromDateColumn(value) {
+  if (!value) return null;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    return value.getUTCMonth() + 1;
   }
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value).trim());
+  if (match) return Number(match[2]);
+  const parsed = new Date(String(value));
+  return Number.isNaN(parsed.getTime()) ? null : parsed.getUTCMonth() + 1;
 }
 
 function emptyResult(serviceId) {
@@ -396,12 +365,11 @@ function emptyResult(serviceId) {
 
 // The route-facing orchestrator: loads the scheduled service + its
 // service_key/service_type/month, resolves the default product ENTRIES
-// (pure, above; seasonal-window-resolved for this visit's month), applies
-// the Taurus SC yearly rotation for pest visits (needs a DB count, so it
-// can't live in the pure resolver), then resolves each entry to an active
-// catalog row. Fail-soft throughout — this must never block a completion:
-// any error (missing row, DB error, malformed default_products) resolves
-// to an empty product list rather than throwing.
+// (pure, above; seasonal-window-resolved for this visit's month), then
+// resolves each entry to an active catalog row. Fail-soft throughout —
+// this must never block a completion: any error (missing row, DB error,
+// malformed default_products) resolves to an empty product list rather
+// than throwing.
 async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {}) {
   const empty = emptyResult(serviceId);
   if (!db || !serviceId) return empty;
@@ -415,10 +383,10 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
       ? await db('services').where({ id: scheduled.service_id }).first('id', 'default_products').catch(() => null)
       : null;
 
-    // The visit's OWN month (ET) — both for month-keyed programs (lawn,
-    // tree & shrub — neither carries completionDefaultProducts today) and
-    // for a seasonal completionDefaultProducts window (pest visit 1).
-    const month = scheduled.scheduled_date ? etParts(new Date(scheduled.scheduled_date)).month : null;
+    // The visit's OWN calendar month — both for month-keyed programs
+    // (lawn, tree & shrub — neither carries completionDefaultProducts
+    // today) and for a future seasonal completionDefaultProducts window.
+    const month = monthFromDateColumn(scheduled.scheduled_date);
 
     const resolved = resolveCompletionDefaultProductNames({
       // Lazy require keeps this module free of a hard load-time dependency
@@ -431,21 +399,10 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
       fallbackDefaultProducts: serviceRow?.default_products,
     });
 
-    // Always surfaced for a pest-program visit (owner 2026-09-27), whether
-    // Taurus is even in this window or not — the drawer shows "Taurus this
-    // year: N of 2" as plain info regardless.
-    let taurusYearCount = null;
-    let entries = resolved.entries;
-    let notes = [];
-    if (resolved.programKey === 'pest') {
-      taurusYearCount = await countTaurusApplicationsThisYear(db, scheduled.customer_id);
-      ({ entries, notes } = applyTaurusYearlySwap(entries, taurusYearCount));
-    }
-
-    if (!entries.length) {
+    if (!resolved.entries.length) {
       return {
         serviceId, programKey: resolved.programKey, matchedVisit: resolved.matchedVisit,
-        source: resolved.source, products: [], unresolved: [], taurusYearCount, notes,
+        source: resolved.source, products: [], unresolved: [],
       };
     }
 
@@ -453,21 +410,19 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
     const products = [];
     const unresolved = [];
     const seenProductIds = new Set();
-    for (const entry of entries) {
+    for (const entry of resolved.entries) {
       const row = resolveCatalogProductForName(entry.name, catalogRows);
       if (!row) { unresolved.push(entry.name); continue; }
-      // Two entries (e.g. the Taurus-swap Alpine WSG and the window's own
-      // Alpine WSG line) can resolve to the SAME catalog row — one line on
-      // the drawer, not two. First occurrence wins (the swap replaces
-      // Taurus's position, so it's already ahead of any later duplicate).
+      // Two entries resolving to the SAME catalog row show one line on the
+      // drawer, not two — first occurrence wins.
       if (seenProductIds.has(row.id)) continue;
       seenProductIds.add(row.id);
-      products.push(shapeCompletionProductLine(entry, row, { ...resolved, entries }));
+      products.push(shapeCompletionProductLine(entry, row, resolved));
     }
 
     return {
       serviceId, programKey: resolved.programKey, matchedVisit: resolved.matchedVisit,
-      source: resolved.source, products, unresolved, taurusYearCount, notes,
+      source: resolved.source, products, unresolved,
     };
   } catch (err) {
     return { ...empty, error: err?.message || 'completion_product_defaults_failed' };
@@ -480,7 +435,6 @@ module.exports = {
   resolveCompletionProductDefaults,
   resolveSeasonalWindow,
   isSeasonalWindowList,
-  applyTaurusYearlySwap,
-  countTaurusApplicationsThisYear,
+  monthFromDateColumn,
   parseDefaultProductNames,
 };

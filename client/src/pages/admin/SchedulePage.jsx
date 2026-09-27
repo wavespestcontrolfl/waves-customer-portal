@@ -15006,6 +15006,14 @@ export function CompletionPanel({
     );
     lawnAreasInitializedRef.current = true;
     lawnDefaultMixSeededRef.current = true;
+    // Pre-push audit P1: a draft that saved an EMPTY product list (the tech
+    // removed every prefilled default before the page closed) must not
+    // come back seeded — selectedProducts.length is falsy either way, so
+    // the seed effect's own "already has products" check can't tell "never
+    // ran" apart from "restored empty on purpose". Marking done HERE, once,
+    // regardless of how many products the draft actually carried, is the
+    // only signal that distinguishes them.
+    protocolCompletionDefaultsSeededRef.current = true;
     if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
     setLawnAreaOverride(savedDraft.lawnAreaOverride);
     setLawnRemovedDefaultIds(Array.isArray(savedDraft.lawnRemovedDefaultIds) ? [...new Set(savedDraft.lawnRemovedDefaultIds.map(String))] : []);
