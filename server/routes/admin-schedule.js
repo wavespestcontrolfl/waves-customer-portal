@@ -22460,6 +22460,21 @@ function renderTypedGroupLines(sections) {
   return parts;
 }
 
+// Owner ruling 2026-09-26 (#5037): a derive-mapped activity indicator has
+// no gauge — its score comes from the findings field alone. Report copy must
+// follow the same rule as completion (complete-scheduled-service.js), or a
+// tab loaded before the gauge was removed could generate prose against an
+// obsolete pinned score that the saved record then contradicts (Codex r3).
+// Tech-set-only indicators keep the submitted 0-5 score.
+function copyActivityScore(type, values, submitted) {
+  const indicator = ActivityIndicators.getActivityIndicator(type);
+  if (indicator?.derive) {
+    const derived = ActivityIndicators.deriveActivityScore(type, values || {});
+    return derived ? derived.score : null;
+  }
+  return Number.isInteger(submitted) && submitted >= 0 && submitted <= 5 ? submitted : null;
+}
+
 function buildTypedFindingsPromptBlock({
   findingsType = null, values = null, nextStepChips = [], companionFindings = [],
   allowedCompanionTypes = [], activityScore = null,
@@ -22576,18 +22591,36 @@ router.post('/generate-report', async (req, res) => {
     // only here; the prompt block is assembled further down ONLY after the
     // appointment's completion profile confirms the findings type (same
     // profile-authority rule as the old draft route).
-    const typedActivityScoreNum = Number.isInteger(typedActivityScore)
-      && typedActivityScore >= 0 && typedActivityScore <= 5
-      ? typedActivityScore : null;
     const typedValuesRaw = structuredFindings && typeof structuredFindings === 'object'
       && structuredFindings.values && typeof structuredFindings.values === 'object'
       && !Array.isArray(structuredFindings.values)
       ? structuredFindings.values : null;
+    // Derive-mapped types score from their findings, never a submitted pin
+    // (copyActivityScore). The claimed type is what the profile later
+    // confirms, so deriving from it here keeps gate, prompt and fallback on
+    // the one score completion will store.
+    const typedActivityScoreNum = copyActivityScore(
+      structuredFindings && typeof structuredFindings === 'object' ? structuredFindings.type : null,
+      typedValuesRaw,
+      typedActivityScore,
+    );
     // Companion sections count independently of the primary — companion-only
     // profiles (findingsType null, e.g. lawn_tree_shrub_combo) record their
     // facts exclusively in companion forms. A manually tapped activity score
     // alone is substantive input, matching the primary rule (codex r3).
-    const companionEntries = Array.isArray(companionFindings) ? companionFindings : [];
+    // Same score rule per companion entry (copyActivityScore) — every later
+    // read (gate, prompt block, fallback) sees the authoritative score.
+    const companionEntries = (Array.isArray(companionFindings) ? companionFindings : [])
+      .map((entry) => (entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? {
+          ...entry,
+          activityScore: copyActivityScore(
+            entry.type,
+            entry.values && typeof entry.values === 'object' && !Array.isArray(entry.values) ? entry.values : {},
+            entry.activityScore,
+          ),
+        }
+        : entry));
     // Only fields that SURVIVE prompt rendering may open the gate — a
     // schema-internal calibration value (e.g. tree_shrub bed_sqft_serviced)
     // is dropped from the prompt, so counting it would let Generate replace
@@ -24643,6 +24676,7 @@ function blackoutDateString(value) {
 }
 
 router._test = {
+  copyActivityScore,
   // Post-cancel counted-plan reseed (owner ruling 2026-09-24) — the split
   // writer's helpers, so the behavioural suite can drive each one against a
   // scripted connection (fallback auditor P1: source guards alone would
@@ -24831,6 +24865,14 @@ module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
 // cancel so a 'following' / 'series' cancel refuses prepaid visits the same
 // way the trim does instead of silently dropping paid visits off the books.
 module.exports.findBillingCoveredVisits = findBillingCoveredVisits;
+// The billable-amount booking gate — also consumed lazily by the IB
+// create_appointment proposal and executor for its single visit
+// (ADMIN-BUG-R12), same avoid-a-route-load-cycle reason as above.
+module.exports.recurringWithoutBillableAmount = recurringWithoutBillableAmount;
+// The booking price builder — also consumed lazily by the IB
+// create_appointment proposal and executor, so an IB booking carries exactly
+// the price a Schedule-screen booking would (owner 2026-09-27).
+module.exports.buildAppointmentPricing = buildAppointmentPricing;
 // Completion reruns the visit-scoped trade-name screen with the SAME typed
 // product-field classification generation used (codex r49 #3420).
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;

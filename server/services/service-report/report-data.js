@@ -50,7 +50,7 @@ const {
   isGenericTechnicianLabel,
   initialsForCustomerTechnicianName,
 } = require('../../utils/technician-name');
-const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
+const { etCalendarDayOf, etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
@@ -58,6 +58,7 @@ const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { applyReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
+const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../../shared/service-completion-observations');
 
 let PhotoService = null;
 try {
@@ -328,6 +329,107 @@ function numberOrNull(value) {
   if (value == null || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+// FDACS applicator identification card number for a customer-facing report
+// (owner ruling 2026-09-26 — F.S. 482.2265(1)(b) lets a customer request "the
+// identification card number of the person applying the pesticide"; it's
+// already public record and prints on the public pre-construction
+// certificate). Null when blank on file, or when the license had already
+// expired by the date of the VISIT being documented (never "today" — a report
+// is a historical record). Date-only compare, mirroring the technician-
+// license judgment in closeout-status.js and the applicator picker in
+// admin-projects.js: a MISSING expiry is active by design (seed
+// 20260703000004) rather than a failure, so a blank expiry never withholds
+// the id. Shared by the service-report and project-report payloads.
+// Both dates go through etCalendarDayOf: pg hands DATE columns back as
+// UTC-midnight Date objects (String() of one is "Thu Dec 31 …", which
+// compares by weekday name — codex pre-push P1), and a project's created_at
+// fallback is a real timestamp that must land on its ET calendar day.
+function resolveApplicatorFdacsId(fdacsId, licenseExpiry, visitDate) {
+  const id = String(fdacsId == null ? '' : fdacsId).trim();
+  if (!id) return null;
+  const expiry = calendarDayOrNull(licenseExpiry);
+  const visitDay = calendarDayOrNull(visitDate);
+  if (expiry && visitDay && expiry < visitDay) return null;
+  return id;
+}
+
+function calendarDayOrNull(value) {
+  if (!value) return null;
+  try {
+    const day = etCalendarDayOf(value);
+    return /^\d{4}-\d{2}-\d{2}$/.test(day || '') ? day : null;
+  } catch {
+    return null; // an unparseable date throws inside Intl — judge nothing
+  }
+}
+
+// Which technician's identity backs a PROJECT report's "applicator" line —
+// the person who actually performed the linked service, never merely the
+// staffer who typed up the project record (Codex P1, 2026-09-26: the
+// project create route stamps req.technicianId as created_by_tech_id
+// regardless of who performed the visit, admin-projects.js ~1727-1735 — an
+// admin creating a project for a tech-performed visit was publishing the
+// ADMIN's own FDACS id/name).
+//
+// Resolution order: the performed service_records row's technician_id (the
+// visit actually completed), then the linked scheduled_services row's
+// technician_id (a project attached to a visit with no service_record yet),
+// then the project's own created_by_tech_id — used ONLY for a genuinely
+// unlinked project (neither link present). Returns the technicians row
+// (name / fl_applicator_license / license_expiry) or null when nothing
+// resolves.
+async function resolveProjectApplicatorTechnician(project, knex = db) {
+  let technicianId = null;
+  if (project?.service_record_id) {
+    const row = await knex('service_records').where({ id: project.service_record_id }).first('technician_id');
+    technicianId = row?.technician_id || null;
+  }
+  if (!technicianId && project?.scheduled_service_id) {
+    const row = await knex('scheduled_services').where({ id: project.scheduled_service_id }).first('technician_id');
+    technicianId = row?.technician_id || null;
+  }
+  // The creator stands in ONLY for a genuinely unlinked project: a linked
+  // visit whose row names no technician leaves the applicator unknown —
+  // never the office staffer who typed the project up (codex pre-push P1).
+  if (!technicianId && !project?.service_record_id && !project?.scheduled_service_id) {
+    technicianId = project?.created_by_tech_id || null;
+  }
+  if (!technicianId) return null;
+  return knex('technicians').where({ id: technicianId }).first('id', 'name', 'fl_applicator_license', 'license_expiry');
+}
+
+// Shared by the public project report (reports-public.js) AND the admin
+// detail/preview endpoint (admin-projects.js) so neither route re-derives
+// this branching itself (each call site collapses to one await + a
+// destructure — see resolveProjectApplicatorTechnician above and
+// activity-indicators.js's projectPoisonControl for what each field means).
+// judgmentDate is the caller's own date to judge license expiry against —
+// the public route's viewerProjectDate (a WDO archived filing can override
+// project_date) vs the admin route's plain project_date || created_at.
+async function resolveProjectReportPreviewFields(project, judgmentDate, knex = db) {
+  const { projectPoisonControl, projectPrimaryApplication } = require('./activity-indicators');
+  const poisonControl = projectPoisonControl(project?.project_type, project?.findings, project?.followup_findings);
+  // The applicator line names the PRIMARY visit's technician, judged at the
+  // primary visit's date — so it prints only when that visit itself applied
+  // product. A bed-bug follow-up application alone keeps Poison Control but
+  // names no applicator (the follow-up's technician and date aren't stored,
+  // codex r3), and a rodent bait-station check keeps it but applied nothing,
+  // so it names none either (codex r4 on #5032).
+  if (!projectPrimaryApplication(project?.project_type, project?.findings)) {
+    return { applicatorFdacsId: null, applicatorName: null, poisonControl };
+  }
+  const technician = await resolveProjectApplicatorTechnician(project, knex);
+  return {
+    applicatorFdacsId: resolveApplicatorFdacsId(
+      technician?.fl_applicator_license,
+      technician?.license_expiry,
+      judgmentDate,
+    ),
+    applicatorName: String(technician?.name || '').trim() || null,
+    poisonControl,
+  };
 }
 
 function firstNumber(...values) {
@@ -1682,6 +1784,7 @@ function buildProtocolPayload(record) {
   const structured = parseJsonObject(record.structured_notes);
   const serviceData = parseJsonObject(record.service_data);
   const protocol = parseJsonObject(serviceData.protocol);
+  const structuredObservations = uniqueStrings(parseJsonArray(structured.formObservations));
   return {
     actions: uniqueStrings([
       ...parseJsonArray(protocol.actions),
@@ -1696,7 +1799,15 @@ function buildProtocolPayload(record) {
     // Safe customer-facing provenance: completion form/chip values only.
     // Never substitute the merged observations list, which also contains
     // raw [Found] technician-note lines.
-    structuredObservations: uniqueStrings(parseJsonArray(structured.formObservations)),
+    structuredObservations,
+    // This marker covers only the completion-form snapshot above. That field
+    // is written after the server-owned service-line allowlist and conflict
+    // checks, so the live client may keep its frozen labels when today's
+    // catalog has renamed or removed one. Never apply this provenance to the
+    // merged observations list, which may contain raw technician-note text.
+    ...(structuredObservations.length ? {
+      structuredObservationsProvenance: 'completion_form_snapshot',
+    } : {}),
     recommendations: uniqueStrings([
       ...parseJsonArray(protocol.recommendations),
       ...parseJsonArray(structured.recommendations),
@@ -3291,14 +3402,27 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
 
 
   for (const observation of protocol.structuredObservations) {
-    if (findings.some((finding) => finding.title.toLowerCase() === observation.toLowerCase())) continue;
+    const persistedFinding = findings.find(
+      (finding) => finding.title.toLowerCase() === observation.toLowerCase(),
+    );
+    if (persistedFinding) {
+      // Older completion rows stored the selected form label as a bare
+      // service_findings title. Once the authoritative formObservations
+      // snapshot proves its provenance, upgrade that row for customer egress.
+      // Unmatched bare rows stay bare so the document's raw-note guard keeps
+      // filtering them.
+      if (!persistedFinding.detail && !persistedFinding.recommendation) {
+        persistedFinding.detail = STRUCTURED_OBSERVATION_FINDING_DETAIL;
+      }
+      continue;
+    }
     findings.push({
       id: `observation-${findings.length + 1}`,
       zoneId: null,
       category: 'observation',
       severity: findingSeverityForObservation(observation),
       title: observation,
-      detail: 'Recorded during the structured service closeout.',
+      detail: STRUCTURED_OBSERVATION_FINDING_DETAIL,
       recommendation: '',
     });
   }
@@ -4257,6 +4381,15 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     first_name: service.technician_first_name,
     last_name: service.technician_last_name,
   });
+  // Withheld (not just left null upstream) when the identity snapshot froze a
+  // different technician name than the one currently joined — see
+  // applyReportIdentitySnapshot, which nulls technician_fdacs_id itself in
+  // that case so every caller of this builder gets the same withholding.
+  const applicatorFdacsId = resolveApplicatorFdacsId(
+    service.technician_fdacs_id,
+    service.technician_license_expiry,
+    service.service_date,
+  );
   const technicianPhotoUrl = await resolveTechPhotoUrl(
     service.technician_photo_s3_key,
     service.technician_avatar_url || service.technician_photo_url,
@@ -5268,6 +5401,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     treatmentPerformed: treatmentPerformedVerdict,
     coverageServiceType: coverageServiceType(serviceLine),
     technicianName,
+    // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
+    // see resolveApplicatorFdacsId above for the withholding rules.
+    applicatorFdacsId,
     technician: {
       name: technicianName,
       photoUrl: technicianPhotoUrl,
@@ -5611,6 +5747,9 @@ function termiteStationPinsFlag({ stationMap, mode, gateValue = process.env.GATE
 module.exports = {
   buildReportV1Data,
   termiteStationPinsFlag,
+  resolveApplicatorFdacsId,
+  resolveProjectApplicatorTechnician,
+  resolveProjectReportPreviewFields,
   // Pure — exported so the rainfall-provenance contract can be tested against
   // the real implementation rather than a copy of it.
   buildLawnWaterContext,

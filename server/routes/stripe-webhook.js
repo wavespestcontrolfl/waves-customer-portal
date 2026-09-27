@@ -1519,6 +1519,15 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
   });
 }
 
+// Stripe's settlement moment a payments row already carries, if any.
+function paymentSettledAt(payment) {
+  let meta = payment?.metadata || {};
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = {}; }
+  }
+  return meta?.settled_event_at || null;
+}
+
 async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) {
   const piId = paymentIntent.id;
   logger.info(`[stripe-webhook] PaymentIntent succeeded: ${piId}`);
@@ -1892,6 +1901,24 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         // chargeback back to paid (dispute resolution owns that row now).
         if (!['paid', 'refunded', 'disputed'].includes(existingPayment.status)) {
           await trx('payments').where({ id: existingPayment.id }).update(paymentUpdates);
+        } else if (existingPayment.status === 'paid' && eventCreated && !paymentSettledAt(existingPayment)) {
+          // A row already paid can lack Stripe's settlement moment: a bank
+          // (ACH) row /confirm promoted before this event landed, a card row
+          // whose charge /confirm could not read, a synchronous autopay
+          // charge. Stamp this event's moment and its cash-basis day, as the
+          // processing flip above does, and touch updated_at so the readers
+          // that watch the row (the billing-cron pause veto, the SMS
+          // commitment event page) see the settlement. A row already stamped
+          // (or a replay) is left alone.
+          const settledAt = new Date(eventCreated * 1000);
+          await trx('payments').where({ id: existingPayment.id })
+            .whereRaw("COALESCE(metadata ->> 'settled_event_at', '') = ''")
+            .update({
+              updated_at: new Date(),
+              payment_date: etDateString(settledAt),
+              metadata: trx.raw(`jsonb_set(COALESCE(metadata, '{}'::jsonb), '{settled_event_at}', to_jsonb(?::text))`,
+                [settledAt.toISOString()]),
+            });
         }
         return;
       }

@@ -436,7 +436,11 @@ describe('validateCompanionSubmission — activity scores', () => {
     }
   });
 
-  test('pinned score crossing the cleared boundary is 422 activity_score_inconsistent + companionType', () => {
+  test('an obsolete pinned score on a derive-mapped companion is ignored — the findings field wins', () => {
+    // Owner ruling 2026-09-26: flea's gauge is gone; its score follows
+    // evidence_level only. A pin still sent by a tab loaded before the
+    // gauge was removed used to cross the cleared boundary and 422 — it is
+    // now ignored instead of blocking or reaching the trend.
     const result = validateCompanionSubmission({
       profile: profileWith([{ type: 'flea', delivery: 'auto_send' }]),
       companionFindings: [{
@@ -447,9 +451,10 @@ describe('validateCompanionSubmission — activity scores', () => {
         activityScoreSource: 'technician',
       }],
     });
-    expect(result.status).toBe(422);
-    expect(result.body.code).toBe('activity_score_inconsistent');
-    expect(result.body.companionType).toBe('flea');
+    expect(result.ok).toBe(true);
+    const [flea] = result.companions;
+    expect(flea.activityScoreSource).toBe('derived');
+    expect(flea.activityScore).toBe(0);
   });
 });
 
@@ -536,9 +541,10 @@ describe('validateCompanionSubmission — happy path', () => {
     expect(termite.activityScore).toBe(0);
     expect(termite.activityScoreSource).toBe('derived');
     expect(termite.chips).toEqual(['Continue scheduled monitoring']);
-    // Pinned away from the derived value (Moderate → 3) stays technician.
-    expect(rodent.activityScore).toBe(4);
-    expect(rodent.activityScoreSource).toBe('technician');
+    // Derive-mapped (owner ruling 2026-09-26): a pin away from the derived
+    // value (Moderate → 3) is obsolete and ignored — the findings win.
+    expect(rodent.activityScore).toBe(3);
+    expect(rodent.activityScoreSource).toBe('derived');
     expect(rodent.values).toEqual(RODENT_STATION_VALUES);
   });
 

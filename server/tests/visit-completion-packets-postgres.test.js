@@ -343,6 +343,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       visitId: randomUUID(), serviceIds: [randomUUID(), randomUUID()].sort(), key: randomUUID(), estimateIds: [],
       extraCatalogIds: [] };
     const date = etDateString();
+    fixture.scheduledDate = date;
     await mockPg('customers').insert({ id: fixture.customerId, first_name: 'Fixture', phone: '+12025550123',
       email: `${fixture.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false,
       billing_mode: 'per_application' });
@@ -3588,13 +3589,13 @@ postgres('visit completion packet records on PostgreSQL', () => {
     });
 
   test.each([
-    ['same-date', etDateString(), 'First service application'],
-    ['missing-date', null, 'First service application'],
-    ['same-date combined setup and application', etDateString(), 'WaveGuard Membership — $99 setup fee plus first application'],
-  ])('a paid %s unlinked acceptance application parks ordinary packet mint', async (_label, serviceDate, description) => {
+    ['same-date', true, 'First service application'],
+    ['missing-date', false, 'First service application'],
+    ['same-date combined setup and application', true, 'WaveGuard Membership — $99 setup fee plus first application'],
+  ])('a paid %s unlinked acceptance application parks ordinary packet mint', async (_label, sameDate, description) => {
     const estimateId = await linkFixtureEstimate();
     const invoice = await InvoiceService.create({
-      customerId: fixture.customerId, ...(serviceDate ? { serviceDate } : {}),
+      customerId: fixture.customerId, ...(sameDate ? { serviceDate: fixture.scheduledDate } : {}),
       lineItems: [{ description, quantity: 1, unit_price: 120 }],
       notes: `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application.`,
     });

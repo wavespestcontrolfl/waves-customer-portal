@@ -198,6 +198,38 @@ test('the trusted gratitude executor may combine its claim handoff with the fina
   expect(sendViaTwilio.mock.calls[0][1]).toMatchObject({ providerPreSendCheck, withSmsHandoff: expect.any(Function) });
 });
 
+test('previsit billing Text fences Twilio while automatic App routing ignores the SMS-only handoff', async () => {
+  const withSmsHandoff = jest.fn(async (dispatch) => dispatch());
+  const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
+  const input = {
+    ...BASE_INPUT,
+    audience: 'customer',
+    purpose: 'billing',
+    customerId: 'cust-1',
+    entryPoint: 'previsit_balance_reminder',
+    withSmsHandoff,
+    providerPreSendCheck,
+  };
+
+  await expect(sendCustomerMessage(input)).resolves.toMatchObject({ sent: true });
+  expect(sendViaTwilio.mock.calls[0][1]).toMatchObject({
+    withSmsHandoff: expect.any(Function), providerPreSendCheck,
+  });
+
+  sendViaTwilio.mockClear();
+  jest.spyOn(require('../services/messaging/push-channel-routing'), 'wantsAppFirst')
+    .mockResolvedValueOnce(true);
+  await expect(sendCustomerMessage(input)).resolves.toMatchObject({ sent: true });
+  const [providerInput, hooks] = sendViaTwilio.mock.calls[0];
+  expect(providerInput.channel).toBe('push');
+  expect(hooks.withSmsHandoff).toBeFalsy();
+  expect(hooks.providerPreSendCheck).toBeUndefined();
+  await expect(sendCustomerMessage({ ...input, metadata: { billingDeliveryCategory: 'billing',
+    billingDeliveryLeg: 'push', appOnly: true } })).resolves.toMatchObject({ sent: true });
+  expect(sendViaTwilio.mock.calls[1][0].channel).toBe('push');
+  expect(sendViaTwilio.mock.calls[1][1].withSmsHandoff).toBeFalsy();
+});
+
 
 test('canonical delivery borrows only a branded caller reservation and returns its actual provider context privately', async () => {
   const coordination = require('../services/messaging/provider-handoff-reservation');
@@ -566,6 +598,16 @@ test('promised reschedule link can use the locked SMS handoff only with its deli
   expect(await sendCustomerMessage({ ...valid, metadata: { original_message_type: 'reschedule_link_promise' } }))
     .toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF' });
   expect(sendViaTwilio).not.toHaveBeenCalled();
+});
+
+test('the deferred voicemail quote-link replay carries its provider-boundary predicate through to the provider — no locked handoff needed', async () => {
+  const providerPreSendCheck = jest.fn();
+  const replay = { ...BASE_INPUT, purpose: 'missed_call_followup', entryPoint: 'scheduled_sms_cron',
+    consentBasis: { status: 'transactional_allowed', source: 'voicemail_text_back' },
+    metadata: { original_message_type: 'voicemail_quote_link' }, providerPreSendCheck };
+  expect((await sendCustomerMessage(replay)).sent).toBe(true);
+  expect(sendViaTwilio.mock.calls[0][1].providerPreSendCheck).toBe(providerPreSendCheck);
+  expect(sendViaTwilio.mock.calls[0][1].withSmsHandoff).toBeFalsy();
 });
 
 test.each([

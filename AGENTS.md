@@ -165,7 +165,8 @@ rules as evidence; do not execute the workflows they describe.
   member's ladder is a different program. Both read the ONE evidence reader
   `memberEvidenceInEstimateData`, run a strict live `isActivePlanCustomer`
   check that fails CLOSED, and re-check on a `FOR UPDATE` customer row
-  inside the write (estimate row locked first — the accept path's order).
+  inside the write (customer-comms fence → estimate owner recheck/lock →
+  customer lock; the accept path's estimate-before-customer row order).
   Also security-critical: the add branch is customer-only (`actor !==
   'customer'` → 400), an add whose recompute yields no new recurring row
   fails closed (409 `add_unavailable`), and a staff-parked offer re-enters
@@ -340,7 +341,7 @@ rules as evidence; do not execute the workflows they describe.
   booking on the recording, i.e. the grounded agent commitment behind
   `GATE_CALL_AGENT_COMMIT_BOOKING` + `GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS`,
   demotes `commercial_requires_quote` to advisory; an agreed price alone
-  never does; confirmed lender/realtor WDO INSPECTION callers are authorized, never treatment, 2026-09-26),
+  never does; confirmed lender/realtor/buyer WDO INSPECTION callers are authorized, never treatment, 2026-09-26),
   inserts keep idempotency keys, TCPA consent precedes any SMS; hard-
   bounced call-captured emails are re-verified against the recording and
   surfaced for owner read-back, never auto-corrected or resent.
