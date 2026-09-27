@@ -1001,21 +1001,32 @@ const QUESTION_SHAPE_RE = /\?|\b(?:when|how\s+(?:long|soon)|until|till|can|could
 const SAFETY_TOPIC_RE = /\b(?:safe(?:ly|ty)?|unsafe|harm\w*|hurt\w*|toxic\w*|poison\w*|danger\w*|risk\w*|sick|affect\w*|irritat\w*|(?:pet|kid|child|family)[-\s]?friendly|segur[oa]s?|seguridad|peligros\w*|t[oó]xic\w*|da[ñn]\w*|riesgos?|afect\w*|enferm\w*)(?![a-zñáéíóú])/i;
 const SAFETY_TARGET_RE = /\b(?:for|around|to|near|with|on|para|con|a)\s+(?:(?:my|our|the|your|his|her|mi|mis|su|sus|los|las|el|la)\s+)?(?:kids?|children|child|bab(?:y|ies)|toddlers?|family|pets?|dogs?|cats?|pupp(?:y|ies)|kittens?|birds?|fish|bees|plants?|lawn|garden|people|humans?|me|us|him|her|them|mascotas?|ni[ñn][oa]s?|hij[oa]s?|perr[oa]s?|gat[oa]s?|familia|beb[eé]s?|abejas|plantas)(?![a-zñáéíóú])/i;
 const PEST_NOUN_RE = new RegExp(`\\b(?:${PEST_POSSESSOR}|hormigas?|cucarachas?|ratas?|ratones?|ara[ñn]as?|avispas?|abejas?|mosquitos?|pulgas?|garrapatas?|termitas?)(?![a-zñáéíóú])`, 'i');
+// A pest named as a product ("ant bait", "flea treatment") or as the one
+// protected ("safe for bees") is not the subject of a pest question.
+const PEST_PRODUCT_PHRASE_RE = new RegExp(`${PRODUCT_NOUN}|\\b(?:pest|flea|tick|mosquito|termite|ant|roach|rodent|rat|mouse|mice|spider|wasp|bed\\s*bug)s?\\s+(?:treatment|control|service|program|plan|spray|application|barrier)s?\\b`, 'gi');
 function visitorSafetyQuestion(active) {
   if (!QUESTION_SHAPE_RE.test(active) || !SAFETY_TOPIC_RE.test(active)) return false;
-  return INTAKE_TREATMENT_CONTEXT_RE.test(active) || (SAFETY_TARGET_RE.test(active) && !PEST_NOUN_RE.test(active));
+  const pestSubject = PEST_NOUN_RE.test(active.replace(PEST_PRODUCT_PHRASE_RE, ' ').replace(new RegExp(SAFETY_TARGET_RE.source, 'gi'), ' '));
+  return !pestSubject && (INTAKE_TREATMENT_CONTEXT_RE.test(active) || SAFETY_TARGET_RE.test(active));
 }
+// Access wording alone is not a re-entry question ("Can I use your lawn care
+// service for weeds?"): it also needs a timing ask or re-entry words.
+const TIMING_ASK_RE = /\b(?:when|how\s+(?:long|soon)|until|till|after|before|yet|right\s+away|immediately|now|today|tonight|tomorrow|cu[aá]ndo|cu[aá]nto\s+tiempo|despu[eé]s|antes|todav[ií]a)(?![a-zñáéíóú])/i;
+const REENTRY_WORD_RE = /\b(?:re-?ent\w*|re-?occup\w*|dry|dries|dried|drying|wet|sec[oa]s?|secarse|volver\s+a\s+entrar|let\s+\S+(?:\s+\S+)?\s+(?:out|in|back)|back\s+(?:inside|in|outside|out|home))(?![a-zñáéíóú])/i;
 function visitorReentryQuestion(active) {
   const physical = active.replace(DIGITAL_ACCESS_RE, ' ');
-  return QUESTION_SHAPE_RE.test(active) && (ACCESS_SIGNAL_RE.test(physical) || OCCUPANT_RETURN_RE.test(physical));
+  if (!QUESTION_SHAPE_RE.test(active)) return false;
+  return OCCUPANT_RETURN_RE.test(physical)
+    || (ACCESS_SIGNAL_RE.test(physical) && (TIMING_ASK_RE.test(physical) || REENTRY_WORD_RE.test(physical)));
 }
 
 // The emergency script for a model-classified emergency: the visitor's words
 // pick the Poison Control and veterinary lines as usual, and a pet named in
 // the conversation adds the veterinary line even when the regex saw nothing.
+const PET_NAMED_RE = new RegExp(`\\b(?:my|our|the|mi|mis|su|sus|nuestr[oa]s?|el|la|los|las)\\s+${PET_WORD}(?![a-zñáéíóú])`, 'i');
 function topicEmergencyScript(base, context) {
   const script = emergencyGuidance({ ...base, reply: '', intent: 'emergency' }, context);
-  if (PET_ANTECEDENT_RE.test(foldTypography(context)) && !script.reply.includes(VET_EMERGENCY_SCRIPT)) {
+  if (PET_NAMED_RE.test(foldTypography(context)) && !script.reply.includes(VET_EMERGENCY_SCRIPT)) {
     return { ...script, reply: `${script.reply} ${VET_EMERGENCY_SCRIPT}` };
   }
   return script;
@@ -1031,7 +1042,7 @@ function topicEmergencyScript(base, context) {
 // but emergency evidence in the conversation upgrades a safety or re-entry
 // answer to it. Anything else returns null and keeps the model's answer,
 // still checked by the claim chokepoint.
-function routeByTopic(modelTopic, base, contextText, activeMessage) {
+function routeByTopic(modelTopic, base, contextText, activeMessage, quoteFields) {
   const emergencyContext = emergencyContextOf(contextText, activeMessage);
   if (modelTopic === 'medical_emergency') return topicEmergencyScript(base, emergencyContext);
   const active = foldTypography(activeMessage);
@@ -1040,7 +1051,11 @@ function routeByTopic(modelTopic, base, contextText, activeMessage) {
   if (!reviewedTopic) return null;
   if (looksLikeEmergency(foldTypography(emergencyContext))) return topicEmergencyScript(base, emergencyContext);
   const spanish = looksSpanish(activeMessage) || looksSpanish(base.reply);
-  return { ...base, intent: base.intent === 'emergency' ? 'question' : base.intent, reply: spanish ? UNSAFE_CLAIM_REPLY_ES : UNSAFE_CLAIM_REPLY };
+  const reply = spanish ? UNSAFE_CLAIM_REPLY_ES : UNSAFE_CLAIM_REPLY;
+  // A safety question the model labeled "emergency" had its quote offer
+  // cleared; the answer is no longer an emergency, so the offer comes back.
+  if (base.intent === 'emergency') return { ...base, ...quoteFields, intent: 'question', reply };
+  return { ...base, reply };
 }
 
 function normalizeIntakeResult(json, source, contextText = '', activeMessage = contextText) {
@@ -1060,7 +1075,7 @@ function normalizeIntakeResult(json, source, contextText = '', activeMessage = c
     source,
   };
   if (askWavesTopicRoutingLive()) {
-    const routed = routeByTopic(json.topic, base, contextText, activeMessage);
+    const routed = routeByTopic(json.topic, base, contextText, activeMessage, { service_keys: serviceKeys, ready_for_quote: json.ready_for_quote === true });
     if (routed) return routed;
   }
   // Safety/emergency handling reads the model's ORIGINAL reply, before any

@@ -2425,17 +2425,32 @@ describe('topic routing (GATE_ASK_WAVES_TOPIC_ROUTING)', () => {
     expect(out.ready_for_quote).toBe(false);
   });
 
-  test('a model-classified emergency about a pet adds the veterinary line even when the regex sees nothing', () => {
-    const out = normalizeIntakeResult(withTopic('medical_emergency'), 'openai', 'My dog is acting strange after you were here');
+  test.each([
+    'My dog is acting strange after you were here',
+    'Mi perro se comporta raro después de que estuvieron aquí',
+  ])('a model-classified emergency about a pet adds the veterinary line even when the regex sees nothing: %s', (message) => {
+    const out = normalizeIntakeResult(withTopic('medical_emergency'), 'openai', message);
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
     expect(out.reply).toMatch(VET);
+  });
+
+  test('a safety question the model labeled "emergency" gets its quote offer back', () => {
+    const out = normalizeIntakeResult(withTopic('product_safety', { intent: 'emergency', ready_for_quote: true, service_keys: ['rodentBait'] }), 'openai', 'Is your rodent bait safe for my kids?');
+    expect(out.reply).toMatch(LABEL_COPY);
+    expect(out.intent).toBe('question');
+    expect(out.ready_for_quote).toBe(true);
+    expect(out.service_keys).toEqual(['rodentBait']);
   });
 
   test.each([
     'Is the spray safe for my cat?',
     'Will the treatment hurt the kids?',
+    'Is your treatment safe for my dog?',
+    'Is the ant bait safe for my dog?',
+    'Is your mosquito spray safe for bees?',
     'When can the kids go back outside?',
     'How long until the lawn is dry?',
+    'Is it ok to let the dog out after the spray?',
   ])('the visitor\'s words are a floor when the model says none: %s', (message) => {
     expect(normalizeIntakeResult(withTopic('none'), 'openai', message).reply).toMatch(LABEL_COPY);
   });
@@ -2447,6 +2462,9 @@ describe('topic routing (GATE_ASK_WAVES_TOPIC_ROUTING)', () => {
     'Are fire ants dangerous for my dog?',
     'Do ants come inside when it rains?',
     'How much is quarterly pest control?',
+    'Do you treat dangerous spiders?',
+    'Are spiders dangerous for my dog?',
+    'Can I use your lawn care service for weeds?',
   ])('the regex never forces reviewed or emergency copy on its own: %s', (message) => {
     expect(normalizeIntakeResult(withTopic('none'), 'openai', message).reply).toBe(neutral);
   });
