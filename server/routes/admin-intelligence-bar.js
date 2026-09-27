@@ -284,12 +284,15 @@ const EARLIER_CARD_REFERENCE_RE = /\b(?:earlier|previous|prior|last|old|existing
 // claim in another. A sentence naming "below" is always a CURRENT-card
 // claim regardless — the earlier-card exclusion never applies to it, even
 // when the same sentence also happens to mention an earlier one.
-function splitIntoSentences(text) {
-  return String(text).split(/(?<=[.!?])\s+/).filter(Boolean);
+// Clauses, not just sentences: "The earlier card expired; I've prepared a new
+// confirmation card." holds two claims, and the earlier-card exclusion may
+// only cover the clause that names the earlier card.
+function splitIntoClauses(text) {
+  return String(text).split(/[.!?;,\n]+|\b(?:and|but|so)\b/i).map((clause) => clause.trim()).filter(Boolean);
 }
 function claimsCardWithoutEarlierReference(text) {
-  return splitIntoSentences(text).some((sentence) => CARD_CLAIM_RE.test(sentence)
-    && (/\bbelow\b/i.test(sentence) || !EARLIER_CARD_REFERENCE_RE.test(sentence)));
+  return splitIntoClauses(text).some((clause) => CARD_CLAIM_RE.test(clause)
+    && (/\bbelow\b/i.test(clause) || !EARLIER_CARD_REFERENCE_RE.test(clause)));
 }
 
 function hasImageTaintedHistory(conversationHistory) {

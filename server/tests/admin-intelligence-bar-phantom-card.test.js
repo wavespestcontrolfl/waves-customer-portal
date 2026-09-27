@@ -219,8 +219,17 @@ test('a genuine new-card claim is flagged even when an EARLIER sentence in the s
   });
 });
 
+test('a claim after a semicolon is its own clause: the earlier-card mention before it does not hide it', async () => {
+  scriptModelTurns([[{ type: 'text', text: "The earlier card expired; I've prepared a new confirmation card." }]]);
+  await withServer(async (baseUrl) => {
+    const { status, body } = await postQuery(baseUrl, { prompt: 'anything', context: 'customers' });
+    expect(status).toBe(200);
+    expect(body.response).toContain(NOTICE);
+  });
+});
+
 test('a reply claiming a card that THIS turn actually created gets no notice', async () => {
-  mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Jeff', last_name: 'V' });
+  mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Test', last_name: 'Customer' });
   mockExecuteTool.mockImplementation(async () => ({
     preview: true, tool: 'update_customer', product: null, effects: 'Updates the customer record.',
   }));
@@ -229,7 +238,7 @@ test('a reply claiming a card that THIS turn actually created gets no notice', a
     [{ type: 'text', text: 'Prepared — confirm on the card below.' }],
   ]);
   await withServer(async (baseUrl) => {
-    const { status, body } = await postQuery(baseUrl, { prompt: 'set Jeff city to Venice', context: 'customers' });
+    const { status, body } = await postQuery(baseUrl, { prompt: 'set Test Customer city to Venice', context: 'customers' });
     expect(status).toBe(200);
     expect(body.pendingActions).toHaveLength(1);
     expect(body.response).not.toContain(NOTICE);

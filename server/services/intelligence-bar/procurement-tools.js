@@ -966,13 +966,13 @@ const UUID_RE_THREAD = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 // percent") count too; percentWordsToValue converts the ones this regex can
 // capture (one..twenty, thirty..ninety, and a tens+ones compound).
 const PERCENT_WORD_RE = '(?:%|percent\\b|per\\s+cent\\b|pct\\b)';
-const PERCENT_NUMBER_ONES = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten',
+const NUMBER_WORD_ONES = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten',
   'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
-const PERCENT_NUMBER_TENS = ['twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
-const PERCENT_NUMBER_WORD_ALT = `(?:${PERCENT_NUMBER_TENS.join('|')})(?:[\\s-]+(?:${PERCENT_NUMBER_ONES.slice(0, 9).join('|')}))?|${PERCENT_NUMBER_ONES.join('|')}`;
+const NUMBER_WORD_TENS = ['twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+const PERCENT_NUMBER_WORD_ALT = `(?:${NUMBER_WORD_TENS.join('|')})(?:[\\s-]+(?:${NUMBER_WORD_ONES.slice(0, 9).join('|')}))?|${NUMBER_WORD_ONES.join('|')}`;
 const PERCENT_NUMBER_WORDS_TO_VALUE = Object.fromEntries([
-  ...PERCENT_NUMBER_ONES.map((word, i) => [word, i + 1]),
-  ...PERCENT_NUMBER_TENS.map((word, i) => [word, (i + 2) * 10]),
+  ...NUMBER_WORD_ONES.map((word, i) => [word, i + 1]),
+  ...NUMBER_WORD_TENS.map((word, i) => [word, (i + 2) * 10]),
 ]);
 // "twenty seven" → 27; a lone tens or ones word converts directly; anything
 // else (a malformed compound the regex still matched loosely) yields null —
@@ -1021,13 +1021,13 @@ const FORMULATION_CODE_ALT = FORMULATION_CODES.join('|');
 // concentration (converted via percentWordsToValue), 3+4 = a bare strength
 // number + formulation code pair, 5 = a bare formulation code alone.
 const QUALIFIER_AFTER_RE = new RegExp(
-  `^[^a-zA-Z0-9]*(?:(\\d+(?:\\.\\d+)?)\\s*${PERCENT_WORD_RE}|(${PERCENT_NUMBER_WORD_ALT})\\s*(?:percent\\b|per\\s+cent\\b|pct\\b)|(\\d+(?:\\.\\d+)?)\\s+(${FORMULATION_CODE_ALT})\\b|(${FORMULATION_CODE_ALT})\\b)`, 'i',
+  `^[^a-zA-Z0-9]*(?:(\\d+(?:\\.\\d+)?)\\s*${PERCENT_WORD_RE}|(${PERCENT_NUMBER_WORD_ALT})\\s*(?:percent\\b|per\\s+cent\\b|pct\\b)|(\\d+(?:\\.\\d+)?)\\s*(${FORMULATION_CODE_ALT})\\b|(${FORMULATION_CODE_ALT})\\b)`, 'i',
 );
 // Reading backward, a qualifier must also START on a word boundary: the
 // code "SE" must not be read out of "Please", nor "1.5%" out of "21.5%".
 // Same group layout as QUALIFIER_AFTER_RE.
 const QUALIFIER_BEFORE_RE = new RegExp(
-  `(?:(?<![\\d.])(\\d+(?:\\.\\d+)?)\\s*${PERCENT_WORD_RE}|\\b(${PERCENT_NUMBER_WORD_ALT})\\s*(?:percent\\b|per\\s+cent\\b|pct\\b)|(?<![\\d.])(\\d+(?:\\.\\d+)?)\\s+\\b(${FORMULATION_CODE_ALT})\\b|\\b(${FORMULATION_CODE_ALT})\\b)[^a-zA-Z0-9]*$`, 'i',
+  `(?:(?<![\\d.])(\\d+(?:\\.\\d+)?)\\s*${PERCENT_WORD_RE}|\\b(${PERCENT_NUMBER_WORD_ALT})\\s*(?:percent\\b|per\\s+cent\\b|pct\\b)|(?<![\\d.])(\\d+(?:\\.\\d+)?)\\s*(${FORMULATION_CODE_ALT})\\b|\\b(${FORMULATION_CODE_ALT})\\b)[^a-zA-Z0-9]*$`, 'i',
 );
 
 function escapeRegExpLiteral(value) {
@@ -1038,8 +1038,21 @@ function escapeRegExpLiteral(value) {
 // catalog name's words, an alias's own words, or a single distinctive token)
 // occurs. Punctuation/whitespace may separate the phrase's own words,
 // mirroring containsWholeWords' tolerance. Returns [{ start, end }, ...].
+// Between a digit and a letter (either order, inside a word or between two
+// words) a separator is optional, so a catalog "Barricade 65WG" matches a
+// spoken "65 WG" and an "Armada 50 WDG" matches "50WDG". Elsewhere words
+// still need a separator between them.
+const DIGIT_LETTER_BOUNDARY = /(?<=\d)(?=[a-z])|(?<=[a-z])(?=\d)/i;
+function phrasePattern(words) {
+  return words.map((word, i) => {
+    const inner = word.split(DIGIT_LETTER_BOUNDARY).map(escapeRegExpLiteral).join('[^a-zA-Z0-9]*');
+    if (i === 0) return inner;
+    const boundary = /\d$/.test(words[i - 1]) !== /^\d/.test(word);
+    return `${boundary ? '[^a-zA-Z0-9]*' : '[^a-zA-Z0-9]+'}${inner}`;
+  }).join('');
+}
 function findPhraseSpansInRawText(rawText, words) {
-  const pattern = words.map(escapeRegExpLiteral).join('[^a-zA-Z0-9]+');
+  const pattern = phrasePattern(words);
   return [...rawText.matchAll(new RegExp(`\\b${pattern}\\b`, 'gi'))]
     .map((match) => ({ start: match.index, end: match.index + match[0].length }));
 }
@@ -1113,7 +1126,10 @@ function qualifierConflict(rawText, phrases, productNameRaw) {
     const numberCodes = [...before.numberCodes, ...after.numberCodes];
     return !formulations.every((code) => nameTokens.has(code.toLowerCase()))
       || !concentrations.every((n) => nameConcentrations.includes(n))
-      || !numberCodes.every((nc) => nameTokens.has(String(nc.number)) && nameTokens.has(nc.code.toLowerCase()));
+      // "65 WG" or "65WG" in the text agrees with either "65 WG" or "65WG" in
+      // the catalog name.
+      || !numberCodes.every((nc) => (nameTokens.has(String(nc.number)) && nameTokens.has(nc.code.toLowerCase()))
+        || nameTokens.has(`${nc.number}${nc.code.toLowerCase()}`));
   }));
 }
 
@@ -1155,8 +1171,7 @@ const CLOSED_VOCAB = new Set([
   'log', 'logged', 'record', 'recorded', 'put', 'count', 'stock', 'inventory', 'shelf',
   'delivered', 'arrived', 'came',
   // quantity words
-  'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'twelve',
-  'dozen', 'half', 'couple', 'few',
+  ...NUMBER_WORD_ONES, ...NUMBER_WORD_TENS, 'hundred', 'dozen', 'half', 'quarter', 'couple', 'few', 'several',
   // units/containers
   'oz', 'ounce', 'ounces', 'fl', 'fluid', 'gal', 'gallon', 'gallons', 'qt', 'quart', 'quarts',
   'pt', 'pint', 'pints', 'lb', 'lbs', 'pound', 'pounds', 'g', 'gram', 'grams', 'kg', 'ml', 'l',
@@ -1222,12 +1237,19 @@ function isBareFollowUp(text) {
 // one check every match type routes through.
 const NOUN_POSITION_UNITS = 'fl\\s*oz|oz|ounces?|gal(?:lons?)?|gals|qts?|quarts?|pts?|pints?|lbs?|pounds?|g|grams?|kg|ml|l|liters?'
   + '|each|items?|bottles?|jugs?|bags?|cases?|box(?:es)?|pails?|cans?|containers?|tubes?|packs?|things?|units?|buckets?';
+const NOUN_POSITION_NUMBER_WORDS = ['a', 'an', ...NUMBER_WORD_ONES, ...NUMBER_WORD_TENS, 'hundred', 'dozen'].join('|');
 const NOUN_POSITION_BEFORE_RE = new RegExp('(?:\\bof'
-  + '|\\b(?:bought|purchased|got|received|restocked|reordered|ordered|add|added|picked\\s+up)(?:\\s+(?:a|an|the|some|more|another))?'
-  + `|(?:\\b\\d+(?:\\.\\d+)?|\\b(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|twelve|dozen))\\s*(?:${NOUN_POSITION_UNITS})(?:\\s+of)?`
+  + `|(?:\\b\\d+(?:\\.\\d+)?|\\b(?:${NOUN_POSITION_NUMBER_WORDS}))\\s*(?:${NOUN_POSITION_UNITS})(?:\\s+of)?`
   + ')[^a-zA-Z0-9]*$', 'i');
-function inNounPosition(rawText, start) {
-  return NOUN_POSITION_BEFORE_RE.test(rawText.slice(Math.max(0, start - 40), start));
+// Also a noun position: right after a purchase word when a quantity follows
+// ("we bought Taurus, eleven ounces"). "We received the dispatch today" has
+// no quantity after it, so the shipment reading wins and it names nothing.
+const PURCHASE_BEFORE_RE = /\b(?:bought|purchased|got|received|restocked|reordered|ordered|add|added|picked\s+up)(?:\s+(?:a|an|the|some|more|another))?[^a-zA-Z0-9]*$/i;
+const QUANTITY_AFTER_RE = new RegExp(`^[^a-zA-Z0-9]*(?:\\d+(?:\\.\\d+)?|(?:${NOUN_POSITION_NUMBER_WORDS}))\\s*(?:${NOUN_POSITION_UNITS})\\b`, 'i');
+function inNounPosition(rawText, start, end) {
+  const before = rawText.slice(Math.max(0, start - 40), start);
+  if (NOUN_POSITION_BEFORE_RE.test(before)) return true;
+  return PURCHASE_BEFORE_RE.test(before) && QUANTITY_AFTER_RE.test(rawText.slice(end, end + 40));
 }
 
 async function productsNamedIn(rawText) {
@@ -1270,11 +1292,13 @@ async function productsNamedIn(rawText) {
       .filter((phrase) => phrase.spans.length > 0);
     if (!phrases.length) continue;
     // Named only by a lone word (a distinctive token or a one-word alias):
-    // that word must stand where a product name stands ("a jug of Taurus",
-    // "bought Taurus", "78 oz Taurus"). "Can you dispatch this order?" uses
-    // the same word as a verb, so it names nothing.
+    // that word must stand where a product name stands (inNounPosition): after
+    // "of" or a quantity ("a jug of Taurus", "78 oz Taurus"), or after a
+    // purchase word with a quantity following ("bought Taurus, eleven
+    // ounces"). A verb use ("Can you dispatch this order?") or a common noun
+    // ("We received the dispatch today") names nothing.
     if (phrases.every((phrase) => phrase.single)
-      && !phrases.some((phrase) => phrase.spans.some((span) => inNounPosition(rawText, span.start)))) continue;
+      && !phrases.some((phrase) => phrase.spans.some((span) => inNounPosition(rawText, span.start, span.end)))) continue;
     // The residual rule: remove every one of THIS product's own mention
     // spans (every match type combined — a full-name match and its own
     // token match cover the same ground) and require the rest of the text

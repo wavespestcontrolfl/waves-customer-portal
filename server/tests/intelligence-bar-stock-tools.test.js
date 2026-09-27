@@ -830,7 +830,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       setGroundingDb({ products: [TAURUS_10, ALPINE] });
       const result = await resolveInventoryWriteTarget({
         toolName: 'adjust_stock',
-        prompt: 'we bought Taurus, add 12 oz',
+        prompt: 'we bought Taurus, 12 oz',
         preview: { product: { id: TAURUS_10.id, name: TAURUS_10.name } },
       });
       expect(result).toEqual({ productId: TAURUS_10.id });
@@ -1018,13 +1018,30 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         expect(result).toMatchObject({ code: 'target_clarification_required' });
       });
 
-      test('a lone product word in a noun position still names it (can you add dispatch to inventory)', async () => {
+      test.each([
+        'can you add dispatch to inventory',
+        'We received the dispatch today',
+      ])('a lone product word with no quantity or "of" names nothing (%s)', async (prompt) => {
         setGroundingDb({ products: [TAURUS, ALPINE, DISPATCH_WORD] });
         const result = await resolveInventoryWriteTarget({
-          toolName: 'adjust_stock', prompt: 'can you add dispatch to inventory',
+          toolName: 'adjust_stock', prompt,
           preview: { product: { id: DISPATCH_WORD.id, name: DISPATCH_WORD.name } },
         });
-        expect(result).toEqual({ productId: DISPATCH_WORD.id });
+        expect(result).toMatchObject({ code: 'target_clarification_required' });
+      });
+
+      test.each([
+        'add a jug of dispatch',
+        'we bought dispatch, two jugs',
+        'we bought Taurus, eleven ounces',
+      ])('a lone product word after "of", or after a purchase word with a quantity, names it (%s)', async (prompt) => {
+        const target = /taurus/i.test(prompt) ? TAURUS : DISPATCH_WORD;
+        setGroundingDb({ products: [TAURUS, ALPINE, DISPATCH_WORD] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt,
+          preview: { product: { id: target.id, name: target.name } },
+        });
+        expect(result).toEqual({ productId: target.id });
       });
 
       const DISPATCH = { id: 'p-dispatch', name: 'Dispatch Sprayable Wetting Agent', active: true };
@@ -1125,7 +1142,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         setGroundingDb({ products: [DEMAND, ALPINE] });
         IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
         IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce([
-          'we bought Demand', // newest
+          'we bought a jug of Demand', // newest
           'CS is what we need for that job', // older
         ]);
         const result = await resolveInventoryWriteTarget({
@@ -1142,6 +1159,18 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     // row is exactly as much a mismatch as "20%" against "10%".
     describe('a bare strength number followed by a formulation code is a qualifier', () => {
       const ARMADA_50 = { id: 'p-armada-50', name: 'Armada 50 WDG', active: true };
+
+      test.each([
+        ['we bought Barricade 65 WG, 2 bags', { id: 'p-barricade', name: 'Barricade 65WG', active: true }],
+        ['we bought Armada 50WDG, 2 lb', { id: 'p-armada-50', name: 'Armada 50 WDG', active: true }],
+      ])('a compact or separated strength code agrees with the catalog either way (%s)', async (prompt, product) => {
+        setGroundingDb({ products: [product, ALPINE] });
+        const result = await resolveInventoryWriteTarget({
+          toolName: 'adjust_stock', prompt,
+          preview: { product: { id: product.id, name: product.name } },
+        });
+        expect(result).toEqual({ productId: product.id });
+      });
 
       test('"Armada 20 WDG" refuses against an "Armada 50 WDG" catalog row', async () => {
         setGroundingDb({ products: [ARMADA_50, ALPINE] });
