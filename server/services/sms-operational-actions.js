@@ -718,12 +718,13 @@ const UNSEEN_FLOOR = `GREATEST(${SOURCE_AT}, COALESCE(${EVENT_SEEN_AT}, ${SOURCE
 // The floor and the tick bound sit in every branch, so each scan starts from
 // the row's watermark rather than the customer's whole visit history.
 const unseen = (column) => `${column} <= ? AND ${column} > ${UNSEEN_FLOOR}`;
-// Visit activity, and money landing (R2): a paid payments row or a received
-// estimate deposit. Without the money branches a payment-only ask waited for
-// its cursor page — a full rotation under backlog (Codex #4996 r1). Money
-// wakes only the kinds that can cite it: a callback or report row it cannot
-// answer must not take a slot from a settlement question (r4). A payment or
-// deposit counts from when its row last changed, not its settlement stamp: a
+// Visit activity, and money landing (R2): a paid payments row, a received
+// estimate deposit, or a prepayment stamped on a visit. Without the money
+// branches a payment-only ask waited for its cursor page — a full rotation
+// under backlog (Codex #4996 r1). Money wakes only the kinds that can cite it:
+// a callback or report row it cannot answer must not take a slot from a
+// settlement question (r4). A payment or deposit counts from when its row last
+// changed (a visit prepayment from its stamp), not its settlement stamp: a
 // late webhook records a settlement from hours or days ago
 // (stripe-webhook.js), which the watermark has long passed.
 const PAYMENT_CHANGED_AT = "GREATEST(pm.updated_at, COALESCE((pm.metadata->>'settled_event_at')::timestamptz, pm.created_at))";
@@ -749,6 +750,9 @@ const UNSEEN_EVENT_ACTIVITY = `(SELECT MAX(a.at) FROM (
     UNION ALL SELECT GREATEST(ed.updated_at, ed.received_at) FROM estimate_deposits ed JOIN estimates e ON e.id = ed.estimate_id
       WHERE ${MONEY_KIND} AND ed.status IN ('received', 'credited') AND ${unseen('GREATEST(ed.updated_at, ed.received_at)')}
         AND ${ESTIMATE_MAY_BELONG}
+    UNION ALL SELECT pv.prepaid_at FROM scheduled_services pv
+      WHERE ${MONEY_KIND} AND pv.customer_id = s.customer_id AND pv.prepaid_amount > 0 AND pv.annual_prepay_term_id IS NULL
+        AND COALESCE(pv.prepaid_method, '') <> 'annual_prepay_invoice' AND ${unseen('pv.prepaid_at')}
   ) a)`;
 
 // Match merge and intake: customer, source, then commitment. A relink, an
@@ -895,7 +899,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   // future) with unseen event activity (visit or payment), so an event is
   // checked on the next tick wherever the cursors stand (Codex #4816
   // r15–r17; Codex round 1 P2, #4996: payment activity joined the scan).
-  const tickBound = Array(6).fill(now);
+  const tickBound = Array(7).fill(now);
   // A row waiting out a provider/schema failure's retry_after cannot make
   // progress on the same evidence (verify returns the stored failure until
   // then), so it yields its slot rather than pinning the page through an

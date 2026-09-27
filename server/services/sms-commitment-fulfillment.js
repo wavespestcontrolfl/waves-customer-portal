@@ -116,10 +116,11 @@ const WITNESS_TRANSITION_STATUSES = Object.freeze(['confirmed', 'rescheduled', '
 // tender/method word counts, "did my card payment go through?" merely names
 // the tender — and money going the OTHER way (refund, dispute, chargeback).
 // Bare "split"/"separate" are not here: "did the separate payment go
-// through?" describes a payment. Nor is a bare "payment method" ("did that
+// through?" describes a payment. Nor is the noun "setup": "did my setup
+// payment go through?" asks about a setup fee (Codex #4996 r5 test). Nor is a bare "payment method" ("did that
 // payment method work?" is a settlement question): billing across TWO
 // methods/cards is the split request.
-const NOT_ANSWERED_BY_PAYMENT = /\b(?:(?:two|2|multiple)\s+(?:payment\s+)?(?:methods|cards)|(?:update|change|switch|replace|remove|add|set ?up|cancel|turn (?:on|off))\s+(?:\w+\s+){0,3}?(?:card|method|autopay|auto ?pay|payment|billing)|refund\w*|disput\w*|chargeback\w*|overcharg\w*|double[- ]?charg\w*)\b/gi;
+const NOT_ANSWERED_BY_PAYMENT = /\b(?:(?:two|2|multiple)\s+(?:payment\s+)?(?:methods|cards)|(?:update|change|switch|replace|remove|add|set up|cancel|turn (?:on|off))\s+(?:\w+\s+){0,3}?(?:card|method|autopay|auto ?pay|payment|billing)|setup\s+(?:autopay|auto ?pay)|refund\w*|disput\w*|chargeback\w*|overcharg\w*|double[- ]?charg\w*)\b/gi;
 // A term the customer negates names what they are NOT asking for: "Don't
 // refund it, did my payment go through?", "I don't want to change my card —
 // did the charge land?" (Codex #4996 r2). A negation counts only inside the
@@ -157,6 +158,10 @@ const namesNoInvoice = (alias) => INVOICE_KEYS.map((key) => `COALESCE(${alias}.m
 // a close fails the recheck (pre-push audit).
 const NOT_FULLY_REFUNDED = (t) => `COALESCE(${t}.refund_amount, 0) < ${t}.amount`;
 const refundNote = (refunded) => (Number(refunded) > 0 ? `; $${Number(refunded).toFixed(2)} of it refunded` : '');
+// A method is shown only as one of these; the free-form method some writers
+// accept (the /prepaid route) never reaches the model.
+const KNOWN_TENDERS = new Set(['cash', 'check', 'zelle', 'venmo', 'paypal', 'card', 'ach', 'other']);
+const tender = (method) => (KNOWN_TENDERS.has(String(method || '').toLowerCase()) ? ` (${String(method).toLowerCase()})` : '');
 
 async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
   const after = new Date(message.created_at);
@@ -205,10 +210,10 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
     // R2 (owner ruling 2026-09-25): a payment question is answered by money
     // actually landing, not by a staff reply — a settled payment toward one
     // of the customer's invoices, money tied to no invoice, or a received
-    // estimate deposit, after the request. A payment receipt (text, App push
-    // or email) is not evidence of its own: it reports one of these rows,
-    // which answers directly. Three distinct tables share one witness type;
-    // each row is
+    // estimate deposit, or a prepayment recorded on a visit, after the
+    // request. A payment receipt (text, App push or email) is not evidence of
+    // its own: it reports one of these rows, which answers directly. Four
+    // distinct tables share one witness type; each row is
     // tagged with its source table so admissibility/quoting/revalidation
     // know which (Codex #4816 r13 P1, payment-row lock order; Codex round 1
     // #4996: P1-A manual-payment linkage, P1-C settlement time, P2 exact-
@@ -233,16 +238,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // When the money actually landed: an async (ACH) row is inserted
       // 'processing' and stamped with its Stripe settlement moment when it
       // clears (stripe-webhook.js), so created_at is the wrong clock there.
-      // A scheduled_service_prepaid row is booked when an EARLIER prepayment
-      // is applied at completion (complete-scheduled-service.js,
-      // admin-schedule.js): its money landed when the visit was stamped
-      // prepaid, and a row whose visit carries no stamp has no known
-      // settlement time, so it is never evidence (pre-push audit).
-      const settledAt = (alias) => `CASE WHEN ${alias}.metadata::jsonb ->> 'source' = 'scheduled_service_prepaid'
-        THEN (SELECT pv.prepaid_at FROM scheduled_services pv WHERE pv.id = CASE
-          WHEN ${alias}.metadata::jsonb ->> 'scheduled_service_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-          THEN (${alias}.metadata::jsonb ->> 'scheduled_service_id')::uuid END)
-        ELSE COALESCE((${alias}.metadata::jsonb ->> 'settled_event_at')::timestamptz, ${alias}.created_at) END`;
+      const settledAt = (alias) => `COALESCE((${alias}.metadata::jsonb ->> 'settled_event_at')::timestamptz, ${alias}.created_at)`;
       const settledAtSql = settledAt('p');
       return Promise.all([
         // Every settled payment toward one of this customer's invoices, one
@@ -265,13 +261,21 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .joinRaw(`JOIN invoices pinv ON pinv.customer_id = p.customer_id AND pinv.payer_id IS NULL
             AND (${exactMatchSql} OR ${manualMatchSql} OR ${sharedPiSql})`)
           .leftJoin('scheduled_services as pinv_visit', 'pinv_visit.id', 'pinv.scheduled_service_id')
+          // A setup-only invoice from an estimate has no visit; its setup-fee
+          // claim keeps the estimate, and so the property (Codex #4996 r5).
+          .leftJoin('setup_fee_claims as sfc', 'sfc.invoice_id', 'pinv.id')
+          .leftJoin('estimates as sfc_estimate', 'sfc_estimate.id', 'sfc.estimate_id')
           .where({ 'p.customer_id': customerId, 'p.status': 'paid' })
+          // A visit prepayment applied at completion is the visit's prepaid
+          // stamp, already its own leg below: never counted twice.
+          .whereRaw("COALESCE(p.metadata::jsonb ->> 'source', '') <> 'scheduled_service_prepaid'")
           .whereRaw("COALESCE(p.metadata::jsonb ->> 'payer_id', '') = ''")
           .whereRaw(NOT_FULLY_REFUNDED('p'))
           .whereRaw(`${settledAtSql} > ? AND ${settledAtSql} <= ?`, [after, now])
           .distinctOn('p.id').orderBy('p.id').orderByRaw(`(${exactMatchSql} OR ${manualMatchSql}) DESC, pinv.id`)
           .select('p.id', 'p.amount as payment_amount', 'p.refund_amount', conn.raw(`${settledAtSql} AS settled_at`), 'pinv.id as invoice_id',
-            'pinv.title', 'pinv.invoice_number', 'pinv_visit.property_id as property_id', conn.raw('pinv.paid_at IS NOT NULL AS paid_in_full'))
+            'pinv.title', 'pinv.invoice_number', conn.raw('COALESCE(pinv_visit.property_id, sfc_estimate.property_id) AS property_id'),
+            conn.raw('pinv.paid_at IS NOT NULL AS paid_in_full'))
           .as('invoice_payments'))
           .orderBy([{ column: 'settled_at', order: 'desc' }, { column: 'id', order: 'desc' }]).limit(LIMIT + 1),
         // Money tied to no invoice (rule 4): off-gateway prepayments staff
@@ -300,7 +304,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           // Only the structured method (CREDIT_PAYMENT_METHODS, validated at
           // the admin-customers.js writer) does, when set.
           .select('lp.id', 'lp.amount', 'lp.refund_amount', 'lp.payment_date', 'lp.created_at', conn.raw("lp.metadata->>'method' as method"),
-            conn.raw("(lp.metadata->>'type') = 'monthly_autopay' as monthly_autopay"),
+            conn.raw("CASE WHEN (lp.metadata->>'type') = 'monthly_autopay' THEN COALESCE(lp.metadata->>'billed_month', '') END AS autopay_month"),
             conn.raw(`${settledAt('lp')} AS settled_at`)),
         // A received (or already credited-forward) estimate deposit —
         // estimate_deposits is its own ledger with no payments row
@@ -312,17 +316,37 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .whereIn('ed.status', ['received', 'credited']).whereRaw('ed.refunded_amount < ed.amount')
           .where('ed.received_at', '>', after).where('ed.received_at', '<=', now)
           .orderBy('ed.received_at', 'desc').limit(LIMIT + 1)
-          .select('ed.id', 'ed.estimate_id', 'ed.amount', 'ed.refunded_amount', 'ed.received_at', 'estimates.property_id as property_id'),
-      ]).then(([invoicePayments, ledger, deposits]) => {
+          .select('ed.id', 'ed.estimate_id', 'ed.amount', 'ed.refunded_amount', 'ed.received_at', 'estimates.property_id as property_id',
+            'estimates.service_interest'),
+        // A prepayment staff record on a visit (cash at the door, Zelle —
+        // the /prepaid route and series prepay) exists only as the visit's
+        // prepaid stamp until completion books it against the invoice, so
+        // the stamp is the evidence (Codex #4996 r5). A series prepayment
+        // stamps each visit with its share at one instant; the total rides
+        // along. Annual prepay coverage is an earlier invoice's money.
+        conn('scheduled_services as pv').where({ 'pv.customer_id': customerId }).where('pv.prepaid_amount', '>', 0)
+          .whereNull('pv.annual_prepay_term_id').whereRaw("COALESCE(pv.prepaid_method, '') <> 'annual_prepay_invoice'")
+          .where('pv.prepaid_at', '>', after).where('pv.prepaid_at', '<=', now)
+          .orderBy('pv.prepaid_at', 'desc').limit(LIMIT + 1)
+          .select('pv.id', 'pv.prepaid_amount', 'pv.prepaid_method', 'pv.prepaid_at', 'pv.service_type', 'pv.scheduled_date', 'pv.property_id',
+            conn.raw('SUM(pv.prepaid_amount) OVER (PARTITION BY pv.prepaid_at) AS prepaid_total'),
+            conn.raw('COUNT(*) OVER (PARTITION BY pv.prepaid_at) AS prepaid_visits')),
+      ]).then(([invoicePayments, ledger, deposits, prepaidVisits]) => {
         const legs = [
           invoicePayments.map(({ paid_in_full: paidInFull, ...row }) => ({ ...row, payment_source: 'invoice',
             text: `Payment of $${Number(row.payment_amount).toFixed(2)} toward invoice ${row.invoice_number || row.invoice_id}`
               + `${row.title ? ` (${row.title})` : ''} received ${etDateString(new Date(row.settled_at))}${refundNote(row.refund_amount)}`
               + `${paidInFull ? '; the invoice is paid in full' : ''}` })),
-          ledger.map(({ monthly_autopay: autopay, ...row }) => ({ ...row, payment_source: 'ledger', property_id: null,
-            text: `Payment of $${Number(row.amount).toFixed(2)} recorded ${dateOnlyString(row.payment_date)}${row.method ? ` (${row.method})` : ''}${autopay ? ' (monthly autopay)' : ''}${refundNote(row.refund_amount)}` })),
-          deposits.map((row) => ({ ...row, payment_source: 'deposit',
-            text: `Deposit of $${Number(row.amount).toFixed(2)} received ${etDateString(new Date(row.received_at))}${refundNote(row.refunded_amount)}` })),
+          ledger.map(({ method, autopay_month: autopayMonth, ...row }) => ({ ...row, payment_source: 'ledger', property_id: null,
+            text: `Payment of $${Number(row.amount).toFixed(2)} recorded ${dateOnlyString(row.payment_date)}${tender(method)}`
+              + `${autopayMonth == null ? '' : ` (monthly autopay${/^\d{4}-\d{2}$/.test(autopayMonth) ? ` for ${autopayMonth}` : ''})`}${refundNote(row.refund_amount)}` })),
+          deposits.map(({ service_interest: service, ...row }) => ({ ...row, payment_source: 'deposit',
+            text: `Deposit of $${Number(row.amount).toFixed(2)}${service ? ` on the ${String(service).slice(0, 80)} estimate` : ''}`
+              + ` received ${etDateString(new Date(row.received_at))}${refundNote(row.refunded_amount)}` })),
+          prepaidVisits.map(({ prepaid_method: method, prepaid_total: total, prepaid_visits: visits, ...row }) => ({ ...row, payment_source: 'prepaid',
+            text: `Prepayment of $${Number(row.prepaid_amount).toFixed(2)}${tender(method)} recorded ${etDateString(new Date(row.prepaid_at))}`
+              + ` for the ${row.service_type} visit on ${dateOnlyString(row.scheduled_date)}`
+              + `${Number(visits) > 1 ? ` — part of $${Number(total).toFixed(2)} prepaid across ${visits} visits` : ''}` })),
         ];
         // Each leg is capped on its OWN LIMIT, so together they can run
         // past LIMIT with nothing lost; only a leg that overflowed marks the
@@ -568,10 +592,10 @@ const ORDERING_TIME = {
   sms: (row) => row.created_at, call: (row) => row.created_at, email: (row) => row.received_at,
   email_delivery: (row) => row.delivered_at || row.sent_at, invoice: (row) => row.sent_at,
   // Each payment leg's own sort key: settled_at (invoice and ledger legs),
-  // received_at (deposits). With it a payment_truncated failure relaxes
-  // like any other ordered source for a commitment that can never cite a
-  // payment (Codex round 1 P2).
-  payment: (row) => row.settled_at || row.received_at,
+  // received_at (deposits), prepaid_at (visit prepayments). With it a
+  // payment_truncated failure relaxes like any other ordered source for a
+  // commitment that can never cite a payment (Codex round 1 P2).
+  payment: (row) => row.settled_at || row.received_at || row.prepaid_at,
 };
 // The only kind that admits payment evidence; the watcher's event page wakes
 // only these rows for money landing (Codex #4996 r4).
@@ -717,14 +741,14 @@ async function holdsLeadOwnership(trx, estimateId, customerId) {
 async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) {
   const tables = { sms: 'sms_log', call: 'call_log', email_delivery: 'email_messages',
     estimate: 'estimates', visit: 'scheduled_services',
-    // A 'payment' witness is one of three distinct rows (R2); which table to
+    // A 'payment' witness is one of four distinct rows (R2); which table to
     // lock depends on which leg matched, carried on the verdict as
     // payment_source. Lock order stays customer → source → commitment →
     // payment (lockLiveCommitment above always runs first), and skipLocked
     // means a racing refund/void/chargeback either loses this row to us or
     // leaves us nothing to hold — never a fulfilled verdict grounded on
     // reversed money (rule 8, Codex #4816 r13 P1).
-    payment: { invoice: 'payments', ledger: 'payments', deposit: 'estimate_deposits' }[verdict.payment_source],
+    payment: { invoice: 'payments', ledger: 'payments', deposit: 'estimate_deposits', prepaid: 'scheduled_services' }[verdict.payment_source],
     // The linked invoice a payment settles (paymentLink).
     invoice: 'invoices' };
   const table = tables[verdict.record_type];

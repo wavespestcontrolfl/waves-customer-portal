@@ -1271,14 +1271,14 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
       expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(false);
     }
     for (const description of ['Can you separate the charges under two payment methods?', 'Please update my card on file',
-      'Set up autopay for me', 'Can you change the card on the account?', 'Can you bill this across two cards?',
+      'Set up autopay for me', 'Please setup autopay', 'Can you change the card on the account?', 'Can you bill this across two cards?',
       'Please change my payment method']) {
       expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(false);
     }
     // Naming the tender, or a bare split/separate, describes a payment — not a change request.
     for (const description of ['Did my card payment go through?', 'Was the autopay charged this month?',
       'I split the payment into two charges; did both payments go through?', 'Did you receive the separate payment?',
-      'Did that payment method work?', 'Was this payment method charged?']) {
+      'Did that payment method work?', 'Was this payment method charged?', 'Did my setup payment go through?']) {
       expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(true);
     }
     // Codex #4996 r2: a term the customer negates in its own clause is not the request.

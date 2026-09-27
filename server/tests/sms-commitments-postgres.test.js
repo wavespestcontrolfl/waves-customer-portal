@@ -28,7 +28,7 @@ const schema = `sms_commitments_${randomUUID().replaceAll('-', '')}`;
 const TABLES = ['customers', 'customer_properties', 'property_preferences', 'sms_log', 'call_log',
   'call_commitments', 'data_hygiene_source_extractions', 'data_hygiene_proposals', 'data_hygiene_sensitive_vault',
   'conversations', 'messages', 'notifications', 'audit_log',
-  'emails', 'email_messages', 'estimates', 'estimate_deposits', 'invoices', 'payments', 'payers', 'scheduled_services', 'job_status_history', 'reschedule_log', 'system_settings', 'leads', 'messaging_audit_log'];
+  'emails', 'email_messages', 'estimates', 'estimate_deposits', 'invoices', 'payments', 'payers', 'setup_fee_claims', 'scheduled_services', 'job_status_history', 'reschedule_log', 'system_settings', 'leads', 'messaging_audit_log'];
 let mockPg;
 let admin;
 let message;
@@ -2072,7 +2072,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       address_line1: '300 Example Lane', city: 'Sarasota', zip: '34236' });
     const [estimate, foreign] = await mockPg('estimates').insert([
       { customer_id: message.customer_id, property_id: context.properties[0].id, status: 'accepted', service_interest: 'Termite' },
-      { customer_id: otherCustomer, status: 'accepted', service_interest: 'Termite' }]).returning('id');
+      { customer_id: otherCustomer, status: 'accepted', service_interest: 'Lawn' }]).returning('id');
     const deposit = (estimateId, status, receivedAt) => ({ estimate_id: estimateId, amount: 150, status, received_at: receivedAt,
       stripe_payment_intent_id: `pi_deposit_${randomUUID()}` });
     const [received, credited] = await mockPg('estimate_deposits').insert([deposit(estimate.id, 'received', after),
@@ -2085,7 +2085,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const deposits = evidence.records.filter((r) => r.payment_source === 'deposit');
     expect(deposits.map((r) => r.id).sort()).toEqual([received.id, credited.id].sort());
     expect(deposits[0]).toMatchObject({ estimate_id: estimate.id, property_id: context.properties[0].id,
-      text: `Deposit of $150.00 received ${etDateString(after)}` });
+      text: `Deposit of $150.00 on the Termite estimate received ${etDateString(after)}` });
     expect(admissibleWitness(deposits[0], commitment)).toBe(true);
   });
 
@@ -2212,35 +2212,70 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(evidence.records.filter((r) => r.payment_source === 'ledger')).toEqual([]);
   });
 
-  test('Codex #4996 r2 pre-push: a prepayment applied at completion is dated when the visit was prepaid — money prepaid before the question is not new, money prepaid after it is, and an unstamped visit is never evidence', async () => {
+  test('Codex #4996 r5: a visit prepayment is evidence from its prepaid stamp — before completion, and once, not twice, after it; an earlier stamp, an unstamped visit and annual-prepay coverage never are', async () => {
     const before = new Date(message.created_at.getTime() - 3600000);
     const after = new Date(message.created_at.getTime() + 1000);
     const completedAt = new Date(message.created_at.getTime() + 2 * 3600000);
     const now = new Date(completedAt.getTime() + 1000);
-    const visitRow = (prepaidAt) => ({ customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+    const visitRow = (prepaidAt, extra = {}) => ({ customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
       scheduled_date: etDateString(completedAt), window_start: '09:00:00', status: 'completed', prepaid_amount: 125, prepaid_method: 'cash',
-      prepaid_at: prepaidAt, created_at: new Date(message.created_at.getTime() - 86400000) });
-    const [prepaidEarlier, prepaidLater, unstamped] = await mockPg('scheduled_services')
-      .insert([visitRow(before), visitRow(after), visitRow(null)]).returning('id');
-    const settleAtCompletion = async (visit, number) => {
+      prepaid_at: prepaidAt, created_at: new Date(message.created_at.getTime() - 86400000), ...extra });
+    const [prepaidEarlier, prepaidLater, unstamped, annual] = await mockPg('scheduled_services')
+      .insert([visitRow(before), visitRow(after), visitRow(null), visitRow(after, { prepaid_method: 'annual_prepay_invoice' })]).returning('id');
+    const commitment = { kind: 'other', description: 'Did you get my cash payment?', sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    const expectOnlyTheLaterStamp = (evidence) => {
+      const payments = evidence.records.filter((r) => r.type === 'payment');
+      expect(payments.map((r) => [r.payment_source, r.id])).toEqual([['prepaid', prepaidLater.id]]);
+      expect(payments[0]).toMatchObject({ property_id: context.properties[0].id,
+        text: `Prepayment of $125.00 (cash) recorded ${etDateString(after)} for the Quarterly Pest Control visit on ${etDateString(completedAt)}` });
+      expect(admissibleWitness(payments[0], commitment)).toBe(true);
+    };
+    expectOnlyTheLaterStamp(await loadSmsFulfillmentEvidence(mockPg, commitment, message, now));
+    // Completion applies each prepayment to its invoice (complete-scheduled-service.js): same money, never a second witness.
+    for (const [visit, number] of [[prepaidEarlier, 'WPC-2026-0951'], [prepaidLater, 'WPC-2026-0952'], [unstamped, 'WPC-2026-0953'], [annual, 'WPC-2026-0954']]) {
       const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: number,
         title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: completedAt,
         scheduled_service_id: visit.id }).returning('id');
-      // What complete-scheduled-service.js books when it applies the prepayment.
       await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(completedAt),
         description: `Prepaid credit applied to invoice ${number}`, created_at: completedAt,
         metadata: JSON.stringify({ invoice_id: invoice.id, scheduled_service_id: visit.id, source: 'scheduled_service_prepaid', method: 'cash' }) });
-      return invoice.id;
-    };
-    await settleAtCompletion(prepaidEarlier, 'WPC-2026-0951');
-    const laterInvoice = await settleAtCompletion(prepaidLater, 'WPC-2026-0952');
-    await settleAtCompletion(unstamped, 'WPC-2026-0953');
-    const commitment = { kind: 'other', description: 'Did you get my cash payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    }
+    expectOnlyTheLaterStamp(await loadSmsFulfillmentEvidence(mockPg, commitment, message, now));
+  });
+
+  test('Codex #4996 r5: a series prepayment shows each visit its share and the total; a free-form method stays out of the text', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const visitRow = (days) => ({ customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(new Date(after.getTime() + days * 86400000)), window_start: '09:00:00', status: 'confirmed',
+      prepaid_amount: 100, prepaid_method: 'Zelle from Pat Example 941-555-0123', prepaid_at: after,
+      created_at: new Date(message.created_at.getTime() - 86400000) });
+    await mockPg('scheduled_services').insert([visitRow(30), visitRow(120), visitRow(210)]);
+    const commitment = { kind: 'other', description: 'Did my $300 prepayment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
-    const payments = evidence.records.filter((r) => r.type === 'payment');
-    expect(payments.map((r) => r.invoice_id)).toEqual([laterInvoice]);
-    expect(new Date(payments[0].settled_at).getTime()).toBe(after.getTime());
-    expect(payments[0].text).toContain(`received ${etDateString(after)}`);
+    const prepaid = evidence.records.filter((r) => r.payment_source === 'prepaid');
+    expect(prepaid).toHaveLength(3);
+    for (const record of prepaid) {
+      expect(record.text).toMatch(/^Prepayment of \$100\.00 recorded \S+ for the Quarterly Pest Control visit on \S+ — part of \$300\.00 prepaid across 3 visits$/);
+    }
+    expect(JSON.stringify(evidence.records)).not.toContain('941-555-0123');
+  });
+
+  test('Codex #4996 r5: a setup-only invoice from an estimate is scoped to the estimate\'s property through its setup-fee claim', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
+      status: 'accepted', service_interest: 'Rodent' }).returning('id');
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0981',
+      title: 'Rodent setup', total: 199, subtotal: 199, line_items: '[]', status: 'paid', paid_at: after }).returning('id');
+    await mockPg('setup_fee_claims').insert({ invoice_id: invoice.id, estimate_id: estimate.id, amount: 199 });
+    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 199, status: 'paid', payment_date: etDateString(after),
+      metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: after });
+    const commitment = { kind: 'other', description: 'Did the setup payment go through?', sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const witness = evidence.records.find((r) => r.payment_source === 'invoice');
+    expect(witness).toMatchObject({ invoice_id: invoice.id, property_id: context.properties[0].id });
+    expect(admissibleWitness(witness, commitment)).toBe(true);
   });
 
   test('Codex #4996 r2: a customer-level Stripe charge such as the monthly autopay is payment evidence; one an invoice claims by its PaymentIntent, or names through a dispute, counts once, on the invoice', async () => {
@@ -2261,7 +2296,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
     const ledger = evidence.records.filter((r) => r.payment_source === 'ledger');
     expect(ledger.map((r) => r.id)).toEqual([autopay.id]);
-    expect(ledger[0]).toMatchObject({ property_id: null, text: `Payment of $89.00 recorded ${etDateString(after)} (monthly autopay)` });
+    expect(ledger[0]).toMatchObject({ property_id: null, text: `Payment of $89.00 recorded ${etDateString(after)} (monthly autopay for 2026-09)` });
     expect(admissibleWitness(ledger[0], commitment)).toBe(true);
     expect(Object.fromEntries(evidence.records.filter((r) => r.payment_source === 'invoice').map((r) => [r.invoice_id, r.id])))
       .toEqual({ [claimed.id]: claimedPaid.id, [disputed.id]: disputedPaid.id });
@@ -2291,6 +2326,9 @@ postgres('SMS commitments on PostgreSQL', () => {
     test.each([
       ['a paid payment', (at) => mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(at),
         metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'zelle' }), created_at: at, updated_at: at })],
+      ['a prepayment stamped on a visit', (at) => mockPg('scheduled_services').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
+        service_type: 'Quarterly Pest Control', scheduled_date: etDateString(at), window_start: '09:00:00', status: 'confirmed',
+        prepaid_amount: 125, prepaid_method: 'cash', prepaid_at: at, created_at: new Date(message.created_at.getTime() - 86400000) })],
       ['a received estimate deposit', async (at) => {
         const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, status: 'accepted', service_interest: 'Termite' }).returning('id');
         await mockPg('estimate_deposits').insert({ estimate_id: estimate.id, amount: 150, status: 'received', received_at: at, updated_at: at,
