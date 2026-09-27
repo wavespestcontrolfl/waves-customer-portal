@@ -532,7 +532,7 @@ const SCHEDULING_PAYLOAD_FLAGS = new Set([
   // answer before the sweep may close it (pre-push audit P1 on #4666).
   'on_file_house_number_conflict',
   // The lender/realtor WDO-arranger slot elapsed before the in-transaction
-  // insert (call-recording-processor's arrangerSlotElapsed recheck) — the
+  // insert (call-recording-processor's slotElapsedAtBookingTime recheck) — the
   // office needs the agreed time it can no longer book (codex #4890
   // post-merge review P2).
   'arranger_slot_elapsed_pre_insert',
