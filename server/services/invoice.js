@@ -3,7 +3,7 @@ const { isDeepStrictEqual } = require("node:util");
 const db = require("../models/db");
 const logger = require("./logger");
 const TaxCalculator = require("./tax-calculator");
-const { REPLAY_HOLD_CODES, isReplayHold } = require("./messaging/billing-channel-routing");
+const { REPLAY_HOLD_CODES, isReplayHold, billingLegDeliveryState } = require("./messaging/billing-channel-routing");
 const DiscountEngine = require("./discount-engine");
 const {
   percentageDiscountDollars,
@@ -2320,8 +2320,9 @@ async function checkDeferredInvoiceEmailDelivery(meta, { database } = {}) {
 // reports `sent: true` but never delivered anything). `sent` alone is
 // never enough; every predicate below that decides "was this channel
 // accepted" shares this ONE check so they can't drift apart.
-function legAccepted(leg) {
-  return leg?.sent === true && leg?.deliveryOutcome === "accepted";
+function legAccepted(leg, channel) {
+  return (leg?.sent === true && leg?.deliveryOutcome === "accepted")
+    || (channel === "push" && Boolean(billingLegDeliveryState(channel, leg || {})));
 }
 
 // Whether ANY leg of a dispatchBillingChannels fan-out (channelResults,
@@ -2335,7 +2336,7 @@ function legAccepted(leg) {
 // the plain `sent` flag, byte-identical to before this existed.
 function anyBillingChannelAccepted(channelResults, sent) {
   if (!channelResults) return sent === true;
-  return Object.values(channelResults).some(legAccepted);
+  return Object.entries(channelResults).some(([channel, leg]) => legAccepted(leg, channel));
 }
 
 // Staff-facing wording for which channel(s) actually delivered, built from
@@ -2349,7 +2350,7 @@ function describeInvoiceDeliveryChannels(channelResults) {
   const labels = [];
   if (legAccepted(channelResults.email)) labels.push("Email");
   if (legAccepted(channelResults.sms)) labels.push("SMS");
-  if (legAccepted(channelResults.push)) labels.push("App");
+  if (legAccepted(channelResults.push, "push")) labels.push("App");
   if (!labels.length) return "SMS";
   if (labels.length === 1) return labels[0];
   if (labels.length === 2) return labels.join(" and ");
@@ -5590,6 +5591,7 @@ const InvoiceService = {
     // or hasEmailLeg's own nested SMS/App-only leg) — that is definitionally
     // an SMS/App send, matching the byte-identical fallback below.
     let acceptedChannelResults = null;
+    let settledEvent = {};
     // The pending leg's queueing decision (Codex round-3 P1/P2 #4963), set
     // once known inside the try block below — before finalizeInvoiceAfterSms
     // is ever called, even though this closure is defined here. null means
@@ -5623,7 +5625,7 @@ const InvoiceService = {
       // definitionally the plain SMS path — byte-identical to before.
       const emailAccepted = legAccepted(acceptedChannelResults?.email);
       const smsOrAppAccepted = acceptedChannelResults
-        ? (legAccepted(acceptedChannelResults.sms) || legAccepted(acceptedChannelResults.push))
+        ? (legAccepted(acceptedChannelResults.sms) || legAccepted(acceptedChannelResults.push, "push"))
         : true;
       const updated = await whereSendClaimOwned(
         trx("invoices").where({ id: invoiceId }).whereIn("status", SEND_FINALIZABLE_STATUSES),
@@ -5635,15 +5637,15 @@ const InvoiceService = {
         // hasEmailLeg always excludes Email from THIS call's own fan-out
         // (billing-channel-routing.js selectedLegs), so acceptedChannelResults
         // never carries an accepted email leg here — sms_sent_at is correct.
-        sms_sent_at: new Date(),
+        sms_sent_at: settledEvent.eventVisibleAt || new Date(),
         updated_at: new Date(),
       } : {
           status: trx.raw(
             "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
           ),
-          sent_at: new Date(),
-          ...(smsOrAppAccepted ? { sms_sent_at: new Date() } : {}),
-          ...(emailAccepted ? { email_sent_at: new Date() } : {}),
+          sent_at: settledEvent.eventVisibleAt || new Date(),
+          ...(smsOrAppAccepted ? { sms_sent_at: legAccepted(acceptedChannelResults?.sms) ? new Date() : (acceptedChannelResults?.push?.eventVisibleAt || new Date()) } : {}),
+          ...(emailAccepted ? { email_sent_at: acceptedChannelResults.email.deduped ? trx.raw("email_sent_at") : new Date() } : {}),
           scheduled_send_at: null,
           scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(trx),
           scheduled_request_review: false,
@@ -5760,6 +5762,10 @@ const InvoiceService = {
       // Available to the catch block's retry call too (declared outside the
       // try block) — see finalizeInvoiceAfterSms above.
       acceptedChannelResults = sendResult.channelResults || null;
+      if (acceptedChannelResults?.push?.eventVisibleAt
+        && Object.entries(acceptedChannelResults).every(([channel, leg]) => billingLegDeliveryState(channel, leg) !== "delivered")) {
+        settledEvent = { deduped: true, eventVisibleAt: acceptedChannelResults.push.eventVisibleAt };
+      }
       // Codex round-2 P1 (#4963): billing-channel-routing.js's
       // billingDispatchOutcome deliberately surfaces an UNFINISHED leg's own
       // retry/hold as the top-level `sendResult` when one leg (Email, say)
@@ -5795,7 +5801,7 @@ const InvoiceService = {
       // single-channel API response/log line (retryable wins — the
       // actionable one — else uncertain, else permanently blocked).
       const nonAcceptedLegs = acceptedChannelResults && anyChannelAccepted
-        ? Object.entries(acceptedChannelResults).filter(([, leg]) => !legAccepted(leg))
+        ? Object.entries(acceptedChannelResults).filter(([channel, leg]) => !legAccepted(leg, channel))
         : [];
       // A deferred replay hold (PUSH_IN_FLIGHT, APP_PROVIDER_RETRY,
       // APP_DELIVERY_HOLD) is labelled uncertain but is a deliberate retry
@@ -5871,7 +5877,7 @@ const InvoiceService = {
 
       smsDelivered = true;
       const finalized = await finalizeInvoiceAfterSms();
-      if (!finalized) return { sent: true, payUrl, claimLost: true };
+      if (!finalized) return { sent: true, payUrl, ...settledEvent, claimLost: true };
 
       // Kick off the per-invoice automated follow-up sequence (Day 0/3/7/14/30)
       try {
@@ -5886,7 +5892,7 @@ const InvoiceService = {
       // accepted (Codex round-2 P2 #4963), never the legacy "sent via SMS"
       // wording for an Email-only or App-only send.
       const deliveredVia = describeInvoiceDeliveryChannels(acceptedChannelResults);
-      await db("activity_log")
+      if (!settledEvent.deduped) await db("activity_log")
         .insert({
           customer_id: customer.id,
           action: "invoice_sent",
@@ -5918,7 +5924,7 @@ const InvoiceService = {
       await releaseDirectSmsClaim();
 
       return {
-        sent: true, payUrl, ...queueOutcome,
+        sent: true, payUrl, ...settledEvent, ...queueOutcome,
         ...(pendingChannel ? {
           pendingChannel: pendingChannel[0],
           pendingChannelCode: pendingChannel[1]?.code,
@@ -5948,12 +5954,12 @@ const InvoiceService = {
         );
         try {
           const finalized = await finalizeInvoiceAfterSms();
-          if (!finalized) return { sent: true, payUrl, claimLost: true, finalizeError: err.message };
+          if (!finalized) return { sent: true, payUrl, ...settledEvent, claimLost: true, finalizeError: err.message };
         } catch (retryErr) {
           logger.error(
             `[invoice] finalize retry failed for ${invoice.invoice_number}: ${retryErr.message} — row left under its send claim; do NOT auto-resend`,
           );
-          return { sent: true, payUrl, finalizeError: err.message };
+          return { sent: true, payUrl, ...settledEvent, finalizeError: err.message };
         }
         // Finalize is durable — run the normal post-delivery bookkeeping
         // (each leg best-effort/idempotent, mirroring the happy path) so a
@@ -5964,7 +5970,7 @@ const InvoiceService = {
         } catch (e) {
           logger.error(`[invoice-followups] scheduleForInvoice failed (post-recovery): ${e.message}`);
         }
-        await db("activity_log")
+        if (!settledEvent.deduped) await db("activity_log")
           .insert({
             customer_id: invoice.customer_id,
             action: "invoice_sent",
@@ -5992,8 +5998,8 @@ const InvoiceService = {
         }
         const queueOutcome = await resolveAdoptedRowsAfterDelivery(invoiceId, invoice.send_claim_token, consumedQueuedSendRows, invoice.invoice_number);
         await releaseDirectSmsClaim();
-        if (queueOutcome.queueResolutionError) return { sent: true, payUrl, finalizeError: err.message, ...queueOutcome };
-        return { sent: true, payUrl, finalizeError: err.message };
+        if (queueOutcome.queueResolutionError) return { sent: true, payUrl, ...settledEvent, finalizeError: err.message, ...queueOutcome };
+        return { sent: true, payUrl, ...settledEvent, finalizeError: err.message };
       }
       if (claimed && err.code === "INVOICE_VISIT_TERMINAL" && err.deliveryOutcome === "not_sent") {
         const scheduledServiceId = await linkedScheduledServiceId(invoice);
@@ -6180,6 +6186,7 @@ const InvoiceService = {
       // delivery after unvoid + explicit reschedule.
       sms.ok = true;
       sms.deduped = true;
+      sms.eventVisibleAt = claim.invoice.sms_sent_at;
     } else {
       try {
         // The nested call does not adopt (adoptsQueuedInvoiceSend: false
@@ -6293,6 +6300,7 @@ const InvoiceService = {
         }
         if (smsResult?.sent) {
           sms.ok = true;
+          if (smsResult.deduped) { sms.deduped = true; sms.eventVisibleAt = smsResult.eventVisibleAt; }
           if (smsResult.finalizeError) sms.finalizeError = smsResult.finalizeError;
         } else {
           sms.error = smsResult?.reason || smsResult?.code || "SMS not sent";
@@ -6429,6 +6437,7 @@ const InvoiceService = {
           ...(!operatorInitiated ? { billingDeliveryCategory: 'invoice' } : {}),
         });
         if (r?.ok) email.ok = true;
+        if (r?.deduped) email.deduped = true;
         else if (r?.error) email.error = r.error;
         if (r?.code) email.code = r.code;
         if (r?.deliveryOutcome) email.deliveryOutcome = r.deliveryOutcome;
@@ -6568,7 +6577,7 @@ const InvoiceService = {
             status: db.raw(
               "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
             ),
-            sent_at: new Date(),
+            sent_at: sms.deduped && !(email.ok && !email.deduped) ? (sms.eventVisibleAt || new Date()) : new Date(),
             scheduled_send_at: null,
             scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
             scheduled_request_review: false,
