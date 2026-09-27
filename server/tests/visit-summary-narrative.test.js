@@ -9,6 +9,7 @@ const {
   applyVisitSummaryNarrative,
   _test,
 } = require('../services/service-report/visit-summary-narrative');
+const { appointmentClaimProblems } = require('../services/service-report/next-visit-claims');
 
 const {
   groundingFacts,
@@ -98,6 +99,244 @@ test('clean model output is used verbatim', async () => {
   const out = await applyVisitSummaryNarrative(input(), { callModel });
   expect(out).toBe(text);
   expect(callModel).toHaveBeenCalledTimes(1);
+});
+
+test('model output must include the supplied next visit', async () => {
+  const args = input();
+  const summary = 'We refreshed the perimeter and entry points today, and activity has continued to trend down.';
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test.each([
+  'Friday, October 2, 2027',
+  'Friday, October 2 in 2027',
+  'Friday, October 2 of 2027',
+  'Friday, October 2 (2027)',
+  'Friday, October 2, in 2027',
+  'Friday, October 2nd, 2027',
+  'Friday, October 2nd in 2027',
+  'Friday, October 2nd (2027)',
+  'Friday, October 2ND, in 2027',
+])('model output cannot add a year to the supplied next-visit date: %s', async (date) => {
+  const args = input();
+  const summary = `We refreshed the perimeter and entry points today. Your next visit is ${date}, arriving 8–10 AM.`;
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test.each(['1st', '2nd', '3rd', '4th', '21st', '22nd', '23rd', '31st'])('ordinal dates retain date and year validation: %s', (ordinal) => {
+  const day = Number.parseInt(ordinal, 10);
+  const facts = { nextVisit: { date: `October ${day}`, window: '8–10 AM' } };
+  expect(appointmentClaimProblems(`Your next visit is October ${ordinal}, arriving 8–10 AM.`, facts)).toEqual([]);
+  expect(appointmentClaimProblems(`Your next visit is October ${ordinal}, 2027, arriving 8–10 AM.`, facts))
+    .toEqual(expect.arrayContaining([expect.stringContaining('ungrounded_date:')]));
+  expect(appointmentClaimProblems(`Your next visit is October ${ordinal}, arriving 8–10 AM.`, {
+    nextVisit: { date: `October ${day === 31 ? 30 : day + 1}`, window: '8–10 AM' },
+  })).toEqual(expect.arrayContaining([expect.stringContaining('ungrounded_date:')]));
+});
+
+test.each([
+  "Friday, October 2, '27",
+  'Friday, October 2, ’27',
+  "Friday, October 2nd, '27",
+  "Friday, October 2 in '27",
+  'Friday, October 2, 27',
+  'Friday, October 2nd (27)',
+])('model output cannot add an abbreviated year to the supplied next-visit date: %s', (date) => {
+  const facts = { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } };
+  expect(appointmentClaimProblems(`Your next visit is ${date}, arriving 8–10 AM.`, facts))
+    .toEqual(expect.arrayContaining([expect.stringContaining('ungrounded_date:')]));
+});
+
+test.each(['8 AM', '10 AM', '10 a.m.', '8 p.m.', '10 A.M.', '10 a.m'])('a grounded range does not authorize an exact %s arrival promise', (time) => {
+  const facts = { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } };
+  expect(appointmentClaimProblems(
+    `Your next visit is Friday, October 2, arriving 8–10 AM, specifically at ${time}.`,
+    facts,
+  )).toEqual(expect.arrayContaining([expect.stringContaining('ungrounded_time:')]));
+});
+
+test.each([
+  ['The technician will arrive at8PM.', '8 PM'],
+  ['The technician will arrive at 8PM.', '8 PM'],
+  ['Your specialist expects to be there at 10 a.m.', '10 AM'],
+  ['A crew member plans to reach the property at 8 p.m.', '8 PM'],
+])('exact arrival times are rejected independently of the sentence subject: %s', (extra, normalizedTime) => {
+  const facts = { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } };
+  expect(appointmentClaimProblems(
+    `Your next visit is Friday, October 2, arriving 8–10 AM. ${extra}`,
+    facts,
+  )).toContain(`ungrounded_time:${normalizedTime}`);
+});
+
+test('a subject-qualified exact arrival makes model copy fall back deterministically', async () => {
+  const args = input();
+  const summary = 'Your next visit is Friday, October 2, arriving 8–10 AM. The technician will arrive at8PM.';
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test('arrival windows are validated independently of the sentence subject', () => {
+  const facts = { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } };
+  expect(appointmentClaimProblems(
+    'Your next visit is Friday, October 2, arriving 8–10 AM. The technician expects a 1–3 PM arrival window.',
+    facts,
+  )).toContain('ungrounded_window:1–3 PM');
+});
+
+test.each(['specifically at 10 a.m.', 'and specifically at 10 p.m.'])(
+  'dotted arrival windows retain their exact-arrival continuation: %s', (continuation) => {
+    expect(appointmentClaimProblems(
+      `Your next visit is Friday, October 2, arriving 8–10 a.m. ${continuation}`,
+      { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } },
+    )).toEqual(expect.arrayContaining([expect.stringContaining('ungrounded_time:')]));
+  },
+);
+
+test.each([
+  'Your next visit is Friday, October 2, arriving 8–10 AM.',
+  'Your next visit is Friday, October 2, arriving 8–10 AM, and keep pets away until 8 AM.',
+  'Your next visit is Friday, October 2, arriving 8–10 AM, and keep pets away until 10 AM.',
+  'Your next visit is Friday, October 2, arriving 8–10 a.m.',
+  'Your next visit is Friday, October 2, arriving 8–10 AM, and keep pets away until 10 a.m.',
+  'Your next visit is Friday, October 2, arriving 8–10 a.m. and keep pets away until 4 p.m.',
+])('grounded range copy remains valid without a year or exact arrival promise: %s', (summary) => {
+  expect(appointmentClaimProblems(
+    summary,
+    { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } },
+  )).toEqual([]);
+});
+
+test.each([
+  'Your next visit is Friday, October 2, arriving 8–10 AM. The technician will arrive during the 8–10 AM window.',
+  'The technician said to keep pets away until 4 PM. Your next visit is Friday, October 2, arriving 8–10 AM.',
+  'Your next visit is Friday, October 2, arriving 8–10 AM. The technician’s arrival window remains 8–10 AM. Leave treated surfaces alone until 4 p.m.',
+])('subject-independent validation preserves the supplied window and explicit aftercare times: %s', (summary) => {
+  expect(appointmentClaimProblems(
+    summary,
+    { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } },
+  )).toEqual([]);
+});
+
+test('each appointment promise must independently match the authoritative slot', async () => {
+  const args = input();
+  const summary = 'We refreshed the perimeter today. Your next visit is Friday, October 2, arriving 8–10 AM. We will return next week to inspect again.';
+  const problems = appointmentClaimProblems(summary, groundingFacts(args));
+  expect(problems).toEqual(expect.arrayContaining([
+    'duplicate_appointment_claim',
+    'unsupported_appointment_date',
+    'unsupported_appointment_window',
+  ]));
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test.each([
+  'Your next visit is not scheduled for Friday, October 2, arriving 8–10 AM.',
+  'Your next visit is cancelled for Friday, October 2, arriving 8–10 AM.',
+  'Your next visit is canceled for Friday, October 2, arriving 8–10 AM.',
+  'Your next visit has been cancelled for Friday, October 2, arriving 8–10 AM.',
+  'Your next visit is no longer scheduled for Friday, October 2, arriving 8–10 AM.',
+])('a non-affirmative statement of the authoritative slot falls back: %s', async (appointment) => {
+  const args = input();
+  const summary = `We refreshed the perimeter today. ${appointment}`;
+  expect(appointmentClaimProblems(summary, groundingFacts(args))).toContain('negated_appointment_claim');
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test.each([
+  'We treated a gap first noted on September 18, and your next visit is Friday, October 2, arriving 8–10 AM.',
+  'Keep pets away until 4 PM, and your next visit is Friday, October 2, arriving 8–10 AM.',
+  'Keep pets away until 8 AM, and your next visit is Friday, October 2, arriving 8–10 AM.',
+])('appointment guard ignores dates and times before the appointment clause: %s', (summary) => {
+  expect(appointmentClaimProblems(summary, {
+    nextVisit: { date: 'Friday, October 2', window: '8–10 AM' },
+  })).toEqual([]);
+});
+
+test('model output keeps an unrelated work date before the grounded appointment', async () => {
+  const args = input();
+  const summary = 'We treated a gap first noted on September 18, and your next visit is Friday, October 2, arriving 8–10 AM.';
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(summary);
+});
+
+test.each([
+  ['a mismatched date', 'We refreshed the perimeter today. Your next visit will be Saturday, October 3, arriving 8–10 AM.'],
+  ['a mismatched window', 'We refreshed the perimeter today. Your next visit is scheduled for Friday, October 2, arriving 1–3 PM.'],
+  ['an unsupported appointment form', 'We refreshed the perimeter today. Your next visit is scheduled soon, and we will keep monitoring the treated areas.'],
+  ['an unsupported relative date', 'We refreshed the perimeter today. Your next appointment is tomorrow, arriving 8–10 AM.'],
+  ['a mismatched appointment label', 'We refreshed the perimeter today. Next visit: Saturday, October 3, arriving 8–10 AM.'],
+  ['a contradictory arrival sentence', 'Your next visit is Friday, October 2, arriving 8–10 AM. Arrival is at 8 PM.'],
+  ['a contradictory arrival window sentence', 'Your next visit is Friday, October 2, arriving 8–10 AM. Your arrival window is 8–10 PM.'],
+  ['a contradictory arrival label', 'Your next visit is Friday, October 2, arriving 8–10 AM. Arrival time: 8 PM.'],
+])('model output with %s falls back to grounded copy', async (_label, summary) => {
+  const args = input();
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test('model cannot invent an appointment when no next visit was supplied', async () => {
+  const args = input({ nextAppointment: null });
+  const summary = 'We refreshed the perimeter and entry points today. Your next visit is scheduled for Friday, October 2, arriving 8–10 AM.';
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test.each([
+  'We’ll come back next week to inspect again.',
+  "We'll check back next week to inspect again.",
+  'We will check back next week to inspect again.',
+  "We'll follow up next week to inspect again.",
+  'We’ll follow-up next week to inspect again.',
+  'Your next follow-up is next week.',
+  'The upcoming follow up is tomorrow.',
+  'Arrival is at 8 PM.',
+])('model cannot invent an appointment promise without a next visit: %s', async (promise) => {
+  const args = input({ nextAppointment: null });
+  const summary = `We refreshed the perimeter and entry points today. ${promise}`;
+  expect(appointmentClaimProblems(summary, groundingFacts(args))).toContain('ungrounded_appointment_claim');
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+
+test('appointment guard ignores grounded work numbers, aftercare times, and unrelated dates', async () => {
+  expect(appointmentClaimProblems(
+    'We treated 3 entry points after reviewing the September 18 note. Keep pets away until 4 PM.',
+    { nextVisit: null },
+  )).toEqual([]);
+  expect(appointmentClaimProblems(
+    'We will recheck the garage next visit.',
+    { nextVisit: null },
+  )).toEqual([]);
+
+  const summary = 'We treated 3 entry points after reviewing the September 18 note. Keep the threshold clear until the sealant dries.';
+  const args = input({ recap: summary, nextAppointment: null });
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(summary);
 });
 
 test('banned copy in model output falls back to the deterministic summary', async () => {

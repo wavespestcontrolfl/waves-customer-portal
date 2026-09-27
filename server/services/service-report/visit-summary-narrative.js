@@ -25,8 +25,10 @@ const MODELS = require('../../config/models');
 const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
+const { appointmentClaimProblems } = require('./next-visit-claims');
 
-const PROMPT_VERSION = 'pest_visit_summary_narrative_v2'; // v2: + HUMAN_PROSE_RULES (owner style block 07-30)
+// v3: validate every appointment claim against the authoritative date/window.
+const PROMPT_VERSION = 'pest_visit_summary_narrative_v3';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -200,6 +202,7 @@ async function applyVisitSummaryNarrative(input = {}, deps = {}) {
       const banned = [
         ...findBannedCustomerCopy(text),
         ...EXTRA_FORBIDDEN.map((rx) => text.match(rx)?.[0] || null).filter(Boolean),
+        ...appointmentClaimProblems(text, facts),
       ];
       if (!banned.length) {
         value = text;
