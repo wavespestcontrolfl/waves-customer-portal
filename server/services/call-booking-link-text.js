@@ -414,6 +414,14 @@ async function dispatchClaimedCall(conn, call, now) {
     return { sent: false, skipped: reason };
   };
   if (!leadId) return skip('no_lead_linkage');
+  // The call processor can rewrite call_log.metadata.lead_id later (an
+  // attribution correction, a merge into a different lead) while leaving
+  // THIS lane's own metadata key untouched (codex pre-push P1) — trusting
+  // the staged id would then text whoever the call is linked to NOW, not
+  // the lead this send was ever evaluated for. Skip rather than silently
+  // restage under the new id; a changed linkage is rare enough that losing
+  // the send is the safe direction.
+  if (leadIdOf(call) !== leadId) return skip('lead_linkage_changed');
   // Outside the 8 AM–8 PM ET window is a reason to WAIT, never a reason to
   // give up (codex pre-push P1) — a call due at 7:59 PM must not be lost
   // just because the 5-minute cron's next tick lands a moment after 8 PM.

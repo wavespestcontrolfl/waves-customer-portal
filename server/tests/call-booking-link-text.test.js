@@ -195,7 +195,7 @@ describe('claimForDispatch', () => {
 describe('dispatchClaimedCall', () => {
   const NOW = new Date('2026-09-26T18:00:00Z'); // 2:00 PM ET — inside the window
   const CALL = { id: 'call-1', created_at: new Date('2026-09-26T15:30:00Z'), duration_seconds: 90,
-    metadata: { call_booking_link_text: { status: 'claimed', lead_id: 'lead-1', send_at: NOW.toISOString() } },
+    metadata: { lead_id: 'lead-1', call_booking_link_text: { status: 'claimed', lead_id: 'lead-1', send_at: NOW.toISOString() } },
     ai_extraction_enriched: {
       meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
       caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
@@ -245,6 +245,22 @@ describe('dispatchClaimedCall', () => {
       entryPoint: 'call_booking_link_text', leadId: OPEN_LEAD.id,
       consentBasis: { status: 'transactional_allowed', source: 'call_booking_link_text' },
     }));
+  });
+
+  test('a lead linkage rewritten since staging (attribution correction/merge) blocks the send', async () => {
+    const rewritten = { ...CALL, metadata: { ...CALL.metadata, lead_id: 'lead-2' } };
+    const conn = makeDb();
+    const result = await dispatchClaimedCall(conn, rewritten, NOW);
+    expect(result.skipped).toBe('lead_linkage_changed');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a lead linkage cleared since staging blocks the send', async () => {
+    const cleared = { ...CALL, metadata: { call_booking_link_text: CALL.metadata.call_booking_link_text } };
+    const conn = makeDb();
+    const result = await dispatchClaimedCall(conn, cleared, NOW);
+    expect(result.skipped).toBe('lead_linkage_changed');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('lead no longer open (converted/lost since the call) blocks the send', async () => {
