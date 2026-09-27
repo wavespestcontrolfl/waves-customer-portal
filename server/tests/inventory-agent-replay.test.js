@@ -152,8 +152,8 @@ describe('inQueueOrder', () => {
     const amazon = line('amazon', 'a1', '2026-09-02T10:00:00Z');
     const neverRecorded = line('amazon', 'a2', '2026-09-03T09:00:00Z');
     const recorded = new Map([
-      [lineKey(amazon), { vendor: 'amazon', at: Date.parse('2026-09-03T08:00:00Z') }],
-      [lineKey(siteOne), { vendor: 'siteone', at: Date.parse('2026-09-03T08:00:05Z') }],
+      [lineKey(amazon), { vendor: 'amazon', shipmentKey: 'a1', at: Date.parse('2026-09-03T08:00:00Z') }],
+      [lineKey(siteOne), { vendor: 'siteone', shipmentKey: 's1', at: Date.parse('2026-09-03T08:00:05Z') }],
     ]);
     expect(inQueueOrder([siteOne, neverRecorded, amazon], recorded)).toEqual([amazon, siteOne, neverRecorded]);
   });
@@ -164,8 +164,21 @@ describe('inQueueOrder', () => {
   test('an unrecorded line sorts in the sweep that scanned it, by email arrival', () => {
     const hold = line('amazon', 'a1', '2026-09-01T10:00:00Z');
     const skipped = { ...line('amazon', 'a2', '2026-09-01T10:05:00Z'), shipmentKey: 'a1', lineNo: 2 };
-    const recorded = new Map([[lineKey(hold), { vendor: 'amazon', at: Date.parse('2026-09-01T12:00:00Z') }]]);
+    const recorded = new Map([[lineKey(hold), { vendor: 'amazon', shipmentKey: 'a1', at: Date.parse('2026-09-01T12:00:00Z') }]]);
     expect(inQueueOrder([skipped, hold], recorded)).toEqual([hold, skipped]);
+  });
+
+  // 2026-09-27 pre-push P1: an unrelated row earlier in the same sweep never
+  // pulls a skipped line ahead of the hold that skipped it.
+  test('a skipped line stays after its own shipment hold, past an unrelated earlier row', () => {
+    const unrelated = line('amazon', 'u1', '2026-09-01T09:00:00Z');
+    const hold = line('amazon', 'h1', '2026-09-01T10:00:00Z');
+    const skipped = { ...line('amazon', 'h2', '2026-09-01T10:05:00Z'), shipmentKey: 'h1', lineNo: 2 };
+    const recorded = new Map([
+      [lineKey(unrelated), { vendor: 'amazon', shipmentKey: 'u1', at: Date.parse('2026-09-01T12:00:00Z') }],
+      [lineKey(hold), { vendor: 'amazon', shipmentKey: 'h1', at: Date.parse('2026-09-01T12:00:01Z') }],
+    ]);
+    expect(inQueueOrder([skipped, hold, unrelated], recorded)).toEqual([unrelated, hold, skipped]);
   });
 
   test('ties keep email, then line order', () => {
@@ -183,7 +196,7 @@ describe('dedupe', () => {
   test.each([['a-hold', 'z-delivered'], ['z-hold', 'a-delivered']])('hold email %s vs Delivered email %s', (holdId, deliveredId) => {
     const hold = { ...key, email: { id: holdId, received_at: '2026-09-01T00:00:00Z' }, recordedStatus: 'no_delivery_email' };
     const delivered = { ...key, email: { id: deliveredId, received_at: '2026-09-01T00:00:00Z' } };
-    const ordered = inQueueOrder([delivered, hold], new Map([[lineKey(key), { vendor: 'amazon', at: Date.parse('2026-09-01T00:00:00Z') }]]));
+    const ordered = inQueueOrder([delivered, hold], new Map([[lineKey(key), { vendor: 'amazon', shipmentKey: 'S1', at: Date.parse('2026-09-01T00:00:00Z') }]]));
     expect(dedupe(ordered)).toEqual([hold]);
   });
 });

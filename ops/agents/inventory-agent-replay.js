@@ -177,24 +177,32 @@ function readOnlyConn() {
 // SWEEP time on one basis: a line the live lane recorded, its recorded time;
 // one it never recorded (a hand-off skip, or before the lane existed), the
 // first recorded time of its vendor at or after its email arrived — the
-// sweep that scanned it — else its email's time. Within one sweep time,
-// email arrival order, then email, then line order.
+// sweep that scanned it — else its email's time, but never before the first
+// row its own shipment recorded at or after its arrival (the hold that
+// skipped it, even when an unrelated line of that sweep came first). At one
+// time, a recorded line before an unrecorded one, then email arrival order,
+// then email, then line order.
 function recordedTimes(rows) {
-  return new Map(rows.map((row) => [rowKey(row), { vendor: row.vendor, at: new Date(row.created_at).getTime() }]));
+  return new Map(rows.map((row) => [rowKey(row), { vendor: row.vendor, shipmentKey: row.shipment_key, at: new Date(row.created_at).getTime() }]));
 }
 
 function inQueueOrder(lines, recorded) {
   const recordedTimesOf = {};
-  for (const { vendor, at } of recorded.values()) (recordedTimesOf[vendor] ||= []).push(at);
+  for (const { vendor, shipmentKey, at } of recorded.values()) {
+    (recordedTimesOf[vendor] ||= []).push(at);
+    (recordedTimesOf[`${vendor}|${shipmentKey}`] ||= []).push(at);
+  }
   for (const times of Object.values(recordedTimesOf)) times.sort((a, b) => a - b);
+  const firstAtOrAfter = (group, received) => (recordedTimesOf[group] || []).find((at) => at >= received);
   const sweepTime = (line) => {
     const own = recorded.get(lineKey(line));
-    if (own) return own.at;
+    if (own) return { at: own.at, unrecorded: 0 };
     const received = new Date(line.email.received_at).getTime();
-    return (recordedTimesOf[line.vendor] || []).find((at) => at >= received) ?? received;
+    const sweep = firstAtOrAfter(line.vendor, received) ?? received;
+    return { at: Math.max(sweep, firstAtOrAfter(`${line.vendor}|${line.shipmentKey}`, received) ?? sweep), unrecorded: 1 };
   };
-  return lines.map((line, index) => ({ line, at: sweepTime(line), received: new Date(line.email.received_at).getTime(), index }))
-    .sort((a, b) => (a.at - b.at) || (a.received - b.received)
+  return lines.map((line, index) => ({ line, ...sweepTime(line), received: new Date(line.email.received_at).getTime(), index }))
+    .sort((a, b) => (a.at - b.at) || (a.unrecorded - b.unrecorded) || (a.received - b.received)
       || String(a.line.email.id).localeCompare(String(b.line.email.id)) || (a.index - b.index))
     .map(({ line }) => line);
 }
