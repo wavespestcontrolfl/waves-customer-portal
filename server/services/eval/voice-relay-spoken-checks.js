@@ -61,10 +61,11 @@ const SPANISH_UNCERTAINTY_RE = /\b(?:quiz[aá]s?|tal\s+vez|acaso|posiblemente|pr
 const SPANISH_NEGATION_RE = /\b(?:no|nunca|jam[aá]s|tampoco)\b/i;
 const SPANISH_EXPLICIT_SUBJECT_ASSERTION_RE = new RegExp(`^\\s*(?:(?:el|la|los|las|un|una|este|esta|ese|esa|mi|tu|su|nuestro|nuestra)\\s+(?:[a-záéíóúñü]+\\s+){0,4}|(?:yo|nosotros|nosotras|ellos|ellas|usted|ustedes)\\s+)(?:(?:le|les|nos|se)\\s+)?(?:va(?:mos|n)?\\s+a\\s+)?${SPANISH_ASSERTION_VERB}[a-záéíóúñü]*\\b`, 'i');
 const SPANISH_CLITIC_ASSERTION_RE = new RegExp(`^\\s*(?:le|les|nos|se)\\s+(?:va(?:mos|n)?\\s+a\\s+)?${SPANISH_ASSERTION_VERB}[a-záéíóúñü]*\\b`, 'i');
-const SPANISH_PENDING_STATUS_RE = /(?=[\s\S]*\b(?:cita|visita|solicitud|hora|horario)\b)(?=[\s\S]*\b(?:no|pendiente)\b)[\s\S]*\b(?:confirmad|reservad|agendad|programad|lista|hecha)[a-záéíóúñü]*\b/i;
+const SPANISH_PENDING_STATUS_RE = /^(?=[\s\S]*\b(?:cita|visita|solicitud|hora|horario)\b)[\s\S]*?(?:\bpendiente\b|\b(?:a[uú]n|todav[ií]a)\s+(?:debe|deber[aá]|necesita|tiene\s+que)\s+ser\s+(?:confirmad|reservad|agendad|programad)[a-záéíóúñü]*|\bno\s+(?:est[aá]|qued[oó]|fue|ha\s+sido)\s+(?:confirmad|reservad|agendad|programad|lista|hecha)[a-záéíóúñü]*)/i;
 const SPANISH_NON_PENDING_NEGATION_RE = /\b(?:nunca|jam[aá]s|tampoco)\b|\bno\s+(?!(?:est[aá]|qued[oó]|fue|ha\s+sido)(?![a-záéíóúñü]))/i;
-const SPANISH_COMPLETED_ASSERTION_RE = /(?<![a-záéíóúñü])(?:(?:se\s+)?(?:llam|contact|comunic|confirm|envi|mand|prepar|entreg|lleg|recib|ofrec|escrib|devolv)(?:ó|ió|aron|ieron|aba|aban|ía|ían)|(?:ha|han|hemos|había|habían|fue|fueron)\s+(?:enviad|mandad|preparad|entregad|recibid|ofrecid|llamad|contactad|comunicad|confirmad)[oa]s?|(?:ha|han|hemos|había|habían|fue|fueron)\s+(?:escrito|devuelto|hecho|puesto)|(?:dio|dieron|puso|pusieron|hizo|hicieron))(?![a-záéíóúñü])/i;
-const SPANISH_FUTURE_ASSERTION_RE = new RegExp(`(?<![a-záéíóúñü])(?:(?:${SPANISH_ASSERTION_VERB}|${SPANISH_IRREGULAR_FUTURE_STEM})(?:é|ás|á|emos|éis|án)|va(?:mos|n)?\\s+a\\s+${SPANISH_ASSERTION_VERB})(?![a-záéíóúñü])`, 'i');
+const SPANISH_COMPLETED_ASSERTION_RE = /(?<![a-záéíóúñü])(?:(?:se\s+)?(?:llam|contact|comunic|confirm|envi|mand|prepar|entreg|lleg|recib|ofrec|escrib|devolv)(?:ó|ió|aron|ieron|aba|aban|ía|ían)|(?:llam|contact|comunic|confirm|envi|mand|prepar|entreg)é|(?:recib|ofrec|escrib|devolv)í|(?:he|has|ha|han|hemos|había|habían|fue|fueron)(?:\s+sido)?\s+(?:enviad|mandad|preparad|entregad|recibid|ofrecid|llamad|contactad|comunicad|confirmad)[oa]s?|(?:he|has|ha|han|hemos|había|habían|fue|fueron)(?:\s+sido)?\s+(?:escrito|devuelto|hecho|puesto)|(?:dio|dieron|puso|pusieron|hizo|hicieron))(?![a-záéíóúñü])/i;
+const SPANISH_FUTURE_ASSERTION_RE = new RegExp(`(?<![a-záéíóúñü])(?:(?:${SPANISH_ASSERTION_VERB}|${SPANISH_IRREGULAR_FUTURE_STEM})(?:é|ás|á|emos|éis|án)|va(?:mos|n)?\\s+a\\s+${SPANISH_ASSERTION_VERB}(?:le|les|nos|se)?)(?![a-záéíóúñü])`, 'i');
+const SPANISH_GROUNDED_CONTINUATION_RE = /\b((?:el|su)\s+t[eé]cnico)\b[^;]*;\s*((?:llega|viene|estar[aá])\s+hoy\b[^.!?]*)/i;
 const SPANISH_WITHOUT_PREDICATE_RE = /\bsin\s+(?:llegar\s+a\s+)?(?:enviar|mandar|recibir|entregar|ofrecer|tener|haber)\b/i;
 const SPANISH_REASSURANCE_RE = /^\s*(?:no\s+(?:se\s+)?preocupe|no\s+hay\s+problema|sin\s+problema)\b[\s,:—–]*/i;
 const SPANISH_CERTAINTY_RE = /\b(?:sin\s+duda|no\s+s[oó]lo)\b/gi;
@@ -85,7 +86,9 @@ function spanishClaimIsUncertain(claim) {
 /** A regex hit wholly satisfied by one affirmative clause. */
 function assertedSpokenMatch(text, re, { prospective = false } = {}) {
   const global = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
-  const candidates = String(text || '').split(SENTENCE_SPLIT_RE).flatMap((statement) => {
+  const spoken = String(text || '');
+  const groundedContinuation = spoken.match(SPANISH_GROUNDED_CONTINUATION_RE);
+  const candidates = spoken.split(SENTENCE_SPLIT_RE).flatMap((statement) => {
     const candidates = [statement];
     for (const conjunction of statement.matchAll(SPANISH_COORDINATION_RE)) {
       const left = statement.slice(0, conjunction.index);
@@ -99,6 +102,7 @@ function assertedSpokenMatch(text, re, { prospective = false } = {}) {
     }
     return candidates;
   });
+  if (groundedContinuation) candidates.push(`${groundedContinuation[1]} ${groundedContinuation[2]}`);
   const claims = candidates.flatMap((candidate) => {
     return Array.from({ length: candidate.length }, (_, at) => clauseBounds(candidate, at))
       .filter((bounds, at, all) => all.findIndex((other) => other[0] === bounds[0] && other[1] === bounds[1]) === at)
@@ -111,7 +115,7 @@ function assertedSpokenMatch(text, re, { prospective = false } = {}) {
     const uncertain = spanishClaimIsUncertain(claim);
     global.lastIndex = 0;
     const match = global.exec(claim);
-    const evidence = match ? claim.slice(match.index, match.index + match[0].length + 1) : '';
+    const evidence = match ? claim.slice(0, match.index + match[0].length + 1) : '';
     const completed = prospective && SPANISH_COMPLETED_ASSERTION_RE.test(evidence) && !SPANISH_FUTURE_ASSERTION_RE.test(evidence);
     if (match && !denied && !uncertain && !completed) return match;
   }
