@@ -260,12 +260,14 @@ function periodAfter(toks, j) {
   return toks[k] === 'am' || toks[k] === 'pm' ? toks[k] : null;
 }
 
-// Is the hour at `i`, its mention ending at `end`, inexact: a fraction
-// lead-in ("half past two", "quarter past noon"), or a bound before it
-// ("before noon", "by two", "until two") or after it ("two or later", "noon
-// at the latest")? Such a mention never grounds an on-the-hour slot.
+// Is the hour at `i`, its mention ending at `end`, inexact: minutes before
+// it ("half past two", "twenty past two", "ten minutes past two", "ten to
+// two"), or a bound before it ("before noon", "by two", "until two") or after
+// it ("two or later", "noon at the latest")? Such a mention never grounds an
+// on-the-hour slot. A range's end ("one to two") never reaches here.
 function inexactAt(toks, i, end) {
-  return (['past', 'after', 'to'].includes(toks[i - 1]) && ['half', 'quarter'].includes(toks[i - 2]))
+  return (['past', 'after', 'to', 'til', 'till'].includes(toks[i - 1])
+    && (['half', 'quarter', 'minute', 'minutes'].includes(toks[i - 2]) || isMinuteToken(toks[i - 2])))
     || RELATIVE_HOUR_LEADS.has(toks[i - 1])
     || TRAILING_BOUNDS.some((bound) => toks.slice(end, end + bound.length).join(' ') === bound.join(' '));
 }
