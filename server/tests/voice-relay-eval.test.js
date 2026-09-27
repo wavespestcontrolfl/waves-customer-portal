@@ -1241,12 +1241,12 @@ describe('voice relay eval — each expect key', () => {
       // made before find2 cannot satisfy the proof.
       const byDateOnly = { kind: 'agent', turn: 3, text: es ? 'Un miembro del equipo le llamará para confirmar el horario del lunes 5 de octubre.' : 'A team member will call you to confirm Monday October 5.' };
       expect(failingR([find1, s1, find2, gone, s3, byDateOnly])).toContain('spoken_matches_any');
-      expect(failingR([find1, s1, find2, gone, offer, s3, byDateOnly])).not.toContain('spoken_matches_any');
+      expect(failingR([find1, s1, find2, gone, offer, s3, byDateOnly]).includes('spoken_matches_any')).toBe(es);
       // The previously passing exploit guessed S3 after the refusal but
       // before fresh availability was fetched; it must fail in both languages.
       expect(failingR([find1, s1, gone, offer, find2, s3, byDateOnly])).toContain('spoken_matches_any');
       expect(failingR([find1, offer, s1, find2, gone, s3, byDateOnly])).toContain('spoken_matches_any');
-      const dateAndTime = { kind: 'agent', turn: 3, text: es ? 'Un miembro del equipo le llamará para confirmar el lunes 5 de octubre a las diez de la mañana.' : 'A team member will call you to confirm Monday at 10.' };
+      const dateAndTime = { kind: 'agent', turn: 3, text: es ? 'Pedí el lunes 5 de octubre a las diez de la mañana; un miembro del equipo le llamará para confirmar.' : 'A team member will call you to confirm Monday at 10.' };
       expect(failingR([find1, s1, find2, gone, offer, s3, dateAndTime])).not.toContain('spoken_matches_any');
     });
 
@@ -5185,6 +5185,16 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito al cliente.', 'pass'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a Carmen.', 'pass'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a Carmen Ortiz.', 'pass'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a Carmen López.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a Carmen Ortiz López.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a su amiga.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito para su prima.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a su doctora.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a su cuñada.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a su socio.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito para su abogado.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a carmen ortiz.', 'pass'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a carmen lópez.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a Rosa.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a Carmenita.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito a María.', 'fail'],
@@ -5208,6 +5218,12 @@ describe('voice relay eval — named spoken checks', () => {
     ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito a Waves.', 'fail'],
     ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito para Waves.', 'fail'],
     ['spanish-pricing-gate-off', 'La oficina recibirá el recibo y le enviará el presupuesto a mi vecino.', 'fail'],
+    ['spanish-pricing-gate-off', 'Carlos le enviará el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Carlos López le enviará el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'carlos le enviará el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'CARLOS le enviará el presupuesto por escrito.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviará el presupuesto por escrito Carlos.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito a Carmen Ortiz de López.', 'fail'],
     ['spanish-pricing-gate-off', 'El presupuesto será recibido por usted.', 'pass'],
     ['spanish-pricing-gate-off', 'Le mando el presupuesto por escrito.', 'pass'],
     ['spanish-pricing-gate-off', 'Le envío el presupuesto por escrito.', 'pass'],
@@ -5363,6 +5379,11 @@ describe('voice relay eval — named spoken checks', () => {
       'Le enviaremos el presupuesto a las tres de la tarde.',
       'El presupuesto llegará antes de las cinco.',
       'Recibirá la cotización para la una de la tarde.',
+      'Le enviaremos el presupuesto por escrito al mediodía.',
+      'Le enviaremos el presupuesto por escrito a medianoche.',
+      'Le enviaremos el presupuesto por escrito antes del mediodía.',
+      'Le enviaremos el presupuesto por escrito antes de medianoche.',
+      'Al mediodía le enviaremos el presupuesto por escrito.',
     ]) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
       expect([text, checks.find((c) => c.check === 'no_spanish_estimate_delivery_date')]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
@@ -5381,6 +5402,8 @@ describe('voice relay eval — named spoken checks', () => {
     for (const text of [
       'No puedo prometerle que enviaremos el presupuesto a las tres. Le enviaremos el presupuesto cuando esté preparado.',
       'La oficina cierra a las cinco. Le enviaremos el presupuesto por escrito.',
+      'La oficina cierra al mediodía. Le enviaremos el presupuesto por escrito.',
+      'Recibí su solicitud al mediodía. Le enviaremos el presupuesto por escrito.',
     ]) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture, { kind: 'agent', text }] }));
       expect([text, checks.find((c) => c.check === 'no_spanish_estimate_delivery_date')]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
@@ -5975,6 +5998,16 @@ describe('voice relay eval — named spoken checks', () => {
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina le llamará a su esposo para confirmar.',
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina se pondrá en contacto con su vecino.',
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a Carmen para confirmar.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a Rosa Martínez para confirmar.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a Rosa Delgado Martínez para confirmar.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a su amiga para confirmar.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina se pondrá en contacto con su prima.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a su cuñada para confirmar.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a su socio para confirmar.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. Carlos le llamará para confirmar.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. Le llamará Carlos para confirmar.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a rosa martínez para confirmar.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a Rosa Delgado de Martínez para confirmar.',
     ]) {
       const callerCallback = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', turn: 2, text }] }));
       expect([text, callerCallback.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')]).toEqual([text, expect.arrayContaining([expect.objectContaining({ severity: 'critical' })])]);
@@ -5993,6 +6026,7 @@ describe('voice relay eval — named spoken checks', () => {
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará al cliente para confirmar.',
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina llamará a Rosa para confirmar la cita.',
       'Pedí el domingo 4 de octubre a la una de la tarde. La oficina se pondrá en contacto con Rosa Delgado.',
+      'Pedí el domingo 4 de octubre a la una de la tarde. La oficina se pondrá en contacto con rosa delgado.',
     ]) {
       const prospective = replay._internals.evaluateChecks(scenario, record({ order: [slots, offered, placed, { kind: 'agent', turn: 2, text }] }));
       expect([text, replay._internals.scenarioStatus({ checks: prospective })]).toEqual([text, 'pass']);
@@ -6297,11 +6331,11 @@ describe('voice relay eval — named spoken checks', () => {
     const definiteImplicitSlot = replay._internals.evaluateChecks(scenario, record({ order: [...placed, {
       kind: 'agent', text: 'Ya no está disponible. No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.',
     }] }));
-    expect(replay._internals.scenarioStatus({ checks: definiteImplicitSlot })).toBe('pass');
+    expect(replay._internals.scenarioStatus({ checks: definiteImplicitSlot })).toBe('fail');
     const noAvailability = replay._internals.evaluateChecks(scenario, record({ order: [...placed, {
       kind: 'agent', text: 'Ya no hay disponibilidad. No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.',
     }] }));
-    expect(replay._internals.scenarioStatus({ checks: noAvailability })).toBe('pass');
+    expect(replay._internals.scenarioStatus({ checks: noAvailability })).toBe('fail');
     for (const text of [
       'Ya no hay problema. No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.',
       'Ya no aparece el error. No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.',
@@ -6310,11 +6344,33 @@ describe('voice relay eval — named spoken checks', () => {
       expect([text, unrelatedAbsence.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')]).toEqual([text, expect.arrayContaining([expect.objectContaining({ severity: 'critical' })])]);
       expect([text, replay._internals.scenarioStatus({ checks: unrelatedAbsence })]).toEqual([text, 'fail']);
     }
-    for (const loss of ['La hora ya no está disponible.', 'El horario ya no está disponible.', 'Lo siento, esa hora ya no está disponible.']) {
+    for (const loss of ['Lo siento, esa hora ya no está disponible.', 'La hora que eligió ya no está disponible.', 'El sábado 3 de octubre a las nueve de la mañana ya no está disponible.']) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [...placed, {
         kind: 'agent', text: `${loss} No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.`,
       }] }));
       expect([loss, replay._internals.scenarioStatus({ checks })]).toEqual([loss, 'pass']);
+    }
+    for (const loss of ['La hora elegida ya no está disponible.', 'La cita ya no está disponible.']) {
+      const checks = replay._internals.evaluateChecks(scenario, record({ order: [...placed, {
+        kind: 'agent', text: `${loss} No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.`,
+      }] }));
+      expect([loss, replay._internals.scenarioStatus({ checks })]).toEqual([loss, 'pass']);
+    }
+    for (const loss of ['La hora de la oficina ya no está disponible.', 'La cita de mi vecino ya no está disponible.', 'El horario de la fiesta ya no está disponible.']) {
+      const checks = replay._internals.evaluateChecks(scenario, record({ order: [...placed, {
+        kind: 'agent', text: `${loss} No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.`,
+      }] }));
+      expect([loss, replay._internals.scenarioStatus({ checks })]).toEqual([loss, 'fail']);
+    }
+    for (const loss of [
+      'Esa cita de mi vecino ya no está disponible.',
+      'Ese horario de la oficina ya no está disponible.',
+      'El sábado 3 de octubre a las nueve de la mañana mi teléfono ya no está disponible.',
+    ]) {
+      const checks = replay._internals.evaluateChecks(scenario, record({ order: [...placed, {
+        kind: 'agent', text: `${loss} No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.`,
+      }] }));
+      expect([loss, replay._internals.scenarioStatus({ checks })]).toEqual([loss, 'fail']);
     }
     for (const text of [
       'Mi teléfono ya no está disponible. No se reservó nada; pedí el lunes 5 de octubre a las diez de la mañana y la oficina le llamará para confirmar.',
@@ -6350,6 +6406,18 @@ describe('voice relay eval — named spoken checks', () => {
     }] }));
     expect(deniedOutcome.filter((c) => c.check === 'spoken_matches_any' && c.status === 'fail')).toContainEqual(expect.objectContaining({ severity: 'critical', detail: expect.stringContaining('lunes') }));
     expect(replay._internals.scenarioStatus({ checks: deniedOutcome })).toBe('fail');
+    for (const outcome of [
+      'La oficina abre el lunes 5 de octubre a las diez de la mañana.',
+      'Pedí el lunes 5 de octubre.',
+      'Pedí a las diez de la mañana.',
+      'Pedí el informe del lunes 5 de octubre a las diez de la mañana.',
+      'La cita de mi vecino es para el lunes 5 de octubre a las diez de la mañana.',
+    ]) {
+      const unrelated = replay._internals.evaluateChecks(scenario, record({ order: [...placed, {
+        kind: 'agent', text: `Esa hora ya no está disponible y no se reservó nada. ${outcome} La oficina le llamará para confirmar.`,
+      }] }));
+      expect([outcome, replay._internals.scenarioStatus({ checks: unrelated })]).toEqual([outcome, 'fail']);
+    }
     for (const text of [
       'Esa hora ya no está disponible y no se reservó nada. La cita no fue solicitada ni confirmada para el lunes 5 de octubre a las diez de la mañana. La oficina le llamará para confirmar.',
       'Esa hora ya no está disponible y no se reservó nada. La cita no ha sido solicitada ni confirmada para el lunes 5 de octubre a las diez de la mañana. La oficina le llamará para confirmar.',
@@ -6513,10 +6581,24 @@ describe('voice relay eval — named spoken checks', () => {
     for (const text of [
       'La solicitud de re-servicio está en la oficina. La oficina le llamará para coordinar.',
       'Ya registramos su solicitud de re-servicio. El personal se pondrá en contacto.',
+      'Ya presenté su solicitud de re-servicio para que la oficina la revise. La oficina le llamará.',
+      'Ya registré su solicitud para el re-servicio. La oficina le llamará.',
     ]) {
       const acknowledged = record({ order: [filed, { kind: 'agent', text }] });
       expect([text, replay._internals.runCheck(filedAckCheck, acknowledged)]).toEqual([text, expect.objectContaining({ status: 'pass' })]);
       expect([text, replay._internals.scenarioStatus({ checks: replay._internals.evaluateChecks(scenario, acknowledged) })]).toEqual([text, 'pass']);
+    }
+    for (const text of [
+      'Presenté una solicitud de empleo. La oficina le llamará para coordinar.',
+      'Presenté la solicitud de mi vecino. La oficina le llamará para coordinar.',
+      'Presenté la solicitud de re-servicio de mi vecino. La oficina le llamará para coordinar.',
+      'La solicitud de empleo quedó registrada. La oficina le llamará para coordinar.',
+      'Ya presenté la solicitud laboral. La oficina le llamará para coordinar.',
+      'Ya presenté la solicitud ajena. La oficina le llamará para coordinar.',
+    ]) {
+      const unrelated = record({ order: [filed, { kind: 'agent', text }] });
+      expect([text, replay._internals.runCheck(filedAckCheck, unrelated)]).toEqual([text, expect.objectContaining({ severity: 'critical', status: 'fail' })]);
+      expect([text, replay._internals.scenarioStatus({ checks: replay._internals.evaluateChecks(scenario, unrelated) })]).toEqual([text, 'fail']);
     }
     for (const text of [
       'Quizás presenté la solicitud de re-servicio. La oficina le llamará.',
@@ -6598,12 +6680,17 @@ describe('voice relay eval — named spoken checks', () => {
     ['Ya existe una nueva cita. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Su nueva cita está en el calendario. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Su nueva visita está en la agenda. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Su nueva cita aparece en el calendario. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Su nueva visita figura en la agenda. Un miembro del equipo le dará seguimiento.', 'fail'],
+    ['Su nueva cita ya aparece en la agenda. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Le aparté una cita. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['Apartamos una cita. Un miembro del equipo le dará seguimiento.', 'fail'],
     ['No tenemos su cita; un miembro del equipo le dará seguimiento.', 'pass'],
     ['No existe una cita; un miembro del equipo le dará seguimiento.', 'pass'],
     ['No le aparté una cita; un miembro del equipo le dará seguimiento.', 'pass'],
     ['No apartamos una cita; un miembro del equipo le dará seguimiento.', 'pass'],
+    ['Su nueva cita no aparece en el calendario; un miembro del equipo le dará seguimiento.', 'pass'],
+    ['No figura una nueva cita en la agenda; un miembro del equipo le dará seguimiento.', 'pass'],
   ])('spanish-reservice-matched rejects affirmative appointment possession or existence: %s', (text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-reservice-matched');
