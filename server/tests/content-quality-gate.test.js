@@ -1465,6 +1465,8 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityComparison(noTable).reason).toBe('choice_framed_without_ComparisonTable');
     expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## Bait or spray?\nText.' }).ok).toBe(false);
     expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## Bait or spray: which works?\nText.' }).ok).toBe(false);
+    expect(checkCitabilityComparison({ title: 'Ghost Ants in Venice', body: '## Bait or spray\nText.' }).ok).toBe(false);
+    expect(checkCitabilityComparison({ title: 'DIY or call a professional', body: '## Overview\nText.' }).ok).toBe(false);
     const withTable = { ...noTable, body: '<ComparisonTable columns={["What to weigh","Misting","Barrier"]} rows={[]} />' };
     expect(checkCitabilityComparison(withTable).ok).toBe(true);
   });
@@ -1485,8 +1487,14 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityHowToChoose(plain).reason).toBe('no_comparison_to_choose_from');
     const tableOnly = { frontmatter: { post_type: 'diagnostic' }, body: '<ComparisonTable columns={["a"]} rows={[]} />\n## Next steps\nText.' };
     expect(checkCitabilityHowToChoose(tableOnly).ok).toBe(false);
-    const withHeading = { ...tableOnly, body: `${tableOnly.body}\n## Which option fits your situation\n- If X → Y\n- If Z → W\n1. If Q → R` };
+    const withHeading = { ...tableOnly, body: `${tableOnly.body}\n## Which option fits your situation\n- If X → Y\n- If Z → W\n- If Q → R` };
     expect(checkCitabilityHowToChoose(withHeading).ok).toBe(true);
+  });
+
+  test('how_to_choose reports alongside comparison as soon as the post frames a choice', () => {
+    const draft = { frontmatter: { post_type: 'diagnostic' }, body: '## Bait vs spray\nPlain prose.' };
+    expect(checkCitabilityComparison(draft)).toEqual({ ok: false, reason: 'choice_framed_without_ComparisonTable' });
+    expect(checkCitabilityHowToChoose(draft)).toEqual({ ok: false, reason: 'no_how_to_choose_section' });
   });
 
   test('how_to_choose requires an H2 with 3+ criteria — not an H3, not prose (Codex P2)', () => {
@@ -1504,6 +1512,8 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n- If A → B\n  - because X\n- If C → D\n- If E → F\n  1. detail` }).ok).toBe(true);
     // H3 subsections inside the H2 stay part of it.
     expect(checkCitabilityHowToChoose({ body: `${table}## How to choose\n### Signs\n${bullets}` }).ok).toBe(true);
+    const numbered = checkCitabilityHowToChoose({ body: `${table}## How to choose\n1. Inspect the area\n2. Apply bait\n3. Recheck the trail` });
+    expect(numbered).toEqual({ ok: false, reason: 'how_to_choose_has_0_criteria_need_3+' });
   });
 
   test('evaluate(): citability misses surface in soft_failures but never change ok/score', () => {
@@ -1519,8 +1529,9 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(r.ok).toBe(true);
     expect(r.total_score).toBe(57);
     const softNames = r.soft_failures.map((f) => f.name);
-    expect(softNames).toEqual(expect.arrayContaining(['citability_named_sources', 'citability_concrete_specifics', 'citability_comparison']));
-    expect(softNames).not.toContain('citability_how_to_choose'); // no table on a non-choice post_type → n/a
+    expect(softNames).toEqual(expect.arrayContaining([
+      'citability_named_sources', 'citability_concrete_specifics', 'citability_comparison', 'citability_how_to_choose',
+    ]));
   });
 });
 
@@ -1566,6 +1577,16 @@ describe('citability backfill completion (Codex r6 P2s)', () => {
     expect(r).toEqual({
       ok: false,
       reason: 'planned_gaps_unresolved:comparison(missing_ComparisonTable),how_to_choose(no_how_to_choose_section)',
+    });
+  });
+  test('unknown planned gap identifiers fail closed', () => {
+    expect(checkCitabilityBackfillGapsCleared(
+      { body: 'Per UF/IFAS, ants trail after rain.' },
+      backfill(['named_sources', 'named_sorces']),
+      { previousVersion: { body: 'Ants trail after rain.' } },
+    )).toEqual({
+      ok: false,
+      reason: 'planned_gaps_unresolved:named_sorces(unsupported_citability_gap)',
     });
   });
   test('improvement_over_prior: a backfill targeted edit needs no +200 chars, but the 20% loss floor holds', () => {
@@ -1625,5 +1646,16 @@ describe('citability checks read rendered Markdown only (Codex r8 P2)', () => {
     const table = '<ComparisonTable columns={["a"]} rows={[]} />\n';
     expect(checkCitabilityHowToChoose({ body: `${table}\`\`\`md\n## How to choose\n- a\n- b\n- c\n\`\`\`` }).reason).toBe('no_how_to_choose_section');
     expect(checkCitabilityNamedSources({ body: '<!-- Per UF/IFAS, ants trail. -->\nAnts trail after rain.' }).ok).toBe(false);
+  });
+  test('definitely hidden containers and tag attributes cannot satisfy citability checks', () => {
+    expect(checkCitabilityNamedSources({ body: '<div hidden>According to UF/IFAS, ants trail after rain.</div>' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: '<aside aria-label="According to UF/IFAS">Ants trail after rain.</aside>' }).ok).toBe(false);
+    expect(checkCitabilityComparison({
+      title: 'Bait vs spray',
+      body: '<div style="display:none"><ComparisonTable columns={["Bait","Spray"]} rows={[]} /></div>',
+    }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({
+      body: '<div style="display:block">According to UF/IFAS, ants trail after rain.</div>',
+    }).ok).toBe(true);
   });
 });

@@ -215,6 +215,39 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
     expect(String(retryWrite.patch.signal_metadata)).toContain('QUALITY_GATE');
   });
 
+  test('structured retry preserves every citability nudge beyond the reviewer-summary cap', async () => {
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = 'false';
+    const queue = makeQueue({ id: 'opp_citability_feedback', action_type: 'new_supporting_blog', claimed_at: claimedAt, signal_metadata: {} });
+    const softFailures = [
+      { name: 'voice_match', reason: 'voice' },
+      { name: 'two_plus_city_mentions', reason: 'cities' },
+      { name: 'faq_section_present', reason: 'faq' },
+      { name: 'citability_named_sources', reason: 'no_named_source_attribution' },
+      { name: 'citability_concrete_specifics', reason: 'vague_qualifier_without_measurement' },
+      { name: 'citability_comparison', reason: 'choice_framed_without_ComparisonTable' },
+      { name: 'citability_how_to_choose', reason: 'no_how_to_choose_section' },
+    ];
+    const { runner, dbMock } = loadRunner({
+      queue,
+      briefBuilder: makeBriefBuilder(),
+      dispatcher: makeDispatcher(),
+      uniquenessGate: { evaluateBlog: jest.fn().mockReturnValue({ ok: true }), evaluate: jest.fn().mockReturnValue({ ok: true }) },
+      qualityGate: { evaluate: jest.fn().mockReturnValue({ ok: false, hard_failures: ['word_count'], soft_failures: softFailures, total_score: 40, min_total_score: 80 }) },
+    });
+
+    await expect(runner.runNext()).resolves.toMatchObject({ outcome: 'deferred_gate_retry' });
+
+    const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');
+    const stored = JSON.parse(retryWrite.patch.signal_metadata).gate_retry.findings;
+    expect(stored.map((f) => f.code)).toEqual(expect.arrayContaining([
+      'CITABILITY_NAMED_SOURCES',
+      'CITABILITY_CONCRETE_SPECIFICS',
+      'CITABILITY_COMPARISON',
+      'CITABILITY_HOW_TO_CHOOSE',
+    ]));
+  });
+
   test('second failure (gate_retry already recorded) skips silently — never pending_review', async () => {
     const queue = makeQueue({
       id: 'opp_gate_2',

@@ -4261,6 +4261,17 @@ function aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionR
     blocking.push({ severity: 'P1', code: 'SEO_COMPLETION_GATE', message: `SEO completion failed (${Number(seoCompletionResult?.summary?.p0 || 0)} P0 / ${Number(seoCompletionResult?.summary?.p1 || 0)} P1 findings)` });
   }
   if (prePublishVisibilityResult?.passed !== true) blocking.push({ severity: 'P1', code: 'AI_VISIBILITY_GATE', message: 'draft failed the AI-visibility static checks' });
+  // The compact reviewer summary intentionally caps ordinary soft failures,
+  // but every citability nudge must reach the one structured retry even when
+  // three earlier nudges occupy that display budget.
+  for (const finding of qualityResult?.soft_failures || []) {
+    if (!String(finding?.name || '').startsWith('citability_')) continue;
+    blocking.push({
+      severity: 'P2',
+      code: String(finding.name).toUpperCase(),
+      message: `citability nudge: ${finding.reason || finding.name}`,
+    });
+  }
   if (blocking.length && summary) blocking[0].message = `${blocking[0].message}: ${String(summary)}`;
   return blocking;
 }

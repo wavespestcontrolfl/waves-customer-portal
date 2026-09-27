@@ -1160,8 +1160,12 @@ function nonBlogTarget(brief) {
 // never restore inline comments or code beside otherwise visible prose.
 function renderedCitabilityBody(body) {
   const raw = String(body || '');
-  const { blankNonRenderedMarkdown } = require('./content-guardrails');
-  const blanked = blankNonRenderedMarkdown(raw);
+  const { blankNonRenderedMarkdown, blankDefinitelyHiddenContent, maskJsxAttrQuotes } = require('./content-guardrails');
+  // First remove comments/code, then containers a browser definitely hides;
+  // finally mask JSX/HTML attribute values, which are configuration rather
+  // than reader-visible copy. Keep tag names so visible ComparisonTable
+  // components remain detectable.
+  const blanked = maskJsxAttrQuotes(blankDefinitelyHiddenContent(blankNonRenderedMarkdown(raw)));
   const orig = raw.split(/\r?\n/);
   const mask = blanked.split(/\r?\n/);
   if (orig.length !== mask.length) return blanked;
@@ -1274,7 +1278,7 @@ const COMPARISON_TABLE_RE = /<ComparisonTable\b/;
 // "which option/approach…". A bare "Should you…?" or a yes/no question is
 // NOT a two-path comparison (it fired on 73% of the live corpus in the
 // 2026-09-25 calibration run — most were single-answer questions).
-const CHOICE_FRAMING_RE = /\bvs\.?\b|\bversus\b|^#*\s*[\w'’-]+(?: [\w'’-]+){0,3} or [\w'’-]+(?: [\w'’-]+){0,3}(?:\s*[:—-]\s*[^?\n]{1,80})?\?\s*$|\bwhich (?:one|option|approach|method|plan|treatment|service) (?:is|fits|works|makes|do)\b/i;
+const CHOICE_FRAMING_RE = /\bvs\.?\b|\bversus\b|^#*\s*[\w'’-]+(?: [\w'’-]+){0,3} or [\w'’-]+(?: [\w'’-]+){0,3}(?:\s*[:—-]\s*[^?\n]{1,80})?\??\s*$|\bwhich (?:one|option|approach|method|plan|treatment|service) (?:is|fits|works|makes|do)\b/i;
 
 function headingLines(body) {
   return String(body || '').split(/\r?\n/).filter((l) => /^#{1,3}\s+\S/.test(l));
@@ -1313,7 +1317,7 @@ function howToChooseSectionCriteria(body) {
     let items = 0;
     let topIndent = null;
     for (let j = i + 1; j < lines.length && !/^#{1,2}\s/.test(lines[j]); j += 1) {
-      const m = lines[j].match(/^(\s*)(?:[-*+]|\d+[.)])\s+\S/);
+      const m = lines[j].match(/^(\s*)[-*+]\s+\S/);
       if (!m) continue;
       const indent = m[1].replace(/\t/g, '    ').length;
       if (topIndent === null || indent < topIndent) { topIndent = indent; items = 0; }
@@ -1327,7 +1331,7 @@ function howToChooseSectionCriteria(body) {
 function checkCitabilityHowToChoose(draft, brief) {
   if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
   const body = renderedCitabilityBody(draft.body);
-  const applies = CHOICE_POST_TYPES.has(draftPostType(draft)) || COMPARISON_TABLE_RE.test(body);
+  const applies = CHOICE_POST_TYPES.has(draftPostType(draft)) || COMPARISON_TABLE_RE.test(body) || postFramesAChoice(draft);
   if (!applies) return { ok: true, reason: 'no_comparison_to_choose_from' };
   const criteria = howToChooseSectionCriteria(body);
   if (criteria < 0) return { ok: false, reason: 'no_how_to_choose_section' };
@@ -1369,9 +1373,11 @@ function backfillGapVerdict(gap, draft, brief, context) {
       ? { ok: true }
       : { ok: false, reason: 'missing_concrete_specific' };
   }
+  if (!Object.prototype.hasOwnProperty.call(CITABILITY_GAP_CHECKS, gap)) {
+    return { ok: false, reason: 'unsupported_citability_gap' };
+  }
   return structuralCitabilityVerdict(gap, draft)
-    || CITABILITY_GAP_CHECKS[gap]?.(draft, brief, context || {})
-    || { ok: true };
+    || CITABILITY_GAP_CHECKS[gap](draft, brief, context || {});
 }
 
 function checkCitabilityBackfillGapsCleared(draft, brief, context) {
