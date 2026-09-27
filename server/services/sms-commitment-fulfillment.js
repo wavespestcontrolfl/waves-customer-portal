@@ -151,6 +151,13 @@ const INVOICE_KEYS = ['invoice_id', 'waves_invoice_id', 'dispute_invoice_id'];
 const namesInvoice = (alias, invoiceSql) => `(${INVOICE_KEYS.map((key) => `${alias}.metadata::jsonb ->> '${key}' = ${invoiceSql}`).join(' OR ')})`;
 const namesNoInvoice = (alias) => INVOICE_KEYS.map((key) => `COALESCE(${alias}.metadata::jsonb ->> '${key}', '') = ''`).join(' AND ');
 
+// A partial refund leaves the row 'paid' and records the amount beside it
+// (stripe-webhook.js): money refunded in full never landed, and a partial
+// refund is shown to the model and changes the evidence, so a refund racing
+// a close fails the recheck (pre-push audit).
+const NOT_FULLY_REFUNDED = (t) => `COALESCE(${t}.refund_amount, 0) < ${t}.amount`;
+const refundNote = (refunded) => (Number(refunded) > 0 ? `; $${Number(refunded).toFixed(2)} of it refunded` : '');
+
 async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
   const after = new Date(message.created_at);
   const customerId = message.customer_id;
@@ -260,9 +267,10 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .leftJoin('scheduled_services as pinv_visit', 'pinv_visit.id', 'pinv.scheduled_service_id')
           .where({ 'p.customer_id': customerId, 'p.status': 'paid' })
           .whereRaw("COALESCE(p.metadata::jsonb ->> 'payer_id', '') = ''")
+          .whereRaw(NOT_FULLY_REFUNDED('p'))
           .whereRaw(`${settledAtSql} > ? AND ${settledAtSql} <= ?`, [after, now])
           .distinctOn('p.id').orderBy('p.id').orderByRaw(`(${exactMatchSql} OR ${manualMatchSql}) DESC, pinv.id`)
-          .select('p.id', 'p.amount as payment_amount', conn.raw(`${settledAtSql} AS settled_at`), 'pinv.id as invoice_id',
+          .select('p.id', 'p.amount as payment_amount', 'p.refund_amount', conn.raw(`${settledAtSql} AS settled_at`), 'pinv.id as invoice_id',
             'pinv.title', 'pinv.invoice_number', 'pinv_visit.property_id as property_id', conn.raw('pinv.paid_at IS NOT NULL AS paid_in_full'))
           .as('invoice_payments'))
           .orderBy([{ column: 'settled_at', order: 'desc' }, { column: 'id', order: 'desc' }]).limit(LIMIT + 1),
@@ -277,6 +285,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         // PaymentIntent: no double count.
         conn('payments as lp').where({ 'lp.customer_id': customerId, 'lp.status': 'paid' })
           .whereRaw("COALESCE(lp.metadata::jsonb ->> 'payer_id', '') = ''")
+          .whereRaw(NOT_FULLY_REFUNDED('lp'))
           .whereRaw(namesNoInvoice('lp'))
           .whereNotExists(function claimedByInvoice() {
             this.select(conn.raw('1')).from('invoices as claim_inv')
@@ -290,7 +299,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           // email an operator typed by hand — it never reaches the model.
           // Only the structured method (CREDIT_PAYMENT_METHODS, validated at
           // the admin-customers.js writer) does, when set.
-          .select('lp.id', 'lp.amount', 'lp.payment_date', 'lp.created_at', conn.raw("lp.metadata->>'method' as method"),
+          .select('lp.id', 'lp.amount', 'lp.refund_amount', 'lp.payment_date', 'lp.created_at', conn.raw("lp.metadata->>'method' as method"),
             conn.raw("(lp.metadata->>'type') = 'monthly_autopay' as monthly_autopay"),
             conn.raw(`${settledAt('lp')} AS settled_at`)),
         // A received (or already credited-forward) estimate deposit —
@@ -300,20 +309,20 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         // never match. received_at is the Stripe settlement moment.
         conn('estimate_deposits as ed').join('estimates', 'estimates.id', 'ed.estimate_id')
           .modify((q) => whereEstimateCustomerOwnership(q, customerId))
-          .whereIn('ed.status', ['received', 'credited'])
+          .whereIn('ed.status', ['received', 'credited']).whereRaw('ed.refunded_amount < ed.amount')
           .where('ed.received_at', '>', after).where('ed.received_at', '<=', now)
           .orderBy('ed.received_at', 'desc').limit(LIMIT + 1)
-          .select('ed.id', 'ed.estimate_id', 'ed.amount', 'ed.received_at', 'estimates.property_id as property_id'),
+          .select('ed.id', 'ed.estimate_id', 'ed.amount', 'ed.refunded_amount', 'ed.received_at', 'estimates.property_id as property_id'),
       ]).then(([invoicePayments, ledger, deposits]) => {
         const legs = [
           invoicePayments.map(({ paid_in_full: paidInFull, ...row }) => ({ ...row, payment_source: 'invoice',
             text: `Payment of $${Number(row.payment_amount).toFixed(2)} toward invoice ${row.invoice_number || row.invoice_id}`
-              + `${row.title ? ` (${row.title})` : ''} received ${etDateString(new Date(row.settled_at))}`
+              + `${row.title ? ` (${row.title})` : ''} received ${etDateString(new Date(row.settled_at))}${refundNote(row.refund_amount)}`
               + `${paidInFull ? '; the invoice is paid in full' : ''}` })),
           ledger.map(({ monthly_autopay: autopay, ...row }) => ({ ...row, payment_source: 'ledger', property_id: null,
-            text: `Payment of $${Number(row.amount).toFixed(2)} recorded ${dateOnlyString(row.payment_date)}${row.method ? ` (${row.method})` : ''}${autopay ? ' (monthly autopay)' : ''}` })),
+            text: `Payment of $${Number(row.amount).toFixed(2)} recorded ${dateOnlyString(row.payment_date)}${row.method ? ` (${row.method})` : ''}${autopay ? ' (monthly autopay)' : ''}${refundNote(row.refund_amount)}` })),
           deposits.map((row) => ({ ...row, payment_source: 'deposit',
-            text: `Deposit of $${Number(row.amount).toFixed(2)} received ${etDateString(new Date(row.received_at))}` })),
+            text: `Deposit of $${Number(row.amount).toFixed(2)} received ${etDateString(new Date(row.received_at))}${refundNote(row.refunded_amount)}` })),
         ];
         // Each leg is capped on its OWN LIMIT, so together they can run
         // past LIMIT with nothing lost; only a leg that overflowed marks the

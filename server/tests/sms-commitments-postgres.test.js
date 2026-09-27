@@ -2164,6 +2164,37 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(grounded).toMatchObject({ verdict: 'fulfilled', record_id: first.id, linked_record_type: 'invoice', linked_record_id: invoice.id });
   });
 
+  test('Codex #4996 r4 pre-push: a partial refund is shown to the model and fails a close it races; money refunded in full is never evidence', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [invoice] = await mockPg('invoices').insert({ customer_id: message.customer_id, token: randomUUID(), invoice_number: 'WPC-2026-0971',
+      title: 'Quarterly Pest Control', total: 125, subtotal: 125, line_items: '[]', status: 'paid', paid_at: after }).returning('id');
+    const [payment] = await mockPg('payments').insert({ customer_id: message.customer_id, amount: 125, status: 'paid', payment_date: etDateString(after),
+      metadata: JSON.stringify({ invoice_id: invoice.id }), created_at: after }).returning('id');
+    // Refunded in full but left 'paid': never money landing.
+    await mockPg('payments').insert({ customer_id: message.customer_id, amount: 40, refund_amount: 40, refund_status: 'full', status: 'paid',
+      payment_date: etDateString(after), metadata: JSON.stringify({ source: 'account_credit_prepayment', method: 'cash' }), created_at: after });
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, status: 'accepted', service_interest: 'Termite' }).returning('id');
+    await mockPg('estimate_deposits').insert({ estimate_id: estimate.id, amount: 150, refunded_amount: 50, status: 'received', received_at: after,
+      stripe_payment_intent_id: 'pi_deposit_partly_refunded' });
+    const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const payments = evidence.records.filter((r) => r.type === 'payment');
+    expect(payments.map((r) => r.payment_source).sort()).toEqual(['deposit', 'invoice']);
+    expect(payments.find((r) => r.payment_source === 'deposit').text).toContain('; $50.00 of it refunded');
+    const witness = payments.find((r) => r.payment_source === 'invoice');
+    expect(witness.text).not.toContain('refunded');
+    const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: witness.text }, evidence, commitment);
+    const verdict = { ...grounded, evidence_hash: fulfillmentFingerprint(commitment, evidence).evidenceHash };
+    const closes = () => mockPg.transaction((trx) => revalidateSmsFulfillment(trx, commitment, message, verdict, now));
+    expect(await closes()).toBe(true);
+    // A partial refund lands between the check and the close.
+    await mockPg('payments').where({ id: payment.id }).update({ refund_amount: 25, refund_status: 'partial' });
+    expect(await closes()).toBe(false);
+    const recheck = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    expect(recheck.records.find((r) => r.id === payment.id).text).toContain('; $25.00 of it refunded');
+  });
+
   test('Codex #4996 r3: a partial payment on an invoice still open is money landing, and reads as partial', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);

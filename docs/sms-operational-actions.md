@@ -49,12 +49,12 @@ prepayment applied at completion by when it was prepaid), a staff-recorded cash,
 or Zelle payment, a customer-level card charge such as the monthly autopay, or a
 received estimate deposit. A payment receipt (text, App push or email) is not evidence
 of its own; the money row it reports is. Account credit, third-party payers, refunds and
-disputes are never money landing; a payment never answers a request to change how the
-customer pays, though a term the customer negates ("don't refund it") is not such a
-request; money tied to another property never answers a question about this one; and a
-staff "received" text never closes it. The model must cite the payment; the close locks
-it, and the invoice or estimate it depends on, and rechecks it. Staff payment notes
-never reach the model.
+disputes are never money landing (a partial refund is shown beside the payment it
+reduces); a payment never answers a request to change how the customer pays, though a
+term the customer negates ("don't refund it") is not such a request; money tied to
+another property never answers a question about this one; and a staff "received" text
+never closes it. The model must cite the payment; the close locks it, and the invoice or
+estimate it depends on, and rechecks it. Staff payment notes never reach the model.
 
 ## Verification
 
