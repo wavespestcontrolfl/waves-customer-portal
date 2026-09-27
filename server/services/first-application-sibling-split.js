@@ -186,6 +186,30 @@ function invoiceMoneyFingerprint(invoice) {
   });
 }
 
+// Money-ONLY fingerprint — everything invoiceMoneyFingerprint hashes
+// EXCEPT `status` (pre-push P1: a manual-clear resolution's own money
+// fingerprint must not include status. invoiceMoneyFingerprint's `status`
+// field exists for maybeAutoClearBillingReview, whose window is short —
+// review opened, sibling realigns soon after — where a status change
+// plausibly means something happened to the invoice worth re-reviewing.
+// A manual resolution's window is open-ended: the invoice goes on to
+// progress through its ordinary delivery lifecycle — draft -> scheduled ->
+// sending -> sent -> paid — with NO money change at all, purely because
+// time passed and it got sent/paid normally. Reusing the status-inclusive
+// fingerprint here would reopen a correctly-resolved review the moment the
+// invoice was next sent or paid, exactly the false-reopen this fix exists
+// to stop. isDivergenceAlreadyResolved and clearBillingReview's resolution
+// record both use this one instead; maybeAutoClearBillingReview keeps
+// invoiceMoneyFingerprint (with status) unchanged.
+function invoiceMoneyOnlyFingerprint(invoice) {
+  return JSON.stringify({
+    total: invoice?.total ?? null,
+    subtotal: invoice?.subtotal ?? null,
+    discount_amount: invoice?.discount_amount ?? null,
+    lineItems: parseLineItems(invoice?.line_items) || invoice?.line_items || null,
+  });
+}
+
 function parseLineItems(raw) {
   if (Array.isArray(raw)) return raw;
   if (typeof raw !== 'string' || !raw.trim()) return null;
@@ -412,7 +436,11 @@ async function clearBillingReview(invoiceId, expectedVersion, database = db, act
       resolvedAt: new Date().toISOString(),
       resolvedBy: actorId || null,
       resolvedSiblingIds: Array.isArray(context?.divergingSiblingIds) ? context.divergingSiblingIds : [],
-      resolvedInvoiceMoneyFingerprint: invoiceMoneyFingerprint(invoice),
+      // Money-only (no status) — see invoiceMoneyOnlyFingerprint: this
+      // resolution's window is open-ended, so the invoice's own normal
+      // delivery progress (draft -> scheduled -> sent -> paid) must never
+      // by itself count as "the invoice changed".
+      resolvedInvoiceMoneyFingerprint: invoiceMoneyOnlyFingerprint(invoice),
     };
     const [updated] = await trx('invoices')
       .where({ id: invoiceId })
@@ -456,8 +484,13 @@ function isDivergenceAlreadyResolved(invoice, diverging) {
   );
   const everyDivergingSiblingWasResolved = diverging.every((d) => resolvedIds.has(String(d.id)));
   if (!everyDivergingSiblingWasResolved) return false;
+  // Money-only (no status) — see invoiceMoneyOnlyFingerprint. Must match
+  // exactly what the resolution recorded, or an invoice that simply
+  // progressed through its ordinary delivery lifecycle since the clear
+  // (draft -> scheduled -> sent -> paid, no money change at all) would
+  // wrongly look "touched" and reopen a correctly-resolved review.
   return typeof context.resolvedInvoiceMoneyFingerprint === 'string'
-    && context.resolvedInvoiceMoneyFingerprint === invoiceMoneyFingerprint(invoice);
+    && context.resolvedInvoiceMoneyFingerprint === invoiceMoneyOnlyFingerprint(invoice);
 }
 
 // The trivial auto-clear (owner ruling): EVERY sibling this review recorded

@@ -808,6 +808,30 @@ suite('first-application-sibling-split — same-trip billing review on date chan
       expect(result.opened).toBe(true);
     }));
 
+    test('manual clear, then the invoice is simply sent/paid (status-only change, no money change) — still does NOT reopen for the same resolved sibling', () => rollbackTest(async (trx) => {
+      const ids = await fixture(trx);
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+      await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      const seen = await trx('invoices').where({ id: ids.invoiceId }).first();
+      const version = billingReviewVersion(seen);
+      await clearBillingReview(ids.invoiceId, version, trx);
+
+      // The invoice simply progresses through its ordinary delivery
+      // lifecycle after the clear — sent, then paid — with NO money change
+      // at all. The resolution's own fingerprint must be money-only (never
+      // status), or this alone would look like "the invoice changed" and
+      // wrongly reopen a correctly-resolved review.
+      await trx('invoices').where({ id: ids.invoiceId })
+        .update({ status: 'sent', sent_at: new Date(), token: randomUUID() });
+      await trx('invoices').where({ id: ids.invoiceId }).update({ status: 'paid' });
+
+      await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-07' });
+      const result = await flagFirstApplicationInvoiceReviewOnDateChange(trx, ids.lawnId);
+      expect(result.action).toBe('skipped');
+      expect(result.reason).toBe('already_resolved_by_manual_clear');
+      expect((await readState(trx, ids)).invoice.billing_review_opened_at).toBeNull();
+    }));
+
     test('manual clear, then the invoice looks re-combined (money fingerprint changed) — reopens even for the previously-resolved sibling', () => rollbackTest(async (trx) => {
       const ids = await fixture(trx);
       await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
