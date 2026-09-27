@@ -32,7 +32,7 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
       for (const key of ['service_address_line1','service_address_line2','service_address_city','service_address_zip']) t.string(key);
     });
     await knex.schema.createTable('property_preferences', t => { t.uuid('customer_id').primary(); t.timestamp('irrigation_home_changed_at'); });
-    await knex.schema.createTable('customer_turf_profiles', t => { t.uuid('customer_id').primary(); t.integer('lawn_sqft'); t.timestamp('updated_at'); });
+    await knex.schema.createTable('customer_turf_profiles', t => { t.uuid('customer_id').primary(); t.integer('lawn_sqft'); t.string('grass_type'); t.timestamp('updated_at'); });
     await knex.schema.createTable('audit_log', t => {
       t.increments('id'); t.string('actor_type'); t.uuid('actor_id'); t.string('action'); t.string('resource_type'); t.uuid('resource_id');
       t.jsonb('metadata'); t.string('ip_address'); t.string('user_agent');
@@ -130,6 +130,30 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
     lookup.mockRejectedValue(new Error('fixture cache unavailable'));
     const first = await read(scope());
     expect((await save(scope(), first.version, { beds: { sqft: 0, source: 'field' } })).areas.beds.sqft).toBe(0);
+  });
+  test('legacy turf edits succeed while dark and withdraw only a changed primary lawn review', async () => {
+    const first = await read(scope());
+    await save(scope(), first.version, { lawn: { sqft: 4000, source: 'field' }, beds: { sqft: 900, source: 'field' } });
+    const secondaryScope = { customerId, propertyId: second.id };
+    await save(secondaryScope, (await read(secondaryScope)).version, { lawn: { sqft: 1200, source: 'field' } });
+    delete process.env.GATE_PROPERTY_SERVICE_AREAS;
+    let handler;
+    jest.isolateModules(() => {
+      jest.doMock('../models/db', () => knex);
+      const router = require('../routes/admin-customer-turf-profile');
+      handler = router.stack.find(layer => layer.route?.methods.put).route.stack.at(-1).handle;
+    });
+    jest.dontMock('../models/db');
+    const res = { json: jest.fn() };
+    const write = lawn_sqft => handler({ ...admin, params: { customerId }, body: { lawn_sqft } }, res, err => { throw err; });
+    await write('4000');
+    expect((await knex('customer_properties').where({ id: primary.id }).first()).service_area_measurements.areas.lawn.sqft).toBe(4000);
+    await write(4500);
+    expect(res.json).toHaveBeenLastCalledWith({ profile: expect.objectContaining({ lawn_sqft: 4500 }) });
+    const saved = (await knex('customer_properties').where({ id: primary.id }).first()).service_area_measurements.areas;
+    expect(saved.lawn).toBeUndefined();
+    expect(saved.beds.sqft).toBe(900);
+    expect((await knex('customer_properties').where({ id: second.id }).first()).service_area_measurements.areas.lawn.sqft).toBe(1200);
   });
   test('rolls back the property and mirrors if the required audit fails', async () => {
     const first = await read(scope());

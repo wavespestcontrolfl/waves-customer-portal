@@ -208,12 +208,13 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
         .onConflict('customer_id')
         .merge({ ...fields, updated_at: new Date() })
         .returning('*');
-      if (Object.hasOwn(fields, 'lawn_sqft') && fields.lawn_sqft !== priorRow?.lawn_sqft) {
+      const nextLawnSqft = fields.lawn_sqft == null ? null : Number(fields.lawn_sqft);
+      if (Object.hasOwn(fields, 'lawn_sqft') && nextLawnSqft !== (priorRow?.lawn_sqft ?? null)) {
         // This older editor does not review service areas. A changed turf
         // amount withdraws the old review instead of keeping its stamp on
         // a different number. Same customer fence as the shared editor.
         await trx('customer_properties').where({ customer_id: customerId, is_primary: true })
-          .whereRaw("service_area_measurements->'areas' ? 'lawn'")
+          .whereRaw("jsonb_exists(service_area_measurements->'areas', 'lawn')")
           .update({ service_area_measurements: trx.raw("service_area_measurements #- '{areas,lawn}'"), updated_at: trx.fn.now() });
       }
       // The fence already holds the prefs advisory lock, so this read is
