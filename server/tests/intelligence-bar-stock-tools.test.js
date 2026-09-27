@@ -833,5 +833,18 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       });
       expect(result).toEqual({ productId: TAURUS.id });
     });
+
+    test.each([
+      'We have Taurus SC on the shelf. We bought Taurus SC 20%, add 12 oz',
+      'Taurus SC is low. We got Taurus 20% SC today',
+    ])('a conflicting qualifier on a LATER mention still refuses (%s)', async (prompt) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock',
+        prompt,
+        preview: { product: { id: TAURUS.id, name: TAURUS.name } },
+      });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
+    });
   });
 });

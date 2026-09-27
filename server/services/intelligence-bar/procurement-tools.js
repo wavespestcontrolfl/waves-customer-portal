@@ -993,15 +993,14 @@ function escapeRegExpLiteral(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Where, in the RAW operator text, does this whole-word phrase (the full
+// Every place in the RAW operator text where this whole-word phrase (the full
 // catalog name's words, an alias's own words, or a single distinctive token)
-// first occur? Punctuation/whitespace may separate the phrase's own words,
-// mirroring containsWholeWords' tolerance. Returns { start, end }, or null if
-// it doesn't occur.
-function findPhraseSpanInRawText(rawText, words) {
+// occurs. Punctuation/whitespace may separate the phrase's own words,
+// mirroring containsWholeWords' tolerance. Returns [{ start, end }, ...].
+function findPhraseSpansInRawText(rawText, words) {
   const pattern = words.map(escapeRegExpLiteral).join('[^a-zA-Z0-9]+');
-  const match = new RegExp(`\\b${pattern}\\b`, 'i').exec(rawText);
-  return match ? { start: match.index, end: match.index + match[0].length } : null;
+  return [...rawText.matchAll(new RegExp(`\\b${pattern}\\b`, 'gi'))]
+    .map((match) => ({ start: match.index, end: match.index + match[0].length }));
 }
 
 // The concentration(s)/formulation code(s) immediately trailing `fromIndex`,
@@ -1046,20 +1045,22 @@ function qualifiersPreceding(rawText, toIndex) {
 // a normalized whole token, a concentration as an exact numeric match against
 // the percent numbers in the name's raw text — or it's a conflict. The ONE
 // chokepoint for this check; every productsNamedIn match branch calls it.
-function qualifierConflict(rawText, words, productNameRaw) {
+// `phrases` is every phrase the text names this product by (see
+// productsNamedIn), and every occurrence of each one is checked: "We have
+// Taurus SC on the shelf. We bought Taurus SC 20%" conflicts on its second
+// mention even though the first is clean.
+function qualifierConflict(rawText, phrases, productNameRaw) {
   const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
-  const span = findPhraseSpanInRawText(rawText, words);
-  if (!span) return false;
-  const before = qualifiersPreceding(rawText, span.start);
-  const after = qualifiersFollowing(rawText, span.end);
-  const concentrations = [...before.concentrations, ...after.concentrations];
-  const formulations = [...before.formulations, ...after.formulations];
-  if (!concentrations.length && !formulations.length) return false;
   const nameTokens = new Set(normalizeForMatch(productNameRaw).split(' '));
   const nameConcentrations = [...productNameRaw.matchAll(/(\d+(?:\.\d+)?)\s*%/g)].map((m) => Number(m[1]));
-  const formulationsOk = formulations.every((code) => nameTokens.has(code.toLowerCase()));
-  const concentrationsOk = concentrations.every((n) => nameConcentrations.includes(n));
-  return !(formulationsOk && concentrationsOk);
+  return phrases.some((words) => findPhraseSpansInRawText(rawText, words).some((span) => {
+    const before = qualifiersPreceding(rawText, span.start);
+    const after = qualifiersFollowing(rawText, span.end);
+    const formulations = [...before.formulations, ...after.formulations];
+    const concentrations = [...before.concentrations, ...after.concentrations];
+    return !formulations.every((code) => nameTokens.has(code.toLowerCase()))
+      || !concentrations.every((n) => nameConcentrations.includes(n));
+  }));
 }
 
 // A prior operator turn may only stand in for a CURRENT prompt that carries
@@ -1134,20 +1135,18 @@ async function productsNamedIn(textNorm, rawText) {
     // name "Taurus SC", but the trailing "20%" still has to agree with the
     // catalog row (see qualifierConflict's own doc for why a qualifier
     // INSIDE the matched span needs no separate check).
-    let words = null;
-    if (containsWholeWords(textNorm, nameNorm)) words = nameNorm.split(' ');
-    else {
-      const aliasMatch = aliasRows.find((a) => a.product_id === p.id
-        && containsWholeWords(textNorm, normalizeForMatch(a.alias_name)));
-      if (aliasMatch) words = normalizeForMatch(aliasMatch.alias_name).split(' ');
-      else {
-        const tokenMatch = nameNorm.split(' ').find((token) => isCandidateToken(token)
-          && tokenOwners.get(token)?.size === 1 && containsWholeWords(textNorm, token));
-        if (tokenMatch) words = [tokenMatch];
-      }
-    }
-    if (!words) continue;
-    if (qualifierConflict(rawText, words, p.name)) { conflict = true; continue; }
+    // Every phrase that names this product here (full name, each alias,
+    // each distinctive token) is collected, so a qualifier next to ANY
+    // mention of it is checked, not just the first match type found.
+    const phrases = [
+      ...(containsWholeWords(textNorm, nameNorm) ? [nameNorm.split(' ')] : []),
+      ...aliasRows.filter((a) => a.product_id === p.id && containsWholeWords(textNorm, normalizeForMatch(a.alias_name)))
+        .map((a) => normalizeForMatch(a.alias_name).split(' ')),
+      ...nameNorm.split(' ').filter((token) => isCandidateToken(token)
+        && tokenOwners.get(token)?.size === 1 && containsWholeWords(textNorm, token)).map((token) => [token]),
+    ];
+    if (!phrases.length) continue;
+    if (qualifierConflict(rawText, phrases, p.name)) { conflict = true; continue; }
     named.add(p.id);
   }
   return { named, conflict };
