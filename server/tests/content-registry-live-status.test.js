@@ -27,14 +27,13 @@ function fetchMap(routes) {
 
 function fakeDatabase(rows) {
   const updates = [];
+  const query = {};
+  query.whereIn = jest.fn(() => query);
+  query.orderByRaw = jest.fn(() => query);
+  query.orderBy = jest.fn(() => query);
+  query.limit = jest.fn(async () => rows);
   function database(table) {
     if (table !== 'content_registry') throw new Error(`Unexpected table ${table}`);
-    const query = {
-      whereIn: () => query,
-      orderByRaw: () => query,
-      orderBy: () => query,
-      limit: async () => rows,
-    };
     return {
       select: () => query,
       where: (_field, id) => ({
@@ -46,6 +45,7 @@ function fakeDatabase(rows) {
     };
   }
   database.updates = updates;
+  database.query = query;
   return database;
 }
 
@@ -196,6 +196,35 @@ describe('content registry live status helpers', () => {
       sitemap_present: true,
       sitemap_status: 'present',
     }));
+  });
+
+  test('bounded loads prioritize never and least recently checked rows', async () => {
+    const database = fakeDatabase([]);
+
+    await liveStatus.loadRegistryRows(database, { statuses: ['astro_only'], limit: 300 });
+
+    expect(database.query.orderByRaw).toHaveBeenNthCalledWith(1, 'live_status_checked_at ASC NULLS FIRST');
+    expect(database.query.limit).toHaveBeenCalledWith(300);
+  });
+
+  test('commit mode advances the rotation watermark when live fields are unchanged', async () => {
+    const database = fakeDatabase([{
+      id: 'row-stable', canonical_url_normalized: '/stable/', http_status: '200', live_status: 'live',
+      redirect_target_url: null, canonical_target_url: null, noindex_detected: false,
+      sitemap_present: null, sitemap_status: 'unknown', live_status_checked_at: null,
+    }]);
+    const now = new Date('2026-09-27T02:45:00Z');
+
+    const result = await liveStatus.runContentRegistryLiveStatusCheck({
+      database, commit: true, statuses: ['astro_only'], useSitemap: false, now,
+      fetchImpl: fetchMap({
+        'https://www.wavespestcontrol.com/stable/': response(200, '<html></html>', {}, 'https://www.wavespestcontrol.com/stable/'),
+      }),
+    });
+
+    expect(result.summary.updated_count).toBe(0);
+    expect(database.updates).toHaveLength(1);
+    expect(database.updates[0].payload.live_status_checked_at).toEqual(now);
   });
 
   test('commit mode updates only changed registry mirror fields', async () => {

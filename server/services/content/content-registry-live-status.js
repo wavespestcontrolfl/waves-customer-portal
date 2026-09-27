@@ -13,6 +13,7 @@ const CHECK_FIELDS = [
   'canonical_url_normalized',
   'live_url',
   'title',
+  'live_status_checked_at',
   'http_status',
   'live_status',
   'redirect_target_url',
@@ -316,6 +317,7 @@ async function loadRegistryRows(database, { statuses, limit }) {
   let query = database('content_registry').select(CHECK_FIELDS);
   if (statuses && statuses.length) query = query.whereIn('reconciliation_status', statuses);
   return query
+    .orderByRaw('live_status_checked_at ASC NULLS FIRST')
     .orderByRaw(`CASE reconciliation_status
       WHEN 'db_published_missing_astro' THEN 1
       WHEN 'conflict' THEN 2
@@ -342,6 +344,7 @@ function liveUpdatePayload(row, result, now = new Date()) {
     noindex_detected: Boolean(result.noindex_detected),
     sitemap_present: nextSitemapPresent,
     sitemap_status: nextSitemapStatus,
+    live_status_checked_at: now,
     updated_at: now,
   };
   return updates;
@@ -436,9 +439,11 @@ async function runContentRegistryLiveStatusCheck({
   if (commit) {
     for (let i = 0; i < rows.length; i++) {
       const updates = liveUpdatePayload(rows[i], results[i], now);
-      if (!liveFieldsChanged(rows[i], updates)) continue;
+      const changed = liveFieldsChanged(rows[i], updates);
+      // Always advance the durable check watermark, even when live fields are
+      // unchanged, so the bounded sweep rotates through the full corpus.
       await database('content_registry').where('id', rows[i].id).update(updates);
-      updatedCount += 1;
+      if (changed) updatedCount += 1;
     }
   }
 
