@@ -148,6 +148,22 @@ function leadIdOf(call) {
   return meta?.lead_id || meta?.relay_lead_id || null;
 }
 
+// call-recording-processor.js's fresh-lead-insert path deliberately does
+// NOT stamp metadata.lead_id for the most common "brand new lead" shape —
+// a stamp-less, phone-bearing fresh insert self-links through its OWN
+// leads.twilio_call_sid instead, and only a REUSED lead (whose sid already
+// belongs to an earlier call) gets the metadata stamp, since a reused
+// lead's sid can't be rolled onto this call (codex pre-push P1). leadIdOf
+// alone would read no_lead_linkage for every such fresh lead; falling back
+// to a SID lookup is required to ever resolve it.
+async function resolveLeadId(conn, call) {
+  const stamped = leadIdOf(call);
+  if (stamped) return stamped;
+  if (!call.twilio_call_sid) return null;
+  const lead = await conn('leads').where({ twilio_call_sid: call.twilio_call_sid }).whereNull('deleted_at').first('id');
+  return lead?.id || null;
+}
+
 // call_log.customer_id alone does NOT mean "an existing customer" (codex
 // pre-push P1): the legacy call-created-customer path (call-recording-
 // processor.js's "Create new customer" branch) mints a brand-new customers
@@ -349,7 +365,7 @@ async function stage(conn = db, { now = new Date() } = {}) {
     .whereRaw("metadata->:key IS NULL", { key: METADATA_KEY })
     .orderBy('created_at', 'asc')
     .limit(STAGING_BATCH)
-    .select('id', 'customer_id', 'direction', 'bridged_at', 'duration_seconds', 'recording_duration_seconds', 'created_at', 'metadata', 'ai_extraction_enriched', 'ai_address_validation');
+    .select('id', 'customer_id', 'direction', 'bridged_at', 'duration_seconds', 'recording_duration_seconds', 'created_at', 'metadata', 'twilio_call_sid', 'ai_extraction_enriched', 'ai_address_validation');
   let staged = 0;
   let ineligible = 0;
   for (const call of calls) {
@@ -369,7 +385,7 @@ async function stage(conn = db, { now = new Date() } = {}) {
 }
 
 async function stageOne(conn, call, now) {
-  const leadId = leadIdOf(call);
+  const leadId = await resolveLeadId(conn, call);
   const extraction = extractionOf(call);
   const reason = stagingIneligibleReason(call, extraction, leadId) || (await outboundStagingReason(conn, call, leadId));
   const staged_at = now.toISOString();
@@ -530,8 +546,11 @@ async function dispatchClaimedCall(conn, call, now) {
   // the staged id would then text whoever the call is linked to NOW, not
   // the lead this send was ever evaluated for. Skip rather than silently
   // restage under the new id; a changed linkage is rare enough that losing
-  // the send is the safe direction.
-  if (leadIdOf(call) !== leadId) return skip('lead_linkage_changed');
+  // the send is the safe direction. resolveLeadId (not the pure leadIdOf)
+  // is the correct re-check here too — a fresh, stamp-less lead resolved
+  // only through its own twilio_call_sid must not read as "changed" just
+  // because it never carried a metadata stamp in the first place.
+  if ((await resolveLeadId(conn, call)) !== leadId) return skip('lead_linkage_changed');
   // Outside the 8 AM–8 PM ET window is a reason to WAIT, never a reason to
   // give up (codex pre-push P1) — a call due at 7:59 PM must not be lost
   // just because the 5-minute cron's next tick lands a moment after 8 PM.
@@ -624,6 +643,7 @@ module.exports = {
   stagingIneligibleReason,
   outboundPriorContactMissing,
   outboundStagingReason,
+  resolveLeadId,
   stage,
   stageOne,
   claimForDispatch,

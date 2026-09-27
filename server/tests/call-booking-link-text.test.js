@@ -35,6 +35,7 @@ const {
   stagingIneligibleReason,
   outboundPriorContactMissing,
   outboundStagingReason,
+  resolveLeadId,
   dispatchClaimedCall,
   claimForDispatch,
   stage,
@@ -334,6 +335,43 @@ describe('stage', () => {
     const sendAt = new Date(parsed.call_booking_link_text.send_at);
     expect(sendAt.getTime()).toBe(new Date('2026-09-26T23:55:00Z').getTime()); // 7:55 PM ET, same evening
   });
+
+  // codex pre-push P1: a fresh lead the call pipeline just minted carries
+  // NO metadata.lead_id stamp at all — only its own twilio_call_sid links
+  // it. Staging must still resolve and stage it, not permanently record
+  // no_lead_linkage.
+  test('a fresh lead with no metadata stamp, linked only by twilio_call_sid, is staged', async () => {
+    const now = new Date('2026-09-26T15:00:00Z');
+    const rawBindings = [];
+    const conn = jest.fn((table) => {
+      if (table === 'leads') {
+        const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), first: jest.fn(async () => ({ id: 'lead-fresh' })) };
+        return chain;
+      }
+      const chain = {};
+      ['where', 'whereRaw'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+      chain.update = jest.fn(async () => 1);
+      return chain;
+    });
+    conn.raw = jest.fn((sql, bindings) => { rawBindings.push(bindings); return 'RAW'; });
+    const call = {
+      id: 'call-fresh-lead', direction: 'inbound', created_at: new Date(now.getTime() - 60000), duration_seconds: 90,
+      metadata: {}, twilio_call_sid: 'CAxxx', // no lead_id stamp — SID-only linkage
+      ai_extraction_enriched: {
+        meta: {}, call_nature: 'new_lead', recommended_disposition: 'lead_response_flow_triggered', triage_flags: [],
+        caller: { relationship_to_property: 'owner', preferred_contact_method: 'unspecified' },
+        property: { property_type: 'single_family' },
+        service_request: { service_intent: 'active_infestation_treatment', urgency: 'within_one_week' },
+        scheduling: { status: 'requested' }, consent: { do_not_contact_request: false, sms_consent_given: true },
+        sentiment_and_lead: { lead_quality: 'warm' },
+      },
+      ai_address_validation: { inServiceArea: true },
+    };
+    const decided = await stageOne(conn, call, now);
+    expect(decided).toBe('pending');
+    const parsed = rawBindings.map(([json]) => JSON.parse(json)).find((v) => v.call_booking_link_text?.status === 'pending');
+    expect(parsed.call_booking_link_text.lead_id).toBe('lead-fresh');
+  });
 });
 
 // ── outbound "return call" evidence ───────────────────────────────────────
@@ -387,6 +425,42 @@ describe('outboundPriorContactMissing / outboundStagingReason', () => {
     // created_at (18:10), so a naive created_at comparison would call this
     // a return call — it is not; callStartedAt(call) is 18:05 too.
     expect(first_contact_at.getTime()).toBeLessThan(created_at.getTime());
+  });
+});
+
+// ── resolveLeadId — the SID fallback for a stamp-less fresh lead ─────────
+// codex pre-push P1: call-recording-processor.js's fresh-lead-insert path
+// never stamps metadata.lead_id for the most common "brand new lead" shape
+// — a stamp-less, phone-bearing fresh insert self-links through its OWN
+// leads.twilio_call_sid instead. leadIdOf alone reads no_lead_linkage for
+// every such call.
+describe('resolveLeadId', () => {
+  test('a stamped call resolves without ever querying leads', async () => {
+    const conn = jest.fn();
+    const call = { metadata: { lead_id: 'lead-1' }, twilio_call_sid: 'CAxxx' };
+    await expect(resolveLeadId(conn, call)).resolves.toBe('lead-1');
+    expect(conn).not.toHaveBeenCalled();
+  });
+
+  test('a stamp-less call with no twilio_call_sid at all resolves to null without querying', async () => {
+    const conn = jest.fn();
+    await expect(resolveLeadId(conn, { metadata: {} })).resolves.toBeNull();
+    expect(conn).not.toHaveBeenCalled();
+  });
+
+  test('a stamp-less fresh lead resolves through its own twilio_call_sid', async () => {
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), first: jest.fn(async () => ({ id: 'lead-fresh' })) };
+    const conn = jest.fn(() => chain);
+    const call = { metadata: {}, twilio_call_sid: 'CAxxx' };
+    await expect(resolveLeadId(conn, call)).resolves.toBe('lead-fresh');
+    expect(conn).toHaveBeenCalledWith('leads');
+    expect(chain.where).toHaveBeenCalledWith({ twilio_call_sid: 'CAxxx' });
+  });
+
+  test('a twilio_call_sid matching no lead resolves to null', async () => {
+    const chain = { where: jest.fn(() => chain), whereNull: jest.fn(() => chain), first: jest.fn(async () => undefined) };
+    const conn = jest.fn(() => chain);
+    await expect(resolveLeadId(conn, { metadata: {}, twilio_call_sid: 'CAxxx' })).resolves.toBeNull();
   });
 });
 
