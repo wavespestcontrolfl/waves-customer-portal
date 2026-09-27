@@ -468,6 +468,7 @@ describe('estimate assistant no-guarantee context', () => {
       'Does the $700 trenching include a guarantee?',
       'Does the 700 dollar trenching include a guarantee?',
       'Does the trenching priced at 700 include a guarantee?',
+      'Does trenching that costs 700 include a guarantee?',
       'Does the Front Trenching include a guarantee?',
     ]) {
       expect(answerEstimateQuestionFallback(question, context))
@@ -477,6 +478,7 @@ describe('estimate assistant no-guarantee context', () => {
       'Does the $900 trenching include a guarantee?',
       'Does the 900 dollars trenching include a guarantee?',
       'Does the trenching priced at 900 include a guarantee?',
+      'Does trenching that costs 900 include a guarantee?',
       'Does the Rear Trenching include a guarantee?',
     ]) {
       expect(answerEstimateQuestionFallback(question, context))
@@ -485,6 +487,23 @@ describe('estimate assistant no-guarantee context', () => {
     expect(answerEstimateQuestionFallback('Does the trenching priced at seven hundred include a guarantee?', context))
       .toMatch(/do not see an estimate-wide callback or money-back guarantee/i);
     expect(answerEstimateQuestionFallback('Does the 3-year trenching include a guarantee?', context))
+      .toContain('Annual inspection during the warranty period');
+  });
+
+  test.each([
+    'Does the cost of trenching include a warranty?',
+    'Does the trenching cost include an annual inspection?',
+  ])('ordinary cost wording keeps the purchased service scope: %s', (question) => {
+    const row = { service: 'trenching', label: 'Termite Trenching', amount: 900,
+      warrantyTier: 'one_year_retreat', warrantyAdder: 0 };
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 900 }, serviceMode: 'one_time', noGuaranteeClaims: true,
+      estData: {},
+      pricingBundle: { source: 'engine_invocation', snapshotHit: false,
+        anchorOneTimePrice: 900, oneTimeBreakdown: { total: 900, items: [row] } },
+    });
+
+    expect(answerEstimateQuestionFallback(question, context))
       .toContain('Annual inspection during the warranty period');
   });
 
