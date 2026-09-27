@@ -238,9 +238,10 @@ For a bare signed-in `/book` entry, all three offer requests use the portal's
 authenticated fetch path. These routes validate the optional bearer and bind
 the typed property only within that server-resolved account while customers-
 only mode is enabled; a body/query customer id is never identity. With that
-gate off, an owned property still uses its exact account pin, while a new or
-off-account property keeps the public address behavior that confirmation
-admits. An invalid or absent bearer also keeps public behavior. An expired
+gate off, offers and confirmation both ignore an ambient portal bearer and
+keep the same public address behavior. A bearer from a different account
+cannot sign offers on a pin that confirmation will refuse. An invalid or
+absent bearer also keeps public behavior. An expired
 access token gets the refreshable 401 only when the customers-only gate needs
 that identity. An estimate-linked request keeps the estimate account instead
 of inheriting an ambient portal session.

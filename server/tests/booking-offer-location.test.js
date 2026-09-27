@@ -78,7 +78,7 @@ test('a typed address that uniquely matches a returning customer is offered at t
     .resolves.toEqual({ ...storedPin, disclosable: false });
 });
 
-test('a bearer-proven account wins over an identical global address and caller coordinates, including gate-off', async () => {
+test('a bearer-proven account supplied under customers-only wins over an identical global address and caller coordinates', async () => {
   const otherAccountId = '8e1f4c3b-7d5a-4e9f-a2b3-4d5e6f7a8b9c';
   const accountPin = { lat: 27.40123, lng: -82.50123 };
   const otherPin = { lat: 27.49999, lng: -82.59999 };
@@ -116,7 +116,7 @@ test('a bearer-proven account wins over an identical global address and caller c
     .resolves.toEqual({ ...CALLER, lat: 27.3, lng: -82.5, disclosable: true });
 });
 
-test('gate-off treats a valid bearer as an address hint, while gate-on requires an account property match', async () => {
+test('public identity admits a new property, while a supplied customers-only bearer requires an account match', async () => {
   const authedCustomer = customerRow({
     account_id: CUSTOMER_ID,
     address_line1: '999 Existing Customer Road',
@@ -128,7 +128,7 @@ test('gate-off treats a valid bearer as an address hint, while gate-on requires 
   await expect(resolveOfferCoords({
     ...CALLER,
     address: TYPED,
-    authedCustomer,
+    authedCustomer: null,
   })).resolves.toEqual({ lat: 27.3, lng: -82.5, disclosable: true });
 
   // Customers-only on: confirmation binds the bearer account and refuses
@@ -137,7 +137,6 @@ test('gate-off treats a valid bearer as an address hint, while gate-on requires 
     ...CALLER,
     address: TYPED,
     authedCustomer,
-    requireAuthedAccountMatch: true,
   })).resolves.toEqual({ lat: null, lng: null, disclosable: false });
 });
 

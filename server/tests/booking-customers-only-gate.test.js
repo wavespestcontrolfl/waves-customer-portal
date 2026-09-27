@@ -480,6 +480,39 @@ describe('booking offer routes — customers-only bearer symmetry', () => {
     expect(gatedResult.statusCode).toBe(401);
     expect(gatedResult.body).toEqual({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
   });
+
+  test.each([
+    ['availability', availabilityHandler, { query: {} }],
+    ['find-slots', findSlotsHandler, { body: { query: 'tomorrow' } }],
+  ])('%s leaves every ambient bearer out of gate-off offer ownership, matching confirmation', async (
+    _name, handler, request,
+  ) => {
+    const auth = require('../middleware/auth');
+    const resolver = jest.spyOn(auth, 'resolveBearerCustomer').mockResolvedValue(BEARER_ROW());
+    try {
+      gateState.bookingCustomersOnly = false;
+      const tokens = [
+        jwt.sign({ customerId: CUST_ID }, process.env.JWT_SECRET, { expiresIn: '1h' }),
+        jwt.sign({ customerId: CUST_ID }, process.env.JWT_SECRET, { expiresIn: '-1s' }),
+        'invalid-token',
+      ];
+      const anonymous = await runOffer(handler, request);
+      for (const token of tokens) {
+        const result = await runOffer(handler, { ...request, headers: { authorization: `Bearer ${token}` } });
+        expect({ status: result.statusCode, body: result.body })
+          .toEqual({ status: anonymous.statusCode, body: anonymous.body });
+      }
+      // In particular, a logged-in account cannot replace the public
+      // contact's location when two accounts share the same address.
+      expect(resolver).not.toHaveBeenCalled();
+      gateState.bookingCustomersOnly = true;
+      resolver.mockResolvedValueOnce(null);
+      await runOffer(handler, { ...request, headers: { authorization: `Bearer ${tokens[0]}` } });
+      expect(resolver).toHaveBeenCalledTimes(1);
+    } finally {
+      resolver.mockRestore();
+    }
+  });
 });
 
 // POST /confirm wiring: the route resolves the bearer server-side (real
