@@ -198,6 +198,34 @@ test('the trusted gratitude executor may combine its claim handoff with the fina
   expect(sendViaTwilio.mock.calls[0][1]).toMatchObject({ providerPreSendCheck, withSmsHandoff: expect.any(Function) });
 });
 
+test('previsit billing Text fences Twilio while automatic App routing ignores the SMS-only handoff', async () => {
+  const withSmsHandoff = jest.fn(async (dispatch) => dispatch());
+  const providerPreSendCheck = jest.fn(async () => ({ ok: true }));
+  const input = {
+    ...BASE_INPUT,
+    audience: 'customer',
+    purpose: 'billing',
+    customerId: 'cust-1',
+    entryPoint: 'previsit_balance_reminder',
+    withSmsHandoff,
+    providerPreSendCheck,
+  };
+
+  await expect(sendCustomerMessage(input)).resolves.toMatchObject({ sent: true });
+  expect(sendViaTwilio.mock.calls[0][1]).toMatchObject({
+    withSmsHandoff: expect.any(Function), providerPreSendCheck,
+  });
+
+  sendViaTwilio.mockClear();
+  jest.spyOn(require('../services/messaging/push-channel-routing'), 'wantsAppFirst')
+    .mockResolvedValueOnce(true);
+  await expect(sendCustomerMessage(input)).resolves.toMatchObject({ sent: true });
+  const [providerInput, hooks] = sendViaTwilio.mock.calls[0];
+  expect(providerInput.channel).toBe('push');
+  expect(hooks.withSmsHandoff).toBeFalsy();
+  expect(hooks.providerPreSendCheck).toBeUndefined();
+});
+
 
 test('canonical delivery borrows only a branded caller reservation and returns its actual provider context privately', async () => {
   const coordination = require('../services/messaging/provider-handoff-reservation');

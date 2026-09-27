@@ -387,6 +387,13 @@ async function sendCustomerMessageCore(input) {
       && input.entryPoint === 'reschedule-link-promise'
       && input.metadata?.original_message_type === 'reschedule_link_promise'
       && Boolean(input.metadata?.followThroughCommitmentId))
+    // Legacy previsit balance Text keeps its current automatic App routing,
+    // but an actual Twilio leg holds the complete balance quote through the
+    // provider request. The producer supplies no preSendCheck; its final
+    // predicate is providerPreSendCheck on the held transaction.
+    || (input.audience === 'customer' && input.purpose === 'billing'
+      && input.entryPoint === 'previsit_balance_reminder'
+      && typeof providerPreSendCheck === 'function')
     // Recruiting texts hold the application row through the provider
     // request: the deferred replay (deferred-replay-registry
     // recruiting_comms_deferred) and the immediate sends (recruiting-comms.js
@@ -920,11 +927,19 @@ async function sendCustomerMessageCore(input) {
   };
   const dispatchProvider = () => {
     providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
+    // A legacy previsit Text may route to App before provider dispatch. Its
+    // SMS-only authority callback is irrelevant there; omitting it lets the
+    // canonical App route deliver while every actual Twilio branch remains
+    // fenced. Other handoff callers retain the prior strict behavior.
+    const activeSmsHandoff = input.entryPoint === 'previsit_balance_reminder'
+      && sendInput.channel !== 'sms' ? null : withSmsHandoff;
+    const activeProviderPreSendCheck = input.entryPoint === 'previsit_balance_reminder'
+      && sendInput.channel !== 'sms' ? undefined : providerPreSendCheck;
     return dispatchToProvider(sendInput, {
     // The caller's handoff receives (trx, onProviderStart): the callback fires
     // immediately before the provider request, after the rechecks below, so a
     // caller can tell a failed recheck (nothing sent) from a failed request.
-    withSmsHandoff: withSmsHandoff && (dispatch => withSmsHandoff(async (trx, onProviderStart) => {
+    withSmsHandoff: activeSmsHandoff && (dispatch => activeSmsHandoff(async (trx, onProviderStart) => {
       // Lock acquisition may wait past an opt-out commit. Reuse the canonical
       // validators with fresh state on that same connection, before the SDK.
       const currentState = await loadSuppressionState(sendInput, await loadContactState(sendInput, trx), trx);
@@ -957,7 +972,7 @@ async function sendCustomerMessageCore(input) {
     // after its authoritative annual-offer guard. Keeping it distinct from
     // preSendCheck avoids invoking existing opaque preparation callbacks a
     // second time at the provider boundary.
-    providerPreSendCheck,
+    providerPreSendCheck: activeProviderPreSendCheck,
     providerHandoffReservation,
   });
   };
