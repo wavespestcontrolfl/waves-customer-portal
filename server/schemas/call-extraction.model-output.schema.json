@@ -1199,6 +1199,21 @@
           ],
           "description": "true ONLY when OUR agent, in the agent's own words, explicitly committed to the confirmed slot (\"we'll confirm it for noon on Sunday\", \"you're on the schedule\"). The caller requesting, agreeing, or asserting a commitment is never an agent commitment. null when unclear."
         },
+        "caller_accepted_slot": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Booking or reschedule that ENDS with an agreed slot: true ONLY when the CALLER, in the caller's own words, accepted that FINAL slot (or asked for exactly that slot and the agent committed to it), judged over the whole call; false when the caller later withdrew, changed, conditioned, or questioned it, or left the agent's proposal unanswered. The agent's words never count. Pin the caller's acceptance to /scheduling/caller_accepted_slot. null when no slot was agreed or it is unclear."
+        },
+        "moved_appointment_date": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date",
+          "description": "Reschedule only: the calendar date (YYYY-MM-DD, Eastern) of the EXISTING appointment being moved, as established on the call by either speaker. Pin the utterance naming it to /scheduling/moved_appointment_date. null when the call never identifies which existing appointment is being moved — never inferred from the new slot."
+        },
         "requested_date_range_start": {
           "type": [
             "string",
@@ -1372,7 +1387,7 @@
     },
     "evidence": {
       "type": "array",
-      "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: address, urgency, on_site_authorization, hoa_common_area_service, sms_consent_given, scheduling.status=confirmed, scheduling.agent_committed_booking=true (AGENT-spoken quote).",
+      "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: address, urgency, on_site_authorization, hoa_common_area_service, sms_consent_given, scheduling.status=confirmed, scheduling.agent_committed_booking=true (AGENT-spoken quote), scheduling.caller_accepted_slot=true (CALLER-spoken quote), scheduling.moved_appointment_date (the utterance naming it).",
       "items": {
         "type": "object",
         "additionalProperties": false,

@@ -32,7 +32,13 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // inspection is authorized like a lender or realtor). Buyers calling for
 // themselves were told to use "other", so this changes what the model
 // returns for them: a new cohort.
-const PROMPT_VERSION = 'v12';
+// v13: scheduling.caller_accepted_slot + scheduling.moved_appointment_date
+// (schema 1.16.0; owner decision 2026-09-27). The extraction judges a
+// reschedule's agreement over the whole call and names the existing
+// appointment being moved, each pinned to one speaker's verbatim utterance;
+// the reschedule applier verifies those quotes instead of parsing the
+// transcript itself. New fields and instructions: a new cohort.
+const PROMPT_VERSION = 'v13';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -127,6 +133,8 @@ SCHEDULING STATUS — This is the most important field for downstream routing:
 - DO set status to "confirmed" when a builder explicitly books a Waves pre-slab/preconstruction termite or soil-treatment field-service appointment with a specific date and time.
 - Do NOT set status to "confirmed" for admin calls about invoices, payments, receipts, compliance reports, stickers, certificates, W-9s, or paperwork — unless the caller ALSO books a new field-service visit.
 - agent_committed_booking: true ONLY when OUR agent, in the agent's OWN words, commits to the confirmed slot ("we'll confirm it for noon on Sunday", "you're on the schedule for Tuesday at 10", "we'll see you then"). The caller requesting, agreeing, or asserting that we committed is NEVER an agent commitment. Leave false/null when the agent hedges ("I'll have to check", "someone will call you back") or no specific slot was committed. When true, pin an evidence quote of the AGENT's commitment sentence with speaker "agent" — choose the sentence that states the agreed DAY and TIME ("we'll confirm it for noon on Sunday"), not a bare acknowledgment.
+- caller_accepted_slot: for a booking or reschedule that ENDS with an agreed slot (confirmed_start_at set), true ONLY when the CALLER, in the caller's OWN words, accepted that FINAL slot ("yes, Thursday at two works", "that would be so much better") or asked for exactly that slot and the agent committed to it. Judge the WHOLE call: false when the caller afterwards withdrew it ("actually, keep my original time"), changed it ("make it three"), made it conditional ("if my husband agrees"), said it does not work or conflicts ("I have another appointment then"), asked for a different time, or never answered the agent's proposal. A "yes" to a different question (reminders, the gate code) is not acceptance. The agent's words never count as the caller's acceptance. When true, pin the caller's acceptance utterance to /scheduling/caller_accepted_slot with speaker "caller". null when no slot was agreed or it is unclear.
+- moved_appointment_date: for status "reschedule_requested" ONLY — the calendar date (YYYY-MM-DD, Eastern) of the EXISTING appointment being moved, as established on the call by EITHER speaker: the caller naming it ("my visit on the 24th", "my Thursday appointment") or the agent reading it back ("you're on September 24th at 9 AM"). Resolve relative dates against the call date. Pin the utterance that names that date to /scheduling/moved_appointment_date with its speaker. null when the call never identifies WHICH existing appointment is being moved — never infer it from the new slot, and never guess among several visits.
 - follow_up_mentioned: true ONLY when the agent and caller specifically discussed a SECOND/follow-up treatment visit as part of this booking (e.g. "our standard protocol is two treatments", "we'll come back in two weeks for the follow-up"). A generic "call us if it comes back" is NOT a follow-up visit.
 - follow_up_start_at: ISO 8601 Eastern Time datetime ONLY when a specific follow-up date (and time) was explicitly agreed. Most calls: null — the office schedules the follow-up at the standard interval.
 
@@ -285,6 +293,9 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - scheduling.confirmed_start_at (the quote must contain the agreed date AND time)
 - scheduling.proposed_start_at (when set — the CALLER's requested new date and time)
 - scheduling.agent_committed_booking (when true — the AGENT's commitment sentence; speaker must be "agent")
+- scheduling.caller_accepted_slot (when true — the CALLER's acceptance of the final slot; speaker must be "caller")
+- scheduling.moved_appointment_date (when set — the utterance naming the existing appointment's date)
+- For a reschedule, each of the scheduling quotes above is ONE speaker's words from ONE turn, copied verbatim: no "Agent:"/"Caller:" labels, never two turns stitched together. The /scheduling/confirmed_start_at quote states the agreed time: quote only the words that state the agreed day and time (a verbatim part of one turn, e.g. "Thursday at two"), not other times said around them ("I have an appointment at four"). When the reschedule keeps the appointment's day and changes only the time ("can you make it noon instead of 9?"), a quote with the agreed time alone is enough.
 - scheduling.follow_up_start_at (when set)
 - secondary_contact.wants_notifications (when true — quote the caller directing notifications to this person)
 - service_request.quoted_price_usd (when set — quote the agent's price and the caller's acceptance)
