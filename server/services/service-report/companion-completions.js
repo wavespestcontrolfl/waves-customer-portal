@@ -195,7 +195,12 @@ function validateCompanionSubmission({ profile, companionFindings, primaryFindin
     let finalScoreSource = null;
     if (indicator) {
       const derived = ActivityIndicators.deriveActivityScore(type, values || {});
-      if (activityScore != null) {
+      if (indicator.derive) {
+        // Same rule as the primary: a derive-mapped companion ignores any
+        // obsolete submitted score and follows its findings field.
+        finalScore = derived ? derived.score : null;
+        finalScoreSource = derived ? 'derived' : null;
+      } else if (activityScore != null) {
         finalScore = activityScore;
         finalScoreSource = entry.activityScoreSource === 'derived' && derived?.score === activityScore
           ? 'derived'

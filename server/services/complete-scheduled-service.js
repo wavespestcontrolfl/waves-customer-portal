@@ -3340,7 +3340,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
         }
         if (typedIndicator) {
           const derived = ActivityIndicators.deriveActivityScore(typedFindingsType, typedFindings.values);
-          if (activityScore != null) {
+          if (typedIndicator.derive) {
+            // Derive-mapped: the findings field is the only activity input
+            // (owner ruling 2026-09-26). A score still submitted by a tab
+            // loaded before the gauge was removed is obsolete, never
+            // authoritative — ignore it and use the derived value (or none).
+            typedActivityScore = derived ? derived.score : null;
+            typedScoreSource = derived ? 'derived' : null;
+          } else if (activityScore != null) {
             typedActivityScore = activityScore;
             typedScoreSource = activityScoreSource === 'derived' && derived?.score === activityScore
               ? 'derived'

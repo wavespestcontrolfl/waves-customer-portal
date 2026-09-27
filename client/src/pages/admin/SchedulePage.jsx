@@ -15263,6 +15263,10 @@ export function CompletionPanel({
         savedDraft.typedActivityScore,
         savedDraft.typedActivityTouched,
       );
+      // A generated report built from a score this restore just replaced is
+      // stale — flag it like any other pruned input so it gets invalidated.
+      if ((Number.isInteger(savedDraft.typedActivityScore) ? savedDraft.typedActivityScore : null)
+        !== restoredActivity.score) restorePruned = true;
       setTypedActivityScore(restoredActivity.score);
       setTypedActivityTouched(restoredActivity.touched);
       const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
@@ -15343,6 +15347,9 @@ export function CompletionPanel({
                 const restored = restoredActivityScoreState(
                   schema.activity, values, saved.score, saved.scoreTouched,
                 );
+                if ((Number.isInteger(saved.score) ? saved.score : null) !== restored.score) {
+                  restorePruned = true;
+                }
                 return { score: restored.score, scoreTouched: restored.touched };
               })(),
             },
