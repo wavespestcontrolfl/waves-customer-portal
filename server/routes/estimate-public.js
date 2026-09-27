@@ -10862,9 +10862,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           }
           // A concurrent writer may have won: everything downstream
           // (customer resolution, the new-profile insert, notifications)
-          // uses what is actually stored, not the in-memory patch.
+          // uses what is actually stored, not the in-memory patch — and a
+          // lost field is not copied onto the customer either, so the
+          // customer and the accepted estimate never disagree.
           estimate.customer_name = contactWrite.customer_name ?? lockedContact.customer_name;
           estimate.customer_email = contactWrite.customer_email ?? lockedContact.customer_email;
+          if (!contactWrite.customer_name) contactFillLastName = null;
+          if (!contactWrite.customer_email) contactFillEmail = null;
+        } else {
+          contactFillLastName = null;
+          contactFillEmail = null;
         }
       }
       let customerId = estimate.customer_id;

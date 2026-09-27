@@ -1789,6 +1789,32 @@ describe('Missing-contact capture (contactLastName/contactEmail) — owner rulin
     expect(cust.email).toBe('office@example.com');
   });
 
+  test('an existing customer never gets an email that lost the estimate compare-and-set', async () => {
+    resetStore(recurringPestEstimate({
+      id: 'est-contact-12',
+      token: 'tok-contact-12-x0123456789',
+      customer_id: 'cust-race',
+      customer_phone: null,
+      customer_name: 'Pat Original',
+      customer_email: null,
+    }));
+    db.__state.tables.customers = [{ id: 'cust-race', first_name: 'Pat', last_name: 'Original', email: null, phone: null }];
+    const stored = storedEstimate();
+    conversionOk('cust-race');
+    const origTransaction = db.transaction;
+    db.transaction = async (fn) => {
+      stored.customer_email = 'office@example.com';
+      db.transaction = origTransaction;
+      return origTransaction.call(db, fn);
+    };
+
+    const res = await putAccept('tok-contact-12-x0123456789', { contactEmail: 'testy@example.com' });
+    expect(res.status).toBe(200);
+    expect(storedEstimate().customer_email).toBe('office@example.com');
+    const cust = db.__state.tables.customers.find((c) => c.id === 'cust-race');
+    expect(cust.email).toBeNull();
+  });
+
   test('a crafted request for a field the page never offered writes nothing (estimate already has full name + email)', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-contact-10',
