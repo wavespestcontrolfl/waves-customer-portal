@@ -16,6 +16,19 @@ describe('exactDatesNamed', () => {
       .toEqual(['2026-01-05', '2026-12-24', '2027-01-05', '2027-12-24']);
   });
 
+  test('an abbreviated month with a day is a month and day; a word that only starts like one is not', () => {
+    expect([...exactDatesNamed({ transcript: 'Caller: Move my Dec. 24 visit, or Sept 3.\nAgent: Okay.', callStartedAt: CALL_STARTED_AT })].sort())
+      .toEqual(['2026-09-03', '2026-12-24', '2027-09-03', '2027-12-24']);
+    expect(exactDatesNamed({ transcript: 'Caller: Let me decide 24 hours from now.\nAgent: Okay.', callStartedAt: CALL_STARTED_AT }).size).toBe(0);
+  });
+
+  // An ordinary word that happens to be an Object.prototype key must not
+  // read as a relative day (it used to throw an invalid-date RangeError).
+  test('a word like "constructor" is not a day', () => {
+    expect(exactDatesNamed({ transcript: 'Caller: The constructor is here today.\nAgent: Okay.', callStartedAt: CALL_STARTED_AT }))
+      .toEqual(new Set(['2026-09-26']));
+  });
+
   test('a weekday names two dates, so it names none exactly', () => {
     expect(exactDatesNamed({ transcript: 'Caller: Why not next Saturday, or Friday?\nAgent: Sure.', callStartedAt: CALL_STARTED_AT }).size).toBe(0);
   });
@@ -35,7 +48,7 @@ describe('parseDayMentions', () => {
 
 describe('monthsReferenced', () => {
   test('only a month named without a day counts, for this year and next', () => {
-    const months = monthsReferenced({ transcript: 'Caller: October 2nd is fine but my December visit is not.\nAgent: Okay.', callStartedAt: CALL_STARTED_AT });
-    expect([...months].sort()).toEqual(['2026-12', '2027-12']);
+    const months = monthsReferenced({ transcript: 'Caller: October 2nd is fine but my December visit is not, nor the Mar one.\nAgent: Okay.', callStartedAt: CALL_STARTED_AT });
+    expect([...months].sort()).toEqual(['2026-03', '2026-12', '2027-03', '2027-12']);
   });
 });

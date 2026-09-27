@@ -203,6 +203,11 @@ describe('planRescheduleFromCall', () => {
     expect(planRescheduleFromCall({ v2: v2(), customer: customer(), candidates: [visit(), december], now: NOW,
       call: call({ transcription: `Caller: Move my 12/24 visit to September 24 at noon.\nAgent: ${QUOTE}` }) }))
       .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
+    // An abbreviated month counts too: "Dec. 24" brings up December.
+    hasAgentCommittedEvidence.mockReturnValueOnce(true);
+    expect(planRescheduleFromCall({ v2: v2(), customer: customer(), candidates: [visit(), december], now: NOW,
+      call: call({ transcription: `Caller: Move my Dec. 24 visit to September 24 at noon.\nAgent: ${QUOTE}` }) }))
+      .toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, 'dec-visit'] });
     // Once September is behind today, December 24 is the only upcoming visit.
     expect(plan('2026-12-17T12:00:00-05:00', 'Caller: Move it to December 17th.\nAgent: Okay.', new Date('2026-09-25T19:00:00Z')))
       .toMatchObject({ action: 'apply', visitId: 'dec-visit' });
@@ -221,6 +226,14 @@ describe('planRescheduleFromCall', () => {
 
   // The unresolved-catalog guard covers the single-program path too: an
   // orphaned in-span visit may be the one the named service really means.
+  // Ahead of the span, too: an orphaned December visit may be the one the
+  // caller is moving, and it can never be weighed against the others.
+  test('an unresolved upcoming visit outside the span keeps the call in review', () => {
+    const orphanDecember = visit({ id: 'orphan-dec', service_id: 'retired-program', catalog_service_name: null, scheduled_date: '2026-12-24' });
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [visit(), orphanDecember] }).reason)
+      .toBe('service_needs_review');
+  });
+
   test('an unresolved in-span visit keeps even a single matched program in review', () => {
     const orphan = visit({ id: 'orphan', service_id: 'retired-program', catalog_service_name: null, scheduled_date: '2026-09-25' });
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [visit(), orphan] }).reason)

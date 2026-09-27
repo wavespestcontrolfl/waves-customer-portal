@@ -302,9 +302,12 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
       const d = dateOnly(row.scheduled_date);
       return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
     });
-    // An in-span visit whose catalog identity no longer resolves may be the
-    // caller's actual target, whatever the name matched: review.
-    if (inSpanOf(atProperty).some((row) => !authoritativeServiceName(row))) return skip('service_needs_review');
+    // A visit whose catalog identity no longer resolves, in span or anywhere
+    // ahead, may be the caller's actual target ("move my December visit"),
+    // whatever the name matched, and cannot be weighed as one: review.
+    const today = etDateString(now);
+    const isUpcoming = (row) => dateOnly(row.scheduled_date) >= today;
+    if (atProperty.some((row) => (isUpcoming(row) || inSpanOf([row]).length) && !authoritativeServiceName(row))) return skip('service_needs_review');
     // The visits the call's service evidence can mean: the program(s) a name
     // matched, or, when the call names no service, the property's visits of
     // V2's own category — only when V2 is sure of it (an uncertain
@@ -332,7 +335,7 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     // visit's own day is taken: a program never holds two visits on one day,
     // so the visit already on the destination date is the only one it can
     // mean, unless the call brings up another of them.
-    const upcoming = pool.filter((row) => dateOnly(row.scheduled_date) >= etDateString(now));
+    const upcoming = pool.filter(isUpcoming);
     if (inSpan.length === 1 && upcoming.length > 1
       && (dateOnly(inSpan[0].scheduled_date) !== newDate || otherVisitsMentioned(call, upcoming.filter((row) => row.id !== inSpan[0].id)))) {
       return skip('ambiguous_visit', { candidateIds: upcoming.map((r) => r.id) });
