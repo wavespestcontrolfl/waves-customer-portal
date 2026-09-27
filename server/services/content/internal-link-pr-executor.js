@@ -158,10 +158,15 @@ function prStateGate(ctx) {
   const state = String(ctx.pr?.state || '').toLowerCase();
   if (ctx.pr && !ctx.pr.merged && state === 'closed') {
     // Closed unmerged (by a gate whose branch retirement failed, or by
-    // hand): retire the branch before the tasks leave pr_open.
+    // hand): retire the branch before the tasks leave pr_open. A reviewer
+    // rejection recorded before the failed retirement is carried through.
+    const rejection = ctx.prTasks.map((t) => t.skip_reason)
+      .find((r) => REVIEWER_REJECTION_PREFIXES.some((prefix) => String(r || '').startsWith(prefix)));
     return {
       reason: 'pr_closed_unmerged',
-      close: { status: 'failed', failureReason: 'internal_link_pr_closed_unmerged', note: 'Link PR closed without merging; branch retired.' },
+      close: rejection
+        ? { status: 'skipped', skipReason: rejection, note: 'Link PR closed after a reviewer rejection; branch retired.' }
+        : { status: 'failed', failureReason: 'internal_link_pr_closed_unmerged', note: 'Link PR closed without merging; branch retired.' },
     };
   }
   // Merged PRs are settled by runPostMergeVerification.
@@ -589,6 +594,13 @@ class InternalLinkPrExecutor {
   }
 
   async _closeLinkPr(pr, prTasks, { status, skipReason = null, failureReason = null, note }) {
+    // A reviewer rejection is recorded BEFORE any cleanup: if the branch
+    // retirement below fails, every later path that settles this PR
+    // (prStateGate's closed branch, verification) reads it back from
+    // skip_reason, so the rejection stays terminal (never re-queued).
+    if (skipReason) {
+      await db(TABLE).whereIn('id', prTasks.map((t) => t.id)).where('status', 'pr_open').update({ skip_reason: skipReason, updated_at: new Date() });
+    }
     if (String(pr.state).toLowerCase() !== 'closed') {
       try {
         await GitHubClient.createIssueComment(pr.number, note);
@@ -758,7 +770,10 @@ class InternalLinkPrExecutor {
         }
         if (!retired) return { task_id: task.id, status: task.status, transient: true, skipped: 'branch_retire_pending', pr_number: resolvedPrNumber };
         const reason = 'internal_link_pr_closed_unmerged';
+        // _failAbandonedPrTask keeps skip_reason, so a recorded reviewer
+        // rejection (codex_findings) stays terminal through this path.
         await this._failAbandonedPrTask(task.id, reason);
+        await this._finalizeOriginatingRuns(task.astro_pr_url, { merged: false });
         return { task_id: task.id, status: 'failed', failure_reason: reason, pr_number: resolvedPrNumber };
       }
       return { task_id: task.id, status: task.status, skipped: 'pr_not_merged', pr_number: resolvedPrNumber };

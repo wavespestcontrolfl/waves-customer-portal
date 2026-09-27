@@ -1403,6 +1403,13 @@ describe('internal-link PR auto-merge', () => {
     expect(await instance.runAutoMerge()).toMatchObject({ status: 'hold', reason: 'branch_retire_pending' });
   });
 
+  test('a Codex rejection whose branch retirement failed stays a rejection on the retry', async () => {
+    openTasks([{ id: 't1', status: 'pr_open', astro_pr_url: prUrl, pr_commit_sha: HEAD, executor_version: 'internal-link-pr-executor-v2', skip_reason: 'codex_findings', source_file: 'src/content/blog/a.md', target_url: '/termite-inspection/' }]);
+    GitHubClient.getPr.mockResolvedValue({ number: 77, state: 'closed', merged: false, head: { sha: HEAD, ref: 'content/internal-link-x' }, base: { ref: 'main' } });
+    expect(await instance.runAutoMerge()).toMatchObject({ status: 'closed', reason: 'pr_closed_unmerged' });
+    expect(instance._closeLinkPr).toHaveBeenCalledWith(expect.any(Object), expect.any(Array), expect.objectContaining({ status: 'skipped', skipReason: 'codex_findings' }));
+  });
+
   test('kill switch and shadow mode disable it', async () => {
     process.env.AUTONOMOUS_INTERNAL_LINK_AUTO_MERGE = 'false';
     expect(await instance.runAutoMerge()).toEqual({ status: 'disabled' });
@@ -1464,5 +1471,36 @@ describe('internal-link originating run finalize', () => {
       { table: 'autonomous_runs', patch: expect.objectContaining({ outcome: 'completed_published', skip_reason: null }) },
       { table: 'opportunity_queue', patch: expect.objectContaining({ status: 'done' }) },
     ]);
+  });
+});
+
+describe('internal-link close records the rejection before cleanup', () => {
+  test('skip_reason is written while the task is still pr_open, even if retirement then fails', async () => {
+    const instance = new InternalLinkPrExecutor();
+    const updates = [];
+    const q = { whereIn: jest.fn(() => q), where: jest.fn(() => q), update: jest.fn(async (patch) => { updates.push(patch); return 1; }) };
+    db.mockImplementation(() => q);
+    GitHubClient.closePr = jest.fn();
+    GitHubClient.retireBranch = jest.fn(async () => false);
+    const closed = await instance._closeLinkPr(
+      { number: 77, state: 'open', head: { ref: 'b' } },
+      [{ id: 't1', astro_pr_url: 'u' }],
+      { status: 'skipped', skipReason: 'codex_findings', note: 'n' },
+    );
+    expect(closed).toBe(false);
+    expect(updates).toEqual([expect.objectContaining({ skip_reason: 'codex_findings' })]);
+  });
+});
+
+describe('internal-link verification settles a closed PR run', () => {
+  test('finalizes the originating run as closed-unmerged', async () => {
+    const instance = new InternalLinkPrExecutor();
+    instance._failAbandonedPrTask = jest.fn();
+    instance._finalizeOriginatingRuns = jest.fn();
+    GitHubClient.getPr.mockResolvedValue({ number: 178, merged: false, state: 'closed', head: { ref: 'b' } });
+    GitHubClient.retireBranch = jest.fn(async () => true);
+    const url = 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/178';
+    await instance.verifyMergedTask({ id: 't', status: 'pr_open', astro_pr_url: url });
+    expect(instance._finalizeOriginatingRuns).toHaveBeenCalledWith(url, { merged: false });
   });
 });
