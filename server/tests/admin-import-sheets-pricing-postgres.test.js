@@ -131,4 +131,45 @@ jest.setTimeout(30000);
     expect(products).toHaveLength(1); // never two, however the race lands
     expect(products[0].container_size).toBe('96 oz'); // the manual side's row, reused — not a second insert
   });
+
+  test('a duplicate discovered under the lock is enriched the SAME way the outer whereILike hit is (review item 3)', async () => {
+    let signalLocked;
+    const locked = new Promise((resolve) => { signalLocked = resolve; });
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    // Another writer's row, sparse on details (createCatalogProduct's own
+    // placeholders for active_ingredient/epa_reg_number, no sku, no
+    // unit_size_oz) — exactly what this importer would have backfilled had
+    // it found the row through its OWN whereILike pre-check instead of
+    // discovering it a moment later, under the lock.
+    const manual = mockConn.transaction(async (trx) => {
+      await inventoryOperations.createCatalogProduct({ name: 'Bifen XTS', category: 'insecticide', unitSize: '96 oz', inventoryUnit: 'oz' }, { trx });
+      signalLocked();
+      await held;
+    });
+    await locked;
+
+    const csv = 'Product,Category,Size,SKU,EPA Reg #,Active Ingredient\nBifen XTS,insecticide,96 oz,SKU123,12345-67,Bifenthrin\n';
+    await withServer(async (baseUrl) => {
+      const reqPromise = postPricing(baseUrl, csv);
+      await new Promise((resolve) => { setTimeout(resolve, 300); });
+      release();
+      await manual;
+      const res = await reqPromise;
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body).toMatchObject({ success: true, imported: 1 });
+    });
+
+    const products = await mockConn('products_catalog').where({ name: 'Bifen XTS' });
+    expect(products).toHaveLength(1); // still never duplicated
+    const [product] = products;
+    // Backfilled — the row was missing these (placeholder/blank).
+    expect(product.active_ingredient).toBe('Bifenthrin');
+    expect(product.epa_reg_number).toBe('12345-67');
+    expect(product.sku).toBe('SKU123');
+    expect(Number(product.unit_size_oz)).toBe(96);
+    // NOT overwritten — the manual side's row already had a container_size.
+    expect(product.container_size).toBe('96 oz');
+  });
 });
