@@ -21,6 +21,13 @@
  *                          then runs `dispatch(trx)` while those rows are
  *                          still held, so nothing can change under the
  *                          provider request.
+ *   providerHandoff(claimMeta, dispatch) / billingEmailPreSendCheck(claimMeta, ctx)
+ *                          — the invoice-delivery pair the canonical sender
+ *                          already takes from an immediate invoice send
+ *                          (withProviderHandoff for the Text/App provider,
+ *                          billingEmailPreSendCheck under the Email
+ *                          authority's lock), for a replay that must hold the
+ *                          same invoice lock through its provider request.
  *   dispatch(claimMeta) — replace the frozen-body replay with a fresh,
  *                          guarded canonical send. It must return the same
  *                          canonical send outcome as the default dispatcher;
@@ -262,10 +269,6 @@ const REGISTRY = {
     // Pass-through: a phone-less row is marked requires_registered_dispatch,
     // which dispatchDeferredReplay refuses without a registered hook. Every
     // row still replays through the executor's default dispatch.
-    // Codex r5 P1 #3 (#4963): this replay dispatches the whole notice
-    // WITHOUT re-taking the invoice send-claim lock the immediate path
-    // holds — deliberately out of scope here (split PR 3, locked invoice
-    // replay dispatch).
     //
     // Pre-push audit P1 #A: billingDispatchOutcome (billing-channel-
     // routing.js) deliberately lets an unfinished TEXT leg outrank an
@@ -283,6 +286,14 @@ const REGISTRY = {
     async recheck(meta) {
       return invoiceStillCollectible(meta);
     },
+    // The recheck above reads the invoice before recipient resolution and
+    // provider preparation, so a void, payment or Bill-To change can commit
+    // after it (Codex r5 P1 on #4963). Each leg re-runs the invoice checks at
+    // its own provider boundary, under the invoice lock the immediate send
+    // holds: Text/App (and a plain queued text) inside the invoice handoff,
+    // Email under the Email authority's lock on the same row.
+    providerHandoff: (meta, dispatch) => require('../invoice').withDeferredInvoiceProviderHandoff(meta, dispatch),
+    billingEmailPreSendCheck: (meta, ctx) => require('../invoice').checkDeferredInvoiceEmailDelivery(meta, ctx),
     async finalize(meta) {
       const { finalizeDeferredCompletionSend } = require('../dispatch-completion-deferred');
       const result = await finalizeDeferredCompletionSend(meta);
@@ -1808,6 +1819,20 @@ function deferredSmsHandoff(entryPoint, claimMeta = {}) {
   return (dispatch) => entry.smsHandoff(claimMeta, dispatch);
 }
 
+// undefined = no invoice-delivery handoff registered (see the providerHandoff
+// hook above): the sender dispatches normally.
+function deferredProviderHandoff(entryPoint, claimMeta = {}) {
+  const entry = entryFor(entryPoint);
+  if (!entry?.providerHandoff) return undefined;
+  return (dispatch) => entry.providerHandoff(claimMeta, dispatch);
+}
+
+function deferredBillingEmailPreSendCheck(entryPoint, claimMeta = {}) {
+  const entry = entryFor(entryPoint);
+  if (!entry?.billingEmailPreSendCheck) return undefined;
+  return (ctx) => entry.billingEmailPreSendCheck(claimMeta, ctx);
+}
+
 // null = no finalize registered. { ok:false } rides the durable
 // finalize_only retry rail for durableFinalize entry points.
 async function finalizeDeferredReplay(entryPoint, claimMeta = {}, ctx = {}) {
@@ -1979,6 +2004,8 @@ module.exports = {
   dispatchDeferredReplay,
   replaysWithoutPhone,
   deferredSmsHandoff,
+  deferredProviderHandoff,
+  deferredBillingEmailPreSendCheck,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,
   runTerminalHookDurably,

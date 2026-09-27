@@ -2040,6 +2040,100 @@ async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimT
   return { ok: true };
 }
 
+// The invoice-delivery provider handoff: hold the invoice row and its deposit
+// ledger (withInvoiceDepositSettlement) from `precondition` through the
+// provider request, so a void, payment, Bill-To change or credit cannot commit
+// between the check and the send. Shared by the immediate send (claim held)
+// and a queued notice's replay (withDeferredInvoiceProviderHandoff).
+// `retryableSetupErrors` makes an error thrown before the provider call a
+// retry rather than a refusal: the immediate send reports it to the operator,
+// a queued replay would otherwise drop the notice on a transient lock
+// conflict.
+async function withCheckedInvoiceProviderHandoff(invoiceId, precondition, dispatch, { retryableSetupErrors = false } = {}) {
+  let dispatchedOutcome = null;
+  let providerStarted = false;
+  try {
+    const outcome = await require("./estimate-deposits").withInvoiceDepositSettlement(
+      invoiceId,
+      async (trx, current) => {
+        const verdict = await precondition(trx, current);
+        if (!verdict.ok) return verdict;
+        providerStarted = true;
+        dispatchedOutcome = await dispatch();
+        return dispatchedOutcome;
+      },
+    );
+    return outcome || { sent: false, blocked: true, deliveryOutcome: "not_sent",
+      code: "INVOICE_UNREADABLE", error: "Invoice could not be re-read before delivery",
+      validator: "check_invoice_deposit_settlement" };
+  } catch (err) {
+    // A commit/connection error AFTER provider acceptance cannot be
+    // rewritten as a definite non-send: that would restore the send
+    // claim and offer an automatic retry of a message the customer
+    // already received. Preserve the provider's actual provenance;
+    // normal delivered bookkeeping remains idempotent.
+    if (dispatchedOutcome
+      && (dispatchedOutcome.sent || dispatchedOutcome.deliveryOutcome !== "not_sent")) {
+      logger.error(`[invoice] Provider outcome known for ${invoiceId} but deposit-settlement handoff could not close: ${err.message}`);
+      return { ...dispatchedOutcome, settlementHandoffError: err.message };
+    }
+    if (providerStarted) {
+      return { sent: false, blocked: true, deliveryOutcome: "uncertain",
+        code: err.code || "INVOICE_PROVIDER_OUTCOME_UNCERTAIN", error: err.message,
+        retryable: false, validator: "check_invoice_deposit_settlement" };
+    }
+    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+      code: err.code || "INVOICE_DEPOSIT_SETTLEMENT_FAILED", error: err.message,
+      retryable: err.retryable === true || retryableSetupErrors, validator: "check_invoice_deposit_settlement" };
+  }
+}
+
+// A queued invoice notice (invoice_send_deferred) replays without the send
+// claim its original attempt held, so it re-runs the claim-less invoice
+// checks the notice's Email provider retry uses (invoice-send-replay-
+// eligibility.js): same customer, still collectible, a send-finalizable
+// status, something still due, a linked visit that ran. `database` is the
+// caller's locked transaction.
+async function deferredInvoiceDeliveryRefusal(meta, database) {
+  const { invoiceSendRefusal } = require("./messaging/invoice-send-replay-eligibility");
+  return invoiceSendRefusal({ ...meta, source_entry_point: "invoice_send_deferred" }, database);
+}
+
+// The queued replay's Text/App legs (and a plain queued text): the same
+// locked handoff as the immediate send, with the claim-less checks.
+async function withDeferredInvoiceProviderHandoff(meta, dispatch) {
+  if (!meta?.invoice_id) {
+    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+      code: "INVOICE_UNREADABLE", error: "Queued invoice notice has no invoice",
+      reason: "Queued invoice notice has no invoice", validator: "check_invoice_replay_eligibility" };
+  }
+  return withCheckedInvoiceProviderHandoff(meta.invoice_id, async (trx) => {
+    const refusal = await deferredInvoiceDeliveryRefusal(meta, trx);
+    if (!refusal) return { ok: true };
+    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+      code: "INVOICE_REPLAY_INELIGIBLE", error: refusal.reason, reason: refusal.reason,
+      retryable: refusal.retryable === true, validator: "check_invoice_replay_eligibility" };
+  }, dispatch, { retryableSetupErrors: true });
+}
+
+// The queued replay's Email leg: the same checks, run under the Email
+// authority's own lock on the invoice row (the authority passes its
+// transaction as `database`), never inside a second invoice lock.
+async function checkDeferredInvoiceEmailDelivery(meta, { database } = {}) {
+  if (!database) {
+    return { ok: false, code: "INVOICE_LOCK_UNAVAILABLE",
+      reason: "Queued invoice email check ran without the invoice lock", retryable: true };
+  }
+  try {
+    const refusal = await deferredInvoiceDeliveryRefusal(meta, database);
+    return refusal
+      ? { ok: false, code: "INVOICE_REPLAY_INELIGIBLE", reason: refusal.reason, retryable: refusal.retryable === true }
+      : { ok: true };
+  } catch (err) {
+    return { ok: false, code: err.code || "INVOICE_REPLAY_CHECK_FAILED", reason: err.message, retryable: true };
+  }
+}
+
 // Codex round-3 P2 (#4963): the ONE test for "did this leg actually reach
 // the customer" — the messaging contract allows `sent: true` with
 // `deliveryOutcome: 'not_sent'` (e.g. the owner-phone kill switch,
@@ -5476,46 +5570,13 @@ const InvoiceService = {
             sendClaimToken: invoice.send_claim_token, sendInvoice,
           });
         },
-        withProviderHandoff: async (dispatch) => {
-          let dispatchedOutcome = null;
-          let providerStarted = false;
-          try {
-            const outcome = await require("./estimate-deposits").withInvoiceDepositSettlement(
-              invoiceId,
-              async (trx, current) => {
-                const precondition = await checkInvoiceDeliveryPreconditions(trx, current, {
-                  sendClaimToken: invoice.send_claim_token, sendInvoice,
-                });
-                if (!precondition.ok) return precondition;
-                providerStarted = true;
-                dispatchedOutcome = await dispatch();
-                return dispatchedOutcome;
-              },
-            );
-            return outcome || { sent: false, blocked: true, deliveryOutcome: "not_sent",
-              code: "INVOICE_UNREADABLE", error: "Invoice could not be re-read before delivery",
-              validator: "check_invoice_deposit_settlement" };
-          } catch (err) {
-            // A commit/connection error AFTER provider acceptance cannot be
-            // rewritten as a definite non-send: that would restore the send
-            // claim and offer an automatic retry of a message the customer
-            // already received. Preserve the provider's actual provenance;
-            // normal delivered bookkeeping below remains idempotent.
-            if (dispatchedOutcome
-              && (dispatchedOutcome.sent || dispatchedOutcome.deliveryOutcome !== "not_sent")) {
-              logger.error(`[invoice] Provider outcome known for ${invoiceId} but deposit-settlement handoff could not close: ${err.message}`);
-              return { ...dispatchedOutcome, settlementHandoffError: err.message };
-            }
-            if (providerStarted) {
-              return { sent: false, blocked: true, deliveryOutcome: "uncertain",
-                code: err.code || "INVOICE_PROVIDER_OUTCOME_UNCERTAIN", error: err.message,
-                retryable: false, validator: "check_invoice_deposit_settlement" };
-            }
-            return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-              code: err.code || "INVOICE_DEPOSIT_SETTLEMENT_FAILED", error: err.message,
-              retryable: err.retryable === true, validator: "check_invoice_deposit_settlement" };
-          }
-        },
+        withProviderHandoff: (dispatch) => withCheckedInvoiceProviderHandoff(
+          invoiceId,
+          (trx, current) => checkInvoiceDeliveryPreconditions(trx, current, {
+            sendClaimToken: invoice.send_claim_token, sendInvoice,
+          }),
+          dispatch,
+        ),
       });
       // Available to the catch block's retry call too (declared outside the
       // try block) — see finalizeInvoiceAfterSms above.
@@ -10664,6 +10725,8 @@ InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'cance
 InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
 
 InvoiceService.rodentSetupRebillMarker = rodentSetupRebillMarker;
+InvoiceService.withDeferredInvoiceProviderHandoff = withDeferredInvoiceProviderHandoff;
+InvoiceService.checkDeferredInvoiceEmailDelivery = checkDeferredInvoiceEmailDelivery;
 module.exports = InvoiceService;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
 module.exports.prepayReplacedCharges = prepayReplacedCharges;

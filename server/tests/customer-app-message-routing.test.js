@@ -1256,3 +1256,69 @@ describe('invoice_send_via_sms explicit billing Email leg (send-customer-message
     expect(sendBillingChannelEmail).not.toHaveBeenCalled();
   });
 });
+
+// Split PR 3 of #4963: a queued invoice notice (invoice_send_deferred) replays
+// under the scheduler's scheduled_sms_cron entry point, and its unlocked
+// recheck runs before recipient resolution and provider preparation. The
+// replay carries the same invoice pair the immediate send does, so every leg
+// re-checks the invoice under its lock at the provider boundary.
+describe('queued invoice notice replay (invoice_send_deferred) takes the invoice handoffs', () => {
+  const replayInput = (overrides = {}) => ({
+    to: '+19415550142', body: 'Your invoice is ready: https://waves.test/pay',
+    channel: 'sms', audience: 'customer', purpose: 'payment_link', customerId,
+    invoiceId: 'test-invoice', entryPoint: 'scheduled_sms_cron',
+    metadata: { original_message_type: 'invoice', original_entry_point: 'invoice_send_deferred',
+      billingDeliveryCategory: 'invoice', notificationEventKey: 'invoice:test-invoice:sent' },
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    Twilio.sendSMS.mockResolvedValue({ success: true, deliveryOutcome: 'accepted', sid: `SM${'1'.repeat(32)}` });
+    jest.useFakeTimers().setSystemTime(new Date('2026-01-05T12:00:00-05:00'));
+  });
+  afterEach(() => jest.useRealTimers());
+
+  test('Email+Text: the Text leg runs inside the invoice handoff and the Email leg runs the invoice check under its own lock', async () => {
+    prefs.invoice_channels = ['email', 'sms'];
+    const billingEmailPreSendCheck = jest.fn(async () => ({ ok: true }));
+    const withProviderHandoff = jest.fn(async (dispatch) => dispatch());
+    const result = await sendCustomerMessage(replayInput({ withProviderHandoff, billingEmailPreSendCheck }));
+
+    expect(result.channelResults).toMatchObject({ email: { sent: true }, sms: { sent: true } });
+    expect(withProviderHandoff).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    const [, emailHooks] = sendBillingChannelEmail.mock.calls[0];
+    await emailHooks.preSendCheck({ database: db });
+    expect(billingEmailPreSendCheck).toHaveBeenCalledWith({ channel: 'email', database: db });
+  });
+
+  test('a refusal at the invoice handoff stops the Text leg before Twilio', async () => {
+    prefs.invoice_channels = ['sms'];
+    const withProviderHandoff = jest.fn(async () => ({ sent: false, blocked: true, deliveryOutcome: 'not_sent',
+      code: 'INVOICE_REPLAY_INELIGIBLE', reason: 'invoice-terminal:void' }));
+    const result = await sendCustomerMessage(replayInput({ withProviderHandoff, billingEmailPreSendCheck: jest.fn() }));
+    expect(withProviderHandoff).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ sent: false, code: 'INVOICE_REPLAY_INELIGIBLE' });
+  });
+
+  test('its Email leg without the invoice check is refused, never sent unchecked', async () => {
+    prefs.invoice_channels = ['email'];
+    const result = await sendCustomerMessage(replayInput({ withProviderHandoff: jest.fn(async (dispatch) => dispatch()) }));
+    expect(result.channelResults.email).toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_PROVIDER_HANDOFF' });
+    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['another queued producer', { original_entry_point: 'dispatch_completion_deferred' }],
+    ['a row with no original entry point', {}],
+  ])('%s cannot take the invoice handoff', async (_label, metadata) => {
+    const withProviderHandoff = jest.fn(async (dispatch) => dispatch());
+    const result = await sendCustomerMessage(replayInput({ withProviderHandoff,
+      metadata: { original_message_type: 'invoice', billingDeliveryCategory: 'invoice',
+        notificationEventKey: 'invoice:test-invoice:sent', ...metadata } }));
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'UNSUPPORTED_PROVIDER_HANDOFF' });
+    expect(withProviderHandoff).not.toHaveBeenCalled();
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
+  });
+});
