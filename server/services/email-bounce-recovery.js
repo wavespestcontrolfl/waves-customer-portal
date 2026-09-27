@@ -24,6 +24,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const emailLib = require('./email-template-library');
+const billingReplay = require('./billing-email-provider-replay');
 const NotificationService = require('./notification-service');
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
 
@@ -499,6 +500,15 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
     return { ok: true, messageRowId: message.id, reused: true };
   }
   try {
+    // Billing snapshots carry source authority that must be rechecked against
+    // the original message. Until this recovery path can do that under the
+    // billing locks, fail closed instead of bypassing it through direct sendOne.
+    if (billingReplay.isBillingEmailProviderReplay(bouncedMessage)) {
+      const reason = 'billing_replay_reauthorization_required';
+      await db('email_messages').where({ id: message.id, status: 'queued' })
+        .update({ status: 'blocked', error_message: reason, updated_at: new Date() });
+      return { ok: false, suppressed: true, reason };
+    }
     let result;
     // Codex round 3 on #4608 (structural move): set inside dispatchToProvider
     // when sendgrid.sendOne's OWN annual-offer guard (the authoritative
