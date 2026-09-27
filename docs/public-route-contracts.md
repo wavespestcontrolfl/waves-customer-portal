@@ -1418,7 +1418,20 @@ The check is the intake-local topic chokepoint in `ask-waves-intake.js`
 (`intakeSafetyClaimSupplement`), run on typography-folded text; the shared
 `reentrySafetyClaimFinding` is deliberately NOT called on this per-turn path
 (its worst case blocks the event loop, #4905). Safety wording is judged by
-topic, not grammatical subject, so it over-blocks by design. NOT CORS-open — credentialed allowlist
+topic, not grammatical subject, so it over-blocks by design.
+With `GATE_ASK_WAVES_TOPIC_ROUTING` on (dark; read at call time through
+`askWavesTopicRoutingLive()`), what the visitor ASKED decides first: the
+model also returns a `topic` (`medical_emergency` / `product_safety` /
+`reentry_timing` / `none`, sent only while the gate is on), and those three
+topics get reviewed copy instead of the model's answer — the emergency script
+(Poison Control / veterinary lines picked from the visitor's words, the vet
+line also for a named pet) or the reviewed "follow the product label" copy.
+The visitor's own words are a floor for safety and re-entry questions only;
+the regex emergency detector never forces the emergency script by itself
+(#4899), but emergency evidence in the conversation upgrades a safety or
+re-entry answer to it. With both providers down, a safety or re-entry
+question gets the reviewed copy instead of the generic quote fallback. Gate
+off: prompt, schema and replies are unchanged. NOT CORS-open — credentialed allowlist
 origins only (hub site)).
 `/api/public/experiments` (`GET /status` + `POST /exposure`) (client-side
 GrowthBook experimentation surface — no auth, anonymous visitors are the

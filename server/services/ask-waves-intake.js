@@ -23,6 +23,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
+const { askWavesTopicRoutingLive } = require('../config/feature-gates');
 // The repo's ONE product-claim/safety-compliance rule set (20+ review rounds
 // of paraphrase coverage): unconditional "safe" claims, the "EPA-approved"
 // ban, and fixed re-entry/drying minute figures. Already the canonical check
@@ -352,6 +353,26 @@ const INTAKE_SCHEMA = {
     ready_for_quote: { type: 'boolean' },
   },
 };
+
+// Topic routing (GATE_ASK_WAVES_TOPIC_ROUTING): the model also names what the
+// VISITOR asked about, and a medical-emergency, product-safety or re-entry
+// question gets reviewed copy instead of the model's own answer. Sent only
+// while the gate is on, so an off gate leaves the prompt and schema exactly
+// as they were.
+const TOPICS = ['medical_emergency', 'product_safety', 'reentry_timing', 'none'];
+const INTAKE_SCHEMA_WITH_TOPIC = {
+  ...INTAKE_SCHEMA,
+  required: [...INTAKE_SCHEMA.required, 'topic'],
+  properties: {
+    ...INTAKE_SCHEMA.properties,
+    topic: { type: 'string', enum: TOPICS, description: "What the visitor's newest message is about (see TOPIC in the instructions)" },
+  },
+};
+const TOPIC_RULES = `TOPIC (the topic field) — what the VISITOR's newest message is about, whatever you reply. Pick the first that applies:
+- "medical_emergency": a person or pet may be hurt or exposed now or recently — swallowed, inhaled, touched or got in the eyes or on the skin a pesticide, bait, spray or treatment; a sting or bite with swelling, trouble breathing, vomiting or other symptoms; feeling sick after a treatment; or asking whether to call 911, Poison Control, a doctor or a vet.
+- "product_safety": asks whether a treatment, product or chemical is safe, harmful, toxic or risky for people, children, pets, plants, bees, fish or the home.
+- "reentry_timing": asks when or whether people or pets can go back inside or outside, use the lawn or pool, touch surfaces, or how long to wait or stay away after a treatment.
+- "none": anything else — pests, pricing, scheduling, accounts, general questions.`;
 
 function cleanText(value, maxLen) {
   const text = String(value || '')
@@ -880,6 +901,8 @@ function productExposureIn(context) {
     || String(context || '').split(/\n+/).some((turn) => ELLIPTICAL_EXPOSURE_RE.test(turn));
 }
 
+const VET_EMERGENCY_SCRIPT = `${ANIMAL_EMERGENCY_REPLY.trim()} For an urgent pest problem at your home, call us at ${COMPANY.phone}.`;
+
 function emergencyGuidance(result, contextText = '', { trustIntent = true } = {}) {
   // A denied need for care ("does not require medical care") is not a direction.
   const folded = foldTypography(result.reply).replace(NEGATED_CARE_RE, ' ');
@@ -911,7 +934,7 @@ function emergencyGuidance(result, contextText = '', { trustIntent = true } = {}
     parts.push(EMERGENCY_FALLBACK_RESULT.reply + (ingestion ? POISON_CONTROL_LINE : ''));
   }
   if (vet) {
-    parts.push(`${ANIMAL_EMERGENCY_REPLY.trim()} For an urgent pest problem at your home, call us at ${COMPANY.phone}.`);
+    parts.push(VET_EMERGENCY_SCRIPT);
   }
   return {
     ...result,
@@ -967,6 +990,59 @@ function reassuranceOnEmergency(base, contextText, activeMessage) {
   return emergencyGuidance(base, emergencyContext);
 }
 
+// Topic routing's floor on the visitor's own words, for the two topics where
+// a false alarm only costs a less conversational answer. A safety question
+// must be a question about the treatment or about its effect on a person or
+// pet ("Is the spray safe for my cat?", "Will it hurt the kids?") — a pest
+// question ("Are fire ants dangerous for my dog?") is not. A re-entry
+// question uses the strict access wording and occupants coming back, never
+// the loose topic matcher ("Do ants come inside when it rains?" is pest talk).
+const QUESTION_SHAPE_RE = /\?|\b(?:when|how\s+(?:long|soon)|until|till|can|could|may|should|is\s+it|are\s+(?:we|they|the|you)|will\s+it|do\s+(?:i|we)\s+(?:need|have)|cu[aá]ndo|cu[aá]nto\s+tiempo|puedo|podemos|pueden|hay\s+que|debo|debemos|es\s+seguro)(?![a-zñáéíóú])/i;
+const SAFETY_TOPIC_RE = /\b(?:safe(?:ly|ty)?|unsafe|harm\w*|hurt\w*|toxic\w*|poison\w*|danger\w*|risk\w*|sick|affect\w*|irritat\w*|(?:pet|kid|child|family)[-\s]?friendly|segur[oa]s?|seguridad|peligros\w*|t[oó]xic\w*|da[ñn]\w*|riesgos?|afect\w*|enferm\w*)(?![a-zñáéíóú])/i;
+const SAFETY_TARGET_RE = /\b(?:for|around|to|near|with|on|para|con|a)\s+(?:(?:my|our|the|your|his|her|mi|mis|su|sus|los|las|el|la)\s+)?(?:kids?|children|child|bab(?:y|ies)|toddlers?|family|pets?|dogs?|cats?|pupp(?:y|ies)|kittens?|birds?|fish|bees|plants?|lawn|garden|people|humans?|me|us|him|her|them|mascotas?|ni[ñn][oa]s?|hij[oa]s?|perr[oa]s?|gat[oa]s?|familia|beb[eé]s?|abejas|plantas)(?![a-zñáéíóú])/i;
+const PEST_NOUN_RE = new RegExp(`\\b(?:${PEST_POSSESSOR}|hormigas?|cucarachas?|ratas?|ratones?|ara[ñn]as?|avispas?|abejas?|mosquitos?|pulgas?|garrapatas?|termitas?)(?![a-zñáéíóú])`, 'i');
+function visitorSafetyQuestion(active) {
+  if (!QUESTION_SHAPE_RE.test(active) || !SAFETY_TOPIC_RE.test(active)) return false;
+  return INTAKE_TREATMENT_CONTEXT_RE.test(active) || (SAFETY_TARGET_RE.test(active) && !PEST_NOUN_RE.test(active));
+}
+function visitorReentryQuestion(active) {
+  const physical = active.replace(DIGITAL_ACCESS_RE, ' ');
+  return QUESTION_SHAPE_RE.test(active) && (ACCESS_SIGNAL_RE.test(physical) || OCCUPANT_RETURN_RE.test(physical));
+}
+
+// The emergency script for a model-classified emergency: the visitor's words
+// pick the Poison Control and veterinary lines as usual, and a pet named in
+// the conversation adds the veterinary line even when the regex saw nothing.
+function topicEmergencyScript(base, context) {
+  const script = emergencyGuidance({ ...base, reply: '', intent: 'emergency' }, context);
+  if (PET_ANTECEDENT_RE.test(foldTypography(context)) && !script.reply.includes(VET_EMERGENCY_SCRIPT)) {
+    return { ...script, reply: `${script.reply} ${VET_EMERGENCY_SCRIPT}` };
+  }
+  return script;
+}
+
+// Topic routing (GATE_ASK_WAVES_TOPIC_ROUTING): what the visitor asked
+// decides, not how the model worded its answer. A medical emergency, a
+// product-safety question or a re-entry question gets reviewed copy, and the
+// model's own words for those topics never reach the visitor. The model's
+// topic is the main signal; the visitor's words are a floor for safety and
+// re-entry. The regex emergency detector never forces the emergency script
+// on its own — it fires on "911 Palm Ave" and "passed out flyers" (#4899) —
+// but emergency evidence in the conversation upgrades a safety or re-entry
+// answer to it. Anything else returns null and keeps the model's answer,
+// still checked by the claim chokepoint.
+function routeByTopic(modelTopic, base, contextText, activeMessage) {
+  const emergencyContext = emergencyContextOf(contextText, activeMessage);
+  if (modelTopic === 'medical_emergency') return topicEmergencyScript(base, emergencyContext);
+  const active = foldTypography(activeMessage);
+  const reviewedTopic = modelTopic === 'product_safety' || modelTopic === 'reentry_timing'
+    || visitorSafetyQuestion(active) || visitorReentryQuestion(active);
+  if (!reviewedTopic) return null;
+  if (looksLikeEmergency(foldTypography(emergencyContext))) return topicEmergencyScript(base, emergencyContext);
+  const spanish = looksSpanish(activeMessage) || looksSpanish(base.reply);
+  return { ...base, intent: base.intent === 'emergency' ? 'question' : base.intent, reply: spanish ? UNSAFE_CLAIM_REPLY_ES : UNSAFE_CLAIM_REPLY };
+}
+
 function normalizeIntakeResult(json, source, contextText = '', activeMessage = contextText) {
   if (!json || typeof json !== 'object') return null;
   const reply = cleanText(json.reply, REPLY_MAX_LEN);
@@ -983,6 +1059,10 @@ function normalizeIntakeResult(json, source, contextText = '', activeMessage = c
     ready_for_quote: quoteless ? false : json.ready_for_quote === true,
     source,
   };
+  if (askWavesTopicRoutingLive()) {
+    const routed = routeByTopic(json.topic, base, contextText, activeMessage);
+    if (routed) return routed;
+  }
   // Safety/emergency handling reads the model's ORIGINAL reply, before any
   // price replacement: "…not safe to ingest; call Poison Control now.
   // Treatment costs $50." must keep the emergency script, not become the
@@ -1128,6 +1208,14 @@ function hasUsableReply(result) {
  * Answer one visitor message. Never throws; always returns the wire contract
  * { reply, intent, service_keys, ready_for_quote, source }.
  */
+// With both providers down and topic routing on, a safety or re-entry
+// question gets the reviewed copy instead of the generic quote fallback.
+function topicFallback(activeMessage) {
+  const active = foldTypography(activeMessage);
+  if (!visitorSafetyQuestion(active) && !visitorReentryQuestion(active)) return null;
+  return { ...FALLBACK_RESULT, intent: 'question', reply: looksSpanish(activeMessage) ? UNSAFE_CLAIM_REPLY_ES : UNSAFE_CLAIM_REPLY };
+}
+
 async function processIntakeMessage({ message, history, sessionId } = {}) {
   const text = buildTranscript(message, history);
   let result = null;
@@ -1152,14 +1240,15 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
   // can't leave a visitor waiting on a stalled adapter, so the chain races
   // each leg against its own share from its own side rather than trusting an
   // adapter (or a misbehaving future one) to honor timeoutMs on its own.
+  const topicRouting = askWavesTopicRoutingLive();
   let dispatched;
   try {
     dispatched = await dispatchWithFallback(askWavesPolicy(), {
       laneId: 'ask_waves',
-      system: SYSTEM_PROMPT,
+      system: topicRouting ? `${SYSTEM_PROMPT}\n\n${TOPIC_RULES}` : SYSTEM_PROMPT,
       text,
       jsonMode: true,
-      jsonSchema: INTAKE_SCHEMA,
+      jsonSchema: topicRouting ? INTAKE_SCHEMA_WITH_TOPIC : INTAKE_SCHEMA,
       maxTokens: 400,
       timeoutMs: turnBudgetMs(),
     }, { reserveFallbackBudget: true, hardDeadline: true, validate: hasUsableReply });
@@ -1178,8 +1267,8 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
     // ingestion gets the Poison Control line even with both providers down.
     result = looksLikeEmergency(foldTypography(guardText))
       ? emergencyGuidance({ ...EMERGENCY_FALLBACK_RESULT, reply: '' }, guardText)
-      : SUPPORT_RE.test(guardText) ? { ...SUPPORT_FALLBACK_RESULT }
-        : { ...FALLBACK_RESULT };
+      : (topicRouting && topicFallback(cleanText(message, MESSAGE_MAX_LEN)))
+        || (SUPPORT_RE.test(guardText) ? { ...SUPPORT_FALLBACK_RESULT } : { ...FALLBACK_RESULT });
   }
 
   // Best-effort log: fire-and-forget so a stalled/pending DB read can never
@@ -1210,6 +1299,8 @@ module.exports = {
     SUPPORT_FALLBACK_RESULT,
     SUPPORT_RE,
     looksLikeEmergency,
+    INTAKE_SCHEMA,
+    INTAKE_SCHEMA_WITH_TOPIC,
     MESSAGE_MAX_LEN,
     ASK_WAVES_TURN_BUDGET_MS,
     ASK_WAVES_TURN_BUDGET_MAX_MS,
