@@ -428,6 +428,12 @@ function countBy(values) {
   return out;
 }
 
+// Every effort a turn can stamp (relay-conversation.js _stampedEffort): the
+// Anthropic output_config levels (config/models.js ANTHROPIC_EFFORT_LEVELS)
+// plus the OpenAI Responses reasoning efforts, 'none' included — an
+// explicit no-reasoning request, distinct from no effort configured (null).
+const STORED_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+
 /** Numeric timing observations only; live stats also contain raw utterance objects. */
 function storedTurnStats(stats = []) {
   const numeric = ['turn', 'callerSpeechStoppedAt', 'promptAt', 'firstSendAt', 'firstTokenAt', 'agentSpeakingStartAt',
@@ -436,7 +442,7 @@ function storedTurnStats(stats = []) {
   return stats.map((turn) => ({
     ...Object.fromEntries(numeric.map((key) => [key, Number.isFinite(turn[key]) ? turn[key] : null])),
     ...Object.fromEntries(flags.map((key) => [key, turn[key] === true])),
-    effort: ['low', 'medium', 'high'].includes(turn.effort) ? turn.effort : null,
+    effort: STORED_EFFORTS.has(turn.effort) ? turn.effort : null,
     renderer: ['block', 'stream-v1'].includes(turn.renderer) ? turn.renderer : null,
     playedSource: ['assumed', 'interrupt_truncation', 'twilio_event'].includes(turn.playedSource) ? turn.playedSource : null,
   }));
