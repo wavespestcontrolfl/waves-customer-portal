@@ -52,6 +52,13 @@ jest.mock('../services/service-report/pdf-storage', () => ({
   timeOnSiteAdjustedPdfSignature: () => '',
   reentryAdjustedPdfSignature: () => '',
   treeShrubReviewPdfSignature: jest.requireActual('../services/service-report/pdf-storage').treeShrubReviewPdfSignature,
+  // Applicator-identity key component (Poison Control lane): stubbed empty
+  // like the other adjustment components above — this suite asserts the
+  // Pest Pressure config threading, and the real implementation requires
+  // report-data.js, which this file mocks separately. Its own behavior is
+  // pinned directly against resolveApplicatorFdacsId in
+  // report-identity-snapshot.test.js.
+  applicatorIdentityPdfSignature: () => '',
 }));
 jest.mock('../services/pest-pressure/store', () => ({
   loadActiveConfig: mockLoadActiveConfig,

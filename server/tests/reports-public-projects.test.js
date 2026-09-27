@@ -408,6 +408,10 @@ describe('public project reports', () => {
       if (table === 'projects as p') return projectRead;
       if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
       if (table === 'service_records') return chain();
+      // This project links a scheduled_service_id with no created_by_tech_id
+      // — resolveProjectApplicatorTechnician queries it and resolves no
+      // technician either way; unrelated to what this test asserts.
+      if (table === 'scheduled_services') return chain();
       throw new Error(`Unexpected table query: ${table}`);
     });
     // A real linked follow-up whose SOURCE row carries window_end — the
@@ -449,6 +453,9 @@ describe('public project reports', () => {
 
   // FDACS applicator identification card number (F.S. 482.2265(1)(b), owner
   // ruling 2026-09-26) — same withholding rules as the service report.
+  // Genuinely unlinked project (no service_record_id/scheduled_service_id)
+  // — applicator resolves from created_by_tech_id, the only technician
+  // available.
   test('applicatorFdacsId reflects the technician license status judged against the project date', async () => {
     const projectRead = chain({
       first: jest.fn().mockResolvedValue({
@@ -462,15 +469,20 @@ describe('public project reports', () => {
         last_name: 'Customer',
         project_date: '2026-06-11',
         technician_name: 'Alex Benson',
-        technician_fdacs_id: 'JB1234567',
-        technician_license_expiry: '2026-12-31',
+        created_by_tech_id: 'tech-alex',
         findings: {},
+      }),
+    });
+    const technicianRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'tech-alex', name: 'Alex Benson', fl_applicator_license: 'JB1234567', license_expiry: '2026-12-31',
       }),
     });
     db.mockImplementation((table) => {
       if (table === 'projects as p') return projectRead;
       if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
       if (table === 'service_records') return chain();
+      if (table === 'technicians') return technicianRead;
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -494,8 +506,7 @@ describe('public project reports', () => {
         first_name: 'Pat',
         last_name: 'Customer',
         project_date: '2026-01-01',
-        technician_fdacs_id: 'JB1234567',
-        technician_license_expiry: '2026-03-01',
+        created_by_tech_id: 'tech-alex',
         findings: { wdo_finding: 'No visible signs of WDO observed' },
         // viewerProjectDate is overridden to the archived filing's own
         // project_date, which the license had already lapsed by — the
@@ -507,10 +518,16 @@ describe('public project reports', () => {
         }]),
       }),
     });
+    const technicianRead = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'tech-alex', name: 'Alex Benson', fl_applicator_license: 'JB1234567', license_expiry: '2026-03-01',
+      }),
+    });
     db.mockImplementation((table) => {
       if (table === 'projects as p') return projectRead;
       if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
       if (table === 'service_records') return chain();
+      if (table === 'technicians') return technicianRead;
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -520,6 +537,176 @@ describe('public project reports', () => {
       expect(res.status).toBe(200);
       expect(body.projectDate).toBe('2026-06-11');
       expect(body.applicatorFdacsId).toBeNull();
+    });
+  });
+
+  // Applicator resolution order (Codex P1, 2026-09-26): the PERFORMED
+  // visit's technician, never merely the project's creator.
+  describe('applicator resolution order', () => {
+    function baseProjectRow(overrides = {}) {
+      return {
+        id: 'project-applicator',
+        customer_id: 'customer-1',
+        report_token: '0123456789abcdef0123456789abcdef',
+        report_viewed_at: 'earlier',
+        project_type: 'termite_treatment',
+        status: 'sent',
+        first_name: 'Pat',
+        last_name: 'Customer',
+        project_date: '2026-06-11',
+        // The creator join — 'Office Admin' must never surface as the
+        // applicator when a performed-visit technician resolves instead.
+        technician_name: 'Office Admin',
+        created_by_tech_id: 'admin-tech-id',
+        findings: { treatment_method: 'Trenching', epa_registration: '12345-6' },
+        ...overrides,
+      };
+    }
+
+    test('resolves from the linked service_records technician over the creator', async () => {
+      const projectRead = chain({ first: jest.fn().mockResolvedValue(baseProjectRow({ service_record_id: 'sr-1' })) });
+      const serviceRecordRead = chain({ first: jest.fn().mockResolvedValue({ technician_id: 'tech-performer' }) });
+      const technicianRead = chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'tech-performer', name: 'Taylor Performer', fl_applicator_license: 'FA-PERFORM', license_expiry: '2027-01-01',
+        }),
+      });
+      db.mockImplementation((table) => {
+        if (table === 'projects as p') return projectRead;
+        if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
+        if (table === 'service_records') return serviceRecordRead;
+        if (table === 'scheduled_services') throw new Error('scheduled_services must not be queried when service_record_id resolves a technician');
+        if (table === 'technicians') return technicianRead;
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.applicatorName).toBe('Taylor Performer');
+        expect(body.applicatorFdacsId).toBe('FA-PERFORM');
+        // technicianName stays the creator join, unchanged.
+        expect(body.technicianName).toBe('Office Admin');
+      });
+    });
+
+    test('falls back to the linked scheduled_services technician when there is no service_record_id', async () => {
+      const projectRead = chain({ first: jest.fn().mockResolvedValue(baseProjectRow({ scheduled_service_id: 'ss-1' })) });
+      const scheduledServiceRead = chain({ first: jest.fn().mockResolvedValue({ technician_id: 'tech-assigned' }) });
+      const technicianRead = chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'tech-assigned', name: 'Jordan Assigned', fl_applicator_license: 'FA-ASSIGN', license_expiry: null,
+        }),
+      });
+      db.mockImplementation((table) => {
+        if (table === 'projects as p') return projectRead;
+        if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
+        if (table === 'scheduled_services') return scheduledServiceRead;
+        if (table === 'technicians') return technicianRead;
+        // The router.param('token') suppression gate queries service_records
+        // for EVERY 32-hex token, including project tokens — a plain
+        // pass-through row (record is not a suppressed typed report).
+        if (table === 'service_records') return chain();
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.applicatorName).toBe('Jordan Assigned');
+        expect(body.applicatorFdacsId).toBe('FA-ASSIGN');
+      });
+    });
+
+    test('falls back to created_by_tech_id only for a genuinely unlinked project', async () => {
+      const projectRead = chain({ first: jest.fn().mockResolvedValue(baseProjectRow()) });
+      const technicianRead = chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'admin-tech-id', name: 'Office Admin', fl_applicator_license: 'FA-ADMIN', license_expiry: null,
+        }),
+      });
+      db.mockImplementation((table) => {
+        if (table === 'projects as p') return projectRead;
+        if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
+        if (table === 'technicians') return technicianRead;
+        if (table === 'service_records') return chain();
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.applicatorName).toBe('Office Admin');
+        expect(body.applicatorFdacsId).toBe('FA-ADMIN');
+      });
+    });
+  });
+
+  // Poison Control line (owner ruling 2026-09-26) — end-to-end through the
+  // public route, over the field-level cases already covered directly
+  // against activity-indicators.projectPoisonControl.
+  describe('poisonControl', () => {
+    test('true for a liquid termite treatment, false for device-only work', async () => {
+      const liquidRead = chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'project-pc-1',
+          customer_id: 'customer-1',
+          report_token: '0123456789abcdef0123456789abcdef',
+          report_viewed_at: 'earlier',
+          project_type: 'termite_treatment',
+          status: 'sent',
+          first_name: 'Pat',
+          last_name: 'Customer',
+          project_date: '2026-06-11',
+          created_by_tech_id: null,
+          findings: { treatment_method: 'Trenching', epa_registration: '12345-6' },
+        }),
+      });
+      db.mockImplementation((table) => {
+        if (table === 'projects as p') return liquidRead;
+        if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
+        if (table === 'service_records') return chain();
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.poisonControl).toBe(true);
+      });
+    });
+
+    test('device-only bait station setup is not poison control eligible', async () => {
+      const deviceOnlyRead = chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'project-pc-2',
+          customer_id: 'customer-1',
+          report_token: '0123456789abcdef0123456789abcdef',
+          report_viewed_at: 'earlier',
+          project_type: 'termite_treatment',
+          status: 'sent',
+          first_name: 'Pat',
+          last_name: 'Customer',
+          project_date: '2026-06-11',
+          created_by_tech_id: null,
+          findings: { treatment_method: 'Bait station setup', epa_registration: '12345-6' },
+        }),
+      });
+      db.mockImplementation((table) => {
+        if (table === 'projects as p') return deviceOnlyRead;
+        if (table === 'project_photos') return chain({ orderBy: jest.fn().mockResolvedValue([]) });
+        if (table === 'service_records') return chain();
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.poisonControl).toBe(false);
+      });
     });
   });
 });

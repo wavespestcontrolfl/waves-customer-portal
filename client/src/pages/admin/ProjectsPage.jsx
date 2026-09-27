@@ -20,7 +20,7 @@ import ProjectFindingFieldInput, {
   normalizeApplicationRows,
 } from "../../components/tech/ProjectFindingFieldInput";
 import { parseSections, TERMITE_COMPLIANCE_SECTIONS } from "../ProjectReportViewPage";
-import PoisonControlCopy, { projectAppliedProduct } from "../../components/report/PoisonControlCopy";
+import PoisonControlCopy, { applicatorIdLine } from "../../components/report/PoisonControlCopy";
 import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
 
 const {
@@ -887,6 +887,7 @@ function CustomerProjectReportPreview({
   sentLink,
 }) {
   const typeLabel = typeCfg?.label || TYPE_LABELS[project.project_type] || "Inspection";
+  const previewApplicatorLine = applicatorIdLine(project.applicator_name || project.tech_name, project.applicator_fdacs_id);
   // Same suppression rules as the customer-facing report page — the preview
   // staff approve must match what the customer actually sees: internal keys
   // filtered, and the raw findings hidden when the AI-drafted sectioned
@@ -1158,8 +1159,10 @@ function CustomerProjectReportPreview({
             </div>
           )}
 
-          {/* Same type gate as the public page (preview == final). */}
-          {projectAppliedProduct(project.project_type, findings, project.followup_findings) && (
+          {/* Same server verdict and applicator as the public page (preview
+              == final) — computed from the SAVED findings, which is what the
+              sent report reads. */}
+          {project.poison_control === true && (
             <div data-testid="preview-poison-control" style={{ marginTop: 12 }}>
               <div
                 style={{
@@ -1176,6 +1179,11 @@ function CustomerProjectReportPreview({
               <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5 }}>
                 <PoisonControlCopy linkStyle={{ color: "#1B2C5B", fontWeight: 700 }} />
               </div>
+              {previewApplicatorLine && (
+                <div data-testid="preview-applicator-id" style={{ fontSize: 13, color: "#1B2C5B", fontWeight: 600, lineHeight: 1.5, marginTop: 4 }}>
+                  {previewApplicatorLine}
+                </div>
+              )}
             </div>
           )}
         </div>

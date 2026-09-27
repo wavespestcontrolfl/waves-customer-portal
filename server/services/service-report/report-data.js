@@ -364,6 +364,58 @@ function calendarDayOrNull(value) {
   }
 }
 
+// Which technician's identity backs a PROJECT report's "applicator" line —
+// the person who actually performed the linked service, never merely the
+// staffer who typed up the project record (Codex P1, 2026-09-26: the
+// project create route stamps req.technicianId as created_by_tech_id
+// regardless of who performed the visit, admin-projects.js ~1727-1735 — an
+// admin creating a project for a tech-performed visit was publishing the
+// ADMIN's own FDACS id/name).
+//
+// Resolution order: the performed service_records row's technician_id (the
+// visit actually completed), then the linked scheduled_services row's
+// technician_id (a project attached to a visit with no service_record yet),
+// then the project's own created_by_tech_id — used ONLY for a genuinely
+// unlinked project (neither link present). Returns the technicians row
+// (name / fl_applicator_license / license_expiry) or null when nothing
+// resolves.
+async function resolveProjectApplicatorTechnician(project, knex = db) {
+  let technicianId = null;
+  if (project?.service_record_id) {
+    const row = await knex('service_records').where({ id: project.service_record_id }).first('technician_id');
+    technicianId = row?.technician_id || null;
+  }
+  if (!technicianId && project?.scheduled_service_id) {
+    const row = await knex('scheduled_services').where({ id: project.scheduled_service_id }).first('technician_id');
+    technicianId = row?.technician_id || null;
+  }
+  if (!technicianId) technicianId = project?.created_by_tech_id || null;
+  if (!technicianId) return null;
+  return knex('technicians').where({ id: technicianId }).first('id', 'name', 'fl_applicator_license', 'license_expiry');
+}
+
+// Shared by the public project report (reports-public.js) AND the admin
+// detail/preview endpoint (admin-projects.js) so neither route re-derives
+// this branching itself (each call site collapses to one await + a
+// destructure — see resolveProjectApplicatorTechnician above and
+// activity-indicators.js's projectPoisonControl for what each field means).
+// judgmentDate is the caller's own date to judge license expiry against —
+// the public route's viewerProjectDate (a WDO archived filing can override
+// project_date) vs the admin route's plain project_date || created_at.
+async function resolveProjectReportPreviewFields(project, judgmentDate, knex = db) {
+  const { projectPoisonControl } = require('./activity-indicators');
+  const technician = await resolveProjectApplicatorTechnician(project, knex);
+  return {
+    applicatorFdacsId: resolveApplicatorFdacsId(
+      technician?.fl_applicator_license,
+      technician?.license_expiry,
+      judgmentDate,
+    ),
+    applicatorName: String(technician?.name || '').trim() || null,
+    poisonControl: projectPoisonControl(project?.project_type, project?.findings, project?.followup_findings),
+  };
+}
+
 function firstNumber(...values) {
   for (const value of values) {
     const n = numberOrNull(value);
@@ -5658,6 +5710,8 @@ module.exports = {
   buildReportV1Data,
   termiteStationPinsFlag,
   resolveApplicatorFdacsId,
+  resolveProjectApplicatorTechnician,
+  resolveProjectReportPreviewFields,
   // Pure — exported so the rainfall-provenance contract can be tested against
   // the real implementation rather than a copy of it.
   buildLawnWaterContext,

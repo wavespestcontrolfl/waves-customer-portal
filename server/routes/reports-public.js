@@ -35,7 +35,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveApplicatorFdacsId } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -158,6 +158,7 @@ const {
   timeOnSiteAdjustedPdfSignature,
   reentryAdjustedPdfSignature,
   treeShrubReviewPdfSignature,
+  applicatorIdentityPdfSignature,
 } = require('../services/service-report/pdf-storage');
 const { summaryCopySignature, technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
 const {
@@ -677,11 +678,12 @@ async function findProjectByReportSegment(segment) {
       // Feed the canonical review resolver for the payload's reviewLocation.
       'c.latitude as customer_latitude', 'c.longitude as customer_longitude',
       'c.nearest_location_id',
+      // technicianName stays sourced from the project's CREATOR (unchanged
+      // response field) — the resolved applicator identity for
+      // applicatorFdacsId/applicatorName is looked up separately by
+      // resolveProjectApplicatorTechnician (report-data.js), which does not
+      // assume the creator performed the visit.
       't.name as technician_name',
-      // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
-      // resolved/withheld in report-data.js's resolveApplicatorFdacsId.
-      't.fl_applicator_license as technician_fdacs_id',
-      't.license_expiry as technician_license_expiry',
     );
   if (lookup.type === 'full') {
     return query.where({ 'p.report_token': lookup.value }).first();
@@ -873,11 +875,19 @@ router.get('/project/:token/data', async (req, res, next) => {
     // FDACS applicator identification card number (F.S. 482.2265(1)(b)) —
     // judged against viewerProjectDate (the WDO last-filing date when one
     // exists), same rules as the service report's applicatorFdacsId.
-    const applicatorFdacsId = resolveApplicatorFdacsId(
-      project.technician_fdacs_id,
-      project.technician_license_expiry,
-      viewerProjectDate,
-    );
+    // Resolved from the technician who actually PERFORMED the linked
+    // service (service_records → scheduled_services → the project's
+    // created_by_tech_id only when genuinely unlinked) — never simply the
+    // staffer who typed up the project record, which the plain `t.name as
+    // technician_name` join above still reflects (codex P1: an admin
+    // creating a project for a tech-performed visit was publishing the
+    // ADMIN's own id/name). `technicianName` below is left as-is; the new
+    // `applicatorName` carries the corrected identity. Poison Control line
+    // eligibility (owner ruling 2026-09-26) rides the same shared resolver,
+    // computed from the project's RAW findings/followup_findings, before
+    // the internal-key/fee strip below (structured treatment fields, never
+    // free text, so nothing here needs scrubbing).
+    const { applicatorFdacsId, applicatorName, poisonControl } = await resolveProjectReportPreviewFields(project, viewerProjectDate, db);
 
     // Internal/office-only finding keys must never ride the public JSON — the
     // client registry hides them visually, but any token holder can read the
@@ -933,6 +943,8 @@ router.get('/project/:token/data', async (req, res, next) => {
       ].filter(Boolean).join(', '),
       technicianName: project.technician_name,
       applicatorFdacsId,
+      applicatorName,
+      poisonControl,
       projectDate: viewerProjectDate,
       sentAt: project.sent_at,
       findings: viewerFindings,
@@ -1964,7 +1976,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + applicatorIdentityPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -2098,7 +2110,7 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + applicatorIdentityPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }

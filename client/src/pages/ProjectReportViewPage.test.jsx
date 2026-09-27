@@ -93,44 +93,44 @@ describe('ProjectReportViewPage action bar — same four boxes on every report (
 });
 
 describe('ProjectReportViewPage Poison Control (owner 2026-09-26)', () => {
-  it.each([
-    ['termite_treatment', { products_used: 'Termidor SC' }],
-    ['flea', { treatment_completed: 'Interior flea treatment' }],
-    ['bed_bug', { treatment_method: 'Chemical only' }],
-    ['one_time_lawn_treatment', { work_completed: 'Fertilizer applied' }],
-    ['rodent_bait_station', {}],
-  ])('a %s report that recorded an application carries the tappable Poison Control line', async (projectType, findings) => {
-    const { findByTestId } = renderProjectReport(payload(projectType, { findings }));
-    const card = await findByTestId('project-poison-control');
-    const link = card.querySelector('a[href="tel:+18002221222"]');
-    expect(link).not.toBeNull();
-    expect(link.textContent).toBe('1-800-222-1222');
-    // project findings list no products, so the line never points at one
-    expect(card.textContent).not.toMatch(/names each product/);
-  });
+  it.each(['termite_treatment', 'flea', 'rodent_bait_station'])(
+    'a %s report the server marks poisonControl carries the tappable Poison Control line',
+    async (projectType) => {
+      const { findByTestId } = renderProjectReport(payload(projectType, { poisonControl: true }));
+      const card = await findByTestId('project-poison-control');
+      const link = card.querySelector('a[href="tel:+18002221222"]');
+      expect(link).not.toBeNull();
+      expect(link.textContent).toBe('1-800-222-1222');
+      // project findings list no products, so the line never points at one
+      expect(card.textContent).not.toMatch(/names each product/);
+    },
+  );
 
   it.each([
-    ['flea', { treatment_completed: 'Inspection only' }],
-    ['one_time_lawn_treatment', { work_completed: 'Inspection completed' }],
-    ['bed_bug', { treatment_method: 'Heat only' }],
+    ['flea', { poisonControl: false }],
+    ['termite_treatment', {}],
     ['wdo_inspection', {}],
     ['pre_treatment_termite_certificate', {}],
-    ['termite_inspection', {}],
-    ['pest_inspection', {}],
-    ['rodent_exclusion', {}],
-    ['termite_bait_station', {}],
-  ])('a %s report without a recorded application carries no Poison Control line', async (projectType, findings) => {
-    const { findAllByText, container } = renderProjectReport(payload(projectType, { findings }));
+  ])('a %s report without the server verdict carries no Poison Control line', async (projectType, extra) => {
+    const { findAllByText, container } = renderProjectReport(payload(projectType, extra));
     await findAllByText(/this report is provided for your records|certificate of compliance/i);
     expect(container.querySelector('[data-testid="project-poison-control"]')).toBeNull();
     expect(container.querySelector('a[href="tel:+18002221222"]')).toBeNull();
   });
 
-  it('prints the applicator FDACS ID card number in the Poison Control card', async () => {
+  it('names the tech who performed the visit, not the project creator, beside the FDACS ID', async () => {
     const { findByTestId } = renderProjectReport(payload('flea', {
-      findings: { treatment_completed: 'Exterior flea treatment' },
+      poisonControl: true,
+      technicianName: 'Office Admin',
+      applicatorName: 'Alex',
       applicatorFdacsId: 'JE000001',
     }));
     expect((await findByTestId('project-applicator-id')).textContent).toBe('Applicator: Alex · FDACS ID card #JE000001');
+  });
+
+  it('prints no applicator line when the server withholds the number', async () => {
+    const { findByTestId, container } = renderProjectReport(payload('flea', { poisonControl: true, applicatorFdacsId: null }));
+    await findByTestId('project-poison-control');
+    expect(container.querySelector('[data-testid="project-applicator-id"]')).toBeNull();
   });
 });

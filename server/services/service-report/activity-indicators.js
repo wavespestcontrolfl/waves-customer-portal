@@ -1166,6 +1166,45 @@ function typedTreatmentEvidence(type, values) {
   return result;
 }
 
+function parseFindingsValues(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+// Poison Control line eligibility for PROJECT reports (owner ruling
+// 2026-09-26): whether the visit this project documents involved product a
+// customer might ask Poison Control/PC24 about. Reuses the CANONICAL typed
+// application verdict, typedTreatmentEvidence — the same evidence read/write
+// service reports already use — over the project's OWN findings and its
+// (bed-bug) follow-up findings, OR'd together, PLUS rodent bait stations:
+// the stations hold rodenticide even though servicing one records no
+// TYPED_TREATMENT_OPTIONS entry (rodent_bait_station, like rodent_sanitation,
+// is deliberately absent from that map — see its own comment). Device-only
+// termite work (`noWork`: "Bait station setup" / "Cartridge replacement") is
+// NOT poison control eligible even though the visit records an EPA
+// registration number at send (admin-projects.js's tt_epa_registration
+// requirement) — recording an EPA reg. no. is not itself a treatment signal;
+// a prior classifier that read products_used/epa_registration as sufficient
+// mistook that requirement for one (Codex P1, replaced here). A project type
+// with no TYPED_TREATMENT_OPTIONS entry and not rodent_bait_station — WDO
+// inspection, pre-treatment termite certificate, termite inspection,
+// exclusion, sanitation — is never eligible: typedTreatmentEvidence returns
+// applied:false for an unregistered type by construction.
+function projectPoisonControl(type, findings, followupFindings) {
+  if (type === 'rodent_bait_station') return true;
+  return typedTreatmentEvidence(type, parseFindingsValues(findings)).applied
+    || typedTreatmentEvidence(type, parseFindingsValues(followupFindings)).applied;
+}
+
 // Combined visits keep the primary snapshot in service_data.typedReportSnapshot
 // and companion sections in service_data.companionReportSnapshots; treatment
 // evidence is the union, and no-work only holds when every section declared it.
@@ -4507,6 +4546,7 @@ module.exports = {
   TYPED_TREATMENT_OPTIONS,
   typedTreatmentEvidence,
   typedTreatmentEvidenceForRecord,
+  projectPoisonControl,
   SCHEMA_VERSION,
   BANNED_CUSTOMER_COPY,
   findBannedCustomerCopy,

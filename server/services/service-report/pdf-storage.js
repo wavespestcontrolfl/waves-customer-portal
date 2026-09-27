@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const {
   GetObjectCommand,
   HeadObjectCommand,
@@ -9,6 +10,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { minutesFromElapsed } = require('../../utils/duration-minutes');
 const { detectServiceLine } = require('./service-line-configs');
+const { resolveApplicatorFdacsId } = require('./report-data');
 
 const FALLBACK_PDF_MARKER = 'Browser PDF rendering was unavailable';
 const MIN_EXPECTED_REPORT_BYTES = 50000;
@@ -144,6 +146,34 @@ function reentryAdjustedPdfSignature(service) {
   }
 }
 
+// Applicator-identity key component (Codex P1, 2026-09-26 Poison Control
+// round): the printed FDACS applicator id is resolveApplicatorFdacsId's
+// verdict over technician_fdacs_id / technician_license_expiry /
+// service_date — the SAME three fields on this row, read the SAME way the
+// payload reads them (report-data.js). Compliance can fill or correct a
+// technician's fl_applicator_license or license_expiry after a report was
+// already cached; without this in the key, the stored PDF's storage key
+// never changes and a corrected/added id (or one that newly expires) never
+// re-renders (codex P1). Empty when the resolved id is null (blank,
+// expired, or a snapshot-name mismatch — applyReportIdentitySnapshot) so an
+// ordinary record's key is unchanged; only a record whose RESOLVED id
+// actually changes gets a new key — no fleet-wide cache bust. Hashed rather
+// than printed raw: a license number is public record (F.S. 482.2265), but
+// this key also rides public download URLs' cache-adjacent logs, and a
+// hash is all the invalidation needs. Must ride in EVERY composition site
+// that builds the storage-key signature (pdf-queue renderAndStore +
+// getOrRender, reports-public expected + store).
+function applicatorIdentityPdfSignature(service) {
+  const id = resolveApplicatorFdacsId(
+    service?.technician_fdacs_id,
+    service?.technician_license_expiry,
+    service?.service_date,
+  );
+  if (!id) return '';
+  const hash = crypto.createHash('sha1').update(id).digest('hex').slice(0, 8);
+  return `-ap${hash}`;
+}
+
 // Drop the cached-PDF hint for a service record so the next render rebuilds it
 // from live data. Best-effort: a failure here must never fail the content edit
 // that triggered it (the renderer falls back to re-rendering on the next view).
@@ -255,4 +285,5 @@ module.exports = {
   timeOnSiteAdjustedPdfSignature,
   reentryAdjustedPdfSignature,
   treeShrubReviewPdfSignature,
+  applicatorIdentityPdfSignature,
 };

@@ -395,7 +395,24 @@ frozen `technicianName` above disagrees with the technician currently
 joined (report-identity-snapshot.js withholds the id rather than print it
 beside a name it may not match). The project report's GET
 `/api/reports/project/:token/data` carries the same field, judged against
-the report's own `projectDate` (the WDO last-filing date when one exists).
+the report's own `projectDate` (the WDO last-filing date when one exists),
+PLUS `applicatorName` (the resolved technician's name) and `poisonControl`
+(boolean). Both `applicatorFdacsId` and `applicatorName` on the project
+payload resolve from the technician who actually PERFORMED the linked
+service — the project's own `service_record_id` → `scheduled_service_id` →
+its `created_by_tech_id` only when genuinely unlinked
+(`resolveProjectApplicatorTechnician`, report-data.js) — never simply the
+project's creator, which the separate `technicianName` field still reflects
+unchanged. `poisonControl` is the canonical typed-application verdict
+(`activity-indicators.js`'s `projectPoisonControl`) over the project's raw
+`findings` + `followup_findings`, OR'd, plus `rodent_bait_station` visits
+(always true — the stations hold rodenticide though servicing one records no
+typed application); never true for WDO/certificate/inspection-only project
+types. The admin detail endpoint `GET /api/admin/projects/:id` mirrors both
+fields on the returned `project` object as `applicator_fdacs_id` /
+`applicator_name` / `poison_control` (same shared resolver, judged against
+`project_date || created_at`), so the staff customer-report preview can never
+show a different applicator or Poison Control verdict than the sent report.
 Records
 completed before the snapshot shipped carry none and keep the live
 customers / scheduled_services / technicians / products_catalog joins; a

@@ -10,7 +10,7 @@ import { CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import DocumentActionBar from '../components/DocumentActionBar';
 import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
-import PoisonControlCopy, { applicatorIdLine, projectAppliedProduct } from '../components/report/PoisonControlCopy';
+import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
 import { useGlassSurface } from '../glass/glass-engine';
 import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
@@ -383,7 +383,9 @@ export default function ProjectReportViewPage() {
   // PDF is a server-side artifact linked below, never rendered here.)
   const isCertificate = data?.projectType === 'pre_treatment_termite_certificate';
   const isPaperDocument = isCertificate || data?.projectType === 'wdo_inspection';
-  const applicatorLine = applicatorIdLine(data?.technicianName, data?.applicatorFdacsId);
+  // The applicator is the tech who PERFORMED the linked visit, which can
+  // differ from the project's creator (technicianName) — Codex r2 #5032.
+  const applicatorLine = applicatorIdLine(data?.applicatorName || data?.technicianName, data?.applicatorFdacsId);
   const glassActive = !isPaperDocument;
   useGlassSurface(glassActive);
 
@@ -789,7 +791,10 @@ export default function ProjectReportViewPage() {
           </div>
         )}
 
-        {projectAppliedProduct(data.projectType, data.findings, data.followupFindings) && (
+        {/* The server's verdict (projectPoisonControl): the canonical typed
+            treatment evidence for the visit or its follow-up, or a rodent
+            bait-station visit — never the WDO / certificate documents. */}
+        {data.poisonControl === true && (
           <div data-glass="card" data-testid="project-poison-control" style={{ ...cardStyle, marginTop: 16 }}>
             <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 8 }}>
               Poison Control
