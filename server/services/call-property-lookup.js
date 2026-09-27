@@ -253,7 +253,13 @@ async function enrichPropertyById(propertyId) {
       let propertyUpdate = conn('customer_properties')
         .where({ id: propertyId, address_key: row.address_key, active: true });
       if (patch.latitude) propertyUpdate = geocodeReview.excludePrimaryPropertyReviewForId(propertyUpdate, propertyId);
-      return propertyUpdate.update(patch, ['latitude', 'longitude', 'property_type']);
+      const updated = await propertyUpdate.update(patch, ['latitude', 'longitude', 'property_type']);
+      if (updated?.length || !patch.latitude) return updated;
+      const metadataPatch = { updated_at: patch.updated_at };
+      if (patch.property_type) metadataPatch.property_type = patch.property_type;
+      return conn('customer_properties')
+        .where({ id: propertyId, address_key: row.address_key, active: true })
+        .update(metadataPatch, ['latitude', 'longitude', 'property_type']);
     });
     after = rows && rows[0];
     if (!after) {
@@ -811,7 +817,6 @@ async function reconcileVisitCoordinates() {
         .where('cp.active', true)
         .whereRaw("COALESCE(TRIM(ss.service_address_line1), '') <> ''")
         .whereRaw("LEFT(TRIM(COALESCE(ss.service_address_zip, '')), 5) = LEFT(TRIM(COALESCE(cp.zip, '')), 5)");
-      q = geocodeReview.excludePrimaryPropertyReviewBlocks(q, 'cp');
       q = q.select(
           'ss.id as visit_id',
           // ::text — the cursor must survive the round trip at the
