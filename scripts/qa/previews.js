@@ -10,6 +10,7 @@ const { previewServer, launchBrowser, evidence, waitForFonts } = require('./brow
 const root = path.resolve(__dirname, '../..');
 const artifactDir = path.resolve(process.env.QA_ARTIFACT_DIR || path.join(root, '.tmp/qa/previews'));
 const scenarios = [
+  { name: 'login', url: '/login', ready: 'Sign in to Waves', verify: verifyLogin },
   { name: 'portal', url: '/preview-portal.html', ready: 'Jordan' },
   { name: 'portal-cancelled', url: '/preview-portal.html?persona=cancelled', ready: 'cancelled' },
   { name: 'secure-pest', url: '/preview-secure.html?v=pest', ready: 'Quarterly Pest Control' },
@@ -26,6 +27,30 @@ const viewports = { desktop: { width: 1440, height: 1000 }, mobile: { width: 390
 async function assertNoOverflow(page) {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   assert.ok(overflow <= 2, `Horizontal overflow: ${overflow}px`);
+}
+
+async function verifyLogin(page) {
+  const phone = page.getByRole('textbox', { name: 'Phone number', exact: true });
+  await phone.fill('9415550147');
+  assert.equal(await phone.inputValue(), '(941) 555-0147');
+  assert.equal(await page.getByRole('button', { name: 'Send code', exact: true }).isEnabled(), true);
+  // Exercise input/focus without submitting an authentication request.
+  assert.equal(await phone.evaluate((element) => document.activeElement === element), true);
+}
+
+async function assertShellSafeArea(page, scenario, viewport, insets) {
+  // Login owns its gutters; the report uses CustomerColumn. Both must fit
+  // inside the notch boundaries provided by their shared WavesShell.
+  const content = page.locator(scenario.name === 'login'
+    ? '.portal-login-brand, .portal-login-card' : 'h1.sr-title');
+  assert.ok(await content.count(), 'Expected customer main content');
+  for (const element of await content.all()) {
+    const box = await element.boundingBox();
+    assert.ok(box, 'Expected visible customer main content');
+    assert.ok(box.x >= insets.left, `${scenario.name}: main content starts at ${box.x}px inside the ${insets.left}px left notch`);
+    assert.ok(box.x + box.width <= viewport.width - insets.right + 1,
+      `${scenario.name}: main content extends into the right notch`);
+  }
 }
 
 async function verifyTracker(page) {
@@ -51,7 +76,7 @@ async function verifyScheduleFlow(page, key) {
   await page.screenshot({ path: path.join(artifactDir, `${key}-confirmed.png`), fullPage: true });
 }
 
-async function checkScenario(browser, baseUrl, scenario, viewportName, viewport) {
+async function checkScenario(browser, baseUrl, scenario, viewportName, viewport, safeAreaInsets) {
   const key = `${scenario.name}-${viewportName}`;
   const context = await browser.newContext({ viewport, timezoneId: 'America/New_York', serviceWorkers: 'block' });
   await context.tracing.start({ screenshots: true, snapshots: true });
@@ -69,6 +94,10 @@ async function checkScenario(browser, baseUrl, scenario, viewportName, viewport)
   try {
     const response = await page.goto(baseUrl + scenario.url, { waitUntil: 'domcontentloaded' });
     assert.equal(response.status(), 200);
+    if (safeAreaInsets) {
+      const cdp = await context.newCDPSession(page);
+      await cdp.send('Emulation.setSafeAreaInsetsOverride', { insets: safeAreaInsets });
+    }
     await page.waitForFunction((text) => document.body.innerText.toLowerCase().includes(text.toLowerCase()), scenario.ready, { timeout: 30000 });
     await waitForFonts(page);
     if (scenario.name === 'service-report') {
@@ -89,6 +118,7 @@ async function checkScenario(browser, baseUrl, scenario, viewportName, viewport)
       assert.ok(text.includes('[Found] Yellowjacket') && text.includes('[Protocol] Nest physically removed'));
     }
     await assertNoOverflow(page);
+    if (safeAreaInsets) await assertShellSafeArea(page, scenario, viewport, safeAreaInsets);
     await page.screenshot({ path: path.join(artifactDir, `${key}.png`), fullPage: true });
     if (scenario.verify) await scenario.verify(page, key);
     await assertNoOverflow(page);
@@ -118,6 +148,12 @@ async function checkScenario(browser, baseUrl, scenario, viewportName, viewport)
         const result = await checkScenario(browser, server.baseUrl, scenario, name, viewport);
         report.scenarios.push(result);
         console.log(`${result.passed ? 'PASS' : 'FAIL'} ${scenario.name}/${name}${result.failure ? `: ${result.failure}` : ''}`);
+      }
+      if (scenario.name === 'login' || scenario.name === 'service-report') {
+        const result = await checkScenario(browser, server.baseUrl, scenario, 'landscape-safe-area',
+          { width: 844, height: 390 }, { top: 0, right: 59, bottom: 21, left: 59 });
+        report.scenarios.push(result);
+        console.log(`${result.passed ? 'PASS' : 'FAIL'} ${scenario.name}/${result.viewport}${result.failure ? `: ${result.failure}` : ''}`);
       }
     }
     if (report.scenarios.some((item) => !item.passed)) process.exitCode = 1;
