@@ -40,6 +40,16 @@ const T0 = new Date('2026-09-08T15:00:00Z');
 const hoursAgo = (h) => new Date(T0.getTime() - h * 3600000);
 const PHONE = '+19415550101';
 
+// A REAL, connection-less knex instance for compile-only SQL checks — the
+// mocked ../models/db above (used by every other test in this file) never
+// actually compiles SQL, so it cannot catch a knex binding-count mismatch
+// (codex pre-push r7 P1, second push: a literal `?` inside the stored-phone
+// clause's quoted regex was counted as an extra positional placeholder by
+// knex's raw-query parser, which is not quote-aware, and threw "Expected 1
+// bindings, saw 2" on every real compile). `.toSQL()` never opens a
+// connection, so this needs no database.
+const realKnex = require('knex')({ client: 'pg' });
+
 // state.byTable: table → array of rows for first()/select(); queries record
 // their where() args so the lookback and contact predicate can be asserted.
 let state;
@@ -523,8 +533,26 @@ describe('hasPriorContact', () => {
     for (const [q, column] of [[callQ, 'from_phone'], [smsQ, 'from_phone'], [leadsQ, 'phone']]) {
       const clause = q.raws.find((r) => String(r[0]).includes('regexp_replace'));
       expect(clause[0]).toBe(_private.nanpStoredPhoneClause(column));
-      expect(clause[0]).toContain("~ '^1?\\d{10}$'");
+      expect(clause[0]).toContain("~ '^1{0,1}\\d{10}$'");
       expect(clause[1]).toEqual(['9415550101']);
+    }
+  });
+
+  // Codex pre-push r7 P1 (on push, after the fix above landed): knex's raw
+  // binding parser is not quote-aware — it counts EVERY `?` in the SQL
+  // text, including one sitting inside a quoted regex literal. The mocked
+  // db above can never catch this class of bug because it never compiles
+  // SQL at all; a REAL, connection-less knex instance does.
+  test('nanpStoredPhoneClause compiles under REAL knex with exactly the bindings supplied (mocked db cannot catch a binding-count mismatch)', () => {
+    for (const column of ['phone', 'from_phone', 'c.phone']) {
+      const clause = _private.nanpStoredPhoneClause(column);
+      // No bare `?` other than the one real placeholder — a second bare
+      // `?` (e.g. an unescaped regex quantifier) is exactly what broke
+      // knex's binding count on push.
+      expect(clause.split('?').length - 1).toBe(1);
+      const { sql, bindings } = realKnex('call_log').whereRaw(clause, ['9415550101']).toSQL();
+      expect(bindings).toEqual(['9415550101']);
+      expect(sql).toContain(column === 'c.phone' ? 'c.phone' : column);
     }
   });
 

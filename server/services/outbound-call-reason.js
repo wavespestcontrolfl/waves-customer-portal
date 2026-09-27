@@ -126,7 +126,14 @@ function last10(phone) {
 // 20260927000006's indexes were built for, so those indexes are still used
 // for the equality half; no new migration is required.
 function nanpStoredPhoneClause(column) {
-  return `right(regexp_replace(${column}, '\\D', '', 'g'), 10) = ? AND regexp_replace(${column}, '\\D', '', 'g') ~ '^1?\\d{10}$'`;
+  // {0,1} not a bare `?` (codex pre-push r7 P1, on push): knex's raw-query
+  // binding parser counts every `?` character in the SQL TEXT as a
+  // positional placeholder, including one sitting inside a quoted regex
+  // literal — it is not quote-aware. A literal `?` here would make knex
+  // expect 2 bindings for this single-binding clause and throw
+  // "Expected 1 bindings, saw 2" on every real compile, which the JS mock
+  // (which never actually compiles SQL) could not catch.
+  return `right(regexp_replace(${column}, '\\D', '', 'g'), 10) = ? AND regexp_replace(${column}, '\\D', '', 'g') ~ '^1{0,1}\\d{10}$'`;
 }
 
 function parseMetadata(metadata) {
