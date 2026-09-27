@@ -212,42 +212,18 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
         .where('notes', 'ilike', `%accepted estimate #${estimateId}%`)
         .where(function relevantApplication() {
           this.where('service_date', dateOnly(visit.scheduled_date)).orWhereNull('service_date');
-        }).forUpdate().noWait().select('id', 'status', 'line_items', 'notes');
+        }).forUpdate().noWait().select('status', 'line_items', 'notes');
     } catch (error) { visitBusy(error); }
     const { invoiceContainsOnlySetupFeeCharges, invoiceContainsSetupFeeLine } = require('./estimate-first-application-invoice');
-    // Same DATE+notes-stamp match as above, on a DIFFERENT query shape (a raw
-    // estimate/date scan, not findFirstApplicationInvoiceForEstimateService's
-    // join) — carries the identical risk: the shared first-application
-    // invoice keeps its ORIGINAL acceptance stamp and its own service_date
-    // forever (first-application-sibling-split.js only ever rewrites its
-    // money, never its notes), so a split member landing back on that date
-    // matches this scan too. A candidate this estimate's EVERY billed member
-    // was actually split off (splitFromSharedInvoiceId(member) === invoice.id)
-    // is never a duplicate-billing risk for THIS packet — each such member
-    // bills its own already-carved-out share below; an invoice not every
-    // member is accounted for by still blocks, same as before.
-    const { splitFromSharedInvoiceId } = require('./first-application-sibling-split');
-    const estimateBilledMembers = billed.filter(({ member }) => String(member.source_estimate_id || '') === String(estimateId));
     if (stamped.some((invoice) => {
       if (invoice.status === 'void') return false;
-      if (estimateBilledMembers.length
-          && estimateBilledMembers.every(({ member }) => splitFromSharedInvoiceId(member) === invoice.id)) return false;
       if (invoice.status === 'refunded') return true;
       if (['canceled', 'cancelled'].includes(invoice.status)) return invoiceContainsSetupFeeLine(invoice);
       return !invoiceContainsOnlySetupFeeCharges(invoice);
     })) return office('existing_member_invoice');
   }
   // These financial reads see coverage under each applicable estimate lock.
-  // A member first-application-sibling-split.js already split off its own
-  // price (recurring_template_overrides.first_application_split_invoice_id
-  // — see splitFromSharedInvoiceId) is skipped here: it bills through its
-  // OWN line items above, and findFirstApplicationInvoiceForEstimateService
-  // is a DATE match only — if this member is later moved back onto the
-  // shared invoice's date, it would find that same (already-reduced)
-  // invoice again and wrongly park a billable member as "existing_estimate_
-  // invoice" instead of billing its split share (Codex pre-push P1).
   for (const { member } of billed) {
-    if (require('./first-application-sibling-split').splitFromSharedInvoiceId(member)) continue;
     const prior = await require('./estimate-first-application-invoice')
       .findFirstApplicationInvoiceForEstimateService(member, trx);
     if ([prior.invoice, prior.liveBeside, prior.canceledSetupFee].some(Boolean)) {

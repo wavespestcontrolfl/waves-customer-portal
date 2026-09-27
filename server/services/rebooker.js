@@ -1738,31 +1738,22 @@ class SmartRebooker {
         new_window: win.start ? `${win.start}-${win.end}` : null,
       });
 
-      // Same-trip first-application resplit chokepoint (prod 2026-09-26): a
-      // date-only move of this row may pull it off the date of a shared
-      // first-application invoice (either side — the invoice-holding row or
-      // an unpriced sibling). Runs in its own savepoint off this trx (the
-      // "safely" wrapper) — a successful split still commits atomically with
-      // the move, but a failure inside it never poisons this transaction the
-      // way a plain try/catch around a failing statement would on Postgres.
-      //
-      // options.deferSiblingSplitReconcile (pre-push round 3 P1 on #5021):
-      // a batch caller that moves more than one member of the SAME visit
-      // group through this method — one call per member, each its own
-      // transaction (visit-groups.js moveVisitAsUnit) — must not let this
-      // row's reconcile run before every member in that batch has landed;
-      // the first member's reconcile would otherwise see the second still
-      // on its old date and permanently split an invoice whose siblings end
-      // up sharing a date once the whole unit move commits. When present,
-      // the caller's collector is marked instead of reconciling here, and
-      // the caller flushes it once after its own batch settles.
+      // Same-trip first-application billing-review chokepoint (owner ruling,
+      // #5021 redesign — "flag, don't auto-split"): a date-only move of this
+      // row may pull it off the date of a shared first-application invoice
+      // (either side — the invoice-holding row or an unpriced sibling).
+      // Opens a durable, invoice-keyed review rather than touching money —
+      // see first-application-sibling-split.js. Runs in its own savepoint
+      // off this trx (the "safely" wrapper) — the flag still commits
+      // atomically with the move, but a failure inside it never poisons this
+      // transaction the way a plain try/catch around a failing statement
+      // would on Postgres. Idempotent, so a batch caller that moves more
+      // than one member of the same visit group (visit-groups.js
+      // moveVisitAsUnit) needs no deferral here — each member's own commit
+      // reconciles against state as of THAT commit.
       if (dateOnly(newDate) !== dateOnly(originalDate)) {
-        if (typeof options.deferSiblingSplitReconcile === 'function') {
-          options.deferSiblingSplitReconcile(serviceId);
-        } else {
-          await require('./first-application-sibling-split')
-            .reconcileFirstApplicationSplitOnDateChangeSafely(trx, serviceId, 'single-visit reschedule');
-        }
+        await require('./first-application-sibling-split')
+          .flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, serviceId, 'single-visit reschedule');
       }
     });
 
@@ -3340,15 +3331,16 @@ class SmartRebooker {
         series_move_id: seriesMoveId,
       });
 
-      // Same-trip first-application resplit chokepoint (prod 2026-09-26):
-      // the anchor's own date always changes on this path (the caller only
-      // reaches rescheduleSeries when it does) — it may pull the anchor off
-      // the date of a shared first-application invoice, on either side. Runs
-      // in its own savepoint off this trx (the "safely" wrapper) — see the
-      // single-visit path above for why a plain try/catch does not suffice.
+      // Same-trip first-application billing-review chokepoint (owner ruling,
+      // #5021 redesign): the anchor's own date always changes on this path
+      // (the caller only reaches rescheduleSeries when it does) — it may
+      // pull the anchor off the date of a shared first-application invoice,
+      // on either side. Runs in its own savepoint off this trx (the
+      // "safely" wrapper) — see the single-visit path above for why a plain
+      // try/catch does not suffice.
       if (dateOnly(newDate) !== dateOnly(service.scheduled_date)) {
         await require('./first-application-sibling-split')
-          .reconcileFirstApplicationSplitOnDateChangeSafely(trx, serviceId, 'series reschedule');
+          .flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, serviceId, 'series reschedule');
       }
 
       return touched;

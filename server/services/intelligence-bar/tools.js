@@ -2981,16 +2981,18 @@ async function rescheduleAppointment(input, actionContext = {}) {
         .returning(['id', 'technician_id']);
       updatedRows = committed.length;
       committedTechId = committed[0]?.technician_id || null;
-      // Same-trip first-application resplit chokepoint (Codex #5021 P1): this
-      // appointment writer moves scheduled_date directly and never called
-      // it — a moved member of a same-day combined first-application
-      // invoice would silently keep auto-charging the FULL combined total
-      // on the invoice-holding row while this row's own (unpriced) share
-      // billed nothing. Runs in its own savepoint off this trx (the
-      // "safely" wrapper) — a failure inside it never poisons this move.
+      // Same-trip first-application billing-review chokepoint (owner ruling,
+      // #5021 redesign): this appointment writer moves scheduled_date
+      // directly and must call it too — a moved member of a same-day
+      // combined first-application invoice opens a durable review rather
+      // than touching money (see first-application-sibling-split.js), and
+      // the collection gate holds automatic charging/sending on that
+      // invoice until the office resolves it. Runs in its own savepoint off
+      // this trx (the "safely" wrapper) — a failure inside it never
+      // poisons this move.
       if (updatedRows > 0 && dateStr !== observedDate) {
         await require('../first-application-sibling-split')
-          .reconcileFirstApplicationSplitOnDateChangeSafely(trx, appointment_id, 'intelligence-bar reschedule');
+          .flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, appointment_id, 'intelligence-bar reschedule');
       }
   });
   if (updatedRows === 0) {

@@ -2822,21 +2822,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   const failed = [];
   const warnings = [...(plan.techClashWarnings || [])];
   let primaryResult = null;
-  // Same-trip first-application resplit chokepoint (pre-push round 3 P1 on
-  // #5021): every member below moves through its OWN rebooker call — its
-  // own committed transaction, one at a time (primary first, then each
-  // sibling). Two members of the same visit that both carry a shared
-  // first-application invoice, moved together onto the SAME new date in
-  // this one unit move, would have the first member's reconcile see the
-  // second still on its old date if it ran inline — a transient mid-batch
-  // divergence that permanently splits an invoice whose members end up
-  // sharing a date once the whole unit lands. Deferred via the shared
-  // collector (rebooker.js's rescheduleOnce reads deferSiblingSplitReconcile
-  // off memberOpts below instead of reconciling inline) and flushed ONCE
-  // right after this loop settles — every member's own date write has
-  // already committed by then, whether it moved cleanly or was reported
-  // failed/still on its old date.
-  const siblingSplitReconcile = require('./first-application-sibling-split').createDeferredSiblingSplitReconciler();
+  // Same-trip first-application billing-review chokepoint (owner ruling,
+  // #5021 redesign — "flag, don't auto-split"): every member below moves
+  // through its OWN rebooker call, each its own committed transaction —
+  // rebooker.js's rescheduleOnce already calls first-application-sibling-
+  // split.js on its own date write, so no batch deferral is needed here:
+  // the flag write is idempotent and reconciles against state as of each
+  // member's own commit.
   // technicianId is NOT forwarded to sibling moves (codex r15 P1): the
   // rebooker writes technician_id directly, bypassing the canonical
   // assignment writer (tech-day fences, unassigned_overdue resolution,
@@ -2940,17 +2932,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     const unitTechChanges = Object.prototype.hasOwnProperty.call(options, 'technicianId')
       && (options.technicianId || null) !== (target.expect.technician_id || null);
     const noticeOpts = unitTechChanges ? { suppressTechNotice: true } : {};
-    // deferSiblingSplitReconcile rides EVERY member's call (primary and
-    // sibling alike) — rescheduleOnce marks the collector instead of
-    // reconciling inline when this is a function; see the collector's
-    // declaration above and the flush right after this loop.
     const memberOpts = target.isPrimary
-      ? { ...primaryBase, ...noticeOpts, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect, deferSiblingSplitReconcile: siblingSplitReconcile.markMoved }
+      ? { ...primaryBase, ...noticeOpts, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
       // A sibling is ALWAYS a single-row move (codex r4): the dispatch
       // surface previewed/acknowledged series scope for the tapped row
       // only, so a recurring sibling must never shift its own future
       // series undisclosed.
-      : { ...siblingBase, ...noticeOpts, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect, deferSiblingSplitReconcile: siblingSplitReconcile.markMoved };
+      : { ...siblingBase, ...noticeOpts, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
     // Callers sync reminders for the tapped row only (r2): every moved
     // sibling gets its reminder row synced here, notice suppressed — the
     // visit's one reminder text is the primary's. A sibling's own series
@@ -3166,19 +3154,6 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       }
       await failSibling(target, err, err.message);
     }
-  }
-
-  // Flush the deferred first-application reconcile now — every member's
-  // own date-write transaction above has already committed (moved,
-  // landed-but-post-commit-failed, and left-on-its-old-date members alike),
-  // so this reconciles the batch's FINAL state, never a mid-loop one. On a
-  // fresh connection: each member's move committed independently, there is
-  // no outer transaction still open here to nest under. Before step 3 (the
-  // parent visit retarget) deliberately — that write touches service_visits
-  // only, never scheduled_services.scheduled_date, so it cannot change what
-  // this reconcile sees.
-  if (siblingSplitReconcile.size) {
-    await siblingSplitReconcile.flush(db, 'visit-group unit move');
   }
 
   // ---- 3. retarget the parent from the rows that actually landed ----

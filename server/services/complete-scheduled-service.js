@@ -8521,23 +8521,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     }
     if (!packetEffects) {
       try {
-        // The sibling-invoice lookup below is a DATE match only — it does not
-        // know whether this row was later split off its own price (see
-        // first-application-sibling-split.js). A promoted parent is covered
-        // by the reserved row's invoice ONLY while it stays estimated_price
-        // NULL (estimate-converter.js reservedAcceptPerVisitSplit) — but a
-        // non-null estimated_price alone does NOT prove the shared invoice
-        // was ever reduced (an unrelated price edit through some other flow
-        // could set it on a row nobody split, while the shared invoice still
-        // carries its full uncollapsed amount — checking estimated_price
-        // here would then let this row bill on its own AND leave that
-        // invoice collectible for the same charge). Check the explicit
-        // provenance stamp first-application-sibling-split.js writes ONLY in
-        // the same transaction it actually reduces the shared invoice —
-        // that marker's presence is proof the reduction happened, not an
-        // inference from a price the row happens to carry.
-        const splitFromSharedInvoice = require('./first-application-sibling-split').splitFromSharedInvoiceId(svc);
-        if (!existingCompletionInvoice && !terminalCompletionInvoice && !splitFromSharedInvoice) {
+        if (!existingCompletionInvoice && !terminalCompletionInvoice) {
           const siblingFirstApplication = await findFirstApplicationInvoiceForEstimateService(svc, db);
           existingCompletionInvoice = siblingFirstApplication.invoice;
           if (!recapReviewOnly) {
@@ -9082,14 +9066,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           //    so the classification reads locked statuses, never a
           //    snapshot a concurrent refund/cancel/restore invalidates.
           let siblingLiveNow = null;
-          // Same DATE-only caveat as the mint check above: a row already
-          // split off its own price must never have that OTHER member's
-          // (already-reduced) shared invoice offered here as "collect this
-          // instead" — it is not a substitute for this row's own billing.
-          // (Recomputed here rather than reusing the outer block-scoped
-          // const: this runs inside a SEPARATE db.transaction callback.)
-          const splitFromSharedInvoiceHere = require('./first-application-sibling-split').splitFromSharedInvoiceId(svc);
-          if (!terminalRestored && !freshLiveOnVisit && svc.source_estimate_id && !splitFromSharedInvoiceHere) {
+          if (!terminalRestored && !freshLiveOnVisit && svc.source_estimate_id) {
             const siblingNow = await findFirstApplicationInvoiceForEstimateService(svc, trx, { lockRows: true });
             const siblingCandidate = siblingNow.invoice && siblingNow.invoice.status === 'refunded'
               ? (siblingNow.liveBeside || null)

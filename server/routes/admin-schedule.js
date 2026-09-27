@@ -4547,20 +4547,8 @@ function computePriceServiceGroupChanges(before, updates) {
 }
 
 // Non-edit provenance keys stored beside the edit overrides (see
-// recurring-appointment-seeder markParentRecurring). first_application_split_invoice_id
-// (first-application-sibling-split.js) is the same kind of stamp — it must
-// survive a later price/service "apply to this and following" edit on the
-// SAME row exactly like anchored_split_per_visit / appointment_address do,
-// or stampRecurringTemplateOverrides's wholesale JSON.stringify(merged)
-// rewrite below would silently erase it and reopen the sibling-invoice
-// double-coverage gap this key exists to close (completion would fall back
-// to the date-keyed lookup for a row that was already split off its shared
-// invoice).
-const PROVENANCE_OVERRIDE_KEYS = new Set([
-  'anchored_split_per_visit',
-  'appointment_address',
-  require('../services/first-application-sibling-split').SPLIT_PROVENANCE_KEY,
-]);
+// recurring-appointment-seeder markParentRecurring).
+const PROVENANCE_OVERRIDE_KEYS = new Set(['anchored_split_per_visit', 'appointment_address']);
 function readProvenanceOverrides(raw) {
   let value = raw;
   if (typeof value === 'string') {
@@ -9369,18 +9357,6 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
     // the reseed gate says.
     const { isCountingSourceStatus } = require('../services/recurring-series-cancel-reseed');
     const bulkPlanReductions = action === 'cancel' ? await readBulkPlanReductionIntent(db, serviceIds) : new Map();
-    // Same-trip first-application resplit chokepoint (pre-push round 3 P1 on
-    // #5021): this route commits each selected row's date write in its OWN
-    // transaction, one id at a time — calling the reconciler inside each
-    // one (as the single-visit writers do) would let the FIRST row's
-    // reconcile see the SECOND still on its old date when both siblings of
-    // a combined first-application invoice are selected together in this
-    // same batch, permanently splitting an invoice whose siblings end up
-    // sharing a date once every selected row lands. Deferred with the
-    // shared batch collector (first-application-sibling-split.js) — each
-    // 'reschedule' row marks itself moved instead of reconciling inline,
-    // and the whole batch flushes ONCE after every id below has settled.
-    const siblingSplitReconcile = require('../services/first-application-sibling-split').createDeferredSiblingSplitReconciler();
 
     const { transitionJobStatus } = require('../services/job-status');
 
@@ -9749,18 +9725,16 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   { isValidation: true },
                 );
               }
-              // Same-trip first-application resplit chokepoint (prod
-              // 2026-09-26; deferred pre-push round 3 P1): a bulk date move
-              // may pull this row off the date of a shared first-application
-              // invoice, on either side. This route commits each id in its
-              // OWN transaction, so the reconcile itself must NOT run here —
-              // two same-trip siblings selected together in this batch would
-              // otherwise have the first one's reconcile see the second
-              // still on its old date. Mark it moved; the whole batch
-              // reconciles once after every selected row has committed (see
-              // siblingSplitReconcile.flush below the id loop).
+              // Same-trip first-application billing-review chokepoint (owner
+              // ruling, #5021 redesign): a bulk date move may pull this row
+              // off the date of a shared first-application invoice, on
+              // either side. Opens a durable, idempotent review rather than
+              // touching money — see first-application-sibling-split.js —
+              // so no batch deferral is needed even though this route
+              // commits each id in its own transaction.
               if (prevDate !== bulkTargetDate) {
-                siblingSplitReconcile.markMoved(id);
+                await require('../services/first-application-sibling-split')
+                  .flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, id, 'bulk reschedule');
               }
               {
                 const committedTechId = bulkCommittedRows[0]?.technician_id || null;
@@ -10094,16 +10068,6 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
       await flushDispatchQualityDates(qualityDates);
     } catch (e) {
       logger.error(`[admin-schedule] bulk-action route quality refresh failed: ${e.message}`);
-    }
-    // Same-trip first-application resplit — deferred flush (pre-push round
-    // 3 P1 on #5021): every 'reschedule' row whose date changed committed
-    // its own transaction above; reconcile each one now, against the
-    // batch's FINAL state, on a fresh connection (each row's own trx is
-    // already committed by this point). flush() catches every per-row
-    // failure internally (reconcileFirstApplicationSplitOnDateChangeSafely)
-    // and never throws.
-    if (siblingSplitReconcile.size) {
-      await siblingSplitReconcile.flush(db, 'bulk reschedule');
     }
     // Counted-plan reseed (owner ruling 2026-09-24): once per series for the
     // batch's single-visit cancels. Gated, failure-isolated, post-commit.
@@ -13621,16 +13585,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // land between the claim and the provider request. Recurring children
         // keep inheriting the parent's Bill-To through this update.)
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
-        // Same-trip first-application resplit chokepoint (prod 2026-09-26):
-        // a date-only edit here may pull this row off the date of a shared
-        // first-application invoice, on either side (the invoice-holding row
-        // or an unpriced sibling). Runs in its own savepoint off this trx
-        // (the "safely" wrapper) — a plain try/catch around a failing
+        // Same-trip first-application billing-review chokepoint (owner
+        // ruling, #5021 redesign): a date-only edit here may pull this row
+        // off the date of a shared first-application invoice, on either
+        // side (the invoice-holding row or an unpriced sibling). Opens a
+        // durable review rather than touching money — see first-
+        // application-sibling-split.js. Runs in its own savepoint off this
+        // trx (the "safely" wrapper) — a plain try/catch around a failing
         // statement does not recover a Postgres transaction; every later
         // statement on it, including this route's own COMMIT, would fail.
         if (updates.scheduled_date !== undefined) {
           await require('../services/first-application-sibling-split')
-            .reconcileFirstApplicationSplitOnDateChangeSafely(trx, req.params.id, 'update-details save');
+            .flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, req.params.id, 'update-details save');
         }
         // A job Bill-To edit (payer cleared, self-pay override set) that makes a
         // withdrawn combined-visit invoice self-pay again requeues it here.

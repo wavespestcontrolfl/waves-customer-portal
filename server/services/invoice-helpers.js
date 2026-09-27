@@ -204,6 +204,20 @@ function assertInvoiceCollectible(invoice) {
   if (status === 'canceled' || status === 'cancelled') {
     throw new Error('Invoice is canceled and cannot be paid');
   }
+  // Same-trip first-application billing review (owner ruling, #5021 redesign
+  // — "flag, don't auto-split"): a diverging sibling's move opens a durable,
+  // invoice-keyed review (first-application-sibling-split.js, in the SAME
+  // transaction as the date write) rather than touching this invoice's
+  // money. This is the ONE gate every charge/send seam already calls before
+  // moving money — widening it here, instead of fencing each seam
+  // individually, is what actually holds automatic collection (saved-card
+  // charge, scheduled send finalize, autopay/dunning) while the review is
+  // open. The office clears it (POST /admin/invoices/:id/billing-review/
+  // clear, or the trivial same-date/untouched auto-clear) once the invoice
+  // is priced correctly by hand.
+  if (invoice.billing_review_opened_at) {
+    throw new Error('This invoice has an open billing review — a same-trip visit diverged in date; resolve and clear the review before collecting');
+  }
   // Checked last so a terminal status still reports its own, more accurate
   // reason (a withdrawal never stamps a terminal row, but a row that settled
   // between the withdrawal and this read can carry both).

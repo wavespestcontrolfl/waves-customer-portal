@@ -2573,6 +2573,42 @@ router.post('/:id/unarchive', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /:id/billing-review/clear — releases the same-trip first-application
+// billing-review hold (first-application-sibling-split.js; owner ruling,
+// #5021 redesign — "flag, don't auto-split"): a diverging sibling's move
+// opens this review IN THE SAME TRANSACTION as the date write, and
+// invoice-helpers.js's assertInvoiceCollectible refuses every charge/send
+// seam while it stays open. The trivial case (the diverging visits land
+// back on the invoice's date and the invoice was never touched) clears
+// itself automatically on the next date write that module sees; this route
+// is the manual path for every other case — the office edits the invoice
+// or the visits' prices by hand, then clears the review here to release
+// the hold.
+router.post('/:id/billing-review/clear', requireAdmin, async (req, res, next) => {
+  try {
+    const invoice = await db('invoices').where({ id: req.params.id }).first();
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    if (!invoice.billing_review_opened_at) return res.json(invoice); // idempotent
+    const [updated] = await db('invoices')
+      .where({ id: req.params.id })
+      .whereNotNull('billing_review_opened_at')
+      .update({ billing_review_opened_at: null, billing_review_reason: null, billing_review_context: null })
+      .returning('*');
+    // Resolve the standing admin bell too, same dedupeKey the alert used to
+    // raise it — best-effort, never blocks the clear itself.
+    try {
+      await db('notifications')
+        .where({ recipient_type: 'admin', category: 'billing' })
+        .whereRaw("metadata->>'dedupeKey' = ?", [`first_application_billing_review:${req.params.id}`])
+        .whereNull('read_at')
+        .update({ read_at: db.fn.now() });
+    } catch (e) {
+      logger.warn(`[admin-invoices] billing-review bell resolve failed for invoice ${req.params.id} (non-blocking): ${e.message}`);
+    }
+    res.json(updated || invoice);
+  } catch (err) { next(err); }
+});
+
 // POST /:id/send-receipt — operator-triggered receipt delivery for a paid
 // invoice. Hits the branded email + the invoice_receipt SMS template, then
 // stamps invoices.receipt_sent_at so the UI can mark the service closed.

@@ -347,11 +347,6 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
     expect(sel).toEqual(expect.arrayContaining(['c.per_application_fee', 'c.payer_id as customer_payer_id']));
     expect(sel).not.toEqual(expect.arrayContaining(['ss.billed_to_payer_id']));
     expect(sel).not.toEqual(expect.arrayContaining(['ss.per_application_fee']));
-    // splitFromSharedInvoiceId(v) reads this column — without it in the
-    // real projection the sibling-lookup guard below is dead code in
-    // production, even though a hand-built fixture row can carry the field
-    // regardless of what's actually selected (Codex pre-push P1).
-    expect(sel).toEqual(expect.arrayContaining(['ss.recurring_template_overrides']));
   });
 
   test('a visit that cannot charge the card (payer-billed via visit or customer / callback / gate off → pay-link invoice) leaves the customer exempt', async () => {
@@ -730,23 +725,6 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
       invoices: (own) => (isSiblingInvoiceLookup(own) ? [siblingInvoice('sent', { scheduled_service_id: 'v-sibling' })] : []),
     });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
-  });
-
-  test('a visit already split off its own price (first-application-sibling-split.js provenance stamp) never re-triggers the DATE-only sibling lookup', async () => {
-    // Even with a LIVE sibling invoice sitting right there for the same
-    // estimate/date, the stamp alone must suppress the lookup entirely —
-    // this visit bills through its own estimated_price/line items, never
-    // through the OTHER member's (already-reduced) shared invoice.
-    const calls = route({
-      terms: coveredAlways(['c-prepaid']),
-      visits: [baseVisit({
-        source_estimate_id: 'est-1', estimated_price: '56.40',
-        recurring_template_overrides: { first_application_split_invoice_id: 'inv-shared' },
-      })],
-      invoices: (own) => (isSiblingInvoiceLookup(own) ? [siblingInvoice('sent', { scheduled_service_id: 'v-other' })] : []),
-    });
-    await getCardExpiryExemptCustomerIds(HORIZON);
-    expect(calls.invoices.some((call) => call[0] === 'join')).toBe(false);
   });
 
   test('a hold row closes the EXTENDED lane even under auto_charge — the hold rail alone decides', async () => {

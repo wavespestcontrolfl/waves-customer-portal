@@ -238,93 +238,6 @@ function invoiceHasDepositCreditLine(invoice) {
   );
 }
 
-// Shared retotal-eligibility fences. Both update()'s own line-item retotal
-// path AND first-application-sibling-split.js's shared-invoice reduction
-// must decline under the SAME conditions — a hand-copied duplicate check in
-// the splitter drifts from this one every time a new money-correctness gap
-// is found here (each of five straight Codex pre-push rounds on the split
-// module found ONE MORE fence this file already enforced). New retotal
-// fences belong here, not re-implemented at either call site.
-
-// A positive invoice.discount_amount with NO backing negative line item is a
-// document-level discount (InvoiceService.create's `discountIds` picks —
-// see the "manual discount" math above) that calculateUpdateFinancials
-// cannot reconstruct: it derives discount_amount ENTIRELY from negative
-// line items in the submitted array (manualDiscountRows is always [] on the
-// edit path), so retotaling such an invoice from its line items alone would
-// silently zero the discount and increase the total. A discount already
-// backed by a negative line (the common case: a per-line pick, or a
-// document pick materialized as its own line) is unaffected — that line
-// rides through the retotal and calculateUpdateFinancials prices it fresh.
-function invoiceHasUnbackedDocumentDiscount(invoice, lineItems) {
-  const amt = parseFloat(invoice?.discount_amount || 0);
-  if (!(amt > 0)) return false;
-  const items = Array.isArray(lineItems) ? lineItems : parseInvoiceLineItems(lineItems);
-  return !items.some((li) => {
-    const qty = li?.quantity != null ? Number(li.quantity) : 1;
-    const rawAmt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
-    return Number.isFinite(rawAmt) && rawAmt < 0;
-  });
-}
-
-// Same active-payment-plan fence update()'s editQuery enforces atomically
-// (payment_plans.status = 'active', correlated on invoice_id — plan
-// creation never stamps the invoice itself, so this can only be seen with
-// its own query, not a column predicate). Pre-check form: a boolean read,
-// for a caller that wants to decline/log BEFORE doing retotal math.
-async function invoiceHasActivePaymentPlan(client, invoiceId) {
-  const row = await client("payment_plans")
-    .where({ invoice_id: invoiceId, status: "active" })
-    .first("id");
-  return !!row;
-}
-
-// Atomic form of the same fence, applied AT WRITE TIME so a plan created
-// between the pre-check and this write still blocks the retotal instead of
-// racing it. Takes and returns the query builder (chainable) so both
-// update()'s editQuery and the splitter's own invoice UPDATE apply the
-// IDENTICAL predicate.
-function excludeActivePaymentPlan(queryBuilder) {
-  return queryBuilder.whereNotExists(function () {
-    this.select(db.raw("1"))
-      .from("payment_plans")
-      .whereRaw("payment_plans.invoice_id = invoices.id")
-      .where("payment_plans.status", "active");
-  });
-}
-
-// Same saved-card charge-reconciliation fence, shared so a future fix here
-// reaches every caller instead of needing a second hand-rolled copy.
-async function invoiceHasUnresolvedChargeAttempt(client, invoiceId) {
-  const row = await client("stripe_invoice_charge_attempts")
-    .where({ invoice_id: invoiceId })
-    .whereNull("resolved_at")
-    .whereIn("status", ["claimed", "ambiguous"])
-    .first("id");
-  return !!row;
-}
-
-// Provenance fence (Codex P1): a source invoice this module already split
-// money off of for a sibling visit (first-application-sibling-split.js)
-// must never be retotaled again through the generic edit path — every
-// completion/closeout reader trusts recurring_template_overrides
-// .first_application_split_invoice_id on the SIBLING row forever, and
-// nothing re-validates that marker against the source invoice's current
-// state. Blocking edits here (rather than trying to invalidate every
-// reader's marker) keeps the ONE chokepoint on the write side, where it is
-// cheap and certain, instead of teaching splitFromSharedInvoiceId's many
-// callers to re-derive freshness from a live read each time they consult it.
-// Enforced ONLY at write time (atomically, under the invoice row lock) —
-// see the comment in update() above runEdit for why there is no separate
-// pre-check query here.
-function excludeFirstApplicationSplitSource(queryBuilder) {
-  return queryBuilder.whereNotExists(function () {
-    this.select(db.raw("1"))
-      .from("scheduled_services")
-      .whereRaw("scheduled_services.recurring_template_overrides->>'first_application_split_invoice_id' = invoices.id::text");
-  });
-}
-
 // Linked-visit guards for unvoidInvoice (Codex #3493 r2/r3). Runs TWICE:
 // pre-transaction as a fast fail, and again INSIDE the restore transaction
 // on the freshly-locked invoice row — a cancellation, free re-service
@@ -2842,6 +2755,16 @@ async function claimDueScheduledInvoiceForSend(database, invoiceId) {
     .whereNotNull("scheduled_send_at")
     .where("scheduled_send_at", "<=", new Date())
     .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5))
+    // Same-trip first-application billing review (owner ruling, #5021
+    // redesign — see first-application-sibling-split.js): the automatic
+    // scheduled-send worker must never deliver an invoice whose combined
+    // total is under review. This is the ONE claim query both
+    // processScheduledSends' own loop and claimPacketInvoiceForSend's
+    // requireDue branch share, so gating it here holds every automatic send
+    // without fencing each caller separately. A parked row is simply
+    // skipped (returns null, same as "not due yet") — it is retried once
+    // the review clears, never errored.
+    .whereNull("billing_review_opened_at")
     .update({ status: "sending", updated_at: new Date(), send_claim_token: claimToken })
     .returning("*");
   return claimed || null;
@@ -2932,11 +2855,29 @@ async function claimInvoiceForSend(invoiceId, {
       [`${require("./invoice-helpers").STALE_SEND_PARK_ERROR}%`],
     );
   }
+  // Same-trip first-application billing review (owner ruling, #5021
+  // redesign): a diverging sibling's move opens a durable review on this
+  // invoice (first-application-sibling-split.js, invoices.
+  // billing_review_opened_at) rather than touching its money — but a
+  // scheduled or operator-initiated send still delivers whatever total the
+  // invoice currently carries, which is exactly the wrong-total risk the
+  // review exists to hold. No override switch here (unlike the stale-claim
+  // review hold above): the release valve is clearing the review itself
+  // (POST /admin/invoices/:id/billing-review/clear), not a per-send flag.
+  claimFlip.whereNull("billing_review_opened_at");
   const [invoice] = await claimFlip
     .update({ status: "sending", send_claim_token: freshClaimToken, updated_at: new Date() })
     .returning("*");
   if (!invoice) {
     const latest = await database("invoices").where({ id: invoiceId }).first();
+    // Same-trip first-application billing review: report this specific
+    // reason rather than the generic "not sendable" — see the claimFlip
+    // predicate above.
+    if (latest?.billing_review_opened_at) {
+      const err = new Error(`Invoice ${invoiceId} has an open billing review — resolve and clear it before sending`);
+      err.code = "billing_review_open";
+      throw err;
+    }
     // The row moved between the read and the flip: report the guard the
     // latest row trips (review hold first, then delivered for a first
     // delivery) rather than a generic "not sendable" (round-6 P1 #4131).
@@ -7336,11 +7277,12 @@ const InvoiceService = {
     // Fail CLOSED: if we can't confirm the payment-plan state (migration
     // drift, permissions, transient DB error) we must refuse the edit rather
     // than assume there's no plan — assuming none is exactly the committed-
-    // workflow drift this guard prevents. Shared with the sibling splitter
-    // (invoiceHasActivePaymentPlan, above) — one fence, not two.
-    let activePlan = false;
+    // workflow drift this guard prevents.
+    let activePlan = null;
     try {
-      activePlan = await invoiceHasActivePaymentPlan(db, id);
+      activePlan = await db("payment_plans")
+        .where({ invoice_id: id, status: "active" })
+        .first();
     } catch (err) {
       throw new Error(
         `Could not verify the active payment plan state — refusing to edit (${err.message})`,
@@ -7351,19 +7293,6 @@ const InvoiceService = {
         "This invoice has an active payment plan — cancel the plan before editing the invoice",
       );
     }
-    // Provenance fence (Codex P1): never retotal a source invoice this
-    // module already split money off of for a sibling visit. Enforced ONLY
-    // at write time (excludeFirstApplicationSplitSource, applied to
-    // editQuery inside runEdit below) — no separate pre-check query here.
-    // A pre-check against scheduled_services would run on EVERY update()
-    // call (this table is otherwise never touched by this method), which
-    // is both an extra round trip most edits don't need and a query shape
-    // every mocked-db unit test of this method would then have to account
-    // for. The atomic predicate under the invoice row lock is the real
-    // guarantee anyway (a plain pre-check has the same TOCTOU gap every
-    // other fence here closes with its own whereNotExists); a source
-    // invoice that fails it gets the same "changed while you were editing"
-    // 0-rows-matched error every other write-time predicate miss produces.
 
     // In-flight follow-up fence: a dun touch renders the invoice's amount,
     // title, and pay link and sends externally without a transaction —
@@ -7455,9 +7384,13 @@ const InvoiceService = {
       // still settle. A retotal would let the webhook/reconciler bind
       // collected money to a different live total. Same unresolved-attempt
       // shape the pay page's cross-rail fence uses.
-      let unresolvedChargeAttempt = false;
+      let unresolvedChargeAttempt = null;
       try {
-        unresolvedChargeAttempt = await invoiceHasUnresolvedChargeAttempt(db, id);
+        unresolvedChargeAttempt = await db("stripe_invoice_charge_attempts")
+          .where({ invoice_id: id })
+          .whereNull("resolved_at")
+          .whereIn("status", ["claimed", "ambiguous"])
+          .first("id");
       } catch (err) {
         throw new Error(
           `Could not verify the saved-card charge state — refusing to edit (${err.message})`,
@@ -7536,25 +7469,6 @@ const InvoiceService = {
       if (parseFloat(invoice.credit_applied || 0) > 0) {
         throw new Error(
           "This invoice has account credit applied (prepaid) — reverse the applied credit before editing line items",
-        );
-      }
-      // Document-level discount with no line-item backing (Codex P1, shared
-      // fence — see invoiceHasUnbackedDocumentDiscount above): calculateUpdateFinancials
-      // derives discount_amount ENTIRELY from negative lines in the submitted
-      // array, so it cannot reconstruct a manual discountIds pick that never
-      // became a line. Decline rather than silently zero the discount.
-      //
-      // Checked against the invoice's STORED (pre-edit) line items, never
-      // the submitted ones (Codex pre-push P1): an edit that intentionally
-      // REMOVES an existing, already line-item-backed discount is legitimate
-      // — the stored discount_amount was backed at save time, so the new
-      // submission correctly recomputes it down to whatever remains,
-      // including zero. Checking the submitted array instead would treat
-      // "the discount line staff just deleted" as evidence the discount was
-      // never reconstructable and refuse the edit outright.
-      if (invoiceHasUnbackedDocumentDiscount(invoice, invoice.line_items)) {
-        throw new Error(
-          "This invoice carries a document-level discount with no backing line item — void it and create a replacement instead of editing line items",
         );
       }
       const customer = await db("customers")
@@ -7751,11 +7665,17 @@ const InvoiceService = {
       ) {
         data.status = lockedRow.viewed_at ? "viewed" : "sent";
       }
-      let editQuery = excludeActivePaymentPlan(client("invoices")
+      let editQuery = client("invoices")
         .where({ id })
         .whereIn("status", EDIT_ALLOWED_STATUSES)
         .whereNull("stripe_payment_intent_id")
-        .whereNull("annual_prepay_term_id"))
+        .whereNull("annual_prepay_term_id")
+        .whereNotExists(function () {
+          this.select(db.raw("1"))
+            .from("payment_plans")
+            .whereRaw("payment_plans.invoice_id = invoices.id")
+            .where("payment_plans.status", "active");
+        })
         // In-flight-touch fence re-asserted at write time: a dun send that
         // claimed the sequence between the guard read and this write must
         // fail the edit closed, not race the reminder it's rendering.
@@ -7798,10 +7718,6 @@ const InvoiceService = {
                 "ambiguous",
               ]);
           });
-        // Provenance fence re-asserted at write time (Codex P1): a sibling
-        // split landing between the pre-check and this write must still
-        // block the retotal — see invoiceIsFirstApplicationSplitSource above.
-        editQuery = excludeFirstApplicationSplitSource(editQuery);
       }
       const [edited] = await editQuery.update(data).returning("*");
       if (!edited) {
@@ -10400,13 +10316,6 @@ module.exports.prepaySwitchRestoreAssertDate = prepaySwitchRestoreAssertDate;
 // Exposed for unit tests (pure helpers).
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
-// Shared retotal-eligibility fences (first-application-sibling-split.js is
-// the other caller — see the comment above their definitions).
-module.exports._invoiceHasUnbackedDocumentDiscount = invoiceHasUnbackedDocumentDiscount;
-module.exports._invoiceHasActivePaymentPlan = invoiceHasActivePaymentPlan;
-module.exports._excludeActivePaymentPlan = excludeActivePaymentPlan;
-module.exports._invoiceHasUnresolvedChargeAttempt = invoiceHasUnresolvedChargeAttempt;
-module.exports._excludeFirstApplicationSplitSource = excludeFirstApplicationSplitSource;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
 module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;

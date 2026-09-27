@@ -1405,20 +1405,20 @@ async function moveStopsToDay(input, actionContext = {}) {
       }
       c.committedTechId = committedRows[0]?.technician_id || null;
     }
-    // Same-trip first-application resplit chokepoint (Codex #5021 P1 +
-    // pre-push round-2 P1): this batch mover writes scheduled_date directly
-    // and never called it. Deferred until EVERY row in this batch has
-    // committed its date write — a batch that moves BOTH siblings of a
-    // combined invoice to the SAME new day must never see one already
-    // moved and the other still on its old day mid-loop (that transient
-    // divergence would permanently split an invoice two rows that end up
-    // sharing a date). Runs in its own savepoint off this trx per row (the
-    // "safely" wrapper) — a failure inside it never poisons this batch's
-    // commit.
+    // Same-trip first-application billing-review chokepoint (owner ruling,
+    // #5021 redesign — "flag, don't auto-split"): this batch mover writes
+    // scheduled_date directly and must call it too. Run after every row in
+    // this batch has committed its date write (same shared-transaction
+    // pattern as before) so a batch that moves BOTH siblings of a combined
+    // invoice to the SAME new day is judged on the batch's FINAL state, not
+    // a mid-loop snapshot. Runs in its own savepoint off this trx per row
+    // (the "safely" wrapper) — a failure inside it never poisons this
+    // batch's commit. Opens a durable review rather than touching money —
+    // see first-application-sibling-split.js.
     for (const c of classified) {
       if (c.observedDate === dateStr) continue;
       await require('../first-application-sibling-split')
-        .reconcileFirstApplicationSplitOnDateChangeSafely(trx, c.s.id, 'intelligence-bar batch move');
+        .flagFirstApplicationInvoiceReviewOnDateChangeSafely(trx, c.s.id, 'intelligence-bar batch move');
     }
     return overlappedIds;
   });
