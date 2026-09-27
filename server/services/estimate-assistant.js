@@ -1549,27 +1549,37 @@ function purchasedServiceSubtype(row = {}) {
 }
 
 function purchasedServiceScopeForQuestion(question, rows = []) {
-  const exactLabelRows = rows.filter((row) => {
-    const label = cleanText(row.label).toLowerCase();
-    return label.length >= 4 && question.includes(label);
-  });
-  const amounts = [...question.matchAll(/\$\s*([\d,]+(?:\.\d{1,2})?)/g)]
-    .map((match) => Number(match[1].replace(/,/g, ''))).filter(Number.isFinite);
-  if (exactLabelRows.length || amounts.length) {
-    const labelScoped = exactLabelRows.length ? exactLabelRows : rows;
-    return {
-      named: true,
-      rows: amounts.length
-        ? labelScoped.filter((row) => amounts.includes(Number(row.amount)))
-        : labelScoped,
-    };
-  }
   const namedSubtypes = [
     /\bbond\b/.test(question) ? 'bond' : null,
     /\btrench(?:ing|ed)?\b/.test(question) ? 'trenching' : null,
   ].filter(Boolean);
+  const subtypeRows = namedSubtypes.length
+    ? rows.filter((row) => namedSubtypes.includes(purchasedServiceSubtype(row)))
+    : rows;
+  const matchedLabels = [...new Set(subtypeRows.map((row) => cleanText(row.label).toLowerCase())
+    .filter((label) => label.length >= 4 && question.includes(label)))]
+    .sort((a, b) => b.length - a.length);
+  let unmatchedQuestion = question;
+  const selectedLabels = matchedLabels.filter((label) => {
+    if (!unmatchedQuestion.includes(label)) return false;
+    unmatchedQuestion = unmatchedQuestion.split(label).join(' ');
+    return true;
+  });
+  const exactLabelRows = selectedLabels.length
+    ? subtypeRows.filter((row) => selectedLabels.includes(cleanText(row.label).toLowerCase()))
+    : subtypeRows;
+  const amounts = [...question.matchAll(/\$\s*([\d,]+(?:\.\d{1,2})?)/g)]
+    .map((match) => Number(match[1].replace(/,/g, ''))).filter(Number.isFinite);
+  if (selectedLabels.length || amounts.length) {
+    return {
+      named: true,
+      rows: amounts.length
+        ? exactLabelRows.filter((row) => amounts.includes(Number(row.amount)))
+        : exactLabelRows,
+    };
+  }
   if (namedSubtypes.length) {
-    return { named: true, rows: rows.filter((row) => namedSubtypes.includes(purchasedServiceSubtype(row))) };
+    return { named: true, rows: subtypeRows };
   }
   if (/\bannual inspection\b/.test(question)) {
     return {
@@ -1620,7 +1630,8 @@ function writtenServiceClaimAnswer(question, context = {}, fallback = null) {
   ];
   const seenRows = new Set();
   const rows = allRows.filter((row) => {
-    const key = [row.service, row.label, ...(row.purchasedTerms || [])].map(cleanText).join('|').toLowerCase();
+    const key = [row.service, row.label, row.amount, ...(row.purchasedTerms || [])]
+      .map(cleanText).join('|').toLowerCase();
     if (seenRows.has(key)) return false;
     seenRows.add(key);
     return true;

@@ -437,6 +437,66 @@ describe('estimate assistant no-guarantee context', () => {
   });
 
   test.each([
+    ['paid-first', false],
+    ['removed-first', true],
+  ])('specific and repeated trenching selectors retain distinct jobs: %s', (_name, reverse) => {
+    const paid = { service: 'trenching', label: 'Trenching', amount: 900,
+      warrantyTier: 'one_year_retreat', warrantyAdder: 0 };
+    const removed = { service: 'trenching', label: 'Rear Trenching', amount: 700,
+      warrantyTier: 'none', warrantyAdder: 0 };
+    const rows = reverse ? [removed, paid] : [paid, removed];
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 1600 }, serviceMode: 'one_time', noGuaranteeClaims: true,
+      estData: {},
+      pricingBundle: { source: 'engine_invocation', snapshotHit: false,
+        anchorOneTimePrice: 1600, oneTimeBreakdown: { total: 1600, items: rows } },
+    });
+    expect(answerEstimateQuestionFallback('Does the Rear Trenching include a guarantee?', context))
+      .toMatch(/do not see an estimate-wide callback or money-back guarantee/i);
+    expect(answerEstimateQuestionFallback('Does the Trenching include a guarantee?', context))
+      .toContain('Annual inspection during the warranty period');
+    expect(answerEstimateQuestionFallback('What guarantees do Trenching and Rear Trenching include?', context))
+      .toContain('Annual inspection during the warranty period');
+  });
+
+  test.each([
+    ['ascending', [700, 900]],
+    ['descending', [900, 700]],
+  ])('price scoping retains same-label paid jobs across projections: %s', (_name, amounts) => {
+    const rows = amounts.map((amount) => ({
+      service: 'trenching', label: 'Termite Trenching', amount,
+      warrantyTier: 'one_year_retreat', warrantyAdder: 0,
+    }));
+    const context = buildEstimateAssistantContext({
+      estimate: { onetime_total: 1600 }, serviceMode: 'one_time', noGuaranteeClaims: true,
+      estData: {},
+      pricingBundle: { source: 'engine_invocation', snapshotHit: false,
+        anchorOneTimePrice: 1600, oneTimeBreakdown: { total: 1600, items: rows } },
+    });
+    expect(context.oneTime.items).toHaveLength(2);
+    expect(answerEstimateQuestionFallback('Does the $900 trenching include a guarantee?', context))
+      .toContain('Annual inspection during the warranty period');
+  });
+
+  test('amount selection stays inside the named service subtype', () => {
+    const annual = 'Annual inspection during the warranty period';
+    const bond = 'Purchased termite bond: 5-year term with re-treatment coverage.';
+    const rows = [
+      { service: 'termite_bond_5yr', label: 'Termite Bond', amount: 700, purchasedTerms: [bond] },
+      { service: 'trenching', label: 'Trenching', amount: 900, purchasedTerms: [] },
+    ];
+    const context = {
+      serviceMode: 'one_time', services: rows,
+      oneTime: { amount: 1600, amountText: '$1,600', items: rows },
+      guarantees: { noGuaranteeClaims: true },
+    };
+    const answer = answerEstimateQuestionFallback('Does the $700 trenching include a guarantee?', context);
+    expect(answer).toMatch(/do not see an estimate-wide callback or money-back guarantee/i);
+    expect(answer).not.toContain(bond);
+    expect(answer).not.toContain(annual);
+  });
+
+  test.each([
     ['none', { warrantyTier: 'none', warrantyAdder: 0 }],
     ['null', { warrantyTier: null, warrantyAdder: null }],
   ])('an explicit live %s decision suppresses older raw trenching warranty evidence', (_name, liveDecision) => {
