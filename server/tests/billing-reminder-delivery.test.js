@@ -11,6 +11,8 @@ jest.mock('../services/billing-email-reservation', () => ({
 jest.mock('../services/collections/rail-guard', () => ({
   collectionsChannelPermitted: jest.fn(),
 }));
+jest.mock('../services/collections/contact-policy', () => ({ evaluate: jest.fn() }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const db = require('../models/db');
 const ContactLedger = require('../services/collections/contact-ledger');
@@ -80,6 +82,73 @@ describe('billing reminder per-channel delivery progress', () => {
     purpose: 'balance_reminder', eventKey, channels, metadata: { tier: 'gentle' }, send,
   });
 
+  test('an off-ledger balance allowance reaches every leg policy recheck', async () => {
+    const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+    await sendReminderChannels({
+      customerId: 'customer-1', invoiceId: null, source: 'previsit_balance_reminder',
+      purpose: 'balance_reminder', eventKey: 'previsit-balance:ss-1', channels: ['sms', 'email'],
+      offLedgerBalanceCents: 4900, send,
+    });
+    expect(collectionsChannelPermitted).toHaveBeenCalledTimes(2);
+    for (const [args] of collectionsChannelPermitted.mock.calls) {
+      expect(args).toMatchObject({ offLedgerBalanceCents: 4900 });
+    }
+  });
+
+  test('without an allowance the recheck counts no off-ledger balance', async () => {
+    await deliver(['sms'], jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' })));
+    // Left undefined, so rail-guard's own default (0) applies.
+    expect(collectionsChannelPermitted.mock.calls[0][0].offLedgerBalanceCents).toBeUndefined();
+  });
+
+  test('an aggregate reminder records the invoices it quotes on each reservation', async () => {
+    await sendReminderChannels({
+      customerId: 'customer-1', invoiceId: null, invoiceIds: ['inv-a', 'inv-b'], source: 'previsit_balance_reminder',
+      purpose: 'balance_reminder', eventKey: 'previsit-balance:ss-1', channels: ['sms'],
+      send: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' })),
+    });
+    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['inv-a', 'inv-b'] }));
+  });
+
+  test('the real policy guard blocks an excluded quoted invoice and preserves the draft-invoice allowance', async () => {
+    const originalGate = process.env.GATE_COLLECTIONS_POLICY;
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    try {
+      const ContactPolicy = require('../services/collections/contact-policy');
+      ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-b'], denialReasons: [] });
+      collectionsChannelPermitted.mockImplementation(jest.requireActual('../services/collections/rail-guard').collectionsChannelPermitted);
+      const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+      const result = await sendReminderChannels({
+        customerId: 'customer-1', invoiceId: null, invoiceIds: ['inv-a', 'inv-b'], policyInvoiceIds: ['inv-a', 'inv-b'],
+        source: 'previsit_balance_reminder', purpose: 'balance_reminder', eventKey: 'previsit-balance:ss-1', channels: ['sms'], send,
+      });
+      expect(result.complete).toBe(false);
+      expect(send).not.toHaveBeenCalled();
+      expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+      // A draft annual-prepay invoice is recorded for reconciliation but
+      // intentionally has no collectible-policy membership requirement.
+      ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: [], denialReasons: [] });
+      await sendReminderChannels({
+        customerId: 'customer-1', invoiceId: null, invoiceIds: ['draft-invoice'], offLedgerBalanceCents: 4900,
+        source: 'annual_prepay_payment_reminder', purpose: 'balance_reminder', eventKey: 'annual-prepay-payment:term-1:3', channels: ['sms'], send,
+      });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['draft-invoice'] }));
+    } finally {
+      if (originalGate === undefined) delete process.env.GATE_COLLECTIONS_POLICY;
+      else process.env.GATE_COLLECTIONS_POLICY = originalGate;
+    }
+  });
+
+  test('a dues-only aggregate reminder records an empty invoice list, not [null]', async () => {
+    await sendReminderChannels({
+      customerId: 'customer-1', invoiceId: null, invoiceIds: [], source: 'previsit_balance_reminder',
+      purpose: 'balance_reminder', eventKey: 'previsit-balance:ss-2', channels: ['sms'],
+      send: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' })),
+    });
+    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: [] }));
+  });
+
   test.each(['SUPPRESSED_MANUAL_DNC', 'SUPPRESSED_OPT_OUT'])('an all-channel %s Email refusal resolves the leg terminally', async (code) => {
     const result = await deliver(['email'], jest.fn(async () => ({
       sent: false, blocked: true, deliveryOutcome: 'not_sent', code, reason: 'Recipient is suppressed',
@@ -122,6 +191,53 @@ describe('billing reminder per-channel delivery progress', () => {
     ]));
   });
 
+  test('a persisted App bell settles its leg without inventing provider acceptance or retrying', async () => {
+    const send = jest.fn(async () => ({
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'not_sent',
+      code: 'APP_UNAVAILABLE',
+      bellPersisted: true,
+    }));
+
+    await expect(deliver(['push'], send, 'bell-only'))
+      .resolves.toMatchObject({
+        complete: true,
+        deliveredNow: ['push'],
+        results: {
+          push: expect.objectContaining({ sent: false, deliveryOutcome: 'not_sent', bellPersisted: true }),
+        },
+      });
+    await expect(deliver(['push'], send, 'bell-only'))
+      .resolves.toMatchObject({ complete: true, deliveredNow: [] });
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.markDelivered).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(rows[0].metadata).toMatchObject({ delivered: true });
+  });
+
+  test('an uncertain App outcome without a bell witness stays held', async () => {
+    const send = jest.fn(async () => ({
+      sent: false,
+      deliveryOutcome: 'uncertain',
+      code: 'APP_OUTCOME_UNCONFIRMED',
+    }));
+
+    await expect(deliver(['push'], send, 'uncertain-app'))
+      .resolves.toMatchObject({ complete: false, deliveredNow: [] });
+    await expect(deliver(['push'], send, 'uncertain-app'))
+      .resolves.toMatchObject({
+        complete: false,
+        deliveredNow: [],
+        results: { push: expect.objectContaining({ deliveryHeld: true }) },
+      });
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+  });
+
   test('accepted Text is not repeated while failed Email is retried', async () => {
     const send = jest.fn(async (channel) => {
       if (channel === 'email' && send.mock.calls.length === 1) return { sent: false, deliveryOutcome: 'not_sent', code: 'EMAIL_FAILED' };
@@ -134,6 +250,9 @@ describe('billing reminder per-channel delivery progress', () => {
     expect(send.mock.calls.map(([channel]) => channel)).toEqual(['email', 'sms', 'email']);
     expect(ContactLedger.claimAttempt).toHaveBeenLastCalledWith(expect.objectContaining({
       reused: true, metadata: expect.objectContaining({ send_failed: true }),
+    }), expect.objectContaining({
+      invoiceIds: ['invoice-1'],
+      metadata: expect.objectContaining({ notificationEventKey: 'invoice-1:gentle', tier: 'gentle' }),
     }));
     expect(rows.find((row) => row.channel === 'email').metadata)
       .toMatchObject({ send_failed: false, delivered: true });
@@ -314,6 +433,30 @@ describe('billing reminder per-channel delivery progress', () => {
     await expect(reminderProgress('customer-1', 'balance_reminder_workflow', ['email', 'sms']))
       .resolves.toEqual([expect.objectContaining({ complete: true })]);
     expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  test('a newly allowed Email removes its persisted waiver before a transient retry failure', async () => {
+    let emailAllowed = false;
+    collectionsChannelPermitted.mockImplementation(async ({ channel }) => (channel === 'email' && !emailAllowed
+      ? { allowed: false, durable: true }
+      : { allowed: true, durable: false }));
+    const send = jest.fn()
+      .mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', code: 'SMS_FAILED' })
+      .mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', code: 'EMAIL_FAILED', retryable: true })
+      .mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' });
+
+    await expect(deliver(['email', 'sms'], send, 'waiver-revoked'))
+      .resolves.toMatchObject({ complete: false, deliveredNow: [] });
+    expect(rows.find((row) => row.channel === 'sms').metadata.policy_waived_channels).toEqual(['email']);
+
+    emailAllowed = true;
+    await expect(deliver(['email', 'sms'], send, 'waiver-revoked'))
+      .resolves.toMatchObject({ complete: false, deliveredNow: ['sms'] });
+    expect(send.mock.calls.map(([channel]) => channel)).toEqual(['sms', 'email', 'sms']);
+    expect(rows.find((row) => row.channel === 'sms').metadata.policy_waived_channels).toEqual([]);
+    await expect(require('../services/billing-reminder-delivery')
+      .reminderProgress('customer-1', 'balance_reminder_workflow', ['email', 'sms']))
+      .resolves.toEqual([expect.objectContaining({ complete: false, waived: new Set() })]);
   });
 
   test('an unpersisted waiver never reports the episode settled', async () => {

@@ -108,8 +108,22 @@ function mergedBillingChannelUpdates(winner = {}, loser = {}) {
   return updates;
 }
 
+// A property's stored billing channel choice for a category, read exactly as
+// the send path reads it: the explicit arrays are saved on the property's own
+// notification_prefs row (routes/notifications.js keeps them out of the
+// account-level CHANNEL_DB_COLUMNS; customer-app-notifications-postgres pins
+// the secondary row receiving them while the primary stays null). Throws when
+// the row cannot be read, so a delivery decision fails closed. Returns null
+// when none is stored.
+async function storedBillingChannels(customerId, category, knex) {
+  const database = knex || require('../models/db');
+  const prefs = await database('notification_prefs').where({ customer_id: customerId }).first();
+  return explicitBillingChannels(prefs || {}, category);
+}
+
 module.exports = {
   BILLING_DELIVERY_FIELDS,
+  storedBillingChannels,
   explicitBillingChannels,
   billingChannelAllowed,
   billingChannelsPayload,
