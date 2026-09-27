@@ -19,18 +19,16 @@ const mockInsert = jest.fn();
 const mockLoggerWarn = jest.fn();
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: (...args) => mockLoggerWarn(...args), error: jest.fn() }));
 jest.mock('../models/db', () => {
-  const db = jest.fn(() => ({
-    insert: (row) => {
-      const chain = {
-        onConflict: () => chain,
-        merge: (mergeArgs) => mockInsert(row, mergeArgs),
-      };
-      return chain;
-    },
-  }));
-  db.raw = (sql) => ({ __raw: sql });
+  const db = jest.fn();
+  // The route writes through ONE parameterized upsert: capture its SQL and
+  // bindings as mockInsert(sql, bindings).
+  db.raw = (sql, bindings) => mockInsert(sql, bindings);
   return db;
 });
+const mockFetchSitemapPaths = jest.fn();
+jest.mock('../services/content/content-registry-live-status', () => ({
+  fetchSitemapPaths: (...args) => mockFetchSitemapPaths(...args),
+}));
 
 const http = require('http');
 const express = require('express');
@@ -94,14 +92,22 @@ const GOOD_BODY = { p: '/pest-control/florida-huntsman-spider/', m: '50' };
 const SPOKE_ORIGIN = 'https://www.parrishpestcontrol.com';
 const HUB_ORIGIN = 'https://wavespestcontrol.com';
 
+// The count lands after a sitemap lookup, a few ticks after the 204.
+const flush = async () => { for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r)); };
+const written = (i = 0) => {
+  const [sql, b] = mockInsert.mock.calls[i];
+  return { sql, site: b[0], path: b[1], milestone: b[2], cap: b[3] };
+};
+
 beforeEach(async () => {
   mockIsEnabled.mockReturnValue(true);
   mockInsert.mockClear();
   mockLoggerWarn.mockClear();
   mockFellThrough.mockClear();
-  // Every request in this file comes from 127.0.0.1, so the per-source daily
-  // dedupe would otherwise carry over from one test to the next.
-  require('../routes/public-blog-read-depth')._private.resetDedupe();
+  // Unless a test says otherwise, every path is on its site's sitemap.
+  mockFetchSitemapPaths.mockReset();
+  mockFetchSitemapPaths.mockResolvedValue({ has: () => true });
+  require('../routes/public-blog-read-depth')._private.resetLivePaths();
   await startServer();
 });
 
@@ -152,34 +158,29 @@ describe('valid beacon', () => {
   test('stores the right site, path and milestone and responds 204', async () => {
     const res = await post(GOOD_BODY, { origin: SPOKE_ORIGIN });
     expect(res.status).toBe(204);
-    // The write is fire-and-forget after the response — give the microtask a tick.
-    await new Promise((r) => setImmediate(r));
+    // The write is fire-and-forget after the response.
+    await flush();
     expect(mockInsert).toHaveBeenCalledTimes(1);
-    const [row, mergeArgs] = mockInsert.mock.calls[0];
-    expect(row).toMatchObject({
-      site: 'parrishpestcontrol.com',
-      path: '/pest-control/florida-huntsman-spider/',
-      milestone: '50',
-      count: 1,
-    });
-    expect(row.day).toEqual(expect.objectContaining({ __raw: expect.stringContaining("America/New_York") }));
-    expect(mergeArgs).toEqual(expect.objectContaining({ count: expect.objectContaining({ __raw: expect.stringContaining('count + 1') }) }));
+    const w = written();
+    expect(w).toMatchObject({ site: 'parrishpestcontrol.com', path: '/pest-control/florida-huntsman-spider/', milestone: '50' });
+    expect(w.sql).toMatch(/\(now\(\) AT TIME ZONE 'America\/New_York'\)::date/);
+    expect(w.sql).toMatch(/ON CONFLICT \(day, site, path, milestone\)/);
     // updated_at tracks the latest increment, not just the day's first beacon.
-    expect(mergeArgs.updated_at).toEqual({ __raw: 'now()' });
+    expect(w.sql).toMatch(/count = blog_read_depth_daily\.count \+ 1, updated_at = now\(\)/);
   });
 
   test('www. is stripped and a spoke origin maps to its bare-domain key', async () => {
     const res = await post(GOOD_BODY, { origin: SPOKE_ORIGIN });
     expect(res.status).toBe(204);
-    await new Promise((r) => setImmediate(r));
-    expect(mockInsert.mock.calls[0][0].site).toBe('parrishpestcontrol.com');
+    await flush();
+    expect(written().site).toBe('parrishpestcontrol.com');
   });
 
   test('the hub origin (no www) resolves to its own key', async () => {
     const res = await post(GOOD_BODY, { origin: HUB_ORIGIN });
     expect(res.status).toBe(204);
-    await new Promise((r) => setImmediate(r));
-    expect(mockInsert.mock.calls[0][0].site).toBe('wavespestcontrol.com');
+    await flush();
+    expect(written().site).toBe('wavespestcontrol.com');
   });
 
   test('every valid milestone is accepted', async () => {
@@ -187,9 +188,9 @@ describe('valid beacon', () => {
       mockInsert.mockClear();
       const res = await post({ ...GOOD_BODY, m }, { origin: SPOKE_ORIGIN });
       expect(res.status).toBe(204);
-      await new Promise((r) => setImmediate(r));
+      await flush();
       expect(mockInsert).toHaveBeenCalledTimes(1);
-      expect(mockInsert.mock.calls[0][0].milestone).toBe(m);
+      expect(written().milestone).toBe(m);
     }
   });
 
@@ -199,9 +200,9 @@ describe('valid beacon', () => {
       const p = `/${category}/some-post-slug/`;
       const res = await post({ p, m: '25' }, { origin: SPOKE_ORIGIN });
       expect(res.status).toBe(204);
-      await new Promise((r) => setImmediate(r));
+      await flush();
       expect(mockInsert).toHaveBeenCalledTimes(1);
-      expect(mockInsert.mock.calls[0][0].path).toBe(p);
+      expect(written().path).toBe(p);
     }
   });
 });
@@ -210,28 +211,28 @@ describe('origin handling', () => {
   test('missing origin gives 204 with no write', async () => {
     const res = await post(GOOD_BODY, {});
     expect(res.status).toBe(204);
-    await new Promise((r) => setImmediate(r));
+    await flush();
     expect(mockInsert).not.toHaveBeenCalled();
   });
 
   test('the literal "null" origin gives 204 with no write', async () => {
     const res = await post(GOOD_BODY, { origin: 'null' });
     expect(res.status).toBe(204);
-    await new Promise((r) => setImmediate(r));
+    await flush();
     expect(mockInsert).not.toHaveBeenCalled();
   });
 
   test('an unknown (non-fleet) origin gives 204 with no write', async () => {
     const res = await post(GOOD_BODY, { origin: 'https://evil-scraper.example.com' });
     expect(res.status).toBe(204);
-    await new Promise((r) => setImmediate(r));
+    await flush();
     expect(mockInsert).not.toHaveBeenCalled();
   });
 
   test('the credentialed portal origin (not a blog site) gives 204 with no write', async () => {
     const res = await post(GOOD_BODY, { origin: 'https://portal.wavespestcontrol.com' });
     expect(res.status).toBe(204);
-    await new Promise((r) => setImmediate(r));
+    await flush();
     expect(mockInsert).not.toHaveBeenCalled();
   });
 });
@@ -336,7 +337,7 @@ describe('no request data is logged', () => {
     mockInsert.mockImplementationOnce(() => { throw Object.assign(new Error('boom'), { code: '23505' }); });
     const res = await post(GOOD_BODY, { origin: SPOKE_ORIGIN });
     expect(res.status).toBe(204);
-    await new Promise((r) => setImmediate(r));
+    await flush();
     expect(mockLoggerWarn).toHaveBeenCalledTimes(1);
     const [line] = mockLoggerWarn.mock.calls[0];
     expect(line).not.toContain(GOOD_BODY.p);
@@ -349,7 +350,7 @@ describe('no request data is logged', () => {
     mockInsert.mockImplementationOnce(() => { throw new Error(leaky); });
     const res = await post(GOOD_BODY, { origin: SPOKE_ORIGIN });
     expect(res.status).toBe(204);
-    await new Promise((r) => setImmediate(r));
+    await flush();
     expect(mockLoggerWarn).toHaveBeenCalledTimes(1);
     const [line] = mockLoggerWarn.mock.calls[0];
     expect(line).toBe('[blog-read-depth] write failed: Error');
@@ -367,50 +368,83 @@ describe('no request data is logged', () => {
   });
 });
 
-describe('one count per source per day', () => {
-  test('a repeat beacon from the same source is answered 204 but counted once', async () => {
-    expect((await post(GOOD_BODY, { origin: SPOKE_ORIGIN })).status).toBe(204);
-    expect((await post(GOOD_BODY, { origin: SPOKE_ORIGIN })).status).toBe(204);
-    // the same site claimed via the bare or www origin is still the same beacon
-    expect((await post(GOOD_BODY, { origin: 'https://parrishpestcontrol.com' })).status).toBe(204);
-    await new Promise((r) => setImmediate(r));
-    expect(mockInsert).toHaveBeenCalledTimes(1);
+describe('only posts the site actually publishes count', () => {
+  const POST_PATH = GOOD_BODY.p;
+
+  test('a path on the claimed site\'s sitemap counts, and the sitemap is read once and reused', async () => {
+    mockFetchSitemapPaths.mockResolvedValue(new Set([POST_PATH]));
+    await post({ p: POST_PATH, m: '25' }, { origin: HUB_ORIGIN });
+    await post({ p: POST_PATH, m: '50' }, { origin: HUB_ORIGIN });
+    await flush();
+    expect(mockFetchSitemapPaths).toHaveBeenCalledTimes(1);
+    expect(mockFetchSitemapPaths).toHaveBeenCalledWith({ sitemapUrl: 'https://wavespestcontrol.com/sitemap-index.xml' });
+    expect(mockInsert).toHaveBeenCalledTimes(2);
   });
 
-  test('another milestone, post or site from the same source still counts', async () => {
+  test('an invented slug is answered 204 but never stored', async () => {
+    mockFetchSitemapPaths.mockResolvedValue(new Set([POST_PATH]));
+    const res = await post({ p: '/pest-control/not-a-real-post/', m: '50' }, { origin: HUB_ORIGIN });
+    expect(res.status).toBe(204);
+    await flush();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  test('a spoke beacon is checked against that spoke\'s own sitemap', async () => {
+    mockFetchSitemapPaths.mockImplementation(async ({ sitemapUrl }) => (
+      sitemapUrl === 'https://parrishpestcontrol.com/sitemap-index.xml'
+        ? new Set([`https://parrishpestcontrol.com${POST_PATH}`]) // spoke entries are absolute
+        : new Set()));
     await post(GOOD_BODY, { origin: SPOKE_ORIGIN });
-    await post({ ...GOOD_BODY, m: '75' }, { origin: SPOKE_ORIGIN });
-    await post({ ...GOOD_BODY, p: '/termite/drywood-termites/' }, { origin: SPOKE_ORIGIN });
+    await flush();
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+    expect(written().site).toBe('parrishpestcontrol.com');
+    mockInsert.mockClear();
+    await post({ p: '/termite/drywood-termites/', m: '50' }, { origin: SPOKE_ORIGIN }); // not on that spoke
+    await flush();
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  test('no sitemap yet: dropped, and not refetched until the retry window passes', async () => {
+    const { isLivePath } = require('../routes/public-blog-read-depth')._private;
+    mockFetchSitemapPaths.mockResolvedValueOnce(null);
+    const t0 = 1000000;
+    expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0)).toBe(false);
+    expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0 + 60 * 1000)).toBe(false);
+    expect(mockFetchSitemapPaths).toHaveBeenCalledTimes(1);
+    mockFetchSitemapPaths.mockResolvedValueOnce(new Set([POST_PATH]));
+    expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0 + 5 * 60 * 1000)).toBe(true);
+    expect(mockFetchSitemapPaths).toHaveBeenCalledTimes(2);
+  });
+
+  test('a failed refresh keeps the last good list', async () => {
+    const { isLivePath } = require('../routes/public-blog-read-depth')._private;
+    mockFetchSitemapPaths.mockResolvedValueOnce(new Set([POST_PATH]));
+    const t0 = 2000000;
+    expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0)).toBe(true);
+    mockFetchSitemapPaths.mockRejectedValueOnce(new Error('network'));
+    expect(await isLivePath('wavespestcontrol.com', POST_PATH, t0 + 6 * 60 * 60 * 1000)).toBe(true);
+    expect(mockFetchSitemapPaths).toHaveBeenCalledTimes(2);
+  });
+
+  test('concurrent beacons for one site share a single sitemap fetch', async () => {
+    let release;
+    mockFetchSitemapPaths.mockImplementation(() => new Promise((r) => { release = () => r(new Set([POST_PATH])); }));
+    const { isLivePath } = require('../routes/public-blog-read-depth')._private;
+    const a = isLivePath('wavespestcontrol.com', POST_PATH, 3000000);
+    const b = isLivePath('wavespestcontrol.com', POST_PATH, 3000001);
+    release();
+    expect(await Promise.all([a, b])).toEqual([true, true]);
+    expect(mockFetchSitemapPaths).toHaveBeenCalledTimes(1);
+  });
+
+  test('each (day, site, path, milestone) bucket stops at the daily cap', async () => {
+    const { DAILY_BUCKET_CAP } = require('../routes/public-blog-read-depth')._private;
     await post(GOOD_BODY, { origin: HUB_ORIGIN });
-    await new Promise((r) => setImmediate(r));
-    expect(mockInsert).toHaveBeenCalledTimes(4);
-  });
-
-  test('the dedupe resets at America/New_York midnight, not UTC', () => {
-    const { firstBeaconToday } = require('../routes/public-blog-read-depth')._private;
-    const lateEt = new Date('2026-09-27T03:59:00Z'); // 11:59 PM EDT, Sep 26
-    const utcMidnight = new Date('2026-09-27T00:30:00Z'); // 8:30 PM EDT, same ET day
-    const nextEt = new Date('2026-09-27T04:01:00Z'); // 12:01 AM EDT, Sep 27
-    expect(firstBeaconToday('src', 'wavespestcontrol.com', '/termite/a/', '50', utcMidnight)).toBe(true);
-    expect(firstBeaconToday('src', 'wavespestcontrol.com', '/termite/a/', '50', lateEt)).toBe(false);
-    expect(firstBeaconToday('src', 'wavespestcontrol.com', '/termite/a/', '50', nextEt)).toBe(true);
-  });
-
-  test('past the daily cap further beacons are dropped, not counted', () => {
-    const prev = process.env.BLOG_READ_DEPTH_DEDUPE_MAX;
-    process.env.BLOG_READ_DEPTH_DEDUPE_MAX = '2';
-    try {
-      jest.isolateModules(() => {
-        const { firstBeaconToday } = require('../routes/public-blog-read-depth')._private;
-        const now = new Date('2026-09-27T16:00:00Z');
-        expect(firstBeaconToday('a', 'wavespestcontrol.com', '/termite/a/', '25', now)).toBe(true);
-        expect(firstBeaconToday('b', 'wavespestcontrol.com', '/termite/a/', '25', now)).toBe(true);
-        expect(firstBeaconToday('c', 'wavespestcontrol.com', '/termite/a/', '25', now)).toBe(false);
-      });
-    } finally {
-      if (prev === undefined) delete process.env.BLOG_READ_DEPTH_DEDUPE_MAX;
-      else process.env.BLOG_READ_DEPTH_DEDUPE_MAX = prev;
-    }
+    await flush();
+    const w = written();
+    expect(w.sql).toMatch(/WHERE blog_read_depth_daily\.count < \?/);
+    expect(w.cap).toBe(DAILY_BUCKET_CAP);
+    expect(DAILY_BUCKET_CAP).toBe(2000);
   });
 });
 

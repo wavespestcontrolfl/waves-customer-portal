@@ -32,19 +32,25 @@
  * Beacons are no-cors `text/plain` POSTs whose response the page never
  * reads, so the route sets no CORS headers.
  *
- * One count per source per day: anyone can send this beacon and claim any
- * fleet Origin — an anonymous, cookie-free browser cannot be authenticated
- * without the identifier E2 rules out, and a same-origin proxy would be just
- * as callable. What bounds a single source instead (codex P1 r1): its
- * network address (the limiter's own IPv6-/64-normalized key) is HMACed
- * with a random salt that exists only in this process's memory and is
- * replaced every America/New_York day, together with the site, path and
- * milestone; a repeat digest the same day is dropped (204, nothing written).
- * The address and the digest are never stored or logged, and once the salt
- * rolls over nothing links a digest to anything.
+ * What bounds a forged beacon: anyone can send this beacon and claim any
+ * fleet Origin. An anonymous, cookie-free browser cannot be authenticated
+ * without the identifier E2 rules out (owner scope: no cookies, no IDs), so
+ * the route keeps no per-source state beyond the one-minute per-IP limiter
+ * every public route carries (codex P1 r2 withdrew the per-source daily
+ * dedupe for exactly that reason). Instead:
+ *  - a beacon counts only for a path the claimed site's OWN sitemap lists
+ *    (sitemap-index.xml, read with the tested content-registry helper,
+ *    cached 6 h per site; a failed refresh keeps the last good list and is
+ *    retried after 5 min; no list yet means dropped), so invented slugs never
+ *    create rows (codex P1 r2) — today every blog post is hub-only, so spoke
+ *    beacons find no blog paths and drop;
+ *  - each (day, site, path, milestone) bucket stops at DAILY_BUCKET_CAP.
+ * The response is the same 204 either way, so it never says which paths
+ * are live.
  *
  * Storage: `blog_read_depth_daily` — one row per (day, site, path,
- * milestone), `count` incremented by an INSERT ... ON CONFLICT DO UPDATE.
+ * milestone), `count` incremented by an INSERT ... ON CONFLICT DO UPDATE
+ * that stops at DAILY_BUCKET_CAP.
  * `day` is the America/New_York calendar day, computed in SQL — never from
  * request data. `site` is derived ONLY from the Origin header (never the
  * body) via server/services/content-astro/spoke-sites.js's own
@@ -52,7 +58,6 @@
  * (204, nothing written). Nothing else about the request — IP, user agent,
  * referrer, cookies, raw body — is ever stored or logged.
  */
-const crypto = require('node:crypto');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
@@ -62,6 +67,8 @@ const { notFoundBody } = require('../middleware/errors');
 const { noStore } = require('../middleware/no-store');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const { normalizeSpokeSites } = require('../services/content-astro/spoke-sites');
+const { fetchSitemapPaths } = require('../services/content/content-registry-live-status');
+const { normalizeContentUrl } = require('../services/content/content-registry');
 
 const BODY_LIMIT = '1kb';
 // A page view sends at most 5 beacons (25/50/75/100/next); 120/min per IP
@@ -72,37 +79,48 @@ const RATE_MAX_PER_MIN = Math.max(1, parseInt(process.env.BLOG_READ_DEPTH_RATE_M
 const PATH_RE = /^\/(lawn-care|mosquito|pest-control|seasonal|termite|tree-shrub)\/[a-z0-9]+(?:-[a-z0-9]+)*\/$/;
 const MAX_PATH_CHARS = 200;
 const MILESTONES = new Set(['25', '50', '75', '100', 'next']);
-// Past this many distinct beacons in one day, further ones are dropped
-// rather than counted: memory stays bounded and a flood can't re-count by
-// cycling entries out. Legitimate traffic is a few hundred a day.
-const DEDUPE_MAX_ENTRIES = Math.max(1, parseInt(process.env.BLOG_READ_DEPTH_DEDUPE_MAX, 10) || 200000);
+// A real post reaching this many of one milestone on one site in a day would
+// be ~15x today's whole daily blog traffic; past it the bucket stops, so a
+// forged flood can skew a post by at most this much a day. A saturated
+// bucket reads as exactly the cap.
+const DAILY_BUCKET_CAP = 2000;
 
-let dedupe = { day: null, salt: null, seen: new Set() };
+const LIVE_PATHS_TTL_MS = 6 * 60 * 60 * 1000;
+const LIVE_PATHS_RETRY_MS = 5 * 60 * 1000;
+// site -> { paths: Set|null, ok: bool, checkedAt: ms, pending: Promise|null }
+let livePathCache = new Map();
 
-function etDay(now) {
-  // en-CA formats as YYYY-MM-DD
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(now);
+// The claimed site's own sitemap, as normalized content URLs (a bare path
+// for the hub, an absolute URL for a spoke — normalizeContentUrl decides
+// both sides). One fetch in flight per site; a failed refresh keeps the
+// last good list and retries sooner.
+function livePaths(site, now) {
+  let entry = livePathCache.get(site);
+  if (!entry) {
+    entry = { paths: null, ok: false, checkedAt: -Infinity, pending: null };
+    livePathCache.set(site, entry);
+  }
+  if (entry.pending) return entry.pending;
+  if (now - entry.checkedAt < (entry.ok ? LIVE_PATHS_TTL_MS : LIVE_PATHS_RETRY_MS)) return Promise.resolve(entry.paths);
+  entry.pending = fetchSitemapPaths({ sitemapUrl: `https://${site}/sitemap-index.xml` })
+    .catch(() => null)
+    .then((paths) => {
+      entry.checkedAt = now;
+      entry.ok = !!paths;
+      if (paths) entry.paths = paths;
+      entry.pending = null;
+      return entry.paths;
+    });
+  return entry.pending;
 }
 
-// True the first time today that `sourceKey` sends this (site, path,
-// milestone); false for a repeat or once the day's cap is reached. See the
-// header comment — nothing here is persisted or logged.
-function firstBeaconToday(sourceKey, site, path, milestone, now = new Date()) {
-  const day = etDay(now);
-  if (dedupe.day !== day) dedupe = { day, salt: crypto.randomBytes(32), seen: new Set() };
-  const digest = crypto.createHmac('sha256', dedupe.salt)
-    .update(`${sourceKey}\n${site}\n${path}\n${milestone}`)
-    .digest('base64url')
-    .slice(0, 22);
-  if (dedupe.seen.has(digest) || dedupe.seen.size >= DEDUPE_MAX_ENTRIES) return false;
-  dedupe.seen.add(digest);
-  return true;
+async function isLivePath(site, path, now = Date.now()) {
+  const paths = await livePaths(site, now);
+  return !!paths && paths.has(normalizeContentUrl(`https://${site}${path}`));
 }
 
-function resetDedupe() {
-  dedupe = { day: null, salt: null, seen: new Set() };
+function resetLivePaths() {
+  livePathCache = new Map();
 }
 
 function isPlainObject(v) {
@@ -147,16 +165,19 @@ function errorKind(err) {
 }
 
 async function writeCount(site, path, milestone) {
-  await db('blog_read_depth_daily')
-    .insert({
-      day: db.raw("(now() AT TIME ZONE 'America/New_York')::date"),
-      site,
-      path,
-      milestone,
-      count: 1,
-    })
-    .onConflict(['day', 'site', 'path', 'milestone'])
-    .merge({ count: db.raw('blog_read_depth_daily.count + 1'), updated_at: db.raw('now()') });
+  await db.raw(
+    `INSERT INTO blog_read_depth_daily (day, site, path, milestone, count)
+     VALUES ((now() AT TIME ZONE 'America/New_York')::date, ?, ?, ?, 1)
+     ON CONFLICT (day, site, path, milestone)
+     DO UPDATE SET count = blog_read_depth_daily.count + 1, updated_at = now()
+     WHERE blog_read_depth_daily.count < ?`,
+    [site, path, milestone, DAILY_BUCKET_CAP],
+  );
+}
+
+async function countIfLive(site, path, milestone) {
+  if (!(await isLivePath(site, path))) return;
+  await writeCount(site, path, milestone);
 }
 
 const router = express.Router();
@@ -205,13 +226,12 @@ router.post('/', (req, res) => {
   const { error, value } = validateBody(req.body);
   if (error) return res.status(400).end();
 
-  const site = resolveSite(req);
-  if (!site) return res.status(204).end();
-  if (!firstBeaconToday(unauthenticatedAuthLimitKey(req), site, value.p, value.m)) return res.status(204).end();
-
-  // Respond immediately — the write is never on the request's critical path.
+  // Same 204 whether the beacon is counted or dropped, answered before any
+  // sitemap read or write: the response never says which paths are live.
   res.status(204).end();
-  void writeCount(site, value.p, value.m).catch((err) => {
+  const site = resolveSite(req);
+  if (!site) return undefined;
+  void countIfLive(site, value.p, value.m).catch((err) => {
     // Never log the path/milestone/site here beyond the fixed error kind —
     // this is the ONE catch on the fire-and-forget write and must not leak
     // any request data (AGENTS.md non-card PII rule covers shape too).
@@ -226,4 +246,4 @@ router.post('/', (req, res) => {
 router.use((req, res) => res.status(404).json(notFoundBody(req)));
 
 module.exports = router;
-module.exports._private = { validateBody, resolveSite, errorKind, firstBeaconToday, resetDedupe, PATH_RE, MILESTONES, MAX_PATH_CHARS };
+module.exports._private = { validateBody, resolveSite, errorKind, isLivePath, resetLivePaths, PATH_RE, MILESTONES, MAX_PATH_CHARS, DAILY_BUCKET_CAP };

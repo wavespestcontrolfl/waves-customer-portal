@@ -3121,20 +3121,27 @@ body) via the spoke registry's own `normalizeSpokeSites` — a
 missing/`null`/unknown origin drops the beacon with 204 and writes nothing.
 The Origin is attribution, not authentication: a non-browser caller can claim
 any fleet origin, and an anonymous, cookie-free beacon cannot be
-authenticated without an identifier. What bounds one source is a per-source
-daily dedupe — the limiter's IPv6-/64-normalized address key is HMACed,
-together with site/path/milestone, with a random salt that exists only in
-process memory and is replaced every America/New_York day; a repeat digest
-that day is answered 204 and not written, and past 200,000 distinct beacons
-in a day further ones are dropped rather than counted.
+authenticated without the identifier the owner's E2 scope rules out (no
+cookies, no IDs), so no per-source state is kept beyond the one-minute
+per-IP limiter every public route carries. What bounds a forged beacon
+instead: it counts only for a path the claimed site's OWN sitemap lists
+(`https://{site}/sitemap-index.xml`, read with content-registry-live-status's
+`fetchSitemapPaths` and compared with `normalizeContentUrl`, cached 6 h per
+site; a failed refresh keeps the last good list and retries after 5 min; no
+list yet means the beacon is dropped), so invented slugs never create rows —
+today every blog post is hub-only, so spoke beacons find no blog paths and
+drop; and each `(day, site, path, milestone)` bucket stops at 2,000 a day
+(the upsert's `WHERE count < 2000`), so a forged flood can skew one post by
+at most that much. The 204 is the same whether a beacon counts or drops and
+is sent before any sitemap read, so the response never says which paths
+are live.
 Storage is the ONLY thing this route does: `blog_read_depth_daily`, one row
 per `(day, site, path, milestone)` with an `INSERT ... ON CONFLICT DO UPDATE
-SET count = count + 1`, `day` computed in SQL as the America/New_York
+SET count = count + 1` capped at 2,000, `day` computed in SQL as the America/New_York
 calendar day. The 204 is returned before the write settles (fire-and-forget;
 a write failure is warn-logged by error kind ONLY). No cookie, user agent
-or referrer is ever read; the network address is read only as the in-memory
-dedupe input above; nothing per-visitor — address, digest or any other
-identifier — is ever stored or logged. This is a pure aggregate count, never
+or referrer is ever read; the network address is used only by the
+one-minute per-IP limiter; nothing per-visitor is ever stored or logged. This is a pure aggregate count, never
 a session/visitor record.)
 The route-WIDE invariants — every public route must be listed here, the
 baseline token-route guards, the `/api/reports/:token/*` write rules,
