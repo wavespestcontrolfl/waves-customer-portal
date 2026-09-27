@@ -116,7 +116,7 @@ test('reviewed prompt keeps pressure qualitative and treats missing or zero pres
   expect(SYSTEM_PROMPT).toContain('Report change only when supplied');
   expect(SYSTEM_PROMPT).toContain('Mention at most one customer-visible finding');
   expect(SYSTEM_PROMPT).toContain('Never blame the customer');
-  expect(PROMPT_VERSION).toBe('pest_visit_summary_narrative_v8');
+  expect(PROMPT_VERSION).toBe('pest_visit_summary_narrative_v9');
 });
 
 test('current next visit replaces stale recap appointment in model facts and fallback', () => {
@@ -303,7 +303,7 @@ test('clean model output is used verbatim', async () => {
   expect(callModel).toHaveBeenCalledWith(expect.objectContaining({
     jsonMode: true,
     maxTokens: 400,
-    promptVersion: 'pest_visit_summary_narrative_v8',
+    promptVersion: 'pest_visit_summary_narrative_v9',
   }));
 });
 
@@ -446,6 +446,9 @@ test.each([
   ['an unsupported appointment form', 'We refreshed the perimeter today. Your next visit is scheduled soon, and we will keep monitoring the treated areas.'],
   ['an unsupported relative date', 'We refreshed the perimeter today. Your next appointment is tomorrow, arriving 8–10 AM.'],
   ['a mismatched appointment label', 'We refreshed the perimeter today. Next visit: Saturday, October 3, arriving 8–10 AM.'],
+  ['a contradictory arrival sentence', 'Your next visit is Friday, October 2, arriving 8–10 AM. Arrival is at 8 PM.'],
+  ['a contradictory arrival window sentence', 'Your next visit is Friday, October 2, arriving 8–10 AM. Your arrival window is 8–10 PM.'],
+  ['a contradictory arrival label', 'Your next visit is Friday, October 2, arriving 8–10 AM. Arrival time: 8 PM.'],
 ])('model output with %s falls back to grounded copy', async (_label, summary) => {
   const args = input();
   const out = await applyVisitSummaryNarrative(args, {
@@ -471,6 +474,7 @@ test.each([
   'We’ll follow-up next week to inspect again.',
   'Your next follow-up is next week.',
   'The upcoming follow up is tomorrow.',
+  'Arrival is at 8 PM.',
 ])('model cannot invent an appointment promise without a next visit: %s', async (promise) => {
   const args = input({ nextAppointment: null });
   const summary = `We refreshed the perimeter and entry points today. ${promise}`;
