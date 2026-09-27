@@ -986,7 +986,8 @@ like the dark surface — only analyze/claim are gated.)
 `/api/public/pest-forecast` (+ `/pest-forecast/locations`) (read-only,
 no auth, no DB writes, no PII — returns a deterministic Florida
 pest-pressure model keyed only on a curated city slug / FL ZIP plus
-public NWS + FAWN weather; no request body. Intentionally CORS-open
+public NWS weather and NOAA MRMS radar rainfall (via the Iowa
+Environmental Mesonet); no request body. Intentionally CORS-open
 (`Access-Control-Allow-Origin: *`) so the free embeddable forecast
 widget can run on third-party domains; inherits the global `/api/` IP
 rate limit, served from a 3h per-location server cache and public CDN
