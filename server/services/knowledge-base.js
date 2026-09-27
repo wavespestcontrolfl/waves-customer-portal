@@ -310,7 +310,7 @@ const KnowledgeBaseService = {
   // ══════════════════════════════════════════════════════════════
   // AI AUDIT — "Question Your Assumptions" cron
   // ══════════════════════════════════════════════════════════════
-  async runAIAudit({ maxEntries = 10, forceAll = false, flaggedOnly = false } = {}) {
+  async runAIAudit({ maxEntries = 10, forceAll = false, flaggedOnly = false, ids = null } = {}) {
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       logger.warn('[kb] ANTHROPIC_API_KEY not set — skipping AI audit');
       return { audited: 0, flagged: 0, results: [] };
@@ -325,6 +325,7 @@ const KnowledgeBaseService = {
         '(SELECT MAX(a.created_at) FROM knowledge_base_audits a WHERE a.kb_entry_id = knowledge_base.id AND a.audit_type = ?) AS last_ai_review_at',
         ['ai-review'],
       ));
+    if (Array.isArray(ids)) query = query.whereIn('knowledge_base.id', ids);
     if (flaggedOnly) {
       // Only entries the AI audit hid — a person's flag is a person's call.
       query = query.where({ status: 'flagged' }).whereRaw(`${FLAG_OWNER_SQL} = 'ai-review'`);
@@ -378,7 +379,10 @@ const KnowledgeBaseService = {
         // the meantime wins; the verdict is kept as a 'stale' audit row.
         const { auditResult, source } = await db.transaction(async (trx) => {
           const current = await trx('knowledge_base').where({ id: entry.id }).forUpdate().first();
-          if (!current || current.content !== entry.content || current.status !== entry.status) {
+          // updated_at moves on every write (edit, verify, flag, sync) but
+          // not on an audit verdict, so any change since the read shows here.
+          if (!current || String(current.updated_at) !== String(entry.updated_at)
+            || current.content !== entry.content || current.status !== entry.status) {
             await trx('knowledge_base_audits').insert({
               kb_entry_id: entry.id, audit_type: 'ai-review', findings: JSON.stringify(parsed || {}), result: 'stale', audited_by: 'ai-cron',
             });

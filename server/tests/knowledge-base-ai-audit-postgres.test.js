@@ -38,7 +38,8 @@ describeOrSkip('KB AI audit on PostgreSQL', () => {
     await db.destroy();
   });
 
-  // Oldest verification so the audit's rotation picks these rows first.
+  // Every run is scoped to this suite's rows (ids) so the shared test
+  // database's other entries are never selected or written.
   async function entry(name, { source = 'manual', status = 'active', slug } = {}) {
     const title = `${tag} ${name}`;
     const s = slug || `${tag}-${name}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
@@ -55,7 +56,7 @@ describeOrSkip('KB AI audit on PostgreSQL', () => {
   test('a generated entry stays searchable and its finding names the source', async () => {
     const row = await entry('Product', { source: 'auto-sync', slug: `product-${tag}` });
     mockVerdicts.set(row.title, { status: 'flag', confidence: 'low', issues: ['formulation'], summary: 'fix formulation' });
-    const out = await KB.runAIAudit({ maxEntries: 1 });
+    const out = await KB.runAIAudit({ ids, maxEntries: 1 });
     expect(out.results[0]).toMatchObject({ fixIn: 'products_catalog', fixLink: '/admin/inventory?tab=products' });
     const after = await reload(row.id);
     expect(after.status).toBe('active');
@@ -69,7 +70,7 @@ describeOrSkip('KB AI audit on PostgreSQL', () => {
     const reaudited = await entry('Reaudited');
     mockVerdicts.set(edited.title, { status: 'flag', summary: 'x' });
     mockVerdicts.set(reaudited.title, { status: 'update-needed', summary: 'y' });
-    await KB.runAIAudit({ maxEntries: 2 });
+    await KB.runAIAudit({ ids, maxEntries: 2 });
     expect((await reload(edited.id)).status).toBe('flagged');
     expect((await reload(reaudited.id)).status).toBe('flagged');
 
@@ -77,7 +78,7 @@ describeOrSkip('KB AI audit on PostgreSQL', () => {
     expect((await reload(edited.id)).status).toBe('active');
 
     mockVerdicts.set(reaudited.title, { status: 'pass', confidence: 'high' });
-    const out = await KB.runAIAudit({ flaggedOnly: true, maxEntries: 5 });
+    const out = await KB.runAIAudit({ ids, flaggedOnly: true, maxEntries: 5 });
     expect(out.passed).toBe(1);
     expect((await reload(reaudited.id)).status).toBe('active');
   });
@@ -87,27 +88,36 @@ describeOrSkip('KB AI audit on PostgreSQL', () => {
     await KB.flag(row.id, 'rate looks wrong');
     await KB.update(row.id, { content: 'Manual body v2' });
     expect((await reload(row.id)).status).toBe('flagged');
-    const out = await KB.runAIAudit({ flaggedOnly: true, maxEntries: 5 });
+    const out = await KB.runAIAudit({ ids, flaggedOnly: true, maxEntries: 5 });
     expect(out.results.map((r) => r.id)).not.toContain(row.id);
+  });
+
+  test('a person verifying during the model call wins over an AI flag', async () => {
+    const row = await entry('Verified');
+    mockVerdicts.set(row.title, { status: 'flag', summary: 'x' });
+    mockDuringCall = async (title) => { if (title === row.title) await KB.verify(row.id); };
+    const out = await KB.runAIAudit({ ids: [row.id], maxEntries: 1 });
+    expect(out.results[0]).toMatchObject({ id: row.id, status: 'stale' });
+    expect((await reload(row.id)).status).toBe('active');
   });
 
   test('a person flagging during the model call wins; the verdict is recorded stale', async () => {
     const row = await entry('Race');
     mockDuringCall = async (title) => { if (title === row.title) await KB.flag(row.id, 'mid-call'); };
-    const out = await KB.runAIAudit({ maxEntries: 1 });
+    const out = await KB.runAIAudit({ ids, maxEntries: 1 });
     expect(out.results[0]).toMatchObject({ id: row.id, status: 'stale' });
     expect((await reload(row.id)).status).toBe('flagged');
     const rows = await audits(row.id);
     expect(rows.map((a) => [a.audit_type, a.result])).toEqual([['manual-flag', 'flagged'], ['ai-review', 'stale']]);
     mockDuringCall = null;
-    const again = await KB.runAIAudit({ flaggedOnly: true, maxEntries: 5 });
+    const again = await KB.runAIAudit({ ids, flaggedOnly: true, maxEntries: 5 });
     expect(again.results.map((r) => r.id)).not.toContain(row.id);
   });
 
   test('an unparsed verdict changes nothing', async () => {
     const row = await entry('Unparsed');
     mockVerdicts.set(row.title, { status: 'looks fine' });
-    const out = await KB.runAIAudit({ maxEntries: 1 });
+    const out = await KB.runAIAudit({ ids, maxEntries: 1 });
     expect(out).toMatchObject({ flagged: 0, passed: 0 });
     const after = await reload(row.id);
     expect(after.status).toBe('active');
