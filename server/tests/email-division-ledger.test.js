@@ -95,3 +95,14 @@ test('finding 3: markFailed/markSkipped only move a still-reserved row, and repo
   expect(updateWhere[1]).toEqual({ id: 'row-2', status: 'reserved' });
   expect(updateQ.calls.find((c) => c[0] === 'update')[1]).toMatchObject({ status: 'skipped', reason: 'unsubscribed' });
 });
+
+test('CI push audit: a markSent retry on an already-sent row is a no-op (scoped to status: reserved)', async () => {
+  const lookupQ = chain({ first: { customer_id: 'cust-1' } });
+  const updateQ = chain({ updateReturn: 0 }); // already 'sent' — the WHERE no longer matches
+  setQueue([lookupQ, updateQ]);
+
+  const changed = await Ledger.markSent('row-1', { emailMessageId: 'msg-retry' });
+  expect(changed).toBe(0);
+  const updateWhere = updateQ.calls.find((c) => c[0] === 'where');
+  expect(updateWhere[1]).toEqual({ id: 'row-1', status: 'reserved' });
+});

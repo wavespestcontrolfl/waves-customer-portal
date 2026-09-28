@@ -173,4 +173,22 @@ describeOrSkip('email-division ledger (Postgres)', () => {
     expect(row.status).toBe('sent');
     expect(row.reason).toBeNull(); // the rejected markFailed never wrote its reason either
   });
+
+  test('CI push audit (codex): retrying markSent on an already-sent row preserves the original sent_at and email_message_id', async () => {
+    const first = await attempt('sent-then-retried-completion');
+    expect(first.ok).toBe(true);
+    const originalMessageId = randomUUID();
+    await Ledger.markSent(first.row.id, { emailMessageId: originalMessageId });
+    const original = await db('marketing_email_ledger').where({ id: first.row.id }).first();
+    expect(original.email_message_id).toBe(originalMessageId);
+
+    // A retry (e.g. the caller lost the first response) omits the id and
+    // must not move sent_at forward or erase the original linkage.
+    const changed = await Ledger.markSent(first.row.id, {});
+    expect(changed).toBe(0);
+
+    const after = await db('marketing_email_ledger').where({ id: first.row.id }).first();
+    expect(after.email_message_id).toBe(originalMessageId);
+    expect(after.sent_at.getTime()).toBe(original.sent_at.getTime());
+  });
 });

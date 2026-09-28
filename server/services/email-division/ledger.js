@@ -64,13 +64,22 @@ async function reserve({
 // to bound. Serializing the two transactions on the same lock makes that
 // split-read impossible: whichever gets the lock first runs to completion
 // before the other's checks can begin.
+//
+// Only a still-`reserved` row is completed (codex round-1 P1, GitHub push
+// audit): an unconditional update let a RETRY of markSent (e.g. a caller
+// that lost the response and completes again) push `sent_at` forward and,
+// if that retry omitted emailMessageId, erase the original linkage — moving
+// this send within the weekly/daily cap windows and losing its provider
+// reference despite no new send happening. A retry on an already-`sent`
+// row is now a no-op that returns 0, leaving the original sent_at and
+// email_message_id exactly as first recorded.
 async function markSent(id, { emailMessageId = null } = {}, { conn } = {}) {
   const runner = conn || db;
   return runner.transaction(async (trx) => {
     const existing = await trx('marketing_email_ledger').where({ id }).first('customer_id');
     if (!existing) return 0;
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${existing.customer_id}`]);
-    return trx('marketing_email_ledger').where({ id }).update({
+    return trx('marketing_email_ledger').where({ id, status: 'reserved' }).update({
       status: 'sent',
       sent_at: trx.fn.now(),
       email_message_id: emailMessageId,
