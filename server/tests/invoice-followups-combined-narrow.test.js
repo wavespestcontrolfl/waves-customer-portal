@@ -56,6 +56,12 @@ jest.mock('../services/customer-contact', () => ({
 jest.mock('../services/composer-customer-links', () => ({
   buildPayBalanceLink: jest.fn(),
 }));
+// The microdeposit bank-verification email leg (finding #2's mdPending
+// diversion) — real implementation untouched by this suite; mocked only so
+// the one mdPending test doesn't need to exercise its own internals.
+jest.mock('../services/microdeposit-verification-email', () => ({
+  sendMicrodepositVerificationEmail: jest.fn(async () => ({ ok: true })),
+}));
 
 const db = require('../models/db');
 const BillingEmailAuthority = require('../services/billing-channel-email-authority');
@@ -63,6 +69,12 @@ const smsTemplates = require('../routes/admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailTemplates = require('../services/email-template-library');
 const ComposerLinks = require('../services/composer-customer-links');
+// NOT mocked via jest.mock — finding #2's test spies on its one method
+// directly (StripeService.isInvoiceAwaitingMicrodepositVerification), the
+// same way the rest of this suite leaves it untouched: every other test's
+// rows carry no stripe_payment_intent_id, so the real implementation
+// short-circuits to `false` before any network call.
+const StripeService = require('../services/stripe');
 const InvoiceFollowUps = require('../services/invoice-followups');
 
 function chain({ result = [], first, returning } = {}) {
@@ -150,10 +162,18 @@ function payLink(overrides = {}) {
 
 // The claim/cadence/claim-clear ifs queue every successfully fired touch
 // consumes, in order — shared by every scenario below.
-function claimCycle(seq, sequenceUpdateChain) {
+// `combinedCheck: true` for a touch whose resolveCombinedVariant call
+// reaches the stopped/paused/autopay_hold re-check (local finding #1) —
+// i.e. it resolves 2+ covered invoices including its own — inserting the
+// extra `invoice_followup_sequences` SELECT between the touch claim and
+// the cadence advance, in the order fireTouch actually issues it. A
+// resolveCombinedVariant call that returns null earlier (gate off, link
+// unavailable, fewer than 2 covered invoices, …) never reaches that query.
+function claimCycle(seq, sequenceUpdateChain, { combinedCheck = false } = {}) {
   return [
     chain({ first: { id: seq.id, customer_id: seq.customer_id, status: 'active', step_index: seq.step_index, next_touch_at: seq.next_touch_at, anchor_at: null } }),
     chain({ result: 1 }), // touch claim
+    ...(combinedCheck ? [chain({ first: undefined })] : []), // resolveCombinedVariant's stopped/paused/autopay_hold check — no disqualifying row
     sequenceUpdateChain, // cadence advance
     chain({ result: 1 }), // claim clear
   ];
@@ -197,16 +217,16 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
       invoices: [
         chain({ first: invoice() }), // claim-txn row lock read
         chain({ first: invoice() }), // liveInvoice (third-party payer re-check)
+        chain({ first: invoice() }), // pre-dun refresh (now BEFORE resolveCombinedVariant — local findings #2/#3)
         chain({ result: [ // resolveCombinedVariant's per-invoice line lookup
           { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
           { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
         ] }),
-        chain({ first: invoice() }), // pre-dun refresh
         chain({ first: invoice() }), // sendFollowupEmail's own fresh read
       ],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [chain(), chain()],
-      invoice_followup_sequences: claimCycle(seq, sequenceUpdate),
+      invoice_followup_sequences: claimCycle(seq, sequenceUpdate, { combinedCheck: true }),
     });
 
     await InvoiceFollowUps.runPending();
@@ -276,6 +296,13 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
     // Sibling is the NEWER invoice — never the anchor.
     const siblingSeq = followupRow({ id: 'seq-2', invoice_id: 'inv-2', invoice_created_at: '2026-05-21T12:00:00.000Z', step_index: 0 });
     const sequenceUpdate = chain();
+    // The live re-read under the invoice lock (Codex round-1 P1 + local
+    // finding #6) — same shape the batch snapshot carries, proving the
+    // advance re-derives from it rather than the stale `sibling` object.
+    const siblingLiveRead = chain({ first: {
+      id: siblingSeq.id, customer_id: siblingSeq.customer_id, status: 'active',
+      step_index: siblingSeq.step_index, next_touch_at: siblingSeq.next_touch_at, anchor_at: null,
+    } });
     const siblingUpdate = chain();
     const siblingAudit = chain();
     const siblingInvoiceLock = chain({ first: invoice({ id: 'inv-2' }) });
@@ -285,17 +312,19 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
       invoices: [
         chain({ first: invoice() }),
         chain({ first: invoice() }),
+        chain({ first: invoice() }), // pre-dun refresh (now BEFORE resolveCombinedVariant)
         chain({ result: [
           { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
           { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
         ] }),
         chain({ first: invoice() }),
-        chain({ first: invoice() }),
         siblingInvoiceLock,
       ],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [chain(), chain(), siblingAudit],
-      invoice_followup_sequences: [...claimCycle(anchorSeq, sequenceUpdate), siblingUpdate],
+      invoice_followup_sequences: [
+        ...claimCycle(anchorSeq, sequenceUpdate, { combinedCheck: true }), siblingLiveRead, siblingUpdate,
+      ],
     });
 
     await InvoiceFollowUps.runPending();
@@ -314,18 +343,24 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
     // invoice_created_at at 10am NY), never a copy of the anchor's own
     // next_touch_at (the two invoices can be on very different cadences).
     // Still active (it has steps left).
-    // Advanced under the sibling invoice's row lock, and only from the batch
-    // snapshot's own state (same step, same owner, not claimed by a worker).
+    // Advanced under the sibling invoice's row lock, and only from the LIVE
+    // re-read's own state (same step, same owner, same next_touch_at,
+    // not claimed by a worker) — pinned so a concurrent reschedule between
+    // the read and this write makes the advance a no-op.
     expect(siblingInvoiceLock.forUpdate).toHaveBeenCalled();
     expect(siblingUpdate.where).toHaveBeenCalledWith({
       id: 'seq-2', status: 'active', step_index: 0, customer_id: 'cust-1',
+      next_touch_at: siblingSeq.next_touch_at,
     });
-    expect(siblingUpdate.where).toHaveBeenCalledWith('next_touch_at', '<=', expect.any(Date));
     const siblingPatch = siblingUpdate.update.mock.calls[0][0];
     expect(siblingPatch.step_index).toBe(1);
     expect(siblingPatch.status).toBe('active');
     expect(siblingPatch.touches_sent).toEqual({ sql: 'touches_sent + 1' });
     expect(siblingPatch.next_touch_at).toEqual(new Date('2026-05-28T14:00:00.000Z'));
+    // The pre-visit balance rail's 72h recent-contact guard reads
+    // last_touch_at — a covered sibling must stamp it exactly like a
+    // normal delivered follow-up would (local finding A).
+    expect(siblingPatch.last_touch_at).toBe('CURRENT_TIMESTAMP');
     // Confirms it's independent of the anchor's own new schedule, not a copy.
     expect(sequenceUpdate.update).toHaveBeenCalled();
 
@@ -348,17 +383,17 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
       invoices: [
         chain({ first: invoice() }),
         chain({ first: invoice() }),
+        chain({ first: invoice() }), // pre-dun refresh (now BEFORE resolveCombinedVariant)
         chain({ result: [
           { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
           { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
         ] }),
         chain({ first: invoice() }),
-        chain({ first: invoice() }),
         chain({ first: invoice({ id: 'inv-2', status: 'paid' }) }),
       ],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [chain(), chain(), siblingAudit],
-      invoice_followup_sequences: claimCycle(anchorSeq, sequenceUpdate),
+      invoice_followup_sequences: claimCycle(anchorSeq, sequenceUpdate, { combinedCheck: true }),
     });
 
     await InvoiceFollowUps.runPending();
@@ -508,17 +543,17 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
       invoices: [
         chain({ first: invoice() }),
         chain({ first: invoice() }),
+        chain({ first: invoice() }), // pre-dun refresh (now BEFORE resolveCombinedVariant)
         chain({ result: [
           { id: 'inv-1', invoice_number: 'WPC-1042', title: 'Quarterly Pest Control' },
           { id: 'inv-2', invoice_number: 'WPC-1055', title: 'Lawn Care' },
           { id: 'inv-3', invoice_number: 'WPC-1099', title: 'Tree & Shrub' },
         ] }),
         chain({ first: invoice() }),
-        chain({ first: invoice() }),
       ],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [chain(), chain()],
-      invoice_followup_sequences: claimCycle(seq, sequenceUpdate),
+      invoice_followup_sequences: claimCycle(seq, sequenceUpdate, { combinedCheck: true }),
     });
 
     await InvoiceFollowUps.runPending();
@@ -540,6 +575,10 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
     const anchorSeq = followupRow({ id: 'seq-1', invoice_id: 'inv-1', invoice_created_at: '2026-05-20T12:00:00.000Z', step_index: 3 });
     const siblingSeq = followupRow({ id: 'seq-2', invoice_id: 'inv-2', invoice_created_at: '2026-05-21T12:00:00.000Z', step_index: 3 });
     const sequenceUpdate = chain();
+    const siblingLiveRead = chain({ first: {
+      id: siblingSeq.id, customer_id: siblingSeq.customer_id, status: 'active',
+      step_index: siblingSeq.step_index, next_touch_at: siblingSeq.next_touch_at, anchor_at: null,
+    } });
     const siblingUpdate = chain();
     const siblingAudit = chain();
     setDbQueues({
@@ -547,16 +586,19 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
       customers: [chain({ first: customer() })],
       invoices: [
         chain({ first: invoice() }), chain({ first: invoice() }),
+        chain({ first: invoice() }), // pre-dun refresh (now BEFORE resolveCombinedVariant)
         chain({ result: [
           { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
           { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
         ] }),
-        chain({ first: invoice() }), chain({ first: invoice() }),
+        chain({ first: invoice() }),
         chain({ first: invoice({ id: 'inv-2' }) }),
       ],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [chain(), chain(), siblingAudit],
-      invoice_followup_sequences: [...claimCycle(anchorSeq, sequenceUpdate), siblingUpdate],
+      invoice_followup_sequences: [
+        ...claimCycle(anchorSeq, sequenceUpdate, { combinedCheck: true }), siblingLiveRead, siblingUpdate,
+      ],
     });
 
     await InvoiceFollowUps.runPending();
@@ -588,17 +630,20 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
       customers: [chain({ first: customer() }), chain({ first: customer() })],
       invoices: [
         chain({ first: invoice() }), chain({ first: invoice() }),
+        chain({ first: invoice() }), // pre-dun refresh (now BEFORE resolveCombinedVariant)
         chain({ result: [
           { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
           { id: 'inv-3', invoice_number: 'WPC-2026-1088', title: 'Mosquito' },
         ] }),
-        chain({ first: invoice() }), chain({ first: invoice() }),
+        chain({ first: invoice() }),
         chain({ first: invoice({ id: 'inv-2' }) }), chain({ first: invoice({ id: 'inv-2' }) }),
         chain({ first: invoice({ id: 'inv-2' }) }), chain({ first: invoice({ id: 'inv-2' }) }),
       ],
       notification_prefs: [chain({ first: { email_enabled: true } }), chain({ first: { email_enabled: true } })],
       customer_interactions: [chain(), chain(), chain(), chain()],
-      invoice_followup_sequences: [...claimCycle(anchorSeq, sequenceUpdate), ...claimCycle(siblingSeq, siblingSend)],
+      invoice_followup_sequences: [
+        ...claimCycle(anchorSeq, sequenceUpdate, { combinedCheck: true }), ...claimCycle(siblingSeq, siblingSend),
+      ],
     });
 
     await InvoiceFollowUps.runPending();
@@ -615,5 +660,250 @@ describe('GATE_DUNNING_COMBINED_MESSAGE — narrow rebuild', () => {
       idempotencyKey: 'invoice_followup_email:inv-2:d3_friendly',
     }));
     expect(siblingSend.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
+  });
+
+  // ---------------------------------------------------------------------
+  // Correctness-review findings (local #1-#5 + Codex round-1 A/B) — each
+  // proven to fail with its own fix reverted.
+  // ---------------------------------------------------------------------
+
+  test('a covered sibling on a stopped/paused/autopay-held sequence disqualifies the combined render (finding #1)', async () => {
+    // buildPayBalanceLink's own filter (mocked here, per the suite header)
+    // still reports inv-2 as covered — only THIS invoice's own
+    // invoice_followup_sequences status re-check catches that it is
+    // paused. Never filter the set down: fall back to the single template
+    // entirely (the pay page would still charge the excluded invoice).
+    const seq = followupRow();
+    const sequenceUpdate = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [seq] })],
+      customers: [chain({ first: customer() })],
+      invoices: [
+        chain({ first: invoice() }), // claim-txn row lock read
+        chain({ first: invoice() }), // liveInvoice
+        chain({ first: invoice() }), // pre-dun refresh
+        chain({ first: invoice() }), // sendFollowupEmail's own fresh read
+        // No "resolveCombinedVariant per-invoice line lookup" read — the
+        // disqualifying status short-circuits before it.
+      ],
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain(), chain()],
+      invoice_followup_sequences: [
+        chain({ first: { id: seq.id, customer_id: seq.customer_id, status: 'active', step_index: seq.step_index, next_touch_at: seq.next_touch_at, anchor_at: null } }),
+        chain({ result: 1 }), // touch claim
+        // The stopped/paused/autopay_hold re-check finds inv-2 paused.
+        chain({ first: { invoice_id: 'inv-2' } }),
+        sequenceUpdate, // cadence advance
+        chain({ result: 1 }), // claim clear
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    // The link WAS built (resolveCombinedVariant got that far)...
+    expect(ComposerLinks.buildPayBalanceLink).toHaveBeenCalledWith(['cust-1']);
+    // ...but the touch fell back to the single-invoice template.
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'invoice.followup_3_day',
+    }));
+    expect(smsTemplates.getTemplate).not.toHaveBeenCalledWith(
+      'invoice_followup_combined_3day', expect.anything(), expect.anything(),
+    );
+  });
+
+  test('resolveCombinedVariant runs AFTER the account-credit draw and the pre-dun invoice refresh, never before them (findings #2/#3)', async () => {
+    const seq = followupRow();
+    const sequenceUpdate = chain();
+    const CustomerCredit = require('../services/customer-credit');
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [seq] })],
+      customers: [chain({ first: customer() })],
+      invoices: [
+        chain({ first: invoice() }), // claim-txn row lock read
+        chain({ first: invoice() }), // liveInvoice
+        chain({ first: invoice() }), // pre-dun refresh (now BEFORE resolveCombinedVariant)
+        chain({ result: [
+          { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
+          { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
+        ] }),
+        chain({ first: invoice() }), // sendFollowupEmail's own fresh read
+      ],
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain(), chain()],
+      invoice_followup_sequences: claimCycle(seq, sequenceUpdate, { combinedCheck: true }),
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(CustomerCredit.autoApplyAccountCreditIfEnabled).toHaveBeenCalled();
+    expect(ComposerLinks.buildPayBalanceLink).toHaveBeenCalled();
+    // The credit draw (and, transitively, the pre-dun refresh that follows
+    // it) completed strictly BEFORE resolveCombinedVariant read the
+    // pay-balance link — reverting findings #2/#3's reordering would put
+    // buildPayBalanceLink's call FIRST, failing this comparison.
+    expect(CustomerCredit.autoApplyAccountCreditIfEnabled.mock.invocationCallOrder[0])
+      .toBeLessThan(ComposerLinks.buildPayBalanceLink.mock.invocationCallOrder[0]);
+  });
+
+  test('mdPending (microdeposit diversion) is decided before combinedVariant — a diverted touch never resolves or renders combined copy (finding #2)', async () => {
+    const mdSpy = jest.spyOn(StripeService, 'isInvoiceAwaitingMicrodepositVerification').mockResolvedValue(true);
+    try {
+      const seq = followupRow({ invoice_stripe_pi: 'pi_test_1' });
+      const sequenceUpdate = chain();
+      setDbQueues({
+        'invoice_followup_sequences as s': [chain({ result: [seq] })],
+        customers: [chain({ first: customer() })],
+        invoices: [
+          chain({ first: invoice() }), // claim-txn row lock read
+          chain({ first: invoice() }), // liveInvoice
+          chain({ first: invoice() }), // pre-dun refresh
+          // No combinedVariant-related invoice read at all.
+        ],
+        notification_prefs: [chain({ first: { email_enabled: true } })],
+        customer_interactions: [chain()],
+        // No sms_templates/email_templates/invoice_followup_sequences
+        // combined-check reads either — resolveCombinedVariant is never
+        // even called.
+        invoice_followup_sequences: claimCycle(seq, sequenceUpdate),
+      });
+
+      await InvoiceFollowUps.runPending();
+
+      // combinedVariant's own resolution never runs while mdPending.
+      expect(ComposerLinks.buildPayBalanceLink).not.toHaveBeenCalled();
+      // The touch diverted to the bank-verification nudge.
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+        metadata: expect.objectContaining({ original_message_type: 'bank_verification_incomplete' }),
+      }));
+    } finally {
+      mdSpy.mockRestore();
+    }
+  });
+
+  test('sendNextTouchNow ("send now") never combines — an operator-targeted single invoice never resolves a combined variant (finding #4)', async () => {
+    const seq = followupRow();
+    const sequenceUpdate = chain();
+    setDbQueues({
+      invoice_followup_sequences: [
+        chain({ first: { id: seq.id, invoice_id: seq.invoice_id, status: 'active' } }), // initial lookup by invoice_id
+        chain({ result: 1 }), // temp-activate update
+        ...claimCycle(seq, sequenceUpdate), // the normal fireStep claim/cadence cycle — no combinedCheck entry
+      ],
+      'invoice_followup_sequences as s': [chain({ first: seq })],
+      customers: [chain({ first: customer() })],
+      invoices: [
+        chain({ first: invoice() }), // sendNextTouchNow's own terminal check
+        chain({ first: invoice() }), // claim-txn row lock read
+        chain({ first: invoice() }), // liveInvoice
+        chain({ first: invoice() }), // pre-dun refresh
+        chain({ first: invoice() }), // sendFollowupEmail's own fresh read
+      ],
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain(), chain()],
+    });
+
+    await InvoiceFollowUps.sendNextTouchNow('inv-1');
+
+    // allowCombined:false short-circuits resolveCombinedVariant entirely.
+    expect(ComposerLinks.buildPayBalanceLink).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'invoice.followup_3_day',
+    }));
+  });
+
+  test('a combined touch whose SMS leg is held outside the send window is never queued frozen — the step holds for a fresh re-render instead (finding #5)', async () => {
+    sendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', deferred: true,
+      nextAllowedAt: '2026-05-27T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED',
+    });
+    const seq = followupRow();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [seq] })],
+      customers: [chain({ first: customer() })],
+      invoices: [
+        chain({ first: invoice() }), chain({ first: invoice() }),
+        chain({ first: invoice() }), // pre-dun refresh
+        chain({ result: [
+          { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
+          { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
+        ] }),
+        chain({ first: invoice() }),
+      ],
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain()], // only the email audit row — the touch never reaches its normal completion
+      invoice_followup_sequences: [
+        chain({ first: { id: seq.id, customer_id: seq.customer_id, status: 'active', step_index: seq.step_index, next_touch_at: seq.next_touch_at, anchor_at: null } }),
+        chain({ result: 1 }), // touch claim
+        chain({ first: undefined }), // resolveCombinedVariant's stopped/paused/autopay_hold check
+        chain({ result: 1 }), // the held-touch next_touch_at-only update (smsHoldUnowned branch)
+        chain({ result: 1 }), // claim clear
+      ],
+      // A working queue entry so that, if this fix were reverted, the old
+      // enqueue attempt would SUCCEED (proving the assertion below catches
+      // the regression itself, not an incidental "table not queued" throw).
+      sms_log: [chain()],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(db).not.toHaveBeenCalledWith('sms_log');
+    // The email leg still delivered the combined copy.
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'invoice.followup_combined_3_day',
+    }));
+  });
+
+  test('a partially delivered combined touch (email delivered, SMS held unowned) does not fire the covered sibling individually (Codex round-1 P1, finding B)', async () => {
+    const anchorSeq = followupRow({ id: 'seq-1', invoice_id: 'inv-1', invoice_created_at: '2026-05-20T12:00:00.000Z' });
+    const siblingSeq = followupRow({ id: 'seq-2', invoice_id: 'inv-2', invoice_created_at: '2026-05-21T12:00:00.000Z', step_index: 0 });
+    sendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', deferred: true,
+      nextAllowedAt: '2026-05-27T12:00:00.000Z', code: 'SEND_WINDOW_CLOSED',
+    });
+    const siblingCadenceUpdate = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [anchorSeq, siblingSeq] })],
+      // The 2nd entry is only consumed if this finding were reverted and
+      // the sibling fired individually — harmless and unused while the
+      // fix holds.
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      invoices: [
+        chain({ first: invoice() }), chain({ first: invoice() }),
+        chain({ first: invoice() }), // pre-dun refresh (anchor)
+        chain({ result: [
+          { id: 'inv-1', invoice_number: 'WPC-2026-1042', title: 'Quarterly Pest Control' },
+          { id: 'inv-2', invoice_number: 'WPC-2026-1055', title: 'Lawn Care' },
+        ] }),
+        chain({ first: invoice() }), // sendFollowupEmail read (anchor)
+        // Only consumed if this finding were reverted and the sibling
+        // fired individually — harmless and unused while the fix holds.
+        chain({ first: invoice({ id: 'inv-2' }) }), chain({ first: invoice({ id: 'inv-2' }) }),
+        chain({ first: invoice({ id: 'inv-2' }) }), chain({ first: invoice({ id: 'inv-2' }) }),
+      ],
+      notification_prefs: [chain({ first: { email_enabled: true } }), chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain(), chain(), chain()],
+      invoice_followup_sequences: [
+        chain({ first: { id: anchorSeq.id, customer_id: anchorSeq.customer_id, status: 'active', step_index: anchorSeq.step_index, next_touch_at: anchorSeq.next_touch_at, anchor_at: null } }),
+        chain({ result: 1 }), // touch claim
+        chain({ first: undefined }), // resolveCombinedVariant's stopped/paused/autopay_hold check
+        chain({ result: 1 }), // the held-touch next_touch_at-only update (smsHoldUnowned branch)
+        chain({ result: 1 }), // claim clear
+        // Only consumed if the sibling were fired individually (reverted).
+        ...claimCycle(siblingSeq, siblingCadenceUpdate),
+      ],
+      sms_log: [chain()],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    // Only the anchor's combined email went out — the sibling was never
+    // fired individually (a second, single-invoice send for inv-2 would
+    // otherwise dun the customer twice in one run for invoices its own
+    // combined message already named).
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'invoice.followup_combined_3_day',
+      idempotencyKey: 'invoice_followup_email:inv-1:d3_friendly',
+    }));
   });
 });

@@ -382,6 +382,24 @@ async function resolveCombinedVariant(customer, invoiceId, step) {
     if (!link?.url || !(link?.balance?.total > 0) || coveredIds.length < 2) return null;
     if (!coveredIds.includes(String(invoiceId))) return null;
 
+    // buildPayBalanceLink's own siblings filter (pay-combined.js) excludes
+    // only a sibling whose sequence status is 'stopped' — it never checks
+    // 'paused'/'autopay_hold', and it never checks the ANCHOR invoice at
+    // all (dunningStoppedInvoiceIds is only ever called on candidates/
+    // siblings). Trusting coveredIds verbatim here would let the combined
+    // text dun the customer about an invoice an admin stopped/paused, or
+    // one on an autopay hold — and the linked pay page would still charge
+    // it. Re-check every covered id's OWN sequence status directly: any
+    // disqualifying status anywhere in the set falls back to the single
+    // template (never filter the set down — the page would still charge
+    // the excluded invoice). An invoice with no sequence row at all does
+    // not disqualify (nothing to conflict with).
+    const disqualified = await db('invoice_followup_sequences')
+      .whereIn('invoice_id', coveredIds)
+      .whereIn('status', ['stopped', 'paused', 'autopay_hold'])
+      .first('invoice_id');
+    if (disqualified) return null;
+
     // The itemized lines come from the SAME read as the total and must add
     // up to it exactly, or this touch is not rendered combined.
     const lineCents = link.coveredInvoiceCents || {};
@@ -1087,11 +1105,14 @@ async function runPending() {
  * it fires through the UNCHANGED fireStep/fireTouch path, which renders
  * the combined copy on its own when resolveCombinedVariant finds 2+ open
  * invoices for the customer. The rest ("siblings") wait for it — ONLY
- * when the anchor actually sent (a fresh delivered/accepted send, per
- * fireTouch's own `sent` — never a held/skipped/errored touch) and are no
- * further along their OWN cadence than the anchor. A sibling that fires
- * normally goes through this exact same fireStep call a singleton row
- * would use — no new send path, no new guard, no new transaction.
+ * when the anchor actually told the customer about them this run (either
+ * a full `sent` completion, or a partial delivery where a held/deferred
+ * leg stopped fireTouch short of that but a different leg already
+ * delivered the combined copy — `deliveredCombined`, Codex round-1 P1)
+ * and are no further along their OWN cadence than the anchor. A sibling
+ * that fires normally goes through this exact same fireStep call a
+ * singleton row would use — no new send path, no new guard, no new
+ * transaction.
  */
 async function fireGroupedRows(toFire) {
   let sent = 0, skipped = 0;
@@ -1124,7 +1145,30 @@ async function fireGroupedRows(toFire) {
     );
     const [anchor, ...siblings] = sorted;
     const anchorOutcome = await fireOne(anchor);
+    // The anchor told the customer about every covered invoice whenever it
+    // completed the normal send path (`sent: true`) OR — Codex round-1 P1
+    // — it returned early with `deliveredCombined: true`: a held/deferred
+    // leg stopped fireTouch from reaching its own completed-touch return,
+    // but a DIFFERENT leg (email, most commonly) already delivered the
+    // combined copy this run. Either way the coveredInvoiceIds set names
+    // exactly what the customer was actually told; a bare "the anchor
+    // didn't fully complete" read would otherwise fire every sibling
+    // individually and dun the customer with several separate reminders in
+    // one run for invoices the anchor's own message already named.
     const anchorSent = anchorOutcome?.sent === true;
+    // Partial delivery (Codex round-1 P1): the anchor's OWN sequence did
+    // NOT advance (its held SMS leg re-fires this same step at the window
+    // open — see the smsHoldUnowned branch in fireTouch), but a different
+    // leg already delivered the combined copy this run, so the customer
+    // WAS told about every covered invoice. Advancing a sibling's own
+    // step_index here, while the anchor's is deliberately held at its
+    // current one, would let the two drift out of the lockstep this
+    // grouping is built on — so the smallest correct fix is the minimum
+    // the finding calls for: never fire the sibling individually (it was
+    // already told), but leave its sequence exactly where it is; the next
+    // run re-decides once the anchor's held retry has resolved.
+    const anchorPartialDelivered = !anchorSent && anchorOutcome?.deliveredCombined === true;
+    const anchorToldCustomer = anchorSent || anchorPartialDelivered;
     // Which invoices the anchor's ACTUAL rendered message named — null
     // unless it rendered combined (the anchor may have sent its own plain
     // single-invoice touch: template inactive, link unavailable, fewer
@@ -1137,8 +1181,12 @@ async function fireGroupedRows(toFire) {
       // A sibling already further along its OWN cadence than the anchor —
       // rare, but never deferred: it fires exactly as it would ungrouped.
       // Same for one the anchor's own send did not actually cover.
-      if (sibling.step_index > anchor.step_index || !anchorSent || !siblingCovered) {
+      if (sibling.step_index > anchor.step_index || !anchorToldCustomer || !siblingCovered) {
         await fireOne(sibling, { allowCombined: false });
+        continue;
+      }
+      if (anchorPartialDelivered) {
+        skipped++;
         continue;
       }
       // The anchor's combined reminder covered this invoice this run — the
@@ -1154,16 +1202,11 @@ async function fireGroupedRows(toFire) {
       // 'completed', next_touch_at null. Guarded on the row still being
       // active (a concurrent payment/pause since the batch select is left
       // alone, not revived).
+      // Set inside the transaction below (it depends on the LIVE re-read),
+      // but read afterward by the best-effort audit insert — declared here
+      // so that insert isn't reaching into the transaction's own closure.
+      let siblingNextIndex;
       try {
-        const siblingNextIndex = sibling.step_index + 1;
-        // The sibling's OWN cadence-appropriate interval, the SAME
-        // computation a normal touch would use for it — never the
-        // anchor's own nextTouchAt (which is null whenever the anchor's
-        // send just finished ITS last ladder step, a common case here
-        // since the anchor is always the OLDER, further-along invoice)
-        // and never a flat constant (Claude pre-push review r2 P1).
-        const nextAt = computeNextTouchAt(sequenceAnchor(sibling), siblingNextIndex);
-        const outOfSteps = nextAt === null;
         // Same ordering and revalidation as fireStep's claim: lock the
         // invoice row first, then advance only if the sequence is still the
         // batch snapshot's (active, same step, same owner, due) and no
@@ -1179,15 +1222,54 @@ async function fireGroupedRows(toFire) {
             || TERMINAL_INVOICE_STATUSES.includes(lockedInvoice.status)
             || String(lockedInvoice.customer_id) !== String(sibling.customer_id)
           ) return 0;
+          // Live re-read under the lock (Codex round-1 P1 + local finding
+          // #6): `sibling` is a batch snapshot — an admin due-date edit can
+          // shift anchor_at, or a status/step change can land, between that
+          // select and this transaction. Re-derive from the LIVE row here,
+          // the same discipline fireStep's own liveSeq re-read applies to
+          // the anchor's own touch, rather than trusting the stale
+          // snapshot's anchor_at/step_index.
+          const liveSeq = await trx('invoice_followup_sequences').where({ id: sibling.id }).first();
+          if (
+            !liveSeq
+            || liveSeq.status !== 'active'
+            || liveSeq.step_index !== sibling.step_index
+            || String(liveSeq.customer_id) !== String(sibling.customer_id)
+            || !liveSeq.next_touch_at
+            || new Date(liveSeq.next_touch_at).getTime() > Date.now()
+          ) return 0;
+          siblingNextIndex = liveSeq.step_index + 1;
+          // The sibling's OWN cadence-appropriate interval computed from
+          // its LIVE anchor_at, the SAME computation a normal touch would
+          // use for it — never the anchor's own nextTouchAt (which is null
+          // whenever the anchor's send just finished ITS last ladder step,
+          // a common case here since the anchor is always the OLDER,
+          // further-along invoice) and never a flat constant (Claude
+          // pre-push review r2 P1). anchor_at is the only field an admin
+          // edit (rescheduleForInvoiceEdit) can move on this row — the
+          // invoice's own sent/created timestamps the batch join supplied
+          // are immutable — so only it is taken from the live read here;
+          // everything else stays the batch snapshot's, the same
+          // discipline fireStep's own claimedSeq merge (`row.anchor_at =
+          // claimedSeq.anchor_at`) applies to the anchor's own touch.
+          const nextAt = computeNextTouchAt(
+            sequenceAnchor({ ...sibling, anchor_at: liveSeq.anchor_at }), siblingNextIndex,
+          );
+          const outOfSteps = nextAt === null;
           const claimFloor = new Date(Date.now() - TOUCH_CLAIM_TTL_MS);
           return trx('invoice_followup_sequences')
             .where({
               id: sibling.id,
               status: 'active',
-              step_index: sibling.step_index,
+              step_index: liveSeq.step_index,
               customer_id: sibling.customer_id,
+              // Pinned to the row just locked/read above (local finding
+              // #6, same discipline skipStaleTouches applies to its own
+              // next_touch_at): a concurrent reschedule landing between
+              // that read and this write makes the advance a no-op instead
+              // of clobbering a newer next_touch_at with a stale one.
+              next_touch_at: liveSeq.next_touch_at,
             })
-            .where('next_touch_at', '<=', new Date())
             .where(function () {
               this.whereNull('touch_claimed_at').orWhere('touch_claimed_at', '<', claimFloor);
             })
@@ -1197,8 +1279,12 @@ async function fireGroupedRows(toFire) {
               next_touch_at: nextAt,
               status: outOfSteps ? 'completed' : 'active',
               // The customer was told about this invoice in the anchor's
-              // message, so it counts as a touch sent (read later as "a
-              // reminder went out" for this sequence).
+              // message, so it counts as a touch sent — same last_touch_at
+              // semantics a normal delivered follow-up stamps (fireTouch's
+              // own freshDelivery branch). The pre-visit balance rail reads
+              // this column for its 72h recent-contact guard (Codex
+              // round-1 P1).
+              last_touch_at: trx.fn.now(),
               touches_sent: trx.raw('touches_sent + 1'),
             });
         });
@@ -1728,16 +1814,13 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
     logger.warn(`[invoice-followups] skipped sequence ${row.id} — customer ${row.customer_id} is missing`);
     return;
   }
-  // GATE_DUNNING_COMBINED_MESSAGE (narrow rebuild): null on every path
-  // below except the one that renders the combined copy — computed once,
-  // ahead of the mdPending diversion, which never uses it (a bank-
-  // verification nudge is not a dunning message).
-  // A grouped sibling (fireGroupedRows) never renders combined: only the
-  // group's anchor may, so a customer gets at most one "N invoices" message
-  // per run.
-  const combinedVariant = allowCombined
-    ? await resolveCombinedVariant(customer, row.invoice_id, step)
-    : null;
+  // mdPending decides whether this touch diverts to the bank-verification
+  // nudge — resolved BEFORE combinedVariant (Codex-style pre-push review
+  // P2): a microdeposit nudge is not a dunning message, so combinedVariant
+  // must never be computed (and its coveredInvoiceIds never returned to
+  // fireGroupedRows) when this touch is about to divert. combinedVariant
+  // itself is resolved further below, once the invoice's live totals are
+  // in hand — see the comment there.
   const mdPending = gates.divertMicrodepositDunning
     && await StripeService.isInvoiceAwaitingMicrodepositVerification({
       id: row.invoice_id,
@@ -1848,6 +1931,21 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
     logger.warn(`[invoice-followups] skipped sequence ${row.id} — invoice refresh before dun failed for ${row.invoice_id}: ${refreshErr.message}`);
     return;
   }
+  // GATE_DUNNING_COMBINED_MESSAGE (narrow rebuild): null on every path
+  // below except the one that renders the combined copy. Resolved HERE —
+  // after the account-credit draw and the pre-dun invoice refresh above,
+  // never before them (Codex-style pre-push review P2): resolveCombinedVariant
+  // reads buildPayBalanceLink's own live snapshot of totals/lines, so
+  // computing it earlier could freeze a total the credit apply or the
+  // refresh was about to change underneath it. Also gated on !mdPending —
+  // a bank-verification nudge is not a dunning message and must never
+  // report coveredInvoiceIds to fireGroupedRows.
+  // A grouped sibling (fireGroupedRows) never renders combined: only the
+  // group's anchor may, so a customer gets at most one "N invoices" message
+  // per run.
+  const combinedVariant = (allowCombined && !mdPending)
+    ? await resolveCombinedVariant(customer, row.invoice_id, step)
+    : null;
   // Dun for amount DUE (total − applied account credit), not the pre-credit total.
   const amount = invoiceAmountDue(row).toFixed(2);
   // ADMIN-BUG-R23: service_date is a DATE column, not an instant — formatting
@@ -1857,7 +1955,14 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
   // line below at :196.
   const serviceDate = formatDateOnly(row.service_date, { fallback: '' });
 
-  const payUrl = await shortenOrPassthrough(`${publicPortalUrl()}/pay/${row.token}`, {
+  // A combined touch never sends this invoice's own /pay/:token — both
+  // sendFollowupEmail's pay_url and resolveFollowupSmsBody's combined
+  // template call read combinedVariant.payUrl exclusively once
+  // combinedVariant is set (ctx.payUrl is only ever read as a fallback for
+  // an absent combinedVariant.payUrl, which resolveCombinedVariant never
+  // returns — it requires link.url). Skip the mint entirely rather than
+  // write a short_urls row for a link nobody receives (Codex round-1 P2).
+  const payUrl = combinedVariant ? null : await shortenOrPassthrough(`${publicPortalUrl()}/pay/${row.token}`, {
     kind: 'invoice', entityType: 'invoices', entityId: row.invoice_id, customerId: customer.id,
     codePrefix: invoiceShortCodePrefix(row),
   });
@@ -2115,46 +2220,64 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
           // retry instead of advancing (the email's per-step idempotency
           // key dedupes its leg on the re-fire).
           if (smsDeferUntil && emailResult.ok) {
-            try {
-              const TWILIO_NUMBERS = require('../config/twilio-numbers');
-              await db('sms_log').insert({
-                customer_id: customer.id,
-                direction: 'outbound',
-                from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-                to_phone: customer.phone,
-                message_body: body,
-                status: 'scheduled',
-                scheduled_for: smsDeferUntil,
-                message_type: messageType,
-                metadata: JSON.stringify({
-                  entry_point: 'invoice_followup_deferred',
-                  original_message_type: messageType,
-                  invoice_id: row.invoice_id,
-                  customer_id: customer.id,
-                  // Minted ONCE at enqueue: the replay's delivery-time
-                  // ledger reservation is keyed to it, so executor retries
-                  // of this same queued row can never double-count.
-                  ledger_reservation_key: require('crypto').randomUUID(),
-                  followup_sequence_id: row.id,
-                  notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
-                  billingDeliveryCategory: mdPending ? 'payment_issue' : 'invoice',
-                  hasEmailLeg: true,
-                  original_block_code: sendResult.code,
-                  replay_purpose: 'payment_link',
-                  // The amount the frozen body NAMES (codex r27): credit
-                  // applied/reversed overnight changes the balance while
-                  // the invoice stays collectible — the replay suppresses
-                  // on mismatch and the sequence's next touch re-renders.
-                  rendered_amount: amount,
-                  refresh_customer_phone: true,
-                  resolve_from_by_customer: true,
-                }),
-              });
-              smsDeferredOwned = true;
-              logger.info(`[invoice-followups] SMS leg of sequence ${row.id} held outside the 8AM-8PM ET send window — queued for ${smsDeferUntil.toISOString()} (email leg delivered)`);
-            } catch (queueErr) {
+            if (combinedVariant) {
+              // Never queue a COMBINED body frozen (local finding #5): the
+              // "N invoices, $X total" text is a snapshot of every covered
+              // invoice's live balance, and a sibling can be paid, stopped,
+              // paused, or put on an autopay hold between now and the
+              // window open — replaying the frozen count/total the next
+              // morning could dun (and the pay link could still charge) an
+              // invoice that no longer belongs in it. Reuse the existing
+              // "held SMS with no durable owner" mechanism instead of
+              // inventing a re-render-at-replay path: holding the step at
+              // its current index re-fires it at the window open, and that
+              // re-fire calls resolveCombinedVariant fresh (or renders the
+              // plain single-invoice template if the group no longer
+              // qualifies) rather than replaying stale copy.
               smsHoldUnowned = true;
-              logger.error(`[invoice-followups] Held SMS requeue failed for sequence ${row.id}: ${queueErr.message} — holding the step for retry at the window open (email leg already delivered, idempotency-keyed)`);
+              logger.info(`[invoice-followups] SMS leg of sequence ${row.id} held outside the 8AM-8PM ET send window — combined body not queued frozen; will re-render at ${smsDeferUntil.toISOString()} (email leg delivered)`);
+            } else {
+              try {
+                const TWILIO_NUMBERS = require('../config/twilio-numbers');
+                await db('sms_log').insert({
+                  customer_id: customer.id,
+                  direction: 'outbound',
+                  from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                  to_phone: customer.phone,
+                  message_body: body,
+                  status: 'scheduled',
+                  scheduled_for: smsDeferUntil,
+                  message_type: messageType,
+                  metadata: JSON.stringify({
+                    entry_point: 'invoice_followup_deferred',
+                    original_message_type: messageType,
+                    invoice_id: row.invoice_id,
+                    customer_id: customer.id,
+                    // Minted ONCE at enqueue: the replay's delivery-time
+                    // ledger reservation is keyed to it, so executor retries
+                    // of this same queued row can never double-count.
+                    ledger_reservation_key: require('crypto').randomUUID(),
+                    followup_sequence_id: row.id,
+                    notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
+                    billingDeliveryCategory: mdPending ? 'payment_issue' : 'invoice',
+                    hasEmailLeg: true,
+                    original_block_code: sendResult.code,
+                    replay_purpose: 'payment_link',
+                    // The amount the frozen body NAMES (codex r27): credit
+                    // applied/reversed overnight changes the balance while
+                    // the invoice stays collectible — the replay suppresses
+                    // on mismatch and the sequence's next touch re-renders.
+                    rendered_amount: amount,
+                    refresh_customer_phone: true,
+                    resolve_from_by_customer: true,
+                  }),
+                });
+                smsDeferredOwned = true;
+                logger.info(`[invoice-followups] SMS leg of sequence ${row.id} held outside the 8AM-8PM ET send window — queued for ${smsDeferUntil.toISOString()} (email leg delivered)`);
+              } catch (queueErr) {
+                smsHoldUnowned = true;
+                logger.error(`[invoice-followups] Held SMS requeue failed for sequence ${row.id}: ${queueErr.message} — holding the step for retry at the window open (email leg already delivered, idempotency-keyed)`);
+              }
             }
           }
         }
@@ -2168,6 +2291,17 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
     smsSkipReason = 'no_customer_phone';
     logger.warn(`[invoice-followups] no phone for customer ${row.customer_id}`);
   }
+
+  // Whether the customer actually received the COMBINED copy on ANY leg
+  // this run — fresh SMS/push delivery, or an email leg that delivered
+  // (fresh or a dedup of an earlier attempt of this exact step). This is
+  // the only signal fireGroupedRows may use to advance covered siblings
+  // (Codex round-1 P1): a held/deferred leg below must not silently drop
+  // that evidence just because fireTouch is about to return early instead
+  // of reaching its normal end-of-function return.
+  const combinedDelivered = !!combinedVariant && (actualSmsSent || appSent || emailResult.ok === true);
+  const combinedDeliveredInteractionType = selectedChannels === null || actualSmsSent ? 'sms_outbound'
+    : appSent ? 'app_outbound' : 'email_outbound';
 
   if (!smsSent && !emailResult.ok) {
     // A retryable email outcome (the shared billing email check could not
@@ -2234,7 +2368,17 @@ async function fireTouch(row, { operatorInitiated = false, allowCombined = true 
       next_touch_at: smsDeferUntil,
     });
     logger.warn(`[invoice-followups] sequence ${row.id} step ${row.step_index} held at its current index — the deferred SMS leg never reached the rail; retrying at ${smsDeferUntil.toISOString()}`);
-    return;
+    // A partially delivered combined touch (Codex round-1 P1): this
+    // sequence itself is held back for retry (not advanced — the guard
+    // above is unaffected), but the customer WAS told about every covered
+    // invoice on the leg that did deliver. Report that to fireGroupedRows
+    // so it treats the siblings as covered instead of reading `sent` as
+    // false and firing each of them individually — several separate
+    // collection reminders in one run for invoices the anchor's own
+    // message already named.
+    return combinedDelivered
+      ? { sent: false, deliveredCombined: true, coveredInvoiceIds: combinedVariant.coveredInvoiceIds, interactionType: combinedDeliveredInteractionType }
+      : undefined;
   }
 
   const freshDelivery = actualSmsSent || appSent || (emailResult.ok && !emailResult.deduped);
@@ -2892,7 +3036,11 @@ async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
     )
     .first();
 
-  if (row) await fireStep(row, { operatorInitiated });
+  // Never combined: an operator's "send now" targets THIS one invoice —
+  // fireGroupedRows' sibling-advance handling never runs on this path, so a
+  // combined render here would tell the customer about other invoices while
+  // silently advancing none of them.
+  if (row) await fireStep(row, { operatorInitiated, allowCombined: false });
 }
 
 /**
