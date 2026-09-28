@@ -316,7 +316,6 @@ const GEMINI_VIDEO_QUALITY = process.env.MODEL_GEMINI_VIDEO_QUALITY || DEFAULTS.
 // current | legacy | unavailable (no adapter — listed so the option can be
 // shown disabled).
 const MODEL_CATALOG = {
-  'claude-opus-5-5': { label: 'Claude Opus 5.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
   'claude-opus-5': { label: 'Claude Opus 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
   // Opus 5.5 (see the flip-order note atop this file) — thinking is always
   // on (anthropicThinkingAlwaysOn), and most direct tier callers size
