@@ -441,6 +441,73 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     expect(rewriteMeta.quiet).toBe(false);
   });
 
+  // admin-alerts-ring follow-up (codex r8 P1): item identity from the
+  // findings themselves — `<location id>:<class>` — the same pair the
+  // dedupe signature already sorts and joins, on both surfaces this
+  // finding reaches (the direct same-signature rewrite, and the standing
+  // ops_digest row deliverOpsDigest writes/refreshes). An empty aggregate
+  // with no pulledCount given classifies stats_stale at all 4 locations
+  // (no _stats row) — the same fixture the quiet-repeat/FIX->ACT tests above
+  // use; only the class label matters here, not which one it is.
+  test('a pre-identity standing row rings on its first identified same-count refresh (codex r1 on #5282)', async () => {
+    const t1 = new Date(NOW - 3 * 3600000).toISOString();
+    const t3 = new Date(NOW - 3600000).toISOString();
+    const marker = {
+      id: 'n_legacy_identity', created_at: t1,
+      metadata: { opsKey: 'gbp-sync-health', observedAt: t1, count: 4 }, // no itemKeys/itemSetHash
+    };
+    const updates = installDb({ aggregates: [], stats: [], recentNotification: marker });
+    await gbp._assessReviewSyncHealth(
+      { bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {}, {}, t3,
+    );
+    expect(updates[2].read_at).toBeNull(); // rang: first identity at an equal count (4 -> 4)
+  });
+
+  test('the direct rewrite stamps itemKeys/itemSetHash unconditionally, like count', async () => {
+    const t1 = new Date(NOW - 3 * 3600000).toISOString();
+    const t3 = new Date(NOW - 3600000).toISOString();
+    // Same shrinking-count fixture as the quiet-repeat test above — the
+    // identity stamp is unconditional, independent of whether it rings.
+    const marker = {
+      id: 'n_item_identity', created_at: t1,
+      metadata: { opsKey: 'gbp-sync-health', observedAt: t1, count: 10 },
+    };
+    const updates = installDb({ aggregates: [], stats: [], recentNotification: marker });
+    const out = await gbp._assessReviewSyncHealth(
+      { bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {}, {}, t3,
+    );
+    expect(out).toEqual({ deduped: true });
+    const rewriteMeta = JSON.parse(updates[2].metadata.bindings[0]);
+    expect(rewriteMeta.itemKeys).toEqual(['bradenton:stats_stale', 'parrish:stats_stale', 'sarasota:stats_stale', 'venice:stats_stale']);
+    expect(typeof rewriteMeta.itemSetHash).toBe('string');
+    expect(rewriteMeta.itemSetHash).toHaveLength(64); // sha256 hex, itemSetHashFor
+  });
+
+  test('deliverOpsDigest wires the same item identity through to notifyAdmin: a same-count finding swap rings, the same set stays quiet', async () => {
+    process.env.GATE_OPS_DIGESTS_IN_APP = 'true';
+    process.env.GATE_AGENT_ACTIVITY = 'true';
+    try {
+      installDb({ aggregates: [], stats: [] }); // no standing 'review' row -> the fresh-marker branch runs
+      mockNotifyAdmin.mockResolvedValue({ id: 'n-digest', deduped: false });
+      await gbp._assessReviewSyncHealth({ bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {}, {});
+      const digestCall = mockNotifyAdmin.mock.calls.find(([category]) => category === 'ops_digest');
+      expect(digestCall).toBeDefined();
+      const opts = digestCall[3];
+      const itemKeys = ['bradenton:stats_stale', 'parrish:stats_stale', 'sarasota:stats_stale', 'venice:stats_stale'];
+      expect(opts.metadata.itemKeys).toEqual(itemKeys);
+      expect(typeof opts.ringOnRefresh).toBe('function');
+      // Same set at the same count -> quiet; a swapped location -> rings,
+      // even though the count is unchanged (4 -> 4) in both cases.
+      expect(opts.ringOnRefresh({}, { count: 4, itemKeys })).toBe(false);
+      expect(opts.ringOnRefresh({}, {
+        count: 4, itemKeys: ['bradenton:stats_stale', 'parrish:stats_stale', 'sarasota:stats_stale', 'venice:feed_degraded'],
+      })).toBe(true);
+    } finally {
+      delete process.env.GATE_OPS_DIGESTS_IN_APP;
+      delete process.env.GATE_AGENT_ACTIVITY;
+    }
+  });
+
   test('a delayed older failure cannot resurrect after the durable newer clean watermark', async () => {
     const t1 = new Date(NOW - 2 * 3600000).toISOString();
     const t2 = new Date(NOW - 3600000).toISOString();
