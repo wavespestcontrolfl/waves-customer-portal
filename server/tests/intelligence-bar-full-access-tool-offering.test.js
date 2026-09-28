@@ -120,3 +120,48 @@ describe('Intelligence Bar tool offering — full access (owner ruling 2026-09-2
     }
   });
 });
+
+// Outside-service writes (IB scope expansion item 1, owner ruling
+// 2026-09-28): Sentry/Cloudflare/Railway/GitHub/Search Console write tools
+// are yellow-tier (a card, via WRITE_TWO_STEP_TOOL_NAMES) but STILL
+// full-access-only, unlike every other yellow-tier tool. These modules are
+// NOT mocked above (sentry/cloudflare/ops/github-ops-tools load for real),
+// so this exercises the actual INFRA_TOOLS the route composes, on a context
+// with no per-module fullAccess-aware export to fall back on (unlike SEO/
+// banking's own QUERY_TOOLS) — getToolsForContext's own filter is the ONLY
+// thing keeping these off a non-full-access list.
+const OUTSIDE_WRITE_NAMES = [
+  'resolve_sentry_issue', 'ignore_sentry_issue', 'assign_sentry_issue',
+  'purge_cloudflare_cache', 'retry_cloudflare_pages_build',
+  'redeploy_railway_service', 'restart_railway_service',
+  'rerun_failed_github_checks', 'add_github_pr_label', 'request_codex_review',
+];
+const OUTSIDE_READ_MARKERS = ['get_sentry_top_issues', 'get_cloudflare_zones', 'get_railway_status', 'get_recent_merged_prs'];
+
+describe('Intelligence Bar tool offering — outside-service writes (owner ruling 2026-09-28)', () => {
+  test('an ordinary admin (full access = false) sees the infra READS but none of the outside-write tools', () => {
+    const offered = names(getToolsForContext('customers', true, false));
+    for (const readName of OUTSIDE_READ_MARKERS) expect(offered).toContain(readName);
+    for (const writeName of OUTSIDE_WRITE_NAMES) expect(offered).not.toContain(writeName);
+  });
+
+  test('the full-access login sees every outside-write tool, alongside the reads', () => {
+    const offered = names(getToolsForContext('customers', true, true));
+    for (const readName of OUTSIDE_READ_MARKERS) expect(offered).toContain(readName);
+    for (const writeName of OUTSIDE_WRITE_NAMES) expect(offered).toContain(writeName);
+  });
+
+  test('a technician (isAdmin=false) never sees an outside-write tool regardless of the fullAccess flag', () => {
+    const offered = names(getToolsForContext('tech', false, true));
+    for (const writeName of OUTSIDE_WRITE_NAMES) expect(offered).not.toContain(writeName);
+  });
+
+  test('submit_gsc_sitemap (mocked SEO_TOOLS above) follows the same rule as the other outside writes', () => {
+    // SEO_TOOLS is mocked in this file without submit_gsc_sitemap, so this
+    // only pins the filter's behavior on a name it WOULD apply to — the
+    // real module is covered by intelligence-bar-write-gate-contract.test.js
+    // and the seo-tools unit coverage.
+    const { FULL_ACCESS_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
+    expect(FULL_ACCESS_TWO_STEP_TOOL_NAMES.has('submit_gsc_sitemap')).toBe(true);
+  });
+});

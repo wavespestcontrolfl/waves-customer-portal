@@ -4,6 +4,15 @@
  *
  * Gives Claude access to GSC data, rank tracking,
  * blog content pipeline, and site health metrics for wavespestcontrol.com.
+ *
+ * submit_gsc_sitemap (IB scope expansion item 1, owner ruling 2026-09-28) is
+ * the one outside-write tool here: structurally two-step (write-gates.js
+ * OUTSIDE_WRITE_TOOL_NAMES), full-access-only (ib-access.js ibFullAccess,
+ * enforced in routes/admin-intelligence-bar.js — not here). THIS PR IS
+ * PREVIEW ONLY: called with confirmed:true it refuses — the commit path (an
+ * actual Search Console sitemaps.submit call) ships in a follow-up PR.
+ * GOOGLE_SERVICE_ACCOUNT_JSON is read-scoped (webmasters.readonly) today; a
+ * write needs the webmasters scope (see the IB scope doc's token checklist).
  */
 
 const db = require('../../models/db');
@@ -330,7 +339,24 @@ Use for: "find orphan pages", "internal linking gaps", "which pages have no inbo
       },
     },
   },
+  {
+    name: 'submit_gsc_sitemap',
+    description: `Submit a domain's sitemap to Google Search Console so Google re-crawls it sooner. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Search Console.
+Use for: "resubmit the sitemap for bradentonflpestcontrol.com", "tell Google to recrawl the sitemap"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Domain whose sitemap to submit, e.g. "bradentonflpestcontrol.com"' },
+        sitemap_path: { type: 'string', description: 'Sitemap path on the domain (default "/sitemap-index.xml" — the @astrojs/sitemap default; the hub also serves "/sitemap.xml")' },
+      },
+      required: ['domain'],
+    },
+  },
 ];
+
+const GSC_NOT_CONFIGURED_MESSAGE = 'Search Console access is not configured. Add the GOOGLE_SERVICE_ACCOUNT_JSON service variable (a Google service account with Search Console access) in the Railway dashboard.';
+const DEFAULT_SITEMAP_PATH = '/sitemap-index.xml';
+const NOT_YET_IMPLEMENTED_MESSAGE = 'Search Console write commits are not enabled yet — this preview cannot be confirmed. The commit path ships in a follow-up PR.';
 
 
 // ─── EXECUTION ──────────────────────────────────────────────────
@@ -363,6 +389,7 @@ async function executeSeoTool(toolName, input, context = {}) {
       case 'seo_action_queue': return await seoActionQueueReport(input);
       case 'approve_seo_action': return await approveSeoAction(input, context);
       case 'seo_experiment_results': return await seoExperimentResults(input);
+      case 'submit_gsc_sitemap': return await submitGscSitemap(input);
       default: return { error: `Unknown SEO tool: ${toolName}` };
     }
   } catch (err) {
@@ -1441,6 +1468,36 @@ async function internalLinkGraphReport(input) {
       diagnosis: o.primary_diagnosis,
     })),
   };
+}
+
+// Unconfirmed: resolve the domain against fleet_sites live so the card names
+// the actual site (not just an operator-typed domain string), never submits
+// anything. Confirmed: the commit path (a Search Console sitemaps.submit
+// call) is not built in this PR. Full access is enforced by the route
+// (ib-access.js ibFullAccess) — GOOGLE_SERVICE_ACCOUNT_JSON is read-scoped
+// (webmasters.readonly) today regardless; a write needs the webmasters scope.
+async function submitGscSitemap(input) {
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+    return { configured: false, message: GSC_NOT_CONFIGURED_MESSAGE };
+  }
+  const domain = String(input.domain || '').trim();
+  if (!domain) throw new Error('domain is required.');
+  const sitemapPath = String(input.sitemap_path || DEFAULT_SITEMAP_PATH).trim() || DEFAULT_SITEMAP_PATH;
+  if (input.confirmed !== true) {
+    const site = await db('fleet_sites').whereILike('domain', `%${domain}%`).first('domain', 'name', 'area');
+    const siteUrl = `https://${(site?.domain || domain).replace(/^https?:\/\//, '')}`;
+    const sitemapUrl = `${siteUrl}${sitemapPath.startsWith('/') ? '' : '/'}${sitemapPath}`;
+    return {
+      preview: true,
+      tool: 'submit_gsc_sitemap',
+      site: site ? { domain: site.domain, name: site.name, area: site.area } : { domain, name: null, area: null },
+      sitemap_url: sitemapUrl,
+      note: site
+        ? `Submit "${sitemapUrl}" to Google Search Console for ${site.name} (${site.domain}).`
+        : `Submit "${sitemapUrl}" to Google Search Console. This domain is not in the tracked fleet_sites list — double-check it before confirming.`,
+    };
+  }
+  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
 }
 
 async function seoActionQueueReport(input) {

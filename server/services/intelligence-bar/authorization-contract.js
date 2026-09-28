@@ -61,6 +61,9 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   'request_standard_payout',
   'cancel_pending_payout',
   'run_seo_pipeline',
+  // request_codex_review posts a public GitHub comment — like
+  // submit_review_reply, once sent it can only be followed up, not unsent.
+  'request_codex_review',
 ]);
 
 // Tools whose commit itself sends a customer a message. Bookings, schedule
@@ -152,6 +155,17 @@ const ACTION_LABELS = {
   cancel_pending_payout: 'Cancel a pending payout',
   run_seo_pipeline: 'Run the SEO pipeline',
   approve_seo_action: 'Approve an SEO action',
+  resolve_sentry_issue: 'Resolve a Sentry issue',
+  ignore_sentry_issue: 'Ignore a Sentry issue',
+  assign_sentry_issue: 'Assign a Sentry issue',
+  purge_cloudflare_cache: 'Purge Cloudflare cache',
+  retry_cloudflare_pages_build: 'Retry a Cloudflare Pages build',
+  redeploy_railway_service: 'Redeploy a Railway service',
+  restart_railway_service: 'Restart a Railway service',
+  rerun_failed_github_checks: 'Rerun failed GitHub checks',
+  add_github_pr_label: 'Add a GitHub PR label',
+  request_codex_review: 'Request a Codex review',
+  submit_gsc_sitemap: 'Submit a sitemap to Search Console',
 };
 
 // A preview whose combined-payment disclosure cancels a PaymentIntent in

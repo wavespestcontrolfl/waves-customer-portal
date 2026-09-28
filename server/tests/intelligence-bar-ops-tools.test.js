@@ -253,3 +253,79 @@ describe('intelligence bar Railway ops tools', () => {
     expect(JSON.stringify(body)).not.toContain('foreign-deploy-999');
   });
 });
+
+// Outside-write tools (IB scope expansion item 1, owner ruling 2026-09-28):
+// full-access gating lives in the ROUTE (getToolsForContext,
+// intelligence-bar-full-access-tool-offering.test.js), not here — these
+// tests cover the module contract: missing-token refusal, a human-readable
+// preview naming the real service and its current status, and the commit
+// path's refusal.
+describe('intelligence bar Railway write tools (preview only)', () => {
+  const ENVIRONMENT_FIXTURE = gqlResponse({
+    environment: {
+      id: 'env-1',
+      name: 'production',
+      serviceInstances: {
+        edges: [{ node: { serviceId: 's1', serviceName: 'portal', latestDeployment: { id: 'd1', status: 'SUCCESS', createdAt: '2026-07-11T10:00:00Z' } } }],
+      },
+    },
+  });
+
+  test('unconfigured state is benign for both write tools, no network call', async () => {
+    for (const name of ['redeploy_railway_service', 'restart_railway_service']) {
+      const result = await executeOpsTool(name, { service_name: 'portal' });
+      expect(result.error).toBeUndefined();
+      expect(result.configured).toBe(false);
+    }
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('redeploy_railway_service: unconfirmed names the real service and its current deploy status', async () => {
+    process.env.RAILWAY_TOKEN = 'proj-token';
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+    global.fetch.mockResolvedValueOnce(ENVIRONMENT_FIXTURE);
+
+    const result = await executeOpsTool('redeploy_railway_service', { service_name: 'portal' });
+    expect(result.error).toBeUndefined();
+    expect(result.preview).toBe(true);
+    expect(result.service).toEqual({ service: 'portal', latest_deployment_status: 'SUCCESS', deployed_at: '2026-07-11T10:00:00Z' });
+    expect(result.note).toContain('portal');
+    expect(result.note).toMatch(/Redeploy/);
+  });
+
+  test('restart_railway_service: unconfirmed names the real service too', async () => {
+    process.env.RAILWAY_TOKEN = 'proj-token';
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+    global.fetch.mockResolvedValueOnce(ENVIRONMENT_FIXTURE);
+
+    const result = await executeOpsTool('restart_railway_service', { service_name: 'portal' });
+    expect(result.error).toBeUndefined();
+    expect(result.note).toMatch(/Restart/);
+    expect(result.note).toContain('no new deploy');
+  });
+
+  test('an unknown service name returns an error result, no confirm', async () => {
+    process.env.RAILWAY_TOKEN = 'proj-token';
+    process.env.RAILWAY_PROJECT_ID = 'proj-1';
+    process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+    global.fetch.mockResolvedValueOnce(ENVIRONMENT_FIXTURE);
+
+    const result = await executeOpsTool('redeploy_railway_service', { service_name: 'nonexistent' });
+    expect(result.error).toMatch(/No Railway service matching/);
+  });
+
+  test.each(['redeploy_railway_service', 'restart_railway_service'])(
+    '%s: confirmed:true refuses — the commit path is not built in this PR',
+    async (name) => {
+      process.env.RAILWAY_TOKEN = 'proj-token';
+      process.env.RAILWAY_PROJECT_ID = 'proj-1';
+      process.env.RAILWAY_ENVIRONMENT_ID = 'env-1';
+      const result = await executeOpsTool(name, { service_name: 'portal', confirmed: true });
+      expect(result.error).toMatch(/not enabled yet/);
+      expect(result.code).toBe('not_yet_implemented');
+      expect(global.fetch).not.toHaveBeenCalled();
+    },
+  );
+});

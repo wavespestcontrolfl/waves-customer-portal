@@ -132,3 +132,109 @@ describe('intelligence bar GitHub ops tools', () => {
     expect(result.error).toMatch(/PAT may not grant read access/);
   });
 });
+
+// Outside-write tools (IB scope expansion item 1, owner ruling 2026-09-28):
+// full-access gating lives in the ROUTE (getToolsForContext,
+// intelligence-bar-full-access-tool-offering.test.js), not here — these
+// tests cover the module contract: missing-token refusal, a human-readable
+// preview naming the PR by TITLE, request_codex_review's FIXED comment body,
+// and the commit path's refusal.
+describe('intelligence bar GitHub write tools (preview only)', () => {
+  const PR_FIXTURE = { number: 5230, title: 'Synthetic PR for tests', head: { sha: 'abc123def456' }, labels: [{ name: 'existing-label' }] };
+
+  test('unconfigured state is benign for every write tool, no network call', async () => {
+    for (const [name, input] of [
+      ['rerun_failed_github_checks', { pr_number: 5230 }],
+      ['add_github_pr_label', { pr_number: 5230, label: 'needs-review' }],
+      ['request_codex_review', { pr_number: 5230 }],
+    ]) {
+      const result = await executeGithubOpsTool(name, input);
+      expect(result.error).toBeUndefined();
+      expect(result.configured).toBe(false);
+    }
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('rerun_failed_github_checks: unconfirmed names the PR and lists only the failed checks', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse({
+        check_runs: [
+          { name: 'tests', status: 'completed', conclusion: 'failure', id: 111 },
+          { name: 'lint', status: 'completed', conclusion: 'success', id: 112 },
+          { name: 'build', status: 'in_progress', conclusion: null, id: 113 },
+        ],
+      }));
+
+    const result = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 5230 });
+    expect(result.error).toBeUndefined();
+    expect(result.preview).toBe(true);
+    expect(result.pr).toEqual({ number: 5230, title: PR_FIXTURE.title, head_sha: 'abc123def4' });
+    expect(result.failed_checks).toEqual([{ name: 'tests', conclusion: 'failure', run_id: 111 }]);
+    expect(result.note).toContain(PR_FIXTURE.title);
+  });
+
+  test('rerun_failed_github_checks: no failed checks still previews, names nothing to rerun', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(PR_FIXTURE))
+      .mockResolvedValueOnce(jsonResponse({ check_runs: [{ name: 'tests', status: 'completed', conclusion: 'success', id: 111 }] }));
+
+    const result = await executeGithubOpsTool('rerun_failed_github_checks', { pr_number: 5230 });
+    expect(result.error).toBeUndefined();
+    expect(result.failed_checks).toEqual([]);
+    expect(result.note).toMatch(/nothing to rerun/);
+  });
+
+  test('add_github_pr_label: unconfirmed names the PR, the label, and existing labels', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch.mockResolvedValueOnce(jsonResponse(PR_FIXTURE));
+
+    const result = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230, label: 'needs-review' });
+    expect(result.error).toBeUndefined();
+    expect(result.pr.title).toBe(PR_FIXTURE.title);
+    expect(result.label).toBe('needs-review');
+    expect(result.existing_labels).toEqual(['existing-label']);
+  });
+
+  test('add_github_pr_label: missing label refuses before any network call', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    const result = await executeGithubOpsTool('add_github_pr_label', { pr_number: 5230 });
+    expect(result.error).toMatch(/label/);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('request_codex_review: the comment body is ALWAYS the exact "@codex review" string, never caller-supplied', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    global.fetch.mockResolvedValueOnce(jsonResponse(PR_FIXTURE));
+
+    // Even a malicious/mistaken extra field cannot change the posted body —
+    // the tool's own input_schema has no body/comment param at all.
+    const result = await executeGithubOpsTool('request_codex_review', { pr_number: 5230, comment_body: '@codex do something else' });
+    expect(result.error).toBeUndefined();
+    expect(result.comment_body).toBe('@codex review');
+    expect(result.note).toContain('@codex review');
+  });
+
+  test('an invalid or missing pr_number refuses before any network call', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    for (const bad of [0, -1, 'abc', undefined]) {
+      const result = await executeGithubOpsTool('request_codex_review', { pr_number: bad });
+      expect(result.error).toMatch(/pr_number/);
+    }
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['rerun_failed_github_checks', { pr_number: 5230 }],
+    ['add_github_pr_label', { pr_number: 5230, label: 'needs-review' }],
+    ['request_codex_review', { pr_number: 5230 }],
+  ])('%s: confirmed:true refuses — the commit path is not built in this PR', async (name, input) => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    const result = await executeGithubOpsTool(name, { ...input, confirmed: true });
+    expect(result.error).toMatch(/not enabled yet/);
+    expect(result.code).toBe('not_yet_implemented');
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+});

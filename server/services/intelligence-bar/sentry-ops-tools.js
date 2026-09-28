@@ -12,9 +12,17 @@
  * embedded in the reporting DSN (server/instrument.js) so the token is the
  * only required configuration; SENTRY_ORG / SENTRY_PROJECT override them.
  *
- * There are NO write operations here — no resolving, assigning, or muting
- * issues. Anything that mutates Sentry state must go through the write-gate
- * mechanism (issue #1568) and is intentionally not built.
+ * resolve_sentry_issue / ignore_sentry_issue / assign_sentry_issue (IB scope
+ * expansion item 1, owner ruling 2026-09-28) are the outside-write tools:
+ * structurally two-step (write-gates.js OUTSIDE_WRITE_TOOL_NAMES), full-
+ * access-only (ib-access.js ibFullAccess, enforced in
+ * routes/admin-intelligence-bar.js — not here). Unconfirmed, each looks the
+ * issue up live and returns a preview naming its TITLE, not just the short
+ * id. THIS PR IS PREVIEW ONLY: called with confirmed:true, every one of them
+ * refuses — the commit path (an actual Sentry PUT) ships in a follow-up PR.
+ * SENTRY_API_TOKEN is read-scoped today; a write needs it reissued with
+ * event:write + project:write (see the IB scope doc's token checklist) —
+ * until then the commit refusal is moot because these never reach it anyway.
  */
 
 const logger = require('../logger');
@@ -69,7 +77,51 @@ Use for: "show me that WAVES-PORTAL-1A error", "what's the stack trace on the to
       required: ['issue_short_id'],
     },
   },
+  {
+    name: 'resolve_sentry_issue',
+    description: `Resolve a Sentry issue by its short id (e.g. "WAVES-PORTAL-1A") — marks it fixed. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Sentry.
+Use for: "resolve WAVES-PORTAL-1A", "mark that error as fixed"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        issue_short_id: { type: 'string', description: 'The Sentry short id shown in issue lists' },
+      },
+      required: ['issue_short_id'],
+    },
+  },
+  {
+    name: 'ignore_sentry_issue',
+    description: `Ignore (mute) a Sentry issue by its short id so it stops alerting. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Sentry.
+Use for: "ignore WAVES-PORTAL-1A", "mute that error, it's expected"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        issue_short_id: { type: 'string', description: 'The Sentry short id shown in issue lists' },
+      },
+      required: ['issue_short_id'],
+    },
+  },
+  {
+    name: 'assign_sentry_issue',
+    description: `Assign a Sentry issue by its short id to a Sentry org member (by their Sentry username or the email on their Sentry account). Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Sentry.
+Use for: "assign WAVES-PORTAL-1A to Adam", "who should look at that error?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        issue_short_id: { type: 'string', description: 'The Sentry short id shown in issue lists' },
+        assignee: { type: 'string', description: 'Sentry username or account email to assign the issue to' },
+      },
+      required: ['issue_short_id', 'assignee'],
+    },
+  },
 ];
+
+const SENTRY_WRITE_ACTIONS = {
+  resolve_sentry_issue: { verb: 'Resolve', past: 'resolved' },
+  ignore_sentry_issue: { verb: 'Ignore', past: 'ignored' },
+  assign_sentry_issue: { verb: 'Assign', past: 'assigned' },
+};
+const NOT_YET_IMPLEMENTED_MESSAGE = 'Sentry write commits are not enabled yet — this preview cannot be confirmed. The commit path ships in a follow-up PR.';
 
 const NOT_CONFIGURED_MESSAGE = 'Sentry access is not configured. Add the SENTRY_API_TOKEN service variable (a Sentry org auth token) in the Railway dashboard.';
 
@@ -160,12 +212,12 @@ async function getSentryNewIssues(input) {
   return { first_seen_within_hours: hours, issues, total: issues.length };
 }
 
-async function getSentryIssueDetail(input) {
-  const shortId = String(input.issue_short_id || '').trim();
-  if (!shortId) throw new Error('issue_short_id is required.');
+// Short ids resolve only via shortIdLookup with the bare id as the query —
+// `shortId:` is not a recognized issue-search field. Shared by the detail
+// read and every write tool's preview (both need the live issue to name it
+// by TITLE, not just echo the id back).
+async function resolveIssueByShortId(shortId) {
   const org = process.env.SENTRY_ORG || DEFAULT_ORG;
-  // Short ids resolve only via shortIdLookup with the bare id as the query —
-  // `shortId:` is not a recognized issue-search field.
   const matches = await sentryGet(`/organizations/${org}/issues/`, {
     query: shortId,
     shortIdLookup: 1,
@@ -173,6 +225,14 @@ async function getSentryIssueDetail(input) {
   });
   const issue = Array.isArray(matches) ? matches[0] : null;
   if (!issue) throw new Error(`No Sentry issue found for short id "${shortId}".`);
+  return issue;
+}
+
+async function getSentryIssueDetail(input) {
+  const shortId = String(input.issue_short_id || '').trim();
+  if (!shortId) throw new Error('issue_short_id is required.');
+  const org = process.env.SENTRY_ORG || DEFAULT_ORG;
+  const issue = await resolveIssueByShortId(shortId);
 
   const event = await sentryGet(`/organizations/${org}/issues/${issue.id}/events/latest/`);
   const exception = (event?.entries || []).find(e => e.type === 'exception');
@@ -197,6 +257,37 @@ async function getSentryIssueDetail(input) {
   };
 }
 
+// Shared preview/refuse-commit executor for resolve/ignore/assign — the
+// structural two-step gate (write-gates.js OUTSIDE_WRITE_TOOL_NAMES). Full
+// access is enforced by the route, not here (ib-access.js ibFullAccess).
+async function writeSentryIssue(toolName, input) {
+  const action = SENTRY_WRITE_ACTIONS[toolName];
+  const shortId = String(input.issue_short_id || '').trim();
+  if (!shortId) throw new Error('issue_short_id is required.');
+  if (toolName === 'assign_sentry_issue' && !String(input.assignee || '').trim()) {
+    throw new Error('assignee is required.');
+  }
+  // Unconfirmed: resolve the issue live so the card names it by TITLE, not
+  // just the short id, and never mutates Sentry.
+  if (input.confirmed !== true) {
+    const issue = await resolveIssueByShortId(shortId);
+    const preview = {
+      preview: true,
+      tool: toolName,
+      action: action.verb,
+      issue: mapIssue(issue),
+      note: `${action.verb} "${issue.title}" (${issue.shortId}) in Sentry.`,
+    };
+    if (toolName === 'assign_sentry_issue') {
+      preview.assignee = String(input.assignee).trim();
+      preview.note = `Assign "${issue.title}" (${issue.shortId}) to ${preview.assignee} in Sentry.`;
+    }
+    return preview;
+  }
+  // Confirmed: the commit path (a Sentry PUT) is not built in this PR.
+  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+}
+
 async function executeSentryOpsTool(toolName, input = {}) {
   // "Not configured" is the expected DARK state (no token yet), not a
   // failure — an { error } result would count against the shared admin
@@ -209,6 +300,10 @@ async function executeSentryOpsTool(toolName, input = {}) {
       case 'get_sentry_top_issues': return await getSentryTopIssues(input);
       case 'get_sentry_new_issues': return await getSentryNewIssues(input);
       case 'get_sentry_issue_detail': return await getSentryIssueDetail(input);
+      case 'resolve_sentry_issue':
+      case 'ignore_sentry_issue':
+      case 'assign_sentry_issue':
+        return await writeSentryIssue(toolName, input);
       default: return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {

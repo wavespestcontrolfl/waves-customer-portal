@@ -12,9 +12,15 @@
  * RAILWAY_SERVICE_ID are injected by Railway at runtime; when absent
  * (local dev) the ids are discovered via the projectToken query.
  *
- * There are NO write operations here — no restarts, no redeploys, no
- * variable changes. Anything that mutates infrastructure must go through
- * the write-gate mechanism (issue #1568) and is intentionally not built.
+ * redeploy_railway_service / restart_railway_service (IB scope expansion
+ * item 1, owner ruling 2026-09-28) are the outside-write tools: structurally
+ * two-step (write-gates.js OUTSIDE_WRITE_TOOL_NAMES), full-access-only
+ * (ib-access.js ibFullAccess, enforced in routes/admin-intelligence-bar.js —
+ * not here). THIS PR IS PREVIEW ONLY: called with confirmed:true, both
+ * refuse — the commit path (an actual Railway serviceInstanceRedeploy /
+ * serviceInstanceRestart mutation) ships in a follow-up PR. RAILWAY_TOKEN is
+ * read-scoped today; a write needs deploy/restart added (see the IB scope
+ * doc's token checklist).
  */
 
 const logger = require('../logger');
@@ -73,7 +79,31 @@ Use for: "is MODEL_DEEP set in prod?", "what env vars does the server have?", "i
       },
     },
   },
+  {
+    name: 'redeploy_railway_service',
+    description: `Redeploy a Railway service from its latest successful image (a fresh deploy of what is already built, not a rebuild). Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Railway.
+Use for: "redeploy the server", "kick the portal service", "roll the deploy again"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        service_name: { type: 'string', description: 'Service to redeploy (default: the portal server service)' },
+      },
+    },
+  },
+  {
+    name: 'restart_railway_service',
+    description: `Restart a Railway service's running instance (no new deploy — the same build, process restarted). Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Railway.
+Use for: "restart the server", "bounce the portal service", "it's hung, restart it"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        service_name: { type: 'string', description: 'Service to restart (default: the portal server service)' },
+      },
+    },
+  },
 ];
+
+const NOT_YET_IMPLEMENTED_MESSAGE = 'Railway write commits are not enabled yet — this preview cannot be confirmed. The commit path ships in a follow-up PR.';
 
 // Discovered ids are cached for the process lifetime — a project token maps
 // to exactly one project + environment, so they cannot change under us.
@@ -317,6 +347,28 @@ async function getRailwayVariableNames(input) {
   };
 }
 
+// Shared preview/refuse-commit for redeploy/restart — the structural
+// two-step gate (write-gates.js OUTSIDE_WRITE_TOOL_NAMES). Full access is
+// enforced by the route, not here (ib-access.js ibFullAccess).
+async function writeRailwayService(toolName, input) {
+  if (input.confirmed !== true) {
+    const service = await resolveService(input.service_name);
+    return {
+      preview: true,
+      tool: toolName,
+      service: {
+        service: service.serviceName,
+        latest_deployment_status: service.latestDeployment?.status || 'NONE',
+        deployed_at: service.latestDeployment?.createdAt || null,
+      },
+      note: toolName === 'redeploy_railway_service'
+        ? `Redeploy "${service.serviceName}" from its latest successful image (currently ${service.latestDeployment?.status || 'NONE'}).`
+        : `Restart "${service.serviceName}"'s running instance — no new deploy, the same build restarts.`,
+    };
+  }
+  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+}
+
 async function executeOpsTool(toolName, input = {}) {
   // "Not configured" is the expected DARK state (no token yet), not a
   // failure. Returning an { error } result here would count against the
@@ -333,6 +385,9 @@ async function executeOpsTool(toolName, input = {}) {
       case 'get_railway_deployments': return await getRailwayDeployments(input);
       case 'get_railway_logs': return await getRailwayLogs(input);
       case 'get_railway_variable_names': return await getRailwayVariableNames(input);
+      case 'redeploy_railway_service':
+      case 'restart_railway_service':
+        return await writeRailwayService(toolName, input);
       default: return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {

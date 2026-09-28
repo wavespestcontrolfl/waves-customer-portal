@@ -12,9 +12,19 @@
  * PAT's repository access in GitHub settings (no code change).
  * Repo defaults to the portal; GITHUB_OWNER / GITHUB_PORTAL_REPO override.
  *
- * There are NO write operations here — no merging, commenting, or branch
- * changes. Anything that mutates GitHub state must go through the write-gate
- * mechanism (issue #1568) and is intentionally not built.
+ * rerun_failed_github_checks / add_github_pr_label / request_codex_review
+ * (IB scope expansion item 1, owner ruling 2026-09-28) are the outside-write
+ * tools: structurally two-step (write-gates.js OUTSIDE_WRITE_TOOL_NAMES),
+ * full-access-only (ib-access.js ibFullAccess, enforced in
+ * routes/admin-intelligence-bar.js — not here). request_codex_review always
+ * posts the EXACT body "@codex review" — never a model- or caller-supplied
+ * string — because a bare "@codex" tag (with no "review") runs a different
+ * task instead of a code review. THIS PR IS PREVIEW ONLY: called with
+ * confirmed:true, all three refuse — the commit path (the actual GitHub
+ * rerun-failed-jobs / add-labels / create-comment calls) ships in a
+ * follow-up PR. GITHUB_TOKEN is read-scoped today; a write needs Actions
+ * read/write + Pull requests read/write added (see the IB scope doc's token
+ * checklist).
  */
 
 const logger = require('../logger');
@@ -53,7 +63,47 @@ Use for: "what is commit abae45b?", "what's live right now?" (after getting the 
       required: ['sha'],
     },
   },
+  {
+    name: 'rerun_failed_github_checks',
+    description: `Rerun the failed jobs of the most recent CI run for a pull request's current head commit (only the failed jobs, not the whole run). Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to GitHub.
+Use for: "rerun the failed checks on PR 5230", "that CI run flaked, retry it"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        pr_number: { type: 'number', description: 'Pull request number on the portal repo' },
+      },
+      required: ['pr_number'],
+    },
+  },
+  {
+    name: 'add_github_pr_label',
+    description: `Add a label to a pull request on the portal repo. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to GitHub.
+Use for: "label PR 5230 as needs-review", "tag that PR blocked"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        pr_number: { type: 'number', description: 'Pull request number on the portal repo' },
+        label: { type: 'string', description: 'Existing repo label to add, e.g. "needs-review"' },
+      },
+      required: ['pr_number', 'label'],
+    },
+  },
+  {
+    name: 'request_codex_review',
+    description: `Post a comment on a pull request that triggers a Codex review round. The comment body is ALWAYS the exact text "@codex review" — never anything else — because a bare "@codex" mention with no "review" runs a different automated task instead. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to GitHub.
+Use for: "tag Codex on PR 5230", "ask for a review round on that PR"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        pr_number: { type: 'number', description: 'Pull request number on the portal repo' },
+      },
+      required: ['pr_number'],
+    },
+  },
 ];
+
+const NOT_YET_IMPLEMENTED_MESSAGE = 'GitHub write commits are not enabled yet — this preview cannot be confirmed. The commit path ships in a follow-up PR.';
+const CODEX_REVIEW_COMMENT_BODY = '@codex review';
 
 const NOT_CONFIGURED_MESSAGE = 'GitHub access is not configured. Add the GITHUB_TOKEN service variable (a fine-grained PAT with read access to the portal repo) in the Railway dashboard.';
 
@@ -155,6 +205,76 @@ async function getCommitInfo(input) {
   };
 }
 
+// Shared by every write tool's preview — resolves the real PR so the card
+// names it by TITLE, not just the bare number.
+async function resolvePr(prNumber) {
+  const n = Number(prNumber);
+  if (!Number.isInteger(n) || n <= 0) throw new Error('pr_number must be a positive integer.');
+  const pr = await githubGet(`/repos/${repoPath()}/pulls/${n}`);
+  if (!pr || !pr.number) throw new Error(`No pull request #${n} found on ${repoPath()}.`);
+  return pr;
+}
+
+// Unconfirmed: resolve the PR and its head commit's check-runs live, so the
+// card names the PR and lists exactly which jobs are currently failing.
+// Confirmed: the commit path (a GitHub rerun-failed-jobs POST) is not built
+// in this PR. Full access is enforced by the route (ib-access.js).
+async function rerunFailedGithubChecks(input) {
+  if (input.confirmed !== true) {
+    const pr = await resolvePr(input.pr_number);
+    const sha = pr.head?.sha;
+    if (!sha) throw new Error(`PR #${pr.number} has no head commit to check.`);
+    const checkRuns = await githubGet(`/repos/${repoPath()}/commits/${sha}/check-runs`, { per_page: 100 });
+    const failed = (checkRuns?.check_runs || [])
+      .filter(r => r.status === 'completed' && ['failure', 'timed_out', 'cancelled'].includes(r.conclusion))
+      .map(r => ({ name: r.name, conclusion: r.conclusion, run_id: r.id }));
+    return {
+      preview: true,
+      tool: 'rerun_failed_github_checks',
+      pr: { number: pr.number, title: pr.title, head_sha: sha.slice(0, 10) },
+      failed_checks: failed,
+      note: failed.length
+        ? `Rerun ${failed.length} failed job(s) on PR #${pr.number} "${pr.title}" (${failed.map(f => f.name).join(', ')}) — only the failed jobs, not the whole run.`
+        : `No failed checks found on PR #${pr.number} "${pr.title}"'s current head commit — nothing to rerun.`,
+    };
+  }
+  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+}
+
+async function addGithubPrLabel(input) {
+  const label = String(input.label || '').trim();
+  if (!label) throw new Error('label is required.');
+  if (input.confirmed !== true) {
+    const pr = await resolvePr(input.pr_number);
+    const existing = (pr.labels || []).map(l => l.name);
+    return {
+      preview: true,
+      tool: 'add_github_pr_label',
+      pr: { number: pr.number, title: pr.title },
+      label,
+      existing_labels: existing,
+      note: existing.includes(label)
+        ? `PR #${pr.number} "${pr.title}" already has the "${label}" label.`
+        : `Add the "${label}" label to PR #${pr.number} "${pr.title}".`,
+    };
+  }
+  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+}
+
+async function requestCodexReview(input) {
+  if (input.confirmed !== true) {
+    const pr = await resolvePr(input.pr_number);
+    return {
+      preview: true,
+      tool: 'request_codex_review',
+      pr: { number: pr.number, title: pr.title },
+      comment_body: CODEX_REVIEW_COMMENT_BODY,
+      note: `Post the comment "${CODEX_REVIEW_COMMENT_BODY}" on PR #${pr.number} "${pr.title}" — this starts a Codex review round.`,
+    };
+  }
+  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+}
+
 async function executeGithubOpsTool(toolName, input = {}) {
   // "Not configured" is the expected DARK state, not a failure — an
   // { error } result would count against the shared admin circuit breaker
@@ -166,6 +286,9 @@ async function executeGithubOpsTool(toolName, input = {}) {
     switch (toolName) {
       case 'get_recent_merged_prs': return await getRecentMergedPrs(input);
       case 'get_commit_info': return await getCommitInfo(input);
+      case 'rerun_failed_github_checks': return await rerunFailedGithubChecks(input);
+      case 'add_github_pr_label': return await addGithubPrLabel(input);
+      case 'request_codex_review': return await requestCodexReview(input);
       default: return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {

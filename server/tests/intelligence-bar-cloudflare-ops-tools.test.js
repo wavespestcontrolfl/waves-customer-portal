@@ -133,3 +133,78 @@ describe('intelligence bar Cloudflare ops tools', () => {
     expect(result.error).toMatch(/scope/);
   });
 });
+
+// Outside-write tools (IB scope expansion item 1, owner ruling 2026-09-28):
+// full-access gating lives in the ROUTE (getToolsForContext,
+// intelligence-bar-full-access-tool-offering.test.js), not here — these
+// tests cover the module contract: missing-token refusal (already exercised
+// above for the read tools, shared by these), a human-readable preview
+// naming the real zone/project, and the commit path's refusal.
+describe('intelligence bar Cloudflare write tools (preview only)', () => {
+  test('purge_cloudflare_cache: unconfigured state is benign, no network call', async () => {
+    const result = await executeCloudflareOpsTool('purge_cloudflare_cache', { zone_name: 'wavespestcontrol.com' });
+    expect(result.error).toBeUndefined();
+    expect(result.configured).toBe(false);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('purge_cloudflare_cache: unconfirmed builds a preview naming the real zone, never purges', async () => {
+    process.env.CF_API_TOKEN = 'cf-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse({ success: true, result: [{ id: 'zone-1', name: 'wavespestcontrol.com', status: 'active', paused: false }] }));
+
+    const result = await executeCloudflareOpsTool('purge_cloudflare_cache', { zone_name: 'wavespestcontrol.com' });
+    expect(result.error).toBeUndefined();
+    expect(result.preview).toBe(true);
+    expect(result.zone).toEqual({ zone: 'wavespestcontrol.com', status: 'active', paused: false });
+    expect(result.note).toContain('wavespestcontrol.com');
+  });
+
+  test('purge_cloudflare_cache: confirmed:true refuses — the commit path is not built in this PR', async () => {
+    process.env.CF_API_TOKEN = 'cf-token';
+    const result = await executeCloudflareOpsTool('purge_cloudflare_cache', { zone_name: 'wavespestcontrol.com', confirmed: true });
+    expect(result.error).toMatch(/not enabled yet/);
+    expect(result.code).toBe('not_yet_implemented');
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('retry_cloudflare_pages_build: unconfirmed names the actual project and its current status', async () => {
+    process.env.CF_API_TOKEN = 'cf-token';
+    process.env.CF_ACCOUNT_ID = 'acct-1';
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      success: true,
+      result: [{
+        name: 'spoke-venice',
+        latest_deployment: {
+          latest_stage: { name: 'build', status: 'failure' },
+          deployment_trigger: { metadata: { branch: 'main' } },
+          created_on: '2026-07-11T09:00:00Z',
+        },
+      }],
+    }));
+
+    const result = await executeCloudflareOpsTool('retry_cloudflare_pages_build', { project_name: 'spoke-venice' });
+    expect(result.error).toBeUndefined();
+    expect(result.preview).toBe(true);
+    expect(result.project).toBe('spoke-venice');
+    expect(result.deployment.latest_status).toBe('failure');
+    expect(result.note).toContain('spoke-venice');
+  });
+
+  test('retry_cloudflare_pages_build: unknown project returns an error result, no confirm', async () => {
+    process.env.CF_API_TOKEN = 'cf-token';
+    process.env.CF_ACCOUNT_ID = 'acct-1';
+    global.fetch.mockResolvedValueOnce(jsonResponse({ success: true, result: [] }));
+
+    const result = await executeCloudflareOpsTool('retry_cloudflare_pages_build', { project_name: 'nope' });
+    expect(result.error).toMatch(/No Cloudflare Pages project/);
+  });
+
+  test('retry_cloudflare_pages_build: confirmed:true refuses — the commit path is not built in this PR', async () => {
+    process.env.CF_API_TOKEN = 'cf-token';
+    process.env.CF_ACCOUNT_ID = 'acct-1';
+    const result = await executeCloudflareOpsTool('retry_cloudflare_pages_build', { project_name: 'spoke-venice', confirmed: true });
+    expect(result.error).toMatch(/not enabled yet/);
+    expect(result.code).toBe('not_yet_implemented');
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+});

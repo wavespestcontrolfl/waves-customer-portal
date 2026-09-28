@@ -137,3 +137,78 @@ describe('intelligence bar Sentry ops tools', () => {
     expect(result.error).toMatch(/SENTRY_API_TOKEN scope/);
   });
 });
+
+// Outside-write tools (IB scope expansion item 1, owner ruling 2026-09-28):
+// full-access gating lives in the ROUTE (getToolsForContext,
+// intelligence-bar-full-access-tool-offering.test.js), not here — these
+// tests cover the module contract: missing-token refusal, a human-readable
+// preview naming the issue by TITLE, and the commit path's refusal.
+describe('intelligence bar Sentry write tools (preview only)', () => {
+  test('unconfigured state is benign for every write tool, no network call', async () => {
+    for (const name of ['resolve_sentry_issue', 'ignore_sentry_issue', 'assign_sentry_issue']) {
+      const result = await executeSentryOpsTool(name, { issue_short_id: 'WAVES-PORTAL-1A', assignee: 'adam' });
+      expect(result.error).toBeUndefined();
+      expect(result.configured).toBe(false);
+    }
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('resolve_sentry_issue: unconfirmed builds a preview naming the issue by title, never resolves', async () => {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse([issueFixture]));
+
+    const result = await executeSentryOpsTool('resolve_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A' });
+    expect(result.error).toBeUndefined();
+    expect(result.preview).toBe(true);
+    expect(result.action).toBe('Resolve');
+    expect(result.issue.short_id).toBe('WAVES-PORTAL-1A');
+    expect(result.issue.title).toBe(issueFixture.title);
+    expect(result.note).toContain(issueFixture.title);
+  });
+
+  test('ignore_sentry_issue: unconfirmed names the issue too', async () => {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse([issueFixture]));
+
+    const result = await executeSentryOpsTool('ignore_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A' });
+    expect(result.error).toBeUndefined();
+    expect(result.action).toBe('Ignore');
+    expect(result.issue.short_id).toBe('WAVES-PORTAL-1A');
+  });
+
+  test('assign_sentry_issue: unconfirmed names the issue and the proposed assignee', async () => {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse([issueFixture]));
+
+    const result = await executeSentryOpsTool('assign_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A', assignee: 'adam@wavespestcontrol.com' });
+    expect(result.error).toBeUndefined();
+    expect(result.assignee).toBe('adam@wavespestcontrol.com');
+    expect(result.note).toContain('adam@wavespestcontrol.com');
+  });
+
+  test('assign_sentry_issue: missing assignee refuses before any network call', async () => {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    const result = await executeSentryOpsTool('assign_sentry_issue', { issue_short_id: 'WAVES-PORTAL-1A' });
+    expect(result.error).toMatch(/assignee/);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('unknown short id returns an error result, no confirm', async () => {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse([]));
+
+    const result = await executeSentryOpsTool('resolve_sentry_issue', { issue_short_id: 'WAVES-PORTAL-9Z' });
+    expect(result.error).toMatch(/No Sentry issue found/);
+  });
+
+  test.each(['resolve_sentry_issue', 'ignore_sentry_issue', 'assign_sentry_issue'])(
+    '%s: confirmed:true refuses — the commit path is not built in this PR',
+    async (name) => {
+      process.env.SENTRY_API_TOKEN = 'sentry-token';
+      const result = await executeSentryOpsTool(name, { issue_short_id: 'WAVES-PORTAL-1A', assignee: 'adam', confirmed: true });
+      expect(result.error).toMatch(/not enabled yet/);
+      expect(result.code).toBe('not_yet_implemented');
+      expect(global.fetch).not.toHaveBeenCalled();
+    },
+  );
+});
